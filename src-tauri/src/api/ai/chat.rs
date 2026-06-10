@@ -1180,7 +1180,8 @@ mod tests {
             Some("服务器 'default' 未找到或已禁用"),
         );
 
-        assert!(hint.contains("\"setup_error\""));
+        assert!(hint.contains("\"status\":\"failed\""));
+        assert!(hint.contains("\"error\""));
         let message =
             crate::api::ai::conversation::reconstruct_assistant_with_tool_calls_from_content(&hint)
                 .unwrap();
@@ -1616,7 +1617,7 @@ fn build_native_tool_call_hint(
     parameters: &str,
     call_id: Option<i64>,
     llm_call_id: &str,
-    setup_error: Option<&str>,
+    error: Option<&str>,
 ) -> String {
     let mut payload = serde_json::json!({
         "server_name": server_name,
@@ -1627,8 +1628,9 @@ fn build_native_tool_call_hint(
     if let Some(call_id) = call_id {
         payload["call_id"] = serde_json::json!(call_id);
     }
-    if let Some(setup_error) = setup_error {
-        payload["setup_error"] = serde_json::json!(setup_error);
+    if let Some(error) = error {
+        payload["status"] = serde_json::json!("failed");
+        payload["error"] = serde_json::json!(error);
     }
     format!("\n\n<!-- MCP_TOOL_CALL:{} -->\n", payload)
 }

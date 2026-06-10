@@ -16,6 +16,8 @@ interface McpToolCallProps {
     toolName?: string;
     parameters?: string;
     llmCallId?: string;
+    status?: MCPToolCallUpdateEvent["status"];
+    error?: string;
     conversationId?: number;
     messageId?: number;
     callId?: number; // If provided, this is an existing call
@@ -105,6 +107,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     toolName = "未知工具",
     parameters = "{}",
     llmCallId,
+    status,
+    error,
     conversationId,
     messageId,
     callId,
@@ -149,12 +153,21 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const displayParameters = maskedData.parameters;
     const headerTitle = `${displayServerName} - ${displayToolName}`;
 
-    const [executionState, setExecutionState] = useState<ExecutionState>(isStreaming ? "streaming" : "idle");
+    const initialProtocolState: ExecutionState =
+        !isStreaming && (status === "pending" || status === "executing" || status === "success" || status === "failed")
+            ? status
+            : isStreaming
+              ? "streaming"
+              : "idle";
+    const [executionState, setExecutionState] = useState<ExecutionState>(initialProtocolState);
     const [executionResult, setExecutionResult] = useState<string | null>(null);
-    const [executionError, setExecutionError] = useState<string | null>(null);
+    const [executionError, setExecutionError] = useState<string | null>(
+        initialProtocolState === "failed" ? (error || "执行失败") : null
+    );
     // 默认展开：流式调用和新工具调用默认展开，历史调用根据状态决定
-    const [isExpanded, setIsExpanded] = useState<boolean>(isStreaming || !callId);
-    const [shouldRenderDetails, setShouldRenderDetails] = useState<boolean>(isStreaming || !callId);
+    const shouldInitiallyExpand = isStreaming || !callId || initialProtocolState === "failed";
+    const [isExpanded, setIsExpanded] = useState<boolean>(shouldInitiallyExpand);
+    const [shouldRenderDetails, setShouldRenderDetails] = useState<boolean>(shouldInitiallyExpand);
     // 自动收起定时器引用
     const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
     // 用户手动展开后，后续自动收起不能覆盖用户正在查看详情的意图。
@@ -223,12 +236,23 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         }
     }, [mcpToolCallStates, effectiveCallId, conversationId, messageId, serverName, toolName, llmCallId, continueOnToolErrorEnabled, setAutoExpanded]);
 
+    useEffect(() => {
+        if (effectiveCallId || status !== "failed") {
+            return;
+        }
+        setExecutionState("failed");
+        setExecutionError(error || "执行失败");
+        setExecutionResult(null);
+        setAutoExpanded(true);
+    }, [effectiveCallId, status, error, setAutoExpanded]);
+
     // 检查执行状态
     const isFailed = executionState === "failed";
     const isExecuting = executionState === "executing";
     const canExecute = executionState === "idle" || executionState === "pending" || executionState === "failed"; // idle/pending/failed 状态都可以执行
+    const isProtocolFailureWithoutCall = !effectiveCallId && isFailed && (status === "failed" || Boolean(error));
     const shouldHideFailedActions = isFailed && continueOnToolErrorEnabled;
-    const canShowExecutionActions = canExecute && !shouldHideFailedActions;
+    const canShowExecutionActions = canExecute && !shouldHideFailedActions && !isProtocolFailureWithoutCall;
     const isRunning = effectiveCallId !== null && shiningMcpCallId === effectiveCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
@@ -274,9 +298,11 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
     useEffect(() => {
         if (executionState === "failed") {
-            setAutoExpanded(!continueOnToolErrorEnabled);
+            setAutoExpanded(!effectiveCallId && (status === "failed" || Boolean(error))
+                ? true
+                : !continueOnToolErrorEnabled);
         }
-    }, [executionState, continueOnToolErrorEnabled, setAutoExpanded]);
+    }, [executionState, effectiveCallId, status, error, continueOnToolErrorEnabled, setAutoExpanded]);
 
     // 成功后3秒自动收起
     useEffect(() => {

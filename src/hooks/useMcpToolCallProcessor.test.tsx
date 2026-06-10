@@ -424,6 +424,57 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         expect(screen.getByTestId("shine-border")).toBeInTheDocument();
     });
 
+    it("renders protocol-level failed MCP comments without execution actions", async () => {
+        const markdown = `<!-- MCP_TOOL_CALL:${JSON.stringify({
+            server_name: "default",
+            tool_name: "load_skill",
+            parameters: '{"command":"skill-creator"}',
+            llm_call_id: "call_failed",
+            status: "failed",
+            error: "服务器 'default' 未找到或已禁用",
+        })} -->`;
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={32}
+                messageId={23}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />
+        );
+
+        expect(await screen.findByText("失败")).toBeInTheDocument();
+        expect(screen.getByText(/服务器 'default' 未找到或已禁用/)).toBeInTheDocument();
+        expect(screen.queryByTitle("执行")).not.toBeInTheDocument();
+        expect(screen.queryByText("重新执行")).not.toBeInTheDocument();
+        expect(screen.queryByText("以错误继续")).not.toBeInTheDocument();
+    });
+
+    it("maps legacy setup_error comments to the unified failed protocol state", async () => {
+        const markdown = `<!-- MCP_TOOL_CALL:${JSON.stringify({
+            server_name: "default",
+            tool_name: "load_skill",
+            parameters: "{}",
+            llm_call_id: "call_legacy_failed",
+            setup_error: "legacy setup failed",
+        })} -->`;
+
+        render(
+            <ProcessorHarness
+                markdown={markdown}
+                conversationId={33}
+                messageId={24}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />
+        );
+
+        expect(await screen.findByText("失败")).toBeInTheDocument();
+        expect(screen.getByText(/legacy setup failed/)).toBeInTheDocument();
+        expect(screen.queryByTitle("执行")).not.toBeInTheDocument();
+    });
+
     it("renders preview_code streaming cards inline", async () => {
         const conversationId = 27;
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);

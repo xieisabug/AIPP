@@ -28,6 +28,8 @@ interface ToolCallData {
     parameters?: string;
     call_id?: number;
     llm_call_id?: string;
+    status?: MCPToolCallUpdateEvent["status"];
+    error?: string;
     isStreaming?: boolean;  // 流式工具调用（参数可能不完整）
     fn_arguments?: string;  // 流式工具调用的原始参数
     preview_state?: PreviewCodeStreamingState;
@@ -70,12 +72,25 @@ function normalizeToolCallData(raw: unknown): ToolCallData {
                 ? Number.parseInt(callIdRaw.trim(), 10)
                 : undefined;
     const llmCallIdRaw = value.llm_call_id;
+    const statusRaw = value.status;
+    const status =
+        statusRaw === "pending" ||
+            statusRaw === "executing" ||
+            statusRaw === "success" ||
+            statusRaw === "failed" ||
+            statusRaw === "unknown"
+            ? statusRaw
+            : undefined;
+    const setupError = typeof value.setup_error === "string" ? value.setup_error : undefined;
+    const error = typeof value.error === "string" ? value.error : setupError;
     return {
         server_name: typeof value.server_name === "string" ? value.server_name : undefined,
         tool_name: typeof value.tool_name === "string" ? value.tool_name : undefined,
         parameters: typeof value.parameters === "string" ? value.parameters : undefined,
         call_id: callId,
         llm_call_id: typeof llmCallIdRaw === "string" ? llmCallIdRaw : undefined,
+        status: status ?? (setupError ? "failed" : undefined),
+        error,
         fn_arguments: typeof value.fn_arguments === "string" ? value.fn_arguments : undefined,
         preview_state: parsePreviewCodeStreamingState(value.preview_state) ?? undefined,
     };
@@ -108,6 +123,28 @@ function parsePartialToolCallPayload(rawPayload: string): ToolCallData {
     const llmCallIdMatch = rawPayload.match(/"llm_call_id"\s*:\s*"((?:\\.|[^"\\])*)"/);
     if (llmCallIdMatch) {
         result.llm_call_id = decodeJsonString(llmCallIdMatch[1]);
+    }
+    const statusMatch = rawPayload.match(/"status"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (statusMatch) {
+        const status = decodeJsonString(statusMatch[1]);
+        if (
+            status === "pending" ||
+            status === "executing" ||
+            status === "success" ||
+            status === "failed" ||
+            status === "unknown"
+        ) {
+            result.status = status;
+        }
+    }
+    const errorMatch = rawPayload.match(/"error"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (errorMatch) {
+        result.error = decodeJsonString(errorMatch[1]);
+    }
+    const setupErrorMatch = rawPayload.match(/"setup_error"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (setupErrorMatch) {
+        result.status = result.status ?? "failed";
+        result.error = result.error ?? decodeJsonString(setupErrorMatch[1]);
     }
     const fnArgsMatch = rawPayload.match(/"fn_arguments"\s*:\s*"((?:\\.|[^"\\])*)"/);
     if (fnArgsMatch) {
@@ -479,7 +516,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加 MCP 工具调用组件
             // 只有最后一个工具调用在执行成功后才触发续写
             const isLastCall = index === mcpCalls.length - 1;
-            if (data.tool_name === "preview_code") {
+            if (data.tool_name === "preview_code" && data.status !== "failed") {
                 const toolCallKey = getPreviewCodeToolCallKey(data, messageId, index);
                 parts.push(
                     <InlineCodePreviewCard
@@ -508,6 +545,8 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
                         toolName={data.tool_name}
                         parameters={data.parameters ?? "{}"}
                         llmCallId={data.llm_call_id}
+                        status={data.status}
+                        error={data.error}
                         conversationId={conversationId}
                         messageId={messageId}
                         callId={data.call_id} // 传递 callId，如果存在的话

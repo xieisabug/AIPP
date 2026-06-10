@@ -492,4 +492,32 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.getByText("重新执行")).toBeInTheDocument();
         expect(screen.getByText("以错误继续")).toBeInTheDocument();
     });
+
+    it("renders protocol-level failures without execution actions when no call_id exists", async () => {
+        render(
+            <McpToolCall
+                conversationId={31}
+                messageId={41}
+                serverName="default"
+                toolName="load_skill"
+                parameters='{"command":"skill-creator"}'
+                llmCallId="call_setup_failed"
+                status="failed"
+                error="服务器 'default' 未找到或已禁用"
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />
+        );
+
+        await flushEffects();
+
+        expect(screen.getByText("失败")).toBeInTheDocument();
+        expect(screen.getByText(/服务器 'default' 未找到或已禁用/)).toBeInTheDocument();
+        expect(screen.getByTitle("收起详情")).toBeInTheDocument();
+        expect(screen.queryByTitle("执行")).not.toBeInTheDocument();
+        expect(screen.queryByTitle("重新执行")).not.toBeInTheDocument();
+        expect(screen.queryByTitle("以错误继续对话")).not.toBeInTheDocument();
+        expect(screen.queryByText("重新执行")).not.toBeInTheDocument();
+        expect(screen.queryByText("以错误继续")).not.toBeInTheDocument();
+    });
 });
