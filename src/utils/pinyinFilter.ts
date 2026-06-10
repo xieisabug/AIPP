@@ -13,11 +13,48 @@ export interface FilteredAssistant extends AssistantItem {
     highlightIndices: number[];
 }
 
+interface PinyinSearchIndex {
+    pinyinArray: string[];
+    pinyinFull: string;
+    pinyinWithSpace: string;
+    pinyinInitials: string;
+}
+
 /**
  * 将中文字符转换为拼音用于过滤
  * 支持全拼和首字母匹配
  */
 export class PinyinFilter {
+    private static readonly MAX_PINYIN_CACHE_SIZE = 2000;
+    private static readonly pinyinIndexCache = new Map<string, PinyinSearchIndex>();
+
+    private static getPinyinIndex(text: string): PinyinSearchIndex {
+        const cached = this.pinyinIndexCache.get(text);
+        if (cached) {
+            return cached;
+        }
+
+        const pinyinArray = pinyin(text, {
+            toneType: "none",
+            type: "array",
+        }).map((item) => item.toLowerCase());
+        const index = {
+            pinyinArray,
+            pinyinFull: pinyinArray.join(""),
+            pinyinWithSpace: pinyinArray.join(" "),
+            pinyinInitials: pinyinArray.map((item) => item.charAt(0)).join(""),
+        };
+
+        if (this.pinyinIndexCache.size >= this.MAX_PINYIN_CACHE_SIZE) {
+            const oldestKey = this.pinyinIndexCache.keys().next().value;
+            if (oldestKey !== undefined) {
+                this.pinyinIndexCache.delete(oldestKey);
+            }
+        }
+        this.pinyinIndexCache.set(text, index);
+        return index;
+    }
+
     /**
      * 基于搜索查询使用名称和拼音过滤工件
      * @param artifacts 要过滤的工件列表
@@ -66,22 +103,13 @@ export class PinyinFilter {
 
             // 检查拼音匹配
             try {
-                const pinyinArray = pinyin(artifact.name, {
-                    toneType: "none",
-                    type: "array",
-                }).map((p) => p.toLowerCase());
-
-                const pinyinFull = pinyinArray.join("");
-                const pinyinWithSpace = pinyinArray.join(" ");
-                const pinyinInitials = pinyinArray
-                    .map((p) => p.charAt(0))
-                    .join("");
+                const pinyinIndex = this.getPinyinIndex(artifact.name);
 
                 // 全拼匹配（连续拼音，如 "shitu" 匹配 "识图"）
-                if (pinyinFull.includes(queryLower)) {
+                if (pinyinIndex.pinyinFull.includes(queryLower)) {
                     const indices = this.getPinyinMatchIndices(
-                        pinyinArray,
-                        pinyinFull,
+                        pinyinIndex.pinyinArray,
+                        pinyinIndex.pinyinFull,
                         queryLower,
                     );
                     results.push({
@@ -93,10 +121,10 @@ export class PinyinFilter {
                 }
 
                 // 分词拼音匹配（如 "shi tu" 匹配 "识图"）
-                if (pinyinWithSpace.includes(queryLower)) {
+                if (pinyinIndex.pinyinWithSpace.includes(queryLower)) {
                     const indices = this.getSpacedPinyinMatchIndices(
                         artifact.name,
-                        pinyinWithSpace,
+                        pinyinIndex.pinyinWithSpace,
                         queryLower,
                     );
                     results.push({
@@ -108,9 +136,9 @@ export class PinyinFilter {
                 }
 
                 // 首字母匹配（如 "stcs" 匹配 "识图测试"）
-                if (this.isInitialsMatch(pinyinInitials, queryLower)) {
+                if (this.isInitialsMatch(pinyinIndex.pinyinInitials, queryLower)) {
                     const indices = this.getInitialsMatchIndices(
-                        pinyinInitials,
+                        pinyinIndex.pinyinInitials,
                         queryLower,
                     );
                     results.push({
@@ -177,22 +205,13 @@ export class PinyinFilter {
 
             // 检查拼音匹配
             try {
-                const pinyinArray = pinyin(assistant.name, {
-                    toneType: "none",
-                    type: "array",
-                }).map((p) => p.toLowerCase());
-
-                const pinyinFull = pinyinArray.join("");
-                const pinyinWithSpace = pinyinArray.join(" ");
-                const pinyinInitials = pinyinArray
-                    .map((p) => p.charAt(0))
-                    .join("");
+                const pinyinIndex = this.getPinyinIndex(assistant.name);
 
                 // 全拼匹配（连续拼音，如 "shitu" 匹配 "识图"）
-                if (pinyinFull.includes(queryLower)) {
+                if (pinyinIndex.pinyinFull.includes(queryLower)) {
                     const indices = this.getPinyinMatchIndices(
-                        pinyinArray,
-                        pinyinFull,
+                        pinyinIndex.pinyinArray,
+                        pinyinIndex.pinyinFull,
                         queryLower,
                     );
                     results.push({
@@ -204,10 +223,10 @@ export class PinyinFilter {
                 }
 
                 // 分词拼音匹配（如 "shi tu" 匹配 "识图"）
-                if (pinyinWithSpace.includes(queryLower)) {
+                if (pinyinIndex.pinyinWithSpace.includes(queryLower)) {
                     const indices = this.getSpacedPinyinMatchIndices(
                         assistant.name,
-                        pinyinWithSpace,
+                        pinyinIndex.pinyinWithSpace,
                         queryLower,
                     );
                     results.push({
@@ -219,9 +238,9 @@ export class PinyinFilter {
                 }
 
                 // 首字母匹配（如 "stcs" 匹配 "识图测试"）
-                if (this.isInitialsMatch(pinyinInitials, queryLower)) {
+                if (this.isInitialsMatch(pinyinIndex.pinyinInitials, queryLower)) {
                     const indices = this.getInitialsMatchIndices(
-                        pinyinInitials,
+                        pinyinIndex.pinyinInitials,
                         queryLower,
                     );
                     results.push({
@@ -476,44 +495,35 @@ export class PinyinFilter {
         queryLower: string,
     ): Pick<FilteredSlashSkill, "matchType" | "highlightIndices"> | null {
         try {
-            const pinyinArray = pinyin(text, {
-                toneType: "none",
-                type: "array",
-            }).map((p) => p.toLowerCase());
+            const pinyinIndex = this.getPinyinIndex(text);
 
-            const pinyinFull = pinyinArray.join("");
-            const pinyinWithSpace = pinyinArray.join(" ");
-            const pinyinInitials = pinyinArray
-                .map((p) => p.charAt(0))
-                .join("");
-
-            if (pinyinFull.includes(queryLower)) {
+            if (pinyinIndex.pinyinFull.includes(queryLower)) {
                 return {
                     matchType: "pinyin",
                     highlightIndices: this.getPinyinMatchIndices(
-                        pinyinArray,
-                        pinyinFull,
+                        pinyinIndex.pinyinArray,
+                        pinyinIndex.pinyinFull,
                         queryLower,
                     ),
                 };
             }
 
-            if (pinyinWithSpace.includes(queryLower)) {
+            if (pinyinIndex.pinyinWithSpace.includes(queryLower)) {
                 return {
                     matchType: "pinyin",
                     highlightIndices: this.getSpacedPinyinMatchIndices(
                         text,
-                        pinyinWithSpace,
+                        pinyinIndex.pinyinWithSpace,
                         queryLower,
                     ),
                 };
             }
 
-            if (this.isInitialsMatch(pinyinInitials, queryLower)) {
+            if (this.isInitialsMatch(pinyinIndex.pinyinInitials, queryLower)) {
                 return {
                     matchType: "initial",
                     highlightIndices: this.getInitialsMatchIndices(
-                        pinyinInitials,
+                        pinyinIndex.pinyinInitials,
                         queryLower,
                     ),
                 };
@@ -561,16 +571,10 @@ export class PinyinFilter {
 
         // 拼音匹配
         try {
-            const pinyinArray = pinyin(text, {
-                toneType: "none",
-                type: "array",
-            }).map((p) => p.toLowerCase());
+            const pinyinIndex = this.getPinyinIndex(text);
 
-            const pinyinFull = pinyinArray.join("");
-            const pinyinInitials = pinyinArray.map((p) => p.charAt(0)).join("");
-
-            if (pinyinFull.includes(queryLower)) return true;
-            if (this.isInitialsMatch(pinyinInitials, queryLower)) return true;
+            if (pinyinIndex.pinyinFull.includes(queryLower)) return true;
+            if (this.isInitialsMatch(pinyinIndex.pinyinInitials, queryLower)) return true;
         } catch {
             // 拼音转换失败时忽略
         }
