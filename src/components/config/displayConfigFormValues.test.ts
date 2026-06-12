@@ -16,6 +16,7 @@ describe("displayConfigFormValues", () => {
             ["merge_assistant_messages", "disabled"],
             ["show_thinking", "disabled"],
             ["preview_code_show_toolbar", "enabled"],
+            ["mcp_tool_call_component_id", "builtin.default"],
         ]);
 
         expect(buildDisplayFormValues(config)).toEqual({
@@ -29,6 +30,7 @@ describe("displayConfigFormValues", () => {
             merge_assistant_messages: false,
             show_thinking: false,
             preview_code_show_toolbar: true,
+            mcp_tool_call_component_id: "builtin.default",
         });
     });
 
@@ -67,6 +69,7 @@ describe("displayConfigFormValues", () => {
                 merge_assistant_messages: true,
                 show_thinking: false,
                 preview_code_show_toolbar: true,
+                mcp_tool_call_component_id: "auto",
             }),
         ).toEqual({
             theme: "default",
@@ -78,6 +81,7 @@ describe("displayConfigFormValues", () => {
             merge_assistant_messages: "enabled",
             show_thinking: "disabled",
             preview_code_show_toolbar: "enabled",
+            mcp_tool_call_component_id: "auto",
         });
     });
 });

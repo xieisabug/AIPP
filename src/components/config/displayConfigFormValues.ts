@@ -9,6 +9,7 @@ export interface DisplayFormValues {
     merge_assistant_messages: boolean;
     show_thinking: boolean;
     preview_code_show_toolbar: boolean;
+    mcp_tool_call_component_id: string;
 }
 
 export function buildDisplayFormValues(
@@ -37,6 +38,8 @@ export function buildDisplayFormValues(
         show_thinking: displayConfig?.get("show_thinking") !== "disabled",
         preview_code_show_toolbar:
             displayConfig?.get("preview_code_show_toolbar") === "enabled",
+        mcp_tool_call_component_id:
+            displayConfig?.get("mcp_tool_call_component_id") || "auto",
     };
 }
 
@@ -55,5 +58,6 @@ export function serializeDisplayFormValues(values: DisplayFormValues) {
         preview_code_show_toolbar: values.preview_code_show_toolbar
             ? "enabled"
             : "disabled",
+        mcp_tool_call_component_id: values.mcp_tool_call_component_id || "auto",
     };
 }

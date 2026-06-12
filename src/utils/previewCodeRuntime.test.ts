@@ -145,13 +145,12 @@ describe("previewCodeRuntime", () => {
         runtime.destroy();
     });
 
-    it("runs Tailwind browser scripts against the preview shadow document", async () => {
+    it("runs simple external classic scripts against the preview shadow document", async () => {
         vi.stubGlobal(
             "fetch",
             vi.fn(async () => ({
                 ok: true,
                 text: async () => `
-                    /* @tailwindcss/browser */
                     const style = document.createElement("style");
                     const classNames = Array.from(document.querySelectorAll("[class]"))
                         .flatMap((element) => Array.from(element.classList));
@@ -179,6 +178,62 @@ describe("previewCodeRuntime", () => {
             expect(shadowStyles).toContain(".flex{display:flex;}");
             expect(shadowStyles).toContain(".items-center{display:flex;}");
         });
+
+        runtime.destroy();
+    });
+
+    it("runs MutationObserver scripts through a shadow-root scoped observer", async () => {
+        const observedTargets: Node[] = [];
+        class FakeMutationObserver {
+            constructor(private readonly callback: MutationCallback) {}
+
+            observe(target: Node) {
+                observedTargets.push(target);
+                this.callback([{ target } as MutationRecord], this as unknown as MutationObserver);
+            }
+
+            disconnect() {}
+
+            takeRecords() {
+                return [];
+            }
+        }
+        vi.stubGlobal("MutationObserver", FakeMutationObserver);
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => ({
+                ok: true,
+                text: async () => `
+                    const observer = new MutationObserver(() => {
+                        const marker = document.createElement("span");
+                        marker.id = "observer-ran";
+                        document.body.appendChild(marker);
+                    });
+                    observer.observe(document.body, { childList: true, subtree: true });
+                `,
+            }))
+        );
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+        const onError = vi.fn();
+
+        runtime.update({
+            code: '<div id="card" class="flex"></div><script src="aipp-preview://localhost/observer-script.js"></script>',
+            isFinal: true,
+            bridgeId: "preview-code-block-observer-script-test",
+            bridge,
+            onError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            expect(observedTargets).toEqual([host.shadowRoot]);
+        });
+        vi.advanceTimersByTime(100);
+
+        expect(host.shadowRoot?.querySelector("#observer-ran")).not.toBeNull();
+        expect(onError).not.toHaveBeenCalledWith(expect.stringContaining("MutationObserver"));
 
         runtime.destroy();
     });

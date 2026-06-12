@@ -7,6 +7,12 @@ import { toast } from "sonner";
 import { AVAILABLE_CODE_THEMES } from "@/hooks/useCodeTheme";
 import { useSyntectThemes } from "@/hooks/highlight/useSyntectThemes";
 import { pluginRuntime } from "@/services/PluginRuntime";
+import { ensureBuiltinMcpToolComponentsRegistered } from "@/services/builtinMcpToolComponents";
+import {
+    AUTO_MCP_TOOL_COMPONENT_ID,
+    DEFAULT_MCP_TOOL_COMPONENT_ID,
+    useMcpToolComponentRegistrySnapshot,
+} from "@/services/mcpToolComponentRegistry";
 
 interface DisplayConfigFormProps {
     form: UseFormReturn<any>;
@@ -21,7 +27,12 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
 }) => {
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
+    const mcpToolComponents = useMcpToolComponentRegistrySnapshot();
     const [pluginThemeOptions, setPluginThemeOptions] = useState<Array<{ value: string; label: string }>>([]);
+
+    useEffect(() => {
+        ensureBuiltinMcpToolComponentsRegistered();
+    }, []);
 
     useEffect(() => {
         let disposed = false;
@@ -77,6 +88,22 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
         { value: "enabled", label: "开启" },
         { value: "disabled", label: "关闭" },
     ];
+
+    const mcpToolComponentOptions = useMemo(() => {
+        const optionMap = new Map<string, { value: string; label: string }>([
+            [AUTO_MCP_TOOL_COMPONENT_ID, { value: AUTO_MCP_TOOL_COMPONENT_ID, label: "自动匹配组件" }],
+            [DEFAULT_MCP_TOOL_COMPONENT_ID, { value: DEFAULT_MCP_TOOL_COMPONENT_ID, label: "默认工具调用组件" }],
+        ]);
+        mcpToolComponents.forEach((component) => {
+            optionMap.set(component.id, {
+                value: component.id,
+                label: component.ownerCode === "builtin"
+                    ? component.label
+                    : `${component.label} (${component.ownerCode})`,
+            });
+        });
+        return [...optionMap.values()];
+    }, [mcpToolComponents]);
 
     const defaultHomeWindowOptions = useMemo(() => {
         const options = [
@@ -189,6 +216,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
                 merge_assistant_messages: values.merge_assistant_messages,
                 show_thinking: values.show_thinking,
                 preview_code_show_toolbar: values.preview_code_show_toolbar,
+                mcp_tool_call_component_id: values.mcp_tool_call_component_id,
             });
 
             toast.success("显示配置保存成功");
@@ -277,6 +305,15 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
                 type: "switch" as const,
                 label: "preview_code 展示工具栏",
                 tooltip: "开启后，preview_code 组件显示标题、工具名称、文件类型和隐藏按钮",
+            },
+        },
+        {
+            key: "mcp_tool_call_component_id",
+            config: {
+                type: "select" as const,
+                label: "MCP工具调用组件",
+                options: mcpToolComponentOptions,
+                tooltip: "控制聊天中 MCP 工具调用卡片的视觉组件。自动匹配会优先使用为特定工具注册的组件，否则使用默认组件",
             },
         },
     ];

@@ -267,6 +267,62 @@ interface SystemApiMarkdownTagRegistration {
     render: SystemApiMarkdownTagRenderer;
 }
 
+type SystemApiMcpToolCallStatus = "pending" | "executing" | "success" | "failed" | "unknown";
+
+interface SystemApiMcpToolComponentToolCall {
+    id?: number;
+    call_id: number;
+    conversation_id: number;
+    message_id?: number;
+    status: SystemApiMcpToolCallStatus;
+    llm_call_id?: string;
+    server_name?: string;
+    tool_name?: string;
+    parameters?: string;
+    result?: string;
+    error?: string;
+    started_time?: Date;
+    finished_time?: Date;
+}
+
+interface SystemApiMcpToolComponentMatcher {
+    serverName?: string;
+    toolName?: string;
+}
+
+interface SystemApiMcpToolComponentProps {
+    serverName?: string;
+    toolName?: string;
+    parameters?: string;
+    llmCallId?: string;
+    status?: SystemApiMcpToolCallStatus;
+    error?: string;
+    conversationId?: number;
+    messageId?: number;
+    callId?: number;
+    currentToolCall?: SystemApiMcpToolComponentToolCall;
+    mcpToolCallStates?: Map<number, SystemApiMcpToolComponentToolCall>;
+    shiningMcpCallId?: number | null;
+    isLastCall?: boolean;
+    isStreaming?: boolean;
+    isLastMessage?: boolean;
+    streamingPreviewState?: unknown;
+}
+
+type SystemApiMcpToolComponentRenderer = (
+    props: SystemApiMcpToolComponentProps,
+) => React.ReactNode;
+
+interface SystemApiMcpToolComponentRegistration {
+    id: string;
+    label: string;
+    description?: string | null;
+    match?: SystemApiMcpToolComponentMatcher[];
+    priority?: number;
+    render: SystemApiMcpToolComponentRenderer;
+    shouldRender?: (props: SystemApiMcpToolComponentProps) => boolean;
+}
+
 interface SystemApiUiKit {
     Alert?: React.ComponentType<any>;
     AlertDescription?: React.ComponentType<any>;
@@ -321,6 +377,9 @@ interface SystemApi {
     registerMarkdownTag(registration: SystemApiMarkdownTagRegistration): void;
     unregisterMarkdownTag(tagName: string): void;
     listMarkdownTags(): Promise<SystemApiMarkdownTagRegistration[]>;
+    registerMcpToolComponent(registration: SystemApiMcpToolComponentRegistration): void;
+    unregisterMcpToolComponent(componentId: string): void;
+    listMcpToolComponents(): Promise<SystemApiMcpToolComponentRegistration[]>;
     hooks: SystemApiHooks;
     data: SystemApiData;
     storage: SystemApiStorage;

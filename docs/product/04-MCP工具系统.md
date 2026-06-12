@@ -157,6 +157,15 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 记录调用的工具名称、参数、结果、状态
 - 支持历史调用查询和分析
 
+### MCP 工具调用组件
+- 聊天界面的 MCP 工具调用统一通过前端组件注册表解析
+- 默认回退组件是通用工具调用卡片，内置组件也通过同一注册表注册
+- 特定工具可注册专属组件，例如 `preview_code` 使用内联代码预览卡片，`load_mcp_server` / `load_mcp_tool` 使用轻量加载卡片
+- 插件注册的工具调用组件由「显示」设置控制，不写入 MCP 服务器或工具配置
+- 组件匹配支持 `serverName`、`toolName`，自动匹配时按 `priority` 选择优先级更高的匹配组件
+- 渲染前会为组件 props 注入 `currentToolCall`，优先来自全局 MCP 工具调用状态；如果状态尚未同步，则根据当前注释中的 `callId`、`conversationId`、工具名和参数构造一个 partial 记录
+- `currentToolCall` 包含当前调用的 `call_id`、`conversation_id`、`message_id`、`status`、`llm_call_id`、`server_name`、`tool_name`、`parameters`、`result`、`error`、`started_time`、`finished_time` 等前端已知字段，供插件组件直接展示状态、参数、结果或错误
+
 ---
 相关源码:
 - `src-tauri/src/mcp/mod.rs` - MCP 模块总入口
@@ -167,3 +176,4 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - `src-tauri/src/mcp/summarizer.rs` - MCP 摘要生成
 - `src-tauri/src/api/ai/mcp.rs` - AI 中的 MCP 集成
 - `src/hooks/useMcpToolCallProcessor.tsx` - 工具调用处理 Hook
+- `src/services/mcpToolComponentRegistry.tsx` - 工具调用组件注册表

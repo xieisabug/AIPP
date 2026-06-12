@@ -32,6 +32,9 @@ declare global {
 const PREVIEW_CODE_FRAME_FALLBACK_MS = 16;
 const PREVIEW_CODE_ENTER_ATTRIBUTE = "data-aipp-preview-enter";
 const PREVIEW_CODE_ENTER_DURATION_MS = 280;
+const PREVIEW_CODE_MUTATION_OBSERVER_FLUSH_MS = 100;
+const PREVIEW_CODE_MUTATION_OBSERVER_BUDGET_WINDOW_MS = 5000;
+const PREVIEW_CODE_MUTATION_OBSERVER_MAX_CALLBACKS = 40;
 const PREVIEW_CODE_RUNTIME_STYLES = `
 :host {
     display: block;
@@ -271,6 +274,7 @@ function runScriptContent(
         "host",
         "shadowRoot",
         "aippPreviewCode",
+        "MutationObserver",
         appendWindowExports(scriptContent)
     );
     scriptRunner.call(
@@ -281,7 +285,8 @@ function runScriptContent(
         environment.previewWindow,
         host,
         shadowRoot,
-        environment.previewWindow.aippPreviewCode
+        environment.previewWindow.aippPreviewCode,
+        environment.previewWindow.MutationObserver
     );
 }
 
@@ -380,6 +385,118 @@ type PreviewWindow = Window & Record<string, unknown>;
 interface PreviewScriptEnvironment {
     previewWindow: PreviewWindow;
     previewDocument: ReturnType<typeof createPreviewDocumentFacade>;
+    reportRuntimeError?: (message: string) => void;
+}
+
+function isPreviewScopedNode(node: Node, shadowRoot: ShadowRoot) {
+    return node === shadowRoot || shadowRoot.contains(node);
+}
+
+function normalizePreviewMutationTarget(target: unknown, shadowRoot: ShadowRoot): Node {
+    if (!(target instanceof Node)) {
+        return shadowRoot;
+    }
+    return isPreviewScopedNode(target, shadowRoot) ? target : shadowRoot;
+}
+
+function createScopedMutationObserverConstructor(
+    shadowRoot: ShadowRoot,
+    reportRuntimeError: (message: string) => void
+): typeof MutationObserver {
+    const NativeMutationObserver = window.MutationObserver;
+    if (typeof NativeMutationObserver !== "function") {
+        return NativeMutationObserver;
+    }
+
+    return class ScopedPreviewMutationObserver {
+        private readonly nativeObserver: MutationObserver;
+        private pendingRecords: MutationRecord[] = [];
+        private flushTimer: number | null = null;
+        private callbackWindowStartedAt = 0;
+        private callbackCount = 0;
+        private disconnected = false;
+
+        constructor(private readonly callback: MutationCallback) {
+            this.nativeObserver = new NativeMutationObserver((records) => {
+                if (this.disconnected) {
+                    return;
+                }
+                const scopedRecords = records.filter((record) =>
+                    isPreviewScopedNode(record.target, shadowRoot)
+                );
+                if (scopedRecords.length === 0) {
+                    return;
+                }
+                this.pendingRecords.push(...scopedRecords);
+                this.scheduleFlush();
+            });
+        }
+
+        observe(target: Node, options?: MutationObserverInit) {
+            if (this.disconnected) {
+                return;
+            }
+            this.nativeObserver.observe(normalizePreviewMutationTarget(target, shadowRoot), options);
+        }
+
+        disconnect() {
+            this.disconnected = true;
+            this.pendingRecords = [];
+            if (this.flushTimer !== null) {
+                window.clearTimeout(this.flushTimer);
+                this.flushTimer = null;
+            }
+            this.nativeObserver.disconnect();
+        }
+
+        takeRecords(): MutationRecord[] {
+            const nativeRecords = this.nativeObserver
+                .takeRecords()
+                .filter((record) => isPreviewScopedNode(record.target, shadowRoot));
+            const records = [...this.pendingRecords, ...nativeRecords];
+            this.pendingRecords = [];
+            return records;
+        }
+
+        private scheduleFlush() {
+            if (this.flushTimer !== null) {
+                return;
+            }
+            this.flushTimer = window.setTimeout(
+                () => this.flush(),
+                PREVIEW_CODE_MUTATION_OBSERVER_FLUSH_MS
+            );
+        }
+
+        private flush() {
+            this.flushTimer = null;
+            if (this.disconnected || this.pendingRecords.length === 0) {
+                return;
+            }
+
+            const now = Date.now();
+            if (
+                this.callbackWindowStartedAt === 0
+                || now - this.callbackWindowStartedAt > PREVIEW_CODE_MUTATION_OBSERVER_BUDGET_WINDOW_MS
+            ) {
+                this.callbackWindowStartedAt = now;
+                this.callbackCount = 0;
+            }
+            this.callbackCount += 1;
+
+            if (this.callbackCount > PREVIEW_CODE_MUTATION_OBSERVER_MAX_CALLBACKS) {
+                this.disconnect();
+                reportRuntimeError(
+                    "preview_code 已停止一个高频 MutationObserver：预览脚本持续扫描 DOM，可能导致主界面卡死。"
+                );
+                return;
+            }
+
+            const records = this.pendingRecords;
+            this.pendingRecords = [];
+            this.callback(records, this as unknown as MutationObserver);
+        }
+    } as typeof MutationObserver;
 }
 
 const inlineHandlerRegistry = new WeakMap<Element, Map<string, EventListener>>();
@@ -392,6 +509,14 @@ function createPreviewScriptEnvironment(
     const previewDocument = createPreviewDocumentFacade(shadowRoot, host);
     const bridgeRegistry = getBridgeRegistry();
     const previewWindow = Object.create(window) as PreviewWindow;
+    const environment: PreviewScriptEnvironment = {
+        previewWindow,
+        previewDocument,
+    };
+    const ScopedMutationObserver = createScopedMutationObserverConstructor(
+        shadowRoot,
+        (message) => environment.reportRuntimeError?.(message)
+    );
 
     Object.defineProperty(previewWindow, "document", {
         configurable: true,
@@ -419,11 +544,12 @@ function createPreviewScriptEnvironment(
         writable: true,
         value: bridgeRegistry,
     });
+    Object.defineProperty(previewWindow, "MutationObserver", {
+        configurable: true,
+        value: ScopedMutationObserver,
+    });
 
-    return {
-        previewWindow,
-        previewDocument,
-    };
+    return environment;
 }
 
 function collectExportedSymbolNames(scriptContent: string): string[] {
@@ -597,6 +723,7 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
             } else {
                 lastEnvironment.previewWindow.aippPreviewCode = liveBridge;
             }
+            lastEnvironment.reportRuntimeError = (message: string) => onError?.(message);
 
             if (lastRenderedCode !== code) {
                 const canPatch = isFinal

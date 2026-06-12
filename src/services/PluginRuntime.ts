@@ -26,6 +26,10 @@ import { toast } from "sonner";
 import type { AssistantDetail, AssistantPrompt } from "@/data/Assistant";
 import type { ConversationWithMessages } from "@/data/Conversation";
 import { markdownRegistry, type MarkdownTagRegistration } from "./markdownRegistry";
+import {
+    mcpToolComponentRegistry,
+    type McpToolComponentRegistration,
+} from "./mcpToolComponentRegistry";
 
 type PluginConstructor = new () => AippPlugin | AippAssistantTypePlugin;
 
@@ -86,6 +90,15 @@ export interface PluginAssistantFormFieldContribution {
     options?: PluginSelectOption[];
 }
 
+export interface PluginMcpToolComponentContribution {
+    id: string;
+    title: string;
+    description?: string | null;
+    serverName?: string | null;
+    toolName?: string | null;
+    priority?: number | null;
+}
+
 export interface PluginContributions {
     hooks?: Array<{
         name: string;
@@ -99,6 +112,7 @@ export interface PluginContributions {
     actions?: PluginActionContribution[];
     slots?: PluginSlotContribution[];
     assistantFormFields?: PluginAssistantFormFieldContribution[];
+    mcpToolComponents?: PluginMcpToolComponentContribution[];
 }
 
 interface PluginDataItem {
@@ -343,11 +357,13 @@ class PluginRuntime {
         if (forceReload) {
             this.plugins.forEach((loadedPlugin) => this.clearPluginThemesForPlugin(loadedPlugin.code));
             this.plugins.forEach((loadedPlugin) => this.clearMarkdownTagsForPlugin(loadedPlugin.code));
+            this.plugins.forEach((loadedPlugin) => this.clearMcpToolComponentsForPlugin(loadedPlugin.code));
             this.plugins.forEach((loadedPlugin) => this.clearHookHandlersForPlugin(loadedPlugin.code));
             this.plugins = [];
         }
         this.clearStalePluginThemes(activeCodes);
         this.clearStaleMarkdownTags(activeCodes);
+        this.clearStaleMcpToolComponents(activeCodes);
         this.clearStaleHookHandlers(activeCodes);
         this.startHookBridge();
 
@@ -578,6 +594,25 @@ class PluginRuntime {
                         tagName: tag.tagName,
                         attributes: [...tag.attributes],
                         render: tag.render,
+                    })),
+            registerMcpToolComponent: (registration: McpToolComponentRegistration) => {
+                this.assertPluginPermission(plugin, "mcp.tool-component.register");
+                mcpToolComponentRegistry.register(plugin.code, registration);
+            },
+            unregisterMcpToolComponent: (componentId: string) => {
+                mcpToolComponentRegistry.unregister(plugin.code, componentId);
+            },
+            listMcpToolComponents: async () =>
+                mcpToolComponentRegistry
+                    .listComponents()
+                    .filter((component) => component.ownerCode === plugin.code)
+                    .map((component) => ({
+                        id: component.id,
+                        label: component.label,
+                        description: component.description,
+                        match: component.match.map((matcher) => ({ ...matcher })),
+                        priority: component.priority,
+                        render: component.render,
                     })),
             hooks: {
                 register: (hookName: string, handler: PluginHookHandler) => {
@@ -838,6 +873,10 @@ class PluginRuntime {
         markdownRegistry.clearTagsForPlugin(pluginCode);
     }
 
+    private clearMcpToolComponentsForPlugin(pluginCode: string): void {
+        mcpToolComponentRegistry.clearForOwner(pluginCode);
+    }
+
     private clearStalePluginThemes(activePluginCodes: Set<string>): void {
         const staleThemeIds = [...this.pluginThemes.entries()]
             .filter(([, theme]) => !activePluginCodes.has(theme.ownerCode))
@@ -853,6 +892,10 @@ class PluginRuntime {
 
     private clearStaleMarkdownTags(activePluginCodes: Set<string>): void {
         markdownRegistry.clearStaleTags(activePluginCodes);
+    }
+
+    private clearStaleMcpToolComponents(activePluginCodes: Set<string>): void {
+        mcpToolComponentRegistry.clearStaleOwners(activePluginCodes);
     }
 
     private hookHandlerKey(pluginCode: string, hookName: string): string {

@@ -33,7 +33,7 @@ const ToolErrorContinueContext = createContext(true);
 
 export const ToolErrorContinueProvider = ToolErrorContinueContext.Provider;
 
-const useToolErrorContinueEnabled = () => useContext(ToolErrorContinueContext);
+export const useToolErrorContinueEnabled = () => useContext(ToolErrorContinueContext);
 
 const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
     content,
