@@ -359,6 +359,7 @@ export default function InlineCodePreviewCard({
     const lastStreamingPreviewAppliedAtRef = useRef(0);
     const lastStreamingPreviewIdentityRef = useRef<string | null>(null);
     const preparingRequestSignatureRef = useRef<string | null>(null);
+    const reportedRuntimeErrorKeysRef = useRef<Set<string>>(new Set());
 
     const matchedStateByLlmCallId = useMemo(() => {
         if (!mcpToolCallStates || !llmCallId || callId) {
@@ -595,7 +596,61 @@ export default function InlineCodePreviewCard({
         setIsHidden(false);
         setIsRuntimeActivated(isStreaming || !defaultCollapsed);
         preparingRequestSignatureRef.current = null;
+        reportedRuntimeErrorKeysRef.current.clear();
     }, [conversationId, hasScriptContent, isLastMessage, isStreaming, requestSignature]);
+
+    const handleRuntimeError = useCallback(
+        (message: string | null) => {
+            setRuntimeError(message);
+            if (!message || !effectiveCallId || isStreaming) {
+                return;
+            }
+            if (!resolvedRequestId) {
+                return;
+            }
+
+            const reportKey = `${effectiveCallId}:${requestSignature ?? previewIdentity}:${message}`;
+            if (reportedRuntimeErrorKeysRef.current.has(reportKey)) {
+                return;
+            }
+            reportedRuntimeErrorKeysRef.current.add(reportKey);
+
+            const code = previewRequest?.code?.trim() ?? "";
+            void invoke("report_preview_code_runtime_error", {
+                callId: effectiveCallId,
+                call_id: effectiveCallId,
+                conversationId,
+                conversation_id: conversationId,
+                messageId,
+                message_id: messageId,
+                requestId: resolvedRequestId,
+                request_id: resolvedRequestId,
+                error: {
+                    message,
+                    phase: "runtime",
+                    codeExcerpt: code.length > 2000 ? `${code.slice(0, 2000)}...` : code,
+                },
+            }).catch((error) => {
+                console.warn("Failed to report preview_code runtime error:", getErrorMessage(error));
+            });
+        },
+        [
+            conversationId,
+            effectiveCallId,
+            isStreaming,
+            messageId,
+            previewIdentity,
+            previewRequest?.code,
+            requestSignature,
+            resolvedRequestId,
+        ]
+    );
+
+    useEffect(() => {
+        if (runtimeError && resolvedRequestId) {
+            handleRuntimeError(runtimeError);
+        }
+    }, [handleRuntimeError, resolvedRequestId, runtimeError]);
 
     const authorizeSelectedPreviewResources = useCallback(
         async (
@@ -914,7 +969,7 @@ export default function InlineCodePreviewCard({
                 },
                 emitEvent: (_name: string, _payload?: unknown) => undefined,
             },
-            onError: setRuntimeError,
+            onError: handleRuntimeError,
         });
     }, [
         previewRequest,
@@ -929,6 +984,7 @@ export default function InlineCodePreviewCard({
             isInteractionEnabled,
             isLastMessage,
             shouldRenderRuntimeHost,
+            handleRuntimeError,
         ]);
 
     useEffect(() => {

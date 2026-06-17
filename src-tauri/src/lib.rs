@@ -169,7 +169,7 @@ use crate::mcp::builtin_mcp::{
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
     get_conversation_loaded_mcp_tools, get_mcp_tool_call, get_mcp_tool_calls_by_conversation,
-    send_mcp_tool_results, stop_mcp_tool_call,
+    report_preview_code_runtime_error, send_mcp_tool_results, stop_mcp_tool_call,
 };
 use crate::mcp::registry_api::{
     add_mcp_server,
@@ -1123,6 +1123,7 @@ pub fn run() {
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
             get_conversation_loaded_mcp_tools,
+            report_preview_code_runtime_error,
             stop_mcp_tool_call,
             continue_with_error,
             send_mcp_tool_results,

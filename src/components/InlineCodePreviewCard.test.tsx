@@ -53,6 +53,73 @@ describe("InlineCodePreviewCard", () => {
         );
     });
 
+    it("reports preview_code runtime errors back to the tool call", async () => {
+        const brokenRequest = {
+            title: "broken_preview",
+            renderer: "html",
+            code: '<div>Broken</div><script>throw new Error("render failed")</script>',
+            interaction_mode: "none",
+        };
+        mockInvokeHandler("list_preview_code_requests_for_conversation", () => [
+            {
+                request_id: "runtime-error-request",
+                conversation_id: 1,
+                title: brokenRequest.title,
+                renderer: brokenRequest.renderer,
+                code: brokenRequest.code,
+                loadingMessages: [],
+                interactionMode: "none",
+            },
+        ]);
+        mockInvokeHandler("get_mcp_tool_call", () => ({
+            id: 42,
+            conversation_id: 1,
+            message_id: 10,
+            server_id: 1,
+            server_name: "UI交互工具",
+            tool_name: "preview_code",
+            parameters: "{}",
+            status: "success",
+            result: null,
+            error: null,
+        }));
+        mockInvokeHandler("report_preview_code_runtime_error", () => true);
+
+        render(
+            <InlineCodePreviewCard
+                parameters={JSON.stringify(brokenRequest)}
+                conversationId={1}
+                messageId={10}
+                callId={42}
+                mcpToolCallStates={new Map()}
+                isLastMessage={true}
+                isStreaming={false}
+            />
+        );
+
+        expect(await screen.findByText("broken_preview")).toBeInTheDocument();
+        await waitFor(() => {
+            expect(invoke).toHaveBeenCalledWith(
+                "report_preview_code_runtime_error",
+                expect.objectContaining({
+                    callId: 42,
+                    conversationId: 1,
+                    messageId: 10,
+                    requestId: "runtime-error-request",
+                    error: expect.objectContaining({
+                        message: expect.stringContaining("render failed"),
+                        phase: "runtime",
+                    }),
+                })
+            );
+        });
+
+        const reports = vi.mocked(invoke).mock.calls.filter(
+            ([command]) => command === "report_preview_code_runtime_error"
+        );
+        expect(reports).toHaveLength(1);
+    });
+
     it("does not render raw external image URLs before authorization", async () => {
         mockInvokeHandler("list_preview_code_requests_for_conversation", () => []);
         mockInvokeHandler("prepare_preview_code_request_for_ui", () => ({

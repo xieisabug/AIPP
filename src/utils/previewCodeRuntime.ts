@@ -266,6 +266,9 @@ function runScriptContent(
     environment: PreviewScriptEnvironment,
     scriptContent: string
 ) {
+    const scopedScriptContent = `with(window){
+${appendWindowExports(scriptContent)}
+}`;
     const scriptRunner = new Function(
         "window",
         "document",
@@ -275,7 +278,7 @@ function runScriptContent(
         "shadowRoot",
         "aippPreviewCode",
         "MutationObserver",
-        appendWindowExports(scriptContent)
+        scopedScriptContent
     );
     scriptRunner.call(
         environment.previewWindow,
@@ -501,6 +504,57 @@ function createScopedMutationObserverConstructor(
 
 const inlineHandlerRegistry = new WeakMap<Element, Map<string, EventListener>>();
 
+function definePreviewWindowValue(previewWindow: PreviewWindow, name: string, value: unknown) {
+    Object.defineProperty(previewWindow, name, {
+        configurable: true,
+        writable: true,
+        value,
+    });
+}
+
+function definePreviewWindowNativeGlobals(previewWindow: PreviewWindow) {
+    const sourceWindow = window as unknown as Record<string, unknown>;
+    const nativeValueNames = [
+        "performance",
+        "navigator",
+        "location",
+        "history",
+        "crypto",
+        "screen",
+        "localStorage",
+        "sessionStorage",
+        "console",
+        "innerWidth",
+        "innerHeight",
+        "devicePixelRatio",
+    ];
+    const nativeMethodNames = [
+        "setTimeout",
+        "clearTimeout",
+        "setInterval",
+        "clearInterval",
+        "requestAnimationFrame",
+        "cancelAnimationFrame",
+        "queueMicrotask",
+        "fetch",
+    ];
+
+    nativeValueNames.forEach((name) => {
+        try {
+            definePreviewWindowValue(previewWindow, name, sourceWindow[name]);
+        } catch {
+            // Some browser globals can throw when unavailable or blocked by settings.
+        }
+    });
+
+    nativeMethodNames.forEach((name) => {
+        const value = sourceWindow[name];
+        if (typeof value === "function") {
+            definePreviewWindowValue(previewWindow, name, value.bind(window));
+        }
+    });
+}
+
 function createPreviewScriptEnvironment(
     shadowRoot: ShadowRoot,
     host: HTMLElement,
@@ -513,6 +567,7 @@ function createPreviewScriptEnvironment(
         previewWindow,
         previewDocument,
     };
+    definePreviewWindowNativeGlobals(previewWindow);
     const ScopedMutationObserver = createScopedMutationObserverConstructor(
         shadowRoot,
         (message) => environment.reportRuntimeError?.(message)

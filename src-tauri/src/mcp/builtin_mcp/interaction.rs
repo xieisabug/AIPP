@@ -18,6 +18,7 @@ type PreviewCodeDecision = Result<PreviewCodeResponse, String>;
 pub const PREVIEW_FILE_RELAY_SCHEME: &str = "aipp-preview";
 const PREVIEW_FILE_RELAY_TTL_SECS: u64 = 10 * 60;
 const PREVIEW_FILE_RELAY_MAX_BYTES: u64 = 20 * 1024 * 1024;
+const PREVIEW_CODE_RENDER_ERROR_GRACE_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskUserQuestionOption {
@@ -1032,16 +1033,47 @@ pub async fn request_preview_code(
     let interaction_mode = event.interaction_mode.clone();
 
     if interaction_mode == "none" {
+        let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
+        interaction_state.store_preview_code_request(event.clone(), tx).await;
+        let mut cleanup_guard = PendingInteractionCleanup::new(
+            interaction_state,
+            request_id.clone(),
+            InteractionCleanupKind::PreviewCode,
+        );
+
         if let Err(e) = app_handle.emit("preview-code-request", &event) {
+            interaction_state.remove_preview_code_request(&request_id).await;
+            cleanup_guard.disarm();
             warn!(request_id = %request_id, error = %e, "Failed to emit preview-code-request");
             return Err("Failed to emit PreviewCode event".to_string());
         }
 
-        return Ok(PreviewCodeResponse {
-            status: "displayed".to_string(),
-            request_id,
-            payload: None,
-        });
+        match tokio::time::timeout(
+            Duration::from_millis(PREVIEW_CODE_RENDER_ERROR_GRACE_MS),
+            rx,
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                interaction_state.remove_preview_code_request(&request_id).await;
+                cleanup_guard.disarm();
+                return result;
+            }
+            Ok(Err(_)) => {
+                interaction_state.remove_preview_code_request(&request_id).await;
+                cleanup_guard.disarm();
+                return Err("PreviewCode request was cancelled".to_string());
+            }
+            Err(_) => {
+                interaction_state.remove_preview_code_request(&request_id).await;
+                cleanup_guard.disarm();
+                return Ok(PreviewCodeResponse {
+                    status: "displayed".to_string(),
+                    request_id,
+                    payload: None,
+                });
+            }
+        }
     }
 
     let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();

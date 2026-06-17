@@ -30,6 +30,7 @@ use rmcp::{
     },
     ServiceExt,
 };
+use serde::Deserialize;
 use serde_json::Map as JsonMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -1265,6 +1266,117 @@ pub(crate) async fn finalize_tool_call_from_external_result(
     )
     .await
     .map(|_| ())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreviewCodeRuntimeErrorReport {
+    pub message: String,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub stack: Option<String>,
+    #[serde(default, alias = "scriptSrc")]
+    pub script_src: Option<String>,
+    #[serde(default, alias = "scriptIndex")]
+    pub script_index: Option<usize>,
+    #[serde(default, alias = "codeExcerpt")]
+    pub code_excerpt: Option<String>,
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    let truncated: String = value.chars().take(max_chars).collect();
+    format!("{}...\n[truncated, total chars: {}]", truncated, count)
+}
+
+fn clean_optional_report_field(value: Option<String>, max_chars: usize) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_chars(&value, max_chars))
+}
+
+fn format_preview_code_runtime_error(report: &PreviewCodeRuntimeErrorReport) -> Result<String> {
+    let message = report.message.trim();
+    if message.is_empty() {
+        bail!("preview_code runtime error message cannot be empty");
+    }
+
+    let mut lines = vec![
+        "PreviewCode runtime error after render:".to_string(),
+        format!("Message: {}", truncate_chars(message, 2000)),
+    ];
+    if let Some(phase) = clean_optional_report_field(report.phase.clone(), 120) {
+        lines.push(format!("Phase: {}", phase));
+    }
+    if let Some(script_src) = clean_optional_report_field(report.script_src.clone(), 1000) {
+        lines.push(format!("Script source: {}", script_src));
+    }
+    if let Some(script_index) = report.script_index {
+        lines.push(format!("Script index: {}", script_index));
+    }
+    if let Some(code_excerpt) = clean_optional_report_field(report.code_excerpt.clone(), 2000) {
+        lines.push(format!("Code excerpt:\n{}", code_excerpt));
+    }
+    if let Some(stack) = clean_optional_report_field(report.stack.clone(), 5000) {
+        lines.push(format!("Stack:\n{}", stack));
+    }
+    Ok(lines.join("\n"))
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, error), fields(call_id, conversation_id, message_id))]
+pub async fn report_preview_code_runtime_error(
+    app_handle: tauri::AppHandle,
+    call_id: i64,
+    conversation_id: Option<i64>,
+    message_id: Option<i64>,
+    request_id: Option<String>,
+    error: PreviewCodeRuntimeErrorReport,
+) -> std::result::Result<bool, String> {
+    let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
+    let tool_call = db
+        .get_mcp_tool_call(call_id)
+        .map_err(|e| format!("获取工具调用信息失败: {}", e))?;
+
+    if tool_call.tool_name != "preview_code" {
+        return Err(format!(
+            "tool call {} is '{}', not preview_code",
+            call_id, tool_call.tool_name
+        ));
+    }
+    if let Some(conversation_id) = conversation_id {
+        if tool_call.conversation_id != conversation_id {
+            return Err("preview_code runtime error conversation mismatch".to_string());
+        }
+    }
+    if let Some(message_id) = message_id {
+        if tool_call.message_id != Some(message_id) {
+            return Err("preview_code runtime error message mismatch".to_string());
+        }
+    }
+
+    let Some(request_id) = clean_optional_report_field(request_id, 200) else {
+        return Ok(false);
+    };
+
+    let mut error_message = format_preview_code_runtime_error(&error).map_err(|e| e.to_string())?;
+    error_message.push_str("
+Request ID: ");
+    error_message.push_str(&request_id);
+
+    let Some(interaction_state) = app_handle.try_state::<crate::mcp::builtin_mcp::InteractionState>() else {
+        return Ok(false);
+    };
+
+    // Resolve the still-running preview_code call. If the original tool call already
+    // returned success, do not emit a second model continuation for a late UI error.
+    Ok(interaction_state
+        .resolve_preview_code_request(&request_id, Err(error_message))
+        .await)
 }
 
 /// 规范化从 LLM 返回的 parameters JSON，移除可能的 markdown 代码块包裹。

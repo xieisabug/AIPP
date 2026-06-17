@@ -182,6 +182,71 @@ describe("previewCodeRuntime", () => {
         runtime.destroy();
     });
 
+    it("exposes preview window globals to later inline scripts", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => ({
+                ok: true,
+                text: async () => `
+                    (function(global) {
+                        global.d3 = {
+                            select(selector) {
+                                return {
+                                    text(value) {
+                                        document.querySelector(selector).textContent = value;
+                                    }
+                                };
+                            }
+                        };
+                    })(this);
+                `,
+            }))
+        );
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+        const onError = vi.fn();
+
+        runtime.update({
+            code: '<div id="chart"></div><script src="aipp-preview://localhost/d3.js"></script><script>d3.select("#chart").text("loaded");</script>',
+            isFinal: true,
+            bridgeId: "preview-code-d3-global-test",
+            bridge,
+            onError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            expect(host.shadowRoot?.querySelector("#chart")?.textContent).toBe("loaded");
+        });
+        expect(onError).toHaveBeenCalledWith(null);
+
+        runtime.destroy();
+    });
+
+    it("allows inline scripts to read native window globals through the preview scope", async () => {
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+        const onError = vi.fn();
+
+        runtime.update({
+            code: '<div id="clock"></div><script>document.getElementById("clock").textContent = String(typeof performance.now === "function");</script>',
+            isFinal: true,
+            bridgeId: "preview-code-performance-global-test",
+            bridge,
+            onError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            expect(host.shadowRoot?.querySelector("#clock")?.textContent).toBe("true");
+        });
+        expect(onError).toHaveBeenCalledWith(null);
+
+        runtime.destroy();
+    });
+
     it("runs MutationObserver scripts through a shadow-root scoped observer", async () => {
         const observedTargets: Node[] = [];
         class FakeMutationObserver {

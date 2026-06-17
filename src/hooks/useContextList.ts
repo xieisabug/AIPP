@@ -653,6 +653,9 @@ export function useContextList({
             }
 
             const contextType = getContextTypeFromToolName(toolName);
+            const finishedAt = toolCall.finished_time
+                ? new Date(toolCall.finished_time)
+                : undefined;
 
             if (contextType === 'preview_file') {
                 const parsedPreviewFile = parsePreviewFileRequest(toolCall.parameters);
@@ -783,7 +786,7 @@ export function useContextList({
                 searchResults,
                 searchMarkdown,
                 source: 'mcp',
-                timestamp: new Date(),
+                timestamp: finishedAt,
                 previewStatus: 'ready',
                 previewData,
             }, rawValue);

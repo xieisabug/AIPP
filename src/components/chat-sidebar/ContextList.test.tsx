@@ -1,12 +1,16 @@
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import ContextList from './ContextList';
 import { ContextItem } from './types';
 
 vi.mock('@tauri-apps/plugin-opener', () => ({
     openUrl: vi.fn(),
 }));
+
+afterEach(() => {
+    vi.useRealTimers();
+});
 
 describe('ContextList skills', () => {
     it('groups active skills under the Skills section', () => {
@@ -28,7 +32,7 @@ describe('ContextList skills', () => {
         expect(screen.queryByText('用户文件')).not.toBeInTheDocument();
     });
 
-    it('exposes full truncated values through title attributes', () => {
+    it('exposes full truncated values through title attributes', async () => {
         const items: ContextItem[] = [
             {
                 id: 'read-1',
@@ -62,6 +66,12 @@ describe('ContextList skills', () => {
             screen.getByTitle('/very/long/path/to/a/file/that/gets/truncated/in/the/sidebar/App.tsx'),
         ).toBeInTheDocument();
         expect(screen.getByTitle('read_file')).toBeInTheDocument();
+        expect(
+            screen.queryByTitle('A long search result title that may not fit in the available row width'),
+        ).not.toBeInTheDocument();
+
+        await userEvent.click(screen.getByLabelText('展开搜索结果'));
+
         expect(
             screen.getByTitle('A long search result title that may not fit in the available row width'),
         ).toBeInTheDocument();
@@ -121,5 +131,46 @@ describe('ContextList skills', () => {
         await user.click(screen.getByText('/workspace/src'));
 
         expect(onPreviewFileClick).toHaveBeenCalledWith(item);
+    });
+
+    it('auto-expands fresh search results briefly and keeps manual opens expanded', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-06-12T00:00:00.000Z'));
+        const searchItem: ContextItem = {
+            id: 'search-fresh',
+            type: 'search',
+            name: 'fresh query',
+            source: 'mcp',
+            timestamp: new Date(),
+            searchResults: [
+                {
+                    title: 'Fresh result',
+                    url: 'https://example.com/fresh',
+                    snippet: 'Fresh snippet',
+                },
+            ],
+        };
+
+        const { rerender } = render(<ContextList items={[]} />);
+
+        rerender(<ContextList items={[searchItem]} />);
+
+        expect(screen.getByTitle('Fresh result')).toBeInTheDocument();
+
+        act(() => {
+            vi.advanceTimersByTime(5000);
+        });
+
+        expect(screen.queryByTitle('Fresh result')).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByLabelText('展开搜索结果'));
+
+        expect(screen.getByTitle('Fresh result')).toBeInTheDocument();
+
+        act(() => {
+            vi.advanceTimersByTime(10000);
+        });
+
+        expect(screen.getByTitle('Fresh result')).toBeInTheDocument();
     });
 });

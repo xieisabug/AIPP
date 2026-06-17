@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { File, FileText, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image, Sparkles } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
@@ -12,6 +12,9 @@ interface ContextListProps {
     onItemClick?: (item: ContextItem) => void;
     onPreviewFileClick?: (item: ContextItem) => void;
 }
+
+const SEARCH_AUTO_EXPAND_MS = 5000;
+const RECENT_SEARCH_FINISH_WINDOW_MS = 10000;
 
 const getPathBasename = (value: string): string => {
     const trimmed = value.trim();
@@ -75,13 +78,100 @@ const getContextLabel = (type: ContextItem['type']): string => {
     }
 };
 
+const getItemTimestamp = (timestamp?: Date): number | null => {
+    if (!timestamp) return null;
+
+    const value = new Date(timestamp).getTime();
+    return Number.isFinite(value) ? value : null;
+};
+
 const ContextList: React.FC<ContextListProps> = ({
     items,
     className,
     onItemClick,
     onPreviewFileClick,
 }) => {
-    const [collapsedSearchIds, setCollapsedSearchIds] = useState<Set<string>>(new Set());
+    const [expandedSearchIds, setExpandedSearchIds] = useState<Set<string>>(new Set());
+    const manuallyToggledSearchIdsRef = useRef<Set<string>>(new Set());
+    const seenSearchIdsRef = useRef<Set<string> | null>(null);
+    const autoCloseTimersRef = useRef<Map<string, number>>(new Map());
+
+    const searchResultItems = useMemo(
+        () => items.filter((item) => item.type === 'search' && item.searchResults && item.searchResults.length > 0),
+        [items],
+    );
+
+    useEffect(() => {
+        const currentSearchIds = new Set(searchResultItems.map((item) => item.id));
+
+        const previousSearchIds = seenSearchIdsRef.current ?? new Set<string>();
+        const now = Date.now();
+        const autoExpandIds = searchResultItems
+            .filter((item) => {
+                if (previousSearchIds.has(item.id)) return false;
+                const finishedAt = getItemTimestamp(item.timestamp);
+                if (finishedAt === null) return false;
+                const ageMs = now - finishedAt;
+                return ageMs >= 0 && ageMs <= RECENT_SEARCH_FINISH_WINDOW_MS;
+            })
+            .map((item) => item.id);
+
+        seenSearchIdsRef.current = currentSearchIds;
+
+        autoCloseTimersRef.current.forEach((timer, id) => {
+            if (!currentSearchIds.has(id)) {
+                window.clearTimeout(timer);
+                autoCloseTimersRef.current.delete(id);
+            }
+        });
+        manuallyToggledSearchIdsRef.current.forEach((id) => {
+            if (!currentSearchIds.has(id)) {
+                manuallyToggledSearchIdsRef.current.delete(id);
+            }
+        });
+
+        setExpandedSearchIds((prev) => {
+            const next = new Set<string>();
+            prev.forEach((id) => {
+                if (currentSearchIds.has(id)) {
+                    next.add(id);
+                }
+            });
+            autoExpandIds.forEach((id) => next.add(id));
+            if (next.size === prev.size && Array.from(next).every((id) => prev.has(id))) {
+                return prev;
+            }
+            return next;
+        });
+
+        autoExpandIds.forEach((id) => {
+            const existingTimer = autoCloseTimersRef.current.get(id);
+            if (existingTimer) {
+                window.clearTimeout(existingTimer);
+            }
+
+            const timer = window.setTimeout(() => {
+                autoCloseTimersRef.current.delete(id);
+                if (manuallyToggledSearchIdsRef.current.has(id)) {
+                    return;
+                }
+                setExpandedSearchIds((prev) => {
+                    if (!prev.has(id)) return prev;
+                    const next = new Set(prev);
+                    next.delete(id);
+                    return next;
+                });
+            }, SEARCH_AUTO_EXPAND_MS);
+            autoCloseTimersRef.current.set(id, timer);
+        });
+    }, [searchResultItems]);
+
+    useEffect(() => {
+        return () => {
+            autoCloseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+            autoCloseTimersRef.current.clear();
+        };
+    }, []);
 
     const handleOpenUrl = useCallback((url?: string) => {
         if (!url) return;
@@ -119,8 +209,15 @@ const ContextList: React.FC<ContextListProps> = ({
         }
     }, []);
 
-    const toggleSearchCollapse = useCallback((id: string) => {
-        setCollapsedSearchIds((prev) => {
+    const toggleSearchExpansion = useCallback((id: string) => {
+        manuallyToggledSearchIdsRef.current.add(id);
+        const existingTimer = autoCloseTimersRef.current.get(id);
+        if (existingTimer) {
+            window.clearTimeout(existingTimer);
+            autoCloseTimersRef.current.delete(id);
+        }
+
+        setExpandedSearchIds((prev) => {
             const next = new Set(prev);
             if (next.has(id)) {
                 next.delete(id);
@@ -204,19 +301,21 @@ const ContextList: React.FC<ContextListProps> = ({
                                             className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground"
                                             onClick={(event) => {
                                                 event.stopPropagation();
-                                                toggleSearchCollapse(item.id);
+                                                toggleSearchExpansion(item.id);
                                             }}
+                                            aria-label={expandedSearchIds.has(item.id) ? "收起搜索结果" : "展开搜索结果"}
+                                            title={expandedSearchIds.has(item.id) ? "收起搜索结果" : "展开搜索结果"}
                                         >
                                             <ChevronDown
                                                 className={cn(
                                                     "h-4 w-4 transition-transform",
-                                                    !collapsedSearchIds.has(item.id) && "rotate-180"
+                                                    expandedSearchIds.has(item.id) && "rotate-180"
                                                 )}
                                             />
                                         </button>
                                     )}
                                 </div>
-                                {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && !collapsedSearchIds.has(item.id) && (
+                                {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && expandedSearchIds.has(item.id) && (
                                     <div className="ml-3 mt-1 flex flex-col gap-1 border-l border-border pl-2">
                                         {item.searchResults.map((result, index) => (
                                             <button
