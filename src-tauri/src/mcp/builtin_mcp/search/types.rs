@@ -85,6 +85,7 @@ pub enum SearchResponse {
         engine_id: String,
         html_content: String,
         message: String,
+        search_time_ms: u64,
     },
     /// Markdown内容响应
     Markdown {
@@ -94,6 +95,7 @@ pub enum SearchResponse {
         engine_id: String,
         markdown_content: String,
         message: String,
+        search_time_ms: u64,
     },
     /// 结构化结果响应（完整对象）
     Items(SearchResults),

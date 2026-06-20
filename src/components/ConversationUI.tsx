@@ -788,7 +788,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [conversationId, onPreviewFileContextClick]);
 
         // ============= Sidebar Window 事件处理 =============
-        
+
+        // Inline-mode focus target (used only when the sidebar window is NOT open)
+        const [focusedContextId, setFocusedContextId] = useState<string | null>(null);
+
         // Listen for sidebar window open/close events
         useEffect(() => {
             const unlistenOpened = listen("sidebar-window-opened", () => {
@@ -823,6 +826,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 unlistenReady.then((f) => f());
             };
         }, [todos, artifacts, contextItems, conversationId]);
+
+        // Listen for focus-context requests from inline MCP tool cards. Only react
+        // when the separate sidebar window is NOT open — otherwise the sidebar
+        // window handles its own focus/scroll/highlight.
+        useEffect(() => {
+            const unlisten = listen<{ id: string }>("sidebar-focus-context", (event) => {
+                if (sidebarWindowOpen) return;
+                setFocusedContextId(event.payload.id);
+            });
+            return () => {
+                unlisten.then((f) => f());
+            };
+        }, [sidebarWindowOpen]);
+
+        // Auto-clear inline highlight after 1s to match the sidebar window behavior
+        useEffect(() => {
+            if (!focusedContextId) return;
+            const timer = setTimeout(() => setFocusedContextId(null), 1000);
+            return () => clearTimeout(timer);
+        }, [focusedContextId]);
 
         // Sync sidebar data to window when data changes (if window is open)
         useEffect(() => {
@@ -1708,6 +1731,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             conversationId={conversationId}
                             pluginList={pluginList}
                             toggleRequestVersion={sidebarToggleRequestVersion}
+                            focusedContextId={focusedContextId}
                             onExpandChange={handleSidebarExpandChange}
                             onOpenWindow={handleOpenSidebarWindow}
                             onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}

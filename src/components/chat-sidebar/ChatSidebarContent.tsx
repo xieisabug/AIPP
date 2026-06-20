@@ -16,6 +16,8 @@ interface ChatSidebarContentProps {
     pluginList?: LoadedPlugin[];
     conversationId?: string;
     className?: string;
+    focusedContextId?: string | null;
+    selectedContextId?: string | null;
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
     onPreviewFileClick?: (item: ContextItem) => void;
@@ -92,6 +94,8 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     pluginList = [],
     conversationId,
     className,
+    focusedContextId,
+    selectedContextId,
     onArtifactClick,
     onContextClick,
     onPreviewFileClick,
@@ -112,6 +116,14 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     React.useEffect(() => {
         if (contextItems.length > 0 && !contextOpen) setContextOpen(true);
     }, [contextItems.length]);
+
+    // Ensure context section is expanded when a focus request arrives so the
+    // target item is visible and scrollable.
+    React.useEffect(() => {
+        if (focusedContextId) {
+            setContextOpen(true);
+        }
+    }, [focusedContextId]);
 
     const sidebarPluginViews = useMemo(
         () =>
@@ -167,6 +179,8 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                 >
                     <ContextList
                         items={contextItems}
+                        focusedItemId={focusedContextId}
+                        selectedItemId={selectedContextId}
                         onItemClick={onContextClick}
                         onPreviewFileClick={onPreviewFileClick}
                     />

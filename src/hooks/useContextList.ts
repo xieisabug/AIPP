@@ -452,6 +452,17 @@ const inferContentType = (
     return { contentType: 'text', content, language };
 };
 
+const getSearchToolDisplayLabel = (toolName?: string): string => {
+    const normalizedName = toolName?.toLowerCase() || '';
+    if (normalizedName === 'search_web' || normalizedName.includes('search_web')) {
+        return '网络搜索';
+    }
+    if (normalizedName === 'fetch_url' || normalizedName.includes('fetch_url')) {
+        return '抓取网页';
+    }
+    return toolName || '搜索';
+};
+
 export function useContextList({
     conversationId,
     userFiles,
@@ -713,6 +724,7 @@ export function useContextList({
 
             const displayName = rawValue || toolCall.tool_name || 'Unknown';
             const parsedResult = parseToolResultPayload(toolCall.result);
+            const searchToolDisplayLabel = getSearchToolDisplayLabel(toolCall.tool_name);
             const searchResults =
                 contextType === 'search' && toolCall.result ? parseSearchResultItems(toolCall.result) : undefined;
             const searchMarkdown =
@@ -728,7 +740,7 @@ export function useContextList({
                 contextType === 'search'
                     ? {
                         title: displayName,
-                        subtitle: toolCall.tool_name,
+                        subtitle: searchToolDisplayLabel,
                         rawValue: rawValue || displayName,
                         contentType: searchMarkdown ? 'markdown' : 'file-meta',
                         content: searchMarkdown,
@@ -738,8 +750,8 @@ export function useContextList({
                             url: result.url,
                         })),
                         metadata: buildMetadata({
-                            来源: 'MCP 搜索',
-                            工具: toolCall.tool_name,
+                            来源: searchToolDisplayLabel,
+                            工具: searchToolDisplayLabel,
                             查询: rawValue,
                         }),
                     }
@@ -782,7 +794,7 @@ export function useContextList({
                 id: `mcp-${callId}`,
                 type: contextType,
                 name: displayName,
-                details: toolCall.tool_name,
+                details: contextType === 'search' ? searchToolDisplayLabel : toolCall.tool_name,
                 searchResults,
                 searchMarkdown,
                 source: 'mcp',

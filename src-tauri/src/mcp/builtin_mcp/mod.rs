@@ -1084,16 +1084,20 @@ pub async fn execute_aipp_builtin_tool(
                         Ok(response) => {
                             // 根据result_type返回不同格式的内容
                             match response {
-                                SearchResponse::Html { html_content, .. } => {
+                                SearchResponse::Html { html_content, search_engine, search_time_ms, .. } => {
                                     serde_json::json!({
                                         "content": [{"type": "text", "text": html_content}],
-                                        "isError": false
+                                        "isError": false,
+                                        "search_engine": search_engine,
+                                        "search_time_ms": search_time_ms
                                     })
                                 }
-                                SearchResponse::Markdown { markdown_content, .. } => {
+                                SearchResponse::Markdown { markdown_content, search_engine, search_time_ms, .. } => {
                                     serde_json::json!({
                                         "content": [{"type": "text", "text": markdown_content}],
-                                        "isError": false
+                                        "isError": false,
+                                        "search_engine": search_engine,
+                                        "search_time_ms": search_time_ms
                                     })
                                 }
                                 SearchResponse::Items(search_results) => {

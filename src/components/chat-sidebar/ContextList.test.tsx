@@ -173,4 +173,51 @@ describe('ContextList skills', () => {
 
         expect(screen.getByTitle('Fresh result')).toBeInTheDocument();
     });
+
+    it('expands a focused search item 300ms after highlight starts', () => {
+        vi.useFakeTimers();
+        Element.prototype.scrollIntoView = vi.fn();
+        const searchItem: ContextItem = {
+            id: 'search-focused',
+            type: 'search',
+            name: 'focused query',
+            source: 'mcp',
+            searchResults: [
+                {
+                    title: 'Focused result',
+                    url: 'https://example.com/focused',
+                    snippet: 'Focused snippet',
+                },
+            ],
+        };
+
+        render(<ContextList items={[searchItem]} focusedItemId="search-focused" />);
+
+        expect(screen.queryByTitle('Focused result')).not.toBeInTheDocument();
+
+        act(() => {
+            vi.advanceTimersByTime(299);
+        });
+        expect(screen.queryByTitle('Focused result')).not.toBeInTheDocument();
+
+        act(() => {
+            vi.advanceTimersByTime(1);
+        });
+        expect(screen.getByTitle('Focused result')).toBeInTheDocument();
+    });
+
+    it('keeps the selected context row visually selected', () => {
+        const items: ContextItem[] = [
+            {
+                id: 'search-selected',
+                type: 'search',
+                name: 'selected query',
+                source: 'mcp',
+            },
+        ];
+
+        render(<ContextList items={items} selectedItemId="search-selected" />);
+
+        expect(screen.getByText('selected query').closest('.cursor-pointer')).toHaveClass('bg-muted/50');
+    });
 });
