@@ -1545,6 +1545,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 在切换对话后，加载完成并渲染出消息后，强制滚动到底部
         useEffect(() => {
+            if (virtualizeMessages) return;
             // 必须有对话且不在加载中，且有可显示的消息时才执行
             if (!conversationId) return;
             if (isLoadingShow) return;
@@ -1562,7 +1563,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     smartScroll(true, 'auto');
                 })
             );
-        }, [conversationId, isLoadingShow, allDisplayMessages.length, smartScroll]);
+        }, [conversationId, isLoadingShow, allDisplayMessages.length, smartScroll, virtualizeMessages]);
 
         // 按消息 ID 定位滚动（用于搜索结果）
         useEffect(() => {
@@ -1603,7 +1604,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 requestAnimationFrame(() =>
                     requestAnimationFrame(() => {
                         if (virtualizeMessages) {
-                            smartScroll(true, "smooth");
+                            smartScroll(true, "auto");
                             return;
                         }
                         scrollToUserMessage();

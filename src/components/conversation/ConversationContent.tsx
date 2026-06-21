@@ -113,6 +113,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         virtualizedListEngine === "virtuoso" ? (
                             <VirtuosoMessageList
                                 {...sharedMessageListProps}
+                                conversationId={conversationId}
                                 scrollContainerRef={scrollContainerRef}
                                 pendingScrollMessageId={pendingScrollMessageId}
                                 clearPendingScrollMessageId={

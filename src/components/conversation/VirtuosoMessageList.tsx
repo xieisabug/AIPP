@@ -29,6 +29,7 @@ import {
 } from "./useMessageListElements";
 
 interface VirtuosoMessageListProps extends UseMessageListElementsProps {
+    conversationId: string;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId: number | null;
     clearPendingScrollMessageId: (messageId: number | null) => void;
@@ -44,6 +45,9 @@ interface VirtuosoMessageListContext {
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 60;
 const DEFAULT_ITEM_HEIGHT = 160;
+const INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT = 10;
+const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 30;
+const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
 const LIVE_ONLY_FOOTER_STYLE = {
     [CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR]: `var(${CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR}, var(${CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR}, 0px))`,
 } as React.CSSProperties;
@@ -209,6 +213,7 @@ function scheduleHighlightAttempt({
 }
 
 const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
+    conversationId,
     scrollContainerRef,
     pendingScrollMessageId,
     clearPendingScrollMessageId,
@@ -219,8 +224,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const { renderItems } = useMessageListElements(messageListProps);
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
     const scrollSyncFrameRef = useRef<number | null>(null);
+    const initialBottomConversationRef = useRef<string | null>(null);
+    const initialBottomPinConversationRef = useRef<string | null>(null);
+    const initialBottomPinFrameRef = useRef<number | null>(null);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
     const [viewportHeight, setViewportHeight] = useState(0);
+    const [
+        initialBottomVisibleConversationId,
+        setInitialBottomVisibleConversationId,
+    ] = useState<string | null>(null);
 
     const firstLiveIndex = useMemo(
         () => findFirstLiveSuffixIndex(renderItems),
@@ -264,6 +276,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         () => ({ liveItems }),
         [liveItems],
     );
+    const hasCurrentConversationMessages = useMemo(() => {
+        if (!conversationId || messageListProps.allDisplayMessages.length === 0) {
+            return false;
+        }
+
+        return messageListProps.allDisplayMessages.every(
+            (message) => String(message.conversation_id) === conversationId,
+        );
+    }, [conversationId, messageListProps.allDisplayMessages]);
 
     useLayoutEffect(() => {
         setScrollParent(scrollContainerRef.current);
@@ -301,10 +322,166 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             resizeObserver.disconnect();
         };
     }, [onScrollStateChange, scrollParent]);
+
+    useLayoutEffect(() => {
+        const container = scrollParent;
+        if (pendingScrollMessageId !== null && hasCurrentConversationMessages) {
+            initialBottomConversationRef.current = conversationId;
+            setInitialBottomVisibleConversationId((currentConversationId) =>
+                currentConversationId === conversationId
+                    ? currentConversationId
+                    : conversationId,
+            );
+            return;
+        }
+
+        if (
+            !container
+            || !hasCurrentConversationMessages
+            || initialBottomConversationRef.current === conversationId
+            || initialBottomPinConversationRef.current === conversationId
+        ) {
+            return;
+        }
+
+        initialBottomPinConversationRef.current = conversationId;
+        let elapsedFrames = 0;
+        let stableFrames = 0;
+        let lastMaxScrollTop: number | null = null;
+        let isPinningScroll = false;
+        const pinToBottom = () => {
+            isPinningScroll = true;
+            container.scrollTop = Math.max(
+                0,
+                container.scrollHeight - container.clientHeight,
+            );
+            isPinningScroll = false;
+            onScrollStateChange?.(container);
+        };
+        const handlePinnedScroll = () => {
+            if (isPinningScroll) {
+                return;
+            }
+
+            pinToBottom();
+        };
+        const observedElements = new Set<Element>();
+        const contentResizeObserver = new ResizeObserver(() => {
+            pinToBottom();
+        });
+        const observeContentElements = () => {
+            const elements = [
+                ...Array.from(container.children),
+                ...Array.from(container.querySelectorAll("*")),
+            ];
+            elements.forEach((element) => {
+                if (observedElements.has(element)) {
+                    return;
+                }
+
+                observedElements.add(element);
+                contentResizeObserver.observe(element);
+            });
+        };
+        const mutationObserver = new MutationObserver(() => {
+            observeContentElements();
+            pinToBottom();
+        });
+        const scrollToBottom = () => {
+            if (initialBottomPinConversationRef.current !== conversationId) {
+                return;
+            }
+
+            pinToBottom();
+            elapsedFrames += 1;
+
+            const maxScrollTop = Math.max(
+                0,
+                container.scrollHeight - container.clientHeight,
+            );
+            if (
+                lastMaxScrollTop !== null
+                && maxScrollTop > 0
+                && Math.abs(maxScrollTop - lastMaxScrollTop) <= 1
+            ) {
+                stableFrames += 1;
+            } else {
+                stableFrames = 0;
+            }
+            lastMaxScrollTop = maxScrollTop;
+
+            const canShowAfterStableLayout =
+                elapsedFrames >= INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT
+                && stableFrames >= INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT;
+            const reachedMaxWait =
+                elapsedFrames >= INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT;
+            if (canShowAfterStableLayout || reachedMaxWait) {
+                initialBottomConversationRef.current = conversationId;
+                initialBottomPinConversationRef.current = null;
+                initialBottomPinFrameRef.current = null;
+                container.removeEventListener("scroll", handlePinnedScroll);
+                contentResizeObserver.disconnect();
+                mutationObserver.disconnect();
+                setInitialBottomVisibleConversationId(conversationId);
+                return;
+            }
+
+            initialBottomPinFrameRef.current = requestAnimationFrame(scrollToBottom);
+        };
+
+        container.addEventListener("scroll", handlePinnedScroll, { passive: true });
+        observeContentElements();
+        mutationObserver.observe(container, {
+            childList: true,
+            subtree: true,
+        });
+        scrollToBottom();
+
+        return () => {
+            if (initialBottomPinConversationRef.current === conversationId) {
+                initialBottomPinConversationRef.current = null;
+            }
+            container.removeEventListener("scroll", handlePinnedScroll);
+            contentResizeObserver.disconnect();
+            mutationObserver.disconnect();
+            if (initialBottomPinFrameRef.current !== null) {
+                cancelAnimationFrame(initialBottomPinFrameRef.current);
+                initialBottomPinFrameRef.current = null;
+            }
+        };
+    }, [
+        conversationId,
+        hasCurrentConversationMessages,
+        historyItems.length,
+        liveItems.length,
+        onScrollStateChange,
+        pendingScrollMessageId,
+        scrollParent,
+    ]);
+
     const overscanPx = useMemo(
         () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 8),
         [viewportHeight],
     );
+    const initialBottomOffsetPx = useMemo(() => {
+        if (liveItems.length === 0) {
+            return 0;
+        }
+
+        return -liveItems.reduce((sum, item, index) => {
+            const hasGapAfter = index < liveItems.length - 1;
+            return sum + item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0);
+        }, 0);
+    }, [liveItems]);
+    const shouldHideInitialBottomPositioning =
+        pendingScrollMessageId === null
+        && hasCurrentConversationMessages
+        && initialBottomVisibleConversationId !== conversationId;
+    const initialBottomPositioningStyle = shouldHideInitialBottomPositioning
+        ? {
+            visibility: "hidden",
+        } satisfies React.CSSProperties
+        : undefined;
 
     const itemContent = useCallback(
         (index: number, item: RenderableConversationItem) => (
@@ -389,34 +566,53 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
     if (historyItems.length === 0) {
         return (
-            <VirtuosoLiveFooter
-                context={{
-                    ...context,
-                    useLiveOnlyViewportHeight: true,
-                }}
-            />
+            <div
+                data-aipp-initial-bottom-positioning={
+                    shouldHideInitialBottomPositioning ? "true" : undefined
+                }
+                style={initialBottomPositioningStyle}
+            >
+                <VirtuosoLiveFooter
+                    context={{
+                        ...context,
+                        useLiveOnlyViewportHeight: true,
+                    }}
+                />
+            </div>
         );
     }
 
     return (
-        <Virtuoso
-            ref={virtuosoRef}
-            customScrollParent={scrollParent}
-            data={historyItems}
-            computeItemKey={(_index, item) => item.key}
-            itemContent={itemContent}
-            components={virtuosoComponents}
-            context={context}
-            defaultItemHeight={defaultItemHeight}
-            heightEstimates={heightEstimates}
-            increaseViewportBy={{
-                top: overscanPx,
-                bottom: overscanPx,
-            }}
-            minOverscanItemCount={{ top: 8, bottom: 8 }}
-            alignToBottom
-            style={{ width: "100%" }}
-        />
+        <div
+            data-aipp-initial-bottom-positioning={
+                shouldHideInitialBottomPositioning ? "true" : undefined
+            }
+            style={initialBottomPositioningStyle}
+        >
+            <Virtuoso
+                ref={virtuosoRef}
+                customScrollParent={scrollParent}
+                data={historyItems}
+                computeItemKey={(_index, item) => item.key}
+                itemContent={itemContent}
+                components={virtuosoComponents}
+                context={context}
+                defaultItemHeight={defaultItemHeight}
+                heightEstimates={heightEstimates}
+                initialTopMostItemIndex={{
+                    index: "LAST",
+                    align: "end",
+                    offset: initialBottomOffsetPx,
+                }}
+                increaseViewportBy={{
+                    top: overscanPx,
+                    bottom: overscanPx,
+                }}
+                minOverscanItemCount={{ top: 8, bottom: 8 }}
+                alignToBottom
+                style={{ width: "100%" }}
+            />
+        </div>
     );
 };
 
