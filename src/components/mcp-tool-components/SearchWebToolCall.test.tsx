@@ -100,6 +100,47 @@ describe("SearchWebToolCall", () => {
         expect(screen.getByText("0.3 秒")).toBeInTheDocument();
     });
 
+    it("lets persisted MCP status override a streaming placeholder", () => {
+        const llmCallId = "search-stream-10";
+        const result = JSON.stringify({
+            items: [
+                { title: "A", url: "https://a.com" },
+                { title: "B", url: "https://b.com" },
+            ],
+            search_engine: "Google",
+            search_time_ms: 250,
+        });
+        const states = new Map([
+            [10, {
+                call_id: 10,
+                conversation_id: 1,
+                message_id: 2,
+                status: "success" as const,
+                llm_call_id: llmCallId,
+                server_name: "aipp:search",
+                tool_name: "search_web",
+                parameters: '{"query":"Rust async"}',
+                result,
+            }],
+        ]);
+
+        render(
+            <SearchWebToolCall
+                {...baseProps}
+                llmCallId={llmCallId}
+                isStreaming={true}
+                mcpToolCallStates={states}
+            />,
+        );
+
+        expect(screen.getByText("搜索完成")).toBeInTheDocument();
+        expect(screen.queryByText("生成中")).not.toBeInTheDocument();
+        expect(screen.getByText("2 条")).toBeInTheDocument();
+        expect(screen.getByText("0.3 秒")).toBeInTheDocument();
+        expect(screen.getByText("搜索完成").closest("[data-mcp-motion='status']")).toBeInTheDocument();
+        expect(screen.getByText("2 条").closest("[data-mcp-motion='metric']")).toBeInTheDocument();
+    });
+
     it("estimates result count from markdown by counting distinct external links", () => {
         const markdown = [
             "# Search Results",

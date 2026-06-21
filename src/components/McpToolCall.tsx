@@ -3,6 +3,7 @@ import { Play, Loader2, CheckCircle, XCircle, Blocks, ChevronDown, ChevronUp, Ro
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShineBorder } from "@/components/magicui/shine-border";
+import { MotionMetaRow, MotionStatusSlot, MotionToolCard } from "@/components/mcp-tool-components/McpToolMotion";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { invoke } from "@tauri-apps/api/core";
 import { MCPToolCall } from "@/data/MCPToolCall";
@@ -153,9 +154,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const displayParameters = maskedData.parameters;
     const headerTitle = `${displayServerName} - ${displayToolName}`;
 
+    const protocolStatus = metaOverride?.status ?? status;
     const initialProtocolState: ExecutionState =
-        !isStreaming && (status === "pending" || status === "executing" || status === "success" || status === "failed")
-            ? status
+        protocolStatus === "pending" || protocolStatus === "executing" || protocolStatus === "success" || protocolStatus === "failed"
+            ? protocolStatus
             : isStreaming
               ? "streaming"
               : "idle";
@@ -472,19 +474,19 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
 
         if (displayResult) {
             return (
-                <div className="mt-2">
+                <MotionMetaRow show={Boolean(displayResult)} className="mt-2">
                     <span className="text-xs text-muted-foreground">结果:</span>
                     <JsonDisplay content={displayResult} maxHeight="288px" className="mt-1" />
-                </div>
+                </MotionMetaRow>
             );
         }
 
         if (displayError) {
             return (
-                <div className="mt-2">
+                <MotionMetaRow show={Boolean(displayError)} className="mt-2">
                     <span className="text-xs text-muted-foreground">错误:</span>
                     <JsonDisplay content={displayError} maxHeight="200px" className="mt-1" />
-                </div>
+                </MotionMetaRow>
             );
         }
 
@@ -492,7 +494,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     };
 
     return (
-        <div className="w-full max-w-[600px] my-1 p-2 border border-border rounded-md bg-card overflow-hidden relative">
+        <MotionToolCard>
             {(isRunning || isStreaming) && (
                 <ShineBorder
                     shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -508,7 +510,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     <span className="truncate" title={displayToolName}>{displayToolName}</span>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
-                    <StatusIndicator state={executionState} />
+                    <MotionStatusSlot stateKey={executionState} present={executionState !== "idle"}>
+                        <StatusIndicator state={executionState} />
+                    </MotionStatusSlot>
                     {isExecuting && (
                         <Button
                             onClick={handleStop}
@@ -624,7 +628,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     </div>
                 ) : null}
             </div>
-        </div>
+        </MotionToolCard>
     );
 };
 

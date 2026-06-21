@@ -16,6 +16,7 @@ import { emit } from "@tauri-apps/api/event";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/magicui/shine-border";
+import { MotionDetails, MotionMetaRow, MotionMetricItem, MotionStatusSlot, MotionToolCard } from "@/components/mcp-tool-components/McpToolMotion";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { useToolErrorContinueEnabled } from "@/components/McpToolCall";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
@@ -269,7 +270,8 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
     const stateOverride = effectiveCallId && props.mcpToolCallStates
         ? props.mcpToolCallStates.get(effectiveCallId)
         : matchedStateByLlmCallId;
-    const state = props.isStreaming ? "streaming" : stateOverride?.status ?? localState;
+    const isStreamingPlaceholder = props.isStreaming && !stateOverride?.status;
+    const state = stateOverride?.status ?? (props.isStreaming ? "streaming" : localState);
     const effectiveResult = stateOverride?.result ?? props.currentToolCall?.result;
     const fallbackFetchTimeMs = useMemo(
         () => elapsedMsFromToolCall(
@@ -289,7 +291,7 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
     );
 
     const isRunning = Boolean(effectiveCallId && props.shiningMcpCallId === effectiveCallId);
-    const shouldShine = isRunning || props.isStreaming || state === "executing";
+    const shouldShine = isRunning || isStreamingPlaceholder || state === "executing";
     const isExecuting = state === "executing";
     const isFailed = state === "failed";
     const canExecute = state === "idle" || state === "pending" || state === "failed";
@@ -299,12 +301,12 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
         && (props.status === "failed" || Boolean(props.error));
     const shouldHideFailedActions = isFailed && continueOnToolErrorEnabled;
     const canShowExecute = canExecute
-        && !props.isStreaming
+        && !isStreamingPlaceholder
         && !shouldHideFailedActions
         && !isProtocolFailureWithoutCall;
     const canShowContinueWithError = isFailed
         && Boolean(effectiveCallId)
-        && !props.isStreaming
+        && !isStreamingPlaceholder
         && !shouldHideFailedActions;
     const effectiveError = stateOverride?.error ?? localError ?? props.error ?? null;
 
@@ -316,13 +318,13 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
     const displayUrl = shouldMask ? masked?.parameters ?? "******" : url;
     const displayError = shouldMask && effectiveError ? "******" : effectiveError;
     useEffect(() => {
-        if (props.isStreaming) {
-            setLocalState("streaming");
-            return;
-        }
         if (stateOverride?.status) {
             setLocalState(stateOverride.status);
             setLocalError(stateOverride.error ?? null);
+            return;
+        }
+        if (props.isStreaming) {
+            setLocalState("streaming");
             return;
         }
         setLocalState(props.status ?? "idle");
@@ -433,8 +435,8 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
     }, [canFocusInSidebar, handleFocusInSidebar]);
 
     return (
-        <div
-            className={`w-full max-w-[600px] my-1 p-2 border border-border rounded-md bg-card overflow-hidden relative transition-colors${canFocusInSidebar ? " cursor-pointer hover:border-primary/40 hover:bg-muted/30" : ""}`}
+        <MotionToolCard
+            interactive={canFocusInSidebar}
             onClick={handleCardClick}
             onKeyDown={handleCardKeyDown}
             role={canFocusInSidebar ? "button" : undefined}
@@ -466,7 +468,9 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
                     </div>
                     <div className="flex flex-shrink-0 items-center gap-1">
                         <div title={displayError ?? undefined}>
-                            <StatusBadge state={state} />
+                            <MotionStatusSlot stateKey={state}>
+                                <StatusBadge state={state} />
+                            </MotionStatusSlot>
                         </div>
                         {isExecuting && effectiveCallId && (
                             <Button
@@ -508,35 +512,40 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
                     </div>
                 </div>
 
-                {state === "success" && (typeof parsedResult.wordCount === "number" || typeof parsedResult.fetchTimeMs === "number") && (
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <MotionMetaRow
+                    show={state === "success" && (typeof parsedResult.wordCount === "number" || typeof parsedResult.fetchTimeMs === "number")}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1"
+                >
                         {typeof parsedResult.wordCount === "number" && (
-                            <MetaItem
-                                icon={<Hash className="h-3 w-3" />}
-                                value={`${parsedResult.wordCount} 字`}
-                                title={`参考文档：${parsedResult.wordCount} 字`}
-                            />
+                            <MotionMetricItem metricKey={`words-${parsedResult.wordCount}`}>
+                                <MetaItem
+                                    icon={<Hash className="h-3 w-3" />}
+                                    value={`${parsedResult.wordCount} 字`}
+                                    title={`参考文档：${parsedResult.wordCount} 字`}
+                                />
+                            </MotionMetricItem>
                         )}
                         {typeof parsedResult.fetchTimeMs === "number" && (
-                            <MetaItem
-                                icon={<Clock className="h-3 w-3" />}
-                                value={formatDurationSeconds(parsedResult.fetchTimeMs)}
-                                title={`抓取耗时：${formatDurationSeconds(parsedResult.fetchTimeMs)}`}
-                            />
+                            <MotionMetricItem metricKey={`time-${parsedResult.fetchTimeMs}`}>
+                                <MetaItem
+                                    icon={<Clock className="h-3 w-3" />}
+                                    value={formatDurationSeconds(parsedResult.fetchTimeMs)}
+                                    title={`抓取耗时：${formatDurationSeconds(parsedResult.fetchTimeMs)}`}
+                                />
+                            </MotionMetricItem>
                         )}
-                    </div>
-                )}
+                </MotionMetaRow>
 
-                {state === "failed" && displayError && (
+                <MotionDetails show={state === "failed" && Boolean(displayError)}>
                     <div
                         className="max-h-24 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1.5 text-xs text-destructive"
-                        title={displayError}
+                        title={displayError ?? undefined}
                     >
                         {displayError}
                     </div>
-                )}
+                </MotionDetails>
             </div>
-        </div>
+        </MotionToolCard>
     );
 };
 
