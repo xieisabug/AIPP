@@ -205,6 +205,79 @@ describe('useContextList', () => {
         });
     });
 
+    it('uses Chinese labels for built-in web search and fetch sidebar items', async () => {
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [7, {
+                call_id: 7,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'search_web',
+                parameters: JSON.stringify({ query: 'Rust async', result_type: 'items' }),
+                result: JSON.stringify([
+                    {
+                        type: 'json',
+                        json: [
+                            {
+                                title: 'Rust Async',
+                                url: 'https://example.com/rust',
+                                snippet: 'Rust async result',
+                            },
+                        ],
+                    },
+                ]),
+            }],
+            [8, {
+                call_id: 8,
+                conversation_id: 1,
+                status: 'success',
+                tool_name: 'fetch_url',
+                parameters: JSON.stringify({ url: 'https://example.com/article' }),
+                result: JSON.stringify([{ type: 'text', text: 'Hello world' }]),
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(result.current.contextItems).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        id: 'mcp-7',
+                        type: 'search',
+                        name: 'Rust async',
+                        details: '网络搜索',
+                        previewData: expect.objectContaining({
+                            subtitle: '网络搜索',
+                            metadata: expect.objectContaining({
+                                工具: '网络搜索',
+                            }),
+                        }),
+                    }),
+                    expect.objectContaining({
+                        id: 'mcp-8',
+                        type: 'search',
+                        name: 'https://example.com/article',
+                        details: '抓取网页',
+                        previewData: expect.objectContaining({
+                            subtitle: '抓取网页',
+                            metadata: expect.objectContaining({
+                                工具: '抓取网页',
+                            }),
+                        }),
+                    }),
+                ]),
+            );
+        });
+    });
+
     it('keeps full raw values in context item names for hover and dedupe', async () => {
         const longPath = '/workspace/src/components/chat-sidebar/some/really/long/path/that/should/not/be/truncated/in/context-item-data/ContextList.tsx';
         const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { getErrorMessage } from "@/utils/error";
+import { MotionDetails, MotionStatusSlot } from "@/components/mcp-tool-components/McpToolMotion";
 import {
     buildPreviewCodeSignature,
     parsePreviewCodeRequestLoose,
@@ -1094,6 +1095,9 @@ export default function InlineCodePreviewCard({
         setRuntimeError(null);
     }, [previewHidden]);
 
+    const submittedPayload = toolResult?.status === "submitted" ? toolResult.payload : undefined;
+    const hasSubmittedPayload = submittedPayload !== undefined;
+
     return (
         <div className={isPreviewCodeShowToolbar ? "space-y-3 py-2" : "py-1"}>
             {isPreviewCodeShowToolbar && (
@@ -1108,7 +1112,9 @@ export default function InlineCodePreviewCard({
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
-                            {statusBadge}
+                            <MotionStatusSlot stateKey={displayState} present={statusBadge !== null}>
+                                {statusBadge}
+                            </MotionStatusSlot>
                             {displayState !== "dismissed" && (
                                 <Button
                                     type="button"
@@ -1122,9 +1128,11 @@ export default function InlineCodePreviewCard({
                             )}
                         </div>
                     </div>
-                    {loadingMessage && (displayState === "streaming" || displayState === "executing" || displayState === "pending") && (
+                    <MotionDetails
+                        show={Boolean(loadingMessage) && (displayState === "streaming" || displayState === "executing" || displayState === "pending")}
+                    >
                         <div className="text-xs text-muted-foreground">{loadingMessage}</div>
-                    )}
+                    </MotionDetails>
                 </div>
             )}
             <div className="space-y-3">
@@ -1147,16 +1155,16 @@ export default function InlineCodePreviewCard({
                         </Button>
                     </div>
                 )}
-                {runtimeError && (
+                <MotionDetails show={Boolean(runtimeError)}>
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                         {runtimeError}
                     </div>
-                )}
-                {interactionError && (
+                </MotionDetails>
+                <MotionDetails show={Boolean(interactionError)}>
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                         {interactionError}
                     </div>
-                )}
+                </MotionDetails>
                 {shouldRenderPreviewSurface && (
                     <div
                         className={isCollapsed
@@ -1232,7 +1240,7 @@ export default function InlineCodePreviewCard({
                         )}
                     </div>
                 )}
-                {shouldShowStreamingFallback && !previewHidden && sourceExcerpt && (
+                <MotionDetails show={shouldShowStreamingFallback && !previewHidden && Boolean(sourceExcerpt)}>
                     <div className="rounded-md border border-border/70 bg-muted/40 px-3 py-3 space-y-2">
                         <div className="text-xs text-muted-foreground">
                             正在生成可渲染预览，先展示当前代码片段。
@@ -1241,22 +1249,22 @@ export default function InlineCodePreviewCard({
                             {sourceExcerpt}
                         </pre>
                     </div>
-                )}
-                {toolResult?.status === "submitted" && toolResult.payload !== undefined && (
+                </MotionDetails>
+                <MotionDetails show={hasSubmittedPayload}>
                     <pre className="rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-words">
-                        {JSON.stringify(toolResult.payload, null, 2)}
+                        {JSON.stringify(submittedPayload, null, 2)}
                     </pre>
-                )}
-                {isHidden && displayState !== "dismissed" && (
+                </MotionDetails>
+                <MotionDetails show={isHidden && displayState !== "dismissed"}>
                     <div className="text-sm text-muted-foreground">
                         预览已隐藏。
                     </div>
-                )}
-                {displayState === "dismissed" && (
+                </MotionDetails>
+                <MotionDetails show={displayState === "dismissed"}>
                     <div className="text-sm text-muted-foreground">
                         该内嵌 UI 已关闭。
                     </div>
-                )}
+                </MotionDetails>
             </div>
             <PreviewExternalResourcesDialog<PreviewCodeRequestEvent, unknown>
                 externalResources={previewRequest?.externalResources ?? clientDetectedExternalResources}

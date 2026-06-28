@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/magicui/shine-border";
+import { MotionDetails, MotionStatusSlot, MotionToolCard } from "@/components/mcp-tool-components/McpToolMotion";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { useToolErrorContinueEnabled } from "@/components/McpToolCall";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
@@ -146,9 +147,10 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
     const stateOverride = effectiveCallId && props.mcpToolCallStates
         ? props.mcpToolCallStates.get(effectiveCallId)
         : matchedStateByLlmCallId;
-    const state = props.isStreaming ? "streaming" : stateOverride?.status ?? localState;
+    const isStreamingPlaceholder = props.isStreaming && !stateOverride?.status;
+    const state = stateOverride?.status ?? (props.isStreaming ? "streaming" : localState);
     const isRunning = Boolean(effectiveCallId && props.shiningMcpCallId === effectiveCallId);
-    const shouldShine = isRunning || props.isStreaming || state === "executing";
+    const shouldShine = isRunning || isStreamingPlaceholder || state === "executing";
     const continueOnToolErrorEnabled = useToolErrorContinueEnabled();
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
     const shouldMask = antiLeakageEnabled && !isRevealed;
@@ -175,7 +177,7 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
     const canExecute = state === "idle" || state === "pending" || state === "failed";
     const isExecuting = state === "executing";
     const canShowExecute = canExecute
-        && !props.isStreaming
+        && !isStreamingPlaceholder
         && !shouldHideFailedActions
         && !isProtocolFailureWithoutCall;
     const effectiveError = stateOverride?.error ?? localError ?? props.error ?? null;
@@ -188,13 +190,13 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
         : null;
 
     useEffect(() => {
-        if (props.isStreaming) {
-            setLocalState("streaming");
-            return;
-        }
         if (stateOverride?.status) {
             setLocalState(stateOverride.status);
             setLocalError(stateOverride.error ?? null);
+            return;
+        }
+        if (props.isStreaming) {
+            setLocalState("streaming");
             return;
         }
         setLocalState(props.status ?? "idle");
@@ -258,7 +260,7 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
     }, [effectiveCallId]);
 
     return (
-        <div className="w-full max-w-[600px] my-1 p-2 border border-border rounded-md bg-card overflow-hidden relative">
+        <MotionToolCard>
             {shouldShine && (
                 <ShineBorder
                     shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -278,7 +280,9 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
                     </div>
                     <div className="flex flex-shrink-0 items-center gap-1">
                         <div title={displayError ?? undefined}>
-                            <StatusBadge state={state} />
+                            <MotionStatusSlot stateKey={state}>
+                                <StatusBadge state={state} />
+                            </MotionStatusSlot>
                         </div>
                         {isExecuting && effectiveCallId && (
                             <Button
@@ -326,16 +330,16 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
                         </>
                     )}
                 </div>
-                {state === "failed" && displayError && (
+                <MotionDetails show={state === "failed" && Boolean(displayError)}>
                     <div
                         className="max-h-24 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1.5 text-xs text-destructive"
-                        title={displayError}
+                        title={displayError ?? undefined}
                     >
                         错误原因：{displayError}
                     </div>
-                )}
+                </MotionDetails>
             </div>
-        </div>
+        </MotionToolCard>
     );
 };
 

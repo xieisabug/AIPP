@@ -1,5 +1,7 @@
 import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
+import FetchUrlToolCall from "@/components/mcp-tool-components/FetchUrlToolCall";
 import LoadMcpCatalogToolCall from "@/components/mcp-tool-components/LoadMcpCatalogToolCall";
+import SearchWebToolCall from "@/components/mcp-tool-components/SearchWebToolCall";
 import {
     mcpToolComponentRegistry,
     type McpToolComponentProps,
@@ -34,6 +36,24 @@ export function ensureBuiltinMcpToolComponentsRegistered(): void {
                 isLastMessage={props.isLastMessage}
             />
         ),
+    });
+
+    mcpToolComponentRegistry.register("builtin", {
+        id: "builtin.search-web",
+        label: "search_web 搜索组件",
+        description: "用于 search_web 工具的紧凑搜索摘要卡片",
+        match: [{ toolName: "search_web" }],
+        priority: 110,
+        render: (props: McpToolComponentProps) => <SearchWebToolCall {...props} />,
+    });
+
+    mcpToolComponentRegistry.register("builtin", {
+        id: "builtin.fetch-url",
+        label: "fetch_url 抓取组件",
+        description: "用于 fetch_url 工具的紧凑网页抓取摘要卡片",
+        match: [{ toolName: "fetch_url" }],
+        priority: 110,
+        render: (props: McpToolComponentProps) => <FetchUrlToolCall {...props} />,
     });
 
     mcpToolComponentRegistry.register("builtin", {

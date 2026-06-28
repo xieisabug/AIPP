@@ -56,6 +56,22 @@ interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
     conversationIndex: number;
     conversationName: string;
     messageItemCount: number;
+    initialScrollTop: number;
+    initialMaxScrollTop: number;
+    initialDistanceToBottom: number;
+    initialAtBottom: boolean;
+    initialMaxDistanceToBottomDuringSettle: number;
+    initialMaxVisibleDistanceToBottomDuringSettle: number;
+    initialFirstAwayFromBottomFrame: number | null;
+    initialFirstVisibleAwayFromBottomFrame: number | null;
+    initialSettleSamples: Array<{
+        frame: number;
+        scrollTop: number;
+        maxScrollTop: number;
+        distanceToBottom: number;
+        isInitialBottomPositioning: boolean;
+        visibleDistanceToBottom: number;
+    }>;
     rowHeightDrift: Array<{
         key: string;
         changeCount: number;
@@ -101,6 +117,43 @@ declare global {
         };
         __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean;
     }
+}
+
+async function sampleInitialScrollSettle(
+    container: HTMLDivElement,
+    frameCount: number,
+): Promise<ChatScrollPerfTestResult["initialSettleSamples"]> {
+    const samples: ChatScrollPerfTestResult["initialSettleSamples"] = [];
+
+    for (let frame = 0; frame < frameCount; frame += 1) {
+        await Promise.race([
+            waitForAnimationFrames(1),
+            new Promise<void>((resolve) => {
+                window.setTimeout(resolve, 50);
+            }),
+        ]);
+        const maxScrollTop = Math.max(
+            0,
+            container.scrollHeight - container.clientHeight,
+        );
+        const scrollTop = container.scrollTop;
+        const isInitialBottomPositioning = Boolean(
+            container.querySelector("[data-aipp-initial-bottom-positioning='true']"),
+        );
+        const distanceToBottom = Math.max(0, maxScrollTop - scrollTop);
+        samples.push({
+            frame,
+            scrollTop,
+            maxScrollTop,
+            distanceToBottom,
+            isInitialBottomPositioning,
+            visibleDistanceToBottom: isInitialBottomPositioning
+                ? 0
+                : distanceToBottom,
+        });
+    }
+
+    return samples;
 }
 
 function ChatUIWindow() {
@@ -309,7 +362,60 @@ function ChatUIWindow() {
                     throw new Error("Chat scroll container was not found.");
                 }
 
-                await waitForAnimationFrames(4);
+                const initialSettleSamples = await sampleInitialScrollSettle(
+                    scrollContainer,
+                    72,
+                );
+                const lastInitialSample =
+                    initialSettleSamples[initialSettleSamples.length - 1];
+                const initialMaxScrollTop = Math.max(
+                    0,
+                    lastInitialSample?.maxScrollTop
+                    ?? scrollContainer.scrollHeight - scrollContainer.clientHeight,
+                );
+                const initialScrollTop =
+                    lastInitialSample?.scrollTop ?? scrollContainer.scrollTop;
+                const initialDistanceToBottom = Math.max(
+                    0,
+                    lastInitialSample?.distanceToBottom
+                    ?? initialMaxScrollTop - initialScrollTop,
+                );
+                const initialMaxDistanceToBottomDuringSettle = Math.max(
+                    0,
+                    ...initialSettleSamples.map((sample) => sample.distanceToBottom),
+                );
+                const initialMaxVisibleDistanceToBottomDuringSettle = Math.max(
+                    0,
+                    ...initialSettleSamples.map(
+                        (sample) => sample.visibleDistanceToBottom,
+                    ),
+                );
+                const initialFirstAwayFromBottomFrame =
+                    initialSettleSamples.find(
+                        (sample) => sample.distanceToBottom > 4,
+                    )?.frame ?? null;
+                const initialFirstVisibleAwayFromBottomFrame =
+                    initialSettleSamples.find(
+                        (sample) => sample.visibleDistanceToBottom > 4,
+                    )?.frame ?? null;
+                const compactInitialSettleSamples = initialSettleSamples.filter(
+                    (sample) =>
+                        sample.frame < 8
+                        || sample.frame % 4 === 0
+                        || sample.distanceToBottom > 4
+                        || sample.isInitialBottomPositioning
+                        || sample.frame >= initialSettleSamples.length - 4,
+                );
+                emitProgress("initial-position", {
+                    initialScrollTop,
+                    initialMaxScrollTop,
+                    initialDistanceToBottom,
+                    initialMaxDistanceToBottomDuringSettle,
+                    initialMaxVisibleDistanceToBottomDuringSettle,
+                    initialFirstAwayFromBottomFrame,
+                    initialFirstVisibleAwayFromBottomFrame,
+                });
+
                 scrollContainer.scrollTop = 0;
                 await waitForAnimationFrames(2);
                 window.__AIPP_CHAT_PERF_CAPTURE__?.resetVirtualRowHeightDrift?.();
@@ -336,6 +442,15 @@ function ChatUIWindow() {
                     conversationIndex,
                     conversationName: targetConversation.name,
                     messageItemCount,
+                    initialScrollTop,
+                    initialMaxScrollTop,
+                    initialDistanceToBottom,
+                    initialAtBottom: initialDistanceToBottom <= 4,
+                    initialMaxDistanceToBottomDuringSettle,
+                    initialMaxVisibleDistanceToBottomDuringSettle,
+                    initialFirstAwayFromBottomFrame,
+                    initialFirstVisibleAwayFromBottomFrame,
+                    initialSettleSamples: compactInitialSettleSamples,
                     rowHeightDrift:
                         window.__AIPP_CHAT_PERF_CAPTURE__?.getVirtualRowHeightDrift?.()
                         ?? [],

@@ -9,12 +9,15 @@ import MCP from '@/assets/mcp.svg?react';
 interface ContextListProps {
     items: ContextItem[];
     className?: string;
+    focusedItemId?: string | null;
+    selectedItemId?: string | null;
     onItemClick?: (item: ContextItem) => void;
     onPreviewFileClick?: (item: ContextItem) => void;
 }
 
 const SEARCH_AUTO_EXPAND_MS = 5000;
 const RECENT_SEARCH_FINISH_WINDOW_MS = 10000;
+const FOCUSED_SEARCH_EXPAND_DELAY_MS = 300;
 
 const getPathBasename = (value: string): string => {
     const trimmed = value.trim();
@@ -88,6 +91,8 @@ const getItemTimestamp = (timestamp?: Date): number | null => {
 const ContextList: React.FC<ContextListProps> = ({
     items,
     className,
+    focusedItemId,
+    selectedItemId,
     onItemClick,
     onPreviewFileClick,
 }) => {
@@ -95,6 +100,60 @@ const ContextList: React.FC<ContextListProps> = ({
     const manuallyToggledSearchIdsRef = useRef<Set<string>>(new Set());
     const seenSearchIdsRef = useRef<Set<string> | null>(null);
     const autoCloseTimersRef = useRef<Map<string, number>>(new Map());
+    const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+    // Scroll the focused item into view whenever focusedItemId changes.
+    // Use block:"start" so the item lands at the top of the viewport (just
+    // barely visible) instead of the bottom — feels more like "locate this".
+    useEffect(() => {
+        if (!focusedItemId) return;
+        const el = itemRefs.current.get(focusedItemId);
+        if (!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, [focusedItemId, items]);
+
+    // Shortly after highlighting starts, auto-expand the focused item if it's a search
+    // list with results. The timer is kept in a ref and NOT tied to this
+    // effect's cleanup, so it still fires when the parent clears
+    // focusedItemId at the 1s mark.
+    const focusExpandTimerRef = useRef<number | null>(null);
+    useEffect(() => {
+        return () => {
+            if (focusExpandTimerRef.current !== null) {
+                window.clearTimeout(focusExpandTimerRef.current);
+                focusExpandTimerRef.current = null;
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!focusedItemId) return;
+
+        const item = items.find((i) => i.id === focusedItemId);
+        if (!item || item.type !== 'search' || !item.searchResults || item.searchResults.length === 0) {
+            return;
+        }
+
+        if (focusExpandTimerRef.current !== null) {
+            window.clearTimeout(focusExpandTimerRef.current);
+        }
+
+        focusExpandTimerRef.current = window.setTimeout(() => {
+            focusExpandTimerRef.current = null;
+            manuallyToggledSearchIdsRef.current.add(focusedItemId);
+            const existingAutoClose = autoCloseTimersRef.current.get(focusedItemId);
+            if (existingAutoClose) {
+                window.clearTimeout(existingAutoClose);
+                autoCloseTimersRef.current.delete(focusedItemId);
+            }
+            setExpandedSearchIds((prev) => {
+                if (prev.has(focusedItemId)) return prev;
+                const next = new Set(prev);
+                next.add(focusedItemId);
+                return next;
+            });
+        }, FOCUSED_SEARCH_EXPAND_DELAY_MS);
+    }, [focusedItemId, items]);
 
     const searchResultItems = useMemo(
         () => items.filter((item) => item.type === 'search' && item.searchResults && item.searchResults.length > 0),
@@ -276,11 +335,23 @@ const ContextList: React.FC<ContextListProps> = ({
                     </div>
                     <div className="flex flex-col gap-1">
                         {typeItems.map((item) => (
-                            <div key={item.id} className="flex flex-col">
+                            <div
+                                key={item.id}
+                                className="flex flex-col"
+                                ref={(el) => {
+                                    if (el) {
+                                        itemRefs.current.set(item.id, el);
+                                    } else {
+                                        itemRefs.current.delete(item.id);
+                                    }
+                                }}
+                            >
                                 <div
                                     className={cn(
                                         "flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border bg-background transition-colors",
-                                        "hover:bg-muted/40 cursor-pointer"
+                                        "hover:bg-muted/40 cursor-pointer",
+                                        item.id === selectedItemId && "bg-muted/50 border-primary/30",
+                                        item.id === focusedItemId && "ring-2 ring-primary/60 bg-muted/60 border-primary/40",
                                     )}
                                     onClick={() => handleItemClick(item)}
                                 >

@@ -326,7 +326,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [loadFeatureConfig]);
 
         // ============= Chat Sidebar Hooks =============
-        
+
         // Todo list from built-in agent tool
         const { todos } = useTodoList({
             conversationId: conversationId ? parseInt(conversationId) : null,
@@ -336,14 +336,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [, setSidebarExpanded] = useState(false);
         const [sidebarWidth, setSidebarWidth] = useState(0);
         const [sidebarToggleRequestVersion, setSidebarToggleRequestVersion] = useState(0);
-        
+
         // Sidebar window state - when true, hide the inline sidebar
         const [sidebarWindowOpen, setSidebarWindowOpen] = useState(false);
 
         // Dialog states for shortcut triggering
         const [statsDialogOpen, setStatsDialogOpen] = useState(false);
         const [exportDialogOpen, setExportDialogOpen] = useState(false);
-        
+
         const handleSidebarExpandChange = useCallback((isExpanded: boolean, width: number) => {
             setSidebarExpanded(isExpanded);
             setSidebarWidth(width);
@@ -601,8 +601,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     error instanceof Error
                         ? error.message
                         : typeof error === "string"
-                          ? error
-                          : JSON.stringify(error) || "未知错误";
+                            ? error
+                            : JSON.stringify(error) || "未知错误";
                 const noticeKey = `${conversationId}:${assistantId}:${errorMessage}`;
                 if (acpConnectionErrorNoticeRef.current === noticeKey) {
                     return;
@@ -768,7 +768,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
 
         // ============= Chat Sidebar 数据提取 =============
-        
+
         // Artifacts from messages (code blocks)
         const { artifacts: inferredArtifacts } = useArtifactExtractor({
             messages: allDisplayMessages,
@@ -799,7 +799,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [conversationId, onPreviewFileContextClick]);
 
         // ============= Sidebar Window 事件处理 =============
-        
+
+        // Inline-mode focus target (used only when the sidebar window is NOT open)
+        const [focusedContextId, setFocusedContextId] = useState<string | null>(null);
+
         // Listen for sidebar window open/close events
         useEffect(() => {
             const unlistenOpened = listen("sidebar-window-opened", () => {
@@ -834,6 +837,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 unlistenReady.then((f) => f());
             };
         }, [todos, artifacts, contextItems, conversationId]);
+
+        // Listen for focus-context requests from inline MCP tool cards. Only react
+        // when the separate sidebar window is NOT open — otherwise the sidebar
+        // window handles its own focus/scroll/highlight.
+        useEffect(() => {
+            const unlisten = listen<{ id: string }>("sidebar-focus-context", (event) => {
+                if (sidebarWindowOpen) return;
+                setFocusedContextId(event.payload.id);
+            });
+            return () => {
+                unlisten.then((f) => f());
+            };
+        }, [sidebarWindowOpen]);
+
+        // Auto-clear inline highlight after 1s to match the sidebar window behavior
+        useEffect(() => {
+            if (!focusedContextId) return;
+            const timer = setTimeout(() => setFocusedContextId(null), 1000);
+            return () => clearTimeout(timer);
+        }, [focusedContextId]);
 
         // Sync sidebar data to window when data changes (if window is open)
         useEffect(() => {
@@ -1428,10 +1451,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     </div>
                                 ) : null}
                                 {acpSessionState?.session_id &&
-                                !(
-                                    acpSessionState.load_session_supported ||
-                                    acpSessionState.session_resume_supported
-                                ) ? (
+                                    !(
+                                        acpSessionState.load_session_supported ||
+                                        acpSessionState.session_resume_supported
+                                    ) ? (
                                     <div className="text-xs text-muted-foreground">
                                         该 Agent 不支持恢复历史 ACP 会话，新会话会使用 AIPP 对话上下文继续。
                                     </div>
@@ -1521,8 +1544,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     entry.status === "completed"
                         ? "completed"
                         : entry.status === "in_progress"
-                          ? "in_progress"
-                          : "pending",
+                            ? "in_progress"
+                            : "pending",
                 activeForm: entry.priority ? `ACP ${entry.priority}` : "ACP Plan",
             }));
             return [...acpPlanTodos, ...todos];
@@ -1550,6 +1573,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 在切换对话后，加载完成并渲染出消息后，强制滚动到底部
         useEffect(() => {
+            if (virtualizeMessages) return;
             // 必须有对话且不在加载中，且有可显示的消息时才执行
             if (!conversationId) return;
             if (isLoadingShow) return;
@@ -1569,7 +1593,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     smartScroll(true, 'auto');
                 })
             );
-        }, [conversationId, isLoadingShow, allDisplayMessages.length, pendingScrollMessageId, smartScroll]);
+        }, [conversationId, isLoadingShow, allDisplayMessages.length, pendingScrollMessageId, smartScroll, virtualizeMessages]);
 
         // 按消息 ID 定位滚动（用于搜索结果）
         useEffect(() => {
@@ -1612,7 +1636,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 requestAnimationFrame(() =>
                     requestAnimationFrame(() => {
                         if (virtualizeMessages) {
-                            smartScroll(true, "smooth");
+                            smartScroll(true, "auto");
                             return;
                         }
                         scrollToUserMessage();
@@ -1645,106 +1669,106 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
                     data-aipp-slot="chat-conversation-root"
                 >
-                {!isMobile && conversationId && (
-                    <ConversationTurnRail
-                        turns={userTurns}
-                        scrollContainerRef={scrollContainerRef}
-                        onSelect={(messageId) => {
-                            // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
-                            handleUserScrollIntent();
-                            setPendingScrollMessageId(messageId);
-                        }}
-                    />
-                )}
-                {/* Main content area */}
-                <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
-                    {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
-                    {!isMobile && !hideHeader && (
-                        <ConversationHeader
-                            conversationId={conversationId}
-                            conversation={conversation}
-                            onEdit={openTitleEditDialog}
-                            onDelete={handleDeleteConversationSuccess}
-                            statsOpen={statsDialogOpen}
-                            onStatsOpenChange={setStatsDialogOpen}
-                            exportOpen={exportDialogOpen}
-                            onExportOpenChange={setExportDialogOpen}
-                            allowRename={allowRename}
-                            allowDelete={allowDelete}
-                            extraActions={acpHeaderActions}
+                    {!isMobile && conversationId && (
+                        <ConversationTurnRail
+                            turns={userTurns}
+                            scrollContainerRef={scrollContainerRef}
+                            onSelect={(messageId) => {
+                                // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
+                                handleUserScrollIntent();
+                                setPendingScrollMessageId(messageId);
+                            }}
                         />
                     )}
+                    {/* Main content area */}
+                    <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
+                        {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
+                        {!isMobile && !hideHeader && (
+                            <ConversationHeader
+                                conversationId={conversationId}
+                                conversation={conversation}
+                                onEdit={openTitleEditDialog}
+                                onDelete={handleDeleteConversationSuccess}
+                                statsOpen={statsDialogOpen}
+                                onStatsOpenChange={setStatsDialogOpen}
+                                exportOpen={exportDialogOpen}
+                                onExportOpenChange={setExportDialogOpen}
+                                allowRename={allowRename}
+                                allowDelete={allowDelete}
+                                extraActions={acpHeaderActions}
+                            />
+                        )}
 
-                    <div
-                        ref={scrollContainerRef}
-                        onWheelCapture={handleUserScrollIntent}
-                        onTouchMoveCapture={handleUserScrollIntent}
-                        onScroll={virtualizeMessages ? undefined : handleScroll}
-                        className={`conversation-scroll-transparent-track h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
-                        data-aipp-slot="chat-conversation-scroll"
-                    >
-                        <ConversationContent
-                            conversationId={conversationId}
-                            // MessageList props
-                            allDisplayMessages={allDisplayMessages}
-                            streamingMessages={streamingMessages}
-                            shiningMessageIds={shiningMessageIds}
-                            shiningMcpCallId={shiningMcpCallId}
-                            reasoningExpandStates={reasoningExpandStates}
-                            mcpToolCallStates={mcpToolCallStates}
-                            generationGroups={messageGroupsData.generationGroups}
-                            selectedVersions={messageGroupsData.selectedVersions}
-                            getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
-                            handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
-                            onCodeRun={handleArtifact}
-                            onMessageRegenerate={handleMessageRegenerate}
-                            onMessageEdit={handleMessageEdit}
-                            onMessageFork={handleMessageFork}
-                            onQueuedMessagePromote={handleQueuedMessagePromote}
-                            onToggleReasoningExpand={toggleReasoningExpand}
-                            inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
-                            allowFeishuDebugResend={allowFeishuDebugResend}
-                            virtualizeMessages={virtualizeMessages}
-                            virtualizedListEngine={virtualizedListEngine}
-                            scrollContainerRef={scrollContainerRef}
-                            pendingScrollMessageId={pendingScrollMessageId}
-                            clearPendingScrollMessageId={setPendingScrollMessageId}
-                            setShiningMessageIds={setShiningMessageIds}
-                            onScrollStateChange={syncScrollState}
-                            smartScroll={smartScroll}
-                            // NewChatComponent props
-                            selectedText={selectedText}
-                            selectedAssistant={selectedAssistant}
-                            assistants={assistants}
-                            setSelectedAssistant={setSelectedAssistant}
+                        <div
+                            ref={scrollContainerRef}
+                            onWheelCapture={handleUserScrollIntent}
+                            onTouchMoveCapture={handleUserScrollIntent}
+                            onScroll={virtualizeMessages ? undefined : handleScroll}
+                            className={`conversation-scroll-transparent-track h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
+                            data-aipp-slot="chat-conversation-scroll"
+                        >
+                            <ConversationContent
+                                conversationId={conversationId}
+                                // MessageList props
+                                allDisplayMessages={allDisplayMessages}
+                                streamingMessages={streamingMessages}
+                                shiningMessageIds={shiningMessageIds}
+                                shiningMcpCallId={shiningMcpCallId}
+                                reasoningExpandStates={reasoningExpandStates}
+                                mcpToolCallStates={mcpToolCallStates}
+                                generationGroups={messageGroupsData.generationGroups}
+                                selectedVersions={messageGroupsData.selectedVersions}
+                                getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
+                                handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
+                                onCodeRun={handleArtifact}
+                                onMessageRegenerate={handleMessageRegenerate}
+                                onMessageEdit={handleMessageEdit}
+                                onMessageFork={handleMessageFork}
+                                onQueuedMessagePromote={handleQueuedMessagePromote}
+                                onToggleReasoningExpand={toggleReasoningExpand}
+                                inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
+                                allowFeishuDebugResend={allowFeishuDebugResend}
+                                virtualizeMessages={virtualizeMessages}
+                                virtualizedListEngine={virtualizedListEngine}
+                                scrollContainerRef={scrollContainerRef}
+                                pendingScrollMessageId={pendingScrollMessageId}
+                                clearPendingScrollMessageId={setPendingScrollMessageId}
+                                setShiningMessageIds={setShiningMessageIds}
+                                onScrollStateChange={syncScrollState}
+                                smartScroll={smartScroll}
+                                // NewChatComponent props
+                                selectedText={selectedText}
+                                selectedAssistant={selectedAssistant}
+                                assistants={assistants}
+                                setSelectedAssistant={setSelectedAssistant}
+                            />
+                            <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
+                        </div>
+
+                        {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
+
+                        <InputArea
+                            ref={inputAreaRef}
+                            inputText={inputText}
+                            setInputText={setInputText}
+                            fileInfoList={fileInfoList}
+                            handleChooseFile={handleChooseFile}
+                            handleDeleteFile={handleDeleteFile}
+                            handlePaste={handlePaste}
+                            handleSend={handleSend}
+                            aiIsResponsing={effectiveAiIsResponsing}
+                            placement="bottom"
+                            isMobile={isMobile}
+                            sidebarWidth={sidebarWidth}
+                            sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
+                            sendButtonIcon={sendButtonIconSlot}
+                            sendButtonVisual={sendButtonVisualSlot}
+                            acpAvailableCommands={acpSessionState?.available_commands ?? []}
                         />
-                        <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                     </div>
 
-                    {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
-
-                    <InputArea
-                        ref={inputAreaRef}
-                        inputText={inputText}
-                        setInputText={setInputText}
-                        fileInfoList={fileInfoList}
-                        handleChooseFile={handleChooseFile}
-                        handleDeleteFile={handleDeleteFile}
-                        handlePaste={handlePaste}
-                        handleSend={handleSend}
-                        aiIsResponsing={effectiveAiIsResponsing}
-                        placement="bottom"
-                        isMobile={isMobile}
-                        sidebarWidth={sidebarWidth}
-                        sidebarVisible={!isMobile && !hideSidebar && Boolean(conversationId)}
-                        sendButtonIcon={sendButtonIconSlot}
-                        sendButtonVisual={sendButtonVisualSlot}
-                        acpAvailableCommands={acpSessionState?.available_commands ?? []}
-                    />
-                </div>
-
-                {/* Right sidebar - only show on desktop when sidebar window is not open */}
-                {!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen && (
+                    {/* Right sidebar - only show on desktop when sidebar window is not open */}
+                    {!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen && (
                         <ChatSidebar
                             todos={sidebarTodos}
                             artifacts={artifacts}
@@ -1752,38 +1776,39 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             conversationId={conversationId}
                             pluginList={pluginList}
                             toggleRequestVersion={sidebarToggleRequestVersion}
+                            focusedContextId={focusedContextId}
                             onExpandChange={handleSidebarExpandChange}
                             onOpenWindow={handleOpenSidebarWindow}
                             onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
                             onPreviewFileClick={handlePreviewFileContextClick}
                         />
-                )}
+                    )}
 
-                <ConversationTitleEditDialog
-                    isOpen={titleEditDialogIsOpen}
-                    conversationId={conversation?.id || 0}
-                    initialTitle={conversation?.name || ""}
-                    onClose={closeTitleEditDialog}
-                />
+                    <ConversationTitleEditDialog
+                        isOpen={titleEditDialogIsOpen}
+                        conversationId={conversation?.id || 0}
+                        initialTitle={conversation?.name || ""}
+                        onClose={closeTitleEditDialog}
+                    />
 
-                <MessageEditDialog
-                    isOpen={editDialogIsOpen}
-                    initialContent={editingMessage?.content || ""}
-                    messageType={editingMessage?.message_type || ""}
-                    onClose={closeEditDialog}
-                    onSave={handleEditSave}
-                    onSaveAndRegenerate={handleEditSaveAndRegenerate}
-                />
+                    <MessageEditDialog
+                        isOpen={editDialogIsOpen}
+                        initialContent={editingMessage?.content || ""}
+                        messageType={editingMessage?.message_type || ""}
+                        onClose={closeEditDialog}
+                        onSave={handleEditSave}
+                        onSaveAndRegenerate={handleEditSaveAndRegenerate}
+                    />
 
-                {isLoadingShow ? (
-                    <div
-                        className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl"
-                        data-aipp-slot="chat-loading-overlay"
-                    >
-                        <div className="loading-icon"></div>
-                        <div className="text-primary text-base font-medium">加载中...</div>
-                    </div>
-                ) : null}
+                    {isLoadingShow ? (
+                        <div
+                            className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl"
+                            data-aipp-slot="chat-loading-overlay"
+                        >
+                            <div className="loading-icon"></div>
+                            <div className="text-primary text-base font-medium">加载中...</div>
+                        </div>
+                    ) : null}
                 </div>
             </ToolErrorContinueProvider>
         );

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -8,12 +8,20 @@ import {
 } from "./layoutConstants";
 import type { Message } from "@/data/Conversation";
 
+const virtuosoMockState = vi.hoisted(() => ({
+    lastProps: null as any,
+}));
+
 vi.mock("react-virtuoso", () => ({
-    Virtuoso: ({ components, context }: any) => (
-        <div data-testid="virtuoso">
-            {components.Footer ? <components.Footer context={context} /> : null}
-        </div>
-    ),
+    Virtuoso: (props: any) => {
+        virtuosoMockState.lastProps = props;
+        const { components, context } = props;
+        return (
+            <div data-testid="virtuoso">
+                {components.Footer ? <components.Footer context={context} /> : null}
+            </div>
+        );
+    },
 }));
 
 vi.mock("@/hooks/useDisplayConfig", () => ({
@@ -74,6 +82,7 @@ function makeMessage(overrides: Partial<Message>): Message {
 
 function makeProps(messages: Message[]) {
     return {
+        conversationId: "1",
         allDisplayMessages: messages,
         streamingMessages: new Map<number, never>(),
         shiningMessageIds: new Set<number>(),
@@ -101,6 +110,7 @@ function makeProps(messages: Message[]) {
 
 describe("VirtuosoMessageList row height reservation", () => {
     beforeEach(() => {
+        virtuosoMockState.lastProps = null;
         vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     });
 
@@ -149,5 +159,157 @@ describe("VirtuosoMessageList row height reservation", () => {
         const footer = lastReplyContainer.parentElement as HTMLElement;
 
         expect(footer.style.getPropertyValue(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR)).toBe("");
+    });
+
+    it("starts new conversation renders at the bottom without waiting for outer smartScroll", async () => {
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            value: 1000,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+        const smartScroll = vi.fn();
+        const onScrollStateChange = vi.fn();
+
+        render(
+            <VirtuosoMessageList
+                {...makeProps([
+                    makeMessage({
+                        id: 1,
+                        message_type: "user",
+                        content: "user-1",
+                    }),
+                    makeMessage({
+                        id: 2,
+                        message_type: "response",
+                        content: "response-1",
+                    }),
+                    makeMessage({
+                        id: 3,
+                        message_type: "user",
+                        content: "user-2",
+                    }),
+                ])}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                smartScroll={smartScroll}
+                onScrollStateChange={onScrollStateChange}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+        expect(virtuosoMockState.lastProps.initialTopMostItemIndex).toMatchObject({
+            index: "LAST",
+            align: "end",
+        });
+        expect(virtuosoMockState.lastProps.initialTopMostItemIndex.offset).toBeLessThan(0);
+        expect(smartScroll).not.toHaveBeenCalled();
+        expect(onScrollStateChange).toHaveBeenCalledWith(scrollContainer);
+    });
+
+    it("does not pin to bottom after a pending message scroll is cleared", () => {
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            value: 1000,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+        scrollContainer.scrollTop = 125;
+        const messages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "user-2",
+            }),
+        ];
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...makeProps(messages)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                pendingScrollMessageId={1}
+            />,
+        );
+
+        rerender(
+            <VirtuosoMessageList
+                {...makeProps(messages)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                pendingScrollMessageId={null}
+            />,
+        );
+
+        expect(scrollContainer.scrollTop).toBe(125);
+    });
+
+    it("includes live footer estimate in initial bottom alignment", () => {
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            value: 1000,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        render(
+            <VirtuosoMessageList
+                {...makeProps([
+                    makeMessage({
+                        id: 1,
+                        message_type: "user",
+                        content: "user-1",
+                    }),
+                    makeMessage({
+                        id: 2,
+                        message_type: "response",
+                        content: "response-1",
+                    }),
+                    makeMessage({
+                        id: 3,
+                        message_type: "user",
+                        content: "user-2",
+                    }),
+                    makeMessage({
+                        id: 4,
+                        message_type: "response",
+                        content: "response-2",
+                    }),
+                ])}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+            />,
+        );
+
+        expect(virtuosoMockState.lastProps.initialTopMostItemIndex).toMatchObject({
+            index: "LAST",
+            align: "end",
+        });
+        expect(virtuosoMockState.lastProps.initialTopMostItemIndex.offset).toBeLessThan(0);
     });
 });
