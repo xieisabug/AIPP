@@ -53,6 +53,7 @@ import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationContent, {
     type VirtualizedListEngine,
 } from "./conversation/ConversationContent";
+import ConversationTurnRail from "./conversation/ConversationTurnRail";
 import { applyScrollHighlight } from "./conversation/scrollHighlight";
 import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
@@ -217,6 +218,16 @@ interface ConversationUIProps {
     windowLabel?: string;
     busySendBehavior?: "queue" | "interrupt";
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
+}
+
+// 左侧对话轮次导航条：从用户消息内容生成悬浮预览片段
+const TURN_PREVIEW_MAX = 120;
+function makeTurnPreview(content: string): string {
+    const collapsed = content.replace(/\s+/g, " ").trim();
+    if (collapsed.length <= TURN_PREVIEW_MAX) {
+        return collapsed;
+    }
+    return collapsed.slice(0, TURN_PREVIEW_MAX) + "…";
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -939,6 +950,23 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             [conversationId, handleOpenSidebarWindow]
         );
 
+        // 左侧对话轮次导航条：从当前展示的消息中抽取用户提问轮次
+        const userTurns = useMemo(
+            () =>
+                allDisplayMessages
+                    .filter(
+                        (m) =>
+                            m.message_type === "user" &&
+                            !m.content?.startsWith("Tool execution results:\n") &&
+                            (m.content?.trim().length ?? 0) > 0,
+                    )
+                    .map((m) => ({
+                        id: m.id,
+                        preview: makeTurnPreview(m.content),
+                    })),
+            [allDisplayMessages],
+        );
+
         // 智能聚焦逻辑 - 无延迟版本
         useLayoutEffect(() => {
             // 只在 InputArea 存在且不在加载状态时聚焦
@@ -1526,6 +1554,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             if (!conversationId) return;
             if (isLoadingShow) return;
             if (allDisplayMessages.length === 0) return;
+            // 用户正在通过角标/搜索定位到某条消息时，不要抢回底部
+            if (pendingScrollMessageId !== null) return;
 
             const renderStartTime = performance.now();
             console.log(`[PERF-FRONTEND] 开始渲染 ${allDisplayMessages.length} 条消息`);
@@ -1539,7 +1569,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     smartScroll(true, 'auto');
                 })
             );
-        }, [conversationId, isLoadingShow, allDisplayMessages.length, smartScroll]);
+        }, [conversationId, isLoadingShow, allDisplayMessages.length, pendingScrollMessageId, smartScroll]);
 
         // 按消息 ID 定位滚动（用于搜索结果）
         useEffect(() => {
@@ -1574,6 +1604,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         ]);
 
         useEffect(() => {
+            // 用户正在定位到某条消息时，不要抢回底部
+            if (pendingScrollMessageId !== null) return;
             const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
             if (lastMessage && lastMessage.message_type === 'user') {
                 // 在渲染和布局之后执行，避免时间竞态
@@ -1589,6 +1621,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
         }, [
             allDisplayMessages.length,
+            pendingScrollMessageId,
             scrollToUserMessage,
             smartScroll,
             virtualizeMessages,
@@ -1612,6 +1645,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
                     data-aipp-slot="chat-conversation-root"
                 >
+                {!isMobile && conversationId && (
+                    <ConversationTurnRail
+                        turns={userTurns}
+                        scrollContainerRef={scrollContainerRef}
+                        onSelect={(messageId) => {
+                            // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
+                            handleUserScrollIntent();
+                            setPendingScrollMessageId(messageId);
+                        }}
+                    />
+                )}
                 {/* Main content area */}
                 <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
                     {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}

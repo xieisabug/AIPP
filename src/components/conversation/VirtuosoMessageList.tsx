@@ -42,7 +42,7 @@ interface VirtuosoMessageListContext {
     useLiveOnlyViewportHeight?: boolean;
 }
 
-const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 60;
+const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 180;
 const DEFAULT_ITEM_HEIGHT = 160;
 const LIVE_ONLY_FOOTER_STYLE = {
     [CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR]: `var(${CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR}, var(${CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR}, 0px))`,
@@ -366,7 +366,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         virtuosoRef.current?.scrollToIndex({
             index: targetIndex,
             align: "center",
-            behavior: "smooth",
+            behavior: "auto",
         });
         scheduleHighlightAttempt({
             container,
