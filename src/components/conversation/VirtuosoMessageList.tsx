@@ -17,6 +17,7 @@ import {
     VIRTUAL_OVERSCAN_PX,
     VIRTUAL_ROW_GAP_PX,
 } from "./virtualizedMessageListLayout";
+import { pinScrollContainerToBottom } from "./pinScrollToBottom";
 import {
     findFirstLiveSuffixIndex,
     useMessageListElements,
@@ -213,7 +214,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const scrollSyncFrameRef = useRef<number | null>(null);
     const initialBottomConversationRef = useRef<string | null>(null);
     const initialBottomPinConversationRef = useRef<string | null>(null);
-    const initialBottomPinFrameRef = useRef<number | null>(null);
+    const lastPinnedUserMessageIdRef = useRef<number | null>(null);
+    const tailUserMessageIdRef = useRef<number | null>(null);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
     const [viewportHeight, setViewportHeight] = useState(0);
     const [
@@ -263,6 +265,19 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         () => ({ liveItems }),
         [liveItems],
     );
+    const tailUserMessageId = useMemo(() => {
+        const lastMessage = messageListProps.allDisplayMessages.at(-1);
+        if (!lastMessage || lastMessage.message_type !== "user") {
+            return null;
+        }
+
+        return lastMessage.id;
+    }, [messageListProps.allDisplayMessages]);
+    tailUserMessageIdRef.current = tailUserMessageId;
+    const liveItemKeys = useMemo(
+        () => liveItems.map((item) => item.key).join("|"),
+        [liveItems],
+    );
     const hasCurrentConversationMessages = useMemo(() => {
         if (!conversationId || messageListProps.allDisplayMessages.length === 0) {
             return false;
@@ -302,6 +317,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         messageListProps.allDisplayMessages.length,
         scrollContainerRef,
     ]);
+
+    useLayoutEffect(() => {
+        lastPinnedUserMessageIdRef.current = null;
+    }, [conversationId]);
 
     const effectiveScrollParent = scrollParent ?? scrollContainerRef.current;
 
@@ -379,128 +398,32 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         }
 
         initialBottomPinConversationRef.current = conversationId;
-        let elapsedFrames = 0;
-        let stableFrames = 0;
-        let lastMaxScrollTop: number | null = null;
-        let isPinningScroll = false;
-        const pinToBottom = () => {
-            isPinningScroll = true;
-            container.scrollTop = Math.max(
-                0,
-                container.scrollHeight - container.clientHeight,
-            );
-            isPinningScroll = false;
-            onScrollStateChange?.(container);
-        };
-        const handlePinnedScroll = () => {
-            if (isPinningScroll) {
-                return;
-            }
 
-            pinToBottom();
-        };
-        const observedElements = new Set<Element>();
-        const contentResizeObserver = new ResizeObserver(() => {
-            pinToBottom();
-        });
-        const observeContentElements = () => {
-            const elements = [
-                ...Array.from(container.children),
-                ...Array.from(container.querySelectorAll("*")),
-            ];
-            elements.forEach((element) => {
-                if (observedElements.has(element)) {
-                    return;
+        const stopPin = pinScrollContainerToBottom({
+            container,
+            onScrollStateChange,
+            shouldContinue: () =>
+                initialBottomPinConversationRef.current === conversationId,
+            onComplete: () => {
+                initialBottomConversationRef.current = conversationId;
+                initialBottomPinConversationRef.current = null;
+                if (tailUserMessageIdRef.current !== null) {
+                    lastPinnedUserMessageIdRef.current = tailUserMessageIdRef.current;
                 }
-
-                observedElements.add(element);
-                contentResizeObserver.observe(element);
-            });
-        };
-        const mutationObserver = new MutationObserver(() => {
-            observeContentElements();
-            pinToBottom();
+                setInitialBottomVisibleConversationId(conversationId);
+            },
+            minFrameCount: INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT,
+            stableFrameCount: INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT,
+            maxFrameCount: INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT,
+            observeMode: "full",
+            failsafeTimeoutMs: INITIAL_BOTTOM_PIN_FAILSAFE_MS,
         });
-        let failsafeTimerId: number | null = null;
-        const finishPinAndShow = () => {
-            initialBottomConversationRef.current = conversationId;
-            initialBottomPinConversationRef.current = null;
-            initialBottomPinFrameRef.current = null;
-            container.removeEventListener("scroll", handlePinnedScroll);
-            contentResizeObserver.disconnect();
-            mutationObserver.disconnect();
-            if (failsafeTimerId !== null) {
-                window.clearTimeout(failsafeTimerId);
-                failsafeTimerId = null;
-            }
-            setInitialBottomVisibleConversationId(conversationId);
-        };
-        const scrollToBottom = () => {
-            if (initialBottomPinConversationRef.current !== conversationId) {
-                return;
-            }
-
-            pinToBottom();
-            elapsedFrames += 1;
-
-            const maxScrollTop = Math.max(
-                0,
-                container.scrollHeight - container.clientHeight,
-            );
-            // maxScrollTop === 0（短会话装得下）也应计为稳定，否则只能干等 max frame
-            if (
-                lastMaxScrollTop !== null
-                && Math.abs(maxScrollTop - lastMaxScrollTop) <= 1
-            ) {
-                stableFrames += 1;
-            } else {
-                stableFrames = 0;
-            }
-            lastMaxScrollTop = maxScrollTop;
-
-            const canShowAfterStableLayout =
-                elapsedFrames >= INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT
-                && stableFrames >= INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT;
-            const reachedMaxWait =
-                elapsedFrames >= INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT;
-            if (canShowAfterStableLayout || reachedMaxWait) {
-                finishPinAndShow();
-                return;
-            }
-
-            initialBottomPinFrameRef.current = requestAnimationFrame(scrollToBottom);
-        };
-        // 硬超时：即便 rAF 被反复打断，也不能永久 visibility:hidden
-        failsafeTimerId = window.setTimeout(() => {
-            if (initialBottomConversationRef.current === conversationId) {
-                return;
-            }
-            pinToBottom();
-            finishPinAndShow();
-        }, INITIAL_BOTTOM_PIN_FAILSAFE_MS);
-
-        container.addEventListener("scroll", handlePinnedScroll, { passive: true });
-        observeContentElements();
-        mutationObserver.observe(container, {
-            childList: true,
-            subtree: true,
-        });
-        scrollToBottom();
 
         return () => {
-            if (failsafeTimerId !== null) {
-                window.clearTimeout(failsafeTimerId);
-            }
             if (initialBottomPinConversationRef.current === conversationId) {
                 initialBottomPinConversationRef.current = null;
             }
-            container.removeEventListener("scroll", handlePinnedScroll);
-            contentResizeObserver.disconnect();
-            mutationObserver.disconnect();
-            if (initialBottomPinFrameRef.current !== null) {
-                cancelAnimationFrame(initialBottomPinFrameRef.current);
-                initialBottomPinFrameRef.current = null;
-            }
+            stopPin();
         };
     }, [
         conversationId,
@@ -510,6 +433,47 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         onScrollStateChange,
         pendingScrollMessageId,
         effectiveScrollParent,
+    ]);
+
+    // 发消息后：在列表内部用 ResizeObserver 钉底，避免外层 rAF 轮询过早退出
+    useLayoutEffect(() => {
+        const container = effectiveScrollParent;
+        if (!container || !hasCurrentConversationMessages || tailUserMessageId === null) {
+            return;
+        }
+
+        if (pendingScrollMessageId !== null) {
+            lastPinnedUserMessageIdRef.current = tailUserMessageId;
+            return;
+        }
+
+        if (initialBottomPinConversationRef.current === conversationId) {
+            return;
+        }
+
+        if (lastPinnedUserMessageIdRef.current === tailUserMessageId) {
+            return;
+        }
+
+        const pinningMessageId = tailUserMessageId;
+
+        return pinScrollContainerToBottom({
+            container,
+            onScrollStateChange,
+            shouldContinue: () => true,
+            onComplete: () => {
+                lastPinnedUserMessageIdRef.current = pinningMessageId;
+            },
+            observeMode: "tail",
+        });
+    }, [
+        conversationId,
+        hasCurrentConversationMessages,
+        liveItemKeys,
+        onScrollStateChange,
+        pendingScrollMessageId,
+        effectiveScrollParent,
+        tailUserMessageId,
     ]);
 
     const overscanPx = useMemo(

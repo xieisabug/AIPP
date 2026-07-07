@@ -233,6 +233,82 @@ describe("VirtuosoMessageList row height reservation", () => {
         expect(scrollContainer.scrollTop).toBe(125);
     });
 
+    it("pins to bottom after a new user message is appended", async () => {
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            value: 1000,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+        const smartScroll = vi.fn();
+        const onScrollStateChange = vi.fn();
+        const initialMessages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "user-2",
+            }),
+        ];
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...makeProps(initialMessages)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                smartScroll={smartScroll}
+                onScrollStateChange={onScrollStateChange}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        scrollContainer.scrollTop = 125;
+
+        rerender(
+            <VirtuosoMessageList
+                {...makeProps([
+                    ...initialMessages,
+                    makeMessage({
+                        id: 4,
+                        message_type: "response",
+                        content: "response-2",
+                    }),
+                    makeMessage({
+                        id: 5,
+                        message_type: "user",
+                        content: "user-3",
+                    }),
+                ])}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                smartScroll={smartScroll}
+                onScrollStateChange={onScrollStateChange}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+        expect(smartScroll).not.toHaveBeenCalled();
+    });
+
     it("includes live footer estimate in initial bottom alignment", () => {
         const scrollContainer = document.createElement("div");
         Object.defineProperty(scrollContainer, "scrollHeight", {

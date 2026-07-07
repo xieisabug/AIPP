@@ -761,6 +761,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             syncScrollState,
             smartScroll,
             scrollToUserMessage,
+            scrollToBottomStable,
         } = useScrollManagement({
             disableTailObservation: virtualizeMessages,
         });
@@ -1631,24 +1632,30 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // 用户正在定位到某条消息时，不要抢回底部
             if (pendingScrollMessageId !== null) return;
             const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
-            if (lastMessage && lastMessage.message_type === 'user') {
-                // 在渲染和布局之后执行，避免时间竞态
-                requestAnimationFrame(() =>
-                    requestAnimationFrame(() => {
-                        if (virtualizeMessages) {
-                            smartScroll(true, "auto");
-                            return;
-                        }
-                        scrollToUserMessage();
-                    })
-                );
+            if (!lastMessage || lastMessage.message_type !== "user") {
+                return;
             }
+            // Virtuoso 列表在 VirtuosoMessageList 内用 useLayoutEffect + ResizeObserver 钉底
+            if (virtualizeMessages && virtualizedListEngine === "virtuoso") {
+                return;
+            }
+            // 在渲染和布局之后执行，避免时间竞态
+            requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                    if (virtualizeMessages) {
+                        scrollToBottomStable();
+                        return;
+                    }
+                    scrollToUserMessage();
+                }),
+            );
         }, [
             allDisplayMessages.length,
             pendingScrollMessageId,
+            scrollToBottomStable,
             scrollToUserMessage,
-            smartScroll,
             virtualizeMessages,
+            virtualizedListEngine,
         ]);
 
         useEffect(() => {
