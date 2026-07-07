@@ -151,5 +151,15 @@ pub struct ShineStateSnapshotEvent {
     pub state: ConversationShineState,
 }
 
+/// 对话列表活动事件（供侧边栏列表展示运行态/完成未查看）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationListActivityEvent {
+    pub conversation_id: i64,
+    /// `runtime_state` | `stream_complete`
+    pub kind: String,
+    pub is_running: Option<bool>,
+}
+
 pub const TITLE_CHANGE_EVENT: &str = "title_change";
 pub const ERROR_NOTIFICATION_EVENT: &str = "conversation-window-error-notification";
+pub const CONVERSATION_LIST_ACTIVITY_EVENT: &str = "conversation_list_activity";

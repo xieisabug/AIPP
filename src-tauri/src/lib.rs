@@ -32,6 +32,7 @@ use crate::api::ai::acp::{
 use crate::api::ai_api::{
     ask_ai, cancel_ai, enqueue_conversation_message, get_activity_focus,
     get_conversation_runtime_state, get_shine_state, list_queued_conversation_messages,
+    list_running_conversation_ids,
     promote_queued_conversation_message, regenerate_ai, regenerate_conversation_title,
     tool_result_continue_ask_ai,
 };
@@ -921,6 +922,7 @@ pub fn run() {
             regenerate_ai,
             get_activity_focus,
             get_conversation_runtime_state,
+            list_running_conversation_ids,
             get_shine_state,
             regenerate_conversation_title,
             generate_artifact_metadata,

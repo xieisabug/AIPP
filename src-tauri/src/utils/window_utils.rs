@@ -1,5 +1,6 @@
 use crate::api::ai::events::{
-    ConversationEvent, ErrorNotificationPayload, ERROR_NOTIFICATION_EVENT,
+    ConversationEvent, ConversationListActivityEvent, ErrorNotificationPayload,
+    CONVERSATION_LIST_ACTIVITY_EVENT, ERROR_NOTIFICATION_EVENT,
 };
 use tauri::{Emitter, Manager, Window};
 
@@ -70,5 +71,15 @@ pub fn send_conversation_event_to_chat_windows<R: tauri::Runtime>(
         if let Some(window) = app_handle.get_webview_window(label) {
             let _ = window.emit(&event_name, &event);
         }
+    }
+}
+
+/// 向 ChatUI 侧边栏对话列表发送活动状态更新
+pub fn emit_conversation_list_activity(
+    app_handle: &tauri::AppHandle,
+    event: ConversationListActivityEvent,
+) {
+    if let Some(window) = app_handle.get_webview_window("chat_ui") {
+        let _ = window.emit(CONVERSATION_LIST_ACTIVITY_EVENT, &event);
     }
 }

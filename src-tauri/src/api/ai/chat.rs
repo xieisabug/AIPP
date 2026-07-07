@@ -1,5 +1,7 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
-use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{
+    ConversationEvent, ConversationListActivityEvent, MessageAddEvent, MessageUpdateEvent,
+};
 use crate::api::ai::title::{
     maybe_generate_title_from_conversation_if_needed, spawn_title_generation,
 };
@@ -18,7 +20,8 @@ use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::utils::window_utils::{
-    send_conversation_event_to_chat_windows, send_error_to_appropriate_window,
+    emit_conversation_list_activity, send_conversation_event_to_chat_windows,
+    send_error_to_appropriate_window,
 };
 use anyhow::Context as _;
 use futures::StreamExt;
@@ -3942,9 +3945,17 @@ async fn attempt_stream_chat(
                             }),
                         };
                         send_conversation_event_to_chat_windows(
-                            window.app_handle(),
+                            &app_handle,
                             conversation_id,
                             stream_complete_event,
+                        );
+                        emit_conversation_list_activity(
+                            &app_handle,
+                            ConversationListActivityEvent {
+                                conversation_id,
+                                kind: "stream_complete".to_string(),
+                                is_running: None,
+                            },
                         );
 
                         if try_dispatch_queued_message_after_completion(

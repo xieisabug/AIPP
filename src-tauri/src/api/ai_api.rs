@@ -3497,6 +3497,14 @@ pub async fn get_conversation_runtime_state(
     Ok(activity_manager.get_runtime_state(conversation_id).await)
 }
 
+/// 列出当前正在运行的对话 ID（供侧边栏列表初始同步）
+#[tauri::command]
+pub async fn list_running_conversation_ids(
+    activity_manager: State<'_, ConversationActivityManager>,
+) -> Result<Vec<i64>, String> {
+    Ok(activity_manager.list_running_conversation_ids().await)
+}
+
 /// 重新生成对话标题
 #[tauri::command]
 pub async fn regenerate_conversation_title(

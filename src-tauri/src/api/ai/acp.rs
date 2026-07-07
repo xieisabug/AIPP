@@ -12,7 +12,8 @@ use crate::api::ai::conversation::{
 };
 use crate::api::ai::context_manager::token_estimator::estimate_by_content;
 use crate::api::ai::events::{
-    ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent, TITLE_CHANGE_EVENT,
+    ConversationEvent, ConversationListActivityEvent, MCPToolCallUpdateEvent,
+    MessageUpdateEvent, TITLE_CHANGE_EVENT,
 };
 use crate::api::operation_api::{
     emit_permission_request_event, emit_permission_resolved_event, PermissionResolvedEvent,
@@ -35,7 +36,9 @@ use crate::mcp::builtin_mcp::operation::{
     },
 };
 use crate::state::activity_state::ConversationActivityManager;
-use crate::utils::window_utils::send_conversation_event_to_chat_windows;
+use crate::utils::window_utils::{
+    emit_conversation_list_activity, send_conversation_event_to_chat_windows,
+};
 use agent_client_protocol::{
     self as acp, Agent as _, Client as AcpClient, ClientSideConnection, ToolCallLocation,
 };
@@ -2724,6 +2727,32 @@ impl AcpTauriClient {
                 .clear_message_focus_keep_mcp(&self.app_handle, self.conversation_id)
                 .await;
         }
+
+        let stream_complete_event = ConversationEvent {
+            r#type: "stream_complete".to_string(),
+            data: serde_json::json!({
+                "conversation_id": self.conversation_id,
+                "response_message_id": message_id,
+                "reasoning_message_id": null,
+                "has_response": message_type == "response",
+                "has_reasoning": message_type == "reasoning",
+                "response_length": content.len(),
+                "reasoning_length": 0,
+            }),
+        };
+        send_conversation_event_to_chat_windows(
+            &self.app_handle,
+            self.conversation_id,
+            stream_complete_event,
+        );
+        emit_conversation_list_activity(
+            &self.app_handle,
+            ConversationListActivityEvent {
+                conversation_id: self.conversation_id,
+                kind: "stream_complete".to_string(),
+                is_running: None,
+            },
+        );
     }
 
     /// Send error event to frontend

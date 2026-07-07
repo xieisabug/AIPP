@@ -186,6 +186,14 @@ export interface ConversationRuntimeState {
     revision: number;
 }
 
+export type ConversationListItemStatus = "idle" | "responding" | "completed_unread";
+
+export interface ConversationListActivityEvent {
+    conversation_id: number;
+    kind: "runtime_state" | "stream_complete";
+    is_running?: boolean;
+}
+
 export interface RuntimeStateSnapshotEvent {
     state: ConversationRuntimeState;
 }
