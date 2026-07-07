@@ -1282,7 +1282,7 @@ export default function ScheduleWindow() {
 
     return (
         <div className="flex justify-center items-center h-screen bg-background" data-aipp-window="schedule" data-aipp-slot="window-root">
-            <div className="bg-card shadow-none w-full h-screen overflow-y-auto" data-aipp-slot="schedule-main-panel">
+            <div className="bg-card shadow-none w-full h-screen overflow-hidden flex flex-col" data-aipp-slot="schedule-main-panel">
                 <ConfigPageLayout
                     sidebar={sidebar}
                     content={content}

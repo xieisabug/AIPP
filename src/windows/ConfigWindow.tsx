@@ -248,7 +248,7 @@ function ConfigWindow() {
                     </Button>
                 </div>
 
-                <div className="flex-1 overflow-auto bg-card px-4 py-4" data-aipp-slot="config-content">
+                <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-card" data-aipp-slot="config-content">
                     <SelectedComponent
                         pluginList={stablePluginList}
                         navigateTo={navigateTo}
@@ -277,7 +277,7 @@ function ConfigWindow() {
                 </div>
 
                 {/* 内容区域 */}
-                <div className="bg-card px-4 md:px-6 lg:px-8 py-6 overflow-y-auto max-h-screen" data-aipp-slot="config-content">
+                <div className="bg-card min-h-0 overflow-hidden flex flex-col md:px-2 lg:px-4" data-aipp-slot="config-content">
                     {/* 配置组件内容 */}
                     <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} subNav={subNav} onSubNavConsumed={() => setSubNav(undefined)} />
                 </div>
