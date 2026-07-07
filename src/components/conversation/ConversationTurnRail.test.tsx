@@ -2,7 +2,7 @@ import React from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-import ConversationTurnRail from "./ConversationTurnRail";
+import ConversationTurnRail, { findActiveTurnId } from "./ConversationTurnRail";
 
 // Tooltip 用直通渲染，避免 Radix Portal 在 happy-dom 中的时序问题
 vi.mock("@/components/ui/tooltip", () => ({
@@ -76,6 +76,39 @@ describe("ConversationTurnRail", () => {
         expect(onSelect).toHaveBeenCalledWith(101);
         fireEvent.click(buttons[1]);
         expect(onSelect).toHaveBeenCalledWith(202);
+    });
+
+    it("marks clicked turn as current", () => {
+        render(
+            <ConversationTurnRail
+                turns={[
+                    { id: 101, preview: "first question" },
+                    { id: 202, preview: "second question" },
+                ]}
+                scrollContainerRef={makeRef(800)}
+                onSelect={vi.fn()}
+            />,
+        );
+
+        const buttons = screen.getAllByRole("button");
+        fireEvent.click(buttons[1]);
+
+        expect(buttons[0]).not.toHaveAttribute("aria-current");
+        expect(buttons[1]).toHaveAttribute("aria-current", "true");
+    });
+
+    it("keeps a user turn active until the next user turn boundary", () => {
+        const turns = [{ id: 101 }, { id: 202 }, { id: 303 }];
+        const positions = new Map([
+            [101, 100],
+            [202, 500],
+            [303, 900],
+        ]);
+
+        expect(findActiveTurnId(turns, positions, 120)).toBe(101);
+        expect(findActiveTurnId(turns, positions, 443)).toBe(101);
+        expect(findActiveTurnId(turns, positions, 444)).toBe(202);
+        expect(findActiveTurnId(turns, positions, 860)).toBe(303);
     });
 
     it("uses the max gap when there is plenty of vertical space", () => {

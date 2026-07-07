@@ -513,7 +513,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     ]);
 
     const overscanPx = useMemo(
-        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 8),
+        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 3),
         [viewportHeight],
     );
     const initialBottomOffsetPx = useMemo(() => {

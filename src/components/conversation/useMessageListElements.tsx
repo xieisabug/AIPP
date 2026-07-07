@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
@@ -297,17 +297,72 @@ export function useMessageListElements({
                 : null,
         [allDisplayMessages],
     );
+    // 高度估算按消息缓存：流式输出时只有尾部消息内容在变，历史消息命中缓存，
+    // 避免每个 token 都对全部消息重跑重量级正则计算。
+    const estimatedHeightCacheRef = useRef<
+        Map<
+            number,
+            {
+                content: string;
+                messageType: string;
+                largePreview: Message["large_message_preview"];
+                isLast: boolean;
+                expanded: boolean;
+                height: number;
+            }
+        >
+    >(new Map());
     const estimatedHeightByMessageId = useMemo(() => {
-        return new Map(
-            allDisplayMessages.map((message) => [
-                message.id,
-                estimateMessageHeight(message, {
-                    isLastMessage: message.id === lastMessageId,
-                    isReasoningExpanded:
-                        reasoningExpandStates.get(message.id) || false,
-                }),
-            ] as const),
-        );
+        const previousCache = estimatedHeightCacheRef.current;
+        const nextCache = new Map<
+            number,
+            {
+                content: string;
+                messageType: string;
+                largePreview: Message["large_message_preview"];
+                isLast: boolean;
+                expanded: boolean;
+                height: number;
+            }
+        >();
+        const result = new Map<number, number>();
+
+        for (const message of allDisplayMessages) {
+            const content = message.content ?? "";
+            const isLast = message.id === lastMessageId;
+            const expanded = reasoningExpandStates.get(message.id) || false;
+            const cached = previousCache.get(message.id);
+
+            let height: number;
+            if (
+                cached
+                && cached.content === content
+                && cached.messageType === message.message_type
+                && cached.largePreview === message.large_message_preview
+                && cached.isLast === isLast
+                && cached.expanded === expanded
+            ) {
+                height = cached.height;
+            } else {
+                height = estimateMessageHeight(message, {
+                    isLastMessage: isLast,
+                    isReasoningExpanded: expanded,
+                });
+            }
+
+            result.set(message.id, height);
+            nextCache.set(message.id, {
+                content,
+                messageType: message.message_type,
+                largePreview: message.large_message_preview,
+                isLast,
+                expanded,
+                height,
+            });
+        }
+
+        estimatedHeightCacheRef.current = nextCache;
+        return result;
     }, [allDisplayMessages, lastMessageId, reasoningExpandStates]);
 
     const messageElements = useMemo(() => {
