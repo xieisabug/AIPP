@@ -633,8 +633,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     isSelected={currentAssistant?.assistant.id === assistant.id}
                     onClick={() => handleChooseAssistant(assistant)}
                 >
-                    <User className="h-4 w-4 mr-2 flex-shrink-0" />
-                    <span className="truncate">{assistant.name}</span>
+                    <span className="font-medium truncate">{assistant.name}</span>
                 </ListItemButton>
             ))}
         </SidebarList>

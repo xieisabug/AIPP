@@ -203,7 +203,7 @@ export default function ConversationTurnRail({
     return (
         <div
             aria-hidden={false}
-            className="pointer-events-none absolute left-1.5 top-1/2 z-10 flex -translate-y-1/2 flex-col items-center"
+            className="pointer-events-none absolute left-1.5 top-1/2 z-10 flex -translate-y-1/2 flex-col items-center w-8"
             style={{ gap: `${gap}px` }}
         >
             {turns.map((turn, i) => (
@@ -217,10 +217,10 @@ export default function ConversationTurnRail({
                                 activeTurnId === turn.id ? "true" : undefined
                             }
                             className={cn(
-                                "pointer-events-auto h-[6px] w-7 cursor-pointer rounded-full transition-all",
+                                "pointer-events-auto h-[6px] w-6 cursor-pointer rounded-full transition-all",
                                 "bg-foreground/30 hover:w-8 hover:bg-foreground",
                                 activeTurnId === turn.id
-                                    && "h-2 w-8 bg-foreground shadow-sm ring-2 ring-foreground/15",
+                                && "h-2 w-8 bg-foreground shadow-sm ring-2 ring-foreground/15",
                             )}
                         />
                     </TooltipTrigger>

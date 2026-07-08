@@ -1171,13 +1171,17 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     key={plugin.pluginId}
                     isSelected={selectedPluginId === plugin.pluginId}
                     onClick={() => setSelectedPluginId(plugin.pluginId)}
-                    className="h-auto py-2.5"
                 >
-                    <div className="flex flex-col items-start gap-1">
-                        <span className="font-medium">{plugin.name}</span>
-                        {!plugin.isInstalled && (
-                            <span className="text-xs text-destructive">目录缺失，请卸载</span>
-                        )}
+                    <div className="flex items-center w-full">
+                        <div className="flex-1 truncate">
+                            <div
+                                className={`font-medium truncate ${!plugin.isInstalled ? "text-destructive" : ""}`}
+                            >
+                                {plugin.isInstalled
+                                    ? plugin.name
+                                    : `${plugin.name}（目录缺失）`}
+                            </div>
+                        </div>
                     </div>
                 </ListItemButton>
             ))}
