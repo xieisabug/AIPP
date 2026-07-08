@@ -240,6 +240,29 @@ fn has_active_mcp_calls(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
         .unwrap_or(false)
 }
 
+fn select_tool_call_strategy(has_available_tools: bool) -> ToolCallStrategy {
+    if has_available_tools {
+        ToolCallStrategy::NativeWithToolResponsePairing
+    } else {
+        ToolCallStrategy::NonNative
+    }
+}
+
+async fn backfill_request_message_list(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    mut message_list: Vec<(String, String, Vec<MessageAttachment>)>,
+) -> Result<Vec<(String, String, Vec<MessageAttachment>)>, AppError> {
+    crate::mcp::execution_api::backfill_missing_tool_results(
+        app_handle,
+        conversation_id,
+        &mut message_list,
+    )
+    .await
+    .map_err(|error| AppError::DatabaseError(format!("回填工具结果失败: {}", error)))?;
+    Ok(message_list)
+}
+
 fn collect_openai_responses_instructions(
     messages: &[(String, String, Vec<MessageAttachment>)],
 ) -> Option<String> {
@@ -1574,11 +1597,7 @@ pub async fn ask_ai(
             "chat configuration established"
         );
 
-        let tool_call_strategy = if has_available_tools {
-            ToolCallStrategy::Native
-        } else {
-            ToolCallStrategy::NonNative
-        };
+        let tool_call_strategy = select_tool_call_strategy(has_available_tools);
         let tool_config = build_tool_config(
             &app_handle_clone,
             &mcp_info,
@@ -1676,6 +1695,12 @@ pub async fn ask_ai(
             request_message_list,
             instructions,
         );
+        let request_message_list = backfill_request_message_list(
+            &app_handle_clone,
+            conversation_id,
+            request_message_list,
+        )
+        .await?;
 
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
@@ -2108,8 +2133,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         "chat configuration (tool_result_continue)"
     );
 
-    let tool_call_strategy =
-        if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
+    let tool_call_strategy = select_tool_call_strategy(has_available_tools);
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id_i64));
     let init_message_ids_for_stateful = init_metadata.message_ids.clone();
@@ -2183,6 +2207,12 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         request_message_list,
         instructions,
     );
+    let request_message_list = backfill_request_message_list(
+        &app_handle,
+        conversation_id_i64,
+        request_message_list,
+    )
+    .await?;
 
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
@@ -2507,8 +2537,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         "chat configuration (batch_tool_result_continue)"
     );
 
-    let tool_call_strategy =
-        if has_available_tools { ToolCallStrategy::Native } else { ToolCallStrategy::NonNative };
+    let tool_call_strategy = select_tool_call_strategy(has_available_tools);
     let tool_config =
         build_tool_config(&app_handle, &mcp_info, has_available_tools, Some(conversation_id));
     let init_message_ids_for_stateful = init_metadata.message_ids.clone();
@@ -2582,6 +2611,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         request_message_list,
         instructions,
     );
+    let request_message_list =
+        backfill_request_message_list(&app_handle, conversation_id, request_message_list).await?;
 
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
@@ -3020,11 +3051,7 @@ pub async fn regenerate_ai(
             "chat configuration (regenerate)"
         );
 
-        let tool_call_strategy = if has_available_tools {
-            ToolCallStrategy::Native
-        } else {
-            ToolCallStrategy::NonNative
-        };
+        let tool_call_strategy = select_tool_call_strategy(has_available_tools);
         let tool_config = if has_available_tools {
             if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
                 &app_handle_clone,
@@ -3090,6 +3117,12 @@ pub async fn regenerate_ai(
             init_message_list,
             None,
         );
+        let request_message_list = backfill_request_message_list(
+            &app_handle_clone,
+            conversation_id,
+            request_message_list,
+        )
+        .await?;
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
             build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
         let chat_request = apply_openai_responses_stateful_request_options(
