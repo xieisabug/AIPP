@@ -17,7 +17,9 @@ use crate::errors::AppError;
 use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
-use crate::utils::window_utils::send_error_to_appropriate_window;
+use crate::utils::window_utils::{
+    send_conversation_event_to_chat_windows, send_error_to_appropriate_window,
+};
 use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
@@ -27,7 +29,7 @@ use scraper::{Html, Selector};
 use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -418,7 +420,7 @@ fn emit_message_add_event(
         })
         .unwrap(),
     };
-    window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event)?;
+    send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, add_event);
     Ok(())
 }
 
@@ -628,7 +630,7 @@ fn persist_and_emit_update(
         })
         .unwrap(),
     };
-    window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event)?;
+    send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, update_event);
 
     Ok(())
 }
@@ -1502,8 +1504,9 @@ async fn handle_captured_tool_calls_common(
                         })
                         .unwrap(),
                     };
-                    let _ = window.emit(
-                        format!("conversation_event_{}", conversation_id).as_str(),
+                    send_conversation_event_to_chat_windows(
+                        window.app_handle(),
+                        conversation_id,
                         update_event,
                     );
                 }
@@ -1593,8 +1596,9 @@ async fn handle_captured_tool_calls_common(
                             "response_message_id": response_message_id
                         }
                     });
-                    let _ = window.emit(
-                        format!("conversation_event_{}", conversation_id).as_str(),
+                    send_conversation_event_to_chat_windows(
+                        window.app_handle(),
+                        conversation_id,
                         ConversationEvent {
                             r#type: "tool_call".to_string(),
                             data: tool_call_event["data"].clone(),
@@ -1729,7 +1733,7 @@ async fn create_native_tool_setup_error_result(
             })
             .unwrap(),
         };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+        send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, add_event);
         tool_result_message
     };
 
@@ -1748,7 +1752,7 @@ async fn create_native_tool_setup_error_result(
         })
         .unwrap(),
     };
-    let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+    send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, update_event);
 
     Ok(())
 }
@@ -3155,9 +3159,9 @@ async fn attempt_stream_chat(
                                                 "conversation_id": conversation_id
                                             }
                                         });
-                                        let _ = window.emit(
-                                            format!("conversation_event_{}", conversation_id)
-                                                .as_str(),
+                                        send_conversation_event_to_chat_windows(
+                                            window.app_handle(),
+                                            conversation_id,
                                             ConversationEvent {
                                                 r#type: "group_merge".to_string(),
                                                 data: group_merge_event["data"].clone(),
@@ -3354,8 +3358,9 @@ async fn attempt_stream_chat(
                                 })
                                 .unwrap(),
                             };
-                            let _ = window.emit(
-                                format!("conversation_event_{}", conversation_id).as_str(),
+                            send_conversation_event_to_chat_windows(
+                                window.app_handle(),
+                                conversation_id,
                                 update_event,
                             );
                         }
@@ -3445,9 +3450,9 @@ async fn attempt_stream_chat(
                                                 "conversation_id": conversation_id
                                             }
                                         });
-                                        let _ = window.emit(
-                                            format!("conversation_event_{}", conversation_id)
-                                                .as_str(),
+                                        send_conversation_event_to_chat_windows(
+                                            window.app_handle(),
+                                            conversation_id,
                                             ConversationEvent {
                                                 r#type: "group_merge".to_string(),
                                                 data: group_merge_event["data"].clone(),
@@ -3613,12 +3618,9 @@ async fn attempt_stream_chat(
                                                         )
                                                         .unwrap(),
                                                     };
-                                                    let _ = window.emit(
-                                                        format!(
-                                                            "conversation_event_{}",
-                                                            conversation_id
-                                                        )
-                                                        .as_str(),
+                                                    send_conversation_event_to_chat_windows(
+                                                        window.app_handle(),
+                                                        conversation_id,
                                                         update_event,
                                                     );
                                                 }
@@ -3939,8 +3941,9 @@ async fn attempt_stream_chat(
                                 "reasoning_length": reasoning_content.len(),
                             }),
                         };
-                        let _ = window.emit(
-                            format!("conversation_event_{}", conversation_id).as_str(),
+                        send_conversation_event_to_chat_windows(
+                            window.app_handle(),
+                            conversation_id,
                             stream_complete_event,
                         );
 
@@ -4035,8 +4038,11 @@ async fn create_error_message(
             })
             .unwrap(),
         };
-        let _ =
-            window.emit(format!("conversation_event_{}", conversation_id).as_str(), error_event);
+        send_conversation_event_to_chat_windows(
+            window.app_handle(),
+            conversation_id,
+            error_event,
+        );
 
         let update_event = ConversationEvent {
             r#type: "message_update".to_string(),
@@ -4053,8 +4059,11 @@ async fn create_error_message(
             })
             .unwrap(),
         };
-        let _ =
-            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+        send_conversation_event_to_chat_windows(
+            window.app_handle(),
+            conversation_id,
+            update_event,
+        );
     }
 }
 
@@ -4340,8 +4349,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ =
-                window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                add_event,
+            );
 
             // 立即发送一个 is_done: false 的 message_update 事件，触发前端清理用户消息的 shine-border
             // 这与流式模式的行为保持一致
@@ -4360,8 +4372,9 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window.emit(
-                format!("conversation_event_{}", conversation_id).as_str(),
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
                 initial_update_event,
             );
 
@@ -4481,8 +4494,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                update_event,
+            );
 
             if need_generate_title && !content.is_empty() {
                 spawn_title_generation(
@@ -4593,8 +4609,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), error_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                error_event,
+            );
 
             let update_event = ConversationEvent {
                 r#type: "message_update".to_string(),
@@ -4611,8 +4630,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                update_event,
+            );
             emit_chat_error_hook(
                 app_handle,
                 conversation_id,

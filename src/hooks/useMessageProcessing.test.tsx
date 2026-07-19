@@ -1,6 +1,7 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Message } from "@/data/Conversation";
+import { useMessageGroups } from "@/hooks/useMessageGroups";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 
 function makeMessage(
@@ -99,6 +100,48 @@ describe("useMessageProcessing ordering", () => {
 
         expect(result.current.allDisplayMessages.map((message) => message.id)).toEqual([
             1, 2, 4, 3, 5, 6,
+        ]);
+    });
+
+    it("keeps Butler user and error messages after filtering the system prompt", () => {
+        const butlerMessages = [
+            makeMessage(9990, "system", "2026-07-18T12:26:29.268Z"),
+            makeMessage(9991, "user", "2026-07-18T12:26:29.282Z"),
+            makeMessage(
+                9992,
+                "error",
+                "2026-07-18T12:26:43.940Z",
+                "89703fd7-bac3-4744-804a-8b6d087a56a1",
+            ),
+        ];
+        const groupMergeMap = new Map<string, string>();
+
+        const { result } = renderHook(() => {
+            const initial = useMessageProcessing({
+                messages: butlerMessages,
+                streamingMessages: new Map(),
+                conversation: undefined,
+                generationGroups: new Map(),
+                groupRootMessageIds: new Map(),
+                getMessageVersionInfo: () => ({ shouldShow: true }),
+            });
+            const groups = useMessageGroups({
+                allDisplayMessages: initial.combinedMessagesForGrouping,
+                groupMergeMap,
+            });
+
+            return useMessageProcessing({
+                messages: butlerMessages,
+                streamingMessages: new Map(),
+                conversation: undefined,
+                generationGroups: groups.generationGroups,
+                groupRootMessageIds: groups.groupRootMessageIds,
+                getMessageVersionInfo: groups.getMessageVersionInfo,
+            });
+        });
+
+        expect(result.current.allDisplayMessages.map((message) => message.id)).toEqual([
+            9991, 9992,
         ]);
     });
 });

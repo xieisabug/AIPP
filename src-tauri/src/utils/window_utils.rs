@@ -24,6 +24,7 @@ pub fn is_chat_or_ask_window_focused(app_handle: &tauri::AppHandle) -> bool {
 }
 
 /// 智能发送错误到合适的窗口
+/// Butler 请求的错误直接返回 Butler 窗口，避免被预创建的隐藏 ChatUI 截走
 /// 如果 ChatUI 窗口存在（不管是否可见），只发送给 ChatUI（不发送给 Ask 窗口）
 /// 否则发送给 Ask 窗口，并附带 conversation_id 以便前端过滤
 pub fn send_error_to_appropriate_window(
@@ -33,6 +34,11 @@ pub fn send_error_to_appropriate_window(
 ) {
     let payload =
         ErrorNotificationPayload { conversation_id, error_message: error_message.to_string() };
+
+    if window.label() == "butler_experiment" {
+        let _ = window.emit(ERROR_NOTIFICATION_EVENT, &payload);
+        return;
+    }
 
     // 获取 ChatUI 窗口
     if let Some(chat_ui_window) = window.app_handle().get_webview_window("chat_ui") {
@@ -53,8 +59,8 @@ pub fn send_error_to_appropriate_window(
 
 /// 向对话相关窗口发送对话事件
 /// 同时向 ask、chat_ui 和 butler_experiment 窗口发送对话事件，确保所有相关界面都能收到通知
-pub fn send_conversation_event_to_chat_windows(
-    app_handle: &tauri::AppHandle,
+pub fn send_conversation_event_to_chat_windows<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     conversation_id: i64,
     event: ConversationEvent,
 ) {

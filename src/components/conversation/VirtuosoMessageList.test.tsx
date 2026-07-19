@@ -18,7 +18,9 @@ vi.mock("react-virtuoso", () => ({
         const { components, context } = props;
         return (
             <div data-testid="virtuoso">
-                {components.Footer ? <components.Footer context={context} /> : null}
+                {props.data.length > 0 && components.Footer
+                    ? <components.Footer context={context} />
+                    : null}
             </div>
         );
     },
@@ -311,5 +313,107 @@ describe("VirtuosoMessageList row height reservation", () => {
             align: "end",
         });
         expect(virtuosoMockState.lastProps.initialTopMostItemIndex.offset).toBeLessThan(0);
+    });
+
+    it("renders the latest Butler user message and error without hiding the live footer", () => {
+        const { unmount } = render(
+            <VirtuosoMessageList
+                {...makeProps([
+                    makeMessage({
+                        id: 9985,
+                        message_type: "user",
+                        content: "你好",
+                    }),
+                    makeMessage({
+                        id: 9986,
+                        message_type: "error",
+                        content: "No available providers",
+                    }),
+                ])}
+            />,
+        );
+
+        expect(screen.getByTestId("message-9985")).toBeInTheDocument();
+        expect(screen.getByTestId("message-9986")).toBeInTheDocument();
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        expect(
+            document.querySelector("[data-aipp-initial-bottom-positioning='true']"),
+        ).toBeNull();
+        unmount();
+    });
+
+    it("still renders messages when scrollContainerRef.current is null", () => {
+        render(
+            <VirtuosoMessageList
+                {...makeProps([
+                    makeMessage({
+                        id: 42,
+                        message_type: "user",
+                        content: "still-visible",
+                    }),
+                    makeMessage({
+                        id: 43,
+                        message_type: "error",
+                        content: "provider-error",
+                    }),
+                ])}
+                scrollContainerRef={{ current: null }}
+            />,
+        );
+
+        // 旧逻辑会卡在 minHeight:1 占位，气泡全无；现在即使 ref.current=null 也要渲染
+        expect(screen.getByTestId("message-42")).toBeInTheDocument();
+        expect(screen.getByTestId("message-43")).toBeInTheDocument();
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+    });
+
+    it("unhides virtuoso history path after initial bottom pin settles", async () => {
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            value: 1000,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        render(
+            <VirtuosoMessageList
+                {...makeProps([
+                    makeMessage({
+                        id: 1,
+                        message_type: "user",
+                        content: "user-1",
+                    }),
+                    makeMessage({
+                        id: 2,
+                        message_type: "response",
+                        content: "response-1",
+                    }),
+                    makeMessage({
+                        id: 3,
+                        message_type: "user",
+                        content: "user-2",
+                    }),
+                ])}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+            />,
+        );
+
+        // history 路径允许短暂 hide，但 pin/failsafe 完成后必须露出
+        await waitFor(
+            () => {
+                expect(
+                    document.querySelector(
+                        "[data-aipp-initial-bottom-positioning='true']",
+                    ),
+                ).toBeNull();
+            },
+            { timeout: 2000 },
+        );
+        expect(screen.getByTestId("virtuoso")).toBeVisible();
     });
 });

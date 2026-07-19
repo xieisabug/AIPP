@@ -159,6 +159,24 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(screen.getByTestId("message-4")).toHaveAttribute("data-last-message", "true");
     });
 
+    it("renders a Butler user message followed by an error message", () => {
+        render(
+            <Harness
+                messages={[
+                    makeMessage({ id: 9985, message_type: "user", content: "你好" }),
+                    makeMessage({
+                        id: 9986,
+                        message_type: "error",
+                        content: "No available providers",
+                    }),
+                ]}
+            />
+        );
+
+        expect(screen.getByTestId("message-9985")).toHaveTextContent("你好");
+        expect(screen.getByTestId("message-9986")).toHaveTextContent("No available providers");
+    });
+
     it("uses the whole merged group to estimate historical row height", () => {
         const mergedMessages = [
             makeMessage({ id: 1, message_type: "user", content: "user-1" }),

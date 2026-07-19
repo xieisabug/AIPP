@@ -48,6 +48,8 @@ const DEFAULT_ITEM_HEIGHT = 160;
 const INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT = 10;
 const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 30;
 const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
+/** 硬超时：pin 被打断时也不能永久 visibility:hidden */
+const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 500;
 const LIVE_ONLY_FOOTER_STYLE = {
     [CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR]: `var(${CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR}, var(${CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR}, 0px))`,
 } as React.CSSProperties;
@@ -286,12 +288,40 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         );
     }, [conversationId, messageListProps.allDisplayMessages]);
 
+    // scrollParent 解析不能只依赖 ref 对象 identity：Butler 等场景下首帧
+    // ref.current 偶发仍为 null，若不再重试会永久停在 minHeight:1 占位，气泡全无。
     useLayoutEffect(() => {
-        setScrollParent(scrollContainerRef.current);
-    }, [scrollContainerRef]);
+        const sync = () => {
+            const el = scrollContainerRef.current;
+            setScrollParent((prev) => (prev === el ? prev : el));
+            if (el) {
+                setViewportHeight((prev) =>
+                    prev === el.clientHeight ? prev : el.clientHeight,
+                );
+            }
+            return el;
+        };
+
+        if (sync()) {
+            return;
+        }
+
+        const frameId = requestAnimationFrame(() => {
+            sync();
+        });
+        return () => {
+            cancelAnimationFrame(frameId);
+        };
+    }, [
+        conversationId,
+        messageListProps.allDisplayMessages.length,
+        scrollContainerRef,
+    ]);
+
+    const effectiveScrollParent = scrollParent ?? scrollContainerRef.current;
 
     useEffect(() => {
-        const container = scrollParent;
+        const container = effectiveScrollParent;
         if (!container) {
             return;
         }
@@ -321,10 +351,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             container.removeEventListener("scroll", syncScrollState);
             resizeObserver.disconnect();
         };
-    }, [onScrollStateChange, scrollParent]);
+    }, [onScrollStateChange, effectiveScrollParent]);
 
     useLayoutEffect(() => {
-        const container = scrollParent;
+        const container = effectiveScrollParent;
         if (pendingScrollMessageId !== null && hasCurrentConversationMessages) {
             initialBottomConversationRef.current = conversationId;
             setInitialBottomVisibleConversationId((currentConversationId) =>
@@ -332,6 +362,25 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                     ? currentConversationId
                     : conversationId,
             );
+            return;
+        }
+
+        // live-only 无 Virtuoso 贴底闪动：不 pin、不 hide，仅做一次滚动贴底
+        // 同时标记 visible，避免之后长出 history 时因 ref 已写入却未 unhide 而永久隐藏
+        if (historyItems.length === 0) {
+            if (
+                container
+                && hasCurrentConversationMessages
+                && initialBottomConversationRef.current !== conversationId
+            ) {
+                initialBottomConversationRef.current = conversationId;
+                setInitialBottomVisibleConversationId(conversationId);
+                container.scrollTop = Math.max(
+                    0,
+                    container.scrollHeight - container.clientHeight,
+                );
+                onScrollStateChange?.(container);
+            }
             return;
         }
 
@@ -387,6 +436,20 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             observeContentElements();
             pinToBottom();
         });
+        let failsafeTimerId: number | null = null;
+        const finishPinAndShow = () => {
+            initialBottomConversationRef.current = conversationId;
+            initialBottomPinConversationRef.current = null;
+            initialBottomPinFrameRef.current = null;
+            container.removeEventListener("scroll", handlePinnedScroll);
+            contentResizeObserver.disconnect();
+            mutationObserver.disconnect();
+            if (failsafeTimerId !== null) {
+                window.clearTimeout(failsafeTimerId);
+                failsafeTimerId = null;
+            }
+            setInitialBottomVisibleConversationId(conversationId);
+        };
         const scrollToBottom = () => {
             if (initialBottomPinConversationRef.current !== conversationId) {
                 return;
@@ -399,9 +462,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 0,
                 container.scrollHeight - container.clientHeight,
             );
+            // maxScrollTop === 0（短会话装得下）也应计为稳定，否则只能干等 max frame
             if (
                 lastMaxScrollTop !== null
-                && maxScrollTop > 0
                 && Math.abs(maxScrollTop - lastMaxScrollTop) <= 1
             ) {
                 stableFrames += 1;
@@ -416,18 +479,20 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             const reachedMaxWait =
                 elapsedFrames >= INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT;
             if (canShowAfterStableLayout || reachedMaxWait) {
-                initialBottomConversationRef.current = conversationId;
-                initialBottomPinConversationRef.current = null;
-                initialBottomPinFrameRef.current = null;
-                container.removeEventListener("scroll", handlePinnedScroll);
-                contentResizeObserver.disconnect();
-                mutationObserver.disconnect();
-                setInitialBottomVisibleConversationId(conversationId);
+                finishPinAndShow();
                 return;
             }
 
             initialBottomPinFrameRef.current = requestAnimationFrame(scrollToBottom);
         };
+        // 硬超时：即便 rAF 被反复打断，也不能永久 visibility:hidden
+        failsafeTimerId = window.setTimeout(() => {
+            if (initialBottomConversationRef.current === conversationId) {
+                return;
+            }
+            pinToBottom();
+            finishPinAndShow();
+        }, INITIAL_BOTTOM_PIN_FAILSAFE_MS);
 
         container.addEventListener("scroll", handlePinnedScroll, { passive: true });
         observeContentElements();
@@ -438,6 +503,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         scrollToBottom();
 
         return () => {
+            if (failsafeTimerId !== null) {
+                window.clearTimeout(failsafeTimerId);
+            }
             if (initialBottomPinConversationRef.current === conversationId) {
                 initialBottomPinConversationRef.current = null;
             }
@@ -452,11 +520,11 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     }, [
         conversationId,
         hasCurrentConversationMessages,
-        historyItems.length,
-        liveItems.length,
+        // 仅用是否存在 history 区分 live-only / virtuoso；避免 live 长度抖动反复 cancel pin
+        historyItems.length > 0,
         onScrollStateChange,
         pendingScrollMessageId,
-        scrollParent,
+        effectiveScrollParent,
     ]);
 
     const overscanPx = useMemo(
@@ -473,8 +541,11 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return sum + item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0);
         }, 0);
     }, [liveItems]);
+    // 仅 Virtuoso history 路径需要 hide 掩盖 initialTopMostItemIndex 闪动；
+    // live-only（短会话 / 总管家常见）没有 Virtuoso 定位，绝不能藏气泡。
     const shouldHideInitialBottomPositioning =
-        pendingScrollMessageId === null
+        historyItems.length > 0
+        && pendingScrollMessageId === null
         && hasCurrentConversationMessages
         && initialBottomVisibleConversationId !== conversationId;
     const initialBottomPositioningStyle = shouldHideInitialBottomPositioning
@@ -499,7 +570,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return;
         }
 
-        const container = scrollParent;
+        const container = effectiveScrollParent;
         if (!container) {
             return;
         }
@@ -556,29 +627,35 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         historyItems,
         liveItems,
         pendingScrollMessageId,
-        scrollParent,
+        effectiveScrollParent,
         setShiningMessageIds,
     ]);
 
-    if (!scrollParent) {
-        return <div style={{ minHeight: 1 }} />;
-    }
-
+    // live-only：不依赖 scrollParent，直接渲染（总管家短会话常见路径）
     if (historyItems.length === 0) {
         return (
-            <div
-                data-aipp-initial-bottom-positioning={
-                    shouldHideInitialBottomPositioning ? "true" : undefined
-                }
-                style={initialBottomPositioningStyle}
-            >
-                <VirtuosoLiveFooter
-                    context={{
-                        ...context,
-                        useLiveOnlyViewportHeight: true,
-                    }}
-                />
-            </div>
+            <VirtuosoLiveFooter
+                context={{
+                    liveItems,
+                    useLiveOnlyViewportHeight: true,
+                }}
+            />
+        );
+    }
+
+    // history 路径需要 customScrollParent；ref 尚未就绪时：
+    // - 短列表可先直出，避免空白
+    // - 长列表只露出 live 尾部，避免普通 ChatUI 长会话一次性挂载全部 history
+    if (!effectiveScrollParent) {
+        const fallbackItems =
+            renderItems.length <= 40 ? renderItems : liveItems;
+        return (
+            <VirtuosoLiveFooter
+                context={{
+                    liveItems: fallbackItems,
+                    useLiveOnlyViewportHeight: true,
+                }}
+            />
         );
     }
 
@@ -591,7 +668,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         >
             <Virtuoso
                 ref={virtuosoRef}
-                customScrollParent={scrollParent}
+                customScrollParent={effectiveScrollParent}
                 data={historyItems}
                 computeItemKey={(_index, item) => item.key}
                 itemContent={itemContent}
