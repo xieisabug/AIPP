@@ -1666,7 +1666,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             <ToolErrorContinueProvider value={continueOnToolErrorEnabled}>
                 <div
                     ref={dropRef}
-                    className={`h-full relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
+                    className={`h-full min-h-0 relative flex bg-background ${isMobile ? '' : 'rounded-xl'}`}
                     data-aipp-slot="chat-conversation-root"
                 >
                     {!isMobile && conversationId && (
@@ -1680,8 +1680,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             }}
                         />
                     )}
-                    {/* Main content area */}
-                    <div className="flex-1 flex flex-col min-w-0" data-aipp-slot="chat-conversation-main">
+                    {/* Main content area：min-h-0 防止嵌套 flex（如总管家）把滚动区撑破导致占位过高 */}
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-aipp-slot="chat-conversation-main">
                         {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
                         {!isMobile && !hideHeader && (
                             <ConversationHeader
@@ -1704,7 +1704,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onWheelCapture={handleUserScrollIntent}
                             onTouchMoveCapture={handleUserScrollIntent}
                             onScroll={virtualizeMessages ? undefined : handleScroll}
-                            className={`conversation-scroll-transparent-track h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
+                            className={`conversation-scroll-transparent-track min-h-0 h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                             data-aipp-slot="chat-conversation-scroll"
                         >
                             <ConversationContent

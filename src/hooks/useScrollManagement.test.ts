@@ -116,11 +116,12 @@ describe("useScrollManagement", () => {
         expect(
             container.style.getPropertyValue(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR),
         ).toBe("490px");
+        // contentBox(500-24-24) - endAnchor(0) = 452
         expect(
             container.style.getPropertyValue(
                 CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
             ),
-        ).toBe("426px");
+        ).toBe("452px");
     });
 
     it("cancels queued auto-scroll when the user starts scrolling manually", () => {

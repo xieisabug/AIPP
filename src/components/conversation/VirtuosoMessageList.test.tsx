@@ -3,9 +3,6 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import VirtuosoMessageList, { getVirtuosoRowMinHeight } from "./VirtuosoMessageList";
-import {
-    CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
-} from "./layoutConstants";
 import type { Message } from "@/data/Conversation";
 
 const virtuosoMockState = vi.hoisted(() => ({
@@ -130,37 +127,6 @@ describe("VirtuosoMessageList row height reservation", () => {
         expect(
             getVirtuosoRowMinHeight(1, { estimatedHeight: 240 }),
         ).toBeUndefined();
-    });
-
-    it("does not override the footer viewport height after history items exist", () => {
-        render(
-            <VirtuosoMessageList
-                {...makeProps([
-                    makeMessage({
-                        id: 1,
-                        message_type: "user",
-                        content: "user-1",
-                    }),
-                    makeMessage({
-                        id: 2,
-                        message_type: "response",
-                        content: "response-1",
-                    }),
-                    makeMessage({
-                        id: 3,
-                        message_type: "user",
-                        content: "user-2",
-                    }),
-                ])}
-            />,
-        );
-
-        const lastReplyContainer = screen
-            .getByTestId("message-3")
-            .closest("[data-aipp-slot='chat-last-reply-container']") as HTMLElement;
-        const footer = lastReplyContainer.parentElement as HTMLElement;
-
-        expect(footer.style.getPropertyValue(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR)).toBe("");
     });
 
     it("starts new conversation renders at the bottom without waiting for outer smartScroll", async () => {

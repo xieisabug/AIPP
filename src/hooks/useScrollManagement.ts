@@ -61,22 +61,43 @@ export function useScrollManagement(
         }
 
         const syncViewportHeightVar = () => {
-            const viewportHeight = Math.max(0, container.clientHeight - 10);
             const style = window.getComputedStyle(container);
             const paddingTop = Number.parseFloat(style.paddingTop) || 0;
             const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
             const rowGap = Number.parseFloat(style.rowGap) || 0;
+            const borderTop = Number.parseFloat(style.borderTopWidth) || 0;
+            const borderBottom = Number.parseFloat(style.borderBottomWidth) || 0;
+            // border-box 下 flex 子项可用高度 = clientHeight - 垂直 padding - border
+            const contentBoxHeight = Math.max(
+                0,
+                container.clientHeight
+                    - paddingTop
+                    - paddingBottom
+                    - borderTop
+                    - borderBottom,
+            );
+            const endAnchor = container.querySelector(
+                "[data-aipp-slot='chat-messages-end-anchor']",
+            );
+            const endAnchorHeight =
+                endAnchor instanceof HTMLElement ? endAnchor.offsetHeight : 0;
 
+            // 兼容旧逻辑：接近整段滚动视口
+            const viewportHeight = Math.max(0, container.clientHeight - 10);
             container.style.setProperty(
                 CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
                 `${viewportHeight}px`,
             );
+            // last-reply min-height：内容区 − end-anchor。
+            // 不扣 rowGap：gap 由 flex 布局在子项外占用，再扣会少占约 16px，
+            // 贴底后 user 上方会多出一条空隙。
+            const liveOnlyHeight = Math.max(
+                0,
+                contentBoxHeight - endAnchorHeight,
+            );
             container.style.setProperty(
                 CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
-                `${Math.max(
-                    0,
-                    viewportHeight - paddingTop - paddingBottom - rowGap,
-                )}px`,
+                `${liveOnlyHeight}px`,
             );
         };
 

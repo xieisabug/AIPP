@@ -14,10 +14,6 @@ import {
 
 import { applyScrollHighlight } from "./scrollHighlight";
 import {
-    CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
-    CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
-} from "./layoutConstants";
-import {
     VIRTUAL_OVERSCAN_PX,
     VIRTUAL_ROW_GAP_PX,
 } from "./virtualizedMessageListLayout";
@@ -40,7 +36,6 @@ interface VirtuosoMessageListProps extends UseMessageListElementsProps {
 
 interface VirtuosoMessageListContext {
     liveItems: RenderableConversationItem[];
-    useLiveOnlyViewportHeight?: boolean;
 }
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 180;
@@ -50,9 +45,6 @@ const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 30;
 const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
 /** 硬超时：pin 被打断时也不能永久 visibility:hidden */
 const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 500;
-const LIVE_ONLY_FOOTER_STYLE = {
-    [CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR]: `var(${CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR}, var(${CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR}, 0px))`,
-} as React.CSSProperties;
 
 function itemMatchesMessageId(
     item: RenderableConversationItem,
@@ -137,7 +129,7 @@ MeasuredVirtuosoItem.displayName = "MeasuredVirtuosoItem";
 const VirtuosoLiveFooter = React.memo(
     ({ context }: { context: VirtuosoMessageListContext }) => {
         const footerRef = useRef<HTMLDivElement | null>(null);
-        const { liveItems, useLiveOnlyViewportHeight = false } = context;
+        const { liveItems } = context;
         const footerKey = useMemo(
             () => `live-tail:${liveItems.map((item) => item.key).join("|")}`,
             [liveItems],
@@ -149,16 +141,9 @@ const VirtuosoLiveFooter = React.memo(
             return null;
         }
 
+        // last-reply 的 min-height 直接读 live-only CSS 变量，无需再在 footer 上覆盖
         return (
-            <div
-                ref={footerRef}
-                className="flex flex-col gap-4"
-                style={
-                    useLiveOnlyViewportHeight
-                        ? LIVE_ONLY_FOOTER_STYLE
-                        : undefined
-                }
-            >
+            <div ref={footerRef} className="flex flex-col gap-4">
                 {liveItems.map((item) => (
                     <React.Fragment key={item.key}>{item.element}</React.Fragment>
                 ))}
@@ -633,14 +618,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
     // live-only：不依赖 scrollParent，直接渲染（总管家短会话常见路径）
     if (historyItems.length === 0) {
-        return (
-            <VirtuosoLiveFooter
-                context={{
-                    liveItems,
-                    useLiveOnlyViewportHeight: true,
-                }}
-            />
-        );
+        return <VirtuosoLiveFooter context={{ liveItems }} />;
     }
 
     // history 路径需要 customScrollParent；ref 尚未就绪时：
@@ -649,14 +627,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     if (!effectiveScrollParent) {
         const fallbackItems =
             renderItems.length <= 40 ? renderItems : liveItems;
-        return (
-            <VirtuosoLiveFooter
-                context={{
-                    liveItems: fallbackItems,
-                    useLiveOnlyViewportHeight: true,
-                }}
-            />
-        );
+        return <VirtuosoLiveFooter context={{ liveItems: fallbackItems }} />;
     }
 
     return (
