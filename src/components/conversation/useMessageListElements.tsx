@@ -40,6 +40,7 @@ export interface UseMessageListElementsProps {
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
+    renderMessageActions?: (message: Message) => React.ReactNode;
 }
 
 export interface MessageElementEntry {
@@ -255,6 +256,7 @@ export function useMessageListElements({
     onToggleReasoningExpand,
     inlineInteractionItems,
     allowFeishuDebugResend = false,
+    renderMessageActions,
 }: UseMessageListElementsProps) {
     const { isMergeAssistantMessages } = useDisplayConfig();
     const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
@@ -409,6 +411,7 @@ export function useMessageListElements({
                                 message.id,
                             )}
                             allowFeishuDebugResend={allowFeishuDebugResend}
+                            messageActions={renderMessageActions?.(message)}
                         />
                     ),
                     groupControl,
@@ -480,6 +483,7 @@ export function useMessageListElements({
                                             message.id,
                                         )}
                                         allowFeishuDebugResend={allowFeishuDebugResend}
+                                        messageActions={renderMessageActions?.(message)}
                                         mergedMode
                                     />
                                 );
@@ -518,6 +522,7 @@ export function useMessageListElements({
                                     }
                                     isResendToFeishuDebugPending={pendingMessageId === resendTargetMessage?.id}
                                     messageContent={toolbarMessage.content}
+                                    pluginActions={renderMessageActions?.(toolbarMessage)}
                                 />
                             );
                         })()}
@@ -612,6 +617,7 @@ export function useMessageListElements({
         isMergeAssistantMessages,
         pendingMessageId,
         resendMessageToFeishuDebug,
+        renderMessageActions,
     ]);
 
     const versionControlElements = useMemo(() => {

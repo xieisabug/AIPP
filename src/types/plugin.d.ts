@@ -201,6 +201,17 @@ interface SystemApiActions {
     }): Promise<Message>;
 }
 
+interface SystemApiComfyUi {
+    testConnection(request: { baseUrl: string }): Promise<void>;
+    generateAndAttach(request: {
+        baseUrl: string;
+        workflow: unknown;
+        prompt: string;
+        conversationId: number;
+        messageId: number;
+    }): Promise<{ promptId: string; attachmentId: number; fileName: string }>;
+}
+
 type SystemApiHookAction = "continue" | "replace" | "patch" | "block" | "approvalRequired";
 
 interface SystemApiHookResult {
@@ -387,6 +398,7 @@ interface SystemApi {
     assistants: SystemApiAssistants;
     assistantConfig: SystemApiAssistantConfig;
     actions: SystemApiActions;
+    comfyui: SystemApiComfyUi;
     getDisplayConfig(): Promise<SystemApiDisplayConfig>;
     applyTheme(themeId: string): Promise<void>;
     toast?: {

@@ -1280,6 +1280,51 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [headerExtraActions, pluginHeaderActions]);
 
+        const renderPluginMessageActions = useCallback((message: Message) => {
+            const actionEntries = pluginList
+                .flatMap((plugin) =>
+                    (plugin.contributions?.actions ?? []).map((action: {
+                        id: string;
+                        location: string;
+                        order?: number | null;
+                    }) => ({ plugin, action }))
+                )
+                .filter(({ action }) => action.location === "conversation.message-actions")
+                .sort((left, right) => (left.action.order ?? 100) - (right.action.order ?? 100));
+
+            if (actionEntries.length === 0) {
+                return null;
+            }
+
+            const actionContext = {
+                conversationId: message.conversation_id,
+                messageId: message.id,
+                messageType: message.message_type,
+                messageContent: message.content,
+            };
+
+            return actionEntries.map(({ plugin, action }) => {
+                const instance = plugin.instance as
+                    | { renderAction?: (actionId: string, context?: Record<string, unknown>) => React.ReactNode }
+                    | null;
+                if (typeof instance?.renderAction !== "function") {
+                    return null;
+                }
+                try {
+                    const rendered = instance.renderAction(action.id, actionContext);
+                    return rendered ? (
+                        <Fragment key={`${plugin.code}:${action.id}:${message.id}`}>{rendered}</Fragment>
+                    ) : null;
+                } catch (error) {
+                    console.error(
+                        `[ConversationUI] Failed to render message plugin action '${action.id}' from '${plugin.code}':`,
+                        error
+                    );
+                    return null;
+                }
+            });
+        }, [pluginList]);
+
         const sendButtonSlotContext = useMemo(
             () => ({
                 conversationId: conversation?.id ?? null,
@@ -1735,6 +1780,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 onToggleReasoningExpand={toggleReasoningExpand}
                                 inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}
+                                renderMessageActions={renderPluginMessageActions}
                                 virtualizeMessages={virtualizeMessages}
                                 virtualizedListEngine={virtualizedListEngine}
                                 scrollContainerRef={scrollContainerRef}

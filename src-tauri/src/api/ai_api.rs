@@ -1198,6 +1198,7 @@ pub async fn ask_ai(
         active_skill_attachments,
     )
     .await?;
+    let initial_message_ids_for_after_response = init_message_ids.clone();
 
     let _ = PluginHookBus::new(app_handle.clone())
         .emit_event(
@@ -1760,14 +1761,29 @@ pub async fn ask_ai(
         let _ = PluginHookBus::new(app_handle_clone.clone())
             .emit_event(
                 "chat.afterResponseCompleted",
-                serde_json::json!({
+                {
+                    let initial_ids: std::collections::HashSet<i64> = initial_message_ids_for_after_response.iter().copied().collect();
+                    let assistant_message_id = ConversationDatabase::new(&app_handle_clone)
+                        .ok()
+                        .and_then(|db| db.message_repo().ok())
+                        .and_then(|repo| repo.list_by_conversation_id(conversation_id).ok())
+                        .and_then(|messages| messages.into_iter()
+                            .filter(|(message, _)| {
+                                (message.message_type == "response" || message.message_type == "assistant")
+                                    && !initial_ids.contains(&message.id)
+                            })
+                            .max_by_key(|(message, _)| message.created_time)
+                            .map(|(message, _)| message.id));
+                    serde_json::json!({
                     "conversationId": conversation_id,
                     "userMessageId": user_message_id,
+                    "assistantMessageId": assistant_message_id,
                     "assistantId": processed_request.assistant_id,
                     "modelId": model_id,
                     "modelCode": model_code,
                     "metadata": {}
-                }),
+                    })
+                },
             )
             .await;
 

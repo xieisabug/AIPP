@@ -43,6 +43,7 @@ interface MessageItemProps {
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
+    messageActions?: React.ReactNode;
 }
 
 interface QueueMessageMeta {
@@ -218,6 +219,7 @@ const MessageItem = React.memo<MessageItemProps>(
         inlineInteractionItems,
         allowFeishuDebugResend = false,
         mergedMode = false,
+        messageActions,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -398,6 +400,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     onResendToFeishuDebug={canResendToFeishuDebug ? handleFeishuDebugResend : undefined}
                     isResendToFeishuDebugPending={isFeishuDebugSending}
                     messageContent={message.content}
+                    pluginActions={messageActions}
                 />
             </div>
         );
@@ -468,6 +471,7 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     // 合并模式比较
     if (prevProps.mergedMode !== nextProps.mergedMode) return false;
     if (prevProps.allowFeishuDebugResend !== nextProps.allowFeishuDebugResend) return false;
+    if (prevProps.messageActions !== nextProps.messageActions) return false;
 
     return true;
 };

@@ -35,6 +35,7 @@ use crate::mcp::builtin_mcp::operation::{
         BashProcessStatus, GetBashOutputRequest, ReadFileRequest, WriteFileRequest,
     },
 };
+use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::utils::window_utils::{
     emit_conversation_list_activity, send_conversation_event_to_chat_windows,
@@ -3970,6 +3971,33 @@ async fn process_acp_prompt(
     }
     client_handle
         .send_done_event("response", &final_content, Some(&usage_summary))
+        .await;
+    let (assistant_id, model_id, model_code, user_message_id) = ConversationDatabase::new(&client_handle.app_handle)
+        .ok()
+        .and_then(|db| {
+            let message = db.message_repo().ok()?.read(message_id).ok().flatten()?;
+            let conversation = db.conversation_repo().ok()?.read(conversation_id).ok().flatten()?;
+            Some((
+                conversation.assistant_id,
+                message.llm_model_id,
+                message.llm_model_name,
+                message.parent_id,
+            ))
+        })
+        .unwrap_or((None, Some(0), Some("acp".to_string()), None));
+    let _ = PluginHookBus::new(client_handle.app_handle.clone())
+        .emit_event(
+            "chat.afterResponseCompleted",
+            serde_json::json!({
+                "conversationId": conversation_id,
+                "userMessageId": user_message_id,
+                "assistantMessageId": message_id,
+                "assistantId": assistant_id,
+                "modelId": model_id,
+                "modelCode": model_code,
+                "metadata": { "acp": true }
+            }),
+        )
         .await;
     Ok(())
 }

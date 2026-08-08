@@ -230,6 +230,17 @@ interface AippSystemApiActions {
   }): Promise<AippSystemApiMessage>;
 }
 
+interface AippSystemApiComfyUi {
+  testConnection(request: { baseUrl: string }): Promise<void>;
+  generateAndAttach(request: {
+    baseUrl: string;
+    workflow: unknown;
+    prompt: string;
+    conversationId: number;
+    messageId: number;
+  }): Promise<{ promptId: string; attachmentId: number; fileName: string }>;
+}
+
 interface AippSystemApiConversationSummary {
   id: number;
   name: string;
@@ -397,6 +408,7 @@ interface SystemApi {
   assistants: AippSystemApiAssistants;
   assistantConfig: AippSystemApiAssistantConfig;
   actions: AippSystemApiActions;
+  comfyui: AippSystemApiComfyUi;
   getDisplayConfig(): Promise<AippSystemApiDisplayConfig>;
   applyTheme(themeId: string): Promise<void>;
   toast?: {

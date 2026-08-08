@@ -175,6 +175,8 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 - `systemApi.conversations.getWithMessages(conversationId)`
 - `systemApi.assistants.getDetail(assistantId)`
 - `systemApi.assistants.updatePrompt({ assistantId, prompt, expectedPromptId?, expectedOldPrompt? })`
+- `systemApi.comfyui.testConnection({ baseUrl })`
+- `systemApi.comfyui.generateAndAttach({ baseUrl, workflow, prompt, conversationId, messageId })`
 - `systemApi.assetUrl(relativePath)`：将当前插件目录内的相对资源路径转换成可在宿主窗口中加载的 URL
 - `systemApi.registerTheme({ id, label, mode?, variables, extraCss?, windowCss? })`
 - `systemApi.ui`（宿主 UI 组件集：Button/Input/Textarea/Card/Badge/Alert/...）
@@ -183,7 +185,9 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 说明：
 
 - `runAssistantText` / `runModelText` 走无会话持久化路径，默认不会写入对话列表；
-- 对话标题栏可通过 `contributions.actions` + `renderAction()` 注入小型操作按钮，例如手动触发优化流程；
+- 对话标题栏可通过 `contributions.actions` + `renderAction()` 注入小型操作按钮，例如手动触发优化流程；消息悬浮工具栏使用 `location: "conversation.message-actions"`，上下文包含 `conversationId`、`messageId`、`messageType` 和 `messageContent`；
+- ComfyUI 调用走 Rust `reqwest` 桥接，不依赖 WebView `fetch`。插件必须声明 `network.comfyui`；附加图片还需声明 `conversation.write`。地址仅允许无凭据的 `http/https` URL，生成结果会作为图片附件绑定到目标 assistant 消息并触发会话刷新；
+- `chat.afterResponseCompleted` 事件上下文包含 `assistantMessageId`，普通 Chat 与 ACP 都会提供该字段，插件应使用它精确定位完成的 assistant 消息；
 - 读取会话详情与助手详情、更新助手 prompt，优先使用 `systemApi.conversations` / `systemApi.assistants` 的受限 API，而不是直接 `invoke(...)`；
 - `systemApi.ui` 让插件可复用宿主 shadcn 风格组件，避免“原生 UI 风格割裂”。
 - `registerTheme.windowCss` 支持按窗口 label 精细覆写样式（例如 `chat_ui`、`config`），建议在 CSS 里使用 `:scope` 做作用域替换。

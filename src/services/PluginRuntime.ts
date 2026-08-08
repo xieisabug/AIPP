@@ -224,6 +224,24 @@ interface PluginUpdateMessageMetadataRequest {
     metadata?: unknown;
 }
 
+interface PluginComfyUiConnectionRequest {
+    baseUrl: string;
+}
+
+interface PluginComfyUiGenerateRequest {
+    baseUrl: string;
+    workflow: unknown;
+    prompt: string;
+    conversationId: number;
+    messageId: number;
+}
+
+interface PluginComfyUiGenerateResult {
+    promptId: string;
+    attachmentId: number;
+    fileName: string;
+}
+
 interface PluginDatabaseColumnSchema {
     name: string;
     dataType: string;
@@ -751,6 +769,23 @@ class PluginRuntime {
                 updateMessageMetadata: async (request: PluginUpdateMessageMetadataRequest) => {
                     this.assertPluginPermission(plugin, "conversation.write");
                     return invoke<Message>("plugin_update_message_metadata", {
+                        pluginId,
+                        request,
+                    });
+                },
+            },
+            comfyui: {
+                testConnection: async (request: PluginComfyUiConnectionRequest) => {
+                    this.assertPluginPermission(plugin, "network.comfyui");
+                    await invoke("plugin_comfyui_test_connection", {
+                        pluginId,
+                        request,
+                    });
+                },
+                generateAndAttach: async (request: PluginComfyUiGenerateRequest) => {
+                    this.assertPluginPermission(plugin, "network.comfyui");
+                    this.assertPluginPermission(plugin, "conversation.write");
+                    return invoke<PluginComfyUiGenerateResult>("plugin_comfyui_generate_and_attach", {
                         pluginId,
                         request,
                     });

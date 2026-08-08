@@ -16,6 +16,7 @@ interface MessageActionButtonsProps {
     onResendToFeishuDebug?: () => void;
     isResendToFeishuDebugPending?: boolean;
     messageContent?: string;
+    pluginActions?: React.ReactNode;
 }
 
 const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
@@ -30,6 +31,7 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
     onResendToFeishuDebug,
     isResendToFeishuDebugPending = false,
     messageContent,
+    pluginActions,
 }) => {
     const showEditRegenerate = messageType === "assistant" || messageType === "response" || messageType === "user";
     const [isTokenTooltipOpen, setIsTokenTooltipOpen] = useState(false);
@@ -48,6 +50,7 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
             {messageType === "response" && onFork && (
                 <IconButton icon={<GitBranch size={16} className="text-icon" />} onClick={onFork} />
             )}
+            {pluginActions}
             {(messageType === "response" || messageType === "tool_result") && onResendToFeishuDebug && (
                 <IconButton
                     icon={

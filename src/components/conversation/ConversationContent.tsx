@@ -30,6 +30,7 @@ export interface ConversationContentProps {
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
+    renderMessageActions?: (message: Message) => React.ReactNode;
     virtualizeMessages?: boolean;
     virtualizedListEngine?: VirtualizedListEngine;
     scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
@@ -66,6 +67,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onToggleReasoningExpand,
     inlineInteractionItems,
     allowFeishuDebugResend = false,
+    renderMessageActions,
     virtualizeMessages = false,
     virtualizedListEngine = "legacy",
     scrollContainerRef,
@@ -99,6 +101,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
         onToggleReasoningExpand,
         inlineInteractionItems,
         allowFeishuDebugResend,
+        renderMessageActions,
     };
 
     if (conversationId) {
