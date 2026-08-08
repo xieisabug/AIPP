@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import MessageItem from './MessageItem';
@@ -219,5 +220,50 @@ describe('MessageItem large message preview', () => {
         expect(screen.queryByText('收起完整内容')).not.toBeInTheDocument();
         expect(screen.queryByText(/secret-value/)).not.toBeInTheDocument();
         expect(screen.queryByText(/hidden-final-line/)).not.toBeInTheDocument();
+    });
+});
+
+describe('MessageItem user message folding', () => {
+    beforeEach(() => {
+        antiLeakageState.enabled = false;
+        antiLeakageState.isRevealed = true;
+    });
+
+    it('keeps a 300-character user message fully visible', () => {
+        const content = '用'.repeat(300);
+
+        render(
+            <MessageItem
+                message={createMessage({ content, message_type: 'user' })}
+            />,
+        );
+
+        expect(screen.getByText(content)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: '展开' })).not.toBeInTheDocument();
+    });
+
+    it('shows only the first 300 characters until the user expands the message', async () => {
+        const user = userEvent.setup();
+        const visibleContent = '前'.repeat(300);
+        const hiddenContent = '这是折叠后的内容';
+        const content = `${visibleContent}${hiddenContent}`;
+
+        render(
+            <MessageItem
+                message={createMessage({ content, message_type: 'user' })}
+            />,
+        );
+
+        expect(screen.getByText(`${visibleContent}…`)).toBeInTheDocument();
+        expect(screen.queryByText(content)).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: '展开' }));
+
+        expect(screen.getByText(content)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true');
+
+        await user.click(screen.getByRole('button', { name: '收起' }));
+
+        expect(screen.getByText(`${visibleContent}…`)).toBeInTheDocument();
     });
 });

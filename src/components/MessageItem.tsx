@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import ReasoningMessage from "./ReasoningMessage";
 import ErrorMessage from "./message-item/ErrorMessage";
@@ -17,7 +17,7 @@ import { useFeishuDebugResend } from "../hooks/useFeishuDebugResend";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent } from "../utils/antiLeakage";
 import type { InlineInteractionItem } from "./ConversationUI";
-import { ListEnd, Loader2, Zap } from "lucide-react";
+import { ChevronDown, ChevronUp, ListEnd, Loader2, Zap } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -50,6 +50,8 @@ interface QueueMessageMeta {
     queueId: number;
     queueKind: "normal" | "interrupt";
 }
+
+const USER_MESSAGE_COLLAPSE_THRESHOLD = 300;
 
 interface RichMessageContentProps {
     displayContent: string;
@@ -235,9 +237,23 @@ const MessageItem = React.memo<MessageItemProps>(
         const { isUserMessageMarkdownEnabled, isShowThinking } = useDisplayConfig();
         const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
         const isFeishuDebugSending = pendingMessageId === message.id;
+        const [expandedUserMessage, setExpandedUserMessage] = useState<{
+            messageId: number;
+            content: string;
+        } | null>(null);
 
         const isUserMessage = message.message_type === "user";
         const isStreaming = !!streamEvent && !streamEvent.is_done;
+        const userMessageCharacters = useMemo(
+            () => isUserMessage ? Array.from(displayContent) : [],
+            [displayContent, isUserMessage],
+        );
+        const shouldCollapseUserMessage = userMessageCharacters.length > USER_MESSAGE_COLLAPSE_THRESHOLD;
+        const isUserMessageExpanded = expandedUserMessage?.messageId === message.id
+            && expandedUserMessage.content === displayContent;
+        const renderedDisplayContent = shouldCollapseUserMessage && !isUserMessageExpanded
+            ? `${userMessageCharacters.slice(0, USER_MESSAGE_COLLAPSE_THRESHOLD).join("")}…`
+            : displayContent;
         const speakerLabel = useMemo(() => {
             if (!message.metadata_json) {
                 return null;
@@ -286,7 +302,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const richMessageContent = (
             <RichMessageContent
-                displayContent={displayContent}
+                displayContent={renderedDisplayContent}
                 onCodeRun={onCodeRun}
                 isUserMessage={isUserMessage}
                 isUserMessageMarkdownEnabled={isUserMessageMarkdownEnabled}
@@ -381,6 +397,31 @@ const MessageItem = React.memo<MessageItemProps>(
                 <div className="prose prose-sm max-w-none text-foreground break-all">
                     {richMessageContent}
                 </div>
+
+                {shouldCollapseUserMessage && (
+                    <button
+                        type="button"
+                        className="mt-2 ml-auto flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                        aria-expanded={isUserMessageExpanded}
+                        onClick={() => setExpandedUserMessage(
+                            isUserMessageExpanded
+                                ? null
+                                : { messageId: message.id, content: displayContent },
+                        )}
+                    >
+                        {isUserMessageExpanded ? (
+                            <>
+                                <ChevronUp className="h-3.5 w-3.5" />
+                                收起
+                            </>
+                        ) : (
+                            <>
+                                <ChevronDown className="h-3.5 w-3.5" />
+                                展开
+                            </>
+                        )}
+                    </button>
+                )}
 
                 <ImageAttachments
                     attachments={message.attachment_list}
