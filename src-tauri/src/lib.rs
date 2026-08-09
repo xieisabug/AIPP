@@ -82,7 +82,7 @@ use crate::api::plugin_api::{
     plugin_get_assistant_detail, plugin_get_conversation_with_messages, plugin_storage_execute,
     plugin_storage_query, plugin_storage_schema, plugin_update_assistant_prompt,
     plugin_update_message_metadata, plugin_comfyui_test_connection,
-    plugin_comfyui_generate_and_attach, set_plugin_assistant_config, set_plugin_config,
+    plugin_comfyui_generate_and_attach, plugin_execute_image_task, set_plugin_assistant_config, set_plugin_config,
     set_plugin_data, submit_js_plugin_hook_result, uninstall_plugin, verify_plugin_entry_checksum,
 };
 use crate::api::scheduled_task_api::{
@@ -1232,6 +1232,7 @@ pub fn run() {
             plugin_update_message_metadata,
             plugin_comfyui_test_connection,
             plugin_comfyui_generate_and_attach,
+            plugin_execute_image_task,
             // Todo commands
             get_todos,
             // Export commands

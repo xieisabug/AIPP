@@ -72,6 +72,20 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
                 if (!imageSrc) {
                     return null;
                 }
+                const isGenerating = attachment.attachment_url?.startsWith('aipp://image-generation/pending/');
+
+                if (isGenerating) {
+                    return (
+                        <div
+                            key={attachment.id ?? `image-generating-${index}`}
+                            className="relative aspect-square w-full overflow-hidden rounded-xl border border-border bg-muted/40"
+                            role="status"
+                            aria-label="正在生成图片"
+                        >
+                            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">正在生成中…</div>
+                        </div>
+                    );
+                }
 
                 return (
                     <button

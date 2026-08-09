@@ -24,6 +24,7 @@ const context = {
 };
 vm.createContext(context);
 const bundle = fs.readFileSync(path.join(__dirname, "../dist/main.js"), "utf8");
+assert.match(bundle, /query:\s*\{\s*taskId:\s*"\$task_id"\s*\}/, "Kie polling must send the created task ID");
 vm.runInContext(bundle, context);
 assert.doesNotThrow(
   () => vm.runInContext(bundle, context),
@@ -40,6 +41,9 @@ assert.throws(() => context.comfyRenderInstruction("没有占位符", "山海"))
 const workflow = context.comfyUiBuildWorkflow("new prompt");
 assert.equal(workflow["57:27"].inputs.text, "new prompt");
 assert.equal(workflow["57:3"].inputs.seed, 1047870638845959, "seed must remain fixed");
+const customWorkflow = context.comfyUiBuildWorkflow("custom prompt", "9", "filename_prefix");
+assert.equal(customWorkflow["9"].inputs.filename_prefix, "custom prompt");
+assert.throws(() => context.comfyUiBuildWorkflow("custom prompt", "57:27", "missing"));
 
 (async () => {
   const Plugin = context.window.ComfyUiImagePlugin;

@@ -207,9 +207,24 @@ interface SystemApiComfyUi {
         baseUrl: string;
         workflow: unknown;
         prompt: string;
+        promptNodeId?: string;
+        promptInputName?: string;
         conversationId: number;
         messageId: number;
     }): Promise<{ promptId: string; attachmentId: number; fileName: string }>;
+}
+
+interface SystemApiImageGeneration {
+    executeTask(request: {
+        create: { method: string; url: string; headers?: Record<string, string>; query?: Record<string, string>; body?: unknown };
+        poll: { request: { method: string; url: string; headers?: Record<string, string>; query?: Record<string, string>; body?: unknown }; taskIdPath: string; statusPath: string; successValues?: string[]; failureValues?: string[]; resultPath: string; resultUrlsPath?: string; parseJsonString?: boolean; intervalMs?: number; timeoutMs?: number };
+        conversationId: number; messageId: number;
+    }): Promise<{ taskId: string; attachmentId: number; fileName: string }>;
+    testConnection(request: { provider: string; baseUrl: string; apiKey?: string }): Promise<void>;
+    generateAndAttach(request: {
+        provider: "comfyui";
+        baseUrl: string; workflow: unknown; prompt: string; promptNodeId?: string; promptInputName?: string; conversationId: number; messageId: number;
+    }): Promise<{ taskId?: string; promptId?: string; attachmentId: number; fileName: string }>;
 }
 
 type SystemApiHookAction = "continue" | "replace" | "patch" | "block" | "approvalRequired";
@@ -399,6 +414,7 @@ interface SystemApi {
     assistantConfig: SystemApiAssistantConfig;
     actions: SystemApiActions;
     comfyui: SystemApiComfyUi;
+    imageGeneration: SystemApiImageGeneration;
     getDisplayConfig(): Promise<SystemApiDisplayConfig>;
     applyTheme(themeId: string): Promise<void>;
     toast?: {

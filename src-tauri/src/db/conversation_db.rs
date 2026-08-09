@@ -1024,6 +1024,16 @@ impl MessageAttachmentRepository {
             })
             .optional()
     }
+
+    pub fn update_image_content(&self, id: i64, attachment_url: &str, attachment_content: &str) -> Result<()> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE message_attachment SET attachment_url = ?1, attachment_content = ?2 WHERE id = ?3",
+                (attachment_url, attachment_content, &id),
+            )?;
+            Ok(())
+        })
+    }
 }
 
 impl Repository<MessageAttachment> for MessageAttachmentRepository {

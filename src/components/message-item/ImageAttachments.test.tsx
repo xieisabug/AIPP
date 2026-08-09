@@ -99,6 +99,23 @@ describe('ImageAttachments', () => {
         expect(screen.getByRole('img')).toHaveClass('h-full');
     });
 
+    it('renders generation placeholders as non-clickable square status cards', () => {
+        render(
+            <ImageAttachments
+                attachments={[{
+                    id: 9,
+                    attachment_type: 'Image',
+                    attachment_url: 'aipp://image-generation/pending/task-1',
+                    attachment_content: 'data:image/svg+xml;base64,placeholder',
+                }]}
+            />
+        );
+
+        expect(screen.getByRole('status', { name: '正在生成图片' })).toHaveClass('aspect-square');
+        expect(screen.getByText('正在生成中…')).toBeInTheDocument();
+        expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    });
+
     it('uses a compact grid layout when there are multiple image attachments', () => {
         render(
             <ImageAttachments

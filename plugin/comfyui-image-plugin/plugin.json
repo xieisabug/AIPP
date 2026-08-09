@@ -1,11 +1,11 @@
 {
   "id": "comfyui-image-plugin",
   "code": "comfyui-image-plugin",
-  "name": "ComfyUI 自动生图",
+  "name": "AI 图片生成",
   "version": "0.1.0",
   "entry": "dist/main.js",
   "runtime": { "type": "js", "entry": "dist/main.js" },
-  "description": "将 AI 回复转换为提示词，并把 ComfyUI 生成图片附加到原回复。",
+  "description": "将 AI 回复转换为提示词，并通过可配置的图片生成供应商附加到原回复。",
   "pluginTypes": ["interfaceType", "applicationType"],
   "kinds": ["ui", "worker"],
   "permissions": [
@@ -13,15 +13,16 @@
     "conversation.read",
     "conversation.write",
     "plugin.storage",
-    "network.comfyui"
+    "network.comfyui",
+    "network.image-generation"
   ],
   "contributions": {
     "views": [
       {
         "id": "comfyui-image-config",
         "location": "config.plugin-center",
-        "title": "ComfyUI 自动生图",
-        "description": "配置提示词模型、生成指令和 ComfyUI 地址。"
+        "title": "AI 图片生成",
+        "description": "配置提示词模型、生成指令和图片生成方式。"
       }
     ],
     "actions": [

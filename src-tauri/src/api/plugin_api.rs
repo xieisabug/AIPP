@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tauri::{Emitter, Manager};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::events::{ConversationEvent, MessageAddEvent};
@@ -206,6 +206,10 @@ pub struct PluginComfyUiGenerateRequest {
     pub base_url: String,
     pub workflow: JsonValue,
     pub prompt: String,
+    #[serde(default)]
+    pub prompt_node_id: Option<String>,
+    #[serde(default)]
+    pub prompt_input_name: Option<String>,
     pub conversation_id: i64,
     pub message_id: i64,
 }
@@ -217,6 +221,60 @@ pub struct PluginComfyUiGenerateResult {
     pub attachment_id: i64,
     pub file_name: String,
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHttpRequestSpec {
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub query: HashMap<String, String>,
+    #[serde(default)]
+    pub body: Option<JsonValue>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginImagePollSpec {
+    pub request: PluginHttpRequestSpec,
+    pub task_id_path: String,
+    pub status_path: String,
+    #[serde(default)]
+    pub success_values: Vec<String>,
+    #[serde(default)]
+    pub failure_values: Vec<String>,
+    pub result_path: String,
+    #[serde(default)]
+    pub result_urls_path: Option<String>,
+    #[serde(default)]
+    pub parse_json_string: bool,
+    #[serde(default = "default_poll_interval_ms")]
+    pub interval_ms: u64,
+    #[serde(default = "default_poll_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginImageTaskRequest {
+    pub create: PluginHttpRequestSpec,
+    pub poll: PluginImagePollSpec,
+    pub conversation_id: i64,
+    pub message_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginImageTaskResult {
+    pub task_id: String,
+    pub attachment_id: i64,
+    pub file_name: String,
+}
+
+fn default_poll_interval_ms() -> u64 { 1000 }
+fn default_poll_timeout_ms() -> u64 { 180_000 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ComfyUiOutputImage {
@@ -2013,17 +2071,21 @@ fn comfyui_endpoint(base_url: &reqwest::Url, relative: &str) -> Result<reqwest::
         .map_err(|error| format!("Failed to build ComfyUI endpoint: {error}"))
 }
 
-pub(crate) fn validate_comfyui_workflow(workflow: &JsonValue, prompt: &str) -> Result<(), String> {
+pub(crate) fn validate_comfyui_workflow(workflow: &JsonValue, prompt: &str, prompt_node_id: &str, prompt_input_name: &str) -> Result<(), String> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err("ComfyUI prompt cannot be empty".to_string());
     }
-    let workflow_prompt = workflow
-        .pointer("/57:27/inputs/text")
+    let node = workflow.get(prompt_node_id)
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| format!("ComfyUI workflow is missing node {prompt_node_id}"))?;
+    let workflow_prompt = node.get("inputs")
+        .and_then(JsonValue::as_object)
+        .and_then(|inputs| inputs.get(prompt_input_name))
         .and_then(JsonValue::as_str)
-        .ok_or_else(|| "ComfyUI workflow is missing string node 57:27.inputs.text".to_string())?;
+        .ok_or_else(|| format!("ComfyUI workflow is missing string node {prompt_node_id}.inputs.{prompt_input_name}"))?;
     if workflow_prompt != prompt {
-        return Err("ComfyUI workflow node 57:27.inputs.text does not match prompt".to_string());
+        return Err(format!("ComfyUI workflow node {prompt_node_id}.inputs.{prompt_input_name} does not match prompt"));
     }
     Ok(())
 }
@@ -3136,7 +3198,9 @@ pub async fn plugin_comfyui_generate_and_attach(
     assert_plugin_permission(&app_handle, plugin_id, "conversation.write")?;
     let base_url = normalize_comfyui_base_url(&request.base_url)?;
     let prompt = request.prompt.trim().to_string();
-    validate_comfyui_workflow(&request.workflow, &prompt)?;
+    let prompt_node_id = request.prompt_node_id.as_deref().unwrap_or("57:27");
+    let prompt_input_name = request.prompt_input_name.as_deref().unwrap_or("text");
+    validate_comfyui_workflow(&request.workflow, &prompt, prompt_node_id, prompt_input_name)?;
 
     let db = ConversationDatabase::new(&app_handle).map_err(|error| error.to_string())?;
     let message_repo = db.message_repo().map_err(|error| error.to_string())?;
@@ -3245,6 +3309,124 @@ pub async fn plugin_comfyui_generate_and_attach(
         attachment_id: attachment.id,
         file_name: attachment.attachment_url.unwrap_or_else(|| "comfyui-image.png".to_string()),
     })
+}
+
+fn replace_task_id(value: &mut JsonValue, task_id: &str) {
+    match value {
+        JsonValue::String(text) => *text = text.replace("$task_id", task_id),
+        JsonValue::Array(items) => items.iter_mut().for_each(|item| replace_task_id(item, task_id)),
+        JsonValue::Object(items) => items.values_mut().for_each(|item| replace_task_id(item, task_id)),
+        _ => {}
+    }
+}
+
+fn json_pointer_value<'a>(payload: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
+    if path.is_empty() { Some(payload) } else { payload.pointer(path) }
+}
+
+pub(crate) fn extract_image_urls(payload: &JsonValue, spec: &PluginImagePollSpec) -> Vec<String> {
+    let Some(mut result) = json_pointer_value(payload, &spec.result_path).cloned() else { return Vec::new(); };
+    if spec.parse_json_string {
+        if let Some(text) = result.as_str() {
+            if let Ok(parsed) = serde_json::from_str::<JsonValue>(text) { result = parsed; }
+        }
+    }
+    let target = spec.result_urls_path.as_deref().and_then(|path| json_pointer_value(&result, path)).unwrap_or(&result);
+    target.as_array().into_iter().flatten().filter_map(JsonValue::as_str)
+        .filter(|url| matches!(reqwest::Url::parse(url).ok().as_ref().map(reqwest::Url::scheme), Some("http" | "https")))
+        .map(str::to_string).collect()
+}
+
+fn image_generation_placeholder(text: &str) -> String {
+    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\" viewBox=\"0 0 512 512\"><rect width=\"512\" height=\"512\" fill=\"#e5e5e5\"/><text x=\"256\" y=\"256\" text-anchor=\"middle\" dominant-baseline=\"middle\" fill=\"#525252\" font-family=\"sans-serif\" font-size=\"28\">{escaped}</text></svg>");
+    format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg.as_bytes()))
+}
+
+async fn send_plugin_image_request(client: &reqwest::Client, spec: &PluginHttpRequestSpec) -> Result<JsonValue, String> {
+    let method = reqwest::Method::from_bytes(spec.method.as_bytes()).map_err(|error| format!("Invalid HTTP method: {error}"))?;
+    let mut url = reqwest::Url::parse(&spec.url).map_err(|error| format!("Invalid image task URL: {error}"))?;
+    { let mut query = url.query_pairs_mut(); for (key, value) in &spec.query { query.append_pair(key, value); } }
+    let mut builder = client.request(method, url);
+    for (key, value) in &spec.headers {
+        let header_name = reqwest::header::HeaderName::try_from(key).map_err(|error| format!("Invalid HTTP header name: {error}"))?;
+        let header_value = reqwest::header::HeaderValue::try_from(value).map_err(|error| format!("Invalid HTTP header value: {error}"))?;
+        builder = builder.header(header_name, header_value);
+    }
+    if let Some(body) = &spec.body { builder = builder.json(body); }
+    let response = builder.send().await.map_err(|error| format!("Image task request failed: {error}"))?;
+    let status = response.status();
+    let payload = response.json::<JsonValue>().await.map_err(|error| format!("Invalid image task response: {error}"))?;
+    if !status.is_success() { return Err(format!("Image task request returned HTTP {status}: {payload}")); }
+    Ok(payload)
+}
+
+async fn execute_plugin_image_task(
+    app_handle: &tauri::AppHandle,
+    plugin_id: i64,
+    request: PluginImageTaskRequest,
+) -> Result<PluginImageTaskResult, String> {
+    assert_plugin_permission(app_handle, plugin_id, "network.image-generation")?;
+    assert_plugin_permission(app_handle, plugin_id, "conversation.write")?;
+    let db = ConversationDatabase::new(app_handle).map_err(|error| error.to_string())?;
+    let message_repo = db.message_repo().map_err(|error| error.to_string())?;
+    let message = message_repo.read(request.message_id).map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Target message not found: {}", request.message_id))?;
+    validate_comfyui_target_message(&message, request.conversation_id)?;
+    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build().map_err(|error| format!("Failed to create image task HTTP client: {error}"))?;
+    let create_payload = send_plugin_image_request(&client, &request.create).await?;
+    warn!(plugin_id, response = %create_payload, "image task create response");
+    let task_id = json_pointer_value(&create_payload, &request.poll.task_id_path).and_then(JsonValue::as_str).filter(|id| !id.trim().is_empty()).ok_or_else(|| format!("Image task response did not contain task id at {}", request.poll.task_id_path))?.to_string();
+    info!(plugin_id, task_id = %task_id, task_id_path = %request.poll.task_id_path, "image task created");
+    let placeholder_url = format!("aipp://image-generation/pending/{task_id}");
+    let placeholder_content = image_generation_placeholder("正在生成中…");
+    let placeholder = db.attachment_repo().map_err(|error| error.to_string())?.create(&MessageAttachment {
+        id: 0,
+        message_id: request.message_id,
+        attachment_type: AttachmentType::Image,
+        attachment_url: Some(placeholder_url),
+        attachment_content: Some(placeholder_content),
+        attachment_hash: None,
+        use_vector: false,
+        token_count: None,
+    }).map_err(|error| format!("Failed to create image generation placeholder: {error}"))?;
+    emit_conversation_event(app_handle, message.conversation_id, "message_metadata_update", serde_json::json!({ "message_id": request.message_id }));
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(request.poll.timeout_ms.max(1));
+    let result_urls = loop {
+        if tokio::time::Instant::now() >= deadline { return Err(format!("Image generation timed out (taskId={task_id})")); }
+        let mut poll = request.poll.request.clone();
+        poll.url = poll.url.replace("$task_id", &task_id);
+        poll.query.values_mut().for_each(|value| *value = value.replace("$task_id", &task_id));
+        if let Some(body) = poll.body.as_mut() { replace_task_id(body, &task_id); }
+        let task_id_applied = poll.url.contains(&task_id) || poll.query.values().any(|value| value == &task_id);
+        warn!(plugin_id, task_id = %task_id, method = %poll.method, url = %poll.url, task_id_applied, "image task poll request");
+        let payload = send_plugin_image_request(&client, &poll).await?;
+        warn!(plugin_id, task_id = %task_id, response = %payload, "image task poll response");
+        let state = json_pointer_value(&payload, &request.poll.status_path).and_then(JsonValue::as_str).unwrap_or_default().to_ascii_lowercase();
+        if request.poll.failure_values.iter().any(|value| value.eq_ignore_ascii_case(&state)) { return Err(format!("Image generation failed: {payload}")); }
+        let urls = extract_image_urls(&payload, &request.poll);
+        if state == "success" || !urls.is_empty() {
+            info!(plugin_id, task_id = %task_id, state = %state, result_count = urls.len(), result_path = %request.poll.result_path, "image task result ready");
+        }
+        if !urls.is_empty() { break urls; }
+        tokio::time::sleep(Duration::from_millis(request.poll.interval_ms.max(100))).await;
+    };
+    let image_url = reqwest::Url::parse(&result_urls[0]).map_err(|error| format!("Invalid image result URL: {error}"))?;
+    let download_client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::limited(5)).build().map_err(|error| format!("Failed to create image download client: {error}"))?;
+    let response = download_client.get(image_url.clone()).send().await.map_err(|error| format!("Image result request failed: {error}"))?;
+    if !response.status().is_success() { return Err(format!("Image result request returned HTTP {}", response.status())); }
+    let file_name = image_url.path_segments().and_then(|segments| segments.last()).filter(|value| !value.is_empty()).unwrap_or("generated-image.png");
+    let mime = comfyui_image_mime(response.headers(), file_name);
+    let bytes = read_limited_comfyui_image(response).await?;
+    let image_content = format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes));
+    db.attachment_repo().map_err(|error| error.to_string())?.update_image_content(placeholder.id, file_name, &image_content).map_err(|error| format!("Failed to update image attachment: {error}"))?;
+    emit_conversation_event(app_handle, message.conversation_id, "message_metadata_update", serde_json::json!({ "message_id": request.message_id }));
+    Ok(PluginImageTaskResult { task_id, attachment_id: placeholder.id, file_name: file_name.to_string() })
+}
+
+#[tauri::command]
+pub async fn plugin_execute_image_task(app_handle: tauri::AppHandle, plugin_id: i64, request: PluginImageTaskRequest) -> Result<PluginImageTaskResult, String> {
+    execute_plugin_image_task(&app_handle, plugin_id, request).await
 }
 
 #[cfg(test)]

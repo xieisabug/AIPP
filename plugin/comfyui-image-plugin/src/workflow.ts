@@ -11,11 +11,15 @@ var COMFYUI_IMAGE_WORKFLOW: Record<string, any> = {
   "57:3": { "inputs": { "seed": 1047870638845959, "steps": 8, "cfg": 1, "sampler_name": "res_multistep", "scheduler": "simple", "denoise": 1, "model": ["57:11", 0], "positive": ["57:27", 0], "negative": ["57:33", 0], "latent_image": ["57:13", 0] }, "class_type": "KSampler", "_meta": { "title": "K采样器" } }
 };
 
-function comfyUiBuildWorkflow(prompt: string): Record<string, any> {
+function comfyUiBuildWorkflow(prompt: string, promptNodeId = "57:27", promptInputName = "text"): Record<string, any> {
   var workflow = JSON.parse(JSON.stringify(COMFYUI_IMAGE_WORKFLOW));
-  if (!workflow["57:27"] || !workflow["57:27"].inputs || typeof workflow["57:27"].inputs.text !== "string") {
-    throw new Error("固定 workflow 缺少节点 57:27.inputs.text");
+  var node = workflow[promptNodeId];
+  if (!node || !node.inputs) {
+    throw new Error("固定 workflow 缺少节点 " + promptNodeId);
   }
-  workflow["57:27"].inputs.text = prompt;
+  if (typeof node.inputs[promptInputName] !== "string") {
+    throw new Error("固定 workflow 节点 " + promptNodeId + " 缺少字符串参数 " + promptInputName);
+  }
+  node.inputs[promptInputName] = prompt;
   return workflow;
 }

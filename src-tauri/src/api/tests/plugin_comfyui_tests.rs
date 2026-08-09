@@ -1,5 +1,6 @@
 use crate::api::plugin_api::{
-    build_comfyui_attachment, normalize_comfyui_base_url, parse_comfyui_history,
+    build_comfyui_attachment, extract_image_urls, normalize_comfyui_base_url, parse_comfyui_history,
+    PluginHttpRequestSpec, PluginImagePollSpec,
     validate_comfyui_target_message, validate_comfyui_workflow,
 };
 use crate::db::conversation_db::{Message, MessageAttachmentRepository, Repository};
@@ -34,9 +35,30 @@ fn sample_message(message_type: &str) -> Message {
 #[test]
 fn test_comfyui_workflow_requires_matching_prompt_node() {
     let valid = serde_json::json!({ "57:27": { "inputs": { "text": "landscape" } } });
-    assert!(validate_comfyui_workflow(&valid, "landscape").is_ok());
-    assert!(validate_comfyui_workflow(&valid, "portrait").is_err());
-    assert!(validate_comfyui_workflow(&serde_json::json!({}), "landscape").is_err());
+    assert!(validate_comfyui_workflow(&valid, "landscape", "57:27", "text").is_ok());
+    assert!(validate_comfyui_workflow(&valid, "portrait", "57:27", "text").is_err());
+    assert!(validate_comfyui_workflow(&serde_json::json!({}), "landscape", "57:27", "text").is_err());
+}
+
+/// 验证提示词节点和参数名可以脱离默认值配置。
+#[test]
+fn test_comfyui_workflow_supports_configured_prompt_path() {
+    let workflow = serde_json::json!({ "prompt-node": { "inputs": { "positive": "landscape" } } });
+    assert!(validate_comfyui_workflow(&workflow, "landscape", "prompt-node", "positive").is_ok());
+    assert!(validate_comfyui_workflow(&workflow, "landscape", "prompt-node", "text").is_err());
+}
+
+/// 验证通用图片任务执行器可以解析供应商常见的 JSON 字符串结果。
+#[test]
+fn test_image_task_extracts_stringified_result_urls() {
+    let payload = serde_json::json!({
+        "data": { "state": "success", "resultJson": "{\"resultUrls\":[\"https://cdn.example/result.jpg\"]}" }
+    });
+    let spec = PluginImagePollSpec {
+        request: PluginHttpRequestSpec { method: "GET".to_string(), url: "https://example.test/status".to_string(), headers: Default::default(), query: Default::default(), body: None },
+        task_id_path: "/data/taskId".to_string(), status_path: "/data/state".to_string(), success_values: vec!["success".to_string()], failure_values: vec!["failed".to_string()], result_path: "/data/resultJson".to_string(), result_urls_path: Some("/resultUrls".to_string()), parse_json_string: true, interval_ms: 1000, timeout_ms: 180000,
+    };
+    assert_eq!(extract_image_urls(&payload, &spec), vec!["https://cdn.example/result.jpg"]);
 }
 
 /// 验证 history 只在输出图片可用时完成，并报告无图片执行结果。
