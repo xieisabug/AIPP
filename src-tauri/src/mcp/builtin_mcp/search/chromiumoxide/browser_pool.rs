@@ -2,9 +2,10 @@ use chromiumoxide::browser::Browser;
 use futures::StreamExt;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -21,6 +22,12 @@ pub struct BrowserPool {
     page_semaphore: Arc<Semaphore>,
     /// 配置
     config: BrowserPoolConfig,
+    /// 当前浏览器连接是否已失效
+    browser_stale: Arc<AtomicBool>,
+    /// 浏览器连接失效通知
+    browser_stale_notify: Arc<Notify>,
+    /// 浏览器实例代际，用于避免旧 handler 污染新实例状态
+    browser_generation: Arc<AtomicU64>,
 }
 
 /// 浏览器池配置
@@ -50,6 +57,9 @@ impl BrowserPool {
             idle_pages: Arc::new(StdMutex::new(Vec::new())),
             page_semaphore: Arc::new(Semaphore::new(config.max_pages.max(1))),
             config,
+            browser_stale: Arc::new(AtomicBool::new(false)),
+            browser_stale_notify: Arc::new(Notify::new()),
+            browser_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -73,12 +83,53 @@ impl BrowserPool {
         self.idle_pages.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn mark_browser_stale_for_generation(
+        browser_stale: &AtomicBool,
+        browser_stale_notify: &Notify,
+        browser_generation: &AtomicU64,
+        generation: u64,
+        reason: &str,
+    ) {
+        if browser_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+
+        if !browser_stale.swap(true, Ordering::SeqCst) {
+            warn!(generation, reason, "Chromium BrowserPool browser marked stale");
+            browser_stale_notify.notify_waiters();
+        }
+    }
+
+    fn is_browser_stale(&self) -> bool {
+        self.browser_stale.load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn wait_until_stale(&self) {
+        loop {
+            if self.is_browser_stale() {
+                return;
+            }
+
+            let notified = self.browser_stale_notify.notified();
+            if self.is_browser_stale() {
+                return;
+            }
+
+            notified.await;
+        }
+    }
+
     /// 获取一个页面（自动创建或复用）
     pub async fn acquire_page(&self) -> Result<PooledPage, String> {
         let permit = self.acquire_slot_permit().await?;
 
         // 确保浏览器已初始化
-        let mut browser = self.get_or_init_browser().await?;
+        let mut browser = if self.is_browser_stale() {
+            info!("Chromium BrowserPool browser is stale before acquiring page, recreating");
+            self.recreate_browser().await?
+        } else {
+            self.get_or_init_browser().await?
+        };
 
         // 尝试从空闲队列获取页面
         loop {
@@ -189,6 +240,7 @@ impl BrowserPool {
             || lower.contains("ws(")
             || lower.contains("connection closed")
             || lower.contains("websocket")
+            || lower.contains("channel closed")
             || lower.contains("broken pipe")
     }
 
@@ -255,10 +307,44 @@ impl BrowserPool {
             )
         })?;
 
+        let generation = self.browser_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.browser_stale.store(false, Ordering::SeqCst);
+        let browser_stale = self.browser_stale.clone();
+        let browser_stale_notify = self.browser_stale_notify.clone();
+        let browser_generation = self.browser_generation.clone();
         tokio::spawn(async move {
-            while let Some(event) = handler.next().await {
-                tracing::trace!(?event, "Chromium event received");
+            while let Some(event_result) = handler.next().await {
+                match event_result {
+                    Ok(()) => {
+                        tracing::trace!("Chromium handler tick received");
+                    }
+                    Err(error) => {
+                        let error_message = error.to_string();
+                        warn!(
+                            generation,
+                            error = %error_message,
+                            "Chromium BrowserPool handler error"
+                        );
+                        if BrowserPool::is_connection_closed_error(&error_message) {
+                            BrowserPool::mark_browser_stale_for_generation(
+                                &browser_stale,
+                                &browser_stale_notify,
+                                &browser_generation,
+                                generation,
+                                "handler connection closed",
+                            );
+                        }
+                    }
+                }
             }
+
+            BrowserPool::mark_browser_stale_for_generation(
+                &browser_stale,
+                &browser_stale_notify,
+                &browser_generation,
+                generation,
+                "handler exited",
+            );
         });
 
         info!("Chromium BrowserPool initialized successfully");
@@ -280,6 +366,7 @@ impl BrowserPool {
         }
 
         self.idle_pages_lock().clear();
+        self.browser_stale.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -358,8 +445,36 @@ mod tests {
     fn connection_closed_detection_matches_chromiumoxide_ws_errors() {
         assert!(BrowserPool::is_connection_closed_error("Ws(AlreadyClosed)"));
         assert!(BrowserPool::is_connection_closed_error("websocket connection closed"));
+        assert!(BrowserPool::is_connection_closed_error("channel closed"));
         assert!(BrowserPool::is_connection_closed_error("broken pipe"));
         assert!(!BrowserPool::is_connection_closed_error("selector wait timeout"));
+    }
+
+    #[tokio::test]
+    async fn wait_until_stale_observes_browser_stale_notification() {
+        let pool = test_pool(1);
+        pool.browser_generation.store(1, Ordering::SeqCst);
+
+        let waiting_pool = pool.clone();
+        let waiter = tokio::spawn(async move {
+            waiting_pool.wait_until_stale().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished(), "waiter should block before stale notification");
+
+        BrowserPool::mark_browser_stale_for_generation(
+            &pool.browser_stale,
+            &pool.browser_stale_notify,
+            &pool.browser_generation,
+            1,
+            "test",
+        );
+
+        timeout(Duration::from_millis(250), waiter)
+            .await
+            .expect("waiter should observe stale notification")
+            .expect("waiter task should complete");
     }
 
     #[tokio::test]

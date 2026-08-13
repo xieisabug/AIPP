@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTheme } from "../hooks/useTheme";
 import { ChatSidebarContent } from "../components/chat-sidebar";
@@ -32,6 +33,13 @@ interface SidebarData {
     conversationId: string;
 }
 
+interface PreviewFileContextSelection {
+    callId: number;
+    conversationId?: number;
+    messageId?: number | null;
+    requestId?: string | null;
+}
+
 const resolveContextPreviewImageSrc = (content?: string, url?: string): string | null => {
     const normalizedContent = content?.trim();
     if (normalizedContent) {
@@ -51,7 +59,7 @@ const MAX_SIDEBAR_WIDTH = 500;
 
 function SidebarWindow() {
     useTheme("sidebar");
-    
+
     const [sidebarData, setSidebarData] = useState<SidebarData>({
         todos: [],
         artifacts: [],
@@ -71,6 +79,8 @@ function SidebarWindow() {
     const [dataReceived, setDataReceived] = useState(false);
     const [hasAutoPreviewedLatest, setHasAutoPreviewedLatest] = useState(false);
     const [pluginList, setPluginList] = useState<LoadedPlugin[]>([]);
+    const [focusedContextId, setFocusedContextId] = useState<string | null>(null);
+    const [pendingFocusContextId, setPendingFocusContextId] = useState<string | null>(null);
     
     // Sidebar resize state
     const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
@@ -89,6 +99,46 @@ function SidebarWindow() {
             unlisten.then((f) => f());
         };
     }, []);
+
+    const bringSidebarWindowToFront = useCallback(async () => {
+        const currentWindow = getCurrentWindow();
+        try {
+            await currentWindow.unminimize();
+        } catch (err) {
+            console.warn("[SidebarWindow] unminimize failed", err);
+        }
+        try {
+            await currentWindow.show();
+        } catch (err) {
+            console.warn("[SidebarWindow] show failed", err);
+        }
+        try {
+            await currentWindow.setFocus();
+        } catch (err) {
+            console.warn("[SidebarWindow] setFocus failed", err);
+        }
+    }, []);
+
+    // Listen for focus-context requests from chat window (click inline tool card to locate detail)
+    useEffect(() => {
+        const unlisten = listen<{ id: string }>("sidebar-focus-context", (event) => {
+            const targetId = event.payload.id;
+            setPendingFocusContextId(targetId);
+            setFocusedContextId(targetId);
+            void bringSidebarWindowToFront();
+        });
+
+        return () => {
+            unlisten.then((f) => f());
+        };
+    }, [bringSidebarWindowToFront]);
+
+    // Auto-clear highlight after 1s to avoid persistent ring
+    useEffect(() => {
+        if (!focusedContextId) return;
+        const timer = setTimeout(() => setFocusedContextId(null), 1000);
+        return () => clearTimeout(timer);
+    }, [focusedContextId]);
 
     useEffect(() => {
         let mounted = true;
@@ -282,6 +332,36 @@ function SidebarWindow() {
             setPreviewPayload(null);
         }
     }, [cacheContextItem]);
+
+    useEffect(() => {
+        if (!pendingFocusContextId) {
+            return;
+        }
+
+        const targetItem = sidebarData.contextItems.find((item) => item.id === pendingFocusContextId);
+        if (!targetItem) {
+            return;
+        }
+
+        setPendingFocusContextId(null);
+        void handleContextClick(targetItem);
+    }, [handleContextClick, pendingFocusContextId, sidebarData.contextItems]);
+
+    const handlePreviewFileClick = useCallback((item: ContextItem) => {
+        if (!item.previewFileData) {
+            return;
+        }
+
+        const payload: PreviewFileContextSelection = {
+            ...item.previewFileData,
+            conversationId:
+                item.previewFileData.conversationId ??
+                (sidebarData.conversationId ? Number(sidebarData.conversationId) : undefined),
+        };
+        emit("preview-file-context-selected", payload).catch((error) => {
+            console.error("Failed to emit preview file context selection:", error);
+        });
+    }, [sidebarData.conversationId]);
 
     // Close the window
     const handleClose = useCallback(() => {
@@ -602,8 +682,11 @@ function SidebarWindow() {
                             contextItems={sidebarData.contextItems}
                             pluginList={pluginList}
                             conversationId={sidebarData.conversationId}
+                            focusedContextId={focusedContextId}
+                            selectedContextId={previewMode === 'context' ? contextPreview?.context.id : null}
                             onArtifactClick={handleArtifactClick}
                             onContextClick={handleContextClick}
+                            onPreviewFileClick={handlePreviewFileClick}
                         />
                     ) : (
                         <div className="flex items-center justify-center h-full text-muted-foreground">

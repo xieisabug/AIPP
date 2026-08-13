@@ -100,6 +100,8 @@ pub async fn save_feature_config(
         crate::feishu::refresh_runtime_async(&app_handle);
     }
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
+
     Ok(())
 }
 

@@ -12,7 +12,8 @@ use crate::api::ai::conversation::{
 };
 use crate::api::ai::context_manager::token_estimator::estimate_by_content;
 use crate::api::ai::events::{
-    ConversationEvent, MCPToolCallUpdateEvent, MessageUpdateEvent, TITLE_CHANGE_EVENT,
+    ConversationEvent, ConversationListActivityEvent, MCPToolCallUpdateEvent,
+    MessageUpdateEvent, TITLE_CHANGE_EVENT,
 };
 use crate::api::operation_api::{
     emit_permission_request_event, emit_permission_resolved_event, PermissionResolvedEvent,
@@ -34,8 +35,11 @@ use crate::mcp::builtin_mcp::operation::{
         BashProcessStatus, GetBashOutputRequest, ReadFileRequest, WriteFileRequest,
     },
 };
+use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
-use crate::utils::window_utils::send_conversation_event_to_chat_windows;
+use crate::utils::window_utils::{
+    emit_conversation_list_activity, send_conversation_event_to_chat_windows,
+};
 use agent_client_protocol::{
     self as acp, Agent as _, Client as AcpClient, ClientSideConnection, ToolCallLocation,
 };
@@ -2423,6 +2427,7 @@ impl AcpTauriClient {
                 data: serde_json::to_value(MCPToolCallUpdateEvent {
                     call_id,
                     conversation_id: self.conversation_id,
+                    message_id: call.message_id,
                     status: status.to_string(),
                     llm_call_id: call.llm_call_id.clone(),
                     server_name: Some(call.server_name.clone()),
@@ -2723,6 +2728,32 @@ impl AcpTauriClient {
                 .clear_message_focus_keep_mcp(&self.app_handle, self.conversation_id)
                 .await;
         }
+
+        let stream_complete_event = ConversationEvent {
+            r#type: "stream_complete".to_string(),
+            data: serde_json::json!({
+                "conversation_id": self.conversation_id,
+                "response_message_id": message_id,
+                "reasoning_message_id": null,
+                "has_response": message_type == "response",
+                "has_reasoning": message_type == "reasoning",
+                "response_length": content.len(),
+                "reasoning_length": 0,
+            }),
+        };
+        send_conversation_event_to_chat_windows(
+            &self.app_handle,
+            self.conversation_id,
+            stream_complete_event,
+        );
+        emit_conversation_list_activity(
+            &self.app_handle,
+            ConversationListActivityEvent {
+                conversation_id: self.conversation_id,
+                kind: "stream_complete".to_string(),
+                is_running: None,
+            },
+        );
     }
 
     /// Send error event to frontend
@@ -2946,6 +2977,7 @@ impl AcpClient for AcpTauriClient {
                         data: serde_json::to_value(MCPToolCallUpdateEvent {
                             call_id: existing_call_id,
                             conversation_id: self.conversation_id,
+                            message_id: None,
                             status: status_str,
                             llm_call_id: None,
                             server_name: Some(display_name),
@@ -3056,6 +3088,7 @@ impl AcpClient for AcpTauriClient {
                             data: serde_json::to_value(MCPToolCallUpdateEvent {
                                 call_id,
                                 conversation_id: self.conversation_id,
+                                message_id: None,
                                 status: status_str,
                                 llm_call_id: None,
                                 server_name: Some(display_name),
@@ -3100,6 +3133,7 @@ impl AcpClient for AcpTauriClient {
                                 data: serde_json::to_value(MCPToolCallUpdateEvent {
                                     call_id,
                                     conversation_id: self.conversation_id,
+                                    message_id: None,
                                     status: status_str.clone(),
                                     llm_call_id: None,
                                     server_name: Some(display_name),
@@ -3164,6 +3198,7 @@ impl AcpClient for AcpTauriClient {
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
                         call_id: tool_call_record.id,
                         conversation_id: self.conversation_id,
+                        message_id: tool_call_record.message_id,
                         status: status_str,
                         llm_call_id: None,
                         server_name: Some(display_name),
@@ -3429,6 +3464,7 @@ impl AcpClient for AcpTauriClient {
                     data: serde_json::to_value(MCPToolCallUpdateEvent {
                         call_id,
                         conversation_id: self.conversation_id,
+                        message_id: None,
                         status: status_str,
                         llm_call_id: None,
                         server_name: updated_server_name,
@@ -3935,6 +3971,33 @@ async fn process_acp_prompt(
     }
     client_handle
         .send_done_event("response", &final_content, Some(&usage_summary))
+        .await;
+    let (assistant_id, model_id, model_code, user_message_id) = ConversationDatabase::new(&client_handle.app_handle)
+        .ok()
+        .and_then(|db| {
+            let message = db.message_repo().ok()?.read(message_id).ok().flatten()?;
+            let conversation = db.conversation_repo().ok()?.read(conversation_id).ok().flatten()?;
+            Some((
+                conversation.assistant_id,
+                message.llm_model_id,
+                message.llm_model_name,
+                message.parent_id,
+            ))
+        })
+        .unwrap_or((None, Some(0), Some("acp".to_string()), None));
+    let _ = PluginHookBus::new(client_handle.app_handle.clone())
+        .emit_event(
+            "chat.afterResponseCompleted",
+            serde_json::json!({
+                "conversationId": conversation_id,
+                "userMessageId": user_message_id,
+                "assistantMessageId": message_id,
+                "assistantId": assistant_id,
+                "modelId": model_id,
+                "modelCode": model_code,
+                "metadata": { "acp": true }
+            }),
+        )
         .await;
     Ok(())
 }

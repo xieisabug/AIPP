@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, memo } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { EllipsisVertical } from "lucide-react";
+import { CircleCheckBig, EllipsisVertical, Loader2 } from "lucide-react";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
 import useConversationManager from "../hooks/useConversationManager";
-import { Conversation } from "../data/Conversation";
+import { useConversationListStatus } from "../hooks/useConversationListStatus";
+import { Conversation, ConversationListItemStatus } from "../data/Conversation";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskTitle } from "../utils/antiLeakage";
 import {
@@ -18,6 +19,7 @@ import ConfirmDialog from "./ConfirmDialog";
 interface ConversationItemProps {
     conversation: Conversation;
     isSelected: boolean;
+    status: ConversationListItemStatus;
     onSelect: (id: string) => void;
     onOpenTitleEdit: (id: number, title: string) => void;
     onOpenDelete: (id: string, name: string) => void;
@@ -26,6 +28,7 @@ interface ConversationItemProps {
 const ConversationItem = memo(function ConversationItem({
     conversation,
     isSelected,
+    status,
     onSelect,
     onOpenTitleEdit,
     onOpenDelete,
@@ -52,50 +55,70 @@ const ConversationItem = memo(function ConversationItem({
                 {displayAssistantName}
             </div>
 
-            <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                    <Button
-                        variant="link"
-                        className="invisible absolute right-2 top-4 group-hover:visible transition-opacity duration-200"
-                        data-aipp-slot="chat-conversation-item-menu-trigger"
+            <div className="absolute right-2 top-1/2 size-9 -translate-y-1/2">
+                {status === "responding" && (
+                    <div
+                        className="pointer-events-none absolute inset-0 flex items-center justify-center group-hover:hidden"
+                        data-aipp-slot="chat-conversation-item-status-responding"
+                    >
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    </div>
+                )}
+                {status === "completed_unread" && (
+                    <div
+                        className="pointer-events-none absolute inset-0 flex items-center justify-center group-hover:hidden"
+                        data-aipp-slot="chat-conversation-item-status-completed-unread"
+                    >
+                        <CircleCheckBig className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                )}
+
+                <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                        <Button
+                            variant="link"
+                            size="icon"
+                            className="invisible absolute inset-0 h-9 w-9 p-0 group-hover:visible transition-opacity duration-200"
+                            data-aipp-slot="chat-conversation-item-menu-trigger"
+                            onClick={(e) => {
+                                // 避免点击菜单按钮时触发列表项选择
+                                e.stopPropagation();
+                            }}
+                        >
+                            <EllipsisVertical className="h-4 w-4 text-icon" />
+                        </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                        data-aipp-slot="chat-conversation-item-menu"
                         onClick={(e) => {
-                            // 避免点击菜单按钮时触发列表项选择
+                            // 阻止菜单内部点击冒泡到列表项
                             e.stopPropagation();
                         }}
                     >
-                        <EllipsisVertical className="h-4 w-4 text-icon" />
-                    </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                    data-aipp-slot="chat-conversation-item-menu"
-                    onClick={(e) => {
-                        // 阻止菜单内部点击冒泡到列表项
-                        e.stopPropagation();
-                    }}
-                >
-                    <DropdownMenuItem
-                        data-aipp-slot="chat-conversation-item-menu-edit"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onOpenTitleEdit(conversation.id, conversation.name);
-                        }}
-                    >
-                        修改标题
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                        data-aipp-slot="chat-conversation-item-menu-delete"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onOpenDelete(
-                                conversation.id.toString(),
-                                conversation.name,
-                            );
-                        }}
-                    >
-                        删除
-                    </DropdownMenuItem>
-                </DropdownMenuContent>
-            </DropdownMenu>
+                        <DropdownMenuItem
+                            data-aipp-slot="chat-conversation-item-menu-edit"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenTitleEdit(conversation.id, conversation.name);
+                            }}
+                        >
+                            修改标题
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                            data-aipp-slot="chat-conversation-item-menu-delete"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenDelete(
+                                    conversation.id.toString(),
+                                    conversation.name,
+                                );
+                            }}
+                        >
+                            删除
+                        </DropdownMenuItem>
+                    </DropdownMenuContent>
+                </DropdownMenu>
+            </div>
         </li>
     );
 });
@@ -109,6 +132,7 @@ const ConversationList = memo(function ConversationList({
     onSelectConversation,
     conversationId,
 }: ConversationListProps) {
+    const { getItemStatus } = useConversationListStatus(conversationId);
     const [conversations, setConversations] = useState<Array<Conversation>>([]);
     const [currentPage, setCurrentPage] = useState(1);
     const [isLoading, setIsLoading] = useState(false);
@@ -366,6 +390,7 @@ const ConversationList = memo(function ConversationList({
                         key={conversation.id}
                         conversation={conversation}
                         isSelected={conversationId === conversation.id.toString()}
+                        status={getItemStatus(conversation.id)}
                         onSelect={onSelectConversation}
                         onOpenTitleEdit={openTitleEditDialog}
                         onOpenDelete={openDeleteDialog}

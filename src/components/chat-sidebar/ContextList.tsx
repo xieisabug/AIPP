@@ -1,5 +1,5 @@
-import React, { useCallback, useState } from 'react';
-import { File, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image, Sparkles } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { File, FileText, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image, Sparkles } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { ContextItem } from './types';
@@ -9,8 +9,28 @@ import MCP from '@/assets/mcp.svg?react';
 interface ContextListProps {
     items: ContextItem[];
     className?: string;
+    focusedItemId?: string | null;
+    selectedItemId?: string | null;
     onItemClick?: (item: ContextItem) => void;
+    onPreviewFileClick?: (item: ContextItem) => void;
 }
+
+const SEARCH_AUTO_EXPAND_MS = 5000;
+const RECENT_SEARCH_FINISH_WINDOW_MS = 10000;
+const FOCUSED_SEARCH_EXPAND_DELAY_MS = 300;
+
+const getPathBasename = (value: string): string => {
+    const trimmed = value.trim();
+    const parts = trimmed.split(/[\\/]+/).filter(Boolean);
+    return parts.pop() || trimmed;
+};
+
+const getDisplayName = (item: ContextItem): string => {
+    if (item.type === 'read_file') {
+        return getPathBasename(item.name);
+    }
+    return item.name;
+};
 
 const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
     if ((type === 'user_file' || type === 'generated_image') && attachmentType === 'Image') {
@@ -25,6 +45,8 @@ const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
             return <Sparkles className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'read_file':
             return <File className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+        case 'preview_file':
+            return <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'search':
             return <Search className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
         case 'list_directory':
@@ -46,6 +68,8 @@ const getContextLabel = (type: ContextItem['type']): string => {
             return 'Skills';
         case 'read_file':
             return '读取文件';
+        case 'preview_file':
+            return '预览文件';
         case 'search':
             return '搜索';
         case 'list_directory':
@@ -57,8 +81,156 @@ const getContextLabel = (type: ContextItem['type']): string => {
     }
 };
 
-const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick }) => {
-    const [collapsedSearchIds, setCollapsedSearchIds] = useState<Set<string>>(new Set());
+const getItemTimestamp = (timestamp?: Date): number | null => {
+    if (!timestamp) return null;
+
+    const value = new Date(timestamp).getTime();
+    return Number.isFinite(value) ? value : null;
+};
+
+const ContextList: React.FC<ContextListProps> = ({
+    items,
+    className,
+    focusedItemId,
+    selectedItemId,
+    onItemClick,
+    onPreviewFileClick,
+}) => {
+    const [expandedSearchIds, setExpandedSearchIds] = useState<Set<string>>(new Set());
+    const manuallyToggledSearchIdsRef = useRef<Set<string>>(new Set());
+    const seenSearchIdsRef = useRef<Set<string> | null>(null);
+    const autoCloseTimersRef = useRef<Map<string, number>>(new Map());
+    const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+    // Scroll the focused item into view whenever focusedItemId changes.
+    // Use block:"start" so the item lands at the top of the viewport (just
+    // barely visible) instead of the bottom — feels more like "locate this".
+    useEffect(() => {
+        if (!focusedItemId) return;
+        const el = itemRefs.current.get(focusedItemId);
+        if (!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, [focusedItemId, items]);
+
+    // Shortly after highlighting starts, auto-expand the focused item if it's a search
+    // list with results. The timer is kept in a ref and NOT tied to this
+    // effect's cleanup, so it still fires when the parent clears
+    // focusedItemId at the 1s mark.
+    const focusExpandTimerRef = useRef<number | null>(null);
+    useEffect(() => {
+        return () => {
+            if (focusExpandTimerRef.current !== null) {
+                window.clearTimeout(focusExpandTimerRef.current);
+                focusExpandTimerRef.current = null;
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!focusedItemId) return;
+
+        const item = items.find((i) => i.id === focusedItemId);
+        if (!item || item.type !== 'search' || !item.searchResults || item.searchResults.length === 0) {
+            return;
+        }
+
+        if (focusExpandTimerRef.current !== null) {
+            window.clearTimeout(focusExpandTimerRef.current);
+        }
+
+        focusExpandTimerRef.current = window.setTimeout(() => {
+            focusExpandTimerRef.current = null;
+            manuallyToggledSearchIdsRef.current.add(focusedItemId);
+            const existingAutoClose = autoCloseTimersRef.current.get(focusedItemId);
+            if (existingAutoClose) {
+                window.clearTimeout(existingAutoClose);
+                autoCloseTimersRef.current.delete(focusedItemId);
+            }
+            setExpandedSearchIds((prev) => {
+                if (prev.has(focusedItemId)) return prev;
+                const next = new Set(prev);
+                next.add(focusedItemId);
+                return next;
+            });
+        }, FOCUSED_SEARCH_EXPAND_DELAY_MS);
+    }, [focusedItemId, items]);
+
+    const searchResultItems = useMemo(
+        () => items.filter((item) => item.type === 'search' && item.searchResults && item.searchResults.length > 0),
+        [items],
+    );
+
+    useEffect(() => {
+        const currentSearchIds = new Set(searchResultItems.map((item) => item.id));
+
+        const previousSearchIds = seenSearchIdsRef.current ?? new Set<string>();
+        const now = Date.now();
+        const autoExpandIds = searchResultItems
+            .filter((item) => {
+                if (previousSearchIds.has(item.id)) return false;
+                const finishedAt = getItemTimestamp(item.timestamp);
+                if (finishedAt === null) return false;
+                const ageMs = now - finishedAt;
+                return ageMs >= 0 && ageMs <= RECENT_SEARCH_FINISH_WINDOW_MS;
+            })
+            .map((item) => item.id);
+
+        seenSearchIdsRef.current = currentSearchIds;
+
+        autoCloseTimersRef.current.forEach((timer, id) => {
+            if (!currentSearchIds.has(id)) {
+                window.clearTimeout(timer);
+                autoCloseTimersRef.current.delete(id);
+            }
+        });
+        manuallyToggledSearchIdsRef.current.forEach((id) => {
+            if (!currentSearchIds.has(id)) {
+                manuallyToggledSearchIdsRef.current.delete(id);
+            }
+        });
+
+        setExpandedSearchIds((prev) => {
+            const next = new Set<string>();
+            prev.forEach((id) => {
+                if (currentSearchIds.has(id)) {
+                    next.add(id);
+                }
+            });
+            autoExpandIds.forEach((id) => next.add(id));
+            if (next.size === prev.size && Array.from(next).every((id) => prev.has(id))) {
+                return prev;
+            }
+            return next;
+        });
+
+        autoExpandIds.forEach((id) => {
+            const existingTimer = autoCloseTimersRef.current.get(id);
+            if (existingTimer) {
+                window.clearTimeout(existingTimer);
+            }
+
+            const timer = window.setTimeout(() => {
+                autoCloseTimersRef.current.delete(id);
+                if (manuallyToggledSearchIdsRef.current.has(id)) {
+                    return;
+                }
+                setExpandedSearchIds((prev) => {
+                    if (!prev.has(id)) return prev;
+                    const next = new Set(prev);
+                    next.delete(id);
+                    return next;
+                });
+            }, SEARCH_AUTO_EXPAND_MS);
+            autoCloseTimersRef.current.set(id, timer);
+        });
+    }, [searchResultItems]);
+
+    useEffect(() => {
+        return () => {
+            autoCloseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+            autoCloseTimersRef.current.clear();
+        };
+    }, []);
 
     const handleOpenUrl = useCallback((url?: string) => {
         if (!url) return;
@@ -96,8 +268,15 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
         }
     }, []);
 
-    const toggleSearchCollapse = useCallback((id: string) => {
-        setCollapsedSearchIds((prev) => {
+    const toggleSearchExpansion = useCallback((id: string) => {
+        manuallyToggledSearchIdsRef.current.add(id);
+        const existingTimer = autoCloseTimersRef.current.get(id);
+        if (existingTimer) {
+            window.clearTimeout(existingTimer);
+            autoCloseTimersRef.current.delete(id);
+        }
+
+        setExpandedSearchIds((prev) => {
             const next = new Set(prev);
             if (next.has(id)) {
                 next.delete(id);
@@ -109,6 +288,9 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
     }, []);
 
     const handleItemClick = useCallback((item: ContextItem) => {
+        if (item.type === 'preview_file' && onPreviewFileClick) {
+            onPreviewFileClick(item);
+        }
         if (onItemClick) {
             onItemClick(item);
             return;
@@ -118,7 +300,7 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
         } else if (item.attachmentData) {
             handleOpenAttachment(item);
         }
-    }, [handleOpenAttachment, handleOpenMarkdownPreview, onItemClick]);
+    }, [handleOpenAttachment, handleOpenMarkdownPreview, onItemClick, onPreviewFileClick]);
 
     if (items.length === 0) {
         return (
@@ -153,18 +335,30 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                     </div>
                     <div className="flex flex-col gap-1">
                         {typeItems.map((item) => (
-                            <div key={item.id} className="flex flex-col">
+                            <div
+                                key={item.id}
+                                className="flex flex-col"
+                                ref={(el) => {
+                                    if (el) {
+                                        itemRefs.current.set(item.id, el);
+                                    } else {
+                                        itemRefs.current.delete(item.id);
+                                    }
+                                }}
+                            >
                                 <div
                                     className={cn(
                                         "flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border bg-background transition-colors",
-                                        "hover:bg-muted/40 cursor-pointer"
+                                        "hover:bg-muted/40 cursor-pointer",
+                                        item.id === selectedItemId && "bg-muted/50 border-primary/30",
+                                        item.id === focusedItemId && "ring-2 ring-primary/60 bg-muted/60 border-primary/40",
                                     )}
                                     onClick={() => handleItemClick(item)}
                                 >
                                     {getContextIcon(item.type, item.attachmentData?.type)}
                                     <div className="flex-1 min-w-0">
                                         <p className="text-sm font-medium truncate" title={item.name}>
-                                            {item.name}
+                                            {getDisplayName(item)}
                                         </p>
                                         {item.details && item.details !== item.name && (
                                             <p className="text-xs text-muted-foreground truncate mt-0.5" title={item.details}>
@@ -178,19 +372,21 @@ const ContextList: React.FC<ContextListProps> = ({ items, className, onItemClick
                                             className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground"
                                             onClick={(event) => {
                                                 event.stopPropagation();
-                                                toggleSearchCollapse(item.id);
+                                                toggleSearchExpansion(item.id);
                                             }}
+                                            aria-label={expandedSearchIds.has(item.id) ? "收起搜索结果" : "展开搜索结果"}
+                                            title={expandedSearchIds.has(item.id) ? "收起搜索结果" : "展开搜索结果"}
                                         >
                                             <ChevronDown
                                                 className={cn(
                                                     "h-4 w-4 transition-transform",
-                                                    !collapsedSearchIds.has(item.id) && "rotate-180"
+                                                    expandedSearchIds.has(item.id) && "rotate-180"
                                                 )}
                                             />
                                         </button>
                                     )}
                                 </div>
-                                {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && !collapsedSearchIds.has(item.id) && (
+                                {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && expandedSearchIds.has(item.id) && (
                                     <div className="ml-3 mt-1 flex flex-col gap-1 border-l border-border pl-2">
                                         {item.searchResults.map((result, index) => (
                                             <button

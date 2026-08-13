@@ -25,8 +25,8 @@ const SidebarList: React.FC<SidebarListProps> = ({
     searchPlaceholder = "搜索..."
 }) => {
     return (
-        <Card className="bg-gradient-to-br from-muted/20 to-muted/40 border-border h-fit sticky top-6 shadow-none">
-            <CardHeader className="pb-3">
+        <Card className="bg-gradient-to-br from-muted/20 to-muted/40 border-border shadow-none flex flex-col max-h-full">
+            <CardHeader className="pb-3 flex-shrink-0">
                 <div className="flex items-start justify-between">
                     <div className="flex-1 min-w-0">
                         <CardTitle className="text-lg font-semibold text-foreground flex items-center gap-2">
@@ -55,7 +55,7 @@ const SidebarList: React.FC<SidebarListProps> = ({
                     </div>
                 )}
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-3 flex-1 min-h-0 overflow-y-auto thin-scrollbar">
                 {children}
             </CardContent>
         </Card>

@@ -1,8 +1,15 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import MessageItem from './MessageItem';
 import type { Message } from '@/data/Conversation';
+
+const messageActionButtonCalls = vi.hoisted(() => [] as Array<{ messageContent?: string }>);
+const antiLeakageState = vi.hoisted(() => ({
+    enabled: false,
+    isRevealed: true,
+}));
 
 vi.mock('./UnifiedMarkdown', () => ({
     default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -17,7 +24,10 @@ vi.mock('./message-item/ErrorMessage', () => ({
 }));
 
 vi.mock('./message-item/MessageActionButtons', () => ({
-    default: () => null,
+    default: (props: { messageContent?: string }) => {
+        messageActionButtonCalls.push(props);
+        return null;
+    },
 }));
 
 vi.mock('./message-item/ImageAttachments', () => ({
@@ -75,8 +85,8 @@ vi.mock('@/hooks/useFeishuDebugResend', () => ({
 
 vi.mock('@/contexts/AntiLeakageContext', () => ({
     useAntiLeakage: () => ({
-        enabled: false,
-        isRevealed: true,
+        enabled: antiLeakageState.enabled,
+        isRevealed: antiLeakageState.isRevealed,
     }),
 }));
 
@@ -123,5 +133,137 @@ describe('MessageItem attachment updates', () => {
         expect(screen.getByTestId('image-attachments')).toHaveTextContent(
             'generated-image-1.png'
         );
+    });
+});
+
+describe('MessageItem large message preview', () => {
+    beforeEach(() => {
+        messageActionButtonCalls.length = 0;
+        antiLeakageState.enabled = false;
+        antiLeakageState.isRevealed = true;
+    });
+
+    it('keeps historical plain large response fully rendered', () => {
+        const largeContent = Array.from(
+            { length: 260 },
+            (_, index) => `large response line ${index}`,
+        ).join('\n');
+
+        render(<MessageItem message={createMessage({ content: largeContent })} />);
+
+        expect(screen.queryByText('展开完整内容')).not.toBeInTheDocument();
+        expect(screen.queryByText('收起完整内容')).not.toBeInTheDocument();
+        expect(screen.getByText(/large response line 259/)).toBeInTheDocument();
+    });
+
+    it('keeps historical tool result content rendered without an outer preview gate', () => {
+        const content = ['tool result line 0', 'tool result line 1'].join('\n');
+
+        render(
+            <MessageItem
+                message={createMessage({
+                    content,
+                    message_type: 'tool_result',
+                })}
+            />,
+        );
+
+        expect(screen.queryByText('展开完整内容')).not.toBeInTheDocument();
+        expect(screen.queryByText('收起完整内容')).not.toBeInTheDocument();
+        expect(screen.getByText(/tool result line 1/)).toBeInTheDocument();
+        expect(messageActionButtonCalls.at(-1)?.messageContent).toBe(content);
+    });
+
+    it('does not add an outer preview gate for MCP payload messages', () => {
+        const hiddenPayload = 'x'.repeat(5200);
+        const mcpContent = [
+            `<!-- MCP_TOOL_CALL:${JSON.stringify({
+                call_id: 1751,
+                tool_name: 'write_file',
+                parameters: hiddenPayload,
+            })} -->`,
+            'visible assistant tail',
+        ].join('\n');
+
+        render(<MessageItem message={createMessage({ content: mcpContent })} />);
+
+        expect(screen.queryByText('展开完整内容')).not.toBeInTheDocument();
+        expect(screen.queryByText('收起完整内容')).not.toBeInTheDocument();
+        expect(screen.getByText((content) => content.includes(hiddenPayload))).toBeInTheDocument();
+        expect(screen.getByText(/visible assistant tail/)).toBeInTheDocument();
+    });
+
+    it('does not leak original preview metadata while anti-leakage masking is active', () => {
+        antiLeakageState.enabled = true;
+        antiLeakageState.isRevealed = false;
+        const secretContent = `${'secret-value-line\n'.repeat(900)}hidden-final-line`;
+
+        render(
+            <MessageItem
+                message={createMessage({
+                    content: secretContent,
+                    message_type: 'tool_result',
+                    large_message_preview: {
+                        lineCount: 261,
+                        payloadCharCount: secretContent.length,
+                        contentHash: 'sha256:secret',
+                        reason: 'tool_result',
+                        shouldPreview: true,
+                        summary: '大型工具结果已折叠',
+                        previewText: 'secret-value from backend metadata',
+                    },
+                })}
+            />,
+        );
+
+        expect(screen.queryByText('展开完整内容')).not.toBeInTheDocument();
+        expect(screen.queryByText('收起完整内容')).not.toBeInTheDocument();
+        expect(screen.queryByText(/secret-value/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/hidden-final-line/)).not.toBeInTheDocument();
+    });
+});
+
+describe('MessageItem user message folding', () => {
+    beforeEach(() => {
+        antiLeakageState.enabled = false;
+        antiLeakageState.isRevealed = true;
+    });
+
+    it('keeps a 300-character user message fully visible', () => {
+        const content = '用'.repeat(300);
+
+        render(
+            <MessageItem
+                message={createMessage({ content, message_type: 'user' })}
+            />,
+        );
+
+        expect(screen.getByText(content)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: '展开' })).not.toBeInTheDocument();
+    });
+
+    it('shows only the first 300 characters until the user expands the message', async () => {
+        const user = userEvent.setup();
+        const visibleContent = '前'.repeat(300);
+        const hiddenContent = '这是折叠后的内容';
+        const content = `${visibleContent}${hiddenContent}`;
+
+        render(
+            <MessageItem
+                message={createMessage({ content, message_type: 'user' })}
+            />,
+        );
+
+        expect(screen.getByText(`${visibleContent}…`)).toBeInTheDocument();
+        expect(screen.queryByText(content)).not.toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: '展开' }));
+
+        expect(screen.getByText(content)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: '收起' })).toHaveAttribute('aria-expanded', 'true');
+
+        await user.click(screen.getByRole('button', { name: '收起' }));
+
+        expect(screen.getByText(`${visibleContent}…`)).toBeInTheDocument();
     });
 });

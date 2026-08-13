@@ -856,7 +856,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "properties": {
                         "title": {
                             "type": "string",
-                            "description": "Stable title/identifier for the inline UI card."
+                            "description": "Optional stable title/identifier for the inline UI card. The UI uses a default label when omitted or empty."
                         },
                         "renderer": {
                             "type": "string",
@@ -892,7 +892,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                             "additionalProperties": false
                         }
                     },
-                    "required": ["title", "renderer", "code"],
+                    "required": ["renderer", "code"],
                     "additionalProperties": false
                 }),
             },
@@ -1598,6 +1598,22 @@ mod tests {
             .find(|env| env.key == "PREVIEW_ALLOWED_DOMAINS_JSON");
         assert!(whitelist_env.is_some(), "preview resource whitelist env should exist");
         assert_eq!(whitelist_env.unwrap().field_type, "textarea");
+    }
+
+    #[test]
+    fn test_preview_code_tool_title_is_optional() {
+        let tools = get_builtin_tools_for_command("aipp:ui_interaction");
+        let preview_code = tools
+            .iter()
+            .find(|tool| tool.name == "preview_code")
+            .expect("preview_code tool should exist");
+        let required = preview_code
+            .input_schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .expect("preview_code should declare required fields");
+
+        assert!(!required.iter().any(|value| value.as_str() == Some("title")));
     }
 
     #[test]

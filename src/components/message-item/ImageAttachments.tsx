@@ -34,6 +34,8 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
         return null;
     }
 
+    const useGridLayout = imageAttachments.length > 1;
+
     const handleOpenImage = useCallback(
         async (attachment: Attachment) => {
             const imageData = attachment.attachment_content || attachment.attachment_url;
@@ -58,26 +60,51 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
     );
 
     return (
-        <div className="mt-3 flex w-[300px] flex-col gap-2">
+        <div
+            className={
+                useGridLayout
+                    ? "mt-3 grid w-[300px] grid-cols-2 gap-2"
+                    : "mt-3 flex w-[300px] flex-col gap-2"
+            }
+        >
             {imageAttachments.map((attachment, index) => {
                 const imageSrc = attachment.attachment_content || attachment.attachment_url;
                 if (!imageSrc) {
                     return null;
+                }
+                const isGenerating = attachment.attachment_url?.startsWith('aipp://image-generation/pending/');
+
+                if (isGenerating) {
+                    return (
+                        <div
+                            key={attachment.id ?? `image-generating-${index}`}
+                            className="relative aspect-square w-full overflow-hidden rounded-xl border border-border bg-muted/40"
+                            role="status"
+                            aria-label="正在生成图片"
+                        >
+                            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">正在生成中…</div>
+                        </div>
+                    );
                 }
 
                 return (
                     <button
                         key={attachment.id ?? attachment.attachment_url ?? `image-${index}`}
                         type="button"
-                        className="group relative overflow-hidden rounded-xl border border-border bg-muted/20 text-left transition-colors hover:bg-muted/30"
+                        className={
+                            useGridLayout
+                                ? "group relative aspect-square w-full overflow-hidden rounded-xl border border-border bg-muted/20 text-left transition-colors hover:bg-muted/30"
+                                : "group relative aspect-[4/3] w-full overflow-hidden rounded-xl border border-border bg-muted/20 text-left transition-colors hover:bg-muted/30"
+                        }
                         onClick={() => void handleOpenImage(attachment)}
                         title="点击使用系统默认程序打开图片"
                         aria-label="点击使用系统默认程序打开图片"
                     >
                         <img
-                            className="block max-h-[320px] w-full h-auto object-contain"
+                            className="block h-full w-full object-contain"
                             src={imageSrc}
                             alt={attachment.attachment_url || 'Message attachment'}
+                            decoding="async"
                         />
                         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/70 via-black/30 to-transparent px-3 py-2 text-white opacity-0 transition-opacity group-hover:opacity-100">
                             <span className="truncate text-xs">

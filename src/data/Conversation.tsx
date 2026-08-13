@@ -44,6 +44,17 @@ export interface Message {
     first_token_time?: Date | null;
     ttft_ms?: number | null;
     tps?: number | null;
+    large_message_preview?: LargeMessagePreviewMetadata | null;
+}
+
+export interface LargeMessagePreviewMetadata {
+    lineCount: number;
+    payloadCharCount: number;
+    contentHash: string;
+    reason: "tool_result" | "mcp_payload";
+    shouldPreview: boolean;
+    summary: string;
+    previewText: string;
 }
 
 export type QueuedConversationMessageKind = "normal" | "interrupt";
@@ -121,6 +132,7 @@ export interface GroupMergeEvent {
 export interface MCPToolCallUpdateEvent {
     call_id: number;
     conversation_id: number;
+    message_id?: number;
     status: 'pending' | 'executing' | 'success' | 'failed' | 'unknown';
     llm_call_id?: string;
     server_name?: string;
@@ -172,6 +184,14 @@ export interface ConversationRuntimeState {
     phase: ConversationRuntimePhase;
     epoch: number;
     revision: number;
+}
+
+export type ConversationListItemStatus = "idle" | "responding" | "completed_unread";
+
+export interface ConversationListActivityEvent {
+    conversation_id: number;
+    kind: "runtime_state" | "stream_complete";
+    is_running?: boolean;
 }
 
 export interface RuntimeStateSnapshotEvent {

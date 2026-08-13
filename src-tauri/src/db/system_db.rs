@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, trace};
 
 use super::get_db_path;
 
@@ -207,7 +207,7 @@ impl SystemDatabase {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        debug!(count = configs.len(), "Fetched feature configs by module");
+        trace!(count = configs.len(), "Fetched feature configs by module");
         Ok(configs)
     }
 
@@ -230,7 +230,7 @@ impl SystemDatabase {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        debug!(count = configs.len(), "Fetched all feature configs");
+        trace!(count = configs.len(), "Fetched all feature configs");
         Ok(configs)
     }
 

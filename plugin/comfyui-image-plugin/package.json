@@ -1,0 +1,9 @@
+{
+  "name": "@aipp/comfyui-image-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test": "node tests/plugin.test.cjs"
+  }
+}

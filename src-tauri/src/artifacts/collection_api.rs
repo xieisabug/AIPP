@@ -96,6 +96,7 @@ pub fn save_artifact_to_collection(
             let _ = window.emit("artifact-collection-updated", artifact_id);
         }
     }
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(artifact_id)
 }
@@ -203,6 +204,7 @@ pub fn update_artifact_collection(
             let _ = window.emit("artifact-collection-updated", request.id);
         }
     }
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(())
 }
@@ -222,6 +224,7 @@ pub fn delete_artifact_collection(app_handle: tauri::AppHandle, id: i64) -> Resu
                 let _ = window.emit("artifact-collection-updated", id);
             }
         }
+        crate::sync::schedule_sync_after_local_change(&app_handle);
     }
 
     Ok(deleted)

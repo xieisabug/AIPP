@@ -382,7 +382,7 @@ pub async fn format_mcp_prompt_with_filters(
 "#
         };
 
-        let mut load_tools_info = String::from("\n## Agent 工具（始终可用，无需加载）\n\n");
+        let mut load_tools_info = String::from("\n## Agent 工具（始终可用，无需加载，server_name:Agent 工具）\n\n");
         load_tools_info.push_str("### 工具集: Agent\n\n");
         let mut has_load_tools = false;
         for server_details in &mcp_info.enabled_servers {

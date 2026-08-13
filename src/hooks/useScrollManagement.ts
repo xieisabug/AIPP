@@ -1,10 +1,23 @@
 import { useRef, useCallback, useEffect } from "react";
 import type { TouchEvent, WheelEvent } from "react";
-import { CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR } from "@/components/conversation/layoutConstants";
+import {
+    CHAT_SCROLL_HISTORY_TAIL_VIEWPORT_HEIGHT_CSS_VAR,
+    CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+    CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
+    computeChatViewportHeights,
+} from "@/components/conversation/layoutConstants";
 
 const SMOOTH_SCROLL_LOCK_MS = 350;
 const AUTO_SCROLL_LOCK_MS = 100;
 const USER_SCROLL_SUPPRESSION_MS = 250;
+
+function isChatScrollPerfProbeActive(): boolean {
+    return (
+        typeof window !== "undefined"
+        && (window as Window & { __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean })
+            .__AIPP_CHAT_SCROLL_PERF_ACTIVE__ === true
+    );
+}
 
 export interface UseScrollManagementReturn {
     messagesEndRef: React.RefObject<HTMLDivElement | null>;
@@ -17,6 +30,8 @@ export interface UseScrollManagementReturn {
     // Allow overriding behavior for specific scenarios (e.g., instant on open)
     smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     scrollToUserMessage: () => void;
+    // 虚拟化列表发送消息后稳定滚到底部（多帧钉底，容忍布局延迟增长）
+    scrollToBottomStable: () => void;
 }
 
 interface UseScrollManagementOptions {
@@ -39,6 +54,7 @@ export function useScrollManagement(
         behaviorOverride?: ScrollBehavior;
     } | null>(null);
     const lastUserScrollIntentAtRef = useRef<number | null>(null);
+    const stableScrollFrameRef = useRef<number | null>(null);
     const smartScrollRef = useRef<UseScrollManagementReturn["smartScroll"] | null>(
         null,
     );
@@ -50,9 +66,21 @@ export function useScrollManagement(
         }
 
         const syncViewportHeightVar = () => {
+            const { viewportHeight, liveOnlyHeight, historyTailHeight } =
+                computeChatViewportHeights(container);
+
+            // 兼容旧逻辑：接近整段滚动视口
             container.style.setProperty(
                 CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
-                `${container.clientHeight - 10}px`,
+                `${viewportHeight}px`,
+            );
+            container.style.setProperty(
+                CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+                `${liveOnlyHeight}px`,
+            );
+            container.style.setProperty(
+                CHAT_SCROLL_HISTORY_TAIL_VIEWPORT_HEIGHT_CSS_VAR,
+                `${historyTailHeight}px`,
             );
         };
 
@@ -66,6 +94,12 @@ export function useScrollManagement(
         return () => {
             resizeObserver.disconnect();
             container.style.removeProperty(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR);
+            container.style.removeProperty(
+                CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+            );
+            container.style.removeProperty(
+                CHAT_SCROLL_HISTORY_TAIL_VIEWPORT_HEIGHT_CSS_VAR,
+            );
         };
     }, []);
 
@@ -171,6 +205,9 @@ export function useScrollManagement(
 
     // 智能滚动函数
     const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
+        if (isChatScrollPerfProbeActive()) {
+            return;
+        }
         if (hasRecentUserScrollIntent()) {
             return;
         }
@@ -248,6 +285,9 @@ export function useScrollManagement(
 
     // 发送用户消息后滚动到最后一组消息所在的底部位置，利用 min-height 占位让用户消息贴近顶部
     const scrollToUserMessage = useCallback(() => {
+        if (isChatScrollPerfProbeActive()) {
+            return;
+        }
         const container = scrollContainerRef.current;
         if (!container) return;
 
@@ -265,6 +305,114 @@ export function useScrollManagement(
         scheduleAutoScrollRelease(SMOOTH_SCROLL_LOCK_MS);
     }, [scheduleAutoScrollRelease]);
 
+    // 虚拟化列表专用：发送消息后把内容稳定滚到底部。
+    // 虚拟化列表在插入新消息 / 尾部占位增长后，scrollHeight 需要多帧才稳定，
+    // 一次性滚动会够不到底。这里用有界的多帧循环持续钉到底，直到高度稳定或超时，
+    // 绕开 smartScroll 里锁 + ResizeObserver 的竞态。
+    const scrollToBottomStable = useCallback(() => {
+        if (isChatScrollPerfProbeActive()) {
+            return;
+        }
+        const container = scrollContainerRef.current;
+        if (!container) {
+            return;
+        }
+
+        // 取消已有的观察器/锁/待执行滚动，避免相互干扰
+        if (resizeObserverRef.current) {
+            resizeObserverRef.current.disconnect();
+            resizeObserverRef.current = null;
+        }
+        clearAutoScrollTimeout();
+        pendingSmartScrollRef.current = null;
+        if (stableScrollFrameRef.current !== null) {
+            cancelAnimationFrame(stableScrollFrameRef.current);
+            stableScrollFrameRef.current = null;
+        }
+
+        lastUserScrollIntentAtRef.current = null;
+        isUserScrolledUpRef.current = false;
+        isAutoScrolling.current = true;
+
+        // —— 可调参数 ——
+        // 连续多少帧 maxScrollTop 不变（≤1px）才算稳定
+        const STABLE_FRAME_COUNT = 16;
+        // 观察到高度增长后，最少再钉底多少帧才允许早退
+        const MIN_FRAME_AFTER_GROWTH = 16;
+        // 一直没观察到高度增长（说明布局在调用时已就绪）时，等这么多帧再收手
+        const NO_GROWTH_SETTLE_FRAME_COUNT = 48;
+        // 硬上限：无论如何最多钉这么久，兜底防止死循环
+        const MAX_DURATION_MS = 2000;
+
+        let elapsedFrames = 0;
+        let framesSinceGrowth = 0;
+        let stableFrames = 0;
+        let lastMaxScrollTop = -1;
+        let baselineMaxScrollTop = -1;
+        let hasGrown = false;
+        const startedAt = performance.now();
+
+        const step = () => {
+            stableScrollFrameRef.current = null;
+            const target = scrollContainerRef.current;
+            if (!target) {
+                isAutoScrolling.current = false;
+                return;
+            }
+            // 用户在此期间主动滚动则让位
+            if (hasRecentUserScrollIntent()) {
+                isAutoScrolling.current = false;
+                return;
+            }
+
+            const maxScrollTop = Math.max(
+                0,
+                target.scrollHeight - target.clientHeight,
+            );
+            target.scrollTop = maxScrollTop;
+            elapsedFrames += 1;
+
+            if (baselineMaxScrollTop < 0) {
+                baselineMaxScrollTop = maxScrollTop;
+            }
+            // 关键：只有真正看到高度长大之后，才认为“内容已就位”，
+            // 避免把发送初期还没测量的旧小高度误判成稳定而过早停下
+            if (maxScrollTop > baselineMaxScrollTop + 1) {
+                hasGrown = true;
+                framesSinceGrowth = 0;
+            }
+
+            if (Math.abs(maxScrollTop - lastMaxScrollTop) <= 1) {
+                stableFrames += 1;
+            } else {
+                stableFrames = 0;
+            }
+            lastMaxScrollTop = maxScrollTop;
+            if (hasGrown) {
+                framesSinceGrowth += 1;
+            }
+
+            const settledAfterGrowth =
+                hasGrown
+                && framesSinceGrowth >= MIN_FRAME_AFTER_GROWTH
+                && stableFrames >= STABLE_FRAME_COUNT;
+            const settledWithoutGrowth =
+                !hasGrown
+                && elapsedFrames >= NO_GROWTH_SETTLE_FRAME_COUNT
+                && stableFrames >= STABLE_FRAME_COUNT;
+            const timedOut = performance.now() - startedAt >= MAX_DURATION_MS;
+
+            if (settledAfterGrowth || settledWithoutGrowth || timedOut) {
+                isAutoScrolling.current = false;
+                return;
+            }
+
+            stableScrollFrameRef.current = requestAnimationFrame(step);
+        };
+
+        stableScrollFrameRef.current = requestAnimationFrame(step);
+    }, [clearAutoScrollTimeout, hasRecentUserScrollIntent]);
+
     // 组件卸载时清理资源
     useEffect(() => {
         return () => {
@@ -272,6 +420,10 @@ export function useScrollManagement(
             if (resizeObserverRef.current) {
                 resizeObserverRef.current.disconnect();
                 resizeObserverRef.current = null;
+            }
+            if (stableScrollFrameRef.current !== null) {
+                cancelAnimationFrame(stableScrollFrameRef.current);
+                stableScrollFrameRef.current = null;
             }
         };
     }, [clearAutoScrollTimeout]);
@@ -284,5 +436,6 @@ export function useScrollManagement(
         syncScrollState,
         smartScroll,
         scrollToUserMessage,
+        scrollToBottomStable,
     };
 }

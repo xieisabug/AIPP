@@ -5,10 +5,11 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use crate::api::ai::events::{
-    ActivityFocus, ActivityFocusChangeEvent, ConversationEvent, ConversationRuntimePhase,
-    ConversationRuntimeState, ConversationShineState, RuntimeStateSnapshotEvent,
-    ShineStateSnapshotEvent, ShineTarget,
+    ActivityFocus, ActivityFocusChangeEvent, ConversationEvent, ConversationListActivityEvent,
+    ConversationRuntimePhase, ConversationRuntimeState, ConversationShineState,
+    RuntimeStateSnapshotEvent, ShineStateSnapshotEvent, ShineTarget,
 };
+use crate::utils::window_utils::emit_conversation_list_activity;
 use crate::db::mcp_db::MCPDatabase;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,12 +167,20 @@ impl ConversationActivityManager {
         conversation_id: i64,
         state: ConversationRuntimeState,
     ) {
-        let event = RuntimeStateSnapshotEvent { state };
+        let event = RuntimeStateSnapshotEvent { state: state.clone() };
         let _ = app_handle.emit(
             &format!("conversation_event_{}", conversation_id),
             ConversationEvent {
                 r#type: "runtime_state_snapshot".to_string(),
                 data: serde_json::to_value(event).unwrap(),
+            },
+        );
+        emit_conversation_list_activity(
+            app_handle,
+            ConversationListActivityEvent {
+                conversation_id,
+                kind: "runtime_state".to_string(),
+                is_running: Some(state.is_running),
             },
         );
     }
@@ -309,6 +318,18 @@ impl ConversationActivityManager {
             revision: 0,
             primary_target: ShineTarget::None,
         }
+    }
+
+    /// 列出当前正在运行（is_running=true）的对话 ID
+    pub async fn list_running_conversation_ids(&self) -> Vec<i64> {
+        let activities = self.activities.read().await;
+        activities
+            .iter()
+            .filter_map(|(conversation_id, activity)| {
+                let phase = Self::focus_to_runtime_phase(&activity.current);
+                (phase != ConversationRuntimePhase::Idle).then_some(*conversation_id)
+            })
+            .collect()
     }
 
     /// 获取当前语义化运行状态（用于发送按钮等运行态 UI）
@@ -537,6 +558,24 @@ mod tests {
         assert_eq!(idle_runtime.phase, ConversationRuntimePhase::Idle);
         assert!(!idle_runtime.is_running);
         assert_eq!(idle_shine.primary_target, ShineTarget::None);
+    }
+
+    #[test]
+    fn list_running_conversation_ids_excludes_idle_conversations() {
+        let running_conversation_id = 51;
+        let mut running_activity = ConversationActivity::default();
+        running_activity.pending_user_message_id = Some(1001);
+        running_activity.current = ConversationActivityManager::recompute_focus(&running_activity);
+        let running_runtime = ConversationActivityManager::build_runtime_state(
+            running_conversation_id,
+            &running_activity,
+        );
+
+        let idle_runtime =
+            ConversationActivityManager::build_runtime_state(52, &ConversationActivity::default());
+
+        assert!(running_runtime.is_running);
+        assert!(!idle_runtime.is_running);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 export interface DisplayFormValues {
+    default_home_window: string;
     theme: string;
     color_mode: string;
     user_message_markdown_render: string;
@@ -8,12 +9,22 @@ export interface DisplayFormValues {
     merge_assistant_messages: boolean;
     show_thinking: boolean;
     preview_code_show_toolbar: boolean;
+    mcp_tool_call_component_id: string;
 }
 
 export function buildDisplayFormValues(
     displayConfig?: Map<string, string>,
+    experimentalConfig?: Map<string, string>,
 ): DisplayFormValues {
+    const butlerEnabled = experimentalConfig?.get("butler_experiment_enabled") === "true";
+    const savedHomeWindow = experimentalConfig?.get("default_home_window") || "ask";
+    const defaultHomeWindow =
+        savedHomeWindow === "butler_experiment" && !butlerEnabled
+            ? "ask"
+            : savedHomeWindow;
+
     return {
+        default_home_window: defaultHomeWindow,
         theme: displayConfig?.get("theme") || "default",
         color_mode: displayConfig?.get("color_mode") || "system",
         user_message_markdown_render:
@@ -27,6 +38,8 @@ export function buildDisplayFormValues(
         show_thinking: displayConfig?.get("show_thinking") !== "disabled",
         preview_code_show_toolbar:
             displayConfig?.get("preview_code_show_toolbar") === "enabled",
+        mcp_tool_call_component_id:
+            displayConfig?.get("mcp_tool_call_component_id") || "auto",
     };
 }
 
@@ -45,5 +58,6 @@ export function serializeDisplayFormValues(values: DisplayFormValues) {
         preview_code_show_toolbar: values.preview_code_show_toolbar
             ? "enabled"
             : "disabled",
+        mcp_tool_call_component_id: values.mcp_tool_call_component_id || "auto",
     };
 }

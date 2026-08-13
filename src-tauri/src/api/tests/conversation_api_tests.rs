@@ -1,4 +1,6 @@
-use crate::api::conversation_api::process_message_versions;
+use crate::api::conversation_api::{
+    build_large_message_preview_metadata, process_message_versions,
+};
 use crate::db::conversation_db::MessageDetail;
 use chrono::Utc;
 use uuid::Uuid;
@@ -39,6 +41,7 @@ fn create_message_detail(
         metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
+        large_message_preview: None,
     }
 }
 
@@ -62,6 +65,60 @@ fn quick_message(
         None,
         base_time + chrono::Duration::seconds(offset_secs),
     )
+}
+
+// ============================================================================
+// 大消息预览元数据测试
+// ============================================================================
+
+#[test]
+fn test_large_tool_result_preview_metadata() {
+    let content = (0..260)
+        .map(|index| format!("tool result line {}", index))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let metadata = build_large_message_preview_metadata("tool_result", &content)
+        .expect("large tool result should produce preview metadata");
+
+    assert!(metadata.should_preview);
+    assert_eq!(metadata.reason, "tool_result");
+    assert!(metadata.content_hash.starts_with("sha256:"));
+    assert!(metadata.preview_text.contains("tool result line 0"));
+    assert!(!metadata.preview_text.contains("tool result line 259"));
+}
+
+#[test]
+fn test_large_mcp_payload_preview_metadata() {
+    let payload = "x".repeat(5_200);
+    let content = format!(
+        "<!-- MCP_TOOL_CALL:{} -->\nvisible tail",
+        serde_json::json!({
+            "call_id": 1751,
+            "tool_name": "write_file",
+            "parameters": payload,
+        })
+    );
+
+    let metadata = build_large_message_preview_metadata("response", &content)
+        .expect("large MCP payload should produce preview metadata");
+
+    assert!(metadata.should_preview);
+    assert_eq!(metadata.reason, "mcp_payload");
+    assert!(metadata.content_hash.starts_with("sha256:"));
+    assert!(metadata.summary.contains("write_file"));
+    assert!(metadata.preview_text.contains("visible tail"));
+    assert!(!metadata.preview_text.contains(&payload));
+}
+
+#[test]
+fn test_plain_large_response_does_not_preview_in_phase_one() {
+    let content = (0..260)
+        .map(|index| format!("plain response line {}", index))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(build_large_message_preview_metadata("response", &content).is_none());
 }
 
 // ============================================================================
@@ -607,6 +664,49 @@ async fn test_local_reasoning_response_tie_break_does_not_reorder_other_groups()
     let result = process_message_versions(messages);
     let ids: Vec<i64> = result.iter().map(|message| message.id).collect();
     assert_eq!(ids, vec![1, 2, 4, 3, 5, 6]);
+}
+
+#[tokio::test]
+async fn test_equal_timestamp_interleaved_groups_use_total_order() {
+    let base_time =
+        chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+
+    let messages = vec![
+        create_message_detail(
+            1,
+            1,
+            "response",
+            "Response 1",
+            None,
+            Some("g1".to_string()),
+            None,
+            base_time,
+        ),
+        create_message_detail(
+            2,
+            1,
+            "response",
+            "Response 2",
+            None,
+            Some("g2".to_string()),
+            None,
+            base_time,
+        ),
+        create_message_detail(
+            3,
+            1,
+            "reasoning",
+            "Reasoning 1",
+            None,
+            Some("g1".to_string()),
+            None,
+            base_time,
+        ),
+    ];
+
+    let result = process_message_versions(messages);
+    let ids: Vec<i64> = result.iter().map(|message| message.id).collect();
+    assert_eq!(ids, vec![3, 1, 2]);
 }
 
 /// 测试多个 reasoning+response 组的排序

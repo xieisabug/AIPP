@@ -761,6 +761,66 @@ describe("useConversationEvents MCP completion reconciliation", () => {
         expect(result.current.runtimeState?.is_running).toBe(false);
     });
 
+    it("delivers Butler error add and update events to message callbacks", async () => {
+        const conversationId = 732;
+        const errorMessageId = 9986;
+        const onMessageAdd = vi.fn();
+        const onMessageUpdate = vi.fn();
+        const onError = vi.fn();
+
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, { target_type: "none" }),
+        );
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "idle"),
+        );
+
+        renderHook(() =>
+            useConversationEvents({
+                conversationId,
+                onMessageAdd,
+                onMessageUpdate,
+                onError,
+            }),
+        );
+
+        await flushEffects();
+
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_add",
+                data: {
+                    message_id: errorMessageId,
+                    message_type: "error",
+                },
+            });
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_update",
+                data: {
+                    message_id: errorMessageId,
+                    message_type: "error",
+                    content: "No available providers",
+                    is_done: true,
+                },
+            });
+        });
+
+        await flushEffects();
+
+        expect(onMessageAdd).toHaveBeenCalledWith({
+            message_id: errorMessageId,
+            message_type: "error",
+        });
+        expect(onMessageUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            message_id: errorMessageId,
+            message_type: "error",
+            content: "No available providers",
+            is_done: true,
+        }));
+        expect(onError).toHaveBeenCalledWith("No available providers");
+    });
+
     it("clears user-message shine when stream_complete syncs the final idle state", async () => {
         const conversationId = 19;
         const userMessageId = 902;

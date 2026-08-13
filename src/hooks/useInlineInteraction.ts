@@ -344,10 +344,14 @@ function getLatestAskUserQuestionState(
 
 function getLatestPreviewFileState(
     calls: MCPToolCall[],
-    conversationId: number | undefined
+    conversationId: number | undefined,
+    targetCallId?: number | null
 ): PreviewFilePersistedState | null {
     const candidates = calls
-        .filter((call) => call.tool_name === PREVIEW_FILE_TOOL_NAME)
+        .filter((call) => (
+            call.tool_name === PREVIEW_FILE_TOOL_NAME
+            && (targetCallId === undefined || targetCallId === null || call.id === targetCallId)
+        ))
         .sort((a, b) => b.id - a.id);
 
     for (const call of candidates) {
@@ -654,8 +658,9 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [persistedState, setPersistedState] = useState<PreviewFilePersistedState | null>(null);
     const [dismissedPersistedCallId, setDismissedPersistedCallId] = useState<number | null>(null);
+    const [targetPersistedCallId, setTargetPersistedCallId] = useState<number | null>(null);
 
-    const refreshPersistedState = useCallback(async () => {
+    const refreshPersistedState = useCallback(async (requestedCallId?: number | null) => {
         if (conversationId === undefined) {
             setPersistedState(null);
             return;
@@ -664,7 +669,11 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
             const calls = await invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
                 conversationId,
             });
-            const latest = getLatestPreviewFileState(calls, conversationId);
+            const latest = getLatestPreviewFileState(
+                calls,
+                conversationId,
+                requestedCallId === undefined ? targetPersistedCallId : requestedCallId
+            );
             if (!latest) {
                 setPersistedState(null);
                 return;
@@ -692,12 +701,13 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         } catch (error) {
             console.error("Failed to load persisted preview_file state:", getErrorMessage(error));
         }
-    }, [conversationId]);
+    }, [conversationId, targetPersistedCallId]);
 
     useEffect(() => {
         setPendingRequest(null);
         setIsDialogOpen(false);
         setDismissedPersistedCallId(null);
+        setTargetPersistedCallId(null);
     }, [conversationId]);
 
     useEffect(() => {
@@ -719,6 +729,7 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
 
             setPendingRequest(request);
             setIsDialogOpen(true);
+            setTargetPersistedCallId(null);
             void refreshPersistedState();
             setTimeout(() => {
                 void refreshPersistedState();
@@ -793,6 +804,7 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         if (
             persistedState &&
             persistedState.callId !== dismissedPersistedCallId &&
+            (targetPersistedCallId === null || persistedState.callId === targetPersistedCallId) &&
             (persistedState.status === "pending" ||
                 persistedState.status === "executing" ||
                 persistedState.status === "success")
@@ -811,7 +823,7 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
             callId: null as number | null,
             messageId: null as number | null,
         };
-    }, [pendingRequest, isDialogOpen, persistedState, dismissedPersistedCallId]);
+    }, [pendingRequest, isDialogOpen, persistedState, dismissedPersistedCallId, targetPersistedCallId]);
 
     const handleOpenChange = useCallback((open: boolean) => {
         setIsDialogOpen(open);
@@ -823,11 +835,21 @@ export function usePreviewFile(options: UsePreviewFileOptions = {}) {
         }
     }, [previewFileView.callId]);
 
+    const reopenPersistedPreview = useCallback((callId?: number | null) => {
+        const targetCallId = callId ?? null;
+        setTargetPersistedCallId(targetCallId);
+        setDismissedPersistedCallId(null);
+        setPendingRequest(null);
+        setIsDialogOpen(true);
+        void refreshPersistedState(targetCallId);
+    }, [refreshPersistedState]);
+
     return {
         pendingRequest: previewFileView.request,
         isDialogOpen: previewFileView.isOpen,
         callId: previewFileView.callId,
         messageId: previewFileView.messageId,
         handleOpenChange,
+        reopenPersistedPreview,
     };
 }

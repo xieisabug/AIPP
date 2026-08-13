@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { getErrorMessage } from "@/utils/error";
+import { MotionDetails, MotionStatusSlot } from "@/components/mcp-tool-components/McpToolMotion";
 import {
     buildPreviewCodeSignature,
     parsePreviewCodeRequestLoose,
@@ -67,7 +68,7 @@ function getClientPreviewPlaceholder(type: PreviewExternalResourceType) {
         case "css":
             return "data:text/css,";
         case "script":
-            return "data:text/javascript,";
+            return "";
         case "font":
             return "data:font/woff2;base64,";
         case "pdf":
@@ -134,6 +135,10 @@ function sanitizeClientPreviewCode(code: string) {
         for (const attrName of ["src", "href", "data"]) {
             const rawValue = element.getAttribute(attrName);
             if (!rawValue || !isRawExternalPreviewUrl(rawValue)) {
+                continue;
+            }
+            if (resourceType === "script" && attrName === "src") {
+                element.removeAttribute(attrName);
                 continue;
             }
             element.setAttribute(attrName, placeholder);
@@ -354,6 +359,8 @@ export default function InlineCodePreviewCard({
     const streamingPreviewTimerRef = useRef<number | null>(null);
     const lastStreamingPreviewAppliedAtRef = useRef(0);
     const lastStreamingPreviewIdentityRef = useRef<string | null>(null);
+    const preparingRequestSignatureRef = useRef<string | null>(null);
+    const reportedRuntimeErrorKeysRef = useRef<Set<string>>(new Set());
 
     const matchedStateByLlmCallId = useMemo(() => {
         if (!mcpToolCallStates || !llmCallId || callId) {
@@ -501,6 +508,10 @@ export default function InlineCodePreviewCard({
                   ),
         [isStreaming, rawPreviewRequest]
     );
+    const rawPreviewTitle = rawPreviewRequest?.title ?? null;
+    const rawPreviewRenderer = rawPreviewRequest?.renderer ?? null;
+    const rawPreviewInteractionMode = rawPreviewRequest?.interactionMode ?? null;
+    const rawPreviewCode = rawPreviewRequest?.code ?? null;
     const hasScriptContent = useMemo(() => {
         if (activeStreamingPreviewState) {
             return activeStreamingPreviewState.containsScript;
@@ -585,7 +596,62 @@ export default function InlineCodePreviewCard({
         setIsCollapsed(defaultCollapsed);
         setIsHidden(false);
         setIsRuntimeActivated(isStreaming || !defaultCollapsed);
+        preparingRequestSignatureRef.current = null;
+        reportedRuntimeErrorKeysRef.current.clear();
     }, [conversationId, hasScriptContent, isLastMessage, isStreaming, requestSignature]);
+
+    const handleRuntimeError = useCallback(
+        (message: string | null) => {
+            setRuntimeError(message);
+            if (!message || !effectiveCallId || isStreaming) {
+                return;
+            }
+            if (!resolvedRequestId) {
+                return;
+            }
+
+            const reportKey = `${effectiveCallId}:${requestSignature ?? previewIdentity}:${message}`;
+            if (reportedRuntimeErrorKeysRef.current.has(reportKey)) {
+                return;
+            }
+            reportedRuntimeErrorKeysRef.current.add(reportKey);
+
+            const code = previewRequest?.code?.trim() ?? "";
+            void invoke("report_preview_code_runtime_error", {
+                callId: effectiveCallId,
+                call_id: effectiveCallId,
+                conversationId,
+                conversation_id: conversationId,
+                messageId,
+                message_id: messageId,
+                requestId: resolvedRequestId,
+                request_id: resolvedRequestId,
+                error: {
+                    message,
+                    phase: "runtime",
+                    codeExcerpt: code.length > 2000 ? `${code.slice(0, 2000)}...` : code,
+                },
+            }).catch((error) => {
+                console.warn("Failed to report preview_code runtime error:", getErrorMessage(error));
+            });
+        },
+        [
+            conversationId,
+            effectiveCallId,
+            isStreaming,
+            messageId,
+            previewIdentity,
+            previewRequest?.code,
+            requestSignature,
+            resolvedRequestId,
+        ]
+    );
+
+    useEffect(() => {
+        if (runtimeError && resolvedRequestId) {
+            handleRuntimeError(runtimeError);
+        }
+    }, [handleRuntimeError, resolvedRequestId, runtimeError]);
 
     const authorizeSelectedPreviewResources = useCallback(
         async (
@@ -692,9 +758,9 @@ export default function InlineCodePreviewCard({
                     return signature === requestSignature
                         || (
                             rawPreviewRequest
-                            && event.title === rawPreviewRequest.title
-                            && event.renderer === rawPreviewRequest.renderer
-                            && event.interactionMode === rawPreviewRequest.interactionMode
+                            && event.title === rawPreviewTitle
+                            && event.renderer === rawPreviewRenderer
+                            && event.interactionMode === rawPreviewInteractionMode
                         );
                 });
                 if (matched) {
@@ -711,7 +777,13 @@ export default function InlineCodePreviewCard({
         return () => {
             active = false;
         };
-    }, [conversationId, rawPreviewRequest, requestSignature]);
+    }, [
+        conversationId,
+        requestSignature,
+        rawPreviewInteractionMode,
+        rawPreviewRenderer,
+        rawPreviewTitle,
+    ]);
 
     useEffect(() => {
         if (!conversationId || !requestSignature) {
@@ -737,9 +809,9 @@ export default function InlineCodePreviewCard({
                 signature === requestSignature
                 || (
                     rawPreviewRequest
-                    && payload.title === rawPreviewRequest.title
-                    && payload.renderer === rawPreviewRequest.renderer
-                    && payload.interactionMode === rawPreviewRequest.interactionMode
+                    && payload.title === rawPreviewTitle
+                    && payload.renderer === rawPreviewRenderer
+                    && payload.interactionMode === rawPreviewInteractionMode
                 )
             ) {
                 setResolvedRequestId(payload.request_id);
@@ -748,9 +820,65 @@ export default function InlineCodePreviewCard({
         });
 
         return () => {
-            unsubscribe.then((dispose) => dispose());
+            void unsubscribe.then((dispose) => dispose()).catch(() => undefined);
         };
-    }, [conversationId, rawPreviewRequest, requestSignature]);
+    }, [
+        conversationId,
+        requestSignature,
+        rawPreviewInteractionMode,
+        rawPreviewRenderer,
+        rawPreviewTitle,
+    ]);
+
+    useEffect(() => {
+        if (
+            isStreaming
+            || !rawPreviewRequest
+            || !requestSignature
+            || preparedPreviewRequest
+            || !hasRawExternalPreviewResources(rawPreviewCode ?? undefined)
+        ) {
+            return;
+        }
+        if (preparingRequestSignatureRef.current === requestSignature) {
+            return;
+        }
+
+        let active = true;
+        preparingRequestSignatureRef.current = requestSignature;
+        invoke<PreviewCodeRequestEvent>("prepare_preview_code_request_for_ui", {
+            conversationId,
+            conversation_id: conversationId,
+            request: rawPreviewRequest,
+        })
+            .then((payload) => {
+                if (!active || preparingRequestSignatureRef.current !== requestSignature) {
+                    return;
+                }
+                setResolvedRequestId(payload.request_id);
+                setPreparedPreviewRequest(payload);
+                setClientDetectedExternalResources(null);
+            })
+            .catch((error) => {
+                if (!active || preparingRequestSignatureRef.current !== requestSignature) {
+                    return;
+                }
+                setRuntimeError(`preview_code 外部资源准备失败: ${getErrorMessage(error)}`);
+            });
+
+        return () => {
+            active = false;
+        };
+    }, [
+        conversationId,
+        isStreaming,
+        preparedPreviewRequest,
+        rawPreviewCode,
+        rawPreviewInteractionMode,
+        rawPreviewRenderer,
+        rawPreviewTitle,
+        requestSignature,
+    ]);
 
     useEffect(() => {
         if (!hostRef.current || runtimeRef.current || !isRuntimeActivated || !shouldRenderRuntimeHost) {
@@ -842,7 +970,7 @@ export default function InlineCodePreviewCard({
                 },
                 emitEvent: (_name: string, _payload?: unknown) => undefined,
             },
-            onError: setRuntimeError,
+            onError: handleRuntimeError,
         });
     }, [
         previewRequest,
@@ -857,6 +985,7 @@ export default function InlineCodePreviewCard({
             isInteractionEnabled,
             isLastMessage,
             shouldRenderRuntimeHost,
+            handleRuntimeError,
         ]);
 
     useEffect(() => {
@@ -966,6 +1095,9 @@ export default function InlineCodePreviewCard({
         setRuntimeError(null);
     }, [previewHidden]);
 
+    const submittedPayload = toolResult?.status === "submitted" ? toolResult.payload : undefined;
+    const hasSubmittedPayload = submittedPayload !== undefined;
+
     return (
         <div className={isPreviewCodeShowToolbar ? "space-y-3 py-2" : "py-1"}>
             {isPreviewCodeShowToolbar && (
@@ -980,7 +1112,9 @@ export default function InlineCodePreviewCard({
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
-                            {statusBadge}
+                            <MotionStatusSlot stateKey={displayState} present={statusBadge !== null}>
+                                {statusBadge}
+                            </MotionStatusSlot>
                             {displayState !== "dismissed" && (
                                 <Button
                                     type="button"
@@ -994,9 +1128,11 @@ export default function InlineCodePreviewCard({
                             )}
                         </div>
                     </div>
-                    {loadingMessage && (displayState === "streaming" || displayState === "executing" || displayState === "pending") && (
+                    <MotionDetails
+                        show={Boolean(loadingMessage) && (displayState === "streaming" || displayState === "executing" || displayState === "pending")}
+                    >
                         <div className="text-xs text-muted-foreground">{loadingMessage}</div>
-                    )}
+                    </MotionDetails>
                 </div>
             )}
             <div className="space-y-3">
@@ -1019,16 +1155,16 @@ export default function InlineCodePreviewCard({
                         </Button>
                     </div>
                 )}
-                {runtimeError && (
+                <MotionDetails show={Boolean(runtimeError)}>
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                         {runtimeError}
                     </div>
-                )}
-                {interactionError && (
+                </MotionDetails>
+                <MotionDetails show={Boolean(interactionError)}>
                     <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                         {interactionError}
                     </div>
-                )}
+                </MotionDetails>
                 {shouldRenderPreviewSurface && (
                     <div
                         className={isCollapsed
@@ -1104,7 +1240,7 @@ export default function InlineCodePreviewCard({
                         )}
                     </div>
                 )}
-                {shouldShowStreamingFallback && !previewHidden && sourceExcerpt && (
+                <MotionDetails show={shouldShowStreamingFallback && !previewHidden && Boolean(sourceExcerpt)}>
                     <div className="rounded-md border border-border/70 bg-muted/40 px-3 py-3 space-y-2">
                         <div className="text-xs text-muted-foreground">
                             正在生成可渲染预览，先展示当前代码片段。
@@ -1113,22 +1249,22 @@ export default function InlineCodePreviewCard({
                             {sourceExcerpt}
                         </pre>
                     </div>
-                )}
-                {toolResult?.status === "submitted" && toolResult.payload !== undefined && (
+                </MotionDetails>
+                <MotionDetails show={hasSubmittedPayload}>
                     <pre className="rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-words">
-                        {JSON.stringify(toolResult.payload, null, 2)}
+                        {JSON.stringify(submittedPayload, null, 2)}
                     </pre>
-                )}
-                {isHidden && displayState !== "dismissed" && (
+                </MotionDetails>
+                <MotionDetails show={isHidden && displayState !== "dismissed"}>
                     <div className="text-sm text-muted-foreground">
                         预览已隐藏。
                     </div>
-                )}
-                {displayState === "dismissed" && (
+                </MotionDetails>
+                <MotionDetails show={displayState === "dismissed"}>
                     <div className="text-sm text-muted-foreground">
                         该内嵌 UI 已关闭。
                     </div>
-                )}
+                </MotionDetails>
             </div>
             <PreviewExternalResourcesDialog<PreviewCodeRequestEvent, unknown>
                 externalResources={previewRequest?.externalResources ?? clientDetectedExternalResources}

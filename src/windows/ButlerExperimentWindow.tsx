@@ -21,6 +21,7 @@ import {
 import ConversationUI, {
     ConversationUIRef,
     type InlineInteractionItem,
+    type PreviewFileContextSelection,
 } from "@/components/ConversationUI";
 import IconButton from "@/components/IconButton";
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
@@ -401,9 +402,17 @@ function ButlerExperimentWindow() {
         callId: previewFileCallId,
         messageId: previewFileMessageId,
         handleOpenChange: handlePreviewFileOpenChange,
+        reopenPersistedPreview: reopenPersistedPreviewFile,
     } = usePreviewFile({
         conversationId: conversationIdNumber,
     });
+
+    const handlePreviewFileContextSelection = useCallback((selection: PreviewFileContextSelection) => {
+        if (selection.messageId) {
+            conversationUIRef.current?.scrollToMessage(selection.messageId);
+        }
+        reopenPersistedPreviewFile(selection.callId);
+    }, [reopenPersistedPreviewFile]);
 
     const inlineInteractionItems: InlineInteractionItem[] = [];
     if (isAskUserDialogOpen && pendingAskUserRequest) {
@@ -1495,8 +1504,10 @@ function ButlerExperimentWindow() {
                                         showFeishuStatus && isMainConversationFeishuBound
                                     }
                                     virtualizeMessages
+                                    virtualizedListEngine="virtuoso"
                                     windowLabel="butler_experiment"
                                     busySendBehavior="interrupt"
+                                    onPreviewFileContextClick={handlePreviewFileContextSelection}
                                 />
                             </div>
                         </>

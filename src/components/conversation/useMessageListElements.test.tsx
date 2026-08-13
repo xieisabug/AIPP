@@ -1,6 +1,7 @@
 import { render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+    findFirstLiveSuffixIndex,
     useMessageListElements,
     type UseMessageListElementsProps,
 } from "./useMessageListElements";
@@ -158,6 +159,24 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(screen.getByTestId("message-4")).toHaveAttribute("data-last-message", "true");
     });
 
+    it("renders a Butler user message followed by an error message", () => {
+        render(
+            <Harness
+                messages={[
+                    makeMessage({ id: 9985, message_type: "user", content: "你好" }),
+                    makeMessage({
+                        id: 9986,
+                        message_type: "error",
+                        content: "No available providers",
+                    }),
+                ]}
+            />
+        );
+
+        expect(screen.getByTestId("message-9985")).toHaveTextContent("你好");
+        expect(screen.getByTestId("message-9986")).toHaveTextContent("No available providers");
+    });
+
     it("uses the whole merged group to estimate historical row height", () => {
         const mergedMessages = [
             makeMessage({ id: 1, message_type: "user", content: "user-1" }),
@@ -236,5 +255,29 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(codeItem?.estimatedHeight ?? 0).toBeLessThan(
             plainItem?.estimatedHeight ?? 0,
         );
+    });
+});
+
+describe("findFirstLiveSuffixIndex", () => {
+    it("only treats the trailing live segment as non-virtualized", () => {
+        expect(
+            findFirstLiveSuffixIndex([
+                { virtualizationMode: "virtualized" },
+                { virtualizationMode: "live" },
+                { virtualizationMode: "virtualized" },
+                { virtualizationMode: "live" },
+                { virtualizationMode: "live" },
+            ]),
+        ).toBe(3);
+    });
+
+    it("does not create a live suffix when no trailing item is live", () => {
+        expect(
+            findFirstLiveSuffixIndex([
+                { virtualizationMode: "virtualized" },
+                { virtualizationMode: "live" },
+                { virtualizationMode: "virtualized" },
+            ]),
+        ).toBe(-1);
     });
 });

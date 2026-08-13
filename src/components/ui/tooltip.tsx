@@ -37,7 +37,7 @@ function TooltipContent({
                 {...props}
             >
                 {children}
-                <TooltipPrimitive.Arrow className="bg-popover fill-popover border border-border z-50 size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-[2px]" />
+                <TooltipPrimitive.Arrow className="fill-[hsl(var(--popover))] stroke-[hsl(var(--border))] stroke-1" />
             </TooltipPrimitive.Content>
         </TooltipPrimitive.Portal>
     );

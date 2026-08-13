@@ -1,0 +1,53 @@
+{
+  "id": "comfyui-image-plugin",
+  "code": "comfyui-image-plugin",
+  "name": "AI 图片生成",
+  "version": "0.1.0",
+  "entry": "dist/main.js",
+  "runtime": { "type": "js", "entry": "dist/main.js" },
+  "description": "将 AI 回复转换为提示词，并通过可配置的图片生成供应商附加到原回复。",
+  "pluginTypes": ["interfaceType", "applicationType"],
+  "kinds": ["ui", "worker"],
+  "permissions": [
+    "hook.chat.afterResponseCompleted",
+    "conversation.read",
+    "conversation.write",
+    "plugin.storage",
+    "network.comfyui",
+    "network.image-generation"
+  ],
+  "contributions": {
+    "views": [
+      {
+        "id": "comfyui-image-config",
+        "location": "config.plugin-center",
+        "title": "AI 图片生成",
+        "description": "配置提示词模型、生成指令和图片生成方式。"
+      }
+    ],
+    "actions": [
+      {
+        "id": "comfyui-toggle-auto",
+        "location": "conversation.title-actions",
+        "title": "开启/关闭自动生图",
+        "order": 70
+      },
+      {
+        "id": "comfyui-generate-now",
+        "location": "conversation.message-actions",
+        "title": "立即生图",
+        "order": 71
+      }
+    ],
+    "hooks": [
+      {
+        "name": "chat.afterResponseCompleted",
+        "kind": "event",
+        "priority": 100,
+        "timeoutMs": 1000,
+        "failurePolicy": "log",
+        "isActive": true
+      }
+    ]
+  }
+}

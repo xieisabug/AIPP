@@ -30,6 +30,7 @@ use rmcp::{
     },
     ServiceExt,
 };
+use serde::Deserialize;
 use serde_json::Map as JsonMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -607,18 +608,297 @@ fn has_followup_response_after_tool_results(
     })
 }
 
+fn emit_tool_result_message_events(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    tool_result_message: &crate::db::conversation_db::Message,
+    tool_result_content: &str,
+    is_new: bool,
+) {
+    use crate::api::ai::events::{MessageAddEvent, MessageUpdateEvent};
+
+    if is_new {
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+            })
+            .unwrap(),
+        };
+        send_conversation_event_to_chat_windows(app_handle, conversation_id, add_event);
+    }
+
+    let update_event = ConversationEvent {
+        r#type: "message_update".to_string(),
+        data: serde_json::to_value(MessageUpdateEvent {
+            message_id: tool_result_message.id,
+            message_type: "tool_result".to_string(),
+            content: tool_result_content.to_string(),
+            is_done: true,
+            token_count: None,
+            input_token_count: None,
+            output_token_count: None,
+            ttft_ms: None,
+            tps: None,
+        })
+        .unwrap(),
+    };
+    send_conversation_event_to_chat_windows(app_handle, conversation_id, update_event);
+}
+
+async fn resolve_tool_result_model_metadata(
+    app_handle: &tauri::AppHandle,
+    tool_call: &MCPToolCall,
+) -> Result<(i64, String)> {
+    let conversation_db = ConversationDatabase::new(app_handle).context("初始化对话数据库失败")?;
+
+    if let Some(message_id) = tool_call.message_id {
+        if let Ok(repo) = conversation_db.message_repo() {
+            if let Ok(Some(message)) = repo.read(message_id) {
+                if let (Some(model_id), Some(model_code)) =
+                    (message.llm_model_id, message.llm_model_name.filter(|code| !code.is_empty()))
+                {
+                    return Ok((model_id, model_code));
+                }
+            }
+        }
+    }
+
+    let conversation = conversation_db
+        .conversation_repo()
+        .context("failed to get conversation_repo")?
+        .read(tool_call.conversation_id)
+        .map_err(|e| anyhow!("获取对话信息失败: {}", e))?
+        .ok_or_else(|| anyhow!("未找到对话"))?;
+    let assistant_id = conversation.assistant_id.ok_or_else(|| anyhow!("对话未关联助手"))?;
+    let assistant_detail = crate::api::assistant_api::get_assistant(app_handle.clone(), assistant_id)
+        .map_err(|e| anyhow!("获取助手信息失败: {}", e))?;
+    if assistant_detail.model.is_empty() {
+        bail!("助手未配置模型");
+    }
+
+    Ok((
+        assistant_detail.model[0].id,
+        assistant_detail.model[0].model_code.clone(),
+    ))
+}
+
+async fn persist_single_tool_result_message(
+    app_handle: &tauri::AppHandle,
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+    model_id: i64,
+    model_code: &str,
+    tool_call: &MCPToolCall,
+    existing_tool_result_messages: &mut HashMap<
+        ToolResultMessageKey,
+        crate::db::conversation_db::Message,
+    >,
+    tool_result_group_id: Option<String>,
+    prebuilt_content: Option<String>,
+) -> Result<bool> {
+    let tool_result_id = tool_call_history_id(tool_call);
+    let tool_result_key =
+        tool_result_message_key(tool_result_id.clone(), tool_result_group_id.clone());
+    let tool_result_content = match prebuilt_content {
+        Some(content) => content,
+        None => {
+            let Some(content) = build_tool_result_message_content(app_handle, tool_call).await? else {
+                return Ok(false);
+            };
+            content
+        }
+    };
+
+    let now = chrono::Utc::now();
+    let (tool_result_message, is_new) = if let Some(mut existing_message) =
+        existing_tool_result_messages.get(&tool_result_key).cloned()
+    {
+        existing_message.content = tool_result_content.clone();
+        existing_message.finish_time = Some(now);
+        if existing_message.start_time.is_none() {
+            existing_message.start_time = Some(now);
+        }
+        conversation_db
+            .message_repo()
+            .context("failed to get message_repo")?
+            .update(&existing_message)?;
+        (existing_message, false)
+    } else {
+        let tool_result_message = crate::api::ai_api::add_message(
+            app_handle,
+            None,
+            conversation_id,
+            "tool_result".to_string(),
+            tool_result_content.clone(),
+            Some(model_id),
+            Some(model_code.to_string()),
+            Some(now),
+            Some(now),
+            0,
+            tool_result_group_id.clone(),
+            None,
+        )
+        .map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
+        (tool_result_message, true)
+    };
+
+    emit_tool_result_message_events(
+        app_handle,
+        conversation_id,
+        &tool_result_message,
+        &tool_result_content,
+        is_new,
+    );
+    existing_tool_result_messages.insert(tool_result_key, tool_result_message);
+    Ok(is_new)
+}
+
+pub async fn persist_terminal_tool_result_message(
+    app_handle: &tauri::AppHandle,
+    tool_call: &MCPToolCall,
+) -> Result<Option<String>> {
+    if tool_call.status != "success" && tool_call.status != "failed" {
+        return Ok(None);
+    }
+
+    let Some(tool_result_content) = build_tool_result_message_content(app_handle, tool_call).await?
+    else {
+        return Ok(None);
+    };
+
+    let (model_id, model_code) = resolve_tool_result_model_metadata(app_handle, tool_call).await?;
+    let conversation_db = ConversationDatabase::new(app_handle).context("初始化对话数据库失败")?;
+    let conversation_id = tool_call.conversation_id;
+    let existing_messages = conversation_db
+        .message_repo()
+        .context("failed to get message_repo")?
+        .list_by_conversation_id(conversation_id)
+        .map_err(|e| anyhow!("获取对话消息列表失败: {}", e))?;
+    let mut existing_tool_result_messages =
+        collect_existing_tool_result_messages(&existing_messages);
+    let tool_result_group_id = existing_messages
+        .iter()
+        .filter(|(message, _)| message.message_type == "response")
+        .max_by_key(|(message, _)| message.id)
+        .and_then(|(message, _)| message.generation_group_id.clone());
+
+    let _ = persist_single_tool_result_message(
+        app_handle,
+        &conversation_db,
+        conversation_id,
+        model_id,
+        &model_code,
+        tool_call,
+        &mut existing_tool_result_messages,
+        tool_result_group_id,
+        Some(tool_result_content.clone()),
+    )
+    .await?;
+
+    Ok(Some(tool_result_content))
+}
+
+pub fn collect_required_tool_call_ids_from_message_list(
+    message_list: &[(String, String, Vec<crate::db::conversation_db::MessageAttachment>)],
+) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for (message_type, content, _) in message_list {
+        if message_type == "response" {
+            ids.extend(crate::api::ai::conversation::extract_tool_call_ids_from_mcp_comments(
+                content,
+            ));
+        }
+    }
+    ids
+}
+
+pub fn collect_tool_result_ids_from_message_list(
+    message_list: &[(String, String, Vec<crate::db::conversation_db::MessageAttachment>)],
+) -> HashSet<String> {
+    message_list
+        .iter()
+        .filter(|(message_type, _, _)| message_type == "tool_result")
+        .filter_map(|(_, content, _)| crate::api::ai::conversation::extract_tool_call_id(content))
+        .collect()
+}
+
+fn find_tool_result_insert_index(
+    message_list: &[(String, String, Vec<crate::db::conversation_db::MessageAttachment>)],
+    tool_call_id: &str,
+) -> Option<usize> {
+    let mut response_idx = None;
+    for (idx, (message_type, content, _)) in message_list.iter().enumerate() {
+        if message_type == "response" {
+            let ids =
+                crate::api::ai::conversation::extract_tool_call_ids_from_mcp_comments(content);
+            if ids.contains(tool_call_id) {
+                response_idx = Some(idx);
+            }
+        }
+    }
+
+    let response_idx = response_idx?;
+    let mut insert_at = response_idx + 1;
+    while insert_at < message_list.len() && message_list[insert_at].0 == "tool_result" {
+        insert_at += 1;
+    }
+    Some(insert_at)
+}
+
+pub async fn backfill_missing_tool_results(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    message_list: &mut Vec<(String, String, Vec<crate::db::conversation_db::MessageAttachment>)>,
+) -> Result<usize> {
+    let required = collect_required_tool_call_ids_from_message_list(message_list);
+    let existing = collect_tool_result_ids_from_message_list(message_list);
+    let missing: Vec<String> = required.difference(&existing).cloned().collect();
+    if missing.is_empty() {
+        return Ok(0);
+    }
+
+    let mcp_db = MCPDatabase::new(app_handle).context("初始化 MCP 数据库失败")?;
+    let calls = mcp_db
+        .get_mcp_tool_calls_by_conversation(conversation_id)
+        .map_err(|e| anyhow!("获取工具调用列表失败: {}", e))?;
+
+    let mut backfilled = 0usize;
+    for call in calls {
+        if call.status != "success" && call.status != "failed" {
+            continue;
+        }
+        let history_id = tool_call_history_id(&call);
+        if !missing.contains(&history_id) {
+            continue;
+        }
+        let Some(content) = persist_terminal_tool_result_message(app_handle, &call).await? else {
+            continue;
+        };
+        if let Some(insert_at) = find_tool_result_insert_index(message_list, &history_id) {
+            message_list.insert(
+                insert_at,
+                ("tool_result".to_string(), content, Vec::new()),
+            );
+        } else {
+            message_list.push(("tool_result".to_string(), content, Vec::new()));
+        }
+        backfilled += 1;
+    }
+
+    Ok(backfilled)
+}
+
 async fn ensure_tool_result_messages(
     app_handle: &tauri::AppHandle,
-    window: &tauri::Window,
+    _window: &tauri::Window,
     conversation_db: &ConversationDatabase,
     conversation_id: i64,
     model_id: i64,
     model_code: &str,
     tool_calls: &[MCPToolCall],
 ) -> Result<usize> {
-    use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
-    use tauri::Emitter;
-
     let existing_messages = conversation_db
         .message_repo()
         .context("failed to get message_repo")?
@@ -634,77 +914,21 @@ async fn ensure_tool_result_messages(
 
     let mut created_count = 0usize;
     for tool_call in tool_calls {
-        let tool_result_id = tool_call_history_id(tool_call);
-        let tool_result_key =
-            tool_result_message_key(tool_result_id.clone(), tool_result_group_id.clone());
-        let Some(tool_result_content) = build_tool_result_message_content(app_handle, tool_call).await? else {
-            continue;
-        };
-        let now = chrono::Utc::now();
-        let tool_result_message = if let Some(mut existing_message) =
-            existing_tool_result_messages.get(&tool_result_key).cloned()
+        if persist_single_tool_result_message(
+            app_handle,
+            conversation_db,
+            conversation_id,
+            model_id,
+            model_code,
+            tool_call,
+            &mut existing_tool_result_messages,
+            tool_result_group_id.clone(),
+            None,
+        )
+        .await?
         {
-            existing_message.content = tool_result_content.clone();
-            existing_message.finish_time = Some(now);
-            if existing_message.start_time.is_none() {
-                existing_message.start_time = Some(now);
-            }
-            conversation_db
-                .message_repo()
-                .context("failed to get message_repo")?
-                .update(&existing_message)?;
-            existing_message
-        } else {
-            let tool_result_message = crate::api::ai_api::add_message(
-                app_handle,
-                None,
-                conversation_id,
-                "tool_result".to_string(),
-                tool_result_content.clone(),
-                Some(model_id),
-                Some(model_code.to_string()),
-                Some(now),
-                Some(now),
-                0,
-                tool_result_group_id.clone(),
-                None,
-            )
-            .map_err(|e| anyhow!("创建工具结果消息失败: {}", e))?;
-
-            let add_event = ConversationEvent {
-                r#type: "message_add".to_string(),
-                data: serde_json::to_value(MessageAddEvent {
-                    message_id: tool_result_message.id,
-                    message_type: "tool_result".to_string(),
-                })
-                .unwrap(),
-            };
-            let _ =
-                window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
-
             created_count += 1;
-            tool_result_message
-        };
-
-        let update_event = ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id: tool_result_message.id,
-                message_type: "tool_result".to_string(),
-                content: tool_result_content,
-                is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        };
-        let _ =
-            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
-
-        existing_tool_result_messages.insert(tool_result_key, tool_result_message);
+        }
     }
 
     Ok(created_count)
@@ -898,6 +1122,7 @@ fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEven
         data: serde_json::to_value(MCPToolCallUpdateEvent {
             call_id: tool_call.id,
             conversation_id: tool_call.conversation_id,
+            message_id: tool_call.message_id,
             status: tool_call.status.clone(),
             llm_call_id: tool_call.llm_call_id.clone(),
             server_name: Some(tool_call.server_name.clone()),
@@ -1264,6 +1489,117 @@ pub(crate) async fn finalize_tool_call_from_external_result(
     )
     .await
     .map(|_| ())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreviewCodeRuntimeErrorReport {
+    pub message: String,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub stack: Option<String>,
+    #[serde(default, alias = "scriptSrc")]
+    pub script_src: Option<String>,
+    #[serde(default, alias = "scriptIndex")]
+    pub script_index: Option<usize>,
+    #[serde(default, alias = "codeExcerpt")]
+    pub code_excerpt: Option<String>,
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    let truncated: String = value.chars().take(max_chars).collect();
+    format!("{}...\n[truncated, total chars: {}]", truncated, count)
+}
+
+fn clean_optional_report_field(value: Option<String>, max_chars: usize) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_chars(&value, max_chars))
+}
+
+fn format_preview_code_runtime_error(report: &PreviewCodeRuntimeErrorReport) -> Result<String> {
+    let message = report.message.trim();
+    if message.is_empty() {
+        bail!("preview_code runtime error message cannot be empty");
+    }
+
+    let mut lines = vec![
+        "PreviewCode runtime error after render:".to_string(),
+        format!("Message: {}", truncate_chars(message, 2000)),
+    ];
+    if let Some(phase) = clean_optional_report_field(report.phase.clone(), 120) {
+        lines.push(format!("Phase: {}", phase));
+    }
+    if let Some(script_src) = clean_optional_report_field(report.script_src.clone(), 1000) {
+        lines.push(format!("Script source: {}", script_src));
+    }
+    if let Some(script_index) = report.script_index {
+        lines.push(format!("Script index: {}", script_index));
+    }
+    if let Some(code_excerpt) = clean_optional_report_field(report.code_excerpt.clone(), 2000) {
+        lines.push(format!("Code excerpt:\n{}", code_excerpt));
+    }
+    if let Some(stack) = clean_optional_report_field(report.stack.clone(), 5000) {
+        lines.push(format!("Stack:\n{}", stack));
+    }
+    Ok(lines.join("\n"))
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, error), fields(call_id, conversation_id, message_id))]
+pub async fn report_preview_code_runtime_error(
+    app_handle: tauri::AppHandle,
+    call_id: i64,
+    conversation_id: Option<i64>,
+    message_id: Option<i64>,
+    request_id: Option<String>,
+    error: PreviewCodeRuntimeErrorReport,
+) -> std::result::Result<bool, String> {
+    let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
+    let tool_call = db
+        .get_mcp_tool_call(call_id)
+        .map_err(|e| format!("获取工具调用信息失败: {}", e))?;
+
+    if tool_call.tool_name != "preview_code" {
+        return Err(format!(
+            "tool call {} is '{}', not preview_code",
+            call_id, tool_call.tool_name
+        ));
+    }
+    if let Some(conversation_id) = conversation_id {
+        if tool_call.conversation_id != conversation_id {
+            return Err("preview_code runtime error conversation mismatch".to_string());
+        }
+    }
+    if let Some(message_id) = message_id {
+        if tool_call.message_id != Some(message_id) {
+            return Err("preview_code runtime error message mismatch".to_string());
+        }
+    }
+
+    let Some(request_id) = clean_optional_report_field(request_id, 200) else {
+        return Ok(false);
+    };
+
+    let mut error_message = format_preview_code_runtime_error(&error).map_err(|e| e.to_string())?;
+    error_message.push_str("
+Request ID: ");
+    error_message.push_str(&request_id);
+
+    let Some(interaction_state) = app_handle.try_state::<crate::mcp::builtin_mcp::InteractionState>() else {
+        return Ok(false);
+    };
+
+    // Resolve the still-running preview_code call. If the original tool call already
+    // returned success, do not emit a second model continuation for a late UI error.
+    Ok(interaction_state
+        .resolve_preview_code_request(&request_id, Err(error_message))
+        .await)
 }
 
 /// 规范化从 LLM 返回的 parameters JSON，移除可能的 markdown 代码块包裹。
@@ -1846,6 +2182,16 @@ pub async fn cancel_mcp_tool_calls_by_conversation(
         match db.get_mcp_tool_call(call.id) {
             Ok(updated_call) => {
                 broadcast_mcp_tool_call_update(app_handle, &updated_call);
+                if let Err(error) =
+                    persist_terminal_tool_result_message(app_handle, &updated_call).await
+                {
+                    warn!(
+                        call_id = call.id,
+                        conversation_id = updated_call.conversation_id,
+                        error = %error,
+                        "failed to persist tool_result after cancelling MCP tool call"
+                    );
+                }
                 cancelled_ids.push(call.id);
             }
             Err(e) => {
@@ -1926,6 +2272,15 @@ pub async fn stop_mcp_tool_call(
         // 3. 广播状态更新事件
         let updated_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
         broadcast_mcp_tool_call_update(&app_handle, &updated_call);
+
+        if let Err(error) = persist_terminal_tool_result_message(&app_handle, &updated_call).await {
+            warn!(
+                call_id,
+                conversation_id = updated_call.conversation_id,
+                error = %error,
+                "failed to persist tool_result after stopping MCP tool call"
+            );
+        }
 
         // 4. 立即移除已停止的 MCP 焦点
         if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {

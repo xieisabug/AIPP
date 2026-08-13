@@ -1,18 +1,207 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 
 use chrono::{DateTime, Utc};
-use regex;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::Emitter;
 
 use crate::{
     db::connection::params,
     db::conversation_db::{
-        ConversationDatabase, Message, MessageAttachment, MessageDetail, Repository,
+        ConversationDatabase, LargeMessagePreviewMetadata, Message, MessageAttachment,
+        MessageDetail, Repository,
     },
     errors::AppError,
     NameCacheState,
 };
+
+const LARGE_TOOL_RESULT_CHAR_THRESHOLD: usize = 12_000;
+const LARGE_TOOL_RESULT_LINE_THRESHOLD: usize = 240;
+const LARGE_MCP_PAYLOAD_CHAR_THRESHOLD: usize = 5_000;
+const LARGE_MESSAGE_PREVIEW_CHAR_LIMIT: usize = 5_000;
+const LARGE_MESSAGE_PREVIEW_LINE_LIMIT: usize = 40;
+
+static MCP_TOOL_CALL_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\:([\s\S]*?)-->")
+        .expect("valid MCP tool call comment regex")
+});
+static MCP_TOOL_CALL_XML_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)<mcp_tool_call[\s\S]*?</mcp_tool_call>")
+        .expect("valid MCP tool call XML regex")
+});
+
+#[derive(Debug, Clone)]
+struct McpToolCallPreviewInfo {
+    call_id: Option<String>,
+    tool_name: Option<String>,
+    payload_len: usize,
+}
+
+fn line_count(content: &str) -> usize {
+    if content.is_empty() {
+        1
+    } else {
+        content.as_bytes().iter().filter(|&&byte| byte == b'\n').count() + 1
+    }
+}
+
+fn char_count(content: &str) -> usize {
+    content.chars().count()
+}
+
+fn content_hash(content: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())))
+}
+
+fn slice_content_preview(content: &str) -> String {
+    content
+        .split('\n')
+        .take(LARGE_MESSAGE_PREVIEW_LINE_LIMIT)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .take(LARGE_MESSAGE_PREVIEW_CHAR_LIMIT)
+        .collect()
+}
+
+fn parse_mcp_tool_call_preview_info(segment_body: &str, segment_len: usize) -> McpToolCallPreviewInfo {
+    let Ok(parsed) = serde_json::from_str::<Value>(segment_body.trim()) else {
+        return McpToolCallPreviewInfo {
+            call_id: None,
+            tool_name: None,
+            payload_len: segment_len,
+        };
+    };
+
+    let payload_len = parsed
+        .get("parameters")
+        .map(|parameters| {
+            parameters
+                .as_str()
+                .map(char_count)
+                .unwrap_or_else(|| char_count(&parameters.to_string()))
+        })
+        .unwrap_or(segment_len);
+    let call_id = parsed.get("call_id").and_then(|value| {
+        value
+            .as_str()
+            .map(ToOwned::to_owned)
+            .or_else(|| value.as_i64().map(|id| id.to_string()))
+    });
+    let tool_name = parsed
+        .get("tool_name")
+        .or_else(|| parsed.get("name"))
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+
+    McpToolCallPreviewInfo {
+        call_id,
+        tool_name,
+        payload_len,
+    }
+}
+
+fn collect_mcp_tool_call_preview_info(content: &str) -> Vec<McpToolCallPreviewInfo> {
+    let mut infos = Vec::new();
+
+    for capture in MCP_TOOL_CALL_COMMENT_RE.captures_iter(content) {
+        let segment = capture.get(0).map(|value| value.as_str()).unwrap_or_default();
+        let body = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
+        infos.push(parse_mcp_tool_call_preview_info(body, char_count(segment)));
+    }
+
+    for segment in MCP_TOOL_CALL_XML_RE.find_iter(content) {
+        infos.push(McpToolCallPreviewInfo {
+            call_id: None,
+            tool_name: None,
+            payload_len: char_count(segment.as_str()),
+        });
+    }
+
+    infos
+}
+
+fn strip_mcp_tool_call_segments(content: &str) -> String {
+    let without_comments = MCP_TOOL_CALL_COMMENT_RE.replace_all(content, "");
+    MCP_TOOL_CALL_XML_RE
+        .replace_all(&without_comments, "")
+        .trim()
+        .to_string()
+}
+
+pub fn build_large_message_preview_metadata(
+    message_type: &str,
+    content: &str,
+) -> Option<LargeMessagePreviewMetadata> {
+    if message_type == "tool_result" {
+        let line_count = line_count(content);
+        let content_len = char_count(content);
+        let should_preview =
+            content_len > LARGE_TOOL_RESULT_CHAR_THRESHOLD
+            || line_count > LARGE_TOOL_RESULT_LINE_THRESHOLD;
+        if !should_preview {
+            return None;
+        }
+
+        return Some(LargeMessagePreviewMetadata {
+            line_count,
+            payload_char_count: content_len,
+            content_hash: content_hash(content),
+            reason: "tool_result".to_string(),
+            should_preview: true,
+            summary: "大型工具结果已折叠".to_string(),
+            preview_text: slice_content_preview(content),
+        });
+    }
+
+    if message_type != "response" {
+        return None;
+    }
+    if !content.contains("MCP_TOOL_CALL") && !content.contains("<mcp_tool_call") {
+        return None;
+    }
+
+    let largest_payload = collect_mcp_tool_call_preview_info(content)
+        .into_iter()
+        .max_by_key(|payload| payload.payload_len)?;
+    if largest_payload.payload_len < LARGE_MCP_PAYLOAD_CHAR_THRESHOLD {
+        return None;
+    }
+
+    let line_count = line_count(content);
+    let mut summary_parts = vec!["大型 MCP 工具调用已折叠".to_string()];
+    if let Some(tool_name) = largest_payload.tool_name.as_deref() {
+        summary_parts.push(format!("工具: {}", tool_name));
+    }
+    if let Some(call_id) = largest_payload.call_id.as_deref() {
+        summary_parts.push(format!("Call ID: {}", call_id));
+    }
+    let summary = summary_parts.join(" · ");
+    let visible_tail = strip_mcp_tool_call_segments(content);
+    let mut preview_parts = vec![
+        summary.clone(),
+        format!(
+            "参数约 {} 字符，完整内容可展开查看。",
+            largest_payload.payload_len
+        ),
+    ];
+    if !visible_tail.is_empty() {
+        preview_parts.push(String::new());
+        preview_parts.push(slice_content_preview(&visible_tail));
+    }
+
+    Some(LargeMessagePreviewMetadata {
+        line_count,
+        payload_char_count: largest_payload.payload_len,
+        content_hash: content_hash(content),
+        reason: "mcp_payload".to_string(),
+        should_preview: true,
+        summary,
+        preview_text: preview_parts.join("\n"),
+    })
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConversationSearchHit {
@@ -34,38 +223,62 @@ pub struct ConversationSearchHit {
 /// 此函数仅按时间排序并保证 reasoning 排在 response 之前。
 pub fn process_message_versions(message_details: Vec<MessageDetail>) -> Vec<MessageDetail> {
     let mut final_messages = message_details;
+    let mut group_sort_info: HashMap<(i64, String), (i64, bool, bool)> = HashMap::new();
+
+    for message in &final_messages {
+        let Some(group_id) = &message.generation_group_id else {
+            continue;
+        };
+        let info = group_sort_info
+            .entry((message_order_value(message), group_id.clone()))
+            .or_insert((message.id, false, false));
+        info.0 = info.0.min(message.id);
+        match message.message_type.as_str() {
+            "reasoning" => info.1 = true,
+            "response" => info.2 = true,
+            _ => {}
+        }
+    }
+
+    let sort_keys: HashMap<i64, (i64, i64, i64, i64)> = final_messages
+        .iter()
+        .map(|message| {
+            let time = message_order_value(message);
+            let paired_group_info = message
+                .generation_group_id
+                .as_ref()
+                .and_then(|group_id| group_sort_info.get(&(time, group_id.clone())))
+                .filter(|(_, has_reasoning, has_response)| *has_reasoning && *has_response);
+
+            let (group_order, type_rank) =
+                if let Some((group_min_id, _, _)) = paired_group_info {
+                    let rank = match message.message_type.as_str() {
+                        "reasoning" => 0,
+                        "response" => 1,
+                        _ => 2,
+                    };
+                    (*group_min_id, rank)
+                } else {
+                    (message.id, 0)
+                };
+
+            (message.id, (time, group_order, type_rank, message.id))
+        })
+        .collect();
 
     // 按消息时间顺序排序。只有在同一 generation_group_id 且时间完全相同的情况下，
     // 才用 reasoning -> response 作为兜底 tie-break，避免跨轮次按类型扎堆。
-    final_messages.sort_by(|a, b| {
-        let time_order = message_order_value(a).cmp(&message_order_value(b));
-        if time_order != std::cmp::Ordering::Equal {
-            return time_order;
-        }
-
-        if belongs_to_same_group(a, b) {
-            match (a.message_type.as_str(), b.message_type.as_str()) {
-                ("reasoning", "response") => return std::cmp::Ordering::Less,
-                ("response", "reasoning") => return std::cmp::Ordering::Greater,
-                _ => {}
-            }
-        }
-
-        a.id.cmp(&b.id)
+    final_messages.sort_by_key(|message| {
+        sort_keys
+            .get(&message.id)
+            .copied()
+            .unwrap_or_else(|| (message_order_value(message), message.id, 0, message.id))
     });
     final_messages
 }
 
 fn message_order_value(message: &MessageDetail) -> i64 {
     message.created_time.timestamp_millis()
-}
-
-/// 检查两条消息是否属于同一个 generation_group_id
-fn belongs_to_same_group(a: &MessageDetail, b: &MessageDetail) -> bool {
-    match (&a.generation_group_id, &b.generation_group_id) {
-        (Some(group_a), Some(group_b)) => group_a == group_b,
-        _ => false,
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -200,6 +413,7 @@ pub async fn create_conversation_with_messages(
 
     // 发送事件通知前端更新
     let _ = app_handle.emit("conversation_created", conversation.id);
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     // 更新助手名称缓存（确保UI显示正确）
     let mut assistant_name_cache = name_cache_state.assistant_names.lock().await;
@@ -287,6 +501,10 @@ pub async fn get_conversation_with_messages(
     // Second pass: Create MessageDetail with the collected attachments
     for (message_id, message) in message_map {
         let attachment_list = attachment_map.get(&message_id).cloned().unwrap_or_default();
+        let large_message_preview = build_large_message_preview_metadata(
+            &message.message_type,
+            &message.content,
+        );
         message_details.push(MessageDetail {
             id: message.id,
             parent_id: message.parent_id,
@@ -308,6 +526,7 @@ pub async fn get_conversation_with_messages(
             ttft_ms: message.ttft_ms,
             attachment_list,
             regenerate: Vec::new(),
+            large_message_preview,
         });
     }
     let process_duration = process_start.elapsed();
@@ -344,6 +563,7 @@ pub fn delete_conversation(
 
     // 发送删除事件通知前端更新列表
     let _ = app_handle.emit("conversation_deleted", conversation_id);
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(())
 }
@@ -365,6 +585,7 @@ pub fn update_conversation(
     db.conversation_repo().unwrap().update(&conversation).map_err(|e| e.to_string())?;
 
     let _ = app_handle.emit("title_change", (conversation_id, name));
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
 }
 
@@ -375,7 +596,9 @@ pub fn update_message_content(
     content: String,
 ) -> Result<(), String> {
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    db.message_repo().unwrap().update_content(message_id, &content).map_err(|e| e.to_string())
+    db.message_repo().unwrap().update_content(message_id, &content).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
+    Ok(())
 }
 
 #[tauri::command]
@@ -487,6 +710,7 @@ pub async fn fork_conversation(
         }
     }
 
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(created_conversation.id)
 }
 
@@ -528,6 +752,7 @@ pub async fn create_message(
     };
 
     let created_message = repo.create(&new_message).map_err(|e| e.to_string())?;
+    crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(created_message)
 }
 
@@ -561,6 +786,7 @@ pub async fn update_assistant_message(
             // Update finish time to mark when the update was completed
             repo.update_finish_time(message_id).map_err(|e| e.to_string())?;
 
+            crate::sync::schedule_sync_after_local_change(&app_handle);
             Ok(())
         }
         None => Err(format!("Message with ID {} not found", message_id)),

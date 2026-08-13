@@ -1,7 +1,6 @@
 import React, { useCallback } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
-import McpToolCall from '@/components/McpToolCall';
-import InlineCodePreviewCard from '@/components/InlineCodePreviewCard';
+import McpToolCallRenderer from '@/components/McpToolCallRenderer';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
 import { customUrlTransform } from '@/constants/markdown';
 import type { InlineInteractionItem } from '@/components/ConversationUI';
@@ -28,6 +27,8 @@ interface ToolCallData {
     parameters?: string;
     call_id?: number;
     llm_call_id?: string;
+    status?: MCPToolCallUpdateEvent["status"];
+    error?: string;
     isStreaming?: boolean;  // 流式工具调用（参数可能不完整）
     fn_arguments?: string;  // 流式工具调用的原始参数
     preview_state?: PreviewCodeStreamingState;
@@ -70,12 +71,25 @@ function normalizeToolCallData(raw: unknown): ToolCallData {
                 ? Number.parseInt(callIdRaw.trim(), 10)
                 : undefined;
     const llmCallIdRaw = value.llm_call_id;
+    const statusRaw = value.status;
+    const status =
+        statusRaw === "pending" ||
+            statusRaw === "executing" ||
+            statusRaw === "success" ||
+            statusRaw === "failed" ||
+            statusRaw === "unknown"
+            ? statusRaw
+            : undefined;
+    const setupError = typeof value.setup_error === "string" ? value.setup_error : undefined;
+    const error = typeof value.error === "string" ? value.error : setupError;
     return {
         server_name: typeof value.server_name === "string" ? value.server_name : undefined,
         tool_name: typeof value.tool_name === "string" ? value.tool_name : undefined,
         parameters: typeof value.parameters === "string" ? value.parameters : undefined,
         call_id: callId,
         llm_call_id: typeof llmCallIdRaw === "string" ? llmCallIdRaw : undefined,
+        status: status ?? (setupError ? "failed" : undefined),
+        error,
         fn_arguments: typeof value.fn_arguments === "string" ? value.fn_arguments : undefined,
         preview_state: parsePreviewCodeStreamingState(value.preview_state) ?? undefined,
     };
@@ -108,6 +122,28 @@ function parsePartialToolCallPayload(rawPayload: string): ToolCallData {
     const llmCallIdMatch = rawPayload.match(/"llm_call_id"\s*:\s*"((?:\\.|[^"\\])*)"/);
     if (llmCallIdMatch) {
         result.llm_call_id = decodeJsonString(llmCallIdMatch[1]);
+    }
+    const statusMatch = rawPayload.match(/"status"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (statusMatch) {
+        const status = decodeJsonString(statusMatch[1]);
+        if (
+            status === "pending" ||
+            status === "executing" ||
+            status === "success" ||
+            status === "failed" ||
+            status === "unknown"
+        ) {
+            result.status = status;
+        }
+    }
+    const errorMatch = rawPayload.match(/"error"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (errorMatch) {
+        result.error = decodeJsonString(errorMatch[1]);
+    }
+    const setupErrorMatch = rawPayload.match(/"setup_error"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (setupErrorMatch) {
+        result.status = result.status ?? "failed";
+        result.error = result.error ?? decodeJsonString(setupErrorMatch[1]);
     }
     const fnArgsMatch = rawPayload.match(/"fn_arguments"\s*:\s*"((?:\\.|[^"\\])*)"/);
     if (fnArgsMatch) {
@@ -400,15 +436,21 @@ function extractMcpToolCalls(content: string): ParsedMcpToolCallComment[] {
     return deduped;
 }
 
-function getPreviewCodeToolCallKey(
+function getMcpToolCallKey(
     data: ToolCallData,
     messageId: number | undefined,
     index: number,
 ): string {
     if (data.llm_call_id) {
-        return `mcp-preview-${data.llm_call_id}`;
+        return `mcp-call-${data.llm_call_id}`;
     }
-    return `mcp-preview-slot-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
+    if (data.call_id) {
+        return `mcp-call-${data.call_id}`;
+    }
+    if (data.isStreaming) {
+        return `mcp-stream-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
+    }
+    return `mcp-slot-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
 }
 
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
@@ -451,18 +493,6 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             );
         }
 
-        console.log(
-            "[MCP] detected MCP_TOOL_CALL comments",
-            mcpCalls.map((match) => ({
-                complete: match.complete,
-                call_id: match.data.call_id,
-                llm_call_id: match.data.llm_call_id,
-                server_name: match.data.server_name,
-                tool_name: match.data.tool_name,
-            })),
-            { conversationId, messageId },
-        );
-
         const renderedInlineKeys = new Set<string>();
 
         // 将注释替换为实际的 React 组件
@@ -491,45 +521,27 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加 MCP 工具调用组件
             // 只有最后一个工具调用在执行成功后才触发续写
             const isLastCall = index === mcpCalls.length - 1;
-            if (data.tool_name === "preview_code") {
-                const toolCallKey = getPreviewCodeToolCallKey(data, messageId, index);
-                parts.push(
-                    <InlineCodePreviewCard
-                        key={toolCallKey}
-                        parameters={data.parameters ?? "{}"}
-                        llmCallId={data.llm_call_id}
-                        conversationId={conversationId}
-                        messageId={messageId}
-                        callId={data.call_id}
-                        mcpToolCallStates={mcpToolCallStates}
-                        isStreaming={data.isStreaming}
-                        streamingPreviewState={data.preview_state}
-                        isLastMessage={isLastMessage}
-                    />
-                );
-            } else {
-                const toolCallKey = data.call_id
-                    ? `mcp-call-${data.call_id}`
-                    : data.isStreaming
-                      ? `mcp-stream-${messageId ?? "message"}-${index}-${data.server_name}-${data.tool_name}`
-                      : `mcp-${data.llm_call_id ?? `tmp-${index}-${match.start}`}`;
-                parts.push(
-                    <McpToolCall
-                        key={toolCallKey}
-                        serverName={data.server_name}
-                        toolName={data.tool_name}
-                        parameters={data.parameters ?? "{}"}
-                        llmCallId={data.llm_call_id}
-                        conversationId={conversationId}
-                        messageId={messageId}
-                        callId={data.call_id} // 传递 callId，如果存在的话
-                        mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
-                        shiningMcpCallId={shiningMcpCallId}
-                        isLastCall={isLastCall} // 是否是最后一个工具调用
-                        isStreaming={data.isStreaming} // 流式工具调用标记
-                    />
-                );
-            }
+            const toolCallKey = getMcpToolCallKey(data, messageId, index);
+            parts.push(
+                <McpToolCallRenderer
+                    key={toolCallKey}
+                    serverName={data.server_name}
+                    toolName={data.tool_name}
+                    parameters={data.parameters ?? "{}"}
+                    llmCallId={data.llm_call_id}
+                    status={data.status}
+                    error={data.error}
+                    conversationId={conversationId}
+                    messageId={messageId}
+                    callId={data.call_id} // 传递 callId，如果存在的话
+                    mcpToolCallStates={mcpToolCallStates} // 传递全局 MCP 状态
+                    shiningMcpCallId={shiningMcpCallId}
+                    isLastCall={isLastCall} // 是否是最后一个工具调用
+                    isStreaming={data.isStreaming} // 流式工具调用标记
+                    streamingPreviewState={data.preview_state}
+                    isLastMessage={isLastMessage}
+                />
+            );
 
             if (data.call_id && inlineInteractionItems && inlineInteractionItems.length > 0) {
                 const matchedInlineItems = inlineInteractionItems.filter(
@@ -587,6 +599,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         messageId,
         mcpToolCallStates,
         shiningMcpCallId,
+        isLastMessage,
         inlineInteractionItems,
     ]);
 

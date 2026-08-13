@@ -26,6 +26,10 @@ import { toast } from "sonner";
 import type { AssistantDetail, AssistantPrompt } from "@/data/Assistant";
 import type { ConversationWithMessages } from "@/data/Conversation";
 import { markdownRegistry, type MarkdownTagRegistration } from "./markdownRegistry";
+import {
+    mcpToolComponentRegistry,
+    type McpToolComponentRegistration,
+} from "./mcpToolComponentRegistry";
 
 type PluginConstructor = new () => AippPlugin | AippAssistantTypePlugin;
 
@@ -86,6 +90,15 @@ export interface PluginAssistantFormFieldContribution {
     options?: PluginSelectOption[];
 }
 
+export interface PluginMcpToolComponentContribution {
+    id: string;
+    title: string;
+    description?: string | null;
+    serverName?: string | null;
+    toolName?: string | null;
+    priority?: number | null;
+}
+
 export interface PluginContributions {
     hooks?: Array<{
         name: string;
@@ -99,6 +112,7 @@ export interface PluginContributions {
     actions?: PluginActionContribution[];
     slots?: PluginSlotContribution[];
     assistantFormFields?: PluginAssistantFormFieldContribution[];
+    mcpToolComponents?: PluginMcpToolComponentContribution[];
 }
 
 interface PluginDataItem {
@@ -208,6 +222,58 @@ interface PluginAppendMessageRequest {
 interface PluginUpdateMessageMetadataRequest {
     messageId: number;
     metadata?: unknown;
+}
+
+interface PluginComfyUiConnectionRequest {
+    baseUrl: string;
+}
+
+interface PluginComfyUiGenerateRequest {
+    baseUrl: string;
+    workflow: unknown;
+    prompt: string;
+    promptNodeId?: string;
+    promptInputName?: string;
+    conversationId: number;
+    messageId: number;
+}
+
+interface PluginComfyUiGenerateResult {
+    promptId: string;
+    attachmentId: number;
+    fileName: string;
+}
+
+interface PluginHttpRequestSpec {
+    method: string;
+    url: string;
+    headers?: Record<string, string>;
+    query?: Record<string, string>;
+    body?: unknown;
+}
+
+interface PluginImageTaskRequest {
+    create: PluginHttpRequestSpec;
+    poll: {
+        request: PluginHttpRequestSpec;
+        taskIdPath: string;
+        statusPath: string;
+        successValues?: string[];
+        failureValues?: string[];
+        resultPath: string;
+        resultUrlsPath?: string;
+        parseJsonString?: boolean;
+        intervalMs?: number;
+        timeoutMs?: number;
+    };
+    conversationId: number;
+    messageId: number;
+}
+
+interface PluginImageTaskResult {
+    taskId: string;
+    attachmentId: number;
+    fileName: string;
 }
 
 interface PluginDatabaseColumnSchema {
@@ -343,11 +409,13 @@ class PluginRuntime {
         if (forceReload) {
             this.plugins.forEach((loadedPlugin) => this.clearPluginThemesForPlugin(loadedPlugin.code));
             this.plugins.forEach((loadedPlugin) => this.clearMarkdownTagsForPlugin(loadedPlugin.code));
+            this.plugins.forEach((loadedPlugin) => this.clearMcpToolComponentsForPlugin(loadedPlugin.code));
             this.plugins.forEach((loadedPlugin) => this.clearHookHandlersForPlugin(loadedPlugin.code));
             this.plugins = [];
         }
         this.clearStalePluginThemes(activeCodes);
         this.clearStaleMarkdownTags(activeCodes);
+        this.clearStaleMcpToolComponents(activeCodes);
         this.clearStaleHookHandlers(activeCodes);
         this.startHookBridge();
 
@@ -499,6 +567,39 @@ class PluginRuntime {
             return normalizedValue;
         };
 
+        const comfyuiApi = {
+            testConnection: async (request: PluginComfyUiConnectionRequest) => {
+                this.assertPluginPermission(plugin, "network.comfyui");
+                await invoke("plugin_comfyui_test_connection", { pluginId, request });
+            },
+            generateAndAttach: async (request: PluginComfyUiGenerateRequest) => {
+                this.assertPluginPermission(plugin, "network.comfyui");
+                this.assertPluginPermission(plugin, "conversation.write");
+                return invoke<PluginComfyUiGenerateResult>("plugin_comfyui_generate_and_attach", { pluginId, request });
+            },
+        };
+
+        const imageGenerationApi = {
+            testConnection: async (request: { provider: string; baseUrl: string; apiKey?: string }) => {
+                if (request.provider !== "comfyui") {
+                    this.assertPluginPermission(plugin, "network.image-generation");
+                    if (!request.apiKey?.trim()) throw new Error("图片供应商 API Key 不能为空");
+                    const url = new URL(request.baseUrl);
+                    if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("图片供应商地址必须是无凭据的 http/https URL");
+                    return;
+                }
+                return comfyuiApi.testConnection({ baseUrl: request.baseUrl });
+            },
+            generateAndAttach: async (request: PluginComfyUiGenerateRequest & { provider: "comfyui" }) => {
+                return comfyuiApi.generateAndAttach(request);
+            },
+            executeTask: async (request: PluginImageTaskRequest) => {
+                this.assertPluginPermission(plugin, "network.image-generation");
+                this.assertPluginPermission(plugin, "conversation.write");
+                return invoke<PluginImageTaskResult>("plugin_execute_image_task", { pluginId, request });
+            },
+        };
+
         return {
             pluginId,
             pluginCode,
@@ -578,6 +679,25 @@ class PluginRuntime {
                         tagName: tag.tagName,
                         attributes: [...tag.attributes],
                         render: tag.render,
+                    })),
+            registerMcpToolComponent: (registration: McpToolComponentRegistration) => {
+                this.assertPluginPermission(plugin, "mcp.tool-component.register");
+                mcpToolComponentRegistry.register(plugin.code, registration);
+            },
+            unregisterMcpToolComponent: (componentId: string) => {
+                mcpToolComponentRegistry.unregister(plugin.code, componentId);
+            },
+            listMcpToolComponents: async () =>
+                mcpToolComponentRegistry
+                    .listComponents()
+                    .filter((component) => component.ownerCode === plugin.code)
+                    .map((component) => ({
+                        id: component.id,
+                        label: component.label,
+                        description: component.description,
+                        match: component.match.map((matcher) => ({ ...matcher })),
+                        priority: component.priority,
+                        render: component.render,
                     })),
             hooks: {
                 register: (hookName: string, handler: PluginHookHandler) => {
@@ -721,6 +841,8 @@ class PluginRuntime {
                     });
                 },
             },
+            comfyui: comfyuiApi,
+            imageGeneration: imageGenerationApi,
             getDisplayConfig: async () => this.getDisplayConfig(),
             applyTheme: async (themeId: string) => this.applyDisplayTheme(themeId),
             toast: {
@@ -838,6 +960,10 @@ class PluginRuntime {
         markdownRegistry.clearTagsForPlugin(pluginCode);
     }
 
+    private clearMcpToolComponentsForPlugin(pluginCode: string): void {
+        mcpToolComponentRegistry.clearForOwner(pluginCode);
+    }
+
     private clearStalePluginThemes(activePluginCodes: Set<string>): void {
         const staleThemeIds = [...this.pluginThemes.entries()]
             .filter(([, theme]) => !activePluginCodes.has(theme.ownerCode))
@@ -853,6 +979,10 @@ class PluginRuntime {
 
     private clearStaleMarkdownTags(activePluginCodes: Set<string>): void {
         markdownRegistry.clearStaleTags(activePluginCodes);
+    }
+
+    private clearStaleMcpToolComponents(activePluginCodes: Set<string>): void {
+        mcpToolComponentRegistry.clearStaleOwners(activePluginCodes);
     }
 
     private hookHandlerKey(pluginCode: string, hookName: string): string {

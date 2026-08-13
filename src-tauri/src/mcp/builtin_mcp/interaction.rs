@@ -18,6 +18,7 @@ type PreviewCodeDecision = Result<PreviewCodeResponse, String>;
 pub const PREVIEW_FILE_RELAY_SCHEME: &str = "aipp-preview";
 const PREVIEW_FILE_RELAY_TTL_SECS: u64 = 10 * 60;
 const PREVIEW_FILE_RELAY_MAX_BYTES: u64 = 20 * 1024 * 1024;
+const PREVIEW_CODE_RENDER_ERROR_GRACE_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskUserQuestionOption {
@@ -136,9 +137,6 @@ pub struct PreviewCodeRequest {
 
 impl PreviewCodeRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.title.trim().is_empty() {
-            return Err("PreviewCode title cannot be empty".to_string());
-        }
         if self.renderer.trim() != "html" {
             return Err(format!(
                 "Unsupported preview_code renderer '{}'; only 'html' is currently supported",
@@ -325,13 +323,58 @@ impl Default for PreviewFileRelayState {
     }
 }
 
-fn build_relay_error_response(status: StatusCode, message: &str) -> Response<Vec<u8>> {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(message.as_bytes().to_vec())
-        .unwrap_or_else(|_| Response::new(message.as_bytes().to_vec()))
+fn is_allowed_preview_relay_origin(origin: &str) -> bool {
+    let trimmed = origin.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(trimmed) else {
+        return false;
+    };
+    let host = url.host_str().map(|host| host.to_ascii_lowercase());
+    matches!(
+        (url.scheme(), host.as_deref()),
+        ("http" | "https", Some("localhost" | "127.0.0.1" | "::1" | "tauri.localhost"))
+            | ("tauri" | "app", Some("localhost"))
+    )
+}
+
+fn apply_preview_relay_cors_headers(
+    request: &Request<Vec<u8>>,
+    builder: tauri::http::response::Builder,
+) -> tauri::http::response::Builder {
+    let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| is_allowed_preview_relay_origin(value))
+    else {
+        return builder;
+    };
+
+    builder
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)
+        .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS")
+        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
+        .header(header::ACCESS_CONTROL_EXPOSE_HEADERS, "Content-Type, Cache-Control")
+        .header(header::VARY, "Origin")
+}
+
+fn build_relay_error_response(
+    request: &Request<Vec<u8>>,
+    status: StatusCode,
+    message: &str,
+) -> Response<Vec<u8>> {
+    apply_preview_relay_cors_headers(
+        request,
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-store"),
+    )
+    .body(message.as_bytes().to_vec())
+    .unwrap_or_else(|_| Response::new(message.as_bytes().to_vec()))
 }
 
 fn detect_relay_content_type(file_type: &str, file_path: &Path) -> String {
@@ -538,14 +581,26 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
     ctx: tauri::UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
+    if request.method() == tauri::http::Method::OPTIONS {
+        return apply_preview_relay_cors_headers(
+            &request,
+            Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .header(header::CACHE_CONTROL, "no-store"),
+        )
+        .body(Vec::new())
+        .unwrap_or_else(|_| Response::new(Vec::new()));
+    }
+
     let token =
         request.uri().path().trim_start_matches('/').split('/').next().unwrap_or_default().trim();
     if token.is_empty() {
-        return build_relay_error_response(StatusCode::BAD_REQUEST, "Missing preview relay token");
+        return build_relay_error_response(&request, StatusCode::BAD_REQUEST, "Missing preview relay token");
     }
 
     let Some(relay_state) = ctx.app_handle().try_state::<PreviewFileRelayState>() else {
         return build_relay_error_response(
+            &request,
             StatusCode::INTERNAL_SERVER_ERROR,
             "Preview relay state unavailable",
         );
@@ -555,17 +610,19 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
         Ok(Some(entry)) => entry,
         Ok(None) => {
             return build_relay_error_response(
+                &request,
                 StatusCode::NOT_FOUND,
                 "Preview relay token not found or expired",
             )
         }
-        Err(e) => return build_relay_error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        Err(e) => return build_relay_error_response(&request, StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
 
     let bytes = match std::fs::read(&entry.file_path) {
         Ok(bytes) => bytes,
         Err(e) => {
             return build_relay_error_response(
+                &request,
                 StatusCode::NOT_FOUND,
                 &format!("Failed to read preview file '{}': {}", entry.file_path.display(), e),
             )
@@ -585,13 +642,17 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
         "Serving preview relay file"
     );
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, "no-store")
+    apply_preview_relay_cors_headers(
+        &request,
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CACHE_CONTROL, "no-store"),
+    )
         .body(bytes)
         .unwrap_or_else(|_| {
             build_relay_error_response(
+                &request,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to build relay response",
             )
@@ -972,16 +1033,47 @@ pub async fn request_preview_code(
     let interaction_mode = event.interaction_mode.clone();
 
     if interaction_mode == "none" {
+        let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
+        interaction_state.store_preview_code_request(event.clone(), tx).await;
+        let mut cleanup_guard = PendingInteractionCleanup::new(
+            interaction_state,
+            request_id.clone(),
+            InteractionCleanupKind::PreviewCode,
+        );
+
         if let Err(e) = app_handle.emit("preview-code-request", &event) {
+            interaction_state.remove_preview_code_request(&request_id).await;
+            cleanup_guard.disarm();
             warn!(request_id = %request_id, error = %e, "Failed to emit preview-code-request");
             return Err("Failed to emit PreviewCode event".to_string());
         }
 
-        return Ok(PreviewCodeResponse {
-            status: "displayed".to_string(),
-            request_id,
-            payload: None,
-        });
+        match tokio::time::timeout(
+            Duration::from_millis(PREVIEW_CODE_RENDER_ERROR_GRACE_MS),
+            rx,
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                interaction_state.remove_preview_code_request(&request_id).await;
+                cleanup_guard.disarm();
+                return result;
+            }
+            Ok(Err(_)) => {
+                interaction_state.remove_preview_code_request(&request_id).await;
+                cleanup_guard.disarm();
+                return Err("PreviewCode request was cancelled".to_string());
+            }
+            Err(_) => {
+                interaction_state.remove_preview_code_request(&request_id).await;
+                cleanup_guard.disarm();
+                return Ok(PreviewCodeResponse {
+                    status: "displayed".to_string(),
+                    request_id,
+                    payload: None,
+                });
+            }
+        }
     }
 
     let (tx, rx) = oneshot::channel::<PreviewCodeDecision>();
@@ -1146,8 +1238,8 @@ pub async fn submit_preview_code_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        inline_local_text_preview_files, inline_text_file_content, resolve_local_file_path,
-        PreviewCodeRequest, PreviewFileItem,
+        inline_local_text_preview_files, inline_text_file_content, is_allowed_preview_relay_origin,
+        resolve_local_file_path, PreviewCodeRequest, PreviewFileItem,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1178,6 +1270,20 @@ mod tests {
         };
 
         assert_eq!(request.interaction_mode(), "none");
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn preview_code_request_allows_empty_title() {
+        let request = PreviewCodeRequest {
+            title: "".to_string(),
+            renderer: "html".to_string(),
+            code: "<div>Hello</div>".to_string(),
+            loading_messages: vec![],
+            interaction_mode: Some("none".to_string()),
+            metadata: None,
+        };
+
         assert!(request.validate().is_ok());
     }
 
@@ -1271,5 +1377,18 @@ mod tests {
     #[test]
     fn resolve_local_file_path_rejects_preview_relay_urls() {
         assert!(resolve_local_file_path("aipp-preview://localhost/token-123").is_none());
+    }
+
+    #[test]
+    fn preview_relay_origin_allows_localhost_and_tauri_origins() {
+        assert!(is_allowed_preview_relay_origin("http://localhost:3000"));
+        assert!(is_allowed_preview_relay_origin("https://127.0.0.1:1420"));
+        assert!(is_allowed_preview_relay_origin("http://tauri.localhost"));
+        assert!(is_allowed_preview_relay_origin("tauri://localhost"));
+        assert!(is_allowed_preview_relay_origin("app://localhost"));
+        assert!(!is_allowed_preview_relay_origin("https://example.com"));
+        assert!(!is_allowed_preview_relay_origin("http://localhost.evil.com"));
+        assert!(!is_allowed_preview_relay_origin("https://127.0.0.1.attacker.tld"));
+        assert!(!is_allowed_preview_relay_origin("http://tauri.localhost.evil.com"));
     }
 }

@@ -16,9 +16,11 @@ describe("displayConfigFormValues", () => {
             ["merge_assistant_messages", "disabled"],
             ["show_thinking", "disabled"],
             ["preview_code_show_toolbar", "enabled"],
+            ["mcp_tool_call_component_id", "builtin.default"],
         ]);
 
         expect(buildDisplayFormValues(config)).toEqual({
+            default_home_window: "ask",
             theme: "default",
             color_mode: "dark",
             user_message_markdown_render: "enabled",
@@ -28,13 +30,37 @@ describe("displayConfigFormValues", () => {
             merge_assistant_messages: false,
             show_thinking: false,
             preview_code_show_toolbar: true,
+            mcp_tool_call_component_id: "builtin.default",
         });
+    });
+
+    it("reads the default home window from experimental config", () => {
+        const displayConfig = new Map<string, string>();
+        const experimentalConfig = new Map<string, string>([
+            ["butler_experiment_enabled", "true"],
+            ["default_home_window", "butler_experiment"],
+        ]);
+
+        expect(buildDisplayFormValues(displayConfig, experimentalConfig).default_home_window)
+            .toBe("butler_experiment");
+    });
+
+    it("hides the butler home window value when butler mode is disabled", () => {
+        const displayConfig = new Map<string, string>();
+        const experimentalConfig = new Map<string, string>([
+            ["butler_experiment_enabled", "false"],
+            ["default_home_window", "butler_experiment"],
+        ]);
+
+        expect(buildDisplayFormValues(displayConfig, experimentalConfig).default_home_window)
+            .toBe("ask");
     });
 
     it("serializes display form switches back to persisted config values", () => {
         expect(
             serializeDisplayFormValues({
                 theme: "default",
+                default_home_window: "chat_ui",
                 color_mode: "system",
                 user_message_markdown_render: "enabled",
                 notification_on_completion: false,
@@ -43,6 +69,7 @@ describe("displayConfigFormValues", () => {
                 merge_assistant_messages: true,
                 show_thinking: false,
                 preview_code_show_toolbar: true,
+                mcp_tool_call_component_id: "auto",
             }),
         ).toEqual({
             theme: "default",
@@ -54,6 +81,7 @@ describe("displayConfigFormValues", () => {
             merge_assistant_messages: "enabled",
             show_thinking: "disabled",
             preview_code_show_toolbar: "enabled",
+            mcp_tool_call_component_id: "auto",
         });
     });
 });

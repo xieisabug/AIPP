@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
@@ -8,6 +8,10 @@ import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useFeishuDebugResend } from "@/hooks/useFeishuDebugResend";
+import {
+    LARGE_MESSAGE_PREVIEW_HEIGHT_ESTIMATE,
+    shouldUseLargeMessagePreview,
+} from "@/utils/largeMessagePreview";
 import { ShineBorder } from "../magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import MessageActionButtons from "../message-item/MessageActionButtons";
@@ -36,6 +40,7 @@ export interface UseMessageListElementsProps {
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
+    renderMessageActions?: (message: Message) => React.ReactNode;
 }
 
 export interface MessageElementEntry {
@@ -53,6 +58,17 @@ export interface RenderableConversationItem {
     estimatedHeight: number;
     element: React.ReactElement;
     virtualizationMode?: "virtualized" | "live";
+}
+
+export function findFirstLiveSuffixIndex(
+    items: Pick<RenderableConversationItem, "virtualizationMode">[],
+): number {
+    let index = items.length;
+    while (index > 0 && items[index - 1].virtualizationMode === "live") {
+        index -= 1;
+    }
+
+    return index < items.length ? index : -1;
 }
 
 function stripMcpToolCallMarkup(content: string): string {
@@ -155,8 +171,22 @@ function estimateMessageHeight(
     const tableRowCount = (content.match(/^\|.*\|$/gm) ?? []).length;
     const hasToolCall = mcpToolCallCount > 0;
 
+    if (
+        shouldUseLargeMessagePreview({
+            content: rawContent,
+            isLastMessage,
+            isStreaming: false,
+            messageType: message.message_type,
+            previewMetadata: message.large_message_preview,
+        })
+    ) {
+        return LARGE_MESSAGE_PREVIEW_HEIGHT_ESTIMATE;
+    }
+
+    const structureContributionCap =
+        lineCount > 240 || contentLength > 6000 ? 12000 : 5200;
     const structureContribution = Math.min(
-        5200,
+        structureContributionCap,
         Math.max(0, lineCount - 1) * 22
         + wrappedLineCount * 18
         + codeBlockCount * 240
@@ -226,6 +256,7 @@ export function useMessageListElements({
     onToggleReasoningExpand,
     inlineInteractionItems,
     allowFeishuDebugResend = false,
+    renderMessageActions,
 }: UseMessageListElementsProps) {
     const { isMergeAssistantMessages } = useDisplayConfig();
     const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
@@ -268,17 +299,72 @@ export function useMessageListElements({
                 : null,
         [allDisplayMessages],
     );
+    // 高度估算按消息缓存：流式输出时只有尾部消息内容在变，历史消息命中缓存，
+    // 避免每个 token 都对全部消息重跑重量级正则计算。
+    const estimatedHeightCacheRef = useRef<
+        Map<
+            number,
+            {
+                content: string;
+                messageType: string;
+                largePreview: Message["large_message_preview"];
+                isLast: boolean;
+                expanded: boolean;
+                height: number;
+            }
+        >
+    >(new Map());
     const estimatedHeightByMessageId = useMemo(() => {
-        return new Map(
-            allDisplayMessages.map((message) => [
-                message.id,
-                estimateMessageHeight(message, {
-                    isLastMessage: message.id === lastMessageId,
-                    isReasoningExpanded:
-                        reasoningExpandStates.get(message.id) || false,
-                }),
-            ] as const),
-        );
+        const previousCache = estimatedHeightCacheRef.current;
+        const nextCache = new Map<
+            number,
+            {
+                content: string;
+                messageType: string;
+                largePreview: Message["large_message_preview"];
+                isLast: boolean;
+                expanded: boolean;
+                height: number;
+            }
+        >();
+        const result = new Map<number, number>();
+
+        for (const message of allDisplayMessages) {
+            const content = message.content ?? "";
+            const isLast = message.id === lastMessageId;
+            const expanded = reasoningExpandStates.get(message.id) || false;
+            const cached = previousCache.get(message.id);
+
+            let height: number;
+            if (
+                cached
+                && cached.content === content
+                && cached.messageType === message.message_type
+                && cached.largePreview === message.large_message_preview
+                && cached.isLast === isLast
+                && cached.expanded === expanded
+            ) {
+                height = cached.height;
+            } else {
+                height = estimateMessageHeight(message, {
+                    isLastMessage: isLast,
+                    isReasoningExpanded: expanded,
+                });
+            }
+
+            result.set(message.id, height);
+            nextCache.set(message.id, {
+                content,
+                messageType: message.message_type,
+                largePreview: message.large_message_preview,
+                isLast,
+                expanded,
+                height,
+            });
+        }
+
+        estimatedHeightCacheRef.current = nextCache;
+        return result;
     }, [allDisplayMessages, lastMessageId, reasoningExpandStates]);
 
     const messageElements = useMemo(() => {
@@ -325,6 +411,7 @@ export function useMessageListElements({
                                 message.id,
                             )}
                             allowFeishuDebugResend={allowFeishuDebugResend}
+                            messageActions={renderMessageActions?.(message)}
                         />
                     ),
                     groupControl,
@@ -396,6 +483,7 @@ export function useMessageListElements({
                                             message.id,
                                         )}
                                         allowFeishuDebugResend={allowFeishuDebugResend}
+                                        messageActions={renderMessageActions?.(message)}
                                         mergedMode
                                     />
                                 );
@@ -434,6 +522,7 @@ export function useMessageListElements({
                                     }
                                     isResendToFeishuDebugPending={pendingMessageId === resendTargetMessage?.id}
                                     messageContent={toolbarMessage.content}
+                                    pluginActions={renderMessageActions?.(toolbarMessage)}
                                 />
                             );
                         })()}
@@ -528,6 +617,7 @@ export function useMessageListElements({
         isMergeAssistantMessages,
         pendingMessageId,
         resendMessageToFeishuDebug,
+        renderMessageActions,
     ]);
 
     const versionControlElements = useMemo(() => {

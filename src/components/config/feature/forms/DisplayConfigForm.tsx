@@ -7,16 +7,32 @@ import { toast } from "sonner";
 import { AVAILABLE_CODE_THEMES } from "@/hooks/useCodeTheme";
 import { useSyntectThemes } from "@/hooks/highlight/useSyntectThemes";
 import { pluginRuntime } from "@/services/PluginRuntime";
+import { ensureBuiltinMcpToolComponentsRegistered } from "@/services/builtinMcpToolComponents";
+import {
+    AUTO_MCP_TOOL_COMPONENT_ID,
+    DEFAULT_MCP_TOOL_COMPONENT_ID,
+    useMcpToolComponentRegistrySnapshot,
+} from "@/services/mcpToolComponentRegistry";
 
 interface DisplayConfigFormProps {
     form: UseFormReturn<any>;
     onSave: () => Promise<void>;
+    showButlerHomeWindow: boolean;
 }
 
-export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSave }) => {
+export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
+    form,
+    onSave,
+    showButlerHomeWindow,
+}) => {
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
+    const mcpToolComponents = useMcpToolComponentRegistrySnapshot();
     const [pluginThemeOptions, setPluginThemeOptions] = useState<Array<{ value: string; label: string }>>([]);
+
+    useEffect(() => {
+        ensureBuiltinMcpToolComponentsRegistered();
+    }, []);
 
     useEffect(() => {
         let disposed = false;
@@ -72,6 +88,39 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
         { value: "enabled", label: "开启" },
         { value: "disabled", label: "关闭" },
     ];
+
+    const mcpToolComponentOptions = useMemo(() => {
+        const optionMap = new Map<string, { value: string; label: string }>([
+            [AUTO_MCP_TOOL_COMPONENT_ID, { value: AUTO_MCP_TOOL_COMPONENT_ID, label: "自动匹配组件" }],
+            [DEFAULT_MCP_TOOL_COMPONENT_ID, { value: DEFAULT_MCP_TOOL_COMPONENT_ID, label: "默认工具调用组件" }],
+        ]);
+        mcpToolComponents.forEach((component) => {
+            optionMap.set(component.id, {
+                value: component.id,
+                label: component.ownerCode === "builtin"
+                    ? component.label
+                    : `${component.label} (${component.ownerCode})`,
+            });
+        });
+        return [...optionMap.values()];
+    }, [mcpToolComponents]);
+
+    const defaultHomeWindowOptions = useMemo(() => {
+        const options = [
+            { value: "ask", label: "Ask 悬浮窗" },
+            { value: "chat_ui", label: "Chat 主窗口" },
+        ];
+        if (showButlerHomeWindow) {
+            options.push({ value: "butler_experiment", label: "总管家实验窗口" });
+        }
+        return options;
+    }, [showButlerHomeWindow]);
+
+    useEffect(() => {
+        if (!showButlerHomeWindow && form.getValues("default_home_window") === "butler_experiment") {
+            form.setValue("default_home_window", "ask");
+        }
+    }, [form, showButlerHomeWindow]);
 
     const syntectThemeOptions = useMemo(() => {
         if (!themes || themes.length === 0) return null;
@@ -167,6 +216,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
                 merge_assistant_messages: values.merge_assistant_messages,
                 show_thinking: values.show_thinking,
                 preview_code_show_toolbar: values.preview_code_show_toolbar,
+                mcp_tool_call_component_id: values.mcp_tool_call_component_id,
             });
 
             toast.success("显示配置保存成功");
@@ -176,6 +226,15 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
     }, [form, onSave]);
 
     const DISPLAY_FORM_CONFIG = [
+        {
+            key: "default_home_window",
+            config: {
+                type: "select" as const,
+                label: "默认主页窗口",
+                options: defaultHomeWindowOptions,
+                tooltip: "影响应用启动、托盘点击和唤醒时默认打开的主窗口",
+            },
+        },
         {
             key: "theme",
             config: {
@@ -248,12 +307,21 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({ form, onSa
                 tooltip: "开启后，preview_code 组件显示标题、工具名称、文件类型和隐藏按钮",
             },
         },
+        {
+            key: "mcp_tool_call_component_id",
+            config: {
+                type: "select" as const,
+                label: "MCP工具调用组件",
+                options: mcpToolComponentOptions,
+                tooltip: "控制聊天中 MCP 工具调用卡片的视觉组件。自动匹配会优先使用为特定工具注册的组件，否则使用默认组件",
+            },
+        },
     ];
 
     return (
         <ConfigForm
             title="显示"
-            description="配置系统外观主题、深浅色模式和用户消息渲染方式"
+            description="配置默认主页窗口、系统外观主题、深浅色模式和用户消息渲染方式"
             config={DISPLAY_FORM_CONFIG}
             layout="default"
             classNames="bottom-space"

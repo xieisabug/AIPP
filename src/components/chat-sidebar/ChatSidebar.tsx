@@ -14,9 +14,11 @@ interface ChatSidebarProps {
     pluginList?: LoadedPlugin[];
     toggleRequestVersion?: number;
     className?: string;
+    focusedContextId?: string | null;
     onOpenWindow?: () => void;
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
+    onPreviewFileClick?: (item: ContextItem) => void;
     onExpandChange?: (isExpanded: boolean, width: number) => void;
 }
 
@@ -33,9 +35,11 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     pluginList = [],
     toggleRequestVersion,
     className,
+    focusedContextId,
     onOpenWindow,
     onArtifactClick,
     onContextClick,
+    onPreviewFileClick,
     onExpandChange,
 }) => {
     const [isExpanded, setIsExpanded] = useState(false);
@@ -81,6 +85,13 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
             setHasAutoExpanded(true);
         }
     }, [hasData, hasAutoExpanded, conversationId]);
+
+    // Auto-expand when a focus-context request arrives so the target item is visible.
+    useEffect(() => {
+        if (focusedContextId) {
+            setIsExpanded(true);
+        }
+    }, [focusedContextId]);
 
     // Handle resize drag
     const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -205,8 +216,10 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                             contextItems={contextItems}
                             pluginList={pluginList}
                             conversationId={conversationId}
+                            focusedContextId={focusedContextId}
                             onArtifactClick={onArtifactClick}
                             onContextClick={onContextClick}
+                            onPreviewFileClick={onPreviewFileClick}
                         />
                     </div>
                 </div>

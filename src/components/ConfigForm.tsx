@@ -5,7 +5,6 @@ import { Copy, Trash2, CircleHelp, ChevronDown, ChevronRight, Edit3 } from "luci
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Form, FormControl, FormItem, FormLabel, FormMessage } from "./ui/form";
 import { Button } from "./ui/button";
-import { Textarea } from "./ui/textarea";
 import { RadioGroup, RadioGroupItem } from "./ui/radio-group";
 import { Input } from "./ui/input";
 import { Checkbox } from "./ui/checkbox";
@@ -16,6 +15,7 @@ import { useFilteredModels } from "../hooks/useFilteredModels";
 import { useFilteredProviders } from "../hooks/useFilteredProviders";
 import { useMcpServers } from "../hooks/useMcpServers";
 import { FolderPicker } from "./config/FolderPicker";
+import ExpandableTextareaField from "./config/ExpandableTextareaField";
 
 interface ConfigFieldButton {
     text: string;
@@ -286,11 +286,12 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                     );
                 case "textarea":
                     return (
-                        <Textarea
-                            className={`focus:ring-ring/20 focus:border-ring ${field.className || ""}`}
-                            disabled={field.disabled}
+                        <ExpandableTextareaField
+                            label={field.label}
+                            className={field.className}
                             placeholder={field.placeholder}
-                            {...fieldRenderData}
+                            disabled={field.disabled}
+                            fieldRenderData={fieldRenderData}
                         />
                     );
                 case "input":

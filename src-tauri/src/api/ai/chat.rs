@@ -1,5 +1,7 @@
 use crate::api::ai::config::{calculate_retry_delay, get_retry_attempts_from_config};
-use crate::api::ai::events::{ConversationEvent, MessageAddEvent, MessageUpdateEvent};
+use crate::api::ai::events::{
+    ConversationEvent, ConversationListActivityEvent, MessageAddEvent, MessageUpdateEvent,
+};
 use crate::api::ai::title::{
     maybe_generate_title_from_conversation_if_needed, spawn_title_generation,
 };
@@ -17,7 +19,10 @@ use crate::errors::AppError;
 use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
-use crate::utils::window_utils::send_error_to_appropriate_window;
+use crate::utils::window_utils::{
+    emit_conversation_list_activity, send_conversation_event_to_chat_windows,
+    send_error_to_appropriate_window,
+};
 use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
@@ -27,7 +32,7 @@ use scraper::{Html, Selector};
 use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -418,7 +423,7 @@ fn emit_message_add_event(
         })
         .unwrap(),
     };
-    window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event)?;
+    send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, add_event);
     Ok(())
 }
 
@@ -628,7 +633,7 @@ fn persist_and_emit_update(
         })
         .unwrap(),
     };
-    window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event)?;
+    send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, update_event);
 
     Ok(())
 }
@@ -1170,6 +1175,30 @@ mod tests {
     }
 
     #[test]
+    fn test_native_tool_call_setup_error_hint_reconstructs_tool_call() {
+        let hint = build_native_tool_call_hint(
+            "default",
+            "todo_write",
+            r#"{"todos":[]}"#,
+            None,
+            "call_setup_failed",
+            Some("服务器 'default' 未找到或已禁用"),
+        );
+
+        assert!(hint.contains("\"status\":\"failed\""));
+        assert!(hint.contains("\"error\""));
+        let message =
+            crate::api::ai::conversation::reconstruct_assistant_with_tool_calls_from_content(&hint)
+                .unwrap();
+        let tool_calls = message.content.tool_calls();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].call_id, "call_setup_failed");
+        assert_eq!(tool_calls[0].fn_name, "default__todo_write");
+        assert_eq!(tool_calls[0].fn_arguments, serde_json::json!({"todos": []}));
+    }
+
+    #[test]
     fn test_build_streaming_tool_call_display_partial_arguments() {
         let mapping = ToolNameMapping::new();
         let mut tool_calls = HashMap::new();
@@ -1478,8 +1507,9 @@ async fn handle_captured_tool_calls_common(
                         })
                         .unwrap(),
                     };
-                    let _ = window.emit(
-                        format!("conversation_event_{}", conversation_id).as_str(),
+                    send_conversation_event_to_chat_windows(
+                        window.app_handle(),
+                        conversation_id,
                         update_event,
                     );
                 }
@@ -1569,8 +1599,9 @@ async fn handle_captured_tool_calls_common(
                             "response_message_id": response_message_id
                         }
                     });
-                    let _ = window.emit(
-                        format!("conversation_event_{}", conversation_id).as_str(),
+                    send_conversation_event_to_chat_windows(
+                        window.app_handle(),
+                        conversation_id,
                         ConversationEvent {
                             r#type: "tool_call".to_string(),
                             data: tool_call_event["data"].clone(),
@@ -1584,6 +1615,175 @@ async fn handle_captured_tool_calls_common(
         }
     }
 
+    Ok(())
+}
+
+fn build_native_tool_call_hint(
+    server_name: &str,
+    tool_name: &str,
+    parameters: &str,
+    call_id: Option<i64>,
+    llm_call_id: &str,
+    error: Option<&str>,
+) -> String {
+    let mut payload = serde_json::json!({
+        "server_name": server_name,
+        "tool_name": tool_name,
+        "parameters": parameters,
+        "llm_call_id": llm_call_id,
+    });
+    if let Some(call_id) = call_id {
+        payload["call_id"] = serde_json::json!(call_id);
+    }
+    if let Some(error) = error {
+        payload["status"] = serde_json::json!("failed");
+        payload["error"] = serde_json::json!(error);
+    }
+    format!("\n\n<!-- MCP_TOOL_CALL:{} -->\n", payload)
+}
+
+fn persist_captured_tool_call_response(
+    conversation_db: &ConversationDatabase,
+    response_message_id: i64,
+    response_content: &str,
+    captured_tool_calls: &[genai::chat::ToolCall],
+) -> anyhow::Result<()> {
+    if let Some(mut msg) = conversation_db
+        .message_repo()
+        .context("failed to get message_repo for read")?
+        .read(response_message_id)?
+    {
+        msg.content = response_content.to_string();
+        msg.tool_calls_json = serde_json::to_string(captured_tool_calls).ok();
+        conversation_db
+            .message_repo()
+            .context("failed to get message_repo for update")?
+            .update(&msg)?;
+    }
+    Ok(())
+}
+
+async fn create_native_tool_setup_error_result(
+    app_handle: &tauri::AppHandle,
+    conversation_db: &ConversationDatabase,
+    window: &tauri::Window,
+    conversation_id: i64,
+    response_message_id: i64,
+    server_name: &str,
+    tool_name: &str,
+    parameters: &str,
+    llm_call_id: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let response_message = conversation_db
+        .message_repo()
+        .context("failed to get message_repo")?
+        .read(response_message_id)?
+        .ok_or_else(|| anyhow::anyhow!("response message {} not found", response_message_id))?;
+    let now = chrono::Utc::now();
+    let result_content = format!(
+        "Tool execution completed:\n\nTool Call ID: {}\nTool: {}\nServer: {}\nParameters: {}\nResult:\nError: {}",
+        llm_call_id, tool_name, server_name, parameters, error
+    );
+
+    let existing_messages = conversation_db
+        .message_repo()
+        .context("failed to get message_repo")?
+        .list_by_conversation_id(conversation_id)?;
+    let existing_tool_result = existing_messages
+        .into_iter()
+        .filter(|(message, _)| message.message_type == "tool_result")
+        .filter_map(|(message, _)| {
+            crate::api::ai::conversation::extract_tool_call_id(&message.content)
+                .filter(|existing_call_id| existing_call_id == llm_call_id)
+                .map(|_| message)
+        })
+        .max_by_key(|message| message.id);
+
+    let tool_result_message = if let Some(mut existing_message) = existing_tool_result {
+        existing_message.content = result_content.clone();
+        existing_message.finish_time = Some(now);
+        if existing_message.start_time.is_none() {
+            existing_message.start_time = Some(now);
+        }
+        conversation_db
+            .message_repo()
+            .context("failed to update tool_result message")?
+            .update(&existing_message)?;
+        existing_message
+    } else {
+        let tool_result_message = crate::api::ai_api::add_message(
+            app_handle,
+            None,
+            conversation_id,
+            "tool_result".to_string(),
+            result_content.clone(),
+            response_message.llm_model_id,
+            response_message.llm_model_name.clone(),
+            Some(now),
+            Some(now),
+            0,
+            response_message.generation_group_id.clone(),
+            None,
+        )
+        .map_err(|error| anyhow::anyhow!("创建工具错误结果消息失败: {}", error))?;
+
+        let add_event = ConversationEvent {
+            r#type: "message_add".to_string(),
+            data: serde_json::to_value(MessageAddEvent {
+                message_id: tool_result_message.id,
+                message_type: "tool_result".to_string(),
+            })
+            .unwrap(),
+        };
+        send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, add_event);
+        tool_result_message
+    };
+
+    let update_event = ConversationEvent {
+        r#type: "message_update".to_string(),
+        data: serde_json::to_value(MessageUpdateEvent {
+            message_id: tool_result_message.id,
+            message_type: "tool_result".to_string(),
+            content: result_content,
+            is_done: true,
+            token_count: None,
+            input_token_count: None,
+            output_token_count: None,
+            ttft_ms: None,
+            tps: None,
+        })
+        .unwrap(),
+    };
+    send_conversation_event_to_chat_windows(window.app_handle(), conversation_id, update_event);
+
+    Ok(())
+}
+
+async fn trigger_continuation_for_setup_error_results(
+    app_handle: &tauri::AppHandle,
+    conversation_db: &ConversationDatabase,
+    window: &tauri::Window,
+    conversation_id: i64,
+) -> anyhow::Result<()> {
+    let conversation = conversation_db
+        .conversation_repo()
+        .context("failed to get conversation_repo")?
+        .read(conversation_id)?
+        .ok_or_else(|| anyhow::anyhow!("conversation {} not found", conversation_id))?;
+    let assistant_id = conversation
+        .assistant_id
+        .ok_or_else(|| anyhow::anyhow!("对话未关联助手"))?;
+    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+    crate::api::ai_api::batch_tool_result_continue_ask_ai_impl(
+        app_handle.clone(),
+        feature_config_state,
+        window.clone(),
+        conversation_id,
+        assistant_id,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("工具创建失败结果续写失败: {}", error))?;
     Ok(())
 }
 
@@ -1601,10 +1801,11 @@ async fn setup_captured_tool_calls(
     response_content: &mut String,
     mcp_override_config: Option<&crate::api::ai::types::McpOverrideConfig>,
     tool_name_mapping: &ToolNameMapping,
-) -> anyhow::Result<(Vec<i64>, Vec<i64>)> {
+) -> anyhow::Result<(Vec<i64>, Vec<i64>, usize)> {
     // 第一步：为所有工具调用创建 DB 记录和 UI hints（保持原有顺序）
     let mut all_tool_call_ids = Vec::new();
     let mut tool_call_records: Vec<(i64, String, String)> = Vec::new(); // (id, server_name, tool_name)
+    let mut setup_error_result_count = 0usize;
 
     for tool_call in captured_tool_calls {
         // 使用映射表还原原始名称，用于 UI 显示和数据库记录
@@ -1646,34 +1847,55 @@ async fn setup_captured_tool_calls(
                 all_tool_call_ids.push(tool_call_record.id);
 
                 // 追加 UI hint（使用原始名称）
-                let ui_hint = format!(
-                    "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
-                    serde_json::json!({
-                        "server_name": server_name,
-                        "tool_name": tool_name,
-                        "parameters": params_str,
-                        "call_id": tool_call_record.id,
-                        "llm_call_id": tool_call.call_id.clone(),
-                    })
+                let ui_hint = build_native_tool_call_hint(
+                    &server_name,
+                    &tool_name,
+                    &params_str,
+                    Some(tool_call_record.id),
+                    &tool_call.call_id,
+                    None,
                 );
                 response_content.push_str(&ui_hint);
 
                 // 持久化内容
-                if let Ok(Some(mut msg)) = conversation_db
-                    .message_repo()
-                    .context("failed to get message_repo for read")?
-                    .read(response_message_id)
-                {
-                    msg.content = response_content.clone();
-                    msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
-                    let _ = conversation_db
-                        .message_repo()
-                        .context("failed to get message_repo for update")?
-                        .update(&msg);
-                }
+                persist_captured_tool_call_response(
+                    conversation_db,
+                    response_message_id,
+                    response_content,
+                    captured_tool_calls,
+                )?;
             }
             Err(e) => {
                 warn!(error = %e, "failed to create MCP tool call record");
+                let ui_hint = build_native_tool_call_hint(
+                    &server_name,
+                    &tool_name,
+                    &params_str,
+                    None,
+                    &tool_call.call_id,
+                    Some(&e),
+                );
+                response_content.push_str(&ui_hint);
+                persist_captured_tool_call_response(
+                    conversation_db,
+                    response_message_id,
+                    response_content,
+                    captured_tool_calls,
+                )?;
+                create_native_tool_setup_error_result(
+                    app_handle,
+                    conversation_db,
+                    window,
+                    conversation_id,
+                    response_message_id,
+                    &server_name,
+                    &tool_name,
+                    &params_str,
+                    &tool_call.call_id,
+                    &e,
+                )
+                .await?;
+                setup_error_result_count += 1;
             }
         }
     }
@@ -1727,7 +1949,7 @@ async fn setup_captured_tool_calls(
         }
     }
 
-    Ok((all_tool_call_ids, auto_run_ids))
+    Ok((all_tool_call_ids, auto_run_ids, setup_error_result_count))
 }
 
 /// 并发执行指定的 auto-run 工具调用，并触发后续续写。
@@ -1795,10 +2017,10 @@ async fn handle_captured_tool_calls_concurrent(
     response_content: &mut String,
     mcp_override_config: Option<&crate::api::ai::types::McpOverrideConfig>,
     tool_name_mapping: &ToolNameMapping,
-) -> anyhow::Result<(Vec<i64>, Vec<i64>)> {
+) -> anyhow::Result<(Vec<i64>, Vec<i64>, usize)> {
     use futures::future::join_all;
 
-    let (all_ids, auto_run_ids) = setup_captured_tool_calls(
+    let (all_ids, auto_run_ids, setup_error_result_count) = setup_captured_tool_calls(
         app_handle,
         conversation_db,
         window,
@@ -1841,7 +2063,7 @@ async fn handle_captured_tool_calls_concurrent(
         }
     }
 
-    Ok((all_ids, auto_run_ids))
+    Ok((all_ids, auto_run_ids, setup_error_result_count))
 }
 
 /// 助手提及信息
@@ -2940,9 +3162,9 @@ async fn attempt_stream_chat(
                                                 "conversation_id": conversation_id
                                             }
                                         });
-                                        let _ = window.emit(
-                                            format!("conversation_event_{}", conversation_id)
-                                                .as_str(),
+                                        send_conversation_event_to_chat_windows(
+                                            window.app_handle(),
+                                            conversation_id,
                                             ConversationEvent {
                                                 r#type: "group_merge".to_string(),
                                                 data: group_merge_event["data"].clone(),
@@ -3139,8 +3361,9 @@ async fn attempt_stream_chat(
                                 })
                                 .unwrap(),
                             };
-                            let _ = window.emit(
-                                format!("conversation_event_{}", conversation_id).as_str(),
+                            send_conversation_event_to_chat_windows(
+                                window.app_handle(),
+                                conversation_id,
                                 update_event,
                             );
                         }
@@ -3230,9 +3453,9 @@ async fn attempt_stream_chat(
                                                 "conversation_id": conversation_id
                                             }
                                         });
-                                        let _ = window.emit(
-                                            format!("conversation_event_{}", conversation_id)
-                                                .as_str(),
+                                        send_conversation_event_to_chat_windows(
+                                            window.app_handle(),
+                                            conversation_id,
                                             ConversationEvent {
                                                 r#type: "group_merge".to_string(),
                                                 data: group_merge_event["data"].clone(),
@@ -3398,12 +3621,9 @@ async fn attempt_stream_chat(
                                                         )
                                                         .unwrap(),
                                                     };
-                                                    let _ = window.emit(
-                                                        format!(
-                                                            "conversation_event_{}",
-                                                            conversation_id
-                                                        )
-                                                        .as_str(),
+                                                    send_conversation_event_to_chat_windows(
+                                                        window.app_handle(),
+                                                        conversation_id,
                                                         update_event,
                                                     );
                                                 }
@@ -3506,7 +3726,8 @@ async fn attempt_stream_chat(
                             }
                             if let Some(msg_id) = response_message_id {
                                 // Setup only: create DB records + UI hints + determine auto-run IDs (fast)
-                                if let Ok((_all_ids, exec_ids)) = setup_captured_tool_calls(
+                                if let Ok((_all_ids, exec_ids, setup_error_result_count)) =
+                                    setup_captured_tool_calls(
                                     &app_handle,
                                     &conversation_db,
                                     &window,
@@ -3550,6 +3771,22 @@ async fn attempt_stream_chat(
                                                 .await;
                                             });
                                         });
+                                    } else if setup_error_result_count > 0 {
+                                        debug!(
+                                            setup_error_result_count,
+                                            "triggering continuation after native tool setup errors"
+                                        );
+                                        if let Err(e) =
+                                            trigger_continuation_for_setup_error_results(
+                                                &app_handle,
+                                                &conversation_db,
+                                                &window,
+                                                conversation_id,
+                                            )
+                                            .await
+                                        {
+                                            warn!(error = %e, "failed to continue after native tool setup errors");
+                                        }
                                     } else {
                                         debug!("no exec_ids, skipping batch continuation");
                                     }
@@ -3707,9 +3944,18 @@ async fn attempt_stream_chat(
                                 "reasoning_length": reasoning_content.len(),
                             }),
                         };
-                        let _ = window.emit(
-                            format!("conversation_event_{}", conversation_id).as_str(),
+                        send_conversation_event_to_chat_windows(
+                            &app_handle,
+                            conversation_id,
                             stream_complete_event,
+                        );
+                        emit_conversation_list_activity(
+                            &app_handle,
+                            ConversationListActivityEvent {
+                                conversation_id,
+                                kind: "stream_complete".to_string(),
+                                is_running: None,
+                            },
                         );
 
                         if try_dispatch_queued_message_after_completion(
@@ -3803,8 +4049,11 @@ async fn create_error_message(
             })
             .unwrap(),
         };
-        let _ =
-            window.emit(format!("conversation_event_{}", conversation_id).as_str(), error_event);
+        send_conversation_event_to_chat_windows(
+            window.app_handle(),
+            conversation_id,
+            error_event,
+        );
 
         let update_event = ConversationEvent {
             r#type: "message_update".to_string(),
@@ -3821,8 +4070,11 @@ async fn create_error_message(
             })
             .unwrap(),
         };
-        let _ =
-            window.emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+        send_conversation_event_to_chat_windows(
+            window.app_handle(),
+            conversation_id,
+            update_event,
+        );
     }
 }
 
@@ -4108,8 +4360,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ =
-                window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                add_event,
+            );
 
             // 立即发送一个 is_done: false 的 message_update 事件，触发前端清理用户消息的 shine-border
             // 这与流式模式的行为保持一致
@@ -4128,8 +4383,9 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window.emit(
-                format!("conversation_event_{}", conversation_id).as_str(),
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
                 initial_update_event,
             );
 
@@ -4141,7 +4397,8 @@ pub async fn handle_non_stream_chat(
                 debug!(tool_calls_count = tool_calls.len(), "non stream captured tool calls count");
 
                 // 使用并发处理函数，返回 (所有工具ID, 需要执行的工具ID)
-                if let Ok((_all_ids, exec_ids)) = handle_captured_tool_calls_concurrent(
+                if let Ok((_all_ids, exec_ids, setup_error_result_count)) =
+                    handle_captured_tool_calls_concurrent(
                     app_handle,
                     conversation_db,
                     window,
@@ -4174,6 +4431,21 @@ pub async fn handle_non_stream_chat(
                             .await
                         {
                             warn!(error = %e, "batch continuation failed after non-stream concurrent tool execution");
+                        }
+                    } else if setup_error_result_count > 0 {
+                        debug!(
+                            setup_error_result_count,
+                            "triggering batch continuation after non-stream native tool setup errors"
+                        );
+                        if let Err(e) = trigger_continuation_for_setup_error_results(
+                            app_handle,
+                            conversation_db,
+                            window,
+                            conversation_id,
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "failed to continue after non-stream native tool setup errors");
                         }
                     } else {
                         debug!("no exec_ids in non-stream, skipping batch continuation");
@@ -4233,8 +4505,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                update_event,
+            );
 
             if need_generate_title && !content.is_empty() {
                 spawn_title_generation(
@@ -4345,8 +4620,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), error_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                error_event,
+            );
 
             let update_event = ConversationEvent {
                 r#type: "message_update".to_string(),
@@ -4363,8 +4641,11 @@ pub async fn handle_non_stream_chat(
                 })
                 .unwrap(),
             };
-            let _ = window
-                .emit(format!("conversation_event_{}", conversation_id).as_str(), update_event);
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                update_event,
+            );
             emit_chat_error_hook(
                 app_handle,
                 conversation_id,

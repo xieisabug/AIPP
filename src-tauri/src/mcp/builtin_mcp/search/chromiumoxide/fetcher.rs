@@ -22,6 +22,7 @@ use tracing::{debug, error, info, trace, warn};
 const DEBUG_SAVE_HTML: bool = false;
 /// 调试HTML保存目录
 const DEBUG_HTML_DIR: &str = "~/tmp";
+const PAGE_STATE_CAPTURE_TIMEOUT_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
@@ -342,13 +343,24 @@ impl ContentFetcher {
     }
 
     async fn capture_page_state(&self, page: &chromiumoxide::page::Page) -> Value {
-        page.evaluate(
-            "() => ({ url: window.location.href, title: document.title, readyState: document.readyState, bodyChildren: document.body ? document.body.children.length : 0, bodyLength: document.body ? document.body.innerHTML.length : 0 })",
+        match timeout(
+            Duration::from_millis(PAGE_STATE_CAPTURE_TIMEOUT_MS),
+            page.evaluate(
+                "() => ({ url: window.location.href, title: document.title, readyState: document.readyState, bodyChildren: document.body ? document.body.children.length : 0, bodyLength: document.body ? document.body.innerHTML.length : 0 })",
+            ),
         )
         .await
-        .ok()
-        .and_then(|val| val.value().cloned())
-        .unwrap_or_default()
+        {
+            Ok(Ok(value)) => value.value().cloned().unwrap_or_default(),
+            Ok(Err(error)) => json!({
+                "diagnostic_error": "page_state_capture_failed",
+                "error": error.to_string(),
+            }),
+            Err(_) => json!({
+                "diagnostic_error": "page_state_capture_timeout",
+                "timeout_ms": PAGE_STATE_CAPTURE_TIMEOUT_MS,
+            }),
+        }
     }
 
     /// 应用指纹配置到页面级别
@@ -2063,33 +2075,37 @@ impl ContentFetcher {
             let pooled_page = pool.acquire_page().await?;
             let page = pooled_page.page();
 
-            let result = async {
-                let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+            let result = tokio::select! {
+                result = async {
+                    let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
-                // 注入反检测脚本
-                self.inject_anti_detection_scripts(page).await?;
+                    // 注入反检测脚本
+                    self.inject_anti_detection_scripts(page).await?;
 
-                // 应用指纹配置和HTTP头
-                self.apply_fingerprint_overrides(page, &fingerprint).await?;
-                self.set_page_http_headers(page, &fingerprint).await?;
+                    // 应用指纹配置和HTTP头
+                    self.apply_fingerprint_overrides(page, &fingerprint).await?;
+                    self.set_page_http_headers(page, &fingerprint).await?;
 
-                // 执行搜索流程（使用人性化的延时）
-                let html = self.perform_humanized_search(page, query, search_engine).await?;
+                    // 执行搜索流程（使用人性化的延时）
+                    let html = self.perform_humanized_search(page, query, search_engine).await?;
 
-                if html.trim().is_empty() {
-                    warn!(
-                        stage = "search_flow_pooled",
-                        engine = search_engine.as_str(),
-                        %query,
-                        bytes = html.len(),
-                        "Empty HTML from search flow (pooled)"
-                    );
-                    return Err("Empty HTML from search flow (pooled)".to_string());
+                    if html.trim().is_empty() {
+                        warn!(
+                            stage = "search_flow_pooled",
+                            engine = search_engine.as_str(),
+                            %query,
+                            bytes = html.len(),
+                            "Empty HTML from search flow (pooled)"
+                        );
+                        return Err("Empty HTML from search flow (pooled)".to_string());
+                    }
+
+                    Ok(html)
+                } => result,
+                _ = pool.wait_until_stale() => {
+                    Err("Chromium browser WebSocket connection closed".to_string())
                 }
-
-                Ok(html)
-            }
-            .await;
+            };
 
             match result {
                 Ok(html) => {
@@ -2303,45 +2319,49 @@ impl ContentFetcher {
             let pooled_page = pool.acquire_page().await?;
             let page = pooled_page.page();
 
-            let result = async {
-                let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
+            let result = tokio::select! {
+                result = async {
+                    let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
-                // 注入反检测脚本
-                self.inject_anti_detection_scripts(page).await?;
+                    // 注入反检测脚本
+                    self.inject_anti_detection_scripts(page).await?;
 
-                // 应用指纹配置和HTTP头
-                self.apply_fingerprint_overrides(page, &fingerprint).await?;
-                self.set_page_http_headers(page, &fingerprint).await?;
+                    // 应用指纹配置和HTTP头
+                    self.apply_fingerprint_overrides(page, &fingerprint).await?;
+                    self.set_page_http_headers(page, &fingerprint).await?;
 
-                // 直接导航到搜索结果页面
-                self.goto_with_timeout(page, search_url, "kagi_session_search_pooled").await?;
+                    // 直接导航到搜索结果页面
+                    self.goto_with_timeout(page, search_url, "kagi_session_search_pooled").await?;
 
-                // 等待 Kagi 搜索结果加载
-                let kagi_selectors =
-                    super::super::engines::kagi::KagiEngine::default_wait_selectors();
-                self.wait_for_results_with_selectors(page, &kagi_selectors).await?;
+                    // 等待 Kagi 搜索结果加载
+                    let kagi_selectors =
+                        super::super::engines::kagi::KagiEngine::default_wait_selectors();
+                    self.wait_for_results_with_selectors(page, &kagi_selectors).await?;
 
-                // 提取 HTML
-                let html = page
-                    .content()
-                    .await
-                    .map_err(|e| format!("Failed to get page content: {}", e))?;
+                    // 提取 HTML
+                    let html = page
+                        .content()
+                        .await
+                        .map_err(|e| format!("Failed to get page content: {}", e))?;
 
-                if html.trim().is_empty() {
-                    let page_state = self.capture_page_state(page).await;
-                    warn!(
-                        stage = "kagi_session_search_pooled",
-                        %search_url,
-                        bytes = html.len(),
-                        ?page_state,
-                        "Empty HTML from Kagi session URL search"
-                    );
-                    return Err("Empty HTML from Kagi session URL search".to_string());
+                    if html.trim().is_empty() {
+                        let page_state = self.capture_page_state(page).await;
+                        warn!(
+                            stage = "kagi_session_search_pooled",
+                            %search_url,
+                            bytes = html.len(),
+                            ?page_state,
+                            "Empty HTML from Kagi session URL search"
+                        );
+                        return Err("Empty HTML from Kagi session URL search".to_string());
+                    }
+
+                    Ok(html)
+                } => result,
+                _ = pool.wait_until_stale() => {
+                    Err("Chromium browser WebSocket connection closed".to_string())
                 }
-
-                Ok(html)
-            }
-            .await;
+            };
 
             match result {
                 Ok(html) => {

@@ -237,7 +237,7 @@ fn build_user_message_with_attachments(
     ChatMessage::user(parts)
 }
 
-fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String> {
+pub fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String> {
     let mcp_call_regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").unwrap();
     let mut ids = HashSet::new();
     for capture in mcp_call_regex.captures_iter(content) {

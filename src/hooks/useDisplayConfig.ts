@@ -11,6 +11,7 @@ interface DisplayConfig {
     merge_assistant_messages: string;
     show_thinking: string;
     preview_code_show_toolbar: string;
+    mcp_tool_call_component_id: string;
 }
 
 interface DisplayConfigState {
@@ -28,6 +29,7 @@ const DEFAULT_CONFIG: DisplayConfig = {
     merge_assistant_messages: 'enabled',
     show_thinking: 'enabled',
     preview_code_show_toolbar: 'disabled',
+    mcp_tool_call_component_id: 'auto',
 };
 
 type DisplayConfigStore = {
@@ -96,6 +98,8 @@ const loadConfig = async () => {
                     displayConfigMap.get('show_thinking') || DEFAULT_CONFIG.show_thinking,
                 preview_code_show_toolbar:
                     displayConfigMap.get('preview_code_show_toolbar') || DEFAULT_CONFIG.preview_code_show_toolbar,
+                mcp_tool_call_component_id:
+                    displayConfigMap.get('mcp_tool_call_component_id') || DEFAULT_CONFIG.mcp_tool_call_component_id,
             };
 
             setState({

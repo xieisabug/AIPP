@@ -16,8 +16,11 @@ interface ChatSidebarContentProps {
     pluginList?: LoadedPlugin[];
     conversationId?: string;
     className?: string;
+    focusedContextId?: string | null;
+    selectedContextId?: string | null;
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
+    onPreviewFileClick?: (item: ContextItem) => void;
 }
 
 interface SectionState {
@@ -91,8 +94,11 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     pluginList = [],
     conversationId,
     className,
+    focusedContextId,
+    selectedContextId,
     onArtifactClick,
     onContextClick,
+    onPreviewFileClick,
 }) => {
     const [todoOpen, setTodoOpen] = React.useState(todos.length > 0);
     const [artifactOpen, setArtifactOpen] = React.useState(artifacts.length > 0);
@@ -110,6 +116,14 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     React.useEffect(() => {
         if (contextItems.length > 0 && !contextOpen) setContextOpen(true);
     }, [contextItems.length]);
+
+    // Ensure context section is expanded when a focus request arrives so the
+    // target item is visible and scrollable.
+    React.useEffect(() => {
+        if (focusedContextId) {
+            setContextOpen(true);
+        }
+    }, [focusedContextId]);
 
     const sidebarPluginViews = useMemo(
         () =>
@@ -163,7 +177,13 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                     isOpen={contextOpen}
                     onOpenChange={setContextOpen}
                 >
-                    <ContextList items={contextItems} onItemClick={onContextClick} />
+                    <ContextList
+                        items={contextItems}
+                        focusedItemId={focusedContextId}
+                        selectedItemId={selectedContextId}
+                        onItemClick={onContextClick}
+                        onPreviewFileClick={onPreviewFileClick}
+                    />
                 </CollapsibleSection>
 
                 {sidebarPluginViews.length > 0 && (

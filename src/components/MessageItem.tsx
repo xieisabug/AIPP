@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import ReasoningMessage from "./ReasoningMessage";
 import ErrorMessage from "./message-item/ErrorMessage";
@@ -17,7 +17,7 @@ import { useFeishuDebugResend } from "../hooks/useFeishuDebugResend";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent } from "../utils/antiLeakage";
 import type { InlineInteractionItem } from "./ConversationUI";
-import { ListEnd, Loader2, Zap } from "lucide-react";
+import { ChevronDown, ChevronUp, ListEnd, Loader2, Zap } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -43,12 +43,98 @@ interface MessageItemProps {
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
+    messageActions?: React.ReactNode;
 }
 
 interface QueueMessageMeta {
     queueId: number;
     queueKind: "normal" | "interrupt";
 }
+
+const USER_MESSAGE_COLLAPSE_THRESHOLD = 300;
+
+interface RichMessageContentProps {
+    displayContent: string;
+    onCodeRun?: (lang: string, code: string) => void;
+    isUserMessage: boolean;
+    isUserMessageMarkdownEnabled: boolean;
+    isStreaming: boolean;
+    isLastMessage: boolean;
+    useRawTextRenderer?: boolean;
+    conversationId?: number;
+    messageId: number;
+    mcpToolCallStates?: Map<number, MCPToolCallUpdateEvent>;
+    shiningMcpCallId?: number | null;
+    inlineInteractionItems?: InlineInteractionItem[];
+}
+
+const RichMessageContent = React.memo(function RichMessageContent({
+    displayContent,
+    onCodeRun,
+    isUserMessage,
+    isUserMessageMarkdownEnabled,
+    isStreaming,
+    isLastMessage,
+    useRawTextRenderer = false,
+    conversationId,
+    messageId,
+    mcpToolCallStates,
+    shiningMcpCallId,
+    inlineInteractionItems,
+}: RichMessageContentProps) {
+    const { parseCustomTags } = useCustomTagParser();
+    const markdownContent = useMemo(
+        () => useRawTextRenderer ? displayContent : parseCustomTags(displayContent),
+        [displayContent, parseCustomTags, useRawTextRenderer],
+    );
+    const markdownConfig = useMarkdownConfig({
+        onCodeRun,
+        disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
+        isStreaming,
+    });
+    const { processContent } = useMcpToolCallProcessor(markdownConfig, {
+        conversationId,
+        messageId,
+        isLastMessage,
+        mcpToolCallStates,
+        shiningMcpCallId,
+        inlineInteractionItems,
+    });
+
+    return useMemo(
+        () => {
+            if (useRawTextRenderer) {
+                return <RawTextRenderer content={displayContent} />;
+            }
+
+            if (isUserMessage && !isUserMessageMarkdownEnabled) {
+                return <RawTextRenderer content={markdownContent} />;
+            }
+
+            const element = (
+                <UnifiedMarkdown
+                    noProseWrapper
+                    onCodeRun={onCodeRun}
+                    isStreaming={isStreaming}
+                >
+                    {markdownContent}
+                </UnifiedMarkdown>
+            );
+
+            return processContent(markdownContent, element);
+        },
+        [
+            isUserMessage,
+            isUserMessageMarkdownEnabled,
+            useRawTextRenderer,
+            displayContent,
+            markdownContent,
+            onCodeRun,
+            processContent,
+            isStreaming,
+        ],
+    );
+});
 
 function QueuedMessageIndicator({
     meta,
@@ -135,11 +221,11 @@ const MessageItem = React.memo<MessageItemProps>(
         inlineInteractionItems,
         allowFeishuDebugResend = false,
         mergedMode = false,
+        messageActions,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
-
         // 防泄露模式：获取实际显示的内容
         // 流式消息优先使用 streamEvent.content（包含 MCP_TOOL_CALL_STREAMING 标记）
         const displayContent = useMemo(() => {
@@ -148,35 +234,26 @@ const MessageItem = React.memo<MessageItemProps>(
         }, [shouldMaskContent, message.content, streamEvent, maskContent]);
 
         const { copyIconState, handleCopy } = useCopyHandler(displayContent);
-        const { parseCustomTags } = useCustomTagParser();
         const { isUserMessageMarkdownEnabled, isShowThinking } = useDisplayConfig();
         const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
         const isFeishuDebugSending = pendingMessageId === message.id;
+        const [expandedUserMessage, setExpandedUserMessage] = useState<{
+            messageId: number;
+            content: string;
+        } | null>(null);
 
-        // 统一的 Markdown 配置，根据用户消息类型和配置决定是否禁用 Markdown 语法
         const isUserMessage = message.message_type === "user";
         const isStreaming = !!streamEvent && !streamEvent.is_done;
-        const markdownConfig = useMarkdownConfig({
-            onCodeRun,
-            disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
-            isStreaming,
-        });
-
-        const { processContent } = useMcpToolCallProcessor(markdownConfig, {
-            conversationId,
-            messageId: message.id,
-            isLastMessage,
-            mcpToolCallStates,
-            shiningMcpCallId,
-            inlineInteractionItems,
-        });
-
-        // 处理自定义标签解析
-        const markdownContent = useMemo(
-            () => parseCustomTags(displayContent),
-            [displayContent, parseCustomTags]
+        const userMessageCharacters = useMemo(
+            () => isUserMessage ? Array.from(displayContent) : [],
+            [displayContent, isUserMessage],
         );
-
+        const shouldCollapseUserMessage = userMessageCharacters.length > USER_MESSAGE_COLLAPSE_THRESHOLD;
+        const isUserMessageExpanded = expandedUserMessage?.messageId === message.id
+            && expandedUserMessage.content === displayContent;
+        const renderedDisplayContent = shouldCollapseUserMessage && !isUserMessageExpanded
+            ? `${userMessageCharacters.slice(0, USER_MESSAGE_COLLAPSE_THRESHOLD).join("")}…`
+            : displayContent;
         const speakerLabel = useMemo(() => {
             if (!message.metadata_json) {
                 return null;
@@ -223,35 +300,21 @@ const MessageItem = React.memo<MessageItemProps>(
             await resendMessageToFeishuDebug(message.id);
         }, [canResendToFeishuDebug, isFeishuDebugSending, message.id, resendMessageToFeishuDebug]);
 
-        // 渲染内容 - 根据用户消息类型和配置选择渲染方式
-        const contentElement = useMemo(
-            () => {
-                // 如果内容被脱敏（防泄露模式），使用 RawTextRenderer 避免 Markdown 解析星号
-                if (shouldMaskContent) {
-                    return <RawTextRenderer content={displayContent} />;
-                }
-
-                // 如果是用户消息且禁用了 Markdown 渲染，使用 RawTextRenderer
-                if (isUserMessage && !isUserMessageMarkdownEnabled) {
-                    return <RawTextRenderer content={markdownContent} />;
-                }
-
-                // 否则使用统一的 UnifiedMarkdown 渲染
-                const element = (
-                    <UnifiedMarkdown
-                        // 使用 noProseWrapper，避免嵌套重复 prose 容器
-                        noProseWrapper
-                        onCodeRun={onCodeRun}
-                        isStreaming={isStreaming}
-                    >
-                        {markdownContent}
-                    </UnifiedMarkdown>
-                );
-
-                // MCP 工具调用后处理
-                return processContent(markdownContent, element);
-            },
-            [shouldMaskContent, displayContent, markdownContent, onCodeRun, processContent, isUserMessage, isUserMessageMarkdownEnabled, isStreaming]
+        const richMessageContent = (
+            <RichMessageContent
+                displayContent={renderedDisplayContent}
+                onCodeRun={onCodeRun}
+                isUserMessage={isUserMessage}
+                isUserMessageMarkdownEnabled={isUserMessageMarkdownEnabled}
+                isStreaming={isStreaming}
+                isLastMessage={isLastMessage}
+                useRawTextRenderer={shouldMaskContent}
+                conversationId={conversationId}
+                messageId={message.id}
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={shiningMcpCallId}
+                inlineInteractionItems={inlineInteractionItems}
+            />
         );
 
         // 早期返回：reasoning 类型消息
@@ -302,7 +365,7 @@ const MessageItem = React.memo<MessageItemProps>(
             return (
                 <div data-message-item data-message-id={message.id} data-message-type={message.message_type}>
                     <div className="prose prose-sm max-w-none text-foreground break-all">
-                        {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
+                        {richMessageContent}
                     </div>
                     <ImageAttachments
                         attachments={message.attachment_list}
@@ -317,44 +380,69 @@ const MessageItem = React.memo<MessageItemProps>(
             <div
                 className="group relative inline-block max-w-[65%] rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200"
             >
-                    {shouldShowShineBorder && (
-                        <ShineBorder
-                            shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
-                            borderWidth={DEFAULT_SHINE_BORDER_CONFIG.borderWidth}
-                            duration={DEFAULT_SHINE_BORDER_CONFIG.duration}
-                        />
-                    )}
+                {shouldShowShineBorder && (
+                    <ShineBorder
+                        shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
+                        borderWidth={DEFAULT_SHINE_BORDER_CONFIG.borderWidth}
+                        duration={DEFAULT_SHINE_BORDER_CONFIG.duration}
+                    />
+                )}
 
-                    {speakerLabel && (
-                        <div className="mb-2 text-xs font-medium text-muted-foreground">
-                            {speakerLabel}
-                        </div>
-                    )}
-
-                    <div className="prose prose-sm max-w-none text-foreground break-all">
-                        {/* RawTextRenderer 已包含 prose 样式，条件渲染避免重复包装 */}
-                        {isUserMessage && !isUserMessageMarkdownEnabled ? contentElement : <div>{contentElement}</div>}
+                {speakerLabel && (
+                    <div className="mb-2 text-xs font-medium text-muted-foreground">
+                        {speakerLabel}
                     </div>
+                )}
 
-                    <ImageAttachments
-                        attachments={message.attachment_list}
-                        conversationId={message.conversation_id}
-                        messageId={message.id}
-                    />
+                <div className="prose prose-sm max-w-none text-foreground break-all">
+                    {richMessageContent}
+                </div>
 
-                    <MessageActionButtons
-                        messageId={message.id}
-                        messageType={message.message_type}
-                        isUserMessage={isUserMessage}
-                        copyIconState={copyIconState}
-                        onCopy={handleCopy}
-                        onEdit={onMessageEdit}
-                        onRegenerate={onMessageRegenerate}
-                        onFork={onMessageFork}
-                        onResendToFeishuDebug={canResendToFeishuDebug ? handleFeishuDebugResend : undefined}
-                        isResendToFeishuDebugPending={isFeishuDebugSending}
-                        messageContent={message.content}
-                    />
+                {shouldCollapseUserMessage && (
+                    <button
+                        type="button"
+                        className="mt-2 ml-auto flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                        aria-expanded={isUserMessageExpanded}
+                        onClick={() => setExpandedUserMessage(
+                            isUserMessageExpanded
+                                ? null
+                                : { messageId: message.id, content: displayContent },
+                        )}
+                    >
+                        {isUserMessageExpanded ? (
+                            <>
+                                <ChevronUp className="h-3.5 w-3.5" />
+                                收起
+                            </>
+                        ) : (
+                            <>
+                                <ChevronDown className="h-3.5 w-3.5" />
+                                展开
+                            </>
+                        )}
+                    </button>
+                )}
+
+                <ImageAttachments
+                    attachments={message.attachment_list}
+                    conversationId={message.conversation_id}
+                    messageId={message.id}
+                />
+
+                <MessageActionButtons
+                    messageId={message.id}
+                    messageType={message.message_type}
+                    isUserMessage={isUserMessage}
+                    copyIconState={copyIconState}
+                    onCopy={handleCopy}
+                    onEdit={onMessageEdit}
+                    onRegenerate={onMessageRegenerate}
+                    onFork={onMessageFork}
+                    onResendToFeishuDebug={canResendToFeishuDebug ? handleFeishuDebugResend : undefined}
+                    isResendToFeishuDebugPending={isFeishuDebugSending}
+                    messageContent={message.content}
+                    pluginActions={messageActions}
+                />
             </div>
         );
 
@@ -384,6 +472,9 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.message.content !== nextProps.message.content) return false;
     if (prevProps.message.message_type !== nextProps.message.message_type) return false;
     if (prevProps.message.metadata_json !== nextProps.message.metadata_json) return false;
+    if (prevProps.message.large_message_preview !== nextProps.message.large_message_preview) {
+        return false;
+    }
     if (!areAttachmentListsEqual(prevProps.message.attachment_list, nextProps.message.attachment_list)) {
         return false;
     }
@@ -421,6 +512,7 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     // 合并模式比较
     if (prevProps.mergedMode !== nextProps.mergedMode) return false;
     if (prevProps.allowFeishuDebugResend !== nextProps.allowFeishuDebugResend) return false;
+    if (prevProps.messageActions !== nextProps.messageActions) return false;
 
     return true;
 };

@@ -56,7 +56,7 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
         const selectedOption = selectOptions?.find(option => option.id === selectedOptionId);
 
         return (
-            <div className="mb-6">
+            <div className="flex-shrink-0 px-4 pt-6 pb-4">
                 <div className="flex items-center gap-3">
                     <div className="flex-1">
                         <Select value={selectedOptionId} onValueChange={onSelectOption}>
@@ -93,22 +93,26 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
     };
 
     return (
-        <div className="max-w-none mx-auto px-4 py-6 space-y-8">
+        <div className="flex flex-col h-full min-h-0 max-w-none">
             {/* 响应式下拉菜单 - 小屏幕时显示 */}
             {renderDropdownHeader()}
 
             {/* 主要内容区域 */}
-            {showEmptyState ? emptyState : (
-                <div className={`grid gap-6 ${shouldShowDropdown ? 'grid-cols-1' : 'grid-cols-12'}`}>
-                    {/* 左侧列表 - 大屏幕时显示 */}
+            {showEmptyState ? (
+                <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 py-6">
+                    {emptyState}
+                </div>
+            ) : (
+                <div className={`flex-1 min-h-0 grid gap-6 px-4 py-6 ${shouldShowDropdown ? 'grid-cols-1' : 'grid-cols-12'}`}>
+                    {/* 左侧列表 - 大屏幕时显示，列表内部独立滚动（标题/搜索栏固定） */}
                     {!shouldShowDropdown && (
-                        <div className="col-span-12 lg:col-span-4 xl:col-span-4 2xl:col-span-3">
+                        <div className="col-span-12 lg:col-span-4 xl:col-span-4 2xl:col-span-3 min-h-0">
                             {sidebar}
                         </div>
                     )}
 
-                    {/* 右侧配置区域 */}
-                    <div className={shouldShowDropdown ? 'col-span-1' : 'col-span-12 lg:col-span-8 xl:col-span-8 2xl:col-span-9'}>
+                    {/* 右侧配置区域，独立滚动 */}
+                    <div className={`min-h-0 overflow-y-auto thin-scrollbar ${shouldShowDropdown ? 'col-span-1' : 'col-span-12 lg:col-span-8 xl:col-span-8 2xl:col-span-9'}`}>
                         {content}
                     </div>
                 </div>

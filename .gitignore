@@ -16,6 +16,9 @@ dist-official-plugins
 *.local
 
 target/*
+sync-server/tmp
+sync-server/data
+__pycache__
 
 # Editor directories and files
 .vscode/*

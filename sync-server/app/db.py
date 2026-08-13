@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from collections.abc import Generator
+from datetime import UTC, datetime
+from hashlib import sha256
+from uuid import uuid4
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config import Settings, get_settings
+from app.models import Base, SyncAccount, SyncToken
+
+engine: Engine | None = None
+SessionLocal: sessionmaker[Session] | None = None
+
+
+def configure_database(settings: Settings | None = None) -> None:
+    global engine, SessionLocal
+    settings = settings or get_settings()
+    settings.ensure_sqlite_parent()
+    connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+    engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+def get_engine() -> Engine:
+    if engine is None:
+        configure_database()
+    assert engine is not None
+    return engine
+
+
+def get_sessionmaker() -> sessionmaker[Session]:
+    if SessionLocal is None:
+        configure_database()
+    assert SessionLocal is not None
+    return SessionLocal
+
+
+def init_db(settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    Base.metadata.create_all(bind=get_engine())
+    if settings.bootstrap_token:
+        ensure_bootstrap_token(settings)
+
+
+def get_db() -> Generator[Session, None, None]:
+    db = get_sessionmaker()()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def token_hash(token: str) -> str:
+    return sha256(token.encode("utf-8")).hexdigest()
+
+
+def ensure_bootstrap_token(settings: Settings) -> None:
+    now = datetime.now(UTC)
+    with get_sessionmaker()() as db:
+        account = db.get(SyncAccount, settings.bootstrap_account_id)
+        if account is None:
+            db.add(SyncAccount(id=settings.bootstrap_account_id, created_at=now))
+
+        digest = token_hash(settings.bootstrap_token or "")
+        existing = db.scalar(select(SyncToken).where(SyncToken.token_hash == digest))
+        if existing is None:
+            db.add(
+                SyncToken(
+                    id=str(uuid4()),
+                    account_id=settings.bootstrap_account_id,
+                    name="bootstrap",
+                    token_hash=digest,
+                    created_at=now,
+                    revoked_at=None,
+                )
+            )
+        db.commit()
+

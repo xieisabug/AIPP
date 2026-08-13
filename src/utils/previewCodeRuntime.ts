@@ -25,12 +25,16 @@ declare global {
         aippPreviewCode?: PreviewCodeBridge;
         __AIPP_PREVIEW_CODE_BRIDGES__?: Record<string, PreviewCodeBridge>;
         __AIPP_PREVIEW_CODE_SCRIPT_LOADS__?: Record<string, Promise<void> | undefined>;
+        __AIPP_PREVIEW_CODE_SCRIPT_TEXTS__?: Record<string, Promise<string> | undefined>;
     }
 }
 
 const PREVIEW_CODE_FRAME_FALLBACK_MS = 16;
 const PREVIEW_CODE_ENTER_ATTRIBUTE = "data-aipp-preview-enter";
 const PREVIEW_CODE_ENTER_DURATION_MS = 280;
+const PREVIEW_CODE_MUTATION_OBSERVER_FLUSH_MS = 100;
+const PREVIEW_CODE_MUTATION_OBSERVER_BUDGET_WINDOW_MS = 5000;
+const PREVIEW_CODE_MUTATION_OBSERVER_MAX_CALLBACKS = 40;
 const PREVIEW_CODE_RUNTIME_STYLES = `
 :host {
     display: block;
@@ -125,6 +129,13 @@ function getScriptLoadRegistry(): Record<string, Promise<void> | undefined> {
     return window.__AIPP_PREVIEW_CODE_SCRIPT_LOADS__;
 }
 
+function getScriptTextRegistry(): Record<string, Promise<string> | undefined> {
+    if (!window.__AIPP_PREVIEW_CODE_SCRIPT_TEXTS__) {
+        window.__AIPP_PREVIEW_CODE_SCRIPT_TEXTS__ = {};
+    }
+    return window.__AIPP_PREVIEW_CODE_SCRIPT_TEXTS__;
+}
+
 function getLiveBridgeOrThrow(bridgeId: string): PreviewCodeBridge {
     const bridge = getBridgeRegistry()[bridgeId];
     if (!bridge) {
@@ -147,11 +158,19 @@ function normalizeStyleNodes(root: ParentNode) {
 }
 
 function collectScriptNodes(root: ParentNode) {
-    return Array.from(root.querySelectorAll("script")).map((script) => ({
-        src: script.getAttribute("src"),
-        type: script.getAttribute("type"),
-        content: script.textContent ?? "",
-    }));
+    return Array.from(root.querySelectorAll("script")).map((script) => {
+        const src = script.getAttribute("src");
+        const type = script.getAttribute("type");
+        const content = script.textContent ?? "";
+        if (src) {
+            script.removeAttribute("src");
+            script.setAttribute("data-aipp-preview-script-src", src);
+            if (type) {
+                script.setAttribute("data-aipp-preview-script-type", type);
+            }
+        }
+        return { src, type, content };
+    });
 }
 
 function buildTargetMountPoint(code: string): {
@@ -209,30 +228,126 @@ function normalizeExternalScriptUrl(src: string): string {
     return url.toString();
 }
 
-async function ensureExternalScriptLoaded(src: string, type: string | null) {
-    const normalizedSrc = normalizeExternalScriptUrl(src);
-    const registry = getScriptLoadRegistry();
-    if (registry[normalizedSrc]) {
-        await registry[normalizedSrc];
+async function fetchExternalScriptText(src: string) {
+    const registry = getScriptTextRegistry();
+    if (!registry[src]) {
+        registry[src] = fetch(src)
+            .then((response) => {
+                if (!response.ok) {
+                    throw new Error(`preview_code 获取外部脚本失败: ${src}`);
+                }
+                return response.text();
+            })
+            .catch((error) => {
+                delete registry[src];
+                throw error;
+            });
+    }
+    return registry[src];
+}
+
+const previewScopedExternalScriptRuns = new WeakMap<ShadowRoot, Set<string>>();
+
+function isClassicJavaScriptType(type: string | null) {
+    if (!type) {
+        return true;
+    }
+    const normalized = type.trim().toLowerCase();
+    return normalized === ""
+        || normalized === "text/javascript"
+        || normalized === "application/javascript"
+        || normalized === "application/ecmascript"
+        || normalized === "text/ecmascript";
+}
+
+function runScriptContent(
+    host: HTMLElement,
+    shadowRoot: ShadowRoot,
+    environment: PreviewScriptEnvironment,
+    scriptContent: string
+) {
+    const scopedScriptContent = `with(window){
+${appendWindowExports(scriptContent)}
+}`;
+    const scriptRunner = new Function(
+        "window",
+        "document",
+        "globalThis",
+        "self",
+        "host",
+        "shadowRoot",
+        "aippPreviewCode",
+        "MutationObserver",
+        scopedScriptContent
+    );
+    scriptRunner.call(
+        environment.previewWindow,
+        environment.previewWindow,
+        environment.previewDocument,
+        environment.previewWindow,
+        environment.previewWindow,
+        host,
+        shadowRoot,
+        environment.previewWindow.aippPreviewCode,
+        environment.previewWindow.MutationObserver
+    );
+}
+
+async function runPreviewScopedExternalScript(
+    src: string,
+    host: HTMLElement,
+    shadowRoot: ShadowRoot,
+    environment: PreviewScriptEnvironment
+) {
+    let runs = previewScopedExternalScriptRuns.get(shadowRoot);
+    if (!runs) {
+        runs = new Set<string>();
+        previewScopedExternalScriptRuns.set(shadowRoot, runs);
+    }
+    if (runs.has(src)) {
         return;
     }
+    const scriptContent = await fetchExternalScriptText(src);
+    runScriptContent(host, shadowRoot, environment, scriptContent);
+    runs.add(src);
+}
 
-    registry[normalizedSrc] = new Promise<void>((resolve, reject) => {
-        const scriptElement = document.createElement("script");
-        if (type) {
-            scriptElement.type = type;
-        }
-        scriptElement.src = normalizedSrc;
-        scriptElement.async = false;
-        scriptElement.onload = () => resolve();
-        scriptElement.onerror = () => {
-            delete registry[normalizedSrc];
-            reject(new Error(`preview_code 加载外部脚本失败: ${normalizedSrc}`));
-        };
-        document.head.appendChild(scriptElement);
-    });
+async function loadExternalScriptElement(src: string, type: string | null) {
+    const registry = getScriptLoadRegistry();
+    if (!registry[src]) {
+        registry[src] = new Promise<void>((resolve, reject) => {
+            const scriptElement = document.createElement("script");
+            if (type) {
+                scriptElement.type = type;
+            }
+            scriptElement.src = src;
+            scriptElement.async = false;
+            scriptElement.onload = () => resolve();
+            scriptElement.onerror = () => {
+                reject(new Error(`preview_code 加载外部脚本失败: ${src}`));
+            };
+            document.head.appendChild(scriptElement);
+        }).catch((error) => {
+            delete registry[src];
+            throw error;
+        });
+    }
+    await registry[src];
+}
 
-    await registry[normalizedSrc];
+async function ensureExternalScriptLoaded(
+    src: string,
+    type: string | null,
+    host: HTMLElement,
+    shadowRoot: ShadowRoot,
+    environment: PreviewScriptEnvironment
+) {
+    const normalizedSrc = normalizeExternalScriptUrl(src);
+    if (isClassicJavaScriptType(type)) {
+        await runPreviewScopedExternalScript(normalizedSrc, host, shadowRoot, environment);
+        return;
+    }
+    await loadExternalScriptElement(normalizedSrc, type);
 }
 
 function getElementByIdFromShadowRoot(shadowRoot: ShadowRoot, id: string): HTMLElement | null {
@@ -244,7 +359,14 @@ function getElementByIdFromShadowRoot(shadowRoot: ShadowRoot, id: string): HTMLE
 
 function createPreviewDocumentFacade(shadowRoot: ShadowRoot, host: HTMLElement) {
     const ownerDocument = host.ownerDocument;
+    const previewHead = {
+        append: (...nodes: Node[]) => {
+            nodes.forEach((node) => shadowRoot.appendChild(node));
+        },
+        appendChild: (node: Node) => shadowRoot.appendChild(node),
+    };
     return {
+        head: previewHead,
         body: shadowRoot,
         documentElement: shadowRoot,
         querySelector: shadowRoot.querySelector.bind(shadowRoot),
@@ -266,9 +388,172 @@ type PreviewWindow = Window & Record<string, unknown>;
 interface PreviewScriptEnvironment {
     previewWindow: PreviewWindow;
     previewDocument: ReturnType<typeof createPreviewDocumentFacade>;
+    reportRuntimeError?: (message: string) => void;
+}
+
+function isPreviewScopedNode(node: Node, shadowRoot: ShadowRoot) {
+    return node === shadowRoot || shadowRoot.contains(node);
+}
+
+function normalizePreviewMutationTarget(target: unknown, shadowRoot: ShadowRoot): Node {
+    if (!(target instanceof Node)) {
+        return shadowRoot;
+    }
+    return isPreviewScopedNode(target, shadowRoot) ? target : shadowRoot;
+}
+
+function createScopedMutationObserverConstructor(
+    shadowRoot: ShadowRoot,
+    reportRuntimeError: (message: string) => void
+): typeof MutationObserver {
+    const NativeMutationObserver = window.MutationObserver;
+    if (typeof NativeMutationObserver !== "function") {
+        return NativeMutationObserver;
+    }
+
+    return class ScopedPreviewMutationObserver {
+        private readonly nativeObserver: MutationObserver;
+        private pendingRecords: MutationRecord[] = [];
+        private flushTimer: number | null = null;
+        private callbackWindowStartedAt = 0;
+        private callbackCount = 0;
+        private disconnected = false;
+
+        constructor(private readonly callback: MutationCallback) {
+            this.nativeObserver = new NativeMutationObserver((records) => {
+                if (this.disconnected) {
+                    return;
+                }
+                const scopedRecords = records.filter((record) =>
+                    isPreviewScopedNode(record.target, shadowRoot)
+                );
+                if (scopedRecords.length === 0) {
+                    return;
+                }
+                this.pendingRecords.push(...scopedRecords);
+                this.scheduleFlush();
+            });
+        }
+
+        observe(target: Node, options?: MutationObserverInit) {
+            if (this.disconnected) {
+                return;
+            }
+            this.nativeObserver.observe(normalizePreviewMutationTarget(target, shadowRoot), options);
+        }
+
+        disconnect() {
+            this.disconnected = true;
+            this.pendingRecords = [];
+            if (this.flushTimer !== null) {
+                window.clearTimeout(this.flushTimer);
+                this.flushTimer = null;
+            }
+            this.nativeObserver.disconnect();
+        }
+
+        takeRecords(): MutationRecord[] {
+            const nativeRecords = this.nativeObserver
+                .takeRecords()
+                .filter((record) => isPreviewScopedNode(record.target, shadowRoot));
+            const records = [...this.pendingRecords, ...nativeRecords];
+            this.pendingRecords = [];
+            return records;
+        }
+
+        private scheduleFlush() {
+            if (this.flushTimer !== null) {
+                return;
+            }
+            this.flushTimer = window.setTimeout(
+                () => this.flush(),
+                PREVIEW_CODE_MUTATION_OBSERVER_FLUSH_MS
+            );
+        }
+
+        private flush() {
+            this.flushTimer = null;
+            if (this.disconnected || this.pendingRecords.length === 0) {
+                return;
+            }
+
+            const now = Date.now();
+            if (
+                this.callbackWindowStartedAt === 0
+                || now - this.callbackWindowStartedAt > PREVIEW_CODE_MUTATION_OBSERVER_BUDGET_WINDOW_MS
+            ) {
+                this.callbackWindowStartedAt = now;
+                this.callbackCount = 0;
+            }
+            this.callbackCount += 1;
+
+            if (this.callbackCount > PREVIEW_CODE_MUTATION_OBSERVER_MAX_CALLBACKS) {
+                this.disconnect();
+                reportRuntimeError(
+                    "preview_code 已停止一个高频 MutationObserver：预览脚本持续扫描 DOM，可能导致主界面卡死。"
+                );
+                return;
+            }
+
+            const records = this.pendingRecords;
+            this.pendingRecords = [];
+            this.callback(records, this as unknown as MutationObserver);
+        }
+    } as typeof MutationObserver;
 }
 
 const inlineHandlerRegistry = new WeakMap<Element, Map<string, EventListener>>();
+
+function definePreviewWindowValue(previewWindow: PreviewWindow, name: string, value: unknown) {
+    Object.defineProperty(previewWindow, name, {
+        configurable: true,
+        writable: true,
+        value,
+    });
+}
+
+function definePreviewWindowNativeGlobals(previewWindow: PreviewWindow) {
+    const sourceWindow = window as unknown as Record<string, unknown>;
+    const nativeValueNames = [
+        "performance",
+        "navigator",
+        "location",
+        "history",
+        "crypto",
+        "screen",
+        "localStorage",
+        "sessionStorage",
+        "console",
+        "innerWidth",
+        "innerHeight",
+        "devicePixelRatio",
+    ];
+    const nativeMethodNames = [
+        "setTimeout",
+        "clearTimeout",
+        "setInterval",
+        "clearInterval",
+        "requestAnimationFrame",
+        "cancelAnimationFrame",
+        "queueMicrotask",
+        "fetch",
+    ];
+
+    nativeValueNames.forEach((name) => {
+        try {
+            definePreviewWindowValue(previewWindow, name, sourceWindow[name]);
+        } catch {
+            // Some browser globals can throw when unavailable or blocked by settings.
+        }
+    });
+
+    nativeMethodNames.forEach((name) => {
+        const value = sourceWindow[name];
+        if (typeof value === "function") {
+            definePreviewWindowValue(previewWindow, name, value.bind(window));
+        }
+    });
+}
 
 function createPreviewScriptEnvironment(
     shadowRoot: ShadowRoot,
@@ -278,6 +563,15 @@ function createPreviewScriptEnvironment(
     const previewDocument = createPreviewDocumentFacade(shadowRoot, host);
     const bridgeRegistry = getBridgeRegistry();
     const previewWindow = Object.create(window) as PreviewWindow;
+    const environment: PreviewScriptEnvironment = {
+        previewWindow,
+        previewDocument,
+    };
+    definePreviewWindowNativeGlobals(previewWindow);
+    const ScopedMutationObserver = createScopedMutationObserverConstructor(
+        shadowRoot,
+        (message) => environment.reportRuntimeError?.(message)
+    );
 
     Object.defineProperty(previewWindow, "document", {
         configurable: true,
@@ -305,11 +599,12 @@ function createPreviewScriptEnvironment(
         writable: true,
         value: bridgeRegistry,
     });
+    Object.defineProperty(previewWindow, "MutationObserver", {
+        configurable: true,
+        value: ScopedMutationObserver,
+    });
 
-    return {
-        previewWindow,
-        previewDocument,
-    };
+    return environment;
 }
 
 function collectExportedSymbolNames(scriptContent: string): string[] {
@@ -422,31 +717,14 @@ async function executeScripts(
 ) {
     for (const script of scripts) {
         if (script.src) {
-            await ensureExternalScriptLoaded(script.src, script.type);
+            await ensureExternalScriptLoaded(script.src, script.type, host, shadowRoot, environment);
             continue;
         }
         if (!script.content.trim()) {
             continue;
         }
 
-        const scriptRunner = new Function(
-            "window",
-            "document",
-            "globalThis",
-            "host",
-            "shadowRoot",
-            "aippPreviewCode",
-            appendWindowExports(script.content)
-        );
-        scriptRunner.call(
-            environment.previewWindow,
-            environment.previewWindow,
-            environment.previewDocument,
-            environment.previewWindow,
-            host,
-            shadowRoot,
-            environment.previewWindow.aippPreviewCode
-        );
+        runScriptContent(host, shadowRoot, environment, script.content);
     }
 }
 
@@ -500,6 +778,7 @@ export function createPreviewCodeRuntime(host: HTMLElement): PreviewCodeRuntimeC
             } else {
                 lastEnvironment.previewWindow.aippPreviewCode = liveBridge;
             }
+            lastEnvironment.reportRuntimeError = (message: string) => onError?.(message);
 
             if (lastRenderedCode !== code) {
                 const canPatch = isFinal

@@ -145,6 +145,254 @@ describe("previewCodeRuntime", () => {
         runtime.destroy();
     });
 
+    it("runs simple external classic scripts against the preview shadow document", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => ({
+                ok: true,
+                text: async () => `
+                    const style = document.createElement("style");
+                    const classNames = Array.from(document.querySelectorAll("[class]"))
+                        .flatMap((element) => Array.from(element.classList));
+                    style.textContent = classNames.map((className) => "." + className + "{display:flex;}").join("\\n");
+                    document.head.append(style);
+                `,
+            }))
+        );
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+
+        runtime.update({
+            code: '<div id="card" class="flex items-center"></div><script src="aipp-preview://localhost/tailwind-browser.js"></script>',
+            isFinal: true,
+            bridgeId: "preview-code-tailwind-browser-test",
+            bridge,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            const shadowStyles = Array.from(host.shadowRoot?.querySelectorAll("style") ?? [])
+                .map((style) => style.textContent ?? "")
+                .join("\n");
+            expect(shadowStyles).toContain(".flex{display:flex;}");
+            expect(shadowStyles).toContain(".items-center{display:flex;}");
+        });
+
+        runtime.destroy();
+    });
+
+    it("exposes preview window globals to later inline scripts", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => ({
+                ok: true,
+                text: async () => `
+                    (function(global) {
+                        global.d3 = {
+                            select(selector) {
+                                return {
+                                    text(value) {
+                                        document.querySelector(selector).textContent = value;
+                                    }
+                                };
+                            }
+                        };
+                    })(this);
+                `,
+            }))
+        );
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+        const onError = vi.fn();
+
+        runtime.update({
+            code: '<div id="chart"></div><script src="aipp-preview://localhost/d3.js"></script><script>d3.select("#chart").text("loaded");</script>',
+            isFinal: true,
+            bridgeId: "preview-code-d3-global-test",
+            bridge,
+            onError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            expect(host.shadowRoot?.querySelector("#chart")?.textContent).toBe("loaded");
+        });
+        expect(onError).toHaveBeenCalledWith(null);
+
+        runtime.destroy();
+    });
+
+    it("allows inline scripts to read native window globals through the preview scope", async () => {
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+        const onError = vi.fn();
+
+        runtime.update({
+            code: '<div id="clock"></div><script>document.getElementById("clock").textContent = String(typeof performance.now === "function");</script>',
+            isFinal: true,
+            bridgeId: "preview-code-performance-global-test",
+            bridge,
+            onError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            expect(host.shadowRoot?.querySelector("#clock")?.textContent).toBe("true");
+        });
+        expect(onError).toHaveBeenCalledWith(null);
+
+        runtime.destroy();
+    });
+
+    it("runs MutationObserver scripts through a shadow-root scoped observer", async () => {
+        const observedTargets: Node[] = [];
+        class FakeMutationObserver {
+            constructor(private readonly callback: MutationCallback) {}
+
+            observe(target: Node) {
+                observedTargets.push(target);
+                this.callback([{ target } as MutationRecord], this as unknown as MutationObserver);
+            }
+
+            disconnect() {}
+
+            takeRecords() {
+                return [];
+            }
+        }
+        vi.stubGlobal("MutationObserver", FakeMutationObserver);
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => ({
+                ok: true,
+                text: async () => `
+                    const observer = new MutationObserver(() => {
+                        const marker = document.createElement("span");
+                        marker.id = "observer-ran";
+                        document.body.appendChild(marker);
+                    });
+                    observer.observe(document.body, { childList: true, subtree: true });
+                `,
+            }))
+        );
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+        const onError = vi.fn();
+
+        runtime.update({
+            code: '<div id="card" class="flex"></div><script src="aipp-preview://localhost/observer-script.js"></script>',
+            isFinal: true,
+            bridgeId: "preview-code-block-observer-script-test",
+            bridge,
+            onError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            expect(observedTargets).toEqual([host.shadowRoot]);
+        });
+        vi.advanceTimersByTime(100);
+
+        expect(host.shadowRoot?.querySelector("#observer-ran")).not.toBeNull();
+        expect(onError).not.toHaveBeenCalledWith(expect.stringContaining("MutationObserver"));
+
+        runtime.destroy();
+    });
+
+    it("falls back to real script loading for external module scripts", async () => {
+        const appendChildSpy = vi.spyOn(document.head, "appendChild").mockImplementation((node) => {
+            const script = node as HTMLScriptElement;
+            queueMicrotask(() => {
+                script.onload?.(new Event("load"));
+            });
+            return node;
+        });
+        const host = document.createElement("div");
+        document.body.appendChild(host);
+        const runtime = createPreviewCodeRuntime(host);
+
+        runtime.update({
+            code: '<div>Module</div><script type="module" src="aipp-preview://localhost/module-entry.js"></script>',
+            isFinal: true,
+            bridgeId: "preview-code-module-script-test",
+            bridge,
+        });
+
+        vi.advanceTimersByTime(16);
+        await Promise.resolve();
+
+        expect(appendChildSpy).toHaveBeenCalledTimes(1);
+        const appendedScript = appendChildSpy.mock.calls[0]?.[0] as HTMLScriptElement;
+        expect(appendedScript.tagName).toBe("SCRIPT");
+        expect(appendedScript.type).toBe("module");
+        expect(appendedScript.src).toBe("aipp-preview://localhost/module-entry.js");
+
+        runtime.destroy();
+    });
+
+    it("retries fetching a classic external script after an earlier fetch failure", async () => {
+        const fetchMock = vi
+            .fn()
+            .mockRejectedValueOnce(new Error("network down"))
+            .mockResolvedValueOnce({
+                ok: true,
+                text: async () => `
+                    const style = document.createElement("style");
+                    style.textContent = ".recovered{display:block;}";
+                    document.head.append(style);
+                `,
+            });
+        vi.stubGlobal("fetch", fetchMock);
+
+        const firstHost = document.createElement("div");
+        document.body.appendChild(firstHost);
+        const firstRuntime = createPreviewCodeRuntime(firstHost);
+        const firstOnError = vi.fn();
+
+        firstRuntime.update({
+            code: '<div class="recovered"></div><script src="aipp-preview://localhost/retry-script.js"></script>',
+            isFinal: true,
+            bridgeId: "preview-code-script-retry-failure",
+            bridge,
+            onError: firstOnError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            expect(firstOnError).toHaveBeenCalledWith("network down");
+        });
+        firstRuntime.destroy();
+
+        const secondHost = document.createElement("div");
+        document.body.appendChild(secondHost);
+        const secondRuntime = createPreviewCodeRuntime(secondHost);
+        const secondOnError = vi.fn();
+
+        secondRuntime.update({
+            code: '<div class="recovered"></div><script src="aipp-preview://localhost/retry-script.js"></script>',
+            isFinal: true,
+            bridgeId: "preview-code-script-retry-success",
+            bridge,
+            onError: secondOnError,
+        });
+
+        vi.advanceTimersByTime(16);
+        await vi.waitFor(() => {
+            const shadowStyles = Array.from(secondHost.shadowRoot?.querySelectorAll("style") ?? [])
+                .map((style) => style.textContent ?? "")
+                .join("\n");
+            expect(shadowStyles).toContain(".recovered{display:block;}");
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(secondOnError).toHaveBeenCalledWith(null);
+
+        secondRuntime.destroy();
+    });
+
     it("keeps stable DOM nodes across streaming patches instead of replacing the whole subtree", () => {
         const host = document.createElement("div");
         document.body.appendChild(host);

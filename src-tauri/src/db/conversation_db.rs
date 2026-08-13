@@ -201,6 +201,18 @@ pub struct Message {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LargeMessagePreviewMetadata {
+    pub line_count: usize,
+    pub payload_char_count: usize,
+    pub content_hash: String,
+    pub reason: String,
+    pub should_preview: bool,
+    pub summary: String,
+    pub preview_text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MessageDetail {
     pub id: i64,
     pub parent_id: Option<i64>,
@@ -226,6 +238,8 @@ pub struct MessageDetail {
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
     pub attachment_list: Vec<MessageAttachment>,
     pub regenerate: Vec<MessageDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub large_message_preview: Option<LargeMessagePreviewMetadata>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1009,6 +1023,16 @@ impl MessageAttachmentRepository {
                 })
             })
             .optional()
+    }
+
+    pub fn update_image_content(&self, id: i64, attachment_url: &str, attachment_content: &str) -> Result<()> {
+        self.with_serialized_write(|conn| {
+            conn.execute(
+                "UPDATE message_attachment SET attachment_url = ?1, attachment_content = ?2 WHERE id = ?3",
+                (attachment_url, attachment_content, &id),
+            )?;
+            Ok(())
+        })
     }
 }
 

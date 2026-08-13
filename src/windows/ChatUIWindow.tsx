@@ -7,6 +7,7 @@ import ConversationSearchDialog from "../components/ConversationSearchDialog";
 import ConversationUI, {
     ConversationUIRef,
     type InlineInteractionItem,
+    type PreviewFileContextSelection,
 } from "../components/ConversationUI";
 import {
     AcpPermissionDialog,
@@ -55,6 +56,22 @@ interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
     conversationIndex: number;
     conversationName: string;
     messageItemCount: number;
+    initialScrollTop: number;
+    initialMaxScrollTop: number;
+    initialDistanceToBottom: number;
+    initialAtBottom: boolean;
+    initialMaxDistanceToBottomDuringSettle: number;
+    initialMaxVisibleDistanceToBottomDuringSettle: number;
+    initialFirstAwayFromBottomFrame: number | null;
+    initialFirstVisibleAwayFromBottomFrame: number | null;
+    initialSettleSamples: Array<{
+        frame: number;
+        scrollTop: number;
+        maxScrollTop: number;
+        distanceToBottom: number;
+        isInitialBottomPositioning: boolean;
+        visibleDistanceToBottom: number;
+    }>;
     rowHeightDrift: Array<{
         key: string;
         changeCount: number;
@@ -98,7 +115,45 @@ declare global {
                 lastHeight: number;
             }>;
         };
+        __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean;
     }
+}
+
+async function sampleInitialScrollSettle(
+    container: HTMLDivElement,
+    frameCount: number,
+): Promise<ChatScrollPerfTestResult["initialSettleSamples"]> {
+    const samples: ChatScrollPerfTestResult["initialSettleSamples"] = [];
+
+    for (let frame = 0; frame < frameCount; frame += 1) {
+        await Promise.race([
+            waitForAnimationFrames(1),
+            new Promise<void>((resolve) => {
+                window.setTimeout(resolve, 50);
+            }),
+        ]);
+        const maxScrollTop = Math.max(
+            0,
+            container.scrollHeight - container.clientHeight,
+        );
+        const scrollTop = container.scrollTop;
+        const isInitialBottomPositioning = Boolean(
+            container.querySelector("[data-aipp-initial-bottom-positioning='true']"),
+        );
+        const distanceToBottom = Math.max(0, maxScrollTop - scrollTop);
+        samples.push({
+            frame,
+            scrollTop,
+            maxScrollTop,
+            distanceToBottom,
+            isInitialBottomPositioning,
+            visibleDistanceToBottom: isInitialBottomPositioning
+                ? 0
+                : distanceToBottom,
+        });
+    }
+
+    return samples;
 }
 
 function ChatUIWindow() {
@@ -115,6 +170,8 @@ function ChatUIWindow() {
     const [conversationTitle, setConversationTitle] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
     const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
+    const [pendingPreviewFileSelection, setPendingPreviewFileSelection] =
+        useState<PreviewFileContextSelection | null>(null);
 
     const [pluginList, setPluginList] = useState<any[]>([]);
 
@@ -170,6 +227,7 @@ function ChatUIWindow() {
         callId: previewFileCallId,
         messageId: previewFileMessageId,
         handleOpenChange: handlePreviewFileOpenChange,
+        reopenPersistedPreview: reopenPersistedPreviewFile,
     } = usePreviewFile({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
@@ -251,6 +309,10 @@ function ChatUIWindow() {
                     ...extra,
                 });
             };
+            const perfWindow = window as Window & {
+                __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean;
+            };
+            perfWindow.__AIPP_CHAT_SCROLL_PERF_ACTIVE__ = true;
             try {
                 emitProgress("start");
                 if (isMobile) {
@@ -300,7 +362,60 @@ function ChatUIWindow() {
                     throw new Error("Chat scroll container was not found.");
                 }
 
-                await waitForAnimationFrames(4);
+                const initialSettleSamples = await sampleInitialScrollSettle(
+                    scrollContainer,
+                    72,
+                );
+                const lastInitialSample =
+                    initialSettleSamples[initialSettleSamples.length - 1];
+                const initialMaxScrollTop = Math.max(
+                    0,
+                    lastInitialSample?.maxScrollTop
+                    ?? scrollContainer.scrollHeight - scrollContainer.clientHeight,
+                );
+                const initialScrollTop =
+                    lastInitialSample?.scrollTop ?? scrollContainer.scrollTop;
+                const initialDistanceToBottom = Math.max(
+                    0,
+                    lastInitialSample?.distanceToBottom
+                    ?? initialMaxScrollTop - initialScrollTop,
+                );
+                const initialMaxDistanceToBottomDuringSettle = Math.max(
+                    0,
+                    ...initialSettleSamples.map((sample) => sample.distanceToBottom),
+                );
+                const initialMaxVisibleDistanceToBottomDuringSettle = Math.max(
+                    0,
+                    ...initialSettleSamples.map(
+                        (sample) => sample.visibleDistanceToBottom,
+                    ),
+                );
+                const initialFirstAwayFromBottomFrame =
+                    initialSettleSamples.find(
+                        (sample) => sample.distanceToBottom > 4,
+                    )?.frame ?? null;
+                const initialFirstVisibleAwayFromBottomFrame =
+                    initialSettleSamples.find(
+                        (sample) => sample.visibleDistanceToBottom > 4,
+                    )?.frame ?? null;
+                const compactInitialSettleSamples = initialSettleSamples.filter(
+                    (sample) =>
+                        sample.frame < 8
+                        || sample.frame % 4 === 0
+                        || sample.distanceToBottom > 4
+                        || sample.isInitialBottomPositioning
+                        || sample.frame >= initialSettleSamples.length - 4,
+                );
+                emitProgress("initial-position", {
+                    initialScrollTop,
+                    initialMaxScrollTop,
+                    initialDistanceToBottom,
+                    initialMaxDistanceToBottomDuringSettle,
+                    initialMaxVisibleDistanceToBottomDuringSettle,
+                    initialFirstAwayFromBottomFrame,
+                    initialFirstVisibleAwayFromBottomFrame,
+                });
+
                 scrollContainer.scrollTop = 0;
                 await waitForAnimationFrames(2);
                 window.__AIPP_CHAT_PERF_CAPTURE__?.resetVirtualRowHeightDrift?.();
@@ -327,6 +442,15 @@ function ChatUIWindow() {
                     conversationIndex,
                     conversationName: targetConversation.name,
                     messageItemCount,
+                    initialScrollTop,
+                    initialMaxScrollTop,
+                    initialDistanceToBottom,
+                    initialAtBottom: initialDistanceToBottom <= 4,
+                    initialMaxDistanceToBottomDuringSettle,
+                    initialMaxVisibleDistanceToBottomDuringSettle,
+                    initialFirstAwayFromBottomFrame,
+                    initialFirstVisibleAwayFromBottomFrame,
+                    initialSettleSamples: compactInitialSettleSamples,
                     rowHeightDrift:
                         window.__AIPP_CHAT_PERF_CAPTURE__?.getVirtualRowHeightDrift?.()
                         ?? [],
@@ -357,6 +481,8 @@ function ChatUIWindow() {
                     }),
                 );
                 throw error;
+            } finally {
+                perfWindow.__AIPP_CHAT_SCROLL_PERF_ACTIVE__ = false;
             }
         },
         [isMobile, listConversations],
@@ -368,6 +494,41 @@ function ChatUIWindow() {
             setPendingScrollMessageId(hit.message_id);
         }
     }, []);
+
+    const handlePreviewFileContextSelection = useCallback((selection: PreviewFileContextSelection) => {
+        if (selection.conversationId) {
+            setSelectedConversation(selection.conversationId.toString());
+        }
+        if (selection.messageId) {
+            setPendingScrollMessageId(selection.messageId);
+        }
+        setPendingPreviewFileSelection(selection);
+    }, []);
+
+    useEffect(() => {
+        const unsubscribe = listen<PreviewFileContextSelection>("preview-file-context-selected", (event) => {
+            handlePreviewFileContextSelection(event.payload);
+        });
+
+        return () => {
+            unsubscribe.then((unlisten) => unlisten());
+        };
+    }, [handlePreviewFileContextSelection]);
+
+    useEffect(() => {
+        if (!pendingPreviewFileSelection) {
+            return;
+        }
+        if (
+            pendingPreviewFileSelection.conversationId &&
+            selectedConversation !== pendingPreviewFileSelection.conversationId.toString()
+        ) {
+            return;
+        }
+
+        reopenPersistedPreviewFile(pendingPreviewFileSelection.callId);
+        setPendingPreviewFileSelection(null);
+    }, [pendingPreviewFileSelection, reopenPersistedPreviewFile, selectedConversation]);
 
     // 应用内快捷键
     useAppShortcuts("chat", {
@@ -609,7 +770,9 @@ function ChatUIWindow() {
                             onConversationChange={handleConversationChange}
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
+                            onPreviewFileContextClick={handlePreviewFileContextSelection}
                             virtualizeMessages
+                            virtualizedListEngine="virtuoso"
                         />
                     </div>
 
@@ -662,7 +825,9 @@ function ChatUIWindow() {
                         onChangeConversationId={setSelectedConversation}
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
+                        onPreviewFileContextClick={handlePreviewFileContextSelection}
                         virtualizeMessages
+                        virtualizedListEngine="virtuoso"
                     />
                 </div>
 

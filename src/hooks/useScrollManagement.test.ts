@@ -1,7 +1,17 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, render, renderHook, screen } from "@testing-library/react";
+import { createElement, useLayoutEffect } from "react";
 import type { WheelEvent } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useScrollManagement } from "./useScrollManagement";
+import {
+    CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+    CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR,
+} from "@/components/conversation/layoutConstants";
+
+class ResizeObserverMock {
+    observe = vi.fn();
+    disconnect = vi.fn();
+}
 
 describe("useScrollManagement", () => {
     beforeEach(() => {
@@ -13,6 +23,7 @@ describe("useScrollManagement", () => {
                 return 1;
             }),
         );
+        vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     });
 
     afterEach(() => {
@@ -72,6 +83,45 @@ describe("useScrollManagement", () => {
             top: 1000,
             behavior: "auto",
         });
+    });
+
+    it("keeps a padded live-only viewport height separate from the normal viewport height", () => {
+        function Harness() {
+            const { scrollContainerRef } = useScrollManagement();
+
+            useLayoutEffect(() => {
+                const container = scrollContainerRef.current;
+                if (!container) return;
+                Object.defineProperty(container, "clientHeight", {
+                    value: 500,
+                    configurable: true,
+                });
+            }, [scrollContainerRef]);
+
+            return createElement("div", {
+                ref: scrollContainerRef,
+                "data-testid": "scroll-container",
+                style: {
+                    paddingTop: 24,
+                    paddingBottom: 24,
+                    rowGap: 16,
+                },
+            });
+        }
+
+        render(createElement(Harness));
+
+        const container = screen.getByTestId("scroll-container");
+
+        expect(
+            container.style.getPropertyValue(CHAT_SCROLL_VIEWPORT_HEIGHT_CSS_VAR),
+        ).toBe("490px");
+        // contentBox(500-24-24) - endAnchor(0) = 452
+        expect(
+            container.style.getPropertyValue(
+                CHAT_SCROLL_LIVE_ONLY_VIEWPORT_HEIGHT_CSS_VAR,
+            ),
+        ).toBe("452px");
     });
 
     it("cancels queued auto-scroll when the user starts scrolling manually", () => {

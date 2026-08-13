@@ -139,7 +139,7 @@ impl SearchHandler {
         {
             Ok(html) => {
                 // 根据结果类型处理HTML
-                self.process_html_by_type(html, &request, &search_engine)
+                self.process_html_by_type(html, &request, &search_engine, start.elapsed().as_millis() as u64)
             }
             Err(e) => {
                 let timeout_like = is_timeout_like(&e);
@@ -213,6 +213,7 @@ impl SearchHandler {
         html: String,
         request: &SearchRequest,
         search_engine: &SearchEngine,
+        search_time_ms: u64,
     ) -> Result<SearchResponse, String> {
         match request.result_type {
             SearchResultType::Html => Ok(SearchResponse::Html {
@@ -225,6 +226,7 @@ impl SearchHandler {
                     "Successfully retrieved HTML search results from {}",
                     search_engine.display_name()
                 ),
+                search_time_ms,
             }),
             SearchResultType::Markdown => {
                 let markdown_content = SearchEngineBase::html_to_markdown(&html);
@@ -238,6 +240,7 @@ impl SearchHandler {
                         "Successfully converted {} search results to Markdown format",
                         search_engine.display_name()
                     ),
+                    search_time_ms,
                 })
             }
             SearchResultType::Items => {

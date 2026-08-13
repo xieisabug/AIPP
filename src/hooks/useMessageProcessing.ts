@@ -105,47 +105,8 @@ export function useMessageProcessing({
             return true;
         });
 
-        // 如果没有分组信息，直接按时间/ID排序返回
-        if (generationGroups.size === 0) {
-            return visibleMessages.sort(
-                (a, b) => compareMessagesChronologically(a, b),
-            );
-        }
-
-        // 创建消息到根组的映射，包括子分组的消息
-        const messageToRootGroupMap = new Map<number, string>();
-        
-        // 首先建立所有 generation_group_id 到根分组的映射
-        const generationIdToRootMap = new Map<string, string>();
-        combinedMessagesForGrouping.forEach(message => {
-            if (message.generation_group_id) {
-                // 查找这个 generation_group_id 在哪个根分组中
-                generationGroups.forEach((group, rootGroupId) => {
-                    group.versions.forEach((version: any) => {
-                        if (version.versionId === message.generation_group_id) {
-                            generationIdToRootMap.set(message.generation_group_id!, rootGroupId);
-                        }
-                    });
-                });
-            }
-        });
-        
-        // 然后为每个消息建立到根分组的映射
-        combinedMessagesForGrouping.forEach(message => {
-            if (message.generation_group_id) {
-                const rootGroupId = generationIdToRootMap.get(message.generation_group_id);
-                if (rootGroupId) {
-                    messageToRootGroupMap.set(message.id, rootGroupId);
-                }
-            }
-        });
-
-        // 然后对可见消息进行排序
-        const sorted = visibleMessages.sort((a, b) => {
-            return compareMessagesChronologically(a, b);
-        });
-
-        return sorted;
+        // 排序不依赖分组映射，直接按时间/ID稳定排序即可
+        return visibleMessages.sort((a, b) => compareMessagesChronologically(a, b));
     }, [combinedMessagesForGrouping, generationGroups, groupRootMessageIds, getMessageVersionInfo]);
 
     return {

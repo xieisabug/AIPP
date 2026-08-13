@@ -13,6 +13,7 @@ mod scheduler;
 mod skills;
 mod slash;
 mod state;
+mod sync;
 mod template_engine;
 mod utils;
 mod window;
@@ -31,6 +32,7 @@ use crate::api::ai::acp::{
 use crate::api::ai_api::{
     ask_ai, cancel_ai, enqueue_conversation_message, get_activity_focus,
     get_conversation_runtime_state, get_shine_state, list_queued_conversation_messages,
+    list_running_conversation_ids,
     promote_queued_conversation_message, regenerate_ai, regenerate_conversation_title,
     tool_result_continue_ask_ai,
 };
@@ -79,7 +81,8 @@ use crate::api::plugin_api::{
     plugin_append_message, plugin_create_conversation, plugin_data_query, plugin_data_schema,
     plugin_get_assistant_detail, plugin_get_conversation_with_messages, plugin_storage_execute,
     plugin_storage_query, plugin_storage_schema, plugin_update_assistant_prompt,
-    plugin_update_message_metadata, set_plugin_assistant_config, set_plugin_config,
+    plugin_update_message_metadata, plugin_comfyui_test_connection,
+    plugin_comfyui_generate_and_attach, plugin_execute_image_task, set_plugin_assistant_config, set_plugin_config,
     set_plugin_data, submit_js_plugin_hook_result, uninstall_plugin, verify_plugin_entry_checksum,
 };
 use crate::api::scheduled_task_api::{
@@ -106,6 +109,7 @@ use crate::api::system_api::{
     suspend_global_shortcut, trigger_assistant_summary_generation,
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
+use crate::sync::{get_sync_status, retry_failed_sync_outbox, save_sync_settings, trigger_sync_now};
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::updater_api::{
@@ -167,7 +171,7 @@ use crate::mcp::builtin_mcp::{
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
     get_conversation_loaded_mcp_tools, get_mcp_tool_call, get_mcp_tool_calls_by_conversation,
-    send_mcp_tool_results, stop_mcp_tool_call,
+    report_preview_code_runtime_error, send_mcp_tool_results, stop_mcp_tool_call,
 };
 use crate::mcp::registry_api::{
     add_mcp_server,
@@ -886,6 +890,7 @@ pub fn run() {
             }
 
             crate::feishu::refresh_runtime_async(&app_handle);
+            crate::sync::start_worker_from_config(app_handle.clone());
 
             Ok(())
         })
@@ -903,6 +908,7 @@ pub fn run() {
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
         .manage(PreviewResourceState::new())
+        .manage(crate::sync::SyncState::new())
         .manage(FeishuButlerState::default());
     #[cfg(desktop)]
     let app = app.manage(CopilotLspState::default());
@@ -917,6 +923,7 @@ pub fn run() {
             regenerate_ai,
             get_activity_focus,
             get_conversation_runtime_state,
+            list_running_conversation_ids,
             get_shine_state,
             regenerate_conversation_title,
             generate_artifact_metadata,
@@ -945,6 +952,10 @@ pub fn run() {
             debug_resend_message_to_feishu,
             conversation_has_feishu_target,
             open_data_folder,
+            get_sync_status,
+            retry_failed_sync_outbox,
+            save_sync_settings,
+            trigger_sync_now,
             get_llm_providers,
             get_filtered_providers,
             update_llm_provider,
@@ -1115,6 +1126,7 @@ pub fn run() {
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
             get_conversation_loaded_mcp_tools,
+            report_preview_code_runtime_error,
             stop_mcp_tool_call,
             continue_with_error,
             send_mcp_tool_results,
@@ -1218,6 +1230,9 @@ pub fn run() {
             plugin_create_conversation,
             plugin_append_message,
             plugin_update_message_metadata,
+            plugin_comfyui_test_connection,
+            plugin_comfyui_generate_and_attach,
+            plugin_execute_image_task,
             // Todo commands
             get_todos,
             // Export commands
@@ -1249,6 +1264,8 @@ pub fn run() {
                             if let Err(e) = crate::mcp::builtin_mcp::search::handler::shutdown_search_browser_pool().await {
                                 warn!(error = %e, "Failed to shutdown search browser pool");
                             }
+                            let sync_flush = crate::sync::flush_before_exit(&app_handle);
+                            let _ = tokio::time::timeout(Duration::from_secs(8), sync_flush).await;
                             EXIT_STATE.store(EXIT_STATE_READY, Ordering::SeqCst);
                             app_handle.exit(0);
                         });
@@ -1266,6 +1283,13 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
             crate::window::awaken_aipp(app_handle);
+            crate::sync::schedule_sync_after_local_change(app_handle);
+        }
+        RunEvent::WindowEvent {
+            event: tauri::WindowEvent::Focused(true),
+            ..
+        } => {
+            crate::sync::schedule_sync_after_local_change(app_handle);
         }
         _ => {}
     });

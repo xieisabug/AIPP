@@ -141,6 +141,26 @@ export function waitForCondition(
     });
 }
 
+async function resetScrollPosition(
+    container: HTMLElement,
+    options: {
+        frameCount?: number;
+        maxAttempts?: number;
+    } = {},
+): Promise<void> {
+    const { frameCount = 2, maxAttempts = 4 } = options;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        container.scrollTo({ top: 0, behavior: "auto" });
+        container.scrollTop = 0;
+        await waitForAnimationFrames(frameCount);
+
+        if (Math.abs(container.scrollTop) < 1) {
+            return;
+        }
+    }
+}
+
 function easeInOutQuad(progress: number): number {
     return progress < 0.5
         ? 2 * progress * progress
@@ -279,6 +299,9 @@ export async function runScrollPerformanceProbe(
     } = options;
 
     await waitForAnimationFrames(settleFrameCount);
+    await resetScrollPosition(container, {
+        frameCount: Math.max(2, settleFrameCount),
+    });
 
     const startScrollTop = container.scrollTop;
     const maxScrollTop = Math.max(
@@ -349,9 +372,6 @@ export async function runScrollPerformanceProbe(
     const startedAt = performance.now();
 
     try {
-        container.scrollTop = 0;
-        await waitForAnimationFrames(2);
-
         await runScrollPass(
             container,
             0,

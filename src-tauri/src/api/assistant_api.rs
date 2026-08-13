@@ -379,6 +379,7 @@ pub async fn save_assistant(
 
     // 广播助手列表更新事件
     let _ = app_handle.emit("assistant_list_changed", ());
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(())
 }
@@ -499,6 +500,7 @@ pub fn add_assistant(
 
     // 广播助手列表更新事件
     let _ = app_handle.emit("assistant_list_changed", ());
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(assistant_detail)
 }
@@ -609,6 +611,7 @@ pub fn copy_assistant(
 
     // 广播助手列表更新事件
     let _ = app_handle.emit("assistant_list_changed", ());
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(assistant_detail)
 }
@@ -647,6 +650,7 @@ pub fn delete_assistant(app_handle: tauri::AppHandle, assistant_id: i64) -> Resu
 
     // 广播助手列表更新事件
     let _ = app_handle.emit("assistant_list_changed", ());
+    crate::sync::schedule_sync_after_local_change(&app_handle);
 
     Ok(())
 }
