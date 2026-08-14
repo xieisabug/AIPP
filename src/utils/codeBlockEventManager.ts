@@ -16,7 +16,7 @@ class CodeBlockEventManager {
     }
 
     private throttle<T extends any[]>(func: (...args: T) => void, delay: number) {
-        let timeoutId: NodeJS.Timeout | null = null;
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
         return (...args: T) => {
             if (timeoutId) return;
             timeoutId = setTimeout(() => {

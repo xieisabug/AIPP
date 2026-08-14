@@ -1,5 +1,5 @@
 import { visit } from "unist-util-visit";
-import { Node } from "unist";
+import type { Node } from "unist";
 
 interface CodeNode extends Node {
     type: "code";

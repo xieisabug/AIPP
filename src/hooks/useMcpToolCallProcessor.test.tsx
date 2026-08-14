@@ -384,7 +384,8 @@ describe("useMcpToolCallProcessor MCP identity", () => {
 
         // Should now show "待执行" instead of "生成中"
         expect(await screen.findByText("待执行")).toBeInTheDocument();
-        expect(screen.queryByText("生成中")).not.toBeInTheDocument();
+        // motion 13 下 AnimatePresence 退出动画会短暂保留旧 badge，等待其卸载
+        await waitFor(() => expect(screen.queryByText("生成中")).not.toBeInTheDocument());
         expect(screen.getByText("my-tool")).toBeInTheDocument();
         expect(screen.getAllByText("my-tool")).toHaveLength(1);
     });

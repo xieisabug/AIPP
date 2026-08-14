@@ -105,7 +105,7 @@ function ChartTooltipContent({
     color,
     nameKey,
     labelKey,
-}: React.ComponentProps<typeof RechartsPrimitive.Tooltip> &
+}: RechartsPrimitive.TooltipContentProps &
     React.ComponentProps<"div"> & {
         hideLabel?: boolean;
         hideIndicator?: boolean;
@@ -157,11 +157,16 @@ function ChartTooltipContent({
                 {payload.map((item, index) => {
                     const key = `${nameKey || item.name || item.dataKey || "value"}`;
                     const itemConfig = getPayloadConfigFromPayload(config, item, key);
-                    const indicatorColor = color || item.payload.fill || item.color;
+                    const indicatorColor =
+                        color ||
+                        (item.payload && typeof item.payload === "object" && "fill" in item.payload
+                            ? String(item.payload.fill)
+                            : undefined) ||
+                        item.color;
 
                     return (
                         <div
-                            key={item.dataKey}
+                            key={typeof item.dataKey === "function" ? index : (item.dataKey ?? index)}
                             className={cn(
                                 "[&>svg]:text-muted-foreground flex w-full flex-wrap items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5",
                                 indicator === "dot" && "items-center"
@@ -231,8 +236,9 @@ function ChartLegendContent({
     payload,
     verticalAlign = "bottom",
     nameKey,
-}: React.ComponentProps<"div"> &
-    Pick<RechartsPrimitive.LegendProps, "payload" | "verticalAlign"> & {
+}: React.ComponentProps<"div"> & {
+        payload?: ReadonlyArray<RechartsPrimitive.LegendPayload>;
+        verticalAlign?: RechartsPrimitive.LegendProps["verticalAlign"];
         hideIcon?: boolean;
         nameKey?: string;
     }) {

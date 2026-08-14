@@ -103,7 +103,7 @@ export function useArtifactEvents(options: UseArtifactEventsOptions): UseArtifac
 
     const unlistenersRef = useRef<(() => void)[]>([]);
     const isRegisteredRef = useRef(false);
-    const readyIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const readyIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const hasReceivedDataRef = useRef(false);
     const currentRequestIdRef = useRef<string | null>(null);
 

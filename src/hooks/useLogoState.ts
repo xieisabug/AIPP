@@ -16,7 +16,7 @@ export const useLogoState = (options: UseLogoStateOptions = {}) => {
   } = options;
 
   const [state, setState] = useState<LogoState>(defaultState);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 清理定时器
   const clearAutoReturn = useCallback(() => {

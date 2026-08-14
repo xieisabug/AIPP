@@ -100,6 +100,8 @@ interface InputAreaProps {
     acpAvailableCommands?: AcpAvailableCommand[];
 }
 const IMAGE_AREA_HEIGHT = 80;
+// 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
+const EMPTY_ACP_COMMANDS: AcpAvailableCommand[] = [];
 
 const InputArea = React.memo(
     forwardRef<InputAreaRef, InputAreaProps>(
@@ -119,7 +121,7 @@ const InputArea = React.memo(
                 sidebarVisible = false,
                 sendButtonIcon,
                 sendButtonVisual,
-                acpAvailableCommands = [],
+                acpAvailableCommands = EMPTY_ACP_COMMANDS,
             },
             ref
         ) => {

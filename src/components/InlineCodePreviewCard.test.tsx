@@ -433,7 +433,8 @@ describe("InlineCodePreviewCard", () => {
         expect(await screen.findByRole("button", { name: "显示" })).toBeInTheDocument();
 
         await user.click(screen.getByRole("button", { name: "显示" }));
-        expect(screen.queryByText("预览已隐藏。")).not.toBeInTheDocument();
+        // motion 13 下 AnimatePresence 退出动画会短暂保留旧节点，等待其卸载
+        await waitFor(() => expect(screen.queryByText("预览已隐藏。")).not.toBeInTheDocument());
         expect(await screen.findByRole("button", { name: "隐藏" })).toBeInTheDocument();
         const restoredHost = await screen.findByTestId("preview-code-host");
         await waitFor(() =>

@@ -171,7 +171,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [isExpanded, setIsExpanded] = useState<boolean>(shouldInitiallyExpand);
     const [shouldRenderDetails, setShouldRenderDetails] = useState<boolean>(shouldInitiallyExpand);
     // 自动收起定时器引用
-    const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const collapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     // 用户手动展开后，后续自动收起不能覆盖用户正在查看详情的意图。
     const userExpandedRef = useRef(false);
     // 移除前端自动执行，避免与后端 detect_and_process_mcp_calls 的自动执行叠加

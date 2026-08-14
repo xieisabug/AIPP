@@ -15,6 +15,9 @@ dist-ssr
 dist-official-plugins
 *.local
 
+# 项目使用 pnpm，忽略 npm 生成的锁文件
+package-lock.json
+
 target/*
 sync-server/tmp
 sync-server/data
