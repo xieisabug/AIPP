@@ -57,9 +57,9 @@ image = "0.25"
 uuid = { version = "1.0", features = ["v4"] }
 glob = "0.3"
 urlencoding = "2.1"
-tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
+tauri-plugin-dialog = "2.7"
 tauri-plugin-clipboard-manager = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
-tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
+tauri-plugin-fs = "2.5"
 tauri-plugin-opener = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 genai = { git = "https://github.com/xieisabug/rust-genai.git", rev="04359b109d65cac31b3fdbec841d03dc27880bb3" }
 rmcp = { version = "0.16", features = [
