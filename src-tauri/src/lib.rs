@@ -109,7 +109,10 @@ use crate::api::system_api::{
     suspend_global_shortcut, trigger_assistant_summary_generation,
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
-use crate::sync::{get_sync_status, retry_failed_sync_outbox, save_sync_settings, trigger_sync_now};
+use crate::sync::{
+    get_sync_status, retry_failed_sync_outbox, retry_sync_dead_letters, save_sync_settings,
+    trigger_sync_now,
+};
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
 use crate::api::updater_api::{
@@ -956,6 +959,7 @@ pub fn run() {
             retry_failed_sync_outbox,
             save_sync_settings,
             trigger_sync_now,
+            retry_sync_dead_letters,
             get_llm_providers,
             get_filtered_providers,
             update_llm_provider,

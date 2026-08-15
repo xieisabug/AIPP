@@ -22,6 +22,7 @@ interface SyncStatus {
     pending_outbox_count: number;
     pushing_outbox_count: number;
     failed_outbox_count: number;
+    dead_letter_count: number;
     server_cursor: number;
 }
 
@@ -32,6 +33,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [retryingFailed, setRetryingFailed] = useState(false);
+    const [retryingDeadLetters, setRetryingDeadLetters] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
 
@@ -150,6 +152,19 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
+    const handleRetryDeadLetters = useCallback(async () => {
+        setRetryingDeadLetters(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("retry_sync_dead_letters");
+            setStatus(nextStatus);
+            toast.success("已重试无法应用的变更");
+        } catch (error) {
+            toast.error("重试无法应用的变更失败: " + getErrorMessage(error));
+        } finally {
+            setRetryingDeadLetters(false);
+        }
+    }, []);
+
     const statusText = useMemo(() => {
         if (!status) {
             return "读取中";
@@ -158,7 +173,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             return "本地模式：仅使用本机 SQLite，后台同步已停止。";
         }
         const state = status.syncing ? "同步中" : status.connected ? "已连接" : status.running ? "等待同步" : "未运行";
-        return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，游标 ${status.server_cursor}`;
+        return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
     }, [status]);
 
     const dataFolderConfig = [
@@ -252,6 +267,17 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 value: retryingFailed ? "重试中..." : "重试失败",
                 disabled: mode !== "self_hosted" || retryingFailed || saving || (status?.failed_outbox_count ?? 0) === 0,
                 onClick: handleRetryFailed,
+            },
+        },
+        {
+            key: "retryDeadLetters",
+            config: {
+                type: "button" as const,
+                label: "无法应用的变更",
+                value: retryingDeadLetters ? "重试中..." : "重试无法应用的变更",
+                disabled:
+                    mode !== "self_hosted" || retryingDeadLetters || saving || (status?.dead_letter_count ?? 0) === 0,
+                onClick: handleRetryDeadLetters,
             },
         },
     ];

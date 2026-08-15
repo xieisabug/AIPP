@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::db::get_db_path;
@@ -75,6 +75,7 @@ pub struct SyncStatusDto {
     pending_outbox_count: i64,
     pushing_outbox_count: i64,
     failed_outbox_count: i64,
+    dead_letter_count: i64,
     server_cursor: i64,
 }
 
@@ -192,7 +193,7 @@ struct PullResponse {
     changes: Vec<PullChange>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PullChange {
     #[allow(dead_code)]
     seq: i64,
@@ -575,6 +576,18 @@ pub async fn retry_failed_sync_outbox(app_handle: AppHandle) -> Result<SyncStatu
     sync_status(&app_handle).await
 }
 
+#[tauri::command]
+pub async fn retry_sync_dead_letters(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    let settings = load_settings(&app_handle)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return Err("当前是本地模式，未启用自建同步".to_string());
+    }
+    let device_id = ensure_device_id(&app_handle)?;
+    replay_dead_letters(&app_handle, &device_id)?;
+    emit_status_changed(&app_handle).await;
+    sync_status(&app_handle).await
+}
+
 async fn start_worker(app_handle: AppHandle) {
     let state = app_handle.state::<SyncState>();
     let mut task = state.worker_task.lock().await;
@@ -785,15 +798,138 @@ async fn pull_remote(
             return Err(format!("同步服务器 pull 返回 {}", response.status()));
         }
         let body = response.json::<PullResponse>().await.map_err(|e| e.to_string())?;
+        let mut deferred: Vec<&PullChange> = Vec::new();
         for change in &body.changes {
-            apply_change(app_handle, change, device_id)?;
+            if let Err(err) = apply_change(app_handle, change, device_id) {
+                if is_dependency_pending_error(&err) {
+                    // 依赖对象可能在本页后面的 change 里：先记下，本页处理完后重放一次
+                    deferred.push(change);
+                } else {
+                    record_dead_letter(app_handle, change, &err);
+                }
+            }
+        }
+        for change in deferred {
+            if let Err(err) = apply_change(app_handle, change, device_id) {
+                record_dead_letter(app_handle, change, &err);
+            }
         }
         set_cursor(app_handle, body.cursor)?;
         emit_status_changed(app_handle).await;
         if !body.has_more {
+            // pull 全部完成后自愈重放一次存量死信：跨页的依赖此时已就位
+            if let Err(err) = replay_dead_letters(app_handle, device_id) {
+                warn!(error = %err, "Replay sync dead letters after pull failed");
+            }
             return Ok(());
         }
     }
+}
+
+/// 判断 apply 失败是否属于"依赖对象尚未同步"类错误（可等后续变更就位后重试）。
+fn is_dependency_pending_error(err: &str) -> bool {
+    err.starts_with("缺少同步依赖") || err.starts_with("远端变更缺少外键引用")
+}
+
+/// 将无法应用的远端变更写入死信表；同一对象只保留最新一条。
+/// 死信写入本身失败只记日志，不阻断 pull 主流程。
+fn record_dead_letter(app_handle: &AppHandle, change: &PullChange, error: &str) {
+    let result = (|| -> Result<(), String> {
+        let change_json =
+            serde_json::to_string(change).map_err(|e| format!("serialize dead letter: {e}"))?;
+        let conn = open_sync_db(app_handle)?;
+        conn.execute(
+            "DELETE FROM sync_dead_letter WHERE object_type = ?1 AND object_id = ?2",
+            params![change.object_type, change.object_id],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO sync_dead_letter
+             (object_type, object_id, operation, change_json, error, failed_at, retry_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            params![
+                change.object_type,
+                change.object_id,
+                change.operation,
+                change_json,
+                error,
+                now_string(),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if let Err(err) = result {
+        warn!(
+            object_type = %change.object_type,
+            object_id = %change.object_id,
+            error = %err,
+            "Failed to record sync dead letter"
+        );
+    }
+    warn!(
+        object_type = %change.object_type,
+        object_id = %change.object_id,
+        error = %error,
+        "Remote change moved to sync dead letter"
+    );
+}
+
+/// 按序重放死信表中的变更：成功则删除，失败则更新错误信息并保留。
+/// 返回（成功数，剩余数）。
+fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize, usize), String> {
+    ensure_sync_db(app_handle)?;
+    let pending: Vec<(i64, String)> = {
+        let conn = open_sync_db(app_handle)?;
+        let mut stmt = conn
+            .prepare("SELECT id, change_json FROM sync_dead_letter ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    if pending.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut resolved = 0usize;
+    for (id, change_json) in &pending {
+        let change: PullChange = match serde_json::from_str(change_json) {
+            Ok(change) => change,
+            Err(err) => {
+                update_dead_letter_failure(app_handle, *id, &format!("死信反序列化失败: {err}"))?;
+                continue;
+            }
+        };
+        match apply_change(app_handle, &change, device_id) {
+            Ok(()) => {
+                let conn = open_sync_db(app_handle)?;
+                conn.execute("DELETE FROM sync_dead_letter WHERE id = ?1", params![id])
+                    .map_err(|e| e.to_string())?;
+                resolved += 1;
+            }
+            Err(err) => {
+                update_dead_letter_failure(app_handle, *id, &err)?;
+            }
+        }
+    }
+    let remaining = pending.len() - resolved;
+    if resolved > 0 {
+        debug!(resolved, remaining, "Replayed sync dead letters");
+    }
+    Ok((resolved, remaining))
+}
+
+fn update_dead_letter_failure(app_handle: &AppHandle, id: i64, error: &str) -> Result<(), String> {
+    let conn = open_sync_db(app_handle)?;
+    conn.execute(
+        "UPDATE sync_dead_letter
+         SET error = ?2, failed_at = ?3, retry_count = retry_count + 1
+         WHERE id = ?1",
+        params![id, error, now_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn sync_http_client() -> Result<reqwest::Client, String> {
@@ -807,25 +943,214 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
     ensure_sync_db(app_handle)?;
     let mut enqueued = 0;
     for spec in specs() {
-        let snapshots = read_local_snapshots(app_handle, &spec)?;
+        let (snapshots, present_ids) = read_local_snapshots(app_handle, &spec)?;
         for snapshot in snapshots {
             if enqueue_snapshot_if_changed(app_handle, &snapshot)? {
                 enqueued += 1;
             }
         }
+        enqueued += scan_local_deletes(app_handle, &spec, &present_ids)?;
     }
     Ok(enqueued)
+}
+
+/// 删除检测：shadow 中已同步（非墓碑）但本轮快照里不存在的对象，
+/// 确认本地行确实不存在后入队 delete 事件。
+/// 同时清理"本地行已删除但 outbox 里还留着 upsert"的过期事件。
+fn scan_local_deletes(
+    app_handle: &AppHandle,
+    spec: &SyncTableSpec,
+    present_ids: &HashSet<String>,
+) -> Result<usize, String> {
+    let conn = open_sync_db(app_handle)?;
+    let device_id = ensure_device_id(app_handle)?;
+    let mut enqueued = 0;
+
+    let candidates = find_deleted_candidates(&conn, spec.object_type, present_ids)?;
+    for (object_id, base_version) in candidates {
+        // 行可能只是被 where_clause 过滤出同步范围，必须确认行真的不存在
+        if local_row_exists(app_handle, spec, &object_id)? {
+            continue;
+        }
+        if enqueue_delete_event(&conn, spec, &object_id, base_version, &device_id)? {
+            enqueued += 1;
+        }
+    }
+
+    // 新增后未推送即删除：没有 shadow，但 outbox 可能残留 pending/failed upsert，
+    // 不清理的话会把已删除的对象推上服务器（幽灵复活）。
+    let stale_upserts = find_stale_pending_upserts(&conn, spec.object_type, present_ids)?;
+    for object_id in stale_upserts {
+        if local_row_exists(app_handle, spec, &object_id)? {
+            continue;
+        }
+        debug!(
+            object_type = %spec.object_type,
+            object_id = %object_id,
+            "Dropping stale pending upsert for locally deleted row"
+        );
+        conn.execute(
+            "DELETE FROM sync_outbox
+             WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert'
+               AND status IN ('pending', 'failed')",
+            params![spec.object_type, object_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(enqueued)
+}
+
+/// shadow 中已同步且非墓碑、但不在 present_ids 中的对象，返回 (object_id, base_version)。
+fn find_deleted_candidates(
+    conn: &Connection,
+    object_type: &str,
+    present_ids: &HashSet<String>,
+) -> Result<Vec<(String, i64)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT object_id, server_version FROM sync_shadow
+             WHERE object_type = ?1 AND deleted_at IS NULL",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![object_type], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    for row in rows {
+        let (object_id, server_version) = row.map_err(|e| e.to_string())?;
+        if !present_ids.contains(&object_id) {
+            result.push((object_id, server_version));
+        }
+    }
+    Ok(result)
+}
+
+/// outbox 中 pending/failed 的 upsert 事件里，object_id 不在 present_ids 中的条目。
+fn find_stale_pending_upserts(
+    conn: &Connection,
+    object_type: &str,
+    present_ids: &HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT object_id FROM sync_outbox
+             WHERE object_type = ?1 AND operation = 'upsert'
+               AND status IN ('pending', 'failed')",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![object_type], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    for row in rows {
+        let object_id = row.map_err(|e| e.to_string())?;
+        if !present_ids.contains(&object_id) {
+            result.push(object_id);
+        }
+    }
+    Ok(result)
+}
+
+/// 确认本地行是否仍然存在（忽略 where_clause 的同步范围过滤）。
+fn local_row_exists(
+    app_handle: &AppHandle,
+    spec: &SyncTableSpec,
+    object_id: &str,
+) -> Result<bool, String> {
+    let path = get_db_path(app_handle, spec.db_name)?;
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    if spec.natural_key_columns.is_empty() {
+        let Some(local_id) = find_local_id_by_object_id(app_handle, spec.object_type, object_id)?
+        else {
+            return Ok(false);
+        };
+        let found = conn
+            .query_row(
+                &format!("SELECT 1 FROM {} WHERE id = ?1", spec.table),
+                params![local_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        return Ok(found.is_some());
+    }
+    let values = natural_values_from_object_id(object_id)?;
+    let where_clause = spec
+        .natural_key_columns
+        .iter()
+        .map(|column| format!("{column} = ?"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let found = conn
+        .query_row(
+            &format!("SELECT 1 FROM {} WHERE {}", spec.table, where_clause),
+            params_from_iter(values.iter()),
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(found.is_some())
+}
+
+/// 入队 delete 事件。已有未完成的 delete 事件时去重；
+/// 同对象的 pending/failed upsert 一并移除（行已删除，不应再上传）。
+fn enqueue_delete_event(
+    conn: &Connection,
+    spec: &SyncTableSpec,
+    object_id: &str,
+    base_version: i64,
+    device_id: &str,
+) -> Result<bool, String> {
+    let pending_delete: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM sync_outbox
+             WHERE object_type = ?1 AND object_id = ?2 AND operation = 'delete'
+               AND status IN ('pending', 'pushing', 'failed')
+             LIMIT 1",
+            params![spec.object_type, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if pending_delete.is_some() {
+        return Ok(false);
+    }
+    conn.execute(
+        "DELETE FROM sync_outbox
+         WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert'
+           AND status IN ('pending', 'failed')",
+        params![spec.object_type, object_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO sync_outbox
+         (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+         VALUES (?1, ?2, ?3, 'delete', NULL, ?4, ?5, ?6, ?7, 'pending')",
+        params![
+            Uuid::new_v4().to_string(),
+            spec.object_type,
+            object_id,
+            base_version,
+            Utc::now().timestamp_millis(),
+            device_id,
+            now_string(),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 fn read_local_snapshots(
     app_handle: &AppHandle,
     spec: &SyncTableSpec,
-) -> Result<Vec<LocalObjectSnapshot>, String> {
+) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
     let path = get_db_path(app_handle, spec.db_name)?;
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     let columns = existing_columns(&conn, spec.table, spec.columns)?;
     if columns.is_empty() || !columns.iter().any(|c| c == "id") {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), HashSet::new()));
     }
     let sql = format!(
         "SELECT {} FROM {} {} ORDER BY {}",
@@ -837,10 +1162,10 @@ fn read_local_snapshots(
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut snapshots = Vec::new();
+    let mut present_ids = HashSet::new();
 
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let mut fields = Map::new();
-        let mut refs = Map::new();
         let mut local_id = None;
         let mut raw_values: HashMap<String, JsonValue> = HashMap::new();
 
@@ -860,14 +1185,23 @@ fn read_local_snapshots(
         } else {
             natural_object_id(spec, &raw_values)?
         };
+        // 无论本行是否因外键未决而跳过，都要计入 present 集合，
+        // 否则删除检测会把"暂时跳过"误判成"已删除"。
+        present_ids.insert(object_id.clone());
 
-        for fk in spec.foreign_keys {
-            if let Some(value) = raw_values.get(fk.column).and_then(JsonValue::as_i64) {
-                if let Some(ref_id) = find_object_id(app_handle, fk.object_type, value)? {
-                    refs.insert(fk.column.to_string(), JsonValue::String(ref_id));
-                }
-            }
-        }
+        let Some(refs) = build_fk_refs(spec, &raw_values, |object_type, value| {
+            find_object_id(app_handle, object_type, value)
+        })?
+        else {
+            // 外键引用尚未建立映射（依赖对象未同步）：本轮跳过该行，
+            // 绝不把本地 rowid 作为外键值推送出去。下轮扫描会自然重试。
+            debug!(
+                object_type = %spec.object_type,
+                local_id,
+                "Skipping sync snapshot with unresolved foreign key"
+            );
+            continue;
+        };
 
         let payload = json!({ "fields": fields, "refs": refs });
         let payload_json =
@@ -880,7 +1214,64 @@ fn read_local_snapshots(
             payload_hash,
         });
     }
-    Ok(snapshots)
+    Ok((snapshots, present_ids))
+}
+
+/// 构建一行的外键引用表。
+///
+/// 返回 `Ok(Some(refs))` 表示所有非空外键都已解析为同步 object_id；
+/// 返回 `Ok(None)` 表示存在无法解析的外键（依赖对象尚未同步），
+/// 调用方必须跳过该行，避免把本地 rowid 作为外键值泄露到 payload 中。
+fn build_fk_refs(
+    spec: &SyncTableSpec,
+    raw_values: &HashMap<String, JsonValue>,
+    mut resolve: impl FnMut(&str, i64) -> Result<Option<String>, String>,
+) -> Result<Option<Map<String, JsonValue>>, String> {
+    let mut refs = Map::new();
+    for fk in spec.foreign_keys {
+        if let Some(value) = raw_values.get(fk.column).and_then(JsonValue::as_i64) {
+            match resolve(fk.object_type, value)? {
+                Some(ref_id) => {
+                    refs.insert(fk.column.to_string(), JsonValue::String(ref_id));
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    Ok(Some(refs))
+}
+
+/// 用 refs 中的同步 object_id 外键引用覆盖 fields 里的值。
+///
+/// 外键在 fields 中有非空值但 refs 缺失时返回错误——拒绝把来源设备
+/// 的本地 rowid 写进本机数据库（那会指向本机完全无关的行）。
+fn resolve_remote_foreign_keys(
+    spec: &SyncTableSpec,
+    field_values: &mut Map<String, JsonValue>,
+    refs: &Map<String, JsonValue>,
+    mut resolve_local_id: impl FnMut(&str, &str) -> Result<Option<i64>, String>,
+) -> Result<(), String> {
+    for fk in spec.foreign_keys {
+        if let Some(JsonValue::String(ref_object_id)) = refs.get(fk.column) {
+            let local_id = resolve_local_id(fk.object_type, ref_object_id)?.ok_or_else(|| {
+                format!(
+                    "缺少同步依赖: {}.{} -> {}",
+                    spec.object_type, fk.column, ref_object_id
+                )
+            })?;
+            field_values.insert(fk.column.to_string(), JsonValue::Number(local_id.into()));
+        } else if field_values
+            .get(fk.column)
+            .and_then(JsonValue::as_i64)
+            .is_some()
+        {
+            return Err(format!(
+                "远端变更缺少外键引用: {}.{}（refs 缺失，拒绝写入原始本地 id）",
+                spec.object_type, fk.column
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn enqueue_snapshot_if_changed(
@@ -966,18 +1357,9 @@ fn apply_change(app_handle: &AppHandle, change: &PullChange, local_device_id: &s
         .ok_or_else(|| "remote payload missing fields".to_string())?;
     let refs = payload.get("refs").and_then(JsonValue::as_object).cloned().unwrap_or_default();
     let mut field_values = fields.clone();
-    for fk in spec.foreign_keys {
-        if let Some(JsonValue::String(ref_object_id)) = refs.get(fk.column) {
-            let local_id = find_local_id_by_object_id(app_handle, fk.object_type, ref_object_id)?
-                .ok_or_else(|| {
-                    format!(
-                        "缺少同步依赖: {}.{} -> {}",
-                        change.object_type, fk.column, ref_object_id
-                    )
-                })?;
-            field_values.insert(fk.column.to_string(), JsonValue::Number(local_id.into()));
-        }
-    }
+    resolve_remote_foreign_keys(&spec, &mut field_values, &refs, |object_type, ref_object_id| {
+        find_local_id_by_object_id(app_handle, object_type, ref_object_id)
+    })?;
 
     if let Some(local_id) = find_local_id_by_object_id(app_handle, &change.object_type, &change.object_id)? {
         update_row(&conn, &spec, local_id, &field_values)?;
@@ -1000,6 +1382,15 @@ fn apply_delete(
 ) -> Result<(), String> {
     if let Some(local_id) = find_local_id_by_object_id(app_handle, &change.object_type, &change.object_id)? {
         conn.execute(&format!("DELETE FROM {} WHERE id = ?1", spec.table), params![local_id])
+            .map_err(|e| e.to_string())?;
+        // 同步删除 object_map 映射：同 object_id 后续 upsert 时应重新 insert（对象复活），
+        // 而不是命中这条指向已删除行的旧映射。
+        let sync_conn = open_sync_db(app_handle)?;
+        sync_conn
+            .execute(
+                "DELETE FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
+                params![change.object_type, change.object_id],
+            )
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
@@ -1193,6 +1584,49 @@ fn reset_failed_events(app_handle: &AppHandle) -> Result<usize, String> {
     .map_err(|e| e.to_string())
 }
 
+/// push ack 后更新 shadow：upsert 刷新版本与哈希；delete 置墓碑（保留行供删除检测去重）
+/// 并清理 object_map，使同 object_id 的后续 upsert 走重新 insert（对象复活）。
+fn apply_ack_to_shadow(
+    conn: &Connection,
+    object_type: &str,
+    object_id: &str,
+    server_version: i64,
+    operation: &str,
+    payload_hash: &str,
+) -> Result<(), String> {
+    if operation == "delete" {
+        let now = now_string();
+        conn.execute(
+            "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(object_type, object_id)
+             DO UPDATE SET server_version = excluded.server_version,
+                           deleted_at = excluded.deleted_at,
+                           updated_at = excluded.updated_at",
+            params![object_type, object_id, server_version, payload_hash, now],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
+            params![object_type, object_id],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5)
+         ON CONFLICT(object_type, object_id)
+         DO UPDATE SET server_version = excluded.server_version,
+                       payload_hash = excluded.payload_hash,
+                       deleted_at = NULL,
+                       updated_at = excluded.updated_at",
+        params![object_type, object_id, server_version, payload_hash, now_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn handle_push_response(
     app_handle: &AppHandle,
     events: &[(i64, PushEvent)],
@@ -1210,23 +1644,14 @@ fn handle_push_response(
                 .as_ref()
                 .map(|payload| hash_text(&serde_json::to_string(payload).unwrap_or_default()))
                 .unwrap_or_else(|| hash_text(""));
-            conn.execute(
-                "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5)
-                 ON CONFLICT(object_type, object_id)
-                 DO UPDATE SET server_version = excluded.server_version,
-                               payload_hash = excluded.payload_hash,
-                               deleted_at = NULL,
-                               updated_at = excluded.updated_at",
-                params![
-                    accepted.object_type,
-                    accepted.object_id,
-                    accepted.server_version,
-                    payload_hash,
-                    now_string(),
-                ],
-            )
-            .map_err(|e| e.to_string())?;
+            apply_ack_to_shadow(
+                &conn,
+                &accepted.object_type,
+                &accepted.object_id,
+                accepted.server_version,
+                &event.operation,
+                &payload_hash,
+            )?;
         }
     }
 
@@ -1313,10 +1738,8 @@ fn upsert_shadow_from_remote(app_handle: &AppHandle, change: &PullChange) -> Res
     Ok(())
 }
 
-fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
-    let conn = open_sync_db(app_handle)?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sync_object_map (
+/// sync.db 的完整建表 DDL。抽成常量以便单测在内存库上复用同一 schema。
+const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             object_type TEXT NOT NULL,
             local_table TEXT NOT NULL,
             local_id INTEGER NOT NULL,
@@ -1362,9 +1785,23 @@ fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
             deleted_at TEXT,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (object_type, object_id)
-        );",
-    )
-    .map_err(|e| e.to_string())?;
+        );
+        CREATE TABLE IF NOT EXISTS sync_dead_letter (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            object_type TEXT NOT NULL,
+            object_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            change_json TEXT NOT NULL,
+            error TEXT NOT NULL,
+            failed_at TEXT NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_dead_letter_object
+            ON sync_dead_letter(object_type, object_id);";
+
+fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
+    let conn = open_sync_db(app_handle)?;
+    conn.execute_batch(SYNC_SCHEMA_SQL).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1660,6 +2097,9 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         )
         .optional()
         .unwrap_or(None);
+    let dead_letter_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |row| row.get(0))
+        .unwrap_or(0);
     let runtime = if let Some(state) = app_handle.try_state::<SyncState>() {
         state.status.lock().await.clone()
     } else {
@@ -1679,6 +2119,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         pending_outbox_count,
         pushing_outbox_count,
         failed_outbox_count,
+        dead_letter_count,
         server_cursor: get_cursor(app_handle).unwrap_or(0),
     })
 }
@@ -1835,6 +2276,15 @@ fn decrypt_secret_with_key(key_bytes: &[u8; 32], ciphertext: &str, nonce: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter::FromIterator;
+
+    #[test]
+    fn dependency_pending_error_matches_only_dependency_prefixes() {
+        assert!(is_dependency_pending_error("缺少同步依赖: message.conversation_id -> abc"));
+        assert!(is_dependency_pending_error("远端变更缺少外键引用: message.conversation_id（refs 缺失，拒绝写入原始本地 id）"));
+        assert!(!is_dependency_pending_error("remote change evt-1 missing payload"));
+        assert!(!is_dependency_pending_error("数据库写入失败: locked"));
+    }
 
     #[test]
     fn sync_mode_parses_legacy_and_default_values() {
@@ -1872,5 +2322,244 @@ mod tests {
             natural_values_from_object_id(&object_id).unwrap(),
             vec!["display".to_string(), "theme".to_string()]
         );
+    }
+
+    fn message_spec() -> SyncTableSpec {
+        SyncTableSpec {
+            db_name: "conversation.db",
+            table: "message",
+            object_type: "conversation.message",
+            columns: &["id", "conversation_id", "parent_id", "content"],
+            natural_key_columns: &[],
+            foreign_keys: &[
+                ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
+                ForeignKeySpec { column: "parent_id", object_type: "conversation.message" },
+            ],
+            where_clause: None,
+            order_by: "id",
+        }
+    }
+
+    /// 所有非空外键都能解析时，refs 完整返回
+    #[test]
+    fn fk_refs_resolve_all_non_null_columns() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(9)),
+            ("conversation_id".to_string(), json!(3)),
+            ("parent_id".to_string(), json!(7)),
+            ("content".to_string(), json!("hi")),
+        ]);
+        let refs = build_fk_refs(&spec, &raw_values, |object_type, value| {
+            Ok(Some(format!("{object_type}-{value}")))
+        })
+        .unwrap()
+        .expect("all foreign keys resolvable");
+        assert_eq!(refs.get("conversation_id").unwrap(), &json!("conversation-3"));
+        assert_eq!(refs.get("parent_id").unwrap(), &json!("conversation.message-7"));
+    }
+
+    /// 任一外键无法解析时返回 None（调用方跳过该行），不产出裸 rowid
+    #[test]
+    fn fk_refs_return_none_when_dependency_unresolved() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(9)),
+            ("conversation_id".to_string(), json!(3)),
+            ("parent_id".to_string(), json!(7)),
+        ]);
+        let result = build_fk_refs(&spec, &raw_values, |object_type, _| {
+            if object_type == "conversation.message" {
+                Ok(None)
+            } else {
+                Ok(Some(format!("{object_type}-x")))
+            }
+        })
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    /// 外键为 null 时不需要 ref，正常返回
+    #[test]
+    fn fk_refs_ignore_null_foreign_keys() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(9)),
+            ("conversation_id".to_string(), json!(3)),
+            ("parent_id".to_string(), JsonValue::Null),
+        ]);
+        let refs = build_fk_refs(&spec, &raw_values, |object_type, value| {
+            Ok(Some(format!("{object_type}-{value}")))
+        })
+        .unwrap()
+        .expect("null foreign key needs no ref");
+        assert!(!refs.contains_key("parent_id"));
+    }
+
+    /// 接收端：refs 完整时外键被改写为本机 local_id
+    #[test]
+    fn remote_fk_resolved_from_refs() {
+        let spec = message_spec();
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(3)),
+            ("parent_id".to_string(), json!(7)),
+            ("content".to_string(), json!("hi")),
+        ]);
+        let refs = Map::from_iter([
+            ("conversation_id".to_string(), json!("conv-uuid")),
+            ("parent_id".to_string(), json!("msg-uuid")),
+        ]);
+        resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, object_id| {
+            Ok(Some(if object_id == "conv-uuid" { 100 } else { 200 }))
+        })
+        .unwrap();
+        assert_eq!(fields.get("conversation_id").unwrap(), &json!(100));
+        assert_eq!(fields.get("parent_id").unwrap(), &json!(200));
+    }
+
+    /// 接收端：fields 有值但 refs 缺失时拒绝写入（防止写入来源设备的本地 rowid）
+    #[test]
+    fn remote_fk_missing_ref_with_raw_value_is_rejected() {
+        let spec = message_spec();
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(3)),
+            ("content".to_string(), json!("hi")),
+        ]);
+        let refs = Map::new();
+        let result = resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(None));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("缺少外键引用"));
+    }
+
+    /// 接收端：外键为 null 且 refs 缺失时允许（无需解析）
+    #[test]
+    fn remote_fk_null_without_ref_is_allowed() {
+        let spec = message_spec();
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), JsonValue::Null),
+            ("content".to_string(), json!("hi")),
+        ]);
+        let refs = Map::new();
+        resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(None)).unwrap();
+        assert_eq!(fields.get("conversation_id").unwrap(), &JsonValue::Null);
+    }
+
+    fn test_sync_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SYNC_SCHEMA_SQL).unwrap();
+        conn
+    }
+
+    fn seed_shadow(conn: &Connection, object_id: &str, deleted: bool) {
+        conn.execute(
+            "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+             VALUES ('conversation', ?1, 3, 'hash', ?2, 'now')",
+            params![object_id, if deleted { Some("now".to_string()) } else { None }],
+        )
+        .unwrap();
+    }
+
+    /// 删除检测：shadow 有而快照无（非墓碑）的对象成为 delete 候选；
+    /// 墓碑与仍存在的对象不产生候选
+    #[test]
+    fn deleted_candidates_skip_tombstones_and_present_objects() {
+        let conn = test_sync_conn();
+        seed_shadow(&conn, "alive", false);
+        seed_shadow(&conn, "gone", false);
+        seed_shadow(&conn, "tombstoned", true);
+        let present = HashSet::from_iter(["alive".to_string()]);
+        let candidates =
+            find_deleted_candidates(&conn, "conversation", &present).unwrap();
+        assert_eq!(candidates, vec![("gone".to_string(), 3)]);
+    }
+
+    /// delete 事件入队：正常插入、重复去重、并清掉同对象的 pending upsert
+    #[test]
+    fn enqueue_delete_event_dedups_and_drops_stale_upserts() {
+        let conn = test_sync_conn();
+        let spec = message_spec();
+        conn.execute(
+            "INSERT INTO sync_outbox
+             (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+             VALUES ('e1', 'conversation.message', 'obj-1', 'upsert', '{}', NULL, 1, 'dev', 'now', 'pending')",
+            [],
+        )
+        .unwrap();
+
+        assert!(enqueue_delete_event(&conn, &spec, "obj-1", 7, "dev").unwrap());
+        // 重复入队被去重
+        assert!(!enqueue_delete_event(&conn, &spec, "obj-1", 7, "dev").unwrap());
+
+        let events: Vec<(String, Option<i64>)> = conn
+            .prepare("SELECT operation, base_version FROM sync_outbox ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // 只剩一条 delete 事件，upsert 被移除
+        assert_eq!(events, vec![("delete".to_string(), Some(7))]);
+    }
+
+    /// delete ack：shadow 置墓碑且 object_map 映射被清理；upsert ack 正常刷新
+    #[test]
+    fn ack_delete_marks_tombstone_and_clears_object_map() {
+        let conn = test_sync_conn();
+        seed_shadow(&conn, "obj-1", false);
+        conn.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES ('conversation', 'conversation', 42, 'obj-1', 'now')",
+            [],
+        )
+        .unwrap();
+
+        apply_ack_to_shadow(&conn, "conversation", "obj-1", 4, "delete", "hash").unwrap();
+        let deleted_at: Option<String> = conn
+            .query_row(
+                "SELECT deleted_at FROM sync_shadow WHERE object_type = 'conversation' AND object_id = 'obj-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(deleted_at.is_some());
+        let map_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_object_map WHERE sync_id = 'obj-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(map_count, 0);
+
+        // upsert ack 会清除墓碑标记（对象复活场景）
+        apply_ack_to_shadow(&conn, "conversation", "obj-1", 5, "upsert", "hash2").unwrap();
+        let (deleted_at, version): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT deleted_at, server_version FROM sync_shadow WHERE object_id = 'obj-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(deleted_at.is_none());
+        assert_eq!(version, 5);
+    }
+
+    /// 过期 upsert 检测：不在 present 集合中的 pending/failed upsert 被列出
+    #[test]
+    fn stale_pending_upserts_detects_vanished_rows() {
+        let conn = test_sync_conn();
+        for (event_id, object_id, status) in
+            [("e1", "kept", "pending"), ("e2", "vanished", "pending"), ("e3", "gone-failed", "failed"), ("e4", "acked-obj", "acked")]
+        {
+            conn.execute(
+                "INSERT INTO sync_outbox
+                 (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+                 VALUES (?1, 'message', ?2, 'upsert', '{}', NULL, 1, 'dev', 'now', ?3)",
+                params![event_id, object_id, status],
+            )
+            .unwrap();
+        }
+        let present = HashSet::from_iter(["kept".to_string(), "acked-obj".to_string()]);
+        let mut stale = find_stale_pending_upserts(&conn, "message", &present).unwrap();
+        stale.sort();
+        assert_eq!(stale, vec!["gone-failed".to_string(), "vanished".to_string()]);
     }
 }
