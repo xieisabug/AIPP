@@ -258,7 +258,9 @@ fn specs() -> Vec<SyncTableSpec> {
             natural_key_columns: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
-            where_clause: Some("LOWER(name) NOT LIKE '%key%' AND LOWER(name) NOT LIKE '%secret%' AND LOWER(name) NOT LIKE '%token%' AND LOWER(name) NOT LIKE '%password%'"),
+            // 白名单：只同步已知不含密钥的配置名。env 类配置（acp_env_vars / acp_env_* 等）
+            // 的值可能内嵌 API key，刻意不同步；新增配置名时须评估敏感性后再加入。
+            where_clause: Some("LOWER(name) IN ('endpoint', 'base_url', 'acp_cli_command', 'acp_working_directory', 'acp_additional_args', 'acp_claude_auth_mode', 'acp_codex_auth_mode')"),
             order_by: "id",
         },
         SyncTableSpec {

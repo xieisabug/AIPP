@@ -4,6 +4,19 @@
 
 ## 2026-08-15
 
+### P4-13（C13）：llm_provider_config 敏感过滤黑名单→白名单 —— 完成
+
+- `src-tauri/src/sync.rs` specs：`llm.provider_config` 的 where_clause 由"排除 name 含 key/secret/token/password"改为显式白名单：`endpoint`、`base_url`、`acp_cli_command`、`acp_working_directory`、`acp_additional_args`、`acp_claude_auth_mode`、`acp_codex_auth_mode`。
+- 枚举依据：后端写入点（llm_api / copilot_token_manager / acp.rs）与 genai_client 消费点；`api_key` 及 env 类配置（`acp_env_vars`/`acp_claude_env_vars`/`acp_codex_env_vars`/动态 `acp_env_*`）的值可能内嵌密钥，刻意排除——这是对旧行为的收紧：旧黑名单会把内嵌 API key 的 env 配置同步上服务器。
+- 安全性说明：被 where_clause 过滤的行不会被 C1 删除检测误判为删除（`local_row_exists` 忽略 where_clause 直接查行）；远端历史遗留的 env 类对象不会自动清理，保留在服务器上（一次性残留，如需清理可用管理 API 或重置同步状态）。
+- 验证：见收尾统一 `cargo test sync::tests`。
+
+### P4-13 其余小项说明
+
+- C9 echo 幂等：`enqueue_snapshot_if_changed` 的 shadow payload_hash 比对已覆盖（hash 相同跳过入队），无需新代码。
+- "apply_change 先 shadow 后写行"刻意不做：先写 shadow 会让"行写失败但 shadow 已前进"的对象永远不再重试；现行顺序（行→map→shadow，失败进死信重放）才是正确方向。
+- C10 中期项（业务写后 hook 直接入队、扫描降为兜底）与长期项（updated_time 索引增量扫描）按计划属后续迭代，本次不做。
+
 ### P4-13（C12）：master key 迁移到 OS keychain —— 完成
 
 - `src-tauri/Cargo.toml` 新增 `keyring = "3"`。
