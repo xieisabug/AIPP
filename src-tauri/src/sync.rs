@@ -76,6 +76,7 @@ pub struct SyncStatusDto {
     pushing_outbox_count: i64,
     failed_outbox_count: i64,
     dead_letter_count: i64,
+    needs_reset: bool,
     server_cursor: i64,
 }
 
@@ -526,18 +527,35 @@ pub async fn save_sync_settings(
             if parsed.scheme() != "http" && parsed.scheme() != "https" {
                 return Err("服务器地址必须使用 http 或 https".to_string());
             }
+            let previous = load_settings(&app_handle)?;
             let token = token.unwrap_or_default().trim().to_string();
-            let existing = load_sync_token(&app_handle)?;
+            let existing = previous.token.clone();
             if token.is_empty() && existing.is_none() {
                 return Err("自建同步模式需要填写访问 token".to_string());
             }
+            // 服务器地址或账号 token 变更：若本地已有同步状态（cursor/shadow/map），
+            // 不能静默沿用——置 needs_reset，等用户确认后重新全量同步。
+            let url_changed = previous.server_url != server_url;
+            let token_changed = !token.is_empty() && existing.as_deref() != Some(token.as_str());
             if !token.is_empty() {
                 save_sync_token(&app_handle, &token)?;
             }
             save_feature_config_value(&app_handle, &feature_state, "mode", "self_hosted").await?;
             save_feature_config_value(&app_handle, &feature_state, "server_url", &server_url).await?;
+            let reset_required = (url_changed || token_changed) && {
+                ensure_sync_db(&app_handle)?;
+                let conn = open_sync_db(&app_handle)?;
+                has_sync_state(&conn)?
+            };
+            if reset_required {
+                let conn = open_sync_db(&app_handle)?;
+                set_sync_meta(&conn, META_NEEDS_RESET, "1")?;
+                warn!("Sync server/account changed with existing local state; waiting for reset confirmation");
+            }
             start_worker(app_handle.clone()).await;
-            run_sync_once(&app_handle).await;
+            if !reset_required {
+                run_sync_once(&app_handle).await;
+            }
         }
     }
 
@@ -585,6 +603,23 @@ pub async fn retry_sync_dead_letters(app_handle: AppHandle) -> Result<SyncStatus
     let device_id = ensure_device_id(&app_handle)?;
     replay_dead_letters(&app_handle, &device_id)?;
     emit_status_changed(&app_handle).await;
+    sync_status(&app_handle).await
+}
+
+#[tauri::command]
+pub async fn reset_sync_state(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    let settings = load_settings(&app_handle)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return Err("当前是本地模式，未启用自建同步".to_string());
+    }
+    ensure_sync_db(&app_handle)?;
+    {
+        let conn = open_sync_db(&app_handle)?;
+        clear_sync_state(&conn)?;
+    }
+    emit_status_changed(&app_handle).await;
+    // 重置完成后立即重新全量同步（bootstrap）
+    run_sync_once(&app_handle).await;
     sync_status(&app_handle).await
 }
 
@@ -676,6 +711,14 @@ async fn run_sync_once_inner(app_handle: &AppHandle) -> Result<(), String> {
         .ok_or_else(|| "缺少同步 token，请先保存自建同步配置".to_string())?;
     let device_id = ensure_device_id(app_handle)?;
     let device_name = device_name();
+    {
+        let conn = open_sync_db(app_handle)?;
+        if needs_reset(&conn)? {
+            return Err(
+                "检测到同步服务器或账号变更，请在设置中确认重置同步状态后再同步".to_string()
+            );
+        }
+    }
     reset_pushing_events(app_handle)?;
     let remote_status = fetch_remote_status(&settings.server_url, token, &device_id).await?;
 
@@ -1797,11 +1840,67 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             retry_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_sync_dead_letter_object
-            ON sync_dead_letter(object_type, object_id);";
+            ON sync_dead_letter(object_type, object_id);
+        CREATE TABLE IF NOT EXISTS sync_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );";
 
 fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
     let conn = open_sync_db(app_handle)?;
     conn.execute_batch(SYNC_SCHEMA_SQL).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+const META_NEEDS_RESET: &str = "needs_reset";
+
+fn get_sync_meta(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row("SELECT value FROM sync_meta WHERE key = ?1", params![key], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())
+}
+
+fn set_sync_meta(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO sync_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 是否处于"配置已变更、等待用户确认重置"状态。
+fn needs_reset(conn: &Connection) -> Result<bool, String> {
+    Ok(get_sync_meta(conn, META_NEEDS_RESET)?.as_deref() == Some("1"))
+}
+
+/// sync.db 中是否已有任何同步状态（cursor/shadow/map）。
+/// 换服务器/账号时据此判断是否需要重置，而不是静默沿用旧状态。
+fn has_sync_state(conn: &Connection) -> Result<bool, String> {
+    for table in ["sync_cursor", "sync_shadow", "sync_object_map"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if count > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 清空全部同步状态（cursor/shadow/map/outbox/dead_letter）并解除 needs_reset。
+/// 调用方负责在此之前取得用户确认。
+fn clear_sync_state(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "DELETE FROM sync_cursor;
+         DELETE FROM sync_shadow;
+         DELETE FROM sync_object_map;
+         DELETE FROM sync_outbox;
+         DELETE FROM sync_dead_letter;
+         DELETE FROM sync_meta WHERE key = 'needs_reset';",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2100,6 +2199,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
     let dead_letter_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |row| row.get(0))
         .unwrap_or(0);
+    let needs_reset = needs_reset(&conn).unwrap_or(false);
     let runtime = if let Some(state) = app_handle.try_state::<SyncState>() {
         state.status.lock().await.clone()
     } else {
@@ -2120,6 +2220,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         pushing_outbox_count,
         failed_outbox_count,
         dead_letter_count,
+        needs_reset,
         server_cursor: get_cursor(app_handle).unwrap_or(0),
     })
 }
@@ -2561,5 +2662,67 @@ mod tests {
         let mut stale = find_stale_pending_upserts(&conn, "message", &present).unwrap();
         stale.sort();
         assert_eq!(stale, vec!["gone-failed".to_string(), "vanished".to_string()]);
+    }
+
+    /// needs_reset 元数据的设置与读取
+    #[test]
+    fn needs_reset_roundtrip() {
+        let conn = test_sync_conn();
+        assert!(!needs_reset(&conn).unwrap());
+        set_sync_meta(&conn, META_NEEDS_RESET, "1").unwrap();
+        assert!(needs_reset(&conn).unwrap());
+        set_sync_meta(&conn, META_NEEDS_RESET, "1").unwrap();
+        assert!(needs_reset(&conn).unwrap());
+    }
+
+    /// has_sync_state：任一状态表有记录即视为已有同步状态
+    #[test]
+    fn has_sync_state_detects_any_state_table() {
+        let conn = test_sync_conn();
+        assert!(!has_sync_state(&conn).unwrap());
+        seed_shadow(&conn, "obj-1", false);
+        assert!(has_sync_state(&conn).unwrap());
+    }
+
+    /// clear_sync_state 清空全部状态表并解除 needs_reset
+    #[test]
+    fn clear_sync_state_wipes_all_state() {
+        let conn = test_sync_conn();
+        seed_shadow(&conn, "obj-1", false);
+        conn.execute(
+            "INSERT INTO sync_cursor (scope, server_cursor, updated_at) VALUES ('default', 10, 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES ('conversation', 'conversation', 1, 'obj-1', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_outbox
+             (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+             VALUES ('e1', 'conversation', 'obj-1', 'delete', NULL, 3, 1, 'dev', 'now', 'pending')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_dead_letter (object_type, object_id, operation, change_json, error, failed_at, retry_count)
+             VALUES ('conversation', 'obj-2', 'upsert', '{}', 'err', 'now', 0)",
+            [],
+        )
+        .unwrap();
+        set_sync_meta(&conn, META_NEEDS_RESET, "1").unwrap();
+
+        clear_sync_state(&conn).unwrap();
+        assert!(!needs_reset(&conn).unwrap());
+        assert!(!has_sync_state(&conn).unwrap());
+        for table in ["sync_outbox", "sync_dead_letter"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table} should be empty");
+        }
     }
 }

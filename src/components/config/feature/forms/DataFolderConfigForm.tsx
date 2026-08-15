@@ -3,6 +3,7 @@ import { UseFormReturn, useWatch } from "react-hook-form";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 
@@ -23,6 +24,7 @@ interface SyncStatus {
     pushing_outbox_count: number;
     failed_outbox_count: number;
     dead_letter_count: number;
+    needs_reset: boolean;
     server_cursor: number;
 }
 
@@ -34,6 +36,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [syncing, setSyncing] = useState(false);
     const [retryingFailed, setRetryingFailed] = useState(false);
     const [retryingDeadLetters, setRetryingDeadLetters] = useState(false);
+    const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+    const [resetting, setResetting] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
 
@@ -165,6 +169,20 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
+    const handleResetSyncState = useCallback(async () => {
+        setResetConfirmOpen(false);
+        setResetting(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("reset_sync_state");
+            setStatus(nextStatus);
+            toast.success("同步状态已重置，正在重新全量同步");
+        } catch (error) {
+            toast.error("重置同步状态失败: " + getErrorMessage(error));
+        } finally {
+            setResetting(false);
+        }
+    }, []);
+
     const statusText = useMemo(() => {
         if (!status) {
             return "读取中";
@@ -280,18 +298,47 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 onClick: handleRetryDeadLetters,
             },
         },
+        {
+            key: "needsResetWarning",
+            config: {
+                type: "static" as const,
+                label: "同步状态待重置",
+                value: "检测到服务器地址或访问 token 已变更，本机数据需要先与新服务器重新对齐后才能继续同步。",
+                hidden: !status?.needs_reset,
+            },
+        },
+        {
+            key: "resetSyncState",
+            config: {
+                type: "button" as const,
+                label: "重置同步状态",
+                value: resetting ? "重置中..." : "重置并重新全量同步",
+                hidden: !status?.needs_reset,
+                disabled: mode !== "self_hosted" || resetting || saving,
+                onClick: () => setResetConfirmOpen(true),
+            },
+        },
     ];
 
     return (
-        <ConfigForm
-            title="数据目录"
-            description="管理本地数据目录与自建同步。"
-            config={dataFolderConfig}
-            layout="default"
-            classNames="bottom-space"
-            useFormReturn={form}
-            onSave={handleSave}
-        />
+        <>
+            <ConfigForm
+                title="数据目录"
+                description="管理本地数据目录与自建同步。"
+                config={dataFolderConfig}
+                layout="default"
+                classNames="bottom-space"
+                useFormReturn={form}
+                onSave={handleSave}
+            />
+            <ConfirmDialog
+                isOpen={resetConfirmOpen}
+                title="重置同步状态"
+                confirmText="将清空本机的同步游标、对象映射与待推送队列，然后与新服务器重新全量同步。本机数据本身不会被删除，但未推送的本地修改会以全量方式重新上传。确认继续？"
+                onConfirm={handleResetSyncState}
+                onCancel={() => setResetConfirmOpen(false)}
+            />
+        </>
     );
 };
 

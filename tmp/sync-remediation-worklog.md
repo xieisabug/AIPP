@@ -4,6 +4,19 @@
 
 ## 2026-08-15
 
+### P1-5（C5）：切换服务器/账号时重置同步状态 —— 完成
+
+- `src-tauri/src/sync.rs`：
+  - `SYNC_SCHEMA_SQL` 新增 `sync_meta(key, value)` 表；新增 conn 级辅助 `get_sync_meta`/`set_sync_meta`/`needs_reset`/`has_sync_state`/`clear_sync_state`（纯 SQL，可内存库测试）。
+  - `save_sync_settings`：保存前读取旧配置，`server_url` 或 token 实际变更且 sync.db 已有状态（cursor/shadow/map 任一非空）时，保存配置但置 `needs_reset=1` 并跳过自动同步（warn 日志），不再静默沿用旧 cursor/shadow。
+  - `run_sync_once_inner`：`needs_reset` 状态下拒绝执行 push/pull，返回明确错误提示用户去设置里确认重置。
+  - 新 command `reset_sync_state`：清空 cursor/shadow/map/outbox/dead_letter 五张表 + 解除 needs_reset，随后立即触发全量同步（bootstrap）。
+  - `SyncStatusDto` 新增 `needs_reset` 字段。
+  - `lib.rs` 注册 `reset_sync_state`。
+- 前端 `DataFolderConfigForm.tsx`：`needs_reset` 时展示警告说明行和"重置并重新全量同步"按钮，点击弹出 `ConfirmDialog` 确认后调用 `reset_sync_state`。
+- 新增 3 个单测：needs_reset 读写、has_sync_state 检测、clear_sync_state 全清。
+- 验证：`cargo test sync::tests` 17 passed；`npm run build` 通过。
+
 ### P1-4（C1）：本地删除同步上传 —— 完成
 
 - `src-tauri/src/sync.rs`：
