@@ -41,6 +41,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [resetting, setResetting] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
+    const watchedServerUrl = useWatch({ control: form.control, name: "server_url" }) || "";
+    const isPlaintextUrl = watchedServerUrl.trim().toLowerCase().startsWith("http://");
 
     const loadStatus = useCallback(async (syncFormValues = false) => {
         try {
@@ -239,6 +241,15 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 placeholder: "https://sync.example.com",
                 disabled: mode !== "self_hosted",
                 hidden: mode !== "self_hosted",
+            },
+        },
+        {
+            key: "plaintextWarning",
+            config: {
+                type: "static" as const,
+                label: "安全警告",
+                value: "当前服务器地址使用 http:// 明文传输，同步数据（包含敏感配置）在传输过程中可能被窃听或篡改，生产环境请改用 https://。",
+                hidden: mode !== "self_hosted" || !isPlaintextUrl,
             },
         },
         {

@@ -4,6 +4,11 @@
 
 ## 2026-08-15
 
+### P4-13（C11）：http:// 明文传输告警 —— 完成
+
+- `DataFolderConfigForm.tsx`：useWatch 监听 `server_url`，自建模式下地址以 `http://` 开头时显示静态告警行（明文传输风险、建议 https），随输入实时显隐。
+- 验证：见后续统一 `npm run build`。
+
 ### P4-13（部分）：pull/冲突落地后 emit 领域事件 —— 完成
 
 - `src-tauri/src/sync.rs`：新增 `emit_sync_domain_events`，按 object_type 前缀映射到既有前端事件：`assistant*` → `assistant_list_changed`，`mcp.*` → `mcp_state_changed`，`llm.*` → 新增 `llm_provider_changed`。
