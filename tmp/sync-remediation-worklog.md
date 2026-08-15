@@ -4,6 +4,15 @@
 
 ## 2026-08-15
 
+### 收尾：全量验证与文档同步 —— 完成
+
+- 最终验证：客户端 `cargo test sync::tests` 23 passed（含 C12 keyring、C13 白名单）；服务端 pytest 26 passed；前端 `npm run build` 通过。
+- 文档同步：`AGENTS.md` Critical Features 新增 Self-Hosted Data Sync 条目、架构章节补 `sync.rs`；`docs/product/15-数据存储.md` 自建同步章节更新为当前行为。
+- 计划全部 P0~P4 项完成。遗留说明：
+  - C10 中期/长期项（写后 hook 直接入队、updated_time 增量索引）按计划属后续迭代。
+  - Docker 镜像构建未实测（本机 Docker 守护进程未运行），Dockerfile/alembic 已静态验证 + 迁移实测。
+  - 计划测试总览中的"端到端手测清单"（双设备离线收敛、换服务器重置、全新设备 bootstrap、种子不重复）需要真实双端环境，建议发版前人工跑一遍。
+
 ### P4-13（C13）：llm_provider_config 敏感过滤黑名单→白名单 —— 完成
 
 - `src-tauri/src/sync.rs` specs：`llm.provider_config` 的 where_clause 由"排除 name 含 key/secret/token/password"改为显式白名单：`endpoint`、`base_url`、`acp_cli_command`、`acp_working_directory`、`acp_additional_args`、`acp_claude_auth_mode`、`acp_codex_auth_mode`。
