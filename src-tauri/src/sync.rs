@@ -1413,6 +1413,9 @@ fn enqueue_snapshot_if_changed(
         return Ok(false);
     }
 
+    // 新 payload 入队前清理同对象的 failed 旧事件，避免旧 payload 之后被重试覆盖新数据
+    drop_failed_upserts_for_object(&conn, &snapshot.object_type, &snapshot.object_id)?;
+
     let device_id = ensure_device_id(app_handle)?;
     let base_version = shadow.map(|(version, _)| version);
     let now = now_string();
@@ -1433,6 +1436,20 @@ fn enqueue_snapshot_if_changed(
     )
     .map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// 删除同对象残留的 failed upsert 事件（已被更新的本地数据取代）。
+fn drop_failed_upserts_for_object(
+    conn: &Connection,
+    object_type: &str,
+    object_id: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM sync_outbox
+         WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert' AND status = 'failed'",
+        params![object_type, object_id],
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn apply_change(app_handle: &AppHandle, change: &PullChange, local_device_id: &str) -> Result<(), String> {
@@ -1652,12 +1669,13 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
             "SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
              WHERE status = 'pending'
+               AND (next_retry_at IS NULL OR next_retry_at <= ?2)
              ORDER BY id
              LIMIT ?1",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([limit], |row| {
+        .query_map(params![limit, Utc::now().timestamp()], |row| {
             let payload_json: Option<String> = row.get(5)?;
             let payload = payload_json
                 .as_deref()
@@ -1691,6 +1709,37 @@ fn mark_events_pushing(app_handle: &AppHandle, events: &[(i64, PushEvent)]) -> R
     Ok(())
 }
 
+/// 推送失败的退避策略：网络/5xx 类失败保持 pending 并按 retry_count 指数退避
+/// （封顶 300s），连续失败达到上限才转 failed 等待人工重试。
+const MAX_EVENT_RETRY_COUNT: i64 = 10;
+const MAX_RETRY_BACKOFF_SECS: i64 = 300;
+
+fn compute_next_retry_at(retry_count: i64) -> i64 {
+    let backoff = (1i64 << retry_count.clamp(0, 8)).min(MAX_RETRY_BACKOFF_SECS);
+    Utc::now().timestamp() + backoff
+}
+
+/// 记录一次推送失败：retry_count+1 并设置退避时间；超过上限转 failed。
+fn record_event_failure(conn: &Connection, id: i64, error: &str) -> Result<(), String> {
+    let retry_count: i64 = conn
+        .query_row("SELECT retry_count FROM sync_outbox WHERE id = ?1", params![id], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let next_retry_count = retry_count + 1;
+    let (status, next_retry_at): (&str, Option<i64>) = if next_retry_count >= MAX_EVENT_RETRY_COUNT {
+        ("failed", None)
+    } else {
+        ("pending", Some(compute_next_retry_at(next_retry_count)))
+    };
+    conn.execute(
+        "UPDATE sync_outbox
+         SET status = ?2, retry_count = ?3, last_error = ?4, next_retry_at = ?5
+         WHERE id = ?1",
+        params![id, status, next_retry_count, error, next_retry_at],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn mark_events_failed(
     app_handle: &AppHandle,
     events: &[(i64, PushEvent)],
@@ -1698,13 +1747,7 @@ fn mark_events_failed(
 ) -> Result<(), String> {
     let conn = open_sync_db(app_handle)?;
     for (id, _) in events {
-        conn.execute(
-            "UPDATE sync_outbox
-             SET status = 'failed', retry_count = retry_count + 1, last_error = ?2
-             WHERE id = ?1",
-            params![id, error],
-        )
-        .map_err(|e| e.to_string())?;
+        record_event_failure(&conn, *id, error)?;
     }
     Ok(())
 }
@@ -1737,7 +1780,8 @@ fn reset_failed_events_inner(conn: &Connection) -> Result<usize, String> {
                    AND s.object_id = sync_outbox.object_id
              ), base_version),
              status = 'pending',
-             last_error = NULL
+             last_error = NULL,
+             next_retry_at = NULL
          WHERE status = 'failed'",
         [],
     )
@@ -1797,7 +1841,8 @@ fn handle_push_response(
         events.iter().map(|item| (item.1.event_id.as_str(), item)).collect();
     for accepted in response.accepted {
         if let Some((id, event)) = by_event_id.get(accepted.event_id.as_str()) {
-            conn.execute("UPDATE sync_outbox SET status = 'acked', last_error = NULL WHERE id = ?1", params![id])
+            // ack 后直接删除 outbox 行，不再永久残留 'acked' 记录
+            conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
                 .map_err(|e| e.to_string())?;
             let payload_hash = event
                 .payload
@@ -1946,7 +1991,8 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             status TEXT NOT NULL DEFAULT 'pending'
                 CHECK(status IN ('pending', 'pushing', 'acked', 'failed')),
             retry_count INTEGER NOT NULL DEFAULT 0,
-            last_error TEXT
+            last_error TEXT,
+            next_retry_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_sync_outbox_status_id
             ON sync_outbox(status, id);
@@ -1979,6 +2025,25 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
 fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
     let conn = open_sync_db(app_handle)?;
     conn.execute_batch(SYNC_SCHEMA_SQL).map_err(|e| e.to_string())?;
+    ensure_sync_db_columns(&conn)?;
+    Ok(())
+}
+
+/// CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，这里做幂等的列迁移。
+fn ensure_sync_db_columns(conn: &Connection) -> Result<(), String> {
+    ensure_column(conn, "sync_outbox", "next_retry_at", "ALTER TABLE sync_outbox ADD COLUMN next_retry_at INTEGER")
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<(), String> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if !columns.iter().any(|c| c == column) {
+        conn.execute_batch(alter_sql).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -2958,6 +3023,69 @@ mod tests {
         assert!(row_exists_by_id(&conn, &spec, 1).unwrap());
         let auto_id = insert_row(&conn, &spec, &fields).unwrap();
         assert_ne!(auto_id, 1);
+    }
+
+    /// 推送失败退避：低于上限保持 pending 并设置 next_retry_at，达到上限转 failed
+    #[test]
+    fn record_event_failure_backs_off_then_fails() {
+        let conn = test_sync_conn();
+        conn.execute(
+            "INSERT INTO sync_outbox
+             (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+             VALUES ('e1', 'conversation', 'obj-1', 'upsert', '{}', NULL, 1, 'dev', 'now', 'pushing')",
+            [],
+        )
+        .unwrap();
+
+        for expected_count in 1..MAX_EVENT_RETRY_COUNT {
+            record_event_failure(&conn, 1, "network down").unwrap();
+            let (status, retry_count, next_retry_at): (String, i64, Option<i64>) = conn
+                .query_row(
+                    "SELECT status, retry_count, next_retry_at FROM sync_outbox WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "pending", "retry {expected_count} should stay pending");
+            assert_eq!(retry_count, expected_count);
+            assert!(next_retry_at.is_some_and(|t| t > Utc::now().timestamp()));
+        }
+        record_event_failure(&conn, 1, "network down").unwrap();
+        let (status, retry_count, next_retry_at): (String, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT status, retry_count, next_retry_at FROM sync_outbox WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(retry_count, MAX_EVENT_RETRY_COUNT);
+        assert_eq!(next_retry_at, None);
+    }
+
+    /// 入队新 upsert 前清理同对象的 failed 旧事件，pending 事件不受影响
+    #[test]
+    fn drop_failed_upserts_keeps_pending_events() {
+        let conn = test_sync_conn();
+        for (event_id, status) in [("e1", "failed"), ("e2", "failed"), ("e3", "pending")] {
+            conn.execute(
+                "INSERT INTO sync_outbox
+                 (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+                 VALUES (?1, 'conversation', 'obj-1', 'upsert', '{}', NULL, 1, 'dev', 'now', ?2)",
+                params![event_id, status],
+            )
+            .unwrap();
+        }
+        let dropped = drop_failed_upserts_for_object(&conn, "conversation", "obj-1").unwrap();
+        assert_eq!(dropped, 2);
+        let remaining: Vec<String> = conn
+            .prepare("SELECT event_id FROM sync_outbox")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec!["e3".to_string()]);
     }
 
     /// needs_reset 元数据的设置与读取

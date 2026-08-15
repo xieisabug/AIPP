@@ -4,6 +4,23 @@
 
 ## 2026-08-15
 
+### P3-11（S7）：Docker 部署修正 —— 完成
+
+- `sync-server/Dockerfile`（此前已改，本次补 README）：CMD 先 `alembic upgrade head` 再起 uvicorn；`VOLUME /app/data`；非 root 用户 `aipp` 运行。
+- `README.md` 新增 Docker Deployment 章节：卷挂载、环境变量、自动迁移与非 localhost token 要求说明。
+- 验证：Dockerfile 静态检查通过；本机 Docker Desktop 守护进程未运行，镜像构建未能实测（`docker build` 报 pipe 连接失败）。
+
+### P3-9（C7+C8）：failed 事件生命周期与 outbox 清理 —— 完成
+
+- `src-tauri/src/sync.rs`：
+  - `sync_outbox` 新增 `next_retry_at INTEGER`（epoch 秒，避开 RFC3339 字典序比较陷阱）；`ensure_sync_db` 增加幂等列迁移 `ensure_column`（CREATE IF NOT EXISTS 不会给老表补列）。
+  - 网络/5xx 批量失败（`mark_events_failed` → conn 级 `record_event_failure`）：保持 pending，`retry_count+1`，指数退避 `2^n` 秒封顶 300s，连续 10 次（`MAX_EVENT_RETRY_COUNT`）才转 failed。
+  - `load_pending_outbox` 按 `next_retry_at IS NULL OR next_retry_at <= now` 过滤，退避中的事件不再每轮重复打服务器。
+  - `enqueue_snapshot_if_changed` 入队新 upsert 前 `drop_failed_upserts_for_object` 清理同对象 failed 旧事件，避免旧 payload 被重试覆盖新数据。
+  - push ack 后直接 DELETE outbox 行（不再残留 'acked'）；`reset_failed_events` 同时清 `next_retry_at`。
+- 新增 2 个单测：退避到上限转 failed 的状态流转、failed 清理保留 pending。
+- 验证：`cargo test sync::tests` 23 passed。
+
 ### P3-10（S4+S5+S6）：服务端输入校验与认证加固 —— 完成
 
 - `sync-server/app/schemas.py`：新增 `SyncId` 约束类型（1-128 字符，pattern `^[A-Za-z0-9._:+/=\-]+$`）应用于 event_id/object_type/object_id/device_id；`base_version`/`local_version`/schema 版本加 `ge=0`；`device_name` 限长 256。

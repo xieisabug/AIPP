@@ -129,6 +129,27 @@ uvicorn app.main:app --host 127.0.0.1 --port 8080
 
 `AIPP_SYNC_MAX_PAYLOAD_BYTES` controls the maximum size of a single object payload. The default is `0`, which means no application-level payload limit. If you put the service behind a reverse proxy, keep the proxy body-size limit aligned with your expected largest synced object.
 
+## Docker Deployment
+
+Build and run:
+
+```bash
+docker build -t aipp-sync-server .
+docker run -d --name aipp-sync \
+  -p 8080:8080 \
+  -v aipp-sync-data:/app/data \
+  -e AIPP_SYNC_BASE_URL=https://sync.example.com \
+  -e AIPP_SYNC_BOOTSTRAP_TOKEN=$(openssl rand -hex 32) \
+  aipp-sync-server
+```
+
+Notes:
+
+- The container starts as a non-root user (`aipp`) and runs `alembic upgrade head` before launching uvicorn, so schema migrations are applied automatically on every start.
+- The SQLite database lives in `/app/data`; always mount a volume there, otherwise all sync state is lost when the container is recreated.
+- When `AIPP_SYNC_BASE_URL` is not localhost, `AIPP_SYNC_BOOTSTRAP_TOKEN` must be set to a private token or the container exits at startup.
+- Only the SQLite backend is supported in this version.
+
 ## Smoke Test
 
 Open another PowerShell window while the server is running.
