@@ -723,7 +723,7 @@ function ChatUIWindow() {
                 <div className="flex flex-col h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                     {/* 移动端顶部栏 */}
                     <div
-                        className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
+                        className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top"
                         data-aipp-slot="chat-mobile-header"
                     >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>

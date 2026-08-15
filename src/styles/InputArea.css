@@ -106,7 +106,8 @@
 .input-area.mobile.bottom .input-area-textarea-container {
     left: 12px;
     right: 12px;
-    bottom: 12px;
+    /* 底部预留手势条安全区 */
+    bottom: calc(12px + env(safe-area-inset-bottom));
     min-height: 50px;
     border-radius: 25px;
     padding: 0 55px 0 45px;
@@ -120,7 +121,7 @@
 
 /* 移动端发送按钮 - 覆盖 large 尺寸，改为更小的尺寸 */
 .input-area.mobile.bottom .input-area-send-button {
-    bottom: 45px;
+    bottom: calc(45px + env(safe-area-inset-bottom));
     right: 16px;
     height: 44px !important;
     width: 44px !important;
@@ -129,7 +130,7 @@
 
 /* 移动端添加按钮 */
 .input-area.mobile.bottom .input-area-add-button {
-    bottom: 54px;
+    bottom: calc(54px + env(safe-area-inset-bottom));
     left: 20px;
     right: auto;
     height: 28px !important;

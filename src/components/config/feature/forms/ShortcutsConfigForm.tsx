@@ -10,6 +10,7 @@ import {
     type ShortcutWindow,
 } from "@/data/Shortcuts";
 import { formatShortcutDisplay } from "@/hooks/useAppShortcuts";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 import { Button } from "@/components/ui/button";
 import { RotateCcw } from "lucide-react";
 
@@ -32,6 +33,9 @@ export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({
             toast.error("保存快捷键配置失败: " + e);
         }
     }, [onSave]);
+
+    // 全局快捷键仅桌面平台编译支持，移动端隐藏该区块（应用内快捷键保留）
+    const globalShortcutAvailable = useFeatureAvailableOnPlatform("global_shortcut");
 
     // 录入器状态（全局和应用共用一个录入器）
     const [recorderOpen, setRecorderOpen] = useState(false);
@@ -173,6 +177,7 @@ export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({
     const renderAllShortcuts = () => (
         <div className="space-y-6">
             {/* 全局快捷键 */}
+            {globalShortcutAvailable && (
             <div>
                 <h4 className="text-sm font-medium mb-3 text-muted-foreground">全局快捷键</h4>
                 <div className="space-y-1">
@@ -185,6 +190,7 @@ export const ShortcutsConfigForm: React.FC<ShortcutsConfigFormProps> = ({
                     如果有选中的文本，会自动捕获并填充到输入框
                 </p>
             </div>
+            )}
 
             {/* 应用内快捷键 */}
             {(Object.keys(actionsByWindow) as ShortcutWindow[]).map((windowKey) => {

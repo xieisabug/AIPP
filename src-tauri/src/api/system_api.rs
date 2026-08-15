@@ -11,6 +11,14 @@ use crate::FeatureConfigState;
 
 use crate::db::system_db::{FeatureConfig, SystemDatabase};
 
+/// 移动端不支持功能的统一错误前缀，前端可据此识别并给出一致提示
+pub const MOBILE_UNSUPPORTED_PREFIX: &str = "MOBILE_UNSUPPORTED";
+
+/// 生成统一的"移动端不支持"错误信息
+pub fn mobile_unsupported_error(feature: &str) -> String {
+    format!("{MOBILE_UNSUPPORTED_PREFIX}: {feature} 不支持移动平台")
+}
+
 #[derive(Serialize)]
 pub struct ExperimentalSummaryTaskStatus {
     pub mcp_running: bool,
@@ -352,7 +360,29 @@ pub async fn copy_image_to_clipboard(image_data: String) -> Result<(), String> {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[tauri::command]
 pub async fn copy_image_to_clipboard(_image_data: String) -> Result<(), String> {
-    Err("Clipboard image copy is not supported on mobile platforms".to_string())
+    Err(mobile_unsupported_error("剪贴板图片复制"))
+}
+
+/// 获取当前运行平台
+///
+/// 返回 "windows" / "macos" / "linux" / "android" / "ios"，
+/// 用于前端区分"移动平台"与"窄屏布局"（窄屏判断见前端 useIsMobile）。
+#[tauri::command]
+pub async fn get_platform() -> Result<String, String> {
+    let platform = if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    };
+    Ok(platform.to_string())
 }
 
 /// 获取开机自启动状态
@@ -401,7 +431,7 @@ pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), S
     }
     #[cfg(mobile)]
     {
-        Err("Autostart is not supported on mobile platforms".to_string())
+        Err(mobile_unsupported_error("开机自启动"))
     }
 }
 

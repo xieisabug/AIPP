@@ -1717,6 +1717,25 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             });
         }, [inlineInteractionVisible, smartScroll]);
 
+        // 移动端虚拟键盘适配：可视高度明显收缩视为键盘弹起，此时用户刚点了输入框，
+        // 强制滚动到底部，保证最新消息与输入框可见
+        useEffect(() => {
+            if (!isMobile || typeof window === "undefined" || !window.visualViewport) {
+                return;
+            }
+            const viewport = window.visualViewport;
+            let lastHeight = viewport.height;
+            const onResize = () => {
+                const shrunk = lastHeight - viewport.height;
+                lastHeight = viewport.height;
+                if (shrunk > 150) {
+                    requestAnimationFrame(() => smartScroll(true, "auto"));
+                }
+            };
+            viewport.addEventListener("resize", onResize);
+            return () => viewport.removeEventListener("resize", onResize);
+        }, [isMobile, smartScroll]);
+
         // ============= 组件渲染 =============
 
         return (

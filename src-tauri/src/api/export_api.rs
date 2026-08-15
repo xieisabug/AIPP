@@ -1,5 +1,7 @@
 #[cfg(desktop)]
 use crate::api::highlight_api::highlight_code_for_export;
+#[cfg(not(desktop))]
+use crate::api::system_api::MOBILE_UNSUPPORTED_PREFIX;
 use crate::errors::AppError;
 #[cfg(desktop)]
 use crate::mcp::builtin_mcp::search::browser::BrowserManager;
@@ -39,7 +41,9 @@ pub async fn markdown_to_pdf(markdown: String) -> Result<Vec<u8>, AppError> {
 #[cfg(not(desktop))]
 #[tauri::command]
 pub async fn markdown_to_pdf(_markdown: String) -> Result<Vec<u8>, AppError> {
-    Err(AppError::InternalError("PDF 导出暂不支持移动端".to_string()))
+    Err(AppError::InternalError(format!(
+        "{MOBILE_UNSUPPORTED_PREFIX}: PDF 导出暂不支持移动端"
+    )))
 }
 
 #[cfg(desktop)]

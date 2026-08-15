@@ -3,6 +3,7 @@ import React, { useState, useCallback, useEffect, useRef, useMemo } from "react"
 import IconButton from "./IconButton";
 import { Copy, Check, SquareTerminal } from "lucide-react";
 import { useCodeTheme } from "../hooks/useCodeTheme";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 import { listen } from "@tauri-apps/api/event";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -29,6 +30,8 @@ const CodeBlock = React.memo(
         // 获取当前主题信息
         const { currentTheme } = useCodeTheme();
         const { resolvedTheme } = useTheme();
+        // 脚本执行依赖 shell 环境，移动端不支持，隐藏"运行"按钮
+        const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
         const [forceUpdate, setForceUpdate] = useState(0);
         const codeString = useMemo(() => (typeof children === 'string' ? children : String(children)), [children]);
         const lineCount = useMemo(() => codeString.split(/\r?\n/).length, [codeString]);
@@ -92,7 +95,9 @@ const CodeBlock = React.memo(
                     icon={copyIconState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
                 />
-                <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun(language, getCodeString())} />
+                {codeRunAvailable && (
+                    <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun(language, getCodeString())} />
+                )}
             </div>
         );
 

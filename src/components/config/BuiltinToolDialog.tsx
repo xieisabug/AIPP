@@ -8,6 +8,7 @@ import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Switch } from "../ui/switch";
 import { Card, CardContent } from "../ui/card";
+import { useFeatureAvailableOnPlatform, BROWSER_SEARCH_ENV_KEYS } from "@/lib/mobileUnsupported";
 
 type EnvVarOption = {
     label: string;
@@ -71,6 +72,9 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
     const [initialized, setInitialized] = useState(false);
     const [editedName, setEditedName] = useState<string>("");
     const [timeout, setTimeout] = useState<number | null>(null);
+
+    // 浏览器模式搜索依赖仅桌面编译的 chromiumoxide，移动端隐藏其专属环境变量字段
+    const browserSearchAvailable = useFeatureAvailableOnPlatform("browser_search");
 
     const selected = useMemo(() => templates.find((t) => t.id === selectedId), [templates, selectedId]);
 
@@ -443,7 +447,9 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                             <CardContent className="p-6">
                                 {templateForFields?.required_envs?.length ? (
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                        {templateForFields.required_envs.map(renderEnvField)}
+                                        {templateForFields.required_envs
+                                            .filter((env) => browserSearchAvailable || !BROWSER_SEARCH_ENV_KEYS.has(env.key))
+                                            .map(renderEnvField)}
                                     </div>
                                 ) : (
                                     <p className="text-muted-foreground text-center py-4">

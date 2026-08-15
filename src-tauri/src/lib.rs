@@ -103,7 +103,8 @@ use crate::api::skill_api::{
 use crate::api::system_api::{
     clear_butler_feishu_secret, conversation_has_feishu_target, copy_image_to_clipboard,
     debug_resend_message_to_feishu, get_all_feature_config, get_autostart_state, get_bang_list,
-    get_butler_feishu_runtime_status, get_experimental_summary_task_status, get_selected_text_api,
+    get_butler_feishu_runtime_status, get_experimental_summary_task_status, get_platform,
+    get_selected_text_api,
     open_data_folder, open_image, refresh_butler_feishu_runtime_command, resume_global_shortcut,
     save_butler_feishu_secret, save_feature_config, set_autostart, set_shortcut_recording,
     suspend_global_shortcut, trigger_assistant_summary_generation,
@@ -1187,6 +1188,8 @@ pub fn run() {
             // Autostart commands
             get_autostart_state,
             set_autostart,
+            // Platform detection command
+            get_platform,
             // Updater commands
             check_update,
             check_update_with_proxy,

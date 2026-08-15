@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import ConfigForm from "@/components/ConfigForm";
 import { Loader2 } from "lucide-react";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 
 interface OtherConfigFormProps {
     form: UseFormReturn<any>;
@@ -13,6 +14,8 @@ interface OtherConfigFormProps {
 export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
     const [systemAutostartEnabled, setSystemAutostartEnabled] = useState<boolean | null>(null);
     const [isToggling, setIsToggling] = useState(false);
+    // 开机自启动仅桌面平台支持（移动端 Rust 侧直接返回 Err）
+    const autostartAvailable = useFeatureAvailableOnPlatform("autostart");
 
     // 防泄露模式配置
     const { getConfigValue, saveFeatureConfig, loading: featureConfigLoading } = useFeatureConfig();
@@ -40,6 +43,11 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
     }, [featureConfigLoading, getConfigValue, form]);
 
     useEffect(() => {
+        // 移动端不支持开机自启动：跳过状态加载，避免 get_autostart_state 报错后一直停留在加载态
+        if (!autostartAvailable) {
+            setSystemAutostartEnabled(false);
+            return;
+        }
         const loadSystemState = async () => {
             try {
                 console.log("[Autostart] invoking get_autostart_state");
@@ -52,7 +60,7 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
             }
         };
         loadSystemState();
-    }, [form]);
+    }, [form, autostartAvailable]);
 
     const handleAutostartChange = useCallback(async (value: string | boolean) => {
         const checked = value === true || value === "true";
@@ -109,16 +117,21 @@ export const OtherConfigForm: React.FC<OtherConfigFormProps> = ({ form }) => {
     }, [form, continueOnToolErrorEnabled, saveFeatureConfig]);
 
     const AUTOSTART_FORM_CONFIG = [
-        {
-            key: "autostart_enabled",
-            config: {
-                type: "switch" as const,
-                label: "开机自启动",
-                tooltip: "应用将在系统启动时自动运行",
-                onChange: handleAutostartChange,
-                disabled: isToggling || systemAutostartEnabled === null,
-            },
-        },
+        // 移动端隐藏开机自启动设置项
+        ...(autostartAvailable
+            ? [
+                {
+                    key: "autostart_enabled",
+                    config: {
+                        type: "switch" as const,
+                        label: "开机自启动",
+                        tooltip: "应用将在系统启动时自动运行",
+                        onChange: handleAutostartChange,
+                        disabled: isToggling || systemAutostartEnabled === null,
+                    },
+                },
+            ]
+            : []),
         {
             key: "anti_leakage_enabled",
             config: {

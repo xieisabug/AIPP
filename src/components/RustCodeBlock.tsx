@@ -5,6 +5,7 @@ import IconButton from "./IconButton";
 import { Copy, Check, SquareTerminal } from "lucide-react";
 import { useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
 
 interface RustCodeBlockProps {
@@ -66,6 +67,8 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
 }) => {
     const code = useMemo(() => (typeof children === "string" ? children : String(children)), [children]);
     const { resolvedTheme } = useTheme();
+    // 脚本执行依赖 shell 环境，移动端不支持，隐藏"运行"按钮
+    const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
     const [html, setHtml] = useState<string>("");
     const [copyState, setCopyState] = useState<"copy" | "ok">("copy");
     const [isHovered, setIsHovered] = useState(false);
@@ -269,7 +272,9 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     icon={copyState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
                 />
-                <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
+                {codeRunAvailable && (
+                    <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
+                )}
             </div>
 
             {metaLabel && (

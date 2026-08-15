@@ -14,6 +14,8 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 -   **Platform Features**: System tray, global shortcuts (Ctrl+Shift+I/O), multi-window architecture
 -   **Testing**: Comprehensive test suite with integration tests for AI functionality
 
+**移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
+
 ## Essential Build Commands
 
 ```bash
@@ -261,6 +263,7 @@ let config = state.configs.lock().await;
 6. **Testing**: Write tests for new functionality, especially AI-related features
 7. **Code Organization**: Follow domain-driven structure for both frontend and backend
 8. **No Model Fallback**: 当用户配置的模型（如对话总结模型、助手模型等）在数据库中不存在时，禁止自动回退到其他模型。应该直接返回错误信息，在界面上提示用户检查配置，而不是随意选择其他模型执行任务
+9. **工作日志**：干活的时候边干活边写工作日志，只要有一定的成果了就要更新一下，方便后续交接。日志文件放在 `tmp/worklog/` 目录下（按主题/分支命名，如 `mobile-optimization.md`），记录：做了什么（文件、关键改动）、验证结果、未完成事项与下一步。
 
 ## Documentation Sync Guidelines
 

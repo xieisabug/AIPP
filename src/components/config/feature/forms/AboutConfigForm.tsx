@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, Download, CheckCircle2, Info, Globe } from "lucide-react";
 import { useAppUpdater } from "@/hooks/useAppUpdater";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 
 interface AboutConfigFormProps {
     form: UseFormReturn<any>;
@@ -23,6 +24,9 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
         downloadAndInstall,
         downloadAndInstallWithProxy,
     } = useAppUpdater();
+
+    // 应用内更新仅桌面平台支持（移动端 Rust 侧 check_update 返回 Err），移动端只展示版本信息
+    const updaterAvailable = useFeatureAvailableOnPlatform("app_updater");
 
     const getUpdateStatusBadge = () => {
         if (isChecking || isCheckingWithProxy) {
@@ -72,11 +76,11 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
                         <div className="text-sm text-muted-foreground">当前版本</div>
                         <div className="text-2xl font-bold">{currentVersion || "加载中..."}</div>
                     </div>
-                    {getUpdateStatusBadge()}
+                    {updaterAvailable && getUpdateStatusBadge()}
                 </div>
 
                 {/* 更新说明 */}
-                {updateInfo?.available && updateInfo.body && (
+                {updaterAvailable && updateInfo?.available && updateInfo.body && (
                     <div className="p-4 bg-muted rounded-lg">
                         <div className="flex items-center gap-2 mb-2">
                             <Info className="h-4 w-4 text-muted-foreground" />
@@ -89,6 +93,7 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
                 )}
 
                 {/* 操作按钮 */}
+                {updaterAvailable && (
                 <div className="flex gap-3">
                     <Button
                         onClick={handleUpdateButtonClick}
@@ -126,6 +131,7 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
                         </Button>
                     )}
                 </div>
+                )}
             </CardContent>
         </Card>
     );
