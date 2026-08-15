@@ -254,6 +254,11 @@ var GuofengThemePlugin = class GuofengThemePlugin {
     if (slotId !== "guofeng-send-button-icon") {
       return null;
     }
+    // 叶子发送按钮是本主题的一部分，主题未激活时不渲染，避免“残留”在默认主题上
+    var activeTheme = context && typeof context.activeTheme === "string" ? context.activeTheme : "";
+    if (activeTheme !== GUOFENG_THEME_ID) {
+      return null;
+    }
     var React = (window as any).React;
     if (!React || !this.systemApi || typeof this.systemApi.assetUrl !== "function") {
       return null;

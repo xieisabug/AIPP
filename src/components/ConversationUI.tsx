@@ -73,6 +73,7 @@ import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
 import { useContextList } from "@/hooks/useContextList";
 import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -310,6 +311,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             loadFeatureConfig,
             loading: featureConfigLoading,
         } = useFeatureConfig();
+        const { config: displayConfig } = useDisplayConfig();
+        const activeTheme = displayConfig?.theme ?? "default";
         const continueOnToolErrorEnabled = featureConfigLoading
             ? true
             : !["false", "0"].includes(
@@ -1337,8 +1340,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 placement: "bottom",
                 isMobile,
                 windowLabel,
+                activeTheme,
             }),
             [
+                activeTheme,
                 attachedFileCount,
                 conversation,
                 effectiveAiIsResponsing,
