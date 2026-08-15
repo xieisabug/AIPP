@@ -2,8 +2,12 @@ fn main() {
     if let Ok(protoc_path) = protoc_bin_vendored::protoc_bin_path() {
         std::env::set_var("PROTOC", protoc_path);
     }
-    #[cfg(windows)]
-    {
+    // 注意：build.rs 编译并运行在主机上，`#[cfg(windows)]` 反映的是主机平台而不是
+    // 目标平台。Windows 主机上交叉编译 Android 时主机 cfg 仍为 windows，会把
+    // embed-resource 产出的 Windows COFF .lib 传给 Android 链接器，导致
+    // "unknown file type" 链接失败。这里必须按目标平台（CARGO_CFG_TARGET_OS）判断。
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
         // tauri-build 默认把应用 manifest（含 common-controls v6 依赖）只链接进 bin
         // 目标，lib 的测试二进制没有 manifest，加载时 TaskDialogIndirect 解析失败
         // （0xc0000139）。这里改为：不让 tauri-build 嵌 manifest，统一用
@@ -14,9 +18,9 @@ fn main() {
         )
         .expect("tauri build script failed");
         embed_app_manifest_for_all_targets();
+    } else {
+        tauri_build::build();
     }
-    #[cfg(not(windows))]
-    tauri_build::build();
 }
 
 #[cfg(windows)]

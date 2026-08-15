@@ -1,23 +1,40 @@
+#[cfg(desktop)]
 use super::browser::BrowserManager;
+#[cfg(desktop)]
 use super::chromiumoxide::{
     cleanup_profile_locks, BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig,
 };
+#[cfg(desktop)]
 use super::engine_manager::{SearchEngine, SearchEngineManager};
+#[cfg(desktop)]
 use super::engines::base::SearchEngineBase;
+#[cfg(desktop)]
 use super::fingerprint::FingerprintManager;
-use super::types::{SearchRequest, SearchResponse, SearchResultType};
+use super::types::{SearchRequest, SearchResponse};
+#[cfg(desktop)]
+use super::types::SearchResultType;
 use anyhow::Result;
+#[cfg(desktop)]
 use std::collections::HashMap;
+#[cfg(desktop)]
 use std::fs;
+#[cfg(desktop)]
 use std::path::PathBuf;
+#[cfg(desktop)]
 use std::time::Instant;
 use tauri::AppHandle;
+#[cfg(desktop)]
 use tauri::Manager;
+#[cfg(desktop)]
 use tokio::sync::OnceCell;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::debug;
+#[cfg(desktop)]
+use tracing::{error, info, instrument, warn};
 
+#[cfg(desktop)]
 static GLOBAL_BROWSER_POOL: OnceCell<BrowserPool> = OnceCell::const_new();
 
+#[cfg(desktop)]
 pub fn cleanup_search_profile_locks(app_handle: &AppHandle) -> Result<(), String> {
     let config = load_search_config_from_db(app_handle)?;
     let user_data_dir = resolve_search_user_data_dir(app_handle, &config)?;
@@ -32,6 +49,7 @@ pub fn cleanup_search_profile_locks(app_handle: &AppHandle) -> Result<(), String
     Ok(())
 }
 
+#[cfg(desktop)]
 pub async fn shutdown_search_browser_pool() -> Result<(), String> {
     if let Some(pool) = GLOBAL_BROWSER_POOL.get() {
         pool.shutdown().await?;
@@ -39,6 +57,7 @@ pub async fn shutdown_search_browser_pool() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(desktop)]
 fn resolve_search_user_data_dir(
     app_handle: &AppHandle,
     config: &HashMap<String, String>,
@@ -53,6 +72,7 @@ fn resolve_search_user_data_dir(
     Ok(base.join("chromiumoxide_profile"))
 }
 
+#[cfg(desktop)]
 fn is_timeout_like(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.contains("timeout") || lower.contains("timed out") || error.contains("超时")
@@ -70,6 +90,7 @@ impl SearchHandler {
     }
 
     /// 获取或创建浏览器池
+    #[cfg(desktop)]
     async fn get_or_create_browser_pool(&self) -> Result<Option<BrowserPool>, String> {
         // 从配置中读取是否启用池
         let config = self.load_search_config()?;
@@ -115,6 +136,7 @@ impl SearchHandler {
     }
 
     /// 执行带结果类型的网络搜索
+    #[cfg(desktop)]
     #[instrument(skip(self), fields(query = %request.query, result_type = ?request.result_type))]
     pub async fn search_web_with_type(
         &self,
@@ -155,7 +177,17 @@ impl SearchHandler {
         }
     }
 
+    /// 执行带结果类型的网络搜索（移动端不支持浏览器搜索）
+    #[cfg(mobile)]
+    pub async fn search_web_with_type(
+        &self,
+        _request: SearchRequest,
+    ) -> Result<SearchResponse, String> {
+        Err(crate::api::system_api::mobile_unsupported_error("浏览器搜索"))
+    }
+
     /// 获取搜索HTML内容
+    #[cfg(desktop)]
     async fn fetch_search_html(
         &self,
         query: &str,
@@ -208,6 +240,7 @@ impl SearchHandler {
     }
 
     /// 根据结果类型处理HTML
+    #[cfg(desktop)]
     fn process_html_by_type(
         &self,
         html: String,
@@ -273,6 +306,7 @@ impl SearchHandler {
     }
 
     /// 抓取指定URL的内容，支持多种格式
+    #[cfg(desktop)]
     #[instrument(skip(self), fields(url = %url, result_type = %result_type))]
     pub async fn fetch_url_with_type(
         &self,
@@ -316,12 +350,24 @@ impl SearchHandler {
         }
     }
 
+    /// 抓取指定URL的内容（移动端不支持浏览器抓取）
+    #[cfg(mobile)]
+    pub async fn fetch_url_with_type(
+        &self,
+        _url: &str,
+        _result_type: &str,
+    ) -> Result<String, String> {
+        Err(crate::api::system_api::mobile_unsupported_error("浏览器抓取"))
+    }
+
     /// 从数据库加载搜索配置
+    #[cfg(desktop)]
     fn load_search_config(&self) -> Result<HashMap<String, String>, String> {
         load_search_config_from_db(&self.app_handle)
     }
 
     /// 构建针对搜索引擎的抓取配置
+    #[cfg(desktop)]
     fn build_fetch_config(
         &self,
         config: &HashMap<String, String>,
@@ -362,6 +408,7 @@ impl SearchHandler {
     }
 
     /// 构建通用的抓取配置（用于直接URL抓取）
+    #[cfg(desktop)]
     fn build_general_fetch_config(
         &self,
         config: &HashMap<String, String>,
@@ -412,6 +459,7 @@ impl SearchHandler {
     }
 }
 
+#[cfg(desktop)]
 fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, String>, String> {
     use crate::db::mcp_db::MCPDatabase;
     let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;

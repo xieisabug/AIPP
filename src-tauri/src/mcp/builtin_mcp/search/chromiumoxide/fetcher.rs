@@ -1606,7 +1606,7 @@ impl ContentFetcher {
         if DEBUG_SAVE_HTML {
             if let Ok(val) = page.evaluate("() => document.documentElement.outerHTML").await {
                 if let Some(Value::String(html)) = val.value() {
-                    Self::save_debug_html(html, "before_consent");
+                    Self::save_debug_html(&html, "before_consent");
                 }
             }
         }
@@ -1805,7 +1805,7 @@ impl ContentFetcher {
 
         if let Ok(val) = page.evaluate("() => document.documentElement.outerHTML").await {
             if let Some(Value::String(html)) = val.value() {
-                Self::save_debug_html(html, "input_failed");
+                Self::save_debug_html(&html, "input_failed");
             }
         }
 

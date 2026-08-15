@@ -217,6 +217,8 @@ use crate::window::{
     open_config_window, open_config_window_inner, open_default_home_window, open_plugin_window,
     open_schedule_window, open_sidebar_window, preferred_home_window_label,
 };
+#[cfg(mobile)]
+use crate::window::create_chat_ui_window;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -652,18 +654,21 @@ pub fn run() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
     ensure_rustls_crypto_provider();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["com.xieisabug.aipp"]),
-        ))
+        ));
+    let app = builder
         .setup(|app| {
             let app_handle = app.handle();
 
@@ -825,11 +830,16 @@ pub fn run() {
                 warn!(error = %e, "Failed to initialize builtin MCP servers");
             }
 
-            info!("Running search profile lock cleanup on startup");
-            if let Err(e) =
-                crate::mcp::builtin_mcp::search::handler::cleanup_search_profile_locks(&app_handle)
+            #[cfg(desktop)]
             {
-                warn!(error = %e, "Failed to cleanup search profile locks on startup");
+                info!("Running search profile lock cleanup on startup");
+                if let Err(e) =
+                    crate::mcp::builtin_mcp::search::handler::cleanup_search_profile_locks(
+                        &app_handle,
+                    )
+                {
+                    warn!(error = %e, "Failed to cleanup search profile locks on startup");
+                }
             }
 
             // Initialize TodoState with app handle for database persistence
@@ -1119,12 +1129,19 @@ pub fn run() {
             start_github_copilot_device_flow,
             poll_github_copilot_token,
             // Copilot LSP commands
+            #[cfg(desktop)]
             stop_copilot_lsp,
+            #[cfg(desktop)]
             check_copilot_status,
+            #[cfg(desktop)]
             sign_in_initiate,
+            #[cfg(desktop)]
             sign_in_confirm,
+            #[cfg(desktop)]
             sign_out_copilot,
+            #[cfg(desktop)]
             get_copilot_lsp_status,
+            #[cfg(desktop)]
             get_copilot_oauth_token_from_config,
             test_copilot_token_exchange,
             create_mcp_tool_call,
@@ -1269,6 +1286,7 @@ pub fn run() {
                     {
                         let app_handle = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
+                            #[cfg(desktop)]
                             if let Err(e) = crate::mcp::builtin_mcp::search::handler::shutdown_search_browser_pool().await {
                                 warn!(error = %e, "Failed to shutdown search browser pool");
                             }
