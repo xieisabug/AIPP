@@ -64,6 +64,13 @@ class SyncChange(Base):
     __tablename__ = "sync_change"
     __table_args__ = (
         UniqueConstraint("account_id", "event_id", name="uq_sync_change_account_event"),
+        UniqueConstraint(
+            "account_id",
+            "object_type",
+            "object_id",
+            "version",
+            name="uq_sync_change_account_object_version",
+        ),
         Index("idx_sync_change_account_seq", "account_id", "seq"),
     )
 

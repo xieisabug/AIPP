@@ -48,6 +48,9 @@ class ConflictEvent(BaseModel):
     object_id: str
     server_version: int
     server_payload: dict[str, Any] | None
+    # "delete" means the server-side object is a tombstone (payload is None);
+    # clients must not guess this from server_payload being empty.
+    server_operation: Operation = "upsert"
 
 
 class RejectedEvent(BaseModel):

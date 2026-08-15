@@ -54,6 +54,15 @@ def process_push_event(
         )
     )
     if existing_change is not None:
+        # Idempotent replay must describe the same write; a reused event_id with
+        # different content means a client bug and must not be acknowledged.
+        if (
+            existing_change.object_type != event.object_type
+            or existing_change.object_id != event.object_id
+            or existing_change.operation != event.operation
+            or existing_change.payload_json != payload
+        ):
+            return RejectedEvent(event_id=event.event_id, reason="event_id_conflict")
         return AcceptedEvent(
             event_id=event.event_id,
             object_type=existing_change.object_type,
@@ -62,8 +71,8 @@ def process_push_event(
             server_seq=existing_change.seq,
         )
 
-    current = db.get(SyncObject, (account_id, event.object_type, event.object_id))
-    if not should_accept_stale_event(event, current):
+    current = db.get(SyncObject, (account_id, event.object_type, event.object_id), with_for_update=True)
+    if not should_accept_stale_event(event, current, set(settings.stale_lww_types)):
         assert current is not None
         return ConflictEvent(
             event_id=event.event_id,
@@ -71,6 +80,7 @@ def process_push_event(
             object_id=event.object_id,
             server_version=current.version,
             server_payload=current.payload_json,
+            server_operation="delete" if current.deleted_at is not None else "upsert",
         )
 
     now = datetime.now(UTC)

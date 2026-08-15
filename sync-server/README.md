@@ -12,14 +12,14 @@ An account is the server-side sync space.
 
 It is not currently an AIPP desktop login account. In this MVP, an account means: all devices using tokens bound to the same `sync_account.id` read and write the same remote change log and object snapshots.
 
-Default local development values:
+Local development example:
 
 ```text
 account_id: default
 token: dev-token
 ```
 
-The default account and token are created automatically on service startup when `AIPP_SYNC_BOOTSTRAP_TOKEN` is set.
+The bootstrap account and token are created automatically on service startup only when `AIPP_SYNC_BOOTSTRAP_TOKEN` is set (there is no default value). When `AIPP_SYNC_BASE_URL` points at a non-localhost address, the service refuses to start without a private token — the publicly documented `dev-token` is rejected in that case.
 
 ### Token
 
@@ -31,13 +31,17 @@ Authorization: Bearer <token>
 
 The server stores only the token hash in `sync_token`, not the plain token.
 
-For local development, use:
+For local development, set one explicitly, for example:
 
-```text
-Authorization: Bearer dev-token
+```bash
+export AIPP_SYNC_BOOTSTRAP_TOKEN=dev-token
 ```
 
-For real deployment, set a private token with `AIPP_SYNC_BOOTSTRAP_TOKEN` and do not use `dev-token`.
+For real deployment, generate a private token and set it with `AIPP_SYNC_BOOTSTRAP_TOKEN`:
+
+```bash
+openssl rand -hex 32
+```
 
 ### Device
 

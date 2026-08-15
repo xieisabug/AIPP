@@ -9,6 +9,7 @@ from app.routes import pull, push, status
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    settings.validate_bootstrap_security()
     configure_database(settings)
     init_db(settings)
 

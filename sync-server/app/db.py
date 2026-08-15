@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import uuid4
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -16,12 +16,22 @@ engine: Engine | None = None
 SessionLocal: sessionmaker[Session] | None = None
 
 
+def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 def configure_database(settings: Settings | None = None) -> None:
     global engine, SessionLocal
     settings = settings or get_settings()
     settings.ensure_sqlite_parent()
     connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
     engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+    if settings.database_url.startswith("sqlite"):
+        event.listen(engine, "connect", _set_sqlite_pragmas)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
