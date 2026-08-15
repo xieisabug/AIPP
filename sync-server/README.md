@@ -64,6 +64,27 @@ X-AIPP-Device-ID: device-a
 
 The server auto-registers a device the first time it sees a valid token plus device id. Revoked devices cannot push or pull.
 
+> MVP limitation: `device_id` is self-reported by the client. A future version will switch to server-issued device credentials.
+
+### Token & Device Management API
+
+Tokens expire after `AIPP_SYNC_TOKEN_TTL_DAYS` days (default 365; `0` means never). Manage tokens and devices of your account with any valid token:
+
+```text
+GET  /v1/admin/tokens                      list tokens
+POST /v1/admin/tokens        {name}        create token (plaintext returned once)
+POST /v1/admin/tokens/{id}/revoke          revoke token
+POST /v1/admin/tokens/{id}/rotate          rotate: issue a new token and revoke the old one
+GET  /v1/admin/devices                     list devices
+POST /v1/admin/devices/{id}/revoke         revoke device
+```
+
+### Input Validation & Limits
+
+- ID fields (`event_id`, `object_type`, `object_id`, `device_id`) accept `[A-Za-z0-9._:+/=-]`, 1-128 chars. The set includes `+/=` because natural object ids embed standard base64 (`natural:<base64>`).
+- `base_version` must be >= 0.
+- Request bodies larger than `AIPP_SYNC_MAX_REQUEST_BODY_BYTES` (default 16MB) are rejected with 413 based on `Content-Length`.
+
 ## Local Setup with uv
 
 Run these commands in PowerShell:
@@ -221,14 +242,14 @@ On the next startup, the default account and bootstrap token will be recreated.
 Implemented:
 
 - FastAPI service
-- SQLite/PostgreSQL-capable SQLAlchemy models
-- Alembic initial migration
-- token authentication
+- SQLite/PostgreSQL-capable SQLAlchemy models (SQLite is the only tested/supported backend in this version)
+- Alembic migrations
+- token authentication with expiry, rotation and revocation (`/v1/admin/*`)
 - account isolation
 - device registration and revocation checks
 - push idempotency
 - cursor-based pull
-- basic stale conflict handling for messages and artifact collections
+- conflict reporting for stale writes on all object types (last-write-wins allowlist via `AIPP_SYNC_STALE_LWW_TYPES`)
 
 Not implemented yet:
 

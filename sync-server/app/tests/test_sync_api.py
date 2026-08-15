@@ -500,3 +500,97 @@ def test_conflict_with_tombstone_reports_delete_operation(tmp_path) -> None:
     body = response.json()
     assert body["conflicts"][0]["server_operation"] == "delete"
     assert body["conflicts"][0]["server_payload"] is None
+
+def test_push_rejects_invalid_object_id_chars(tmp_path) -> None:
+    client = make_client(tmp_path)
+    event = sample_event("event-1", "bad id with spaces")
+    body = {"device_id": "device-a", "events": [event]}
+
+    response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
+
+    assert response.status_code == 422
+
+
+def test_push_rejects_negative_base_version(tmp_path) -> None:
+    client = make_client(tmp_path)
+    event = sample_event("event-1", "conv-1")
+    event["base_version"] = -1
+    body = {"device_id": "device-a", "events": [event]}
+
+    response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
+
+    assert response.status_code == 422
+
+
+def test_natural_object_id_with_base64_chars_accepted(tmp_path) -> None:
+    client = make_client(tmp_path)
+    event = sample_event("event-1", "natural:aGVsbG8rLz0=")
+    body = {"device_id": "device-a", "events": [event]}
+
+    response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
+
+    assert response.status_code == 200
+    assert len(response.json()["accepted"]) == 1
+
+
+def test_request_body_over_limit_returns_413(tmp_path) -> None:
+    client = make_client(tmp_path, max_request_body_bytes=1024)
+    event = sample_event("event-1", "conv-1")
+    event["payload"]["fields"]["blob"] = "x" * 8192
+    body = {"device_id": "device-a", "events": [event]}
+
+    response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
+
+    assert response.status_code == 413
+
+
+def test_expired_token_rejected(tmp_path) -> None:
+    from sqlalchemy import select
+
+    client = make_client(tmp_path)
+    with get_sessionmaker()() as db:
+        row = db.scalar(select(SyncToken).where(SyncToken.name == "bootstrap"))
+        assert row is not None
+        row.expires_at = datetime(2020, 1, 1, tzinfo=UTC)
+        db.commit()
+
+    response = client.get("/v1/sync/status", headers=auth_headers())
+
+    assert response.status_code == 401
+
+
+def test_admin_create_revoke_rotate_token(tmp_path) -> None:
+    client = make_client(tmp_path)
+
+    created = client.post("/v1/admin/tokens", headers=auth_headers(), json={"name": "laptop"})
+    assert created.status_code == 201
+    payload = created.json()
+    new_token = payload["plaintext"]
+    assert client.get("/v1/sync/status", headers=auth_headers(new_token)).status_code == 200
+
+    revoked = client.post(f"/v1/admin/tokens/{payload['token']['id']}/revoke", headers=auth_headers())
+    assert revoked.status_code == 200
+    assert revoked.json()["revoked_at"] is not None
+    assert client.get("/v1/sync/status", headers=auth_headers(new_token)).status_code == 401
+
+    tokens = client.get("/v1/admin/tokens", headers=auth_headers()).json()
+    bootstrap = next(t for t in tokens if t["name"] == "bootstrap")
+    rotated = client.post(f"/v1/admin/tokens/{bootstrap['id']}/rotate", headers=auth_headers())
+    assert rotated.status_code == 201
+    rotated_token = rotated.json()["plaintext"]
+    assert client.get("/v1/sync/status", headers=auth_headers()).status_code == 401
+    assert client.get("/v1/sync/status", headers=auth_headers(rotated_token)).status_code == 200
+
+
+def test_admin_revoke_device_blocks_push(tmp_path) -> None:
+    client = make_client(tmp_path)
+    body = {"device_id": "device-a", "device_name": "Device A", "events": [sample_event("event-1", "conv-1")]}
+    assert client.post("/v1/sync/push", headers=auth_headers(), json=body).status_code == 200
+
+    revoked = client.post("/v1/admin/devices/device-a/revoke", headers=auth_headers())
+    assert revoked.status_code == 200
+    assert revoked.json()["revoked_at"] is not None
+
+    body["events"] = [sample_event("event-2", "conv-2")]
+    response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
+    assert response.status_code == 403

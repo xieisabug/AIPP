@@ -4,6 +4,20 @@
 
 ## 2026-08-15
 
+### P3-10（S4+S5+S6）：服务端输入校验与认证加固 —— 完成
+
+- `sync-server/app/schemas.py`：新增 `SyncId` 约束类型（1-128 字符，pattern `^[A-Za-z0-9._:+/=\-]+$`）应用于 event_id/object_type/object_id/device_id；`base_version`/`local_version`/schema 版本加 `ge=0`；`device_name` 限长 256。
+  - 与计划的偏差：pattern 必须包含 `+/=`，因为 natural object_id 内嵌标准 base64（`natural:<base64>`），按计划原样字符集会直接 422 掉所有 feature_config 同步。
+- `sync-server/app/factory.py`：请求体大小限制中间件（按 Content-Length 提前 413，`AIPP_SYNC_MAX_REQUEST_BODY_BYTES` 默认 16MB，0 不限制；chunked 无 Content-Length 时由事件级校验兜底）。
+- S5/S6：
+  - `models.py`：`SyncToken` 新增 `expires_at`（NULL 永不过期，向后兼容存量 token）；alembic `0003_sync_token_expires_at`（已实测 upgrade 通过）。
+  - `config.py`：`token_ttl_days` 默认 365（0 永不过期）；bootstrap token 创建时写入 expires_at。
+  - `auth.py`：过期 token 返回 401（兼容 SQLite 存取的 naive datetime）。
+  - 新增 `routes/admin.py` 并注册：token 列表/创建（明文只返回一次）/撤销/轮换，设备列表/撤销，全部按 account 隔离。
+- `README.md`：补充管理 API、输入校验与限制说明、device_id 自报为 MVP 限制、MVP scope 更新（明确仅支持 SQLite）。
+- 新增 7 个测试：非法字符 ID 422 / 负 base_version 422 / natural base64 ID 放行 / 超限请求体 413 / 过期 token 401 / token 创建-撤销-轮换全流程 / 设备撤销后 push 403。
+- 验证：pytest 26 passed。
+
 ### P3-8（C6）：官方/内置种子数据确定性 object_id —— 完成
 
 - `src-tauri/src/sync.rs`：

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
@@ -68,6 +68,12 @@ def token_hash(token: str) -> str:
     return sha256(token.encode("utf-8")).hexdigest()
 
 
+def token_expires_at(settings: Settings) -> datetime | None:
+    if settings.token_ttl_days <= 0:
+        return None
+    return datetime.now(UTC) + timedelta(days=settings.token_ttl_days)
+
+
 def ensure_bootstrap_token(settings: Settings) -> None:
     now = datetime.now(UTC)
     with get_sessionmaker()() as db:
@@ -86,6 +92,7 @@ def ensure_bootstrap_token(settings: Settings) -> None:
                     token_hash=digest,
                     created_at=now,
                     revoked_at=None,
+                    expires_at=token_expires_at(settings),
                 )
             )
         db.commit()

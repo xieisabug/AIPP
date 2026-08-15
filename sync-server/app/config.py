@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     max_events_per_push: int = Field(default=500, ge=1, le=5000)
     # 0 means unlimited. Self-hosted sync must not reject large conversations by default.
     max_payload_bytes: int = Field(default=0, ge=0)
+    # HTTP 请求体大小上限（字节），默认 16MB；0 表示不限制
+    max_request_body_bytes: int = Field(default=16 * 1024 * 1024, ge=0)
+    # token 有效期（天），默认 1 年；0 表示永不过期
+    token_ttl_days: int = Field(default=365, ge=0)
     # Object types whose stale writes are accepted in server receive order (last-write-wins).
     # Empty by default: every other stale write is reported as a conflict.
     stale_lww_types: list[str] = Field(default_factory=list)

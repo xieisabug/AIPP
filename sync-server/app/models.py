@@ -28,6 +28,8 @@ class SyncToken(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # None 表示永不过期；默认按 Settings.token_ttl_days 在创建时赋值
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SyncDevice(Base):

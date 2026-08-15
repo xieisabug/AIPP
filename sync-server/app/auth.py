@@ -28,6 +28,11 @@ def require_auth(request: Request, db: Session = Depends(get_db)) -> AuthContext
     )
     if row is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid bearer token")
+    if row.expires_at is not None:
+        now = datetime.now(UTC)
+        expires_at = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=UTC)
+        if expires_at <= now:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="token expired")
     return AuthContext(account_id=row.account_id, token_id=row.id)
 
 
