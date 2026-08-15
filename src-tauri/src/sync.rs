@@ -634,7 +634,11 @@ pub async fn retry_sync_dead_letters(app_handle: AppHandle) -> Result<SyncStatus
     if settings.mode != SyncMode::SelfHosted {
         return Err("当前是本地模式，未启用自建同步".to_string());
     }
-    let device_id = ensure_device_id(&app_handle)?;
+    ensure_sync_db(&app_handle)?;
+    let device_id = {
+        let conn = open_sync_db(&app_handle)?;
+        ensure_device_id(&conn)?
+    };
     replay_dead_letters(&app_handle, &device_id)?;
     emit_status_changed(&app_handle).await;
     sync_status(&app_handle).await
@@ -743,16 +747,17 @@ async fn run_sync_once_inner(app_handle: &AppHandle) -> Result<(), String> {
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "缺少同步 token，请先保存自建同步配置".to_string())?;
-    let device_id = ensure_device_id(app_handle)?;
-    let device_name = device_name();
-    {
+    let device_id = {
         let conn = open_sync_db(app_handle)?;
+        let device_id = ensure_device_id(&conn)?;
         if needs_reset(&conn)? {
             return Err(
                 "检测到同步服务器或账号变更，请在设置中确认重置同步状态后再同步".to_string()
             );
         }
-    }
+        device_id
+    };
+    let device_name = device_name();
     reset_pushing_events(app_handle)?;
     let remote_status = fetch_remote_status(&settings.server_url, token, &device_id).await?;
 
@@ -776,11 +781,7 @@ async fn run_sync_once_inner(app_handle: &AppHandle) -> Result<(), String> {
         emit_status_changed(app_handle).await;
     }
     push_pending(app_handle, &settings, token, &device_id, &device_name).await?;
-    if remote_status.latest_cursor > get_cursor(app_handle)? {
-        pull_remote(app_handle, &settings, token, &device_id).await?;
-    } else {
-        pull_remote(app_handle, &settings, token, &device_id).await?;
-    }
+    pull_remote(app_handle, &settings, token, &device_id).await?;
     Ok(())
 }
 
@@ -897,22 +898,25 @@ async fn pull_remote(
             return Err(format!("同步服务器 pull 返回 {}", response.status()));
         }
         let body = response.json::<PullResponse>().await.map_err(|e| e.to_string())?;
+        // 每页复用同一个 sync.db 连接应用所有变更
+        let sync_conn = open_sync_db(app_handle)?;
         let mut deferred: Vec<&PullChange> = Vec::new();
         for change in &body.changes {
-            if let Err(err) = apply_change(app_handle, change, device_id) {
+            if let Err(err) = apply_change(app_handle, &sync_conn, change, device_id) {
                 if is_dependency_pending_error(&err) {
                     // 依赖对象可能在本页后面的 change 里：先记下，本页处理完后重放一次
                     deferred.push(change);
                 } else {
-                    record_dead_letter(app_handle, change, &err);
+                    record_dead_letter(&sync_conn, change, &err);
                 }
             }
         }
         for change in deferred {
-            if let Err(err) = apply_change(app_handle, change, device_id) {
-                record_dead_letter(app_handle, change, &err);
+            if let Err(err) = apply_change(app_handle, &sync_conn, change, device_id) {
+                record_dead_letter(&sync_conn, change, &err);
             }
         }
+        drop(sync_conn);
         set_cursor(app_handle, body.cursor)?;
         emit_status_changed(app_handle).await;
         if !body.has_more {
@@ -932,11 +936,10 @@ fn is_dependency_pending_error(err: &str) -> bool {
 
 /// 将无法应用的远端变更写入死信表；同一对象只保留最新一条。
 /// 死信写入本身失败只记日志，不阻断 pull 主流程。
-fn record_dead_letter(app_handle: &AppHandle, change: &PullChange, error: &str) {
+fn record_dead_letter(conn: &Connection, change: &PullChange, error: &str) {
     let result = (|| -> Result<(), String> {
         let change_json =
             serde_json::to_string(change).map_err(|e| format!("serialize dead letter: {e}"))?;
-        let conn = open_sync_db(app_handle)?;
         conn.execute(
             "DELETE FROM sync_dead_letter WHERE object_type = ?1 AND object_id = ?2",
             params![change.object_type, change.object_id],
@@ -978,8 +981,8 @@ fn record_dead_letter(app_handle: &AppHandle, change: &PullChange, error: &str) 
 /// 返回（成功数，剩余数）。
 fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize, usize), String> {
     ensure_sync_db(app_handle)?;
+    let conn = open_sync_db(app_handle)?;
     let pending: Vec<(i64, String)> = {
-        let conn = open_sync_db(app_handle)?;
         let mut stmt = conn
             .prepare("SELECT id, change_json FROM sync_dead_letter ORDER BY id")
             .map_err(|e| e.to_string())?;
@@ -996,19 +999,18 @@ fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize
         let change: PullChange = match serde_json::from_str(change_json) {
             Ok(change) => change,
             Err(err) => {
-                update_dead_letter_failure(app_handle, *id, &format!("死信反序列化失败: {err}"))?;
+                update_dead_letter_failure(&conn, *id, &format!("死信反序列化失败: {err}"))?;
                 continue;
             }
         };
-        match apply_change(app_handle, &change, device_id) {
+        match apply_change(app_handle, &conn, &change, device_id) {
             Ok(()) => {
-                let conn = open_sync_db(app_handle)?;
                 conn.execute("DELETE FROM sync_dead_letter WHERE id = ?1", params![id])
                     .map_err(|e| e.to_string())?;
                 resolved += 1;
             }
             Err(err) => {
-                update_dead_letter_failure(app_handle, *id, &err)?;
+                update_dead_letter_failure(&conn, *id, &err)?;
             }
         }
     }
@@ -1019,8 +1021,7 @@ fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize
     Ok((resolved, remaining))
 }
 
-fn update_dead_letter_failure(app_handle: &AppHandle, id: i64, error: &str) -> Result<(), String> {
-    let conn = open_sync_db(app_handle)?;
+fn update_dead_letter_failure(conn: &Connection, id: i64, error: &str) -> Result<(), String> {
     conn.execute(
         "UPDATE sync_dead_letter
          SET error = ?2, failed_at = ?3, retry_count = retry_count + 1
@@ -1040,15 +1041,18 @@ fn sync_http_client() -> Result<reqwest::Client, String> {
 
 fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
     ensure_sync_db(app_handle)?;
+    // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
+    let sync_conn = open_sync_db(app_handle)?;
+    let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
     for spec in specs() {
-        let (snapshots, present_ids) = read_local_snapshots(app_handle, &spec)?;
+        let (snapshots, present_ids) = read_local_snapshots(app_handle, &spec, &sync_conn)?;
         for snapshot in snapshots {
-            if enqueue_snapshot_if_changed(app_handle, &snapshot)? {
+            if enqueue_snapshot_if_changed(&sync_conn, &snapshot, &device_id)? {
                 enqueued += 1;
             }
         }
-        enqueued += scan_local_deletes(app_handle, &spec, &present_ids)?;
+        enqueued += scan_local_deletes(app_handle, &sync_conn, &spec, &present_ids)?;
     }
     Ok(enqueued)
 }
@@ -1058,29 +1062,29 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
 /// 同时清理"本地行已删除但 outbox 里还留着 upsert"的过期事件。
 fn scan_local_deletes(
     app_handle: &AppHandle,
+    sync_conn: &Connection,
     spec: &SyncTableSpec,
     present_ids: &HashSet<String>,
 ) -> Result<usize, String> {
-    let conn = open_sync_db(app_handle)?;
-    let device_id = ensure_device_id(app_handle)?;
+    let device_id = ensure_device_id(sync_conn)?;
     let mut enqueued = 0;
 
-    let candidates = find_deleted_candidates(&conn, spec.object_type, present_ids)?;
+    let candidates = find_deleted_candidates(sync_conn, spec.object_type, present_ids)?;
     for (object_id, base_version) in candidates {
         // 行可能只是被 where_clause 过滤出同步范围，必须确认行真的不存在
-        if local_row_exists(app_handle, spec, &object_id)? {
+        if local_row_exists(app_handle, sync_conn, spec, &object_id)? {
             continue;
         }
-        if enqueue_delete_event(&conn, spec, &object_id, base_version, &device_id)? {
+        if enqueue_delete_event(sync_conn, spec, &object_id, base_version, &device_id)? {
             enqueued += 1;
         }
     }
 
     // 新增后未推送即删除：没有 shadow，但 outbox 可能残留 pending/failed upsert，
     // 不清理的话会把已删除的对象推上服务器（幽灵复活）。
-    let stale_upserts = find_stale_pending_upserts(&conn, spec.object_type, present_ids)?;
+    let stale_upserts = find_stale_pending_upserts(sync_conn, spec.object_type, present_ids)?;
     for object_id in stale_upserts {
-        if local_row_exists(app_handle, spec, &object_id)? {
+        if local_row_exists(app_handle, sync_conn, spec, &object_id)? {
             continue;
         }
         debug!(
@@ -1088,7 +1092,8 @@ fn scan_local_deletes(
             object_id = %object_id,
             "Dropping stale pending upsert for locally deleted row"
         );
-        conn.execute(
+        sync_conn
+            .execute(
             "DELETE FROM sync_outbox
              WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert'
                AND status IN ('pending', 'failed')",
@@ -1155,13 +1160,14 @@ fn find_stale_pending_upserts(
 /// 确认本地行是否仍然存在（忽略 where_clause 的同步范围过滤）。
 fn local_row_exists(
     app_handle: &AppHandle,
+    sync_conn: &Connection,
     spec: &SyncTableSpec,
     object_id: &str,
 ) -> Result<bool, String> {
     let path = get_db_path(app_handle, spec.db_name)?;
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let conn = open_data_db(&path)?;
     if spec.natural_key_columns.is_empty() {
-        let Some(local_id) = find_local_id_by_object_id(app_handle, spec.object_type, object_id)?
+        let Some(local_id) = find_local_id_by_object_id(sync_conn, spec.object_type, object_id)?
         else {
             return Ok(false);
         };
@@ -1244,9 +1250,10 @@ fn enqueue_delete_event(
 fn read_local_snapshots(
     app_handle: &AppHandle,
     spec: &SyncTableSpec,
+    sync_conn: &Connection,
 ) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
     let path = get_db_path(app_handle, spec.db_name)?;
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let conn = open_data_db(&path)?;
     let columns = existing_columns(&conn, spec.table, spec.columns)?;
     if columns.is_empty() || !columns.iter().any(|c| c == "id") {
         return Ok((Vec::new(), HashSet::new()));
@@ -1288,16 +1295,16 @@ fn read_local_snapshots(
             natural_object_id(spec, &raw_values)?
         } else if is_official_row {
             // 官方/内置种子行：确定性 object_id，各设备对同一内置行生成相同标识
-            ensure_official_object_id(app_handle, spec, local_id)?
+            upsert_official_object_map(sync_conn, spec.object_type, spec.table, local_id)?
         } else {
-            ensure_object_id(app_handle, spec.object_type, spec.table, local_id)?
+            ensure_object_id(sync_conn, spec.object_type, spec.table, local_id)?
         };
         // 无论本行是否因外键未决而跳过，都要计入 present 集合，
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
         present_ids.insert(object_id.clone());
 
         let Some(refs) = build_fk_refs(spec, &raw_values, |object_type, value| {
-            find_object_id(app_handle, object_type, value)
+            find_object_id(sync_conn, object_type, value)
         })?
         else {
             // 外键引用尚未建立映射（依赖对象未同步）：本轮跳过该行，
@@ -1382,10 +1389,10 @@ fn resolve_remote_foreign_keys(
 }
 
 fn enqueue_snapshot_if_changed(
-    app_handle: &AppHandle,
+    conn: &Connection,
     snapshot: &LocalObjectSnapshot,
+    device_id: &str,
 ) -> Result<bool, String> {
-    let conn = open_sync_db(app_handle)?;
     let shadow = conn
         .query_row(
             "SELECT server_version, payload_hash FROM sync_shadow WHERE object_type = ?1 AND object_id = ?2",
@@ -1414,9 +1421,8 @@ fn enqueue_snapshot_if_changed(
     }
 
     // 新 payload 入队前清理同对象的 failed 旧事件，避免旧 payload 之后被重试覆盖新数据
-    drop_failed_upserts_for_object(&conn, &snapshot.object_type, &snapshot.object_id)?;
+    drop_failed_upserts_for_object(conn, &snapshot.object_type, &snapshot.object_id)?;
 
-    let device_id = ensure_device_id(app_handle)?;
     let base_version = shadow.map(|(version, _)| version);
     let now = now_string();
     conn.execute(
@@ -1452,9 +1458,14 @@ fn drop_failed_upserts_for_object(
     .map_err(|e| e.to_string())
 }
 
-fn apply_change(app_handle: &AppHandle, change: &PullChange, local_device_id: &str) -> Result<(), String> {
+fn apply_change(
+    app_handle: &AppHandle,
+    sync_conn: &Connection,
+    change: &PullChange,
+    local_device_id: &str,
+) -> Result<(), String> {
     if change.device_id == local_device_id {
-        upsert_shadow_from_remote(app_handle, change)?;
+        upsert_shadow_from_remote(sync_conn, change)?;
         return Ok(());
     }
 
@@ -1463,11 +1474,11 @@ fn apply_change(app_handle: &AppHandle, change: &PullChange, local_device_id: &s
         return Ok(());
     };
     let db_path = get_db_path(app_handle, spec.db_name)?;
-    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    let conn = open_data_db(&db_path)?;
 
     if change.operation == "delete" {
-        apply_delete(app_handle, &conn, &spec, change)?;
-        upsert_shadow_from_remote(app_handle, change)?;
+        apply_delete(sync_conn, &conn, &spec, change)?;
+        upsert_shadow_from_remote(sync_conn, change)?;
         return Ok(());
     }
 
@@ -1482,10 +1493,10 @@ fn apply_change(app_handle: &AppHandle, change: &PullChange, local_device_id: &s
     let refs = payload.get("refs").and_then(JsonValue::as_object).cloned().unwrap_or_default();
     let mut field_values = fields.clone();
     resolve_remote_foreign_keys(&spec, &mut field_values, &refs, |object_type, ref_object_id| {
-        find_local_id_by_object_id(app_handle, object_type, ref_object_id)
+        find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
     })?;
 
-    if let Some(local_id) = find_local_id_by_object_id(app_handle, &change.object_type, &change.object_id)? {
+    if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
         update_row(&conn, &spec, local_id, &field_values)?;
     } else if let Some(official_id) = parse_official_object_id(&change.object_id, &change.object_type) {
         // 官方/内置种子行按确定性 id 对齐：本机已有同 id 行则更新，
@@ -1495,30 +1506,29 @@ fn apply_change(app_handle: &AppHandle, change: &PullChange, local_device_id: &s
         } else {
             insert_row_with_id(&conn, &spec, official_id, &field_values)?;
         }
-        save_object_map(app_handle, &change.object_type, spec.table, official_id, &change.object_id)?;
+        save_object_map(sync_conn, &change.object_type, spec.table, official_id, &change.object_id)?;
     } else if !spec.natural_key_columns.is_empty() {
         upsert_natural_row(&conn, &spec, &field_values)?;
     } else {
         let new_id = insert_row(&conn, &spec, &field_values)?;
-        save_object_map(app_handle, &change.object_type, spec.table, new_id, &change.object_id)?;
+        save_object_map(sync_conn, &change.object_type, spec.table, new_id, &change.object_id)?;
     }
 
-    upsert_shadow_from_remote(app_handle, change)?;
+    upsert_shadow_from_remote(sync_conn, change)?;
     Ok(())
 }
 
 fn apply_delete(
-    app_handle: &AppHandle,
+    sync_conn: &Connection,
     conn: &Connection,
     spec: &SyncTableSpec,
     change: &PullChange,
 ) -> Result<(), String> {
-    if let Some(local_id) = find_local_id_by_object_id(app_handle, &change.object_type, &change.object_id)? {
+    if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
         conn.execute(&format!("DELETE FROM {} WHERE id = ?1", spec.table), params![local_id])
             .map_err(|e| e.to_string())?;
         // 同步删除 object_map 映射：同 object_id 后续 upsert 时应重新 insert（对象复活），
         // 而不是命中这条指向已删除行的旧映射。
-        let sync_conn = open_sync_db(app_handle)?;
         sync_conn
             .execute(
                 "DELETE FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
@@ -1674,30 +1684,58 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
              LIMIT ?1",
         )
         .map_err(|e| e.to_string())?;
-    let rows = stmt
+    let raw_rows = stmt
         .query_map(params![limit, Utc::now().timestamp()], |row| {
-            let payload_json: Option<String> = row.get(5)?;
-            let payload = payload_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok());
             Ok((
                 row.get::<_, i64>(0)?,
-                PushEvent {
-                    event_id: row.get(1)?,
-                    object_type: row.get(2)?,
-                    object_id: row.get(3)?,
-                    operation: row.get(4)?,
-                    payload,
-                    base_version: row.get(6)?,
-                    local_version: row.get(7)?,
-                    created_at: row.get(8)?,
-                    client_schema_version: CLIENT_SCHEMA_VERSION,
-                    object_schema_version: 1,
-                },
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+
+    let mut events = Vec::with_capacity(raw_rows.len());
+    for (id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at) in raw_rows
+    {
+        let payload = match payload_json.as_deref() {
+            Some(raw) => match serde_json::from_str::<JsonValue>(raw) {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    // 损坏的 payload 不能静默当 None 推上去（upsert 会变空数据）：
+                    // 记失败并跳过该事件，由退避/人工重试处理。
+                    let message = format!("outbox event {event_id} payload 反序列化失败: {err}");
+                    warn!(event_id = %event_id, "Skipping outbox event with corrupt payload");
+                    record_event_failure(&conn, id, &message)?;
+                    continue;
+                }
+            },
+            None => None,
+        };
+        events.push((
+            id,
+            PushEvent {
+                event_id,
+                object_type,
+                object_id,
+                operation,
+                payload,
+                base_version,
+                local_version,
+                created_at,
+                client_schema_version: CLIENT_SCHEMA_VERSION,
+                object_schema_version: 1,
+            },
+        ));
+    }
+    Ok(events)
 }
 
 fn mark_events_pushing(app_handle: &AppHandle, events: &[(i64, PushEvent)]) -> Result<(), String> {
@@ -1899,7 +1937,7 @@ fn handle_push_response(
                 },
                 created_at: now_string(),
             };
-            match apply_change(app_handle, &pseudo_change, "") {
+            match apply_change(app_handle, &conn, &pseudo_change, "") {
                 Ok(()) => {
                     conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
                         .map_err(|e| e.to_string())?;
@@ -1932,8 +1970,7 @@ fn handle_push_response(
     Ok(conflict_resolved)
 }
 
-fn upsert_shadow_from_remote(app_handle: &AppHandle, change: &PullChange) -> Result<(), String> {
-    let conn = open_sync_db(app_handle)?;
+fn upsert_shadow_from_remote(conn: &Connection, change: &PullChange) -> Result<(), String> {
     let payload_hash = hash_text(&serde_json::to_string(&change.payload).unwrap_or_default());
     conn.execute(
         "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
@@ -2101,15 +2138,21 @@ fn clear_sync_state(conn: &Connection) -> Result<(), String> {
 
 fn open_sync_db(app_handle: &AppHandle) -> Result<Connection, String> {
     let path = get_db_path(app_handle, "sync.db")?;
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    let conn = open_data_db(&path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")
         .map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
-fn ensure_device_id(app_handle: &AppHandle) -> Result<String, String> {
-    ensure_sync_db(app_handle)?;
-    let conn = open_sync_db(app_handle)?;
+/// 打开业务数据 DB（读多写少），加 busy_timeout 避免与其他写路径偶发冲突直接报错。
+fn open_data_db(path: &std::path::Path) -> Result<Connection, String> {
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA busy_timeout=5000;").map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+/// 调用方需保证 schema 已建好（各入口都会先调 ensure_sync_db）。
+fn ensure_device_id(conn: &Connection) -> Result<String, String> {
     if let Some(id) = conn
         .query_row("SELECT device_id FROM sync_device LIMIT 1", [], |row| row.get::<_, String>(0))
         .optional()
@@ -2190,12 +2233,11 @@ fn set_cursor(app_handle: &AppHandle, cursor: i64) -> Result<(), String> {
 }
 
 fn ensure_object_id(
-    app_handle: &AppHandle,
+    conn: &Connection,
     object_type: &str,
     local_table: &str,
     local_id: i64,
 ) -> Result<String, String> {
-    let conn = open_sync_db(app_handle)?;
     if let Some(existing) = conn
         .query_row(
             "SELECT sync_id FROM sync_object_map WHERE object_type = ?1 AND local_id = ?2",
@@ -2235,15 +2277,6 @@ fn parse_official_object_id(object_id: &str, expected_object_type: &str) -> Opti
 /// 官方/内置种子行使用确定性 object_id，保证各设备对同一内置行生成相同标识。
 /// 老设备上已存在的随机 UUID 映射在此被就地替换；服务器侧的旧随机对象
 /// 会经删除检测（scan_local_deletes）自然收敛清理。
-fn ensure_official_object_id(
-    app_handle: &AppHandle,
-    spec: &SyncTableSpec,
-    local_id: i64,
-) -> Result<String, String> {
-    let conn = open_sync_db(app_handle)?;
-    upsert_official_object_map(&conn, spec.object_type, spec.table, local_id)
-}
-
 fn upsert_official_object_map(
     conn: &Connection,
     object_type: &str,
@@ -2262,13 +2295,12 @@ fn upsert_official_object_map(
 }
 
 fn save_object_map(
-    app_handle: &AppHandle,
+    conn: &Connection,
     object_type: &str,
     local_table: &str,
     local_id: i64,
     sync_id: &str,
 ) -> Result<(), String> {
-    let conn = open_sync_db(app_handle)?;
     conn.execute(
         "INSERT OR IGNORE INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2278,8 +2310,7 @@ fn save_object_map(
     Ok(())
 }
 
-fn find_object_id(app_handle: &AppHandle, object_type: &str, local_id: i64) -> Result<Option<String>, String> {
-    let conn = open_sync_db(app_handle)?;
+fn find_object_id(conn: &Connection, object_type: &str, local_id: i64) -> Result<Option<String>, String> {
     conn.query_row(
         "SELECT sync_id FROM sync_object_map WHERE object_type = ?1 AND local_id = ?2",
         params![object_type, local_id],
@@ -2290,11 +2321,10 @@ fn find_object_id(app_handle: &AppHandle, object_type: &str, local_id: i64) -> R
 }
 
 fn find_local_id_by_object_id(
-    app_handle: &AppHandle,
+    conn: &Connection,
     object_type: &str,
     object_id: &str,
 ) -> Result<Option<i64>, String> {
-    let conn = open_sync_db(app_handle)?;
     conn.query_row(
         "SELECT local_id FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
         params![object_type, object_id],
@@ -2347,7 +2377,7 @@ fn existing_columns(
 fn is_local_sync_scope_empty(app_handle: &AppHandle) -> Result<bool, String> {
     for spec in specs() {
         let path = get_db_path(app_handle, spec.db_name)?;
-        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let conn = open_data_db(&path)?;
         // 判空时排除官方/内置种子行：每台设备都有它们，
         // 不排除的话"纯拉取 bootstrap"分支永远不可达。
         let mut conditions: Vec<String> = spec.where_clause.map(|w| format!("({w})")).into_iter().collect();

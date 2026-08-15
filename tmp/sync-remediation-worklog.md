@@ -4,6 +4,15 @@
 
 ## 2026-08-15
 
+### P4-12（C10 部分）：sync.db 连接复用重构 —— 完成
+
+- `src-tauri/src/sync.rs`：把 sync.db 辅助函数全部改为 conn 级签名，消除热循环里"每行/每对象重开连接"：
+  - `ensure_device_id` / `ensure_object_id` / `find_object_id` / `find_local_id_by_object_id` / `save_object_map` / `upsert_shadow_from_remote` / `enqueue_snapshot_if_changed` / `record_dead_letter` / `update_dead_letter_failure` 改为接收 `&Connection`；删除 `ensure_official_object_id` 包装（调用方直接用 `upsert_official_object_map`）。
+  - `scan_local_changes`：整轮扫描复用单个 sync 连接，`device_id` 只在入口取一次；`read_local_snapshots` / `scan_local_deletes` / `local_row_exists` 均复用该连接。
+  - `pull_remote`：每页开一个 sync 连接复用于整页 `apply_change` / `record_dead_letter`；`replay_dead_letters` 单连接复用；`apply_change` / `apply_delete` 改为接收 sync 连接（map/shadow 操作不再各自重开）。
+  - 顺带修复：上一小项新增的 `open_data_db` 递归调用自身（运行即栈溢出），改回 `Connection::open`；`enqueue_snapshot_if_changed` 损坏 payload 改报错、run_sync_once_inner 死分支删除此前已完成，本次一并验证。
+- 验证：`cargo test sync::tests` 23 passed。
+
 ### P3-11（S7）：Docker 部署修正 —— 完成
 
 - `sync-server/Dockerfile`（此前已改，本次补 README）：CMD 先 `alembic upgrade head` 再起 uvicorn；`VOLUME /app/data`；非 root 用户 `aipp` 运行。
