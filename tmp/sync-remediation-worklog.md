@@ -4,6 +4,13 @@
 
 ## 2026-08-15
 
+### P4-13（部分）：pull/冲突落地后 emit 领域事件 —— 完成
+
+- `src-tauri/src/sync.rs`：新增 `emit_sync_domain_events`，按 object_type 前缀映射到既有前端事件：`assistant*` → `assistant_list_changed`，`mcp.*` → `mcp_state_changed`，`llm.*` → 新增 `llm_provider_changed`。
+- 接线点：`pull_remote` 每页落库后 emit；`handle_push_response` 冲突远端赢成功落地后按已解决对象的 object_type emit。
+- 前端 `LLMProviderConfig.tsx`：监听 `llm_provider_changed` 自动刷新 provider 列表（assistant 列表与 MCP 配置页已有对应监听，无需改动）。
+- 验证：`cargo test sync::tests` 全绿（exit 0）；`npm run build` 通过。
+
 ### P4-12（C10 部分）：sync.db 连接复用重构 —— 完成
 
 - `src-tauri/src/sync.rs`：把 sync.db 辅助函数全部改为 conn 级签名，消除热循环里"每行/每对象重开连接"：

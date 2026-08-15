@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 import FormDialog from "../FormDialog";
 import ConfirmDialog from "../ConfirmDialog";
@@ -76,6 +77,16 @@ const LLMProviderConfig: React.FC = () => {
     useEffect(() => {
         getLLMProviderList();
     }, []);
+
+    // 自建同步 pull/冲突落地远端 llm.* 变更后刷新列表
+    useEffect(() => {
+        const unlistenPromise = listen('llm_provider_changed', () => {
+            getLLMProviderList();
+        });
+        return () => {
+            unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
+        };
+    }, [getLLMProviderList]);
 
     const [newProviderDialogOpen, setNewProviderDialogOpen] = useState(false);
     const [providerName, setProviderName] = useState('');

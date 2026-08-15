@@ -918,6 +918,7 @@ async fn pull_remote(
         }
         drop(sync_conn);
         set_cursor(app_handle, body.cursor)?;
+        emit_sync_domain_events(app_handle, body.changes.iter().map(|c| c.object_type.as_str()));
         emit_status_changed(app_handle).await;
         if !body.has_more {
             // pull 全部完成后自愈重放一次存量死信：跨页的依赖此时已就位
@@ -926,6 +927,36 @@ async fn pull_remote(
             }
             return Ok(());
         }
+    }
+}
+
+/// pull/冲突落地后按 object_type 域通知前端刷新对应列表。
+/// 复用既有事件约定：assistant_list_changed / mcp_state_changed；
+/// llm 域新增 llm_provider_changed（前端 LLMProviderConfig 监听）。
+fn emit_sync_domain_events<'a>(
+    app_handle: &AppHandle,
+    object_types: impl Iterator<Item = &'a str>,
+) {
+    let mut has_assistant = false;
+    let mut has_mcp = false;
+    let mut has_llm = false;
+    for object_type in object_types {
+        if object_type.starts_with("assistant") {
+            has_assistant = true;
+        } else if object_type.starts_with("mcp.") {
+            has_mcp = true;
+        } else if object_type.starts_with("llm.") {
+            has_llm = true;
+        }
+    }
+    if has_assistant {
+        let _ = app_handle.emit("assistant_list_changed", ());
+    }
+    if has_mcp {
+        let _ = app_handle.emit("mcp_state_changed", "sync_remote");
+    }
+    if has_llm {
+        let _ = app_handle.emit("llm_provider_changed", ());
     }
 }
 
@@ -1916,6 +1947,7 @@ fn handle_push_response(
     }
 
     let mut conflict_resolved = 0usize;
+    let mut resolved_object_types: Vec<String> = Vec::new();
     for conflict in response.conflicts {
         if let Some((id, _)) = by_event_id.get(conflict.event_id.as_str()) {
             // 远端赢：把服务端版本按 pull 语义落地到本地，然后删除该 outbox 事件
@@ -1942,6 +1974,7 @@ fn handle_push_response(
                     conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
                         .map_err(|e| e.to_string())?;
                     conflict_resolved += 1;
+                    resolved_object_types.push(conflict.object_type.clone());
                 }
                 Err(err) => {
                     // 落地失败（如依赖未就绪）：标 failed 等待重试，重试前
@@ -1959,6 +1992,9 @@ fn handle_push_response(
                 }
             }
         }
+    }
+    if !resolved_object_types.is_empty() {
+        emit_sync_domain_events(app_handle, resolved_object_types.iter().map(String::as_str));
     }
     if rejected_count > 0 {
         return Err(format!(
