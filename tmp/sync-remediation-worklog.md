@@ -4,6 +4,20 @@
 
 ## 2026-08-15
 
+### P2-6（C4+S 联合）：冲突语义重做（协议 v2）—— 完成
+
+- 客户端 `src-tauri/src/sync.rs`：
+  - `CLIENT_SCHEMA_VERSION` 升到 2；`ConflictEvent` 新增 `server_operation`（serde 默认 "upsert" 兼容旧服务端）。
+  - conflict 分支改为**远端赢落地**：构造等价 PullChange 走 `apply_change` 写路径（server_operation=delete → apply_delete 语义 + 墓碑；upsert → server_payload 覆盖本地行 + 刷新 shadow），成功后**删除** outbox 事件（不再标 failed 死等）；落地失败才标 failed（该变更后续仍会经 pull 下发，不丢）。
+  - `push_pending` 拆出 `push_pending_loop`，累计本轮远端赢解决数，更新 `SyncRuntimeStatus.conflict_resolved_count` 并 emit 状态；`SyncStatusDto` 新增该字段。
+  - `reset_failed_events`（抽出 `reset_failed_events_inner`）：重试前用 shadow 当前 server_version 刷新 failed 事件的 base_version（COALESCE 子查询，无 shadow 保持原值），消除冲突重试死循环。
+  - 批次错误只统计 rejected；冲突不再计入失败。
+- 前端 `DataFolderConfigForm.tsx`：监听 `sync_status_changed` 时比较 `conflict_resolved_count` 增量，toast 提示"有 N 处修改与服务器冲突，已采用服务器版本"。
+- 服务端 `config.py`：`max_client_schema_version = 2`（min 保持 1，旧客户端可继续按旧语义工作）。
+- 新增 1 个单测（failed 重试刷新 base_version）。
+- 验证：`cargo test sync::tests` 18 passed；服务端 pytest 19 passed；前端 `npm run build` 通过。
+- 服务端部分（默认 conflict、server_operation、event_id 内容校验）此前已完成并提交（e6d4425）。
+
 ### P1-5（C5）：切换服务器/账号时重置同步状态 —— 完成
 
 - `src-tauri/src/sync.rs`：

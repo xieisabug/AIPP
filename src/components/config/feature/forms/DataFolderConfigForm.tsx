@@ -25,6 +25,7 @@ interface SyncStatus {
     failed_outbox_count: number;
     dead_letter_count: number;
     needs_reset: boolean;
+    conflict_resolved_count: number;
     server_cursor: number;
 }
 
@@ -60,7 +61,14 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     useEffect(() => {
         void loadStatus(true);
         const unlistenPromise = listen<SyncStatus>("sync_status_changed", (event) => {
-            setStatus(event.payload);
+            setStatus((prev) => {
+                const next = event.payload;
+                const resolvedDelta = (next.conflict_resolved_count ?? 0) - (prev?.conflict_resolved_count ?? 0);
+                if (resolvedDelta > 0) {
+                    toast.warning(`有 ${resolvedDelta} 处修改与服务器冲突，已采用服务器版本`);
+                }
+                return next;
+            });
         });
         return () => {
             void unlistenPromise.then((unlisten) => unlisten());

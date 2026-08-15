@@ -26,7 +26,7 @@ const TOKEN_SCOPE: &str = "data_sync";
 const TOKEN_KEY: &str = "token";
 const SECURE_MASTER_KEY_FILE: &str = "secure-config-master-key.bin";
 const DEFAULT_SCOPE: &str = "default";
-const CLIENT_SCHEMA_VERSION: i64 = 1;
+const CLIENT_SCHEMA_VERSION: i64 = 2;
 const SYNC_INTERVAL_SECS: u64 = 45;
 const DEBOUNCE_MS: u64 = 1200;
 const HTTP_TIMEOUT_SECS: u64 = 30;
@@ -60,6 +60,8 @@ struct SyncRuntimeStatus {
     syncing: bool,
     last_sync_at: Option<String>,
     last_error: Option<String>,
+    /// 本轮进程内累计的"远端赢"冲突解决数，前端据此提示用户本地修改被覆盖
+    conflict_resolved_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +79,7 @@ pub struct SyncStatusDto {
     failed_outbox_count: i64,
     dead_letter_count: i64,
     needs_reset: bool,
+    conflict_resolved_count: i64,
     server_cursor: i64,
 }
 
@@ -179,6 +182,13 @@ struct ConflictEvent {
     object_id: String,
     server_version: i64,
     server_payload: Option<JsonValue>,
+    /// 服务端当前的操作状态：upsert / delete（v2 协议新增；旧服务端缺省按 upsert 处理）
+    #[serde(default = "default_server_operation")]
+    server_operation: String,
+}
+
+fn default_server_operation() -> String {
+    "upsert".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -776,6 +786,28 @@ async fn push_pending(
     device_id: &str,
     device_name: &str,
 ) -> Result<(), String> {
+    let mut total_conflict_resolved = 0usize;
+    let result =
+        push_pending_loop(app_handle, settings, token, device_id, device_name, &mut total_conflict_resolved).await;
+    if total_conflict_resolved > 0 {
+        if let Some(state) = app_handle.try_state::<SyncState>() {
+            let mut runtime = state.status.lock().await;
+            runtime.conflict_resolved_count += total_conflict_resolved as i64;
+        }
+        emit_status_changed(app_handle).await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn push_pending_loop(
+    app_handle: &AppHandle,
+    settings: &SyncSettings,
+    token: &str,
+    device_id: &str,
+    device_name: &str,
+    total_conflict_resolved: &mut usize,
+) -> Result<(), String> {
     loop {
         let events = load_pending_outbox(app_handle, 100)?;
         if events.is_empty() {
@@ -813,7 +845,7 @@ async fn push_pending(
                 return Err(err.to_string());
             }
         };
-        handle_push_response(app_handle, &events, body)?;
+        *total_conflict_resolved += handle_push_response(app_handle, &events, body)?;
         emit_status_changed(app_handle).await;
     }
 }
@@ -1618,9 +1650,21 @@ fn reset_pushing_events(app_handle: &AppHandle) -> Result<(), String> {
 
 fn reset_failed_events(app_handle: &AppHandle) -> Result<usize, String> {
     let conn = open_sync_db(app_handle)?;
+    reset_failed_events_inner(&conn)
+}
+
+/// 重试 failed 事件前，用 shadow 中当前的 server_version 刷新 base_version，
+/// 消除"base_version 冻结 → 永远 conflict"的重试死循环。
+fn reset_failed_events_inner(conn: &Connection) -> Result<usize, String> {
     conn.execute(
         "UPDATE sync_outbox
-         SET status = 'pending', last_error = NULL
+         SET base_version = COALESCE((
+                 SELECT s.server_version FROM sync_shadow s
+                 WHERE s.object_type = sync_outbox.object_type
+                   AND s.object_id = sync_outbox.object_id
+             ), base_version),
+             status = 'pending',
+             last_error = NULL
          WHERE status = 'failed'",
         [],
     )
@@ -1674,7 +1718,7 @@ fn handle_push_response(
     app_handle: &AppHandle,
     events: &[(i64, PushEvent)],
     response: PushResponse,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let conn = open_sync_db(app_handle)?;
     let by_event_id: HashMap<&str, &(i64, PushEvent)> =
         events.iter().map(|item| (item.1.event_id.as_str(), item)).collect();
@@ -1699,7 +1743,6 @@ fn handle_push_response(
     }
 
     let mut rejected_count = 0;
-    let mut conflict_count = 0;
     let mut latest_failure: Option<String> = None;
 
     for rejected in response.rejected {
@@ -1716,45 +1759,59 @@ fn handle_push_response(
         }
     }
 
+    let mut conflict_resolved = 0usize;
     for conflict in response.conflicts {
         if let Some((id, _)) = by_event_id.get(conflict.event_id.as_str()) {
-            conflict_count += 1;
-            let err = format!(
-                "remote conflict on {}:{} at version {}",
-                conflict.object_type, conflict.object_id, conflict.server_version
-            );
-            latest_failure = Some(err.clone());
-            conn.execute(
-                "UPDATE sync_outbox
-                 SET status = 'failed', retry_count = retry_count + 1, last_error = ?2
-                 WHERE id = ?1",
-                params![id, err],
-            )
-            .map_err(|e| e.to_string())?;
-            if let Some(payload) = conflict.server_payload {
-                let hash = hash_text(&serde_json::to_string(&payload).unwrap_or_default());
-                conn.execute(
-                    "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, NULL, ?5)
-                     ON CONFLICT(object_type, object_id)
-                     DO UPDATE SET server_version = excluded.server_version,
-                                   payload_hash = excluded.payload_hash,
-                                   updated_at = excluded.updated_at",
-                    params![conflict.object_type, conflict.object_id, conflict.server_version, hash, now_string()],
-                )
-                .map_err(|e| e.to_string())?;
+            // 远端赢：把服务端版本按 pull 语义落地到本地，然后删除该 outbox 事件
+            // （冲突已解决，无需重试；本地未推送修改被服务端版本覆盖）。
+            let pseudo_change = PullChange {
+                seq: 0,
+                event_id: conflict.event_id.clone(),
+                // 与本机 device_id（UUID）永不相等，确保 apply_change 走远端应用路径
+                device_id: "server-conflict".to_string(),
+                object_type: conflict.object_type.clone(),
+                object_id: conflict.object_id.clone(),
+                operation: conflict.server_operation.clone(),
+                version: conflict.server_version,
+                payload: conflict.server_payload.clone(),
+                deleted_at: if conflict.server_operation == "delete" {
+                    Some(now_string())
+                } else {
+                    None
+                },
+                created_at: now_string(),
+            };
+            match apply_change(app_handle, &pseudo_change, "") {
+                Ok(()) => {
+                    conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
+                        .map_err(|e| e.to_string())?;
+                    conflict_resolved += 1;
+                }
+                Err(err) => {
+                    // 落地失败（如依赖未就绪）：标 failed 等待重试，重试前
+                    // base_version 会被刷新（见 reset_failed_events）；
+                    // 该变更后续也会经 pull 正常下发，不会丢。
+                    let message = format!("冲突落地失败: {err}");
+                    latest_failure = Some(message.clone());
+                    conn.execute(
+                        "UPDATE sync_outbox
+                         SET status = 'failed', retry_count = retry_count + 1, last_error = ?2
+                         WHERE id = ?1",
+                        params![id, message],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
             }
         }
     }
-    if rejected_count > 0 || conflict_count > 0 {
+    if rejected_count > 0 {
         return Err(format!(
-            "同步服务器拒绝 {} 条、冲突 {} 条；最近原因：{}",
+            "同步服务器拒绝 {} 条；最近原因：{}",
             rejected_count,
-            conflict_count,
             latest_failure.unwrap_or_else(|| "未提供原因".to_string())
         ));
     }
-    Ok(())
+    Ok(conflict_resolved)
 }
 
 fn upsert_shadow_from_remote(app_handle: &AppHandle, change: &PullChange) -> Result<(), String> {
@@ -2221,6 +2278,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         failed_outbox_count,
         dead_letter_count,
         needs_reset,
+        conflict_resolved_count: runtime.conflict_resolved_count,
         server_cursor: get_cursor(app_handle).unwrap_or(0),
     })
 }
@@ -2662,6 +2720,45 @@ mod tests {
         let mut stale = find_stale_pending_upserts(&conn, "message", &present).unwrap();
         stale.sort();
         assert_eq!(stale, vec!["gone-failed".to_string(), "vanished".to_string()]);
+    }
+
+    /// failed 重试前用 shadow 的 server_version 刷新 base_version，消除冲突死循环
+    #[test]
+    fn reset_failed_events_refreshes_base_version() {
+        let conn = test_sync_conn();
+        seed_shadow(&conn, "obj-1", false); // server_version = 3
+        conn.execute(
+            "INSERT INTO sync_outbox
+             (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+             VALUES ('e1', 'conversation', 'obj-1', 'upsert', '{}', 1, 1, 'dev', 'now', 'failed')",
+            [],
+        )
+        .unwrap();
+        // 没有 shadow 的 failed 事件保持原 base_version
+        conn.execute(
+            "INSERT INTO sync_outbox
+             (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
+             VALUES ('e2', 'conversation', 'obj-2', 'upsert', '{}', 2, 1, 'dev', 'now', 'failed')",
+            [],
+        )
+        .unwrap();
+
+        let reset = reset_failed_events_inner(&conn).unwrap();
+        assert_eq!(reset, 2);
+        let rows: Vec<(String, Option<i64>, String)> = conn
+            .prepare("SELECT object_id, base_version, status FROM sync_outbox ORDER BY event_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("obj-1".to_string(), Some(3), "pending".to_string()),
+                ("obj-2".to_string(), Some(2), "pending".to_string()),
+            ]
+        );
     }
 
     /// needs_reset 元数据的设置与读取

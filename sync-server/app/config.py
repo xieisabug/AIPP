@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     bootstrap_account_id: str = "default"
     bootstrap_token: str | None = None
     min_client_schema_version: int = 1
-    max_client_schema_version: int = 1
+    max_client_schema_version: int = 2
     max_events_per_push: int = Field(default=500, ge=1, le=5000)
     # 0 means unlimited. Self-hosted sync must not reject large conversations by default.
     max_payload_bytes: int = Field(default=0, ge=0)
