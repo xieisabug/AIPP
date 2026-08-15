@@ -18,6 +18,7 @@ dependencies = [
  "config",
  "dirs 5.0.1",
  "docx-rs",
+ "embed-resource",
  "encoding_rs",
  "fastrand",
  "flate2",
