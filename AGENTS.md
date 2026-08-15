@@ -118,6 +118,7 @@ src-tauri/
 │   ├── scheduler/           # 定时任务调度运行时
 │   ├── skills/              # Skills 扫描、解析、提示词拼装
 │   ├── db/                  # Database operations (SQLite)
+│   ├── sync.rs              # 自建同步客户端（outbox/shadow/cursor、推拉、冲突与死信）
 │   ├── state/               # Application state management
 │   ├── template_engine/     # Prompt templating with bang commands
 │   └── window.rs            # Window management
@@ -137,6 +138,7 @@ src-tauri/
 -   `token_statistics_api.rs`: Conversation/message token statistics
 -   `copilot_api.rs` & `copilot_lsp.rs`: GitHub Copilot auth and LSP lifecycle
 -   `mcp/registry_api.rs`, `mcp/execution_api.rs`, `mcp/detection.rs`: MCP server/tool orchestration
+-   `sync.rs`: Self-hosted sync client (settings/token, outbox push, cursor pull, conflict/dead-letter handling, domain change events); server side lives in `sync-server/` (FastAPI + SQLite, alembic migrations)
 -   `artifacts/collection_api.rs` & `artifacts/artifact_bridge_api.rs`: Artifact collections + plugin bridge calls
 
 ## Key Development Patterns
@@ -205,7 +207,7 @@ let config = state.configs.lock().await;
 ## Critical Features to Maintain
 
 1. **Multi-Model Support**: Integration with various LLM providers through genai client
-2. **Local Data Storage**: All user data stored locally via SQLite, no cloud sync
+2. **Local Data Storage**: All user data stored locally via SQLite; optional self-hosted sync (`src-tauri/src/sync.rs` + `sync-server/`) for users who run their own server
 3. **Bang Commands**: Input starting with `!` for quick actions via template engine
 4. **Message Versioning & Runtime State**: Response regeneration, parent/child chains, runtime state snapshots
 5. **Content Preview & Artifact Workspace**: Rendering HTML/SVG/React/Vue and managing artifact collections
@@ -221,6 +223,7 @@ let config = state.configs.lock().await;
 15. **Assistant Types**: Different assistant configurations with custom forms
 16. **Butler Orchestration**: Main hidden conversation, task conversations, result callback injection, approval-aware task board
 17. **Feishu Integration**: Experimental Butler-driven Feishu ingress, relay workers, card callbacks, menu-triggered context reset
+18. **Self-Hosted Data Sync**: Outbox/shadow/cursor sync of config-domain data (llm providers/models, assistants, MCP servers) to a user-run sync-server; server-wins conflict resolution, delete propagation, dead-letter replay, deterministic ids for official seed rows, OS-keychain master key, whitelist-based exclusion of sensitive provider config; see `docs/sync-remediation-plan.md` for the design
 
 ## ACP Integration Notes
 
