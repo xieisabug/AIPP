@@ -4,6 +4,17 @@
 
 ## 2026-08-15
 
+### P3-8（C6）：官方/内置种子数据确定性 object_id —— 完成
+
+- `src-tauri/src/sync.rs`：
+  - `SyncTableSpec` 新增 `official_column`：`llm.provider` → `is_official`，`mcp.server` → `is_builtin`。
+  - `read_local_snapshots`：官方标记为真的行用确定性 object_id `official:{object_type}:{local_id}`（`official_object_id`/`parse_official_object_id`），经 `ensure_official_object_id`（核心为 conn 级 `upsert_official_object_map`）写入 map；老设备已有的随机 UUID 映射被就地替换，服务器侧旧随机对象经 C1 的删除检测自然收敛清理（一次性重复按计划文档认可的方式收敛）。
+  - `apply_change`：远端官方对象按确定性 id 对齐——本机同 id 行存在则更新，不存在则 `insert_row_with_id` 按固定 id 插入（`insert_row` 重构出 `insert_row_inner`），避免 fresh 设备 pull 时重复插入。
+  - `is_local_sync_scope_empty`：判空排除官方/内置行（`COALESCE(col,0)=0`），恢复纯拉取 bootstrap 分支可达。
+- 新增 3 个单测：official id 生成/解析（含类型不匹配与非法格式）、随机 UUID 映射迁移为确定性 id、insert_row_with_id 定值插入。
+- 验证：`cargo test sync::tests` 21 passed。
+- 注：官方 provider 级联的 config/model 行不单独做确定性 id——它们不是固定种子（由用户操作产生），强行按 rowid 确定性化会把不同设备的无关行错误合并；它们通过 FK refs 指向确定性父 id 已可正常收敛。
+
 ### P2-6（C4+S 联合）：冲突语义重做（协议 v2）—— 完成
 
 - 客户端 `src-tauri/src/sync.rs`：

@@ -118,6 +118,9 @@ struct SyncTableSpec {
     object_type: &'static str,
     columns: &'static [&'static str],
     natural_key_columns: &'static [&'static str],
+    /// 官方/内置种子行的标记列（如 is_official / is_builtin）。
+    /// 值为真时该行使用确定性 object_id（official:{type}:{local_id}），多端收敛不重复。
+    official_column: Option<&'static str>,
     foreign_keys: &'static [ForeignKeySpec],
     where_clause: Option<&'static str>,
     order_by: &'static str,
@@ -240,6 +243,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.provider",
             columns: &["id", "name", "api_type", "description", "is_official", "is_enabled"],
             natural_key_columns: &[],
+            official_column: Some("is_official"),
             foreign_keys: &[],
             where_clause: None,
             order_by: "id",
@@ -250,6 +254,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.provider_config",
             columns: &["id", "name", "llm_provider_id", "value", "append_location", "is_addition"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
             where_clause: Some("LOWER(name) NOT LIKE '%key%' AND LOWER(name) NOT LIKE '%secret%' AND LOWER(name) NOT LIKE '%token%' AND LOWER(name) NOT LIKE '%password%'"),
             order_by: "id",
@@ -260,6 +265,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.model",
             columns: &["id", "name", "llm_provider_id", "code", "description", "vision_support", "audio_support", "video_support"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
             where_clause: None,
             order_by: "id",
@@ -270,6 +276,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.model_request_mode_preference",
             columns: &["id", "llm_provider_id", "model_code", "request_mode", "created_time", "updated_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
             where_clause: None,
             order_by: "id",
@@ -280,6 +287,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant",
             columns: &["id", "name", "description", "assistant_type", "is_addition", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[],
             where_clause: None,
             order_by: "id",
@@ -290,6 +298,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.prompt",
             columns: &["id", "assistant_id", "prompt", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant" }],
             where_clause: None,
             order_by: "id",
@@ -300,6 +309,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.model",
             columns: &["id", "assistant_id", "provider_id", "model_code", "alias"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
                 ForeignKeySpec { column: "provider_id", object_type: "llm.provider" },
@@ -313,6 +323,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.model_config",
             columns: &["id", "assistant_id", "assistant_model_id", "name", "value", "value_type"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
                 ForeignKeySpec { column: "assistant_model_id", object_type: "assistant.model" },
@@ -326,6 +337,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server",
             columns: &["id", "name", "description", "transport_type", "url", "timeout", "is_long_running", "is_enabled", "is_builtin", "is_deletable", "created_time"],
             natural_key_columns: &[],
+            official_column: Some("is_builtin"),
             foreign_keys: &[],
             where_clause: None,
             order_by: "id",
@@ -336,6 +348,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server_tool",
             columns: &["id", "server_id", "tool_name", "tool_description", "is_enabled", "is_auto_run", "parameters", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
             where_clause: None,
             order_by: "id",
@@ -346,6 +359,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server_resource",
             columns: &["id", "server_id", "resource_uri", "resource_name", "resource_type", "resource_description", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
             where_clause: None,
             order_by: "id",
@@ -356,6 +370,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server_prompt",
             columns: &["id", "server_id", "prompt_name", "prompt_description", "is_enabled", "arguments", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
             where_clause: None,
             order_by: "id",
@@ -366,6 +381,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.mcp_config",
             columns: &["id", "assistant_id", "mcp_server_id", "is_enabled", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
                 ForeignKeySpec { column: "mcp_server_id", object_type: "mcp.server" },
@@ -379,6 +395,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.mcp_tool_config",
             columns: &["id", "assistant_id", "mcp_tool_id", "is_enabled", "is_auto_run", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
                 ForeignKeySpec { column: "mcp_tool_id", object_type: "mcp.server_tool" },
@@ -392,6 +409,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation",
             columns: &["id", "name", "assistant_id", "created_time", "updated_time", "conversation_kind", "parent_butler_conversation_id", "source_task_title", "is_hidden_from_normal_chat_list", "channel_source", "butler_task_status", "butler_task_summary", "butler_task_finalized_at"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
                 ForeignKeySpec { column: "parent_butler_conversation_id", object_type: "conversation" },
@@ -405,6 +423,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.message",
             columns: &["id", "conversation_id", "message_type", "content", "llm_model_id", "created_time", "token_count", "input_token_count", "output_token_count", "parent_id", "start_time", "finish_time", "llm_model_name", "generation_group_id", "parent_group_id", "tool_calls_json", "metadata_json", "first_token_time", "ttft_ms"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
                 ForeignKeySpec { column: "parent_id", object_type: "conversation.message" },
@@ -419,6 +438,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.message_attachment",
             columns: &["id", "message_id", "attachment_type", "attachment_url", "attachment_hash", "attachment_content", "use_vector", "token_count"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "message_id", object_type: "conversation.message" }],
             where_clause: None,
             order_by: "id",
@@ -429,6 +449,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.summary",
             columns: &["id", "conversation_id", "summary", "user_intent", "key_outcomes", "created_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation" }],
             where_clause: None,
             order_by: "id",
@@ -439,6 +460,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.todo",
             columns: &["id", "conversation_id", "content", "status", "active_form", "sort_order", "created_time", "updated_time"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation" }],
             where_clause: None,
             order_by: "id",
@@ -449,6 +471,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "system.feature_config",
             columns: &["id", "feature_code", "key", "value", "data_type", "description"],
             natural_key_columns: &["feature_code", "key"],
+            official_column: None,
             foreign_keys: &[],
             where_clause: Some("feature_code != 'data_sync'"),
             order_by: "feature_code, key",
@@ -459,6 +482,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "artifacts.collection",
             columns: &["id", "name", "icon", "description", "artifact_type", "code", "tags", "created_time", "last_used_time", "use_count", "db_id", "assistant_id"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant" }],
             where_clause: None,
             order_by: "id",
@@ -1255,10 +1279,18 @@ fn read_local_snapshots(
         }
 
         let local_id = local_id.ok_or_else(|| format!("{} row missing id", spec.table))?;
-        let object_id = if spec.natural_key_columns.is_empty() {
-            ensure_object_id(app_handle, spec.object_type, spec.table, local_id)?
-        } else {
+        let is_official_row = spec
+            .official_column
+            .and_then(|column| raw_values.get(column))
+            .and_then(JsonValue::as_i64)
+            .is_some_and(|value| value != 0);
+        let object_id = if !spec.natural_key_columns.is_empty() {
             natural_object_id(spec, &raw_values)?
+        } else if is_official_row {
+            // 官方/内置种子行：确定性 object_id，各设备对同一内置行生成相同标识
+            ensure_official_object_id(app_handle, spec, local_id)?
+        } else {
+            ensure_object_id(app_handle, spec.object_type, spec.table, local_id)?
         };
         // 无论本行是否因外键未决而跳过，都要计入 present 集合，
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
@@ -1438,6 +1470,15 @@ fn apply_change(app_handle: &AppHandle, change: &PullChange, local_device_id: &s
 
     if let Some(local_id) = find_local_id_by_object_id(app_handle, &change.object_type, &change.object_id)? {
         update_row(&conn, &spec, local_id, &field_values)?;
+    } else if let Some(official_id) = parse_official_object_id(&change.object_id, &change.object_type) {
+        // 官方/内置种子行按确定性 id 对齐：本机已有同 id 行则更新，
+        // 没有则按固定 id 插入，保证多端收敛到同一行。
+        if row_exists_by_id(&conn, &spec, official_id)? {
+            update_row(&conn, &spec, official_id, &field_values)?;
+        } else {
+            insert_row_with_id(&conn, &spec, official_id, &field_values)?;
+        }
+        save_object_map(app_handle, &change.object_type, spec.table, official_id, &change.object_id)?;
     } else if !spec.natural_key_columns.is_empty() {
         upsert_natural_row(&conn, &spec, &field_values)?;
     } else {
@@ -1514,10 +1555,34 @@ fn update_row(
 }
 
 fn insert_row(conn: &Connection, spec: &SyncTableSpec, fields: &Map<String, JsonValue>) -> Result<i64, String> {
+    insert_row_inner(conn, spec, None, fields)
+}
+
+/// 按指定 id 插入（官方/内置种子行的确定性 id 对齐用）。
+fn insert_row_with_id(
+    conn: &Connection,
+    spec: &SyncTableSpec,
+    id: i64,
+    fields: &Map<String, JsonValue>,
+) -> Result<i64, String> {
+    insert_row_inner(conn, spec, Some(id), fields)
+}
+
+fn insert_row_inner(
+    conn: &Connection,
+    spec: &SyncTableSpec,
+    id: Option<i64>,
+    fields: &Map<String, JsonValue>,
+) -> Result<i64, String> {
     let columns = existing_columns(conn, spec.table, spec.columns)?;
     let mut insert_columns = Vec::new();
     let mut placeholders = Vec::new();
     let mut values = Vec::new();
+    if id.is_some() && columns.iter().any(|c| c == "id") {
+        insert_columns.push("id".to_string());
+        placeholders.push("?".to_string());
+        values.push(Value::Integer(id.unwrap()));
+    }
     for column in columns {
         if column == "id" {
             continue;
@@ -1536,6 +1601,14 @@ fn insert_row(conn: &Connection, spec: &SyncTableSpec, fields: &Map<String, Json
     );
     conn.execute(&sql, params_from_iter(values.iter())).map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
+}
+
+fn row_exists_by_id(conn: &Connection, spec: &SyncTableSpec, id: i64) -> Result<bool, String> {
+    let found = conn
+        .query_row(&format!("SELECT 1 FROM {} WHERE id = ?1", spec.table), params![id], |_| Ok(()))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(found.is_some())
 }
 
 fn upsert_natural_row(
@@ -2079,6 +2152,50 @@ fn ensure_object_id(
     Ok(sync_id)
 }
 
+/// 官方/内置种子行的确定性 object_id：`official:{object_type}:{local_id}`。
+fn official_object_id(object_type: &str, local_id: i64) -> String {
+    format!("official:{object_type}:{local_id}")
+}
+
+/// 解析 `official:{object_type}:{local_id}`，类型不匹配或格式非法返回 None。
+fn parse_official_object_id(object_id: &str, expected_object_type: &str) -> Option<i64> {
+    let rest = object_id.strip_prefix("official:")?;
+    let (object_type, local_id) = rest.rsplit_once(':')?;
+    if object_type != expected_object_type {
+        return None;
+    }
+    local_id.parse().ok()
+}
+
+/// 官方/内置种子行使用确定性 object_id，保证各设备对同一内置行生成相同标识。
+/// 老设备上已存在的随机 UUID 映射在此被就地替换；服务器侧的旧随机对象
+/// 会经删除检测（scan_local_deletes）自然收敛清理。
+fn ensure_official_object_id(
+    app_handle: &AppHandle,
+    spec: &SyncTableSpec,
+    local_id: i64,
+) -> Result<String, String> {
+    let conn = open_sync_db(app_handle)?;
+    upsert_official_object_map(&conn, spec.object_type, spec.table, local_id)
+}
+
+fn upsert_official_object_map(
+    conn: &Connection,
+    object_type: &str,
+    local_table: &str,
+    local_id: i64,
+) -> Result<String, String> {
+    let sync_id = official_object_id(object_type, local_id);
+    conn.execute(
+        "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(object_type, local_id) DO UPDATE SET sync_id = excluded.sync_id",
+        params![object_type, local_table, local_id, sync_id, now_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(sync_id)
+}
+
 fn save_object_map(
     app_handle: &AppHandle,
     object_type: &str,
@@ -2166,7 +2283,14 @@ fn is_local_sync_scope_empty(app_handle: &AppHandle) -> Result<bool, String> {
     for spec in specs() {
         let path = get_db_path(app_handle, spec.db_name)?;
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        let where_sql = spec.where_clause.map(|w| format!(" WHERE {w}")).unwrap_or_default();
+        // 判空时排除官方/内置种子行：每台设备都有它们，
+        // 不排除的话"纯拉取 bootstrap"分支永远不可达。
+        let mut conditions: Vec<String> = spec.where_clause.map(|w| format!("({w})")).into_iter().collect();
+        if let Some(column) = spec.official_column {
+            conditions.push(format!("COALESCE({column}, 0) = 0"));
+        }
+        let where_sql =
+            if conditions.is_empty() { String::new() } else { format!(" WHERE {}", conditions.join(" AND ")) };
         let count: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM {}{}", spec.table, where_sql),
@@ -2468,6 +2592,7 @@ mod tests {
             object_type: "system.feature_config",
             columns: &["id", "feature_code", "key"],
             natural_key_columns: &["feature_code", "key"],
+            official_column: None,
             foreign_keys: &[],
             where_clause: None,
             order_by: "id",
@@ -2490,6 +2615,7 @@ mod tests {
             object_type: "conversation.message",
             columns: &["id", "conversation_id", "parent_id", "content"],
             natural_key_columns: &[],
+            official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
                 ForeignKeySpec { column: "parent_id", object_type: "conversation.message" },
@@ -2759,6 +2885,79 @@ mod tests {
                 ("obj-2".to_string(), Some(2), "pending".to_string()),
             ]
         );
+    }
+
+    /// 官方 object_id 的生成与解析（含类型不匹配/非法格式）
+    #[test]
+    fn official_object_id_roundtrip() {
+        let id = official_object_id("llm.provider", 10);
+        assert_eq!(id, "official:llm.provider:10");
+        assert_eq!(parse_official_object_id(&id, "llm.provider"), Some(10));
+        assert_eq!(parse_official_object_id(&id, "mcp.server"), None);
+        assert_eq!(
+            parse_official_object_id("550e8400-e29b-41d4-a716-446655440000", "llm.provider"),
+            None
+        );
+        assert_eq!(parse_official_object_id("natural:abc", "llm.provider"), None);
+    }
+
+    /// 官方行的 map 迁移：已存在的随机 UUID 映射被就地替换为确定性 id
+    #[test]
+    fn official_object_map_migrates_random_uuid() {
+        let conn = test_sync_conn();
+        conn.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES ('llm.provider', 'llm_provider', 1, 'random-uuid-1', 'now')",
+            [],
+        )
+        .unwrap();
+        let sync_id = upsert_official_object_map(&conn, "llm.provider", "llm_provider", 1).unwrap();
+        assert_eq!(sync_id, "official:llm.provider:1");
+        let stored: String = conn
+            .query_row(
+                "SELECT sync_id FROM sync_object_map WHERE object_type = 'llm.provider' AND local_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "official:llm.provider:1");
+        // 幂等
+        upsert_official_object_map(&conn, "llm.provider", "llm_provider", 1).unwrap();
+    }
+
+    /// 确定性 id 插入：insert_row_with_id 使用给定 id，insert_row 保持自增
+    #[test]
+    fn insert_row_with_id_uses_given_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE llm_provider (
+                id INTEGER PRIMARY KEY,
+                name TEXT, api_type TEXT, description TEXT,
+                is_official INTEGER, is_enabled INTEGER
+            );",
+        )
+        .unwrap();
+        let spec = SyncTableSpec {
+            db_name: "llm.db",
+            table: "llm_provider",
+            object_type: "llm.provider",
+            columns: &["id", "name", "api_type", "description", "is_official", "is_enabled"],
+            natural_key_columns: &[],
+            official_column: Some("is_official"),
+            foreign_keys: &[],
+            where_clause: None,
+            order_by: "id",
+        };
+        let fields = Map::from_iter([
+            ("name".to_string(), json!("OpenAI")),
+            ("api_type".to_string(), json!("openai_api")),
+            ("is_official".to_string(), json!(1)),
+        ]);
+        let id = insert_row_with_id(&conn, &spec, 1, &fields).unwrap();
+        assert_eq!(id, 1);
+        assert!(row_exists_by_id(&conn, &spec, 1).unwrap());
+        let auto_id = insert_row(&conn, &spec, &fields).unwrap();
+        assert_ne!(auto_id, 1);
     }
 
     /// needs_reset 元数据的设置与读取
