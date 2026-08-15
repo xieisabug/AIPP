@@ -4,6 +4,16 @@
 
 ## 2026-08-15
 
+### P4-13（C12）：master key 迁移到 OS keychain —— 完成
+
+- `src-tauri/Cargo.toml` 新增 `keyring = "3"`。
+- `src-tauri/src/sync.rs`：`get_or_create_master_key` 改为 keychain 优先（service `com.xieisabug.aipp`，user `sync-secure-master-key`，base64 存 32 字节密钥）：
+  - keychain 已有 → 直接取用；
+  - keychain 无条目但存在旧文件 key → 读出、写入 keychain、删除文件（自动迁移）；
+  - 都没有 → 生成新 key 写入 keychain；
+  - keychain 平台不可用（如无 Secret Service 的 headless Linux）→ 记 warn 日志并退回原文件存储（`get_or_create_master_key_from_file`），避免同步功能在该平台整体不可用。这是对"禁止静默 fallback"原则的有意例外：回退目标就是迁移前的既有行为，且有日志可查。
+- 验证：`cargo test sync::tests` 23 passed（keyring 参与编译）。
+
 ### P4-13（C11）：http:// 明文传输告警 —— 完成
 
 - `DataFolderConfigForm.tsx`：useWatch 监听 `server_url`，自建模式下地址以 `http://` 开头时显示静态告警行（明文传输风险、建议 https），随输入实时显隐。

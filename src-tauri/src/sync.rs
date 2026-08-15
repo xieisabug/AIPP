@@ -25,6 +25,8 @@ const FEATURE_CODE: &str = "data_sync";
 const TOKEN_SCOPE: &str = "data_sync";
 const TOKEN_KEY: &str = "token";
 const SECURE_MASTER_KEY_FILE: &str = "secure-config-master-key.bin";
+const KEYRING_SERVICE: &str = "com.xieisabug.aipp";
+const KEYRING_MASTER_KEY_USER: &str = "sync-secure-master-key";
 const DEFAULT_SCOPE: &str = "default";
 const CLIENT_SCHEMA_VERSION: i64 = 2;
 const SYNC_INTERVAL_SECS: u64 = 45;
@@ -2637,6 +2639,54 @@ fn save_sync_token(app_handle: &AppHandle, token: &str) -> Result<(), String> {
 }
 
 fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> {
+    // 优先使用 OS keychain（Windows 凭据管理器 / macOS Keychain / Linux Secret Service）。
+    // keychain 不可用（如无 Secret Service 的 headless Linux）时退回文件存储，
+    // 避免整个同步功能在这些平台上不可用。
+    match keyring::Entry::new(KEYRING_SERVICE, KEYRING_MASTER_KEY_USER) {
+        Ok(entry) => match entry.get_password() {
+            Ok(encoded) => {
+                let bytes = BASE64
+                    .decode(encoded)
+                    .map_err(|e| format!("OS keychain 中的同步主密钥解码失败: {e}"))?;
+                return bytes
+                    .try_into()
+                    .map_err(|_| "OS keychain 中的同步主密钥长度非法".to_string());
+            }
+            Err(keyring::Error::NoEntry) => {
+                // 旧版本文件存储迁移：读出文件 key → 写入 keychain → 删除文件
+                let path = master_key_file_path(app_handle)?;
+                if path.exists() {
+                    let bytes = std::fs::read(&path).map_err(|e| {
+                        format!("Failed to read secure master key `{}`: {}", path.display(), e)
+                    })?;
+                    let key: [u8; 32] = bytes
+                        .try_into()
+                        .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()))?;
+                    entry
+                        .set_password(&BASE64.encode(key))
+                        .map_err(|e| format!("迁移同步主密钥到 OS keychain 失败: {e}"))?;
+                    let _ = std::fs::remove_file(&path);
+                    return Ok(key);
+                }
+                let key: [u8; 32] = rand::random();
+                entry
+                    .set_password(&BASE64.encode(key))
+                    .map_err(|e| format!("写入同步主密钥到 OS keychain 失败: {e}"))?;
+                return Ok(key);
+            }
+            Err(err) => {
+                warn!(error = %err, "OS keychain unavailable, falling back to file-based master key");
+            }
+        },
+        Err(err) => {
+            warn!(error = %err, "OS keychain entry creation failed, falling back to file-based master key");
+        }
+    }
+    get_or_create_master_key_from_file(app_handle)
+}
+
+/// 文件存储的 master key（旧版本格式；仅作为 keychain 不可用时的回退）。
+fn get_or_create_master_key_from_file(app_handle: &AppHandle) -> Result<[u8; 32], String> {
     let path = master_key_file_path(app_handle)?;
     if path.exists() {
         let bytes = std::fs::read(&path)
