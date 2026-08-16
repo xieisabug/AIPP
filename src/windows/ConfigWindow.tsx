@@ -1,11 +1,12 @@
-import React, { ReactNode, useEffect, useState, useCallback, useMemo } from "react";
+import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
-import LLMProviderConfig from "../components/config/LLMProviderConfig";
-import AssistantConfig from "../components/config/AssistantConfig";
-import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
-import MCPConfig from "../components/config/MCPConfig";
-import SkillsConfig from "../components/config/SkillsConfig";
-import PluginCenterConfig from "../components/config/PluginCenterConfig";
+// 各设置页体积较大，按需动态加载，避免打开设置窗口时一次性解析全部页面代码
+const LLMProviderConfig = React.lazy(() => import("../components/config/LLMProviderConfig"));
+const AssistantConfig = React.lazy(() => import("../components/config/AssistantConfig"));
+const FeatureAssistantConfig = React.lazy(() => import("../components/config/FeatureAssistantConfig"));
+const MCPConfig = React.lazy(() => import("../components/config/MCPConfig"));
+const SkillsConfig = React.lazy(() => import("../components/config/SkillsConfig"));
+const PluginCenterConfig = React.lazy(() => import("../components/config/PluginCenterConfig"));
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
@@ -33,6 +34,13 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "skills-config": SkillsConfig,
     "plugins-config": PluginCenterConfig,
 };
+
+// 设置页动态加载时的占位，保持黑白灰主色调
+const configPageFallback = (
+    <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
+        加载中...
+    </div>
+);
 
 function ConfigWindow() {
     // 集成主题系统
@@ -129,7 +137,9 @@ function ConfigWindow() {
                 }
             }
         };
-        loadPlugins(true);
+        // 打开设置时不强制重载插件（避免重复注入并执行插件 JS）；
+        // 仅在插件注册表变化时才 forceReload
+        loadPlugins();
 
         const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
             loadPlugins(true);
@@ -249,12 +259,14 @@ function ConfigWindow() {
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-card" data-aipp-slot="config-content">
-                    <SelectedComponent
-                        pluginList={stablePluginList}
-                        navigateTo={navigateTo}
-                        subNav={subNav}
-                        onSubNavConsumed={() => setSubNav(undefined)}
-                    />
+                    <Suspense fallback={configPageFallback}>
+                        <SelectedComponent
+                            pluginList={stablePluginList}
+                            navigateTo={navigateTo}
+                            subNav={subNav}
+                            onSubNavConsumed={() => setSubNav(undefined)}
+                        />
+                    </Suspense>
                 </div>
             </div>
         );
@@ -279,7 +291,9 @@ function ConfigWindow() {
                 {/* 内容区域 */}
                 <div className="bg-card min-h-0 overflow-hidden flex flex-col md:px-2 lg:px-4" data-aipp-slot="config-content">
                     {/* 配置组件内容 */}
-                    <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} subNav={subNav} onSubNavConsumed={() => setSubNav(undefined)} />
+                    <Suspense fallback={configPageFallback}>
+                        <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} subNav={subNav} onSubNavConsumed={() => setSubNav(undefined)} />
+                    </Suspense>
                 </div>
             </div>
         </div>

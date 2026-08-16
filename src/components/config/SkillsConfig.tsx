@@ -7,7 +7,7 @@ import { Folder, Sparkles, RefreshCw, FolderOpen, FileText, Trash2 } from "lucid
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 
 import {
     ConfigPageLayout,
@@ -40,6 +40,8 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const [isLoading, setIsLoading] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
     // Assistant skill configs (only used when assistantId is provided)
     const [assistantSkills, setAssistantSkills] = useState<SkillWithConfig[]>([]);
@@ -272,7 +274,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             }
         }
         return filtered;
-    }, [groupedSkills, searchQuery]);
+    }, [groupedSkills, searchQuery, pinyinReady]);
 
     // Source order for display
     const sourceOrder: SkillSourceType[] = ['agents', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];

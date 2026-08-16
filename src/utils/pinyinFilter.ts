@@ -1,6 +1,59 @@
-import { pinyin } from "pinyin-pro";
+import { useEffect, useState } from "react";
 import { ArtifactCollectionItem, FilteredArtifact } from "../data/ArtifactCollection";
 import { FilteredSlashSkill, SlashSkillCompletionItem } from "../data/Slash";
+
+type PinyinFn = typeof import("pinyin-pro").pinyin;
+
+let pinyinImpl: PinyinFn | null = null;
+let pinyinLoadPromise: Promise<PinyinFn> | null = null;
+
+/**
+ * 动态加载 pinyin-pro（独立 chunk，避免拖慢窗口首次加载）。
+ * 仅在确实有拼音匹配需求时调用；首次调用后结果会被缓存。
+ */
+export function loadPinyin(): Promise<PinyinFn> {
+    if (pinyinImpl) {
+        return Promise.resolve(pinyinImpl);
+    }
+    if (!pinyinLoadPromise) {
+        pinyinLoadPromise = import("pinyin-pro").then((mod) => {
+            pinyinImpl = mod.pinyin;
+            return mod.pinyin;
+        });
+    }
+    return pinyinLoadPromise;
+}
+
+export function isPinyinReady(): boolean {
+    return pinyinImpl !== null;
+}
+
+/**
+ * 搜索框有输入时触发 pinyin-pro 的动态加载，加载完成后触发一次重渲染，
+ * 让依赖 PinyinFilter 的 useMemo 过滤结果自动补上拼音匹配。
+ */
+export function usePinyinReady(active: boolean): boolean {
+    const [ready, setReady] = useState(isPinyinReady());
+    useEffect(() => {
+        if (ready || !active) {
+            return;
+        }
+        let cancelled = false;
+        loadPinyin()
+            .then(() => {
+                if (!cancelled) {
+                    setReady(true);
+                }
+            })
+            .catch((error) => {
+                console.warn("Failed to load pinyin-pro:", error);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [active, ready]);
+    return ready;
+}
 
 export interface AssistantItem {
     id: number;
@@ -28,13 +81,22 @@ export class PinyinFilter {
     private static readonly MAX_PINYIN_CACHE_SIZE = 2000;
     private static readonly pinyinIndexCache = new Map<string, PinyinSearchIndex>();
 
-    private static getPinyinIndex(text: string): PinyinSearchIndex {
+    private static getPinyinIndex(text: string): PinyinSearchIndex | null {
         const cached = this.pinyinIndexCache.get(text);
         if (cached) {
             return cached;
         }
 
-        const pinyinArray = pinyin(text, {
+        // pinyin-pro 尚未加载完成时，触发异步加载并暂时只走精确匹配；
+        // 加载完成后由 usePinyinReady 触发界面重新过滤。
+        if (!pinyinImpl) {
+            loadPinyin().catch((error) => {
+                console.warn("Failed to load pinyin-pro:", error);
+            });
+            return null;
+        }
+
+        const pinyinArray = pinyinImpl(text, {
             toneType: "none",
             type: "array",
         }).map((item) => item.toLowerCase());
@@ -104,6 +166,9 @@ export class PinyinFilter {
             // 检查拼音匹配
             try {
                 const pinyinIndex = this.getPinyinIndex(artifact.name);
+                if (!pinyinIndex) {
+                    continue;
+                }
 
                 // 全拼匹配（连续拼音，如 "shitu" 匹配 "识图"）
                 if (pinyinIndex.pinyinFull.includes(queryLower)) {
@@ -206,6 +271,9 @@ export class PinyinFilter {
             // 检查拼音匹配
             try {
                 const pinyinIndex = this.getPinyinIndex(assistant.name);
+                if (!pinyinIndex) {
+                    continue;
+                }
 
                 // 全拼匹配（连续拼音，如 "shitu" 匹配 "识图"）
                 if (pinyinIndex.pinyinFull.includes(queryLower)) {
@@ -496,6 +564,9 @@ export class PinyinFilter {
     ): Pick<FilteredSlashSkill, "matchType" | "highlightIndices"> | null {
         try {
             const pinyinIndex = this.getPinyinIndex(text);
+            if (!pinyinIndex) {
+                return null;
+            }
 
             if (pinyinIndex.pinyinFull.includes(queryLower)) {
                 return {
@@ -539,8 +610,11 @@ export class PinyinFilter {
      * 获取名称的拼音表示用于显示
      */
     static getPinyinDisplay(name: string): string {
+        if (!pinyinImpl) {
+            return name;
+        }
         try {
-            return pinyin(name, { toneType: "symbol" });
+            return pinyinImpl(name, { toneType: "symbol" });
         } catch (error) {
             return name;
         }
@@ -550,8 +624,11 @@ export class PinyinFilter {
      * 获取首字母用于快速参考
      */
     static getInitials(name: string): string {
+        if (!pinyinImpl) {
+            return name.substring(0, 1).toUpperCase();
+        }
         try {
-            return pinyin(name, { pattern: "first", toneType: "none" });
+            return pinyinImpl(name, { pattern: "first", toneType: "none" });
         } catch (error) {
             return name.substring(0, 1).toUpperCase();
         }
@@ -573,8 +650,10 @@ export class PinyinFilter {
         try {
             const pinyinIndex = this.getPinyinIndex(text);
 
-            if (pinyinIndex.pinyinFull.includes(queryLower)) return true;
-            if (this.isInitialsMatch(pinyinIndex.pinyinInitials, queryLower)) return true;
+            if (pinyinIndex) {
+                if (pinyinIndex.pinyinFull.includes(queryLower)) return true;
+                if (this.isInitialsMatch(pinyinIndex.pinyinInitials, queryLower)) return true;
+            }
         } catch {
             // 拼音转换失败时忽略
         }

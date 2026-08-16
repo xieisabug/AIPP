@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { FilteredAssistant } from "../../utils/pinyinFilter";
+import type { FilteredAssistant } from "../../utils/pinyinFilter";
 
 interface AssistantCompletionListProps {
     assistantListVisible: boolean;

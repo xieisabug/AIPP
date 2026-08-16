@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
-import PinyinFilter, { type AssistantItem } from "./pinyinFilter";
+import PinyinFilter, { loadPinyin, type AssistantItem } from "./pinyinFilter";
 import type { ArtifactCollectionItem } from "../data/ArtifactCollection";
 import type { SlashSkillCompletionItem } from "../data/Slash";
 
@@ -37,6 +37,11 @@ function makeSlashSkill(displayName: string, invokeName: string): SlashSkillComp
 }
 
 describe("PinyinFilter", () => {
+    // pinyin-pro 为动态加载，测试前先确保加载完成
+    beforeAll(async () => {
+        await loadPinyin();
+    });
+
     it("filters artifacts by cached full pinyin", () => {
         const result = PinyinFilter.filterArtifacts(
             [makeArtifact("识图测试")],

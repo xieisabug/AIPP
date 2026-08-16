@@ -28,7 +28,7 @@ import {
 import { MCPServer, MCPServerTool, MCPServerResource, MCPServerPrompt, MCPServerRequest } from "../../data/MCP";
 import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 
 const MCPConfig: React.FC = () => {
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
@@ -37,6 +37,8 @@ const MCPConfig: React.FC = () => {
     const [serverResources, setServerResources] = useState<MCPServerResource[]>([]);
     const [serverPrompts, setServerPrompts] = useState<MCPServerPrompt[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
     // 所有服务器的工具缓存，用于搜索穿透
     const [allServerTools, setAllServerTools] = useState<Map<number, MCPServerTool[]>>(new Map());
 
@@ -467,7 +469,7 @@ const MCPConfig: React.FC = () => {
                 (tool.tool_description && PinyinFilter.matches(tool.tool_description, searchQuery))
             );
         });
-    }, [mcpServers, allServerTools, searchQuery]);
+    }, [mcpServers, allServerTools, searchQuery, pinyinReady]);
 
     const sidebar = useMemo(() => (
         <SidebarList

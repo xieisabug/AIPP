@@ -8,7 +8,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { useForm } from "react-hook-form";
 import { validateConfig } from "../../utils/validate";
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import AddAssistantDialog from "./AddAssistantDialog";
 
 // 导入公共组件
@@ -63,6 +63,8 @@ const normalizePluginAssistantFieldValue = (
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
     const [pluginAssistantConfigValues, setPluginAssistantConfigValues] = useState<Record<string, string | boolean>>({});
 
     const {
@@ -621,7 +623,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         return assistants.filter(assistant =>
             PinyinFilter.matches(assistant.name, searchQuery)
         );
-    }, [assistants, searchQuery]);
+    }, [assistants, searchQuery, pinyinReady]);
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建
     const sidebar = useMemo(() => (

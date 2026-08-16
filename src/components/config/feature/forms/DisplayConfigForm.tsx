@@ -7,7 +7,6 @@ import { toast } from "sonner";
 import { AVAILABLE_CODE_THEMES } from "@/hooks/useCodeTheme";
 import { useSyntectThemes } from "@/hooks/highlight/useSyntectThemes";
 import { pluginRuntime } from "@/services/PluginRuntime";
-import { ensureBuiltinMcpToolComponentsRegistered } from "@/services/builtinMcpToolComponents";
 import {
     AUTO_MCP_TOOL_COMPONENT_ID,
     DEFAULT_MCP_TOOL_COMPONENT_ID,
@@ -31,7 +30,17 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     const [pluginThemeOptions, setPluginThemeOptions] = useState<Array<{ value: string; label: string }>>([]);
 
     useEffect(() => {
-        ensureBuiltinMcpToolComponentsRegistered();
+        let disposed = false;
+        // 动态加载内置 MCP 工具组件注册模块，避免设置页静态拉入整个聊天消息渲染树。
+        // 注册完成后 useMcpToolComponentRegistrySnapshot 会自动更新下拉选项。
+        void import("@/services/builtinMcpToolComponents").then((m) => {
+            if (!disposed) {
+                m.ensureBuiltinMcpToolComponentsRegistered();
+            }
+        });
+        return () => {
+            disposed = true;
+        };
     }, []);
 
     useEffect(() => {

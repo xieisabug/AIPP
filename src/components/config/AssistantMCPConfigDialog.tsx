@@ -6,7 +6,7 @@ import { Input } from "../ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../ui/collapsible";
 import { Server, Wrench, MoreHorizontal, Play, Pause, ChevronDown, ChevronRight, Settings2, Search } from "lucide-react";
 import { toast } from 'sonner';
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import {
     Dialog,
     DialogContent,
@@ -54,6 +54,8 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     const [expandedServers, setExpandedServers] = useState<Set<number>>(new Set());
     const [serverTools, setServerTools] = useState<Map<number, MCPToolInfo[]>>(new Map());
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
     // loadingTools 不再需要，因为工具数据在初始化时一次性加载
 
     // Skills/MCP 联动校验
@@ -312,7 +314,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
             const tools = serverTools.get(server.id) || [];
             return tools.some(tool => PinyinFilter.matches(tool.name, searchQuery));
         });
-    }, [availableServers, serverTools, searchQuery]);
+    }, [availableServers, serverTools, searchQuery, pinyinReady]);
 
     // 统计有效启用的工具数量：只有服务器启用时，其工具才算有效启用
     const totalEnabledTools = Array.from(serverTools.entries())

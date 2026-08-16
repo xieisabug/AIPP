@@ -63,7 +63,7 @@ import ArtifactCompletionList from "./ArtifactCompletionList";
 import SlashCompletionList from "./SlashCompletionList";
 import { useFileList } from "../../hooks/useFileList";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
-import PinyinFilter, { AssistantItem, FilteredAssistant } from "../../utils/pinyinFilter";
+import PinyinFilter, { AssistantItem, FilteredAssistant, usePinyinReady } from "../../utils/pinyinFilter";
 import { ArtifactCollectionItem, FilteredArtifact } from "../../data/ArtifactCollection";
 import {
     DEFAULT_SLASH_NAMESPACES,
@@ -174,6 +174,11 @@ const InputArea = React.memo(
             const [filteredSlashNamespaces, setFilteredSlashNamespaces] =
                 useState<SlashNamespaceItem[]>(DEFAULT_SLASH_NAMESPACES);
             const [selectedSlashIndex, setSelectedSlashIndex] = useState<number>(0);
+
+            // 补全弹窗出现时才动态加载 pinyin-pro，加载完成后触发重新过滤
+            const pinyinReady = usePinyinReady(
+                slashListVisible || artifactListVisible || assistantListVisible,
+            );
 
             const handleOpenFile = (fileId: number) => {
                 invoke("open_attachment_with_default_app", { id: fileId });
@@ -443,6 +448,7 @@ const InputArea = React.memo(
                 slashContext,
                 slashListVisible,
                 slashSkills,
+                pinyinReady,
             ]);
 
             useEffect(() => {

@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { AlertTriangle, Eye, Mic, Video, Search } from 'lucide-react';
-import { PinyinFilter } from '../../utils/pinyinFilter';
+import { PinyinFilter, usePinyinReady } from '../../utils/pinyinFilter';
 import ModelRequestModeToggle from './ModelRequestModeToggle';
 import {
     ModelForSelection,
@@ -36,6 +36,8 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 }) => {
     const [selectedModels, setSelectedModels] = useState<ModelForSelection[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
     React.useEffect(() => {
         if (modelData) {
@@ -55,7 +57,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
             PinyinFilter.matches(model.name, searchQuery) ||
             PinyinFilter.matches(model.code, searchQuery)
         );
-    }, [selectedModels, searchQuery]);
+    }, [selectedModels, searchQuery, pinyinReady]);
 
     const handleModelToggle = (modelCode: string, checked: boolean) => {
         setSelectedModels(prev => 

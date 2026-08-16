@@ -12,7 +12,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { Zap, Settings, ServerCrash, Download, Plus } from "lucide-react";
 import { toast } from 'sonner';
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 
 // 导入公共组件
 import {
@@ -36,6 +36,8 @@ const LLMProviderConfig: React.FC = () => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
     const [selectedProvider, setSelectedProvider] = useState<LLMProvider | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
     const handleToggle = useCallback((index: number) => {
         const newProviders = [...LLMProviders];
@@ -295,7 +297,7 @@ const LLMProviderConfig: React.FC = () => {
             PinyinFilter.matches(provider.name, searchQuery) ||
             PinyinFilter.matches(provider.api_type, searchQuery)
         );
-    }, [LLMProviders, searchQuery]);
+    }, [LLMProviders, searchQuery, pinyinReady]);
 
     const sidebar = useMemo(() => (
         <SidebarList
