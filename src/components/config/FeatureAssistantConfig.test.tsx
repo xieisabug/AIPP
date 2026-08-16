@@ -4,6 +4,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import FeatureAssistantConfig from "@/components/config/FeatureAssistantConfig";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
+const platformState = vi.hoisted(() => ({ value: "windows" }));
+
+vi.mock("@/hooks/use-platform", () => ({
+    usePlatform: () => platformState.value,
+    useIsMobilePlatform: () => platformState.value === "android" || platformState.value === "ios",
+}));
+
 vi.mock("@/hooks/feature/useVersionManager", () => ({
     useVersionManager: () => ({
         bunVersion: "",
@@ -47,6 +54,7 @@ describe("FeatureAssistantConfig network config", () => {
         clearAllMockHandlers();
         vi.clearAllMocks();
         window.innerWidth = 1024;
+        platformState.value = "windows";
     });
 
     it("saves network_proxy into global network_config", async () => {
@@ -93,5 +101,20 @@ describe("FeatureAssistantConfig network config", () => {
                 })
             );
         });
+    });
+
+    it("hides the shortcuts settings on Android", async () => {
+        platformState.value = "android";
+        window.innerWidth = 1400;
+        window.dispatchEvent(new Event("resize"));
+
+        mockInvokeHandler("get_all_feature_config", () => []);
+        mockInvokeHandler("list_syntect_themes", () => []);
+        mockInvokeHandler("get_enabled_plugins", () => []);
+
+        render(<FeatureAssistantConfig />);
+
+        await screen.findByRole("button", { name: /网络配置/ });
+        expect(screen.queryByRole("button", { name: /快捷键/ })).not.toBeInTheDocument();
     });
 });

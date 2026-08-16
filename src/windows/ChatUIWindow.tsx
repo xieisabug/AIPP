@@ -20,6 +20,7 @@ import {
 import { Conversation, ConversationSearchHit } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
+import { usePlatform } from "../hooks/use-platform";
 import {
     useAcpPermission,
     useOperationPermission,
@@ -166,6 +167,7 @@ function ChatUIWindow() {
 
     // 检测移动端
     const isMobile = useIsMobile();
+    const platform = usePlatform();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [conversationTitle, setConversationTitle] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
@@ -723,7 +725,7 @@ function ChatUIWindow() {
                 <div className="flex flex-col h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                     {/* 移动端顶部栏 */}
                     <div
-                        className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top"
+                        className={`flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
                         data-aipp-slot="chat-mobile-header"
                     >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>

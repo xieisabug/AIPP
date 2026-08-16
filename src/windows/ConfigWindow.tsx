@@ -12,6 +12,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
+import { usePlatform } from "../hooks/use-platform";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Home, Menu } from "lucide-react";
@@ -46,6 +47,7 @@ function ConfigWindow() {
     // 集成主题系统
     useTheme("config");
     const isMobile = useIsMobile();
+    const platform = usePlatform();
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
     const menuList: Array<MenuItem> = [
@@ -222,7 +224,7 @@ function ConfigWindow() {
         return (
             <div className="flex flex-col h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
                 <div
-                    className="flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
+                    className={`flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
                     data-tauri-drag-region
                     data-aipp-slot="config-mobile-header"
                 >

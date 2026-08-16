@@ -91,3 +91,32 @@
 - 未在 Android 真机验证设置页打开耗时的实际改善幅度。
 - ChatUI 冷启动静态图谱仍有 2.06MB（含 katex 253KB、useArtifactEvents 651KB 等），后续可同样按入口拆包。
 - `LLMProviderConfig` 的 sidebar useMemo 在移动端下拉模式下仍构造整棵元素树（未动，收益小）。
+
+## 2026-08-16（Android 顶部状态栏安全区修复）
+
+### 已完成
+
+- `src/App.css`：新增 Android 专用 `safe-top-android`，在 edge-to-edge WebView 未返回顶部 safe-area 时保留 24px 最小状态栏距离。
+- `src/windows/ChatUIWindow.tsx`：仅在运行平台为 Android 时启用最小顶部安全距离；iOS 继续使用系统 safe-area，桌面窄窗口不增加固定间距。
+- `src/windows/ConfigWindow.tsx`：移动端顶部栏补齐 `safe-top`，并按 Android 平台启用最小顶部安全距离。
+
+### 验证
+
+- `npm run build` 通过；受限沙箱首次运行因 Tailwind 原生模块加载与 `spawn EPERM` 失败，沙箱外重跑成功。
+- `cargo check --manifest-path src-tauri/Cargo.toml` 通过；保留仓库既有的 102 条 Rust warning。
+- 尚未在 Android 真机或模拟器验证。
+
+## 2026-08-16（Android 设置能力审计）
+
+### 已完成
+
+- `src/components/config/FeatureAssistantConfig.tsx`：仅在 Android 隐藏整个“快捷键”设置入口；桌面端保留，Android 平台异步识别后若此前选中了快捷键页会自动回到首项。
+- 审计确认当前 Android 无法使用现有 Bun/UV 安装器：Bun 安装器会把 Android 当作 `linux/x64`，UV 安装器依赖 `sh`/`curl`；React/Vue 预览依赖 Bun 本地开发服务器，均不属于可用的 Android 实现。
+- HTML/SVG/XML/Markdown/Mermaid 的渲染本身不依赖 Bun/UV，但当前 Artifact 预览仍通过额外移动端 WebView 窗口，尚无受支持的 MobileShell 流程，不能视为已正确适配。
+
+### 验证
+
+- `npx vitest run src/components/config/FeatureAssistantConfig.test.tsx` 通过（1 文件、2 用例），包含 Android 隐藏快捷键入口的定向用例。
+- `npm run build` 通过；仅有既有的大 chunk 警告。
+- Rust 在同轮前序改动后已通过 `cargo check --manifest-path src-tauri/Cargo.toml`，此后未修改 Rust。
+- 尚未在 Android 真机或模拟器验证。

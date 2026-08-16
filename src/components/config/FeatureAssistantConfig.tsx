@@ -8,6 +8,7 @@ import { ConfigPageLayout, SidebarList, ListItemButton, SelectOption } from "../
 // 导入新的 hooks 和组件
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useVersionManager } from "@/hooks/feature/useVersionManager";
+import { usePlatform } from "@/hooks/use-platform";
 import { FeatureFormRenderer } from "./feature/FeatureFormRenderer";
 import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "@/data/Shortcuts";
 import {
@@ -38,8 +39,10 @@ interface FeatureItem {
 }
 
 const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () => void }> = ({ subNav, onSubNavConsumed }) => {
+    const platform = usePlatform();
+
     // 功能列表定义
-    const featureList: FeatureItem[] = [
+    const featureList = useMemo<FeatureItem[]>(() => [
         {
             id: "display",
             name: "显示",
@@ -103,9 +106,15 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             icon: <Info className="h-5 w-5" />,
             code: "about",
         },
-    ];
+    ].filter((feature) => platform !== "android" || feature.id !== "shortcuts"), [platform]);
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
+
+    useEffect(() => {
+        if (platform === "android" && selectedFeature.id === "shortcuts") {
+            setSelectedFeature(featureList[0]);
+        }
+    }, [featureList, platform, selectedFeature.id]);
 
     // 消费来自父组件的 subNav 导航指令
     useEffect(() => {
@@ -116,7 +125,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             }
             onSubNavConsumed?.();
         }
-    }, [subNav]);
+    }, [featureList, onSubNavConsumed, subNav]);
 
     // 使用新的 hooks
     const { featureConfig, saveFeatureConfig, loadFeatureConfig, loading } = useFeatureConfig();
@@ -527,7 +536,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 label: feature.name,
                 icon: feature.icon,
             })),
-        []
+        [featureList]
     );
 
     // 下拉菜单选择回调
@@ -538,7 +547,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 handleSelectFeature(feature);
             }
         },
-        [handleSelectFeature]
+        [featureList, handleSelectFeature]
     );
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建

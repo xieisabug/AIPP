@@ -543,6 +543,11 @@ body {
     padding-top: env(safe-area-inset-top);
 }
 
+/* Android WebView 在 edge-to-edge 模式下可能不暴露顶部 safe-area，保留状态栏最小高度。 */
+.safe-top-android {
+    padding-top: max(env(safe-area-inset-top), 24px);
+}
+
 .safe-bottom {
     padding-bottom: env(safe-area-inset-bottom);
 }
