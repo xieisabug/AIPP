@@ -19,6 +19,7 @@ dist-official-plugins
 package-lock.json
 
 target/*
+tmp/
 sync-server/tmp
 sync-server/data
 __pycache__

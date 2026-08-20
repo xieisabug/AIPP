@@ -105,7 +105,7 @@ src-tauri/src/plugin/installer.rs
 
 ### 3.2 新增数据类型
 
-参考 `tmp/plugin-store-api-requirements.md`：
+参考 `plugin-store-api-requirements.md`：
 
 - `OfficialPlugin`
 - `PluginInstallRecipeSource`
