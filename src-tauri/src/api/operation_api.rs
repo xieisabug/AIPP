@@ -210,3 +210,43 @@ pub async fn confirm_acp_permission(
         Err("ACP permission request not found or already resolved".to_string())
     }
 }
+
+/// 确认 Codex app-server 的 command/file-change/permissions 请求。
+/// 复用 ACP 的队列存储，但使用独立命令名，避免前端把原生 Codex 请求误路由回 ACP。
+#[tauri::command]
+#[instrument(skip(app_handle))]
+pub async fn confirm_codex_permission(
+    app_handle: AppHandle,
+    request_id: String,
+    option_id: Option<String>,
+    cancelled: Option<bool>,
+) -> Result<bool, String> {
+    let state = app_handle
+        .try_state::<AcpPermissionState>()
+        .ok_or_else(|| "AcpPermissionState not found".to_string())?;
+    let decision = if cancelled.unwrap_or(false) {
+        AcpPermissionDecision::Cancelled
+    } else if let Some(option_id) = option_id {
+        AcpPermissionDecision::Selected(option_id)
+    } else {
+        return Err("Invalid Codex permission decision".to_string());
+    };
+    let resolved = state.resolve_request(&request_id, decision).await;
+    if let Some(resolution) = resolved {
+        let _ = emit_permission_resolved_event(
+            &app_handle,
+            ACP_PERMISSION_RESOLVED_EVENT,
+            &PermissionResolvedEvent {
+                request_id: request_id.clone(),
+                conversation_id: resolution.conversation_id,
+            },
+        );
+        if resolution.delivered {
+            Ok(true)
+        } else {
+            Err("Codex permission receiver dropped before resolution".to_string())
+        }
+    } else {
+        Err("Codex permission request not found or already resolved".to_string())
+    }
+}

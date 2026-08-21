@@ -8,6 +8,10 @@ use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
     handle_stream_chat as ai_handle_stream_chat,
 };
+use crate::api::ai::codex_app_server::{
+    extract_codex_app_server_config, spawn_codex_session_task, CodexSessionEntry,
+    CODEX_APP_SERVER_API_TYPE,
+};
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
     get_openai_responses_stateful_enabled, get_request_timeout_from_config,
@@ -49,7 +53,7 @@ use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::build_template_engine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
-use crate::{AcpSessionState, AppState, FeatureConfigState};
+use crate::{AcpSessionState, AppState, CodexSessionState, FeatureConfigState};
 use anyhow::Context;
 use genai::chat::Tool;
 use std::collections::{HashMap, HashSet};
@@ -967,6 +971,7 @@ pub async fn ask_ai(
     runtime_user_prompt_prefix: Option<String>,
     relay_origin: Option<String>,
 ) -> Result<AiResponse, AppError> {
+    let codex_session_state = app_handle.state::<CodexSessionState>();
     info!("Ask AI start");
     debug!(
         ?request,
@@ -1248,25 +1253,75 @@ pub async fn ask_ai(
 
         // 获取 provider 配置
         // ACP 配置可能在 llm_provider_config 表中（如 acp_cli_command）
-        let provider_configs = if let Some(provider_id) =
-            resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs)
-        {
+        let agent_provider_id = resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs);
+        let (provider_api_type, provider_configs) = if let Some(provider_id) = agent_provider_id {
             debug!("ACP: Getting provider config for provider_id={}", provider_id);
 
             let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
                 AppError::UnknownError(format!("Failed to open LLM database: {}", e))
             })?;
 
-            llm_db.get_llm_provider_config(provider_id).unwrap_or_else(|e| {
+            let provider = llm_db.get_llm_provider(provider_id).map_err(AppError::from)?;
+            let configs = llm_db.get_llm_provider_config(provider_id).unwrap_or_else(|e| {
                 warn!("ACP: Failed to get provider config: {}", e);
                 Vec::new()
-            })
+            });
+            (provider.api_type, configs)
         } else {
             debug!("ACP: No ACP provider found, using empty provider configs");
-            Vec::new()
+            ("acp".to_string(), Vec::new())
         };
 
         debug!("ACP: Loaded {} provider configs", provider_configs.len());
+
+        if provider_api_type == CODEX_APP_SERVER_API_TYPE {
+            info!(conversation_id, "Codex app-server provider detected");
+            let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
+            let codex_config = extract_codex_app_server_config(
+                &assistant_detail.model_configs,
+                &provider_configs,
+                model_code,
+            )?;
+            let response_message = add_message(
+                &app_handle,
+                None,
+                conversation_id,
+                "response".to_string(),
+                String::new(),
+                Some(0),
+                Some("codex-app-server".to_string()),
+                Some(chrono::Utc::now()),
+                None,
+                0,
+                None,
+                None,
+            )?;
+            let add_event = ConversationEvent {
+                r#type: "message_add".to_string(),
+                data: serde_json::to_value(MessageAddEvent {
+                    message_id: response_message.id,
+                    message_type: "response".to_string(),
+                })
+                .unwrap(),
+            };
+            let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), add_event);
+            let handle = {
+                let mut sessions = codex_session_state.sessions.lock().await;
+                if sessions.get(&conversation_id).is_some_and(|entry| entry.config_signature == codex_config.session_signature) {
+                    sessions.get(&conversation_id).unwrap().handle.clone()
+                } else {
+                    let handle = spawn_codex_session_task(app_handle.clone(), conversation_id, codex_config.clone());
+                    sessions.insert(conversation_id, CodexSessionEntry::new(handle.clone(), conversation_id, codex_config.session_signature.clone()));
+                    handle
+                }
+            };
+            handle.send_prompt(response_message.id, runtime_prompt_result.clone(), window_clone.clone())?;
+            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
+        }
+
+        if provider_api_type != "acp" {
+            return Err(AppError::UnknownError(format!("不支持的 Agent provider api_type: {provider_api_type}")));
+        }
 
         // 从 assistant_model_configs 和 llm_provider_configs 提取 ACP 配置
         let proxy_enabled = provider_configs
@@ -2724,12 +2779,20 @@ pub async fn cancel_ai(
     window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
+    let codex_session_state = app_handle.state::<CodexSessionState>();
     let acp_session_handle = {
         let sessions = acp_session_state.sessions.lock().await;
         sessions.get(&conversation_id).map(|entry| entry.handle.clone())
     };
 
-    if let Some(handle) = acp_session_handle {
+    let codex_session_handle = {
+        let sessions = codex_session_state.sessions.lock().await;
+        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
+    };
+
+    if let Some(handle) = codex_session_handle {
+        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
+    } else if let Some(handle) = acp_session_handle {
         handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
     } else {
         message_token_manager.cancel_request(conversation_id).await;

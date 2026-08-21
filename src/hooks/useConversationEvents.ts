@@ -9,6 +9,7 @@ import {
     MessageTypeEndEvent,
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
+    AgentActivityEvent,
     ConversationCancelEvent,
     StreamCompleteEvent,
     ActivityFocusChangeEvent,
@@ -118,6 +119,11 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const [mcpToolCallStates, setMCPToolCallStates] = useState<
         Map<number, MCPToolCallUpdateEvent>
     >(new Map());
+    const [agentActivities, setAgentActivities] = useState<Map<string, AgentActivityEvent>>(new Map());
+
+    useEffect(() => {
+        setAgentActivities(new Map());
+    }, [options.conversationId]);
 
     // 活跃的 MCP 工具调用 ID 集合（正在执行的）
     const [activeMcpCallIds, setActiveMcpCallIds] = useState<Set<number>>(
@@ -883,6 +889,16 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                 // 调用外部的MCP状态更新处理函数
                 callbacksRef.current.onMCPToolCallUpdate?.(mcpUpdateData);
+            } else if (conversationEvent.type === "agent_activity") {
+                const activity = conversationEvent.data as AgentActivityEvent;
+                const key = `${activity.agent_kind}:${activity.session_id ?? ""}:${activity.item_id}`;
+                setAgentActivities((previous) => {
+                    const existing = previous.get(key);
+                    if (existing && existing.sequence >= activity.sequence) return previous;
+                    const next = new Map(previous);
+                    next.set(key, { ...existing, ...activity });
+                    return next;
+                });
             } else if (conversationEvent.type === "conversation_cancel") {
                 // 处理对话取消事件
                 const cancelData = conversationEvent.data as ConversationCancelEvent;
@@ -989,6 +1005,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             setManualShiningMessageIds(new Set());
             setShiningMcpCallId(null);
             setMCPToolCallStates(new Map());
+            setAgentActivities(new Map());
             const clearedActiveSet = new Set<number>();
             activeMcpCallIdsRef.current = clearedActiveSet;
             setActiveMcpCallIds(clearedActiveSet);
@@ -1219,6 +1236,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setShiningMessageIds,
         setManualShineMessage,
         mcpToolCallStates,
+        agentActivities,
         activeMcpCallIds, // 导出活跃的 MCP 调用状态
         shiningMcpCallId,
         shineState,

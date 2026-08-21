@@ -72,7 +72,7 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_model_request_mode, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
-use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+use crate::api::operation_api::{confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
     disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
     get_plugin_assistant_configs, get_plugin_config, get_plugin_data, get_plugin_detail,
@@ -255,6 +255,17 @@ struct AppState {
 #[derive(Clone)]
 struct AcpSessionState {
     sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::acp::AcpSessionEntry>>>,
+}
+
+#[derive(Clone)]
+struct CodexSessionState {
+    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::codex_app_server::CodexSessionEntry>>>,
+}
+
+impl CodexSessionState {
+    fn new() -> Self {
+        Self { sessions: Arc::new(TokioMutex::new(HashMap::new())) }
+    }
 }
 
 impl AcpSessionState {
@@ -913,6 +924,7 @@ pub fn run() {
             recording_shortcut: TokioMutex::new(false),
         })
         .manage(AcpSessionState::new())
+        .manage(CodexSessionState::new())
         .manage(MessageTokenManager::new())
         .manage(ConversationActivityManager::new())
         .manage(crate::slash::SlashRegistryCacheState::default())
@@ -1168,6 +1180,7 @@ pub fn run() {
             submit_preview_code_response,
             confirm_operation_permission,
             confirm_acp_permission,
+            confirm_codex_permission,
             highlight_code,
             ensure_hidden_search_window,
             list_syntect_themes,

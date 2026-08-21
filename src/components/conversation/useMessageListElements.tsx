@@ -2,7 +2,8 @@ import React, { useMemo, useRef } from "react";
 
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
-import { Message, StreamEvent } from "../../data/Conversation";
+import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
+import { AgentActivityList } from "./AgentActivityList";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
@@ -28,6 +29,7 @@ export interface UseMessageListElementsProps {
     shiningMcpCallId: number | null;
     reasoningExpandStates: Map<number, boolean>;
     mcpToolCallStates: Map<number, any>;
+    agentActivities?: Map<string, AgentActivityEvent>;
     generationGroups: Map<string, any>;
     selectedVersions: Map<string, number>;
     getGenerationGroupControl: (message: Message) => any;
@@ -239,6 +241,7 @@ function estimateMessageHeight(
 
 export function useMessageListElements({
     allDisplayMessages,
+    agentActivities = new Map(),
     streamingMessages,
     shiningMessageIds,
     shiningMcpCallId,
@@ -387,6 +390,7 @@ export function useMessageListElements({
                                 reasoningExpandStates.get(message.id) || false,
                         }),
                     messageElement: (
+                        <div className="flex flex-col gap-2">
                         <MessageItem
                             key={`message-${message.id}`}
                             message={message}
@@ -413,6 +417,16 @@ export function useMessageListElements({
                             allowFeishuDebugResend={allowFeishuDebugResend}
                             messageActions={renderMessageActions?.(message)}
                         />
+                        {message.message_type === "response" && (
+                            <AgentActivityList
+                                activities={new Map(
+                                    Array.from(agentActivities.entries()).filter(
+                                        ([, activity]) => activity.response_message_id === message.id,
+                                    ),
+                                )}
+                            />
+                        )}
+                        </div>
                     ),
                     groupControl,
                 } satisfies MessageElementEntry;
@@ -436,6 +450,12 @@ export function useMessageListElements({
             // 合并组使用最后一条消息的 groupControl
             const groupControl = getGenerationGroupControl(lastMsg);
             const anyShining = groupMessages.some((m) => shiningMessageIds.has(m.id));
+            const groupMessageIds = new Set(groupMessages.map((message) => message.id));
+            const groupActivities = new Map(
+                Array.from(agentActivities.entries()).filter(([, activity]) =>
+                    groupMessageIds.has(activity.response_message_id),
+                ),
+            );
 
             const mergedElement = (
                 <div
@@ -527,6 +547,7 @@ export function useMessageListElements({
                             );
                         })()}
                     </div>
+                    <AgentActivityList activities={groupActivities} />
                 </div>
             );
 
@@ -609,6 +630,7 @@ export function useMessageListElements({
         reasoningExpandStates,
         onToggleReasoningExpand,
         mcpToolCallStates,
+        agentActivities,
         shiningMcpCallId,
         messageInlineInteractionMap,
         estimatedHeightByMessageId,

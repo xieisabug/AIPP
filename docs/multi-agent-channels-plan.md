@@ -58,6 +58,118 @@
 
 ## 3. 总体设计
 
+### Codex 原生通道当前实现状态（2026-08-20）
+
+已落地的 Codex app-server 基础链路：
+
+- `codex app-server --listen stdio://` 启动、JSON-RPC initialize、thread/start/thread/resume、turn/start、turn/interrupt。
+- Windows 下 `codex` 的 `.cmd`/`.ps1` shim 通过 `cmd.exe`/`pwsh.exe` 启动，避免 Rust 直接执行 PowerShell shim 失败。
+- `item/agentMessage/delta` 文本流、reasoning delta、command/file-change/MCP activity 的字符串 item ID、sequence 聚合和 UI 展示。
+- Codex approval server request（command、file change、permissions）进入现有权限队列，通过 `confirm_codex_permission` 回传协议要求的 JSON-RPC result。
+- `acp_session` 按 `(conversation_id, agent_kind)` 隔离，Codex thread 不再覆盖 ACP session；响应消息 metadata 保存 activity，重新加载会话后恢复展示。
+
+仍未达到最终验收的项目：
+
+- 已在本机 Codex CLI `0.148.0` 外部进程完成 initialize/thread/start 烟雾验证；三类 approval、thread resume、interrupt 和完整乱序通知链路仍需要专用 fixture/端到端测试，当前已有协议映射单元测试。
+- activity 目前以响应消息为锚点插入，尚未实现独立 activity 表和完整跨消息历史索引；M3 的多目标 shine/父子层级仍未做。
+- Vite 构建受环境中的 Tailwind oxide native binding 与 `spawn EPERM` 阻塞；TypeScript 检查已通过。
+
+### 3.0 UI 适配结论（2026-08-20 评审）
+
+**结论：可以复用当前 UI 展示大部分活动，但不能把原生事件直接塞进现有消息/MCP 数据结构。** 现有 UI 已能承载文本、推理、工具命令的参数/结果/状态；需要增加的是协议到展示模型的适配层，以及补丁的专用展示。当前实现的边界如下：
+
+- `Message` / `MessageUpdateEvent` 以一个 `message_id` 承载一种 `message_type`（`response` / `reasoning` / `error`），没有 agent/channel/item 身份、父子关系、顺序号或并行流标识；`useConversationEvents` 会按 `message_id` 覆盖流式状态。
+- 工具展示契约是 `MCPToolCallUpdateEvent` + `MCPToolCall`，已有工具名、参数、pending/executing/success/failed、结果和错误展示；普通 Claude tool、Codex exec、Codex mcp 可以通过适配器映射成同样的卡片。限制是现有模型要求数值 `call_id`、`server_id`，因此原生字符串 item_id 不能直接落入 MCP 表。
+- 补丁（Codex patch 或 Claude 文件变更）当前没有专用 diff 视图；MVP 可展示为可折叠的 unified diff/文件摘要文本，后续再增加逐文件 diff 和应用/回滚按钮。
+- 审批不是本期必需的主 UI；若目标 CLI 版本发出 approval request，复用现有权限弹窗队列即可，新增 `agent_kind` 与原生 request/item ID 关联。没有审批事件时不显示审批 UI。
+- 运行态/闪亮边框目前只有一个 `primary_target`，而一个 turn 可能交错产生多个活动 item。这里的“并行 item”是同一轮请求中同时处于 pending/executing 的多个工具/命令（不代表子代理）；MVP 可按 sequence 顺序展示，M3 再支持多个活动目标。
+- 前端快照类型是 `AcpConversationSessionState`，只覆盖 ACP 的 mode/config/plan/usage；原生通道还需要 provider、thread/session、turn、capabilities、活动 item 和 approval 状态。
+- `acp_session` 只保存一个 session/thread 标识；要恢复原生会话中的 turn/item/channel 关系，必须至少保存 agent kind，并为活动项使用独立的字符串 ID/事件序列。
+
+因此本计划的 M1/M2 必须先增加一个**通用 Agent UI 契约**，再实现协议适配器。最低范围如下（不要求第一版做完整 TUI）：
+
+1. **事件信封**：所有原生事件统一为 `agent_activity`，包含 `conversation_id`、`agent_kind`、`session_id`、`item_id`（字符串）、单调 `sequence`、`activity_type`、`status`、`content_delta`、`metadata`；`channel_id`/`parent_item_id` 作为预留字段，不因不存在子代理而强制实现。
+2. **通用活动模型**：新增 Agent activity 类型；MCP/普通 tool/command 共用 `kind=tool|command`，patch 使用 `kind=patch`，审批使用 `kind=approval`（可选）。工具 ID 保留字符串，不能写入现有数值 MCP 表。
+3. **展示适配层**：在 `useConversationEvents` 与 `useMessageListElements` 之间增加 selector。text/reasoning 继续映射现有消息气泡；tool/command 映射现有 `McpToolCallRenderer` 的统一卡片输入；patch 映射可折叠 diff 文本块；同一 item 的 delta 原地合并。
+4. **运行态**：MVP 只维护 conversation 级运行态和一个 primary shine，多个活动按 sequence 列表展示；M3 再扩展活动集合和多目标 shine。
+5. **会话快照联合类型**：保留 `acp_session_state_snapshot` 兼容旧 ACP，同时增加 `agent_kind`、provider、session/thread、current_turn、channels、active_items、approval 状态、usage/cost/capabilities；`ConversationUI` 根据能力渲染，不把 Claude/Codex 强行套进 ACP mode/config 控件。
+6. **权限 UI（可选增强）**：若协议发出 approval，统一 Agent approval 事件/命令，payload 携带字符串 `item_id`、工具类型、命令摘要和可选项；复用现有权限弹窗。没有 approval 事件时不增加额外交互。
+
+### 3.0.1 分阶段兼容策略
+
+- **M1/M2 MVP**：text/reasoning 走现有消息；tool/command 复用现有工具卡片视觉；patch 用只读折叠块；approval 按协议实际需要复用现有弹窗。必须保留字符串 item ID 和 sequence，不能把外部 agent 工具写成可由 AIPP 再次执行的 MCP call。
+- **M3 UI 完整化**：实现多活动 shine、快照能力驱动控件和历史活动恢复；只有协议确实提供 channel/sub-agent 时才增加层级 UI。
+- 完成 M0 的事件适配和展示 selector 后即可开始协议端到端实现；不必等待补丁 diff、审批或多活动 shine 的完整 UI。
+
+### 3.0.2 UI 适配实施计划
+
+#### 第一步：定义最小展示模型（M0-1）
+
+- 后端在 `src-tauri/src/api/ai/events.rs` 增加 `AgentActivityEvent`：`item_id: String`、`sequence: u64`、`kind: tool | command | patch | approval | status`、`status: pending | executing | success | failed | cancelled`、`title`、`input`、`output`、`error`、`metadata`。
+- 前端在 `src/data/Conversation.tsx` 增加对应类型；`item_id` 从协议入口到前端始终保持字符串，不转换为 hash/数值 ID。
+- text/reasoning 不进入 activity 模型，继续使用现有 `message_update`，避免改动成熟的消息渲染和流式链路。
+
+#### 第二步：复用工具/命令卡片（M0-2）
+
+- 把 `McpToolCall.tsx` 的纯展示部分抽为 `ToolActivityCard`，props 使用字符串 `activityId`，包含 title/source/input/output/error/status；保留 `McpToolCall` 作为适配包装层，现有 MCP 执行、停止、重试逻辑不变。
+- Claude `tool_use` 映射：工具名 → title，input → 参数区，tool_result → 结果区。
+- Codex exec 映射：命令/工作目录 → title/input，stdout/stderr/exit code → output/error；UI 直接展示为现有样式的工具卡片。
+- Codex MCP item 映射同普通工具；只有 AIPP 自己执行的 MCP call 继续进入 `mcp_tool_call` 表并显示执行/停止按钮，外部 agent 已执行的活动卡片只读，避免 AIPP 重复执行。
+
+#### 第三步：活动聚合与消息列表插入（M0-3）
+
+- `useConversationEvents.ts` 增加 `Map<string, AgentActivity>`，key 使用 `${agent_kind}:${session_id}:${item_id}`；只接受更大的 sequence，同 item delta 合并，多 item 不互相覆盖。
+- `useMessageListElements.tsx` 把当前 turn 的 activity 按 sequence 插入 assistant 回复组；历史 activity 从数据库查询后走同一 selector。
+- 当前运行中的 tool/command 默认展开，成功后沿用现有卡片自动收起行为；失败保持展开。conversation 仍只保留一个 shine 目标，指向最近活跃 item。
+
+#### 第四步：补丁最小展示（M1/M2）
+
+- 新增 `PatchActivityCard`，复用卡片外壳，显示文件列表、增删行统计与可折叠 unified diff；首版只读，不提供应用/回滚按钮。
+- 若协议只给 patch 摘要而无 diff，则显示摘要与受影响文件，不从本地文件状态反推补丁内容。
+- 后续逐文件 diff、语法高亮和应用/回滚属于 M3，不阻塞 Claude/Codex 通道上线。
+
+#### 第五步：审批与高级活动（按协议实际需要）
+
+- Claude/Codex 出现 approval request 时，泛化 `useAcpPermission` 为 `useAgentPermission`，继续复用 `OperationPermissionDialog` 的队列和按钮；新增 `agent_kind`、`request_id`、`item_id` 路由字段。
+- 同一时间多个审批沿用现有请求队列逐个处理，不需要新的并行审批界面。
+- 子代理/channel 层级不属于 M0-M2。只有目标 CLI 确实输出父子 agent/channel 事件时，M3 才使用预留的 `channel_id` / `parent_item_id` 做嵌套或分组展示。
+
+#### 实施验收
+
+- 一轮对话中交错出现两个工具/命令时，两张卡片各自更新，不串参数、结果或状态。
+- 命令卡片能看到命令、工作目录、stdout/stderr、exit code 和最终状态；外部 agent 工具没有可重复执行按钮。
+- 补丁至少能看到受影响文件和协议提供的 diff/摘要，不把 patch 原文塞进普通回复。
+- 无 approval 事件时不出现审批 UI；有事件时现有弹窗能按 request/item ID 正确回传一次决策。
+- 普通 Chat、现有 ACP 和 AIPP MCP 卡片的展示与执行行为保持不变。
+
+### 3.0.3 真正的协议硬限制
+
+以下不是 AIPP UI 缺功能，而是上游 CLI/协议不提供时无法凭空实现的能力。实现时必须明确降级，不把它们写成验收承诺：
+
+- **协议没有发送的内容无法还原**：如果某个模型/CLI 不发送完整 reasoning、工具输入、stdout/stderr 或 unified diff，AIPP 只能展示供应商提供的摘要/占位状态，不能从最终文本可靠推导原始过程。
+- **供应商未暴露的单项控制无法添加**：AIPP 不能强制实现“只取消某一个外部工具”“只重试某一个外部工具”“回滚某一个 patch”。只能使用 CLI 暴露的 cancel/approval/rollback 方法；没有对应方法时只能取消当前 turn 或再次发送用户请求。
+- **不可保证跨版本协议稳定**：Claude stream-json 和 Codex app-server 都可能随 CLI 版本变化。AIPP 可以锁版本、生成 schema、做 fixture 和兼容解析，但不能保证未来任意版本不变。
+- **不能保证真实 TUI 接管**：stream-json/app-server 是 headless 通道，不等于本地交互 TUI。要围观或接管另一个已运行的 TUI 会话，需要 transcript/daemon/pty 等额外能力；本计划不承诺仅靠这两条 stdio 协议实现 TUI 镜像。
+- **外部 agent 的执行权归 CLI**：AIPP 展示 Claude/Codex 已执行的 command/tool/patch，但不能把它们当作 AIPP MCP 记录后自行再次执行；否则会造成重复执行和错误的权限边界。
+
+截至本机验证版本（Claude Code `2.1.72`、Codex CLI `0.148.0`），Codex app-server schema 已包含 command/file-change approval、unified diff、collaboration/sub-agent 相关类型，因此这些功能属于“需要实现”，不是协议上完全不可能。Claude 的 `--agents`、stream-json、resume、permission-mode 入口也已存在；具体事件字段仍需用目标版本 fixture 锁定。
+
+按用户可感知能力划分，绝对边界如下：
+
+| 能力 | 结论 | 无法由 AIPP 单方面补齐的部分 |
+|---|---|---|
+| 工具/命令过程展示 | 可实现 | CLI 未发送的完整参数、stdout/stderr 或中间状态无法还原 |
+| 补丁展示 | 可实现 | CLI 只给文件摘要而不给 diff 时，不能可靠重建“当时生成的原始补丁” |
+| 审批 | 可实现，但受协议控制 | 上游没有发起 approval request 的动作，AIPP 不能在不接管执行权的前提下强插一次真实审批 |
+| 多个并行 item 展示 | 可实现 | 上游把并行过程压平成一个状态时，AIPP 无法推断真实并发关系和精确时序 |
+| 子代理展示 | Codex 可实现；Claude 以实际事件为准 | 未发送 child agent ID、父子关系或独立事件流时，只能显示普通活动，不能可靠重建子代理树 |
+| 完整内部思考过程 | 不可承诺 | 模型隐藏的 chain-of-thought 不会因新增 UI、数据库或适配器而变得可获取；只展示协议允许输出的 reasoning summary/delta |
+| 单 item 取消/重试/回滚 | 仅在协议提供对应方法时可实现 | 只有 turn 级 cancel 时，AIPP 无法安全制造 item 级控制语义 |
+| 任意已运行 TUI 的无损接管 | 不能由本计划通道保证 | stdio headless 协议不能自动接管另一个独立进程；PTY/转录监听只能另做近似方案，也不能保证获得结构化事件和控制权 |
+| 对未来所有 CLI 版本永久兼容 | 不可实现 | 只能锁定已验证版本、兼容已知 schema 并在协议变化时持续维护 |
+
+因此，在本计划要求的核心展示范围内，**工具命令、补丁、审批、并行 item，以及 Codex 子代理都不存在“加代码也做不了”的阻塞项**。真正无法保证的是上游未输出的信息、上游未提供的控制操作、隐藏思维链、任意既有 TUI 的无损接管和未来协议永不变化；Claude 子代理层级是否能完整展示要以目标版本实际输出的结构化事件为准。
+
 ### 3.1 通道身份：复用 `assistant_type = 4`，按 provider `api_type` 二次分发
 
 决策：**不新增 assistant_type**。`assistant_type = 4` 语义泛化为"Agent 助手"（原"ACP 助手"），具体通道由该助手所选 provider 的 `api_type` 决定：
@@ -91,7 +203,7 @@ src-tauri/src/api/ai/
 
 - `agent_runtime.rs` 提取自 `acp.rs` 中协议无关的部分：session task 生命周期（spawn_blocking + 单线程 runtime + LocalSet 模式按需）、prompt 队列、`config_signature` 复用判断、快照 emit helper、用量持久化（`persist_message_usage_in_db`）、done 事件、空闲回收。**acp.rs 保持自治、不回迁**——共享代码只服务新通道，避免动现有 ACP 行为。
 - 快照/权限状态：新通道各自定义 `ClaudeSdkSessionState` / `CodexSessionState`（结构对标 `AcpSessionState`），**复制并改名**而非泛型抽象（隔离好、改动可评审；三条通道稳定后再考虑合并）。
-- 快照事件复用 `acp_session_state_snapshot` 同一事件类型，payload 中增加 `agent_kind: "acp" | "claude_sdk" | "codex_app_server"` 字段（serde 默认值向后兼容），前端同一监听点按 `agent_kind` 渲染差异部分。`AcpConversationSessionState` 相应泛化命名语义（类型名可保留以避免大面积改名，payload 加字段即可）。
+- 快照事件短期复用 `acp_session_state_snapshot` 事件名以兼容旧 ACP，payload 改为 `agent_kind` 判别联合；共享字段为 provider/session-or-thread/current-turn/usage/capabilities，ACP、Claude、Codex 的专属字段分别放入通道 payload。不能只在现有 `AcpConversationSessionState` 上加一个 `agent_kind` 后继续复用全部 ACP 字段。
 
 ### 3.3 会话持久化表
 
@@ -108,7 +220,7 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 
 新通道复用现有两套机制，**不新增第三套**：
 
-- Agent 自有权限（工具调用审批）：复用 `AcpPermissionState` 的挂起/决议模式，新通道各持一份实例（命名 `agent_permission` 或各自复制）；事件继续用 `acp-permission-request`（payload 加 `agent_kind`），`confirm_acp_permission` 命令按 `agent_kind` 路由到对应 state。前端 `useOperationPermission.ts:255` 无需改。
+- Agent 自有权限（工具调用审批）：复用 `AcpPermissionState` 的挂起/决议模式，新通道各持一份实例（命名 `agent_permission` 或各自复制）；事件继续用 `acp-permission-request`（payload 加 `agent_kind`），`confirm_acp_permission` 命令按 `agent_kind` 路由到对应 state。前端泛化 `useAcpPermission` 的类型与路由字段，弹窗和请求队列复用。
   - 备选：直接改名为通用 `agent-permission-request` 事件 + 旧事件名兼容期。评审时定。
 - Claude/Codex 内部的文件/终端操作：stream-json 的 `canUseTool` 回调和 app-server 的 exec/patch 审批都映射到上述 agent 权限事件，**不桥接到内置 operation 工具**（与 ACP 的 fs/terminal 桥接不同——原生协议里这些是 agent 自己的能力，审批语义在 agent 权限层）。
 - 飞书审批回流：`feishu/api.rs:711`（`try_deliver_acp_permission_to_feishu`）泛化为按 `agent_kind` 渲染卡片文案，回流入口（`feishu/events.rs:296/565/595`）不变。
@@ -134,7 +246,7 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 - `src-tauri/src/api/ai/claude_sdk.rs`（新增，对标 acp.rs 结构）：
   - `ClaudeSdkSessionState` / `ClaudeSdkSessionEntry` / `ClaudeSdkSessionHandle`（命令枚举：`Start, Prompt, Interrupt, SetModel, SetPermissionMode`）
   - `spawn_claude_sdk_session_task`：复用 `agent_runtime.rs` 骨架；stdout 按行读 ndjson 解析
-  - 事件映射：`assistant` content blocks → 现有 `message_update` 流式事件 + MCP tool call UI 事件（tool_use/tool_result 映射成与 ACP 通道一致的前端事件格式，复用渲染组件）
+  - 事件映射：`assistant` text/thinking blocks → 现有 `message_update`；`tool_use` / `tool_result` / permission / status → §3.0 的 `agent_activity`。仅在事件确实来自 MCP server 时标记 `tool_kind=mcp`，普通 Claude 工具不能伪装成 MCP call
   - 权限：`control_request(can_use_tool)` → 挂起 → `acp-permission-request` 事件（`agent_kind=claude_sdk`）→ `confirm_acp_permission` 决议 → `control_response`
   - usage/cost：`result` 消息 → `persist_message_usage_in_db` 等价逻辑
   - `config_signature`：由 cli 路径、工作目录、env、model、permission-mode 组成
@@ -150,12 +262,14 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 - `src/components/config/LLMProviderConfig.tsx:83`：apiTypes 下拉加 `claude_sdk`（标签"Claude Code (原生)"）
 - `LLMProviderConfigForm.tsx`：`claude_sdk` 分支表单——CLI 路径（默认 `claude`）、认证模式（复用现有 `acp_claude_auth_mode` 双模式：`claude_settings` 读 `~/.claude/settings.json` / env_vars 注入 `ANTHROPIC_*`）、默认 model、默认 permission-mode
 - `useAcpEnvironment.ts` 泛化为 `useAgentEnvironment`（或加 claude 分支）：检测 `claude` CLI 是否安装、版本、登录态（`claude auth status` 或探测命令）
-- `ConversationUI.tsx`：会话信息 Popover 按 `agent_kind` 渲染 claude 专属的 model/permission-mode 选择器（数据来自快照）
-- `src/data/Conversation.tsx`：快照类型加 `agent_kind` 字段
+- `ConversationUI.tsx`：会话信息 Popover 按 `agent_kind` 和 capabilities 渲染 Claude 专属的 model/permission-mode 选择器（数据来自快照）
+- `src/data/Conversation.tsx`：增加 `AgentSessionState` 判别联合、`AgentActivityEvent`、字符串 `item_id`/`channel_id`/`parent_item_id` 与 `sequence`；旧 `AcpConversationSessionState` 保留为 ACP 分支
+- `useConversationEvents.ts`：监听 `agent_activity`，按 `(agent_kind, session_id, channel_id, item_id)` 合并 delta，并用 `sequence` 丢弃乱序/重复更新
+- `components/conversation/`：抽取 `ToolActivityCard` 复用现有 `McpToolCall` 视觉，tool/command 使用该卡片；新增只读 `PatchActivityCard`；approval 继续用现有权限弹窗。子代理卡片不在 M1 范围
 
 ### 4.3 验收标准
 
-- 新建 Claude 助手（type=4 + claude_sdk provider）发消息，流式输出、工具调用展示与 ACP 通道体验一致
+- 新建 Claude 助手（type=4 + claude_sdk provider）发消息，文本/推理流式输出正常；工具、命令、权限、状态以 Agent Activity 卡片展示且活动不丢失、不串 item
 - 权限弹窗在前端与飞书均可批准/拒绝
 - 应用重启后同一会话可 `--resume` 恢复历史（agent 侧真实恢复，不依赖历史拼接回退）
 - token 用量与 cost 进入统计（`ConversationStatsDialog` 可见）
@@ -177,7 +291,7 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 - `src-tauri/src/api/ai/codex_app_server.rs`（新增）：结构同 WS1
   - ndjson JSON-RPC 帧编解码（分包重组、id 配对、超时）——参照 Paseo `providers/jsonl-rpc-process.ts`
   - `CodexSessionState`（thread_id 存 `acp_session.session_id`，`agent_kind='codex_app_server'`）
-  - 事件映射：`item/*` 通知 → `message_update` 流式事件；approval request → agent 权限事件
+  - 事件映射：Codex message/reasoning delta → `message_update`；exec/mcp → 可复用工具卡片的 `agent_activity`；patch → `PatchActivityCard`；plan/status → 简单 activity；approval request 关联原字符串 item/request ID。sub-agent 事件仅在目标版本实际提供时保留元数据，M2 不做层级 UI
   - `thread/resume` 恢复历史
 - 分发/注册/迁移与 WS1 共用（`ai_api.rs`、`lib.rs`、`assistant_api.rs`）
 - 前端：apiTypes 加 `codex_app_server`；表单复用 codex 认证分支；环境检测加 codex CLI 检测
@@ -185,7 +299,7 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 
 ### 5.3 验收标准
 
-- 同 WS1 的六条，通道换成 Codex；重点验证审批（exec/patch）双向与 thread resume
+- 同 WS1 的六条，通道换成 Codex；重点验证 exec/patch/mcp 等不同 item 卡片、字符串 ID、乱序/重复通知、审批双向与 thread resume
 
 ## 6. 工作流 WS3：体系性改动（provider 过滤、配置、UI 泛化）
 
@@ -221,6 +335,10 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 
 - `LLMProviderConfigForm` 新 apiType 表单分支渲染测试
 - 快照事件 `agent_kind` 兼容性测试（旧 payload 无该字段时默认 acp）
+- `agent_activity` 聚合测试：字符串 item ID、同 item delta、两个交错活动、乱序/重复 sequence；父子 item/channel 留到 M3
+- 展示测试：tool/command 复用卡片的 pending/executing/success/failed/cancelled，patch 的文件摘要/diff 折叠块；sub-agent 展示留到 M3
+- 权限 UI 测试：Claude permission suggestion 与 Codex exec/patch approval 均能批准/拒绝，并且不会串到另一个活动 item
+- 消息列表回归：普通对话与 ACP 的 `message_update` / 数值 MCP call 展示保持不变
 
 验证命令遵循仓库约定：`cargo test --manifest-path src-tauri/Cargo.toml <精确范围>`、`npm run build`、`cargo check --manifest-path src-tauri/Cargo.toml`。
 
@@ -228,9 +346,10 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 
 | 里程碑 | 内容 | 产出 |
 |---|---|---|
-| M1 | WS3 体系性改动 + WS1 Claude 通道 MVP（发消息/流式/权限/resume）+ **安装引导改为官方 claude CLI** | Claude Code 原生通道可用 |
-| M2 | WS2 Codex app-server 通道 + **安装引导改为官方 codex CLI** | Codex 原生通道可用 |
-| M3 | 打磨：ACP 长尾扩展（§6.1，含 gemini 启动参数修复）、快照 UI 差异化、用量统计完整性、文档同步（`AGENTS.md` ACP 章节改为"External Agent Channels"、`docs/product/` 对应功能页） | 多 agent 体验一致 |
+| M0 | 最小 Agent UI 适配：事件信封、字符串 item ID、sequence、活动聚合、抽取可复用工具/命令卡片 | Claude/Codex 工具命令可接入当前 UI |
+| M1 | WS3 体系性改动 + WS1 Claude 通道 MVP（发消息/流式/Activity/权限/resume）+ **安装引导改为官方 claude CLI** | Claude Code 原生通道可用 |
+| M2 | WS2 Codex app-server 通道（含 exec/patch/mcp item）+ **安装引导改为官方 codex CLI** | Codex 原生通道可用 |
+| M3 | 打磨：ACP 长尾扩展（§6.1，含 gemini 启动参数修复）、多 channel/item UI、并行 shine、历史 Activity 恢复、用量统计完整性、文档同步（`AGENTS.md` ACP 章节改为"External Agent Channels"、`docs/product/` 对应功能页） | 多 agent 体验一致 |
 | M4（可选） | transcript 镜像：监听 `~/.claude/projects/*.jsonl`，围观/接管本地 TUI 会话（Happy 本地模式） | 本地/远程无缝切换的基础 |
 
 每个里程碑独立可交付、可回滚（api_type 白名单机制保证旧行为不受影响）。
@@ -243,13 +362,15 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 4. **`confirm_acp_permission` 命名**：若评审决定改为通用 `confirm_agent_permission`，需要旧命令别名兼容（前端、飞书回流、Butler MCP 内调用点 `mcp/builtin_mcp/mod.rs:2121`）。
 5. **开放问题**：快照事件是否改名（`acp_session_state_snapshot` → `agent_session_state_snapshot` 并保留旧事件一个版本周期）？`AcpConversationSessionState` 类型是否随 `agent_kind` 拆判别联合？建议 M1 评审时定。
 6. **zed 适配器的去留**：`claude-code-acp` / `codex-acp` 保留为 acp provider 下的 legacy 选项，不下线、不迁移存量用户配置；UI 标注"推荐改用原生通道"。长期是否移除，待原生通道覆盖度验证后再评估。
+7. **原生活动与 MCP 的边界**：当前 MCP 卡片视觉可以复用，但 MCP 表/执行 API 不能作为外部 agent item 的通用存储，否则会暴露错误的执行/停止/重试行为。M0 使用独立 Agent Activity 持久化；`McpToolCall` 与 Agent Activity 都适配到共享的只展示 `ToolActivityCard`。
+8. **协议版本核验**：Codex app-server 的方法名、通知名、审批 request schema 需在实现时以目标 CLI 版本导出的 schema/官方文档为准，并记录 `codex --version`；计划中的方法名是设计基线，不能作为无版本约束的稳定 API。Claude stream-json/control schema 同样需要 fixture 锁定版本。
 
 ## 10. 新增/修改文件清单（汇总）
 
-**后端新增**：`api/ai/agent_runtime.rs`、`api/ai/claude_sdk.rs`、`api/ai/codex_app_server.rs`、`api/ai/tests/claude_sdk_tests.rs`、`api/ai/tests/codex_app_server_tests.rs`（协议 fixture）
+**后端新增**：`api/ai/agent_runtime.rs`、`api/ai/agent_activity.rs`（通用事件/持久化映射）、`api/ai/claude_sdk.rs`、`api/ai/codex_app_server.rs`、`api/ai/tests/claude_sdk_tests.rs`、`api/ai/tests/codex_app_server_tests.rs`（协议 fixture）
 
-**后端修改**：`api/ai_api.rs`（ask_ai/cancel_ai 分发）、`api/assistant_api.rs`（provider 解析、ensure_session 泛化）、`lib.rs`（state/命令注册）、`db/conversation_db.rs` + `db/mod.rs`（agent_kind 列迁移）、`db/llm_db.rs`（api_type 集合过滤）、`api/operation_api.rs`（权限命令路由）、`feishu/api.rs` + `feishu/events.rs`（审批文案泛化）、`artifacts/env_installer.rs`（官方 claude/codex CLI 检测与安装引导，M1/M2；zed 适配器安装逻辑保留）
+**后端修改**：`api/ai/events.rs`（Agent Activity 信封）、`api/ai_api.rs`（ask_ai/cancel_ai 分发）、`api/assistant_api.rs`（provider 解析、ensure_session 泛化）、`lib.rs`（state/命令注册）、`db/conversation_db.rs` + `db/mod.rs`（agent_kind 与 Agent Activity 持久化迁移）、`db/llm_db.rs`（api_type 集合过滤）、`api/operation_api.rs`（权限命令路由）、`feishu/api.rs` + `feishu/events.rs`（审批文案泛化）、`artifacts/env_installer.rs`（官方 claude/codex CLI 检测与安装引导，M1/M2；zed 适配器安装逻辑保留）
 
-**前端修改**：`components/config/LLMProviderConfig.tsx`、`LLMProviderConfigForm.tsx`、`hooks/feature/useAcpEnvironment.ts`（泛化）、`hooks/assistant/useAssistantFormConfig.ts`、`data/Assistant.tsx`、`data/Conversation.tsx`、`components/ConversationUI.tsx`、`hooks/useConversationEvents.ts`
+**前端修改**：`components/config/LLMProviderConfig.tsx`、`LLMProviderConfigForm.tsx`、`hooks/feature/useAcpEnvironment.ts`（泛化）、`hooks/assistant/useAssistantFormConfig.ts`、`data/Assistant.tsx`、`data/Conversation.tsx`、`components/ConversationUI.tsx`、`hooks/useConversationEvents.ts`、`components/conversation/useMessageListElements.tsx`、Agent Activity 卡片及其测试
 
 **文档修改**：`AGENTS.md`（ACP Integration Notes → External Agent Channels）、`docs/product/` 对应页、`docs/ai-api-technical-documentation.md`

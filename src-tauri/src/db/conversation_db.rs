@@ -1355,6 +1355,43 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
     Ok(())
 }
 
+pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS acp_session (
+            conversation_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_kind TEXT NOT NULL DEFAULT 'acp',
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (conversation_id, agent_kind)
+        )",
+        [],
+    )?;
+    let columns: Vec<(String, i64)> = conn
+        .prepare("PRAGMA table_info(acp_session)")?
+        .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_agent_kind = columns.iter().any(|(name, _)| name == "agent_kind");
+    let has_composite_primary_key = columns.iter().filter(|(_, pk)| *pk > 0).count() >= 2;
+    if !has_agent_kind || !has_composite_primary_key {
+        let legacy_agent_kind = if has_agent_kind { "agent_kind" } else { "'acp'" };
+        conn.execute_batch(&format!(
+            "ALTER TABLE acp_session RENAME TO acp_session_legacy;
+             CREATE TABLE acp_session (
+                 conversation_id INTEGER NOT NULL,
+                 session_id TEXT NOT NULL,
+                 agent_kind TEXT NOT NULL DEFAULT 'acp',
+                 updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY (conversation_id, agent_kind)
+             );
+             INSERT INTO acp_session (conversation_id, session_id, agent_kind, updated_time)
+             SELECT conversation_id, session_id, {legacy_agent_kind}, updated_time
+             FROM acp_session_legacy;
+             DROP TABLE acp_session_legacy;"
+        ))?;
+    }
+    Ok(())
+}
+
 impl ConversationDatabase {
     pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
         let db_path = get_db_path(app_handle, "conversation.db");
@@ -1458,14 +1495,11 @@ impl ConversationDatabase {
             [],
         )?;
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS acp_session (
-                conversation_id INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
+        // Older databases used conversation_id as the sole primary key and had
+        // no agent_kind column. Rebuild that small table so ACP and native
+        // Codex threads can coexist for one conversation without overwriting
+        // each other. Existing rows are ACP sessions for backward compatibility.
+        ensure_agent_session_table(&conn)?;
 
         // 添加迁移逻辑：如果新增列不存在，则按需补齐
         let mut stmt = conn.prepare("PRAGMA table_info(message)")?;
@@ -1771,11 +1805,20 @@ impl ConversationDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn get_acp_session_id(&self, conversation_id: i64) -> Result<Option<String>, AppError> {
+        self.get_agent_session_id(conversation_id, "acp")
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn get_agent_session_id(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+    ) -> Result<Option<String>, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
         let session_id = conn
             .query_row(
-                "SELECT session_id FROM acp_session WHERE conversation_id = ?1",
-                params![conversation_id],
+                "SELECT session_id FROM acp_session WHERE conversation_id = ?1 AND agent_kind = ?2",
+                params![conversation_id, agent_kind],
                 |row| row.get(0),
             )
             .optional()
@@ -1789,13 +1832,23 @@ impl ConversationDatabase {
         conversation_id: i64,
         session_id: &str,
     ) -> Result<(), AppError> {
+        self.upsert_agent_session_id(conversation_id, "acp", session_id)
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn upsert_agent_session_id(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+        session_id: &str,
+    ) -> Result<(), AppError> {
         self.with_write_connection(|conn| {
             conn.execute(
-                "INSERT INTO acp_session (conversation_id, session_id, updated_time)
-                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
-                 ON CONFLICT(conversation_id)
+                "INSERT INTO acp_session (conversation_id, agent_kind, session_id, updated_time)
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+                 ON CONFLICT(conversation_id, agent_kind)
                  DO UPDATE SET session_id = excluded.session_id, updated_time = CURRENT_TIMESTAMP",
-                params![conversation_id, session_id],
+                params![conversation_id, agent_kind, session_id],
             )
             .map_err(AppError::from)?;
             Ok(())
@@ -1804,10 +1857,19 @@ impl ConversationDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn delete_acp_session_id(&self, conversation_id: i64) -> Result<(), AppError> {
+        self.delete_agent_session_id(conversation_id, "acp")
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn delete_agent_session_id(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+    ) -> Result<(), AppError> {
         self.with_write_connection(|conn| {
             conn.execute(
-                "DELETE FROM acp_session WHERE conversation_id = ?1",
-                params![conversation_id],
+                "DELETE FROM acp_session WHERE conversation_id = ?1 AND agent_kind = ?2",
+                params![conversation_id, agent_kind],
             )
             .map_err(AppError::from)?;
             Ok(())

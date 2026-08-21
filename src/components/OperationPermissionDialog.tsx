@@ -36,6 +36,7 @@ export interface AcpPermissionOption {
 export interface AcpPermissionRequest {
     request_id: string;
     conversation_id?: number;
+    agent_kind?: "acp" | "codex_app_server" | string;
     tool_call_id: string;
     title?: string;
     kind?: string;
@@ -248,7 +249,9 @@ export function AcpPermissionDialog({
                 <AlertDialogHeader className={permissionDialogHeaderClassName}>
                     <AlertDialogTitle className="flex items-center gap-2">
                         <Shield className="h-5 w-5 text-yellow-500" />
-                        ACP 工具权限请求
+                        {request.agent_kind === "codex_app_server"
+                            ? "Codex 执行权限请求"
+                            : "ACP 工具权限请求"}
                     </AlertDialogTitle>
                     <AlertDialogDescription asChild>
                         <div className={permissionDialogBodyClassName}>

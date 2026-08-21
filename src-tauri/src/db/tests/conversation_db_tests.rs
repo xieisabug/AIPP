@@ -607,3 +607,39 @@ fn test_ensure_conversation_table_rewrites_butler_main_archive_kind() {
 
     assert_eq!(conversation_kind, "butler_main");
 }
+
+/// 验证 ACP 旧表迁移后，ACP 与 Codex thread 可以在同一对话并存。
+#[test]
+fn test_agent_session_table_migrates_and_isolates_agent_kinds() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute(
+        "CREATE TABLE acp_session (
+            conversation_id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO acp_session (conversation_id, session_id) VALUES (7, 'acp-old')",
+        [],
+    )
+    .unwrap();
+
+    ensure_agent_session_table(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO acp_session (conversation_id, agent_kind, session_id) VALUES (7, 'codex_app_server', 'thread-7')",
+        [],
+    )
+    .unwrap();
+
+    let rows: Vec<(String, String)> = conn
+        .prepare("SELECT agent_kind, session_id FROM acp_session WHERE conversation_id = 7 ORDER BY agent_kind")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![("acp".to_string(), "acp-old".to_string()), ("codex_app_server".to_string(), "thread-7".to_string())]);
+}

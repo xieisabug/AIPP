@@ -1,0 +1,987 @@
+use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
+use crate::api::ai::acp::{
+    resolve_acp_cli_path, AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
+    AcpPermissionState,
+};
+use crate::api::operation_api::{
+    emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT,
+};
+use crate::db::conversation_db::{ConversationDatabase, Repository};
+use crate::errors::AppError;
+use crate::state::activity_state::ConversationActivityManager;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::process::Stdio;
+use tauri::{Emitter, Manager};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, ChildStdout, Command};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{error, info, warn};
+
+pub const CODEX_APP_SERVER_API_TYPE: &str = "codex_app_server";
+
+#[derive(Debug, Clone)]
+pub struct CodexAppServerConfig {
+    pub cli_command: String,
+    pub working_directory: PathBuf,
+    pub env_vars: HashMap<String, String>,
+    pub additional_args: Vec<String>,
+    pub model: Option<String>,
+    pub approval_policy: Option<String>,
+    pub sandbox: Option<String>,
+    pub session_signature: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CodexConversationSessionState {
+    pub conversation_id: i64,
+    pub agent_kind: String,
+    pub session_id: Option<String>,
+    pub current_turn_id: Option<String>,
+    pub has_active_prompt: bool,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexSessionStateSnapshotEvent {
+    state: Option<CodexConversationSessionState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentActivityEvent {
+    pub conversation_id: i64,
+    pub response_message_id: i64,
+    pub agent_kind: String,
+    pub session_id: Option<String>,
+    pub item_id: String,
+    pub sequence: u64,
+    pub kind: String,
+    pub status: String,
+    pub title: Option<String>,
+    pub input: Option<Value>,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub metadata: Value,
+}
+
+enum CodexSessionCommand {
+    Prompt { message_id: i64, prompt: String, window: tauri::Window },
+    CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
+}
+
+#[derive(Clone)]
+pub struct CodexSessionHandle {
+    sender: mpsc::UnboundedSender<CodexSessionCommand>,
+}
+
+impl CodexSessionHandle {
+    pub fn send_prompt(
+        &self,
+        message_id: i64,
+        prompt: String,
+        window: tauri::Window,
+    ) -> Result<(), AppError> {
+        self.sender
+            .send(CodexSessionCommand::Prompt { message_id, prompt, window })
+            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))
+    }
+
+    pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(CodexSessionCommand::CancelCurrentPrompt { response: tx })
+            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?;
+        rx.await
+            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?
+            .map_err(AppError::UnknownError)
+    }
+}
+
+pub struct CodexSessionEntry {
+    pub handle: CodexSessionHandle,
+    pub snapshot: CodexConversationSessionState,
+    pub config_signature: String,
+}
+
+impl CodexSessionEntry {
+    pub fn new(handle: CodexSessionHandle, conversation_id: i64, config_signature: String) -> Self {
+        Self {
+            handle,
+            snapshot: CodexConversationSessionState {
+                conversation_id,
+                agent_kind: CODEX_APP_SERVER_API_TYPE.to_string(),
+                ..Default::default()
+            },
+            config_signature,
+        }
+    }
+}
+
+pub fn extract_codex_app_server_config(
+    model_configs: &[crate::db::assistant_db::AssistantModelConfig],
+    provider_configs: &[crate::db::llm_db::LLMProviderConfig],
+    model: Option<String>,
+) -> Result<CodexAppServerConfig, AppError> {
+    let provider_value = |name: &str| {
+        provider_configs
+            .iter()
+            .find(|config| config.name == name)
+            .map(|config| config.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let model_value = |name: &str| {
+        model_configs
+            .iter()
+            .find(|config| config.name == name)
+            .and_then(|config| config.value.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+
+    let cli_command = provider_value("codex_cli_command").unwrap_or_else(|| "codex".to_string());
+    let working_directory = model_value("acp_working_directory")
+        .or_else(|| provider_value("acp_working_directory"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let additional_args = provider_value("codex_additional_args")
+        .or_else(|| model_value("acp_additional_args"))
+        .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+    let mut env_vars = HashMap::new();
+    if let Some(home) = dirs::home_dir() {
+        let codex_home = home.join(".codex");
+        if codex_home.exists() {
+            env_vars.insert("CODEX_HOME".to_string(), codex_home.display().to_string());
+        }
+    }
+    for raw in [provider_value("acp_env_vars"), model_value("acp_env_vars")].into_iter().flatten() {
+        if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(&raw) {
+            env_vars.extend(parsed);
+        }
+    }
+    let approval_policy = model_value("codex_approval_policy")
+        .or_else(|| provider_value("codex_approval_policy"));
+    let sandbox = model_value("codex_sandbox").or_else(|| provider_value("codex_sandbox"));
+    let signature = serde_json::to_string(&json!({
+        "cli": cli_command,
+        "cwd": working_directory,
+        "args": additional_args,
+        "model": model,
+        "approval": approval_policy,
+        "sandbox": sandbox,
+        "env": env_vars,
+    }))
+    .unwrap_or_default();
+    Ok(CodexAppServerConfig {
+        cli_command,
+        working_directory,
+        env_vars,
+        additional_args,
+        model,
+        approval_policy,
+        sandbox,
+        session_signature: signature,
+    })
+}
+
+fn emit_session_snapshot(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    state: Option<CodexConversationSessionState>,
+) {
+    let event = ConversationEvent {
+        r#type: "acp_session_state_snapshot".to_string(),
+        data: serde_json::to_value(CodexSessionStateSnapshotEvent { state }).unwrap(),
+    };
+    let _ = crate::utils::window_utils::send_conversation_event_to_chat_windows(
+        app_handle,
+        conversation_id,
+        event,
+    );
+}
+
+fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+}
+
+fn rpc_id_key(id: &Value) -> String {
+    id.as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn codex_permission_options(method: &str, params: &Value) -> Vec<AcpPermissionOptionPayload> {
+    let available = params.get("availableDecisions").and_then(Value::as_array);
+    let mut decisions = available
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if decisions.is_empty() {
+        decisions = if method == "item/permissions/requestApproval" {
+            vec!["accept", "acceptForSession", "decline"]
+        } else {
+            vec!["accept", "acceptForSession", "decline", "cancel"]
+        };
+    }
+    decisions
+        .into_iter()
+        .map(|decision| AcpPermissionOptionPayload {
+            option_id: decision.to_string(),
+            name: match decision {
+                "accept" => "本次允许",
+                "acceptForSession" => "本会话允许",
+                "decline" => "拒绝并继续",
+                "cancel" => "拒绝并中止本轮",
+                other => other,
+            }
+            .to_string(),
+            kind: match decision {
+                "accept" => "allow_once",
+                "acceptForSession" => "allow_always",
+                "cancel" => "reject_always",
+                _ => "reject_once",
+            }
+            .to_string(),
+        })
+        .collect()
+}
+
+fn codex_approval_response(method: &str, params: &Value, decision: AcpPermissionDecision) -> Value {
+    let selected = match decision {
+        AcpPermissionDecision::Selected(value) => value,
+        AcpPermissionDecision::Cancelled => "cancel".to_string(),
+    };
+    if method == "item/permissions/requestApproval" {
+        if selected == "accept" || selected == "acceptForSession" {
+            json!({
+                "permissions": params.get("permissions").cloned().unwrap_or_else(|| json!({})),
+                "scope": if selected == "acceptForSession" { "session" } else { "turn" }
+            })
+        } else {
+            json!({"permissions": {}})
+        }
+    } else {
+        json!({"decision": selected})
+    }
+}
+
+async fn handle_approval_request(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    stdin: &mut tokio::process::ChildStdin,
+    frame: &Value,
+) -> Result<bool, String> {
+    let Some(method) = frame.get("method").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if !matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "item/permissions/requestApproval"
+    ) {
+        return Ok(false);
+    }
+    let rpc_id = frame.get("id").cloned().ok_or("Codex approval request missing id")?;
+    let params = frame.get("params").cloned().unwrap_or(Value::Null);
+    let item_id = params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let request_id = format!("codex:{conversation_id}:{}", rpc_id_key(&rpc_id));
+    let title = params
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| params.get("reason").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            Some(match method {
+                "item/fileChange/requestApproval" => "允许 Codex 修改文件",
+                "item/permissions/requestApproval" => "允许 Codex 扩展权限",
+                _ => "允许 Codex 执行命令",
+            }
+            .to_string())
+        });
+    let event = AcpPermissionRequestEvent {
+        request_id: request_id.clone(),
+        conversation_id: Some(conversation_id),
+        agent_kind: Some(CODEX_APP_SERVER_API_TYPE.to_string()),
+        tool_call_id: item_id,
+        title,
+        kind: Some(method.to_string()),
+        parameters: Some(serde_json::to_string_pretty(&params).unwrap_or_else(|_| params.to_string())),
+        options: codex_permission_options(method, &params),
+    };
+    let (decision_tx, decision_rx) = oneshot::channel();
+    let permission_state = app_handle.state::<AcpPermissionState>();
+    permission_state.store_request(event.clone(), decision_tx).await;
+    if let Err(error) = emit_permission_request_event(
+        app_handle,
+        ACP_PERMISSION_REQUEST_EVENT,
+        Some(conversation_id),
+        &event,
+    ) {
+        permission_state.remove_request(&request_id).await;
+        return Err(error);
+    }
+    let decision = decision_rx
+        .await
+        .unwrap_or(AcpPermissionDecision::Cancelled);
+    let result = codex_approval_response(method, &params, decision);
+    write_frame(stdin, &json!({"jsonrpc":"2.0","id":rpc_id,"result":result})).await?;
+    Ok(true)
+}
+
+async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(frame).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    stdin.write_all(&bytes).await.map_err(|error| error.to_string())?;
+    stdin.flush().await.map_err(|error| error.to_string())
+}
+
+async fn read_rpc_response_with_approvals(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    expected_id: u64,
+    pending_notifications: &mut VecDeque<Value>,
+) -> Result<Value, String> {
+    while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+        let frame: Value = serde_json::from_str(&line)
+            .map_err(|error| format!("Invalid Codex app-server JSON: {error}: {line}"))?;
+        if frame.get("method").is_some() && frame.get("id").is_some() {
+            if !handle_approval_request(app_handle, conversation_id, stdin, &frame).await? {
+                write_frame(
+                    stdin,
+                    &json!({
+                        "jsonrpc":"2.0",
+                        "id":frame.get("id").cloned().unwrap_or(Value::Null),
+                        "error":{"code":-32601,"message":format!("AIPP does not support Codex server request {}", frame.get("method").and_then(Value::as_str).unwrap_or("unknown"))}
+                    }),
+                )
+                .await?;
+            }
+            continue;
+        }
+        if frame.get("id").and_then(Value::as_u64) == Some(expected_id) {
+            if let Some(error) = frame.get("error") {
+                return Err(format!("Codex app-server RPC error: {error}"));
+            }
+            return Ok(frame.get("result").cloned().unwrap_or(Value::Null));
+        }
+        if frame.get("method").is_some() {
+            pending_notifications.push_back(frame);
+        }
+    }
+    Err("Codex app-server closed before replying".to_string())
+}
+
+fn thread_id_from_result(result: &Value) -> Option<String> {
+    result
+        .pointer("/thread/id")
+        .or_else(|| result.get("threadId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn item_identity(item: &Value) -> (String, String, Option<String>, Option<Value>) {
+    let item_id = item.get("id").and_then(Value::as_str).unwrap_or("unknown").to_string();
+    let kind = item.get("type").and_then(Value::as_str).unwrap_or("status").to_string();
+    match kind.as_str() {
+        "commandExecution" => (
+            item_id,
+            "command".to_string(),
+            item.get("command").and_then(Value::as_str).map(str::to_string),
+            Some(json!({"command": item.get("command"), "cwd": item.get("cwd")})),
+        ),
+        "fileChange" => (item_id, "patch".to_string(), Some("文件变更".to_string()), Some(item.clone())),
+        "mcpToolCall" | "dynamicToolCall" => (
+            item_id,
+            "tool".to_string(),
+            item.get("tool").and_then(Value::as_str).map(str::to_string),
+            item.get("arguments").cloned(),
+        ),
+        "collabAgentToolCall" | "subAgentActivity" => {
+            (item_id, "sub_agent".to_string(), Some(kind), Some(item.clone()))
+        }
+        _ => (item_id, kind.clone(), Some(kind), Some(item.clone())),
+    }
+}
+
+fn activity_status(item: &Value, fallback: &str) -> String {
+    item.get("status")
+        .and_then(Value::as_str)
+        .map(|status| match status {
+            "inProgress" | "running" => "executing",
+            "completed" => "success",
+            other => other,
+        })
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn merge_activity_notification(
+    items: &mut HashMap<String, Value>,
+    method: &str,
+    params: &Value,
+) -> Option<Value> {
+    if matches!(method, "item/started" | "item/completed") {
+        let incoming = params.get("item")?.clone();
+        let item_id = incoming.get("id")?.as_str()?.to_string();
+        if let Some(existing) = items.get_mut(&item_id) {
+            if let (Some(existing_object), Some(incoming_object)) =
+                (existing.as_object_mut(), incoming.as_object())
+            {
+                for (key, value) in incoming_object {
+                    existing_object.insert(key.clone(), value.clone());
+                }
+            } else {
+                *existing = incoming;
+            }
+        } else {
+            items.insert(item_id.clone(), incoming);
+        }
+        return items.get(&item_id).cloned();
+    }
+    if matches!(
+        method,
+        "item/commandExecution/outputDelta"
+            | "item/fileChange/outputDelta"
+            | "item/fileChange/patchUpdated"
+    ) {
+        let item_id = params.get("itemId")?.as_str()?.to_string();
+        let kind = if method.contains("fileChange") { "fileChange" } else { "commandExecution" };
+        let item = items
+            .entry(item_id.clone())
+            .or_insert_with(|| json!({"id":item_id,"type":kind}));
+        let object = item.as_object_mut()?;
+        if let Some(patch) = params.get("patch") {
+            object.insert("aggregatedOutput".to_string(), patch.clone());
+        } else if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+            let previous = object
+                .get("aggregatedOutput")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            object.insert("aggregatedOutput".to_string(), json!(format!("{previous}{delta}")));
+        }
+        return Some(item.clone());
+    }
+    None
+}
+
+fn emit_activity(
+    window: &tauri::Window,
+    conversation_id: i64,
+    response_message_id: i64,
+    thread_id: Option<&str>,
+    sequence: u64,
+    item: &Value,
+    fallback_status: &str,
+) {
+    let (item_id, kind, title, input) = item_identity(item);
+    let activity = AgentActivityEvent {
+        conversation_id,
+        response_message_id,
+        agent_kind: CODEX_APP_SERVER_API_TYPE.to_string(),
+        session_id: thread_id.map(str::to_string),
+        item_id,
+        sequence,
+        kind,
+        status: activity_status(item, fallback_status),
+        title,
+        input,
+        output: item
+            .get("aggregatedOutput")
+            .or_else(|| item.get("result"))
+            .map(|value| value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())),
+        error: item.get("error").map(Value::to_string),
+        metadata: item.clone(),
+    };
+    let event = ConversationEvent {
+        r#type: "agent_activity".to_string(),
+        data: serde_json::to_value(&activity).unwrap(),
+    };
+    persist_activity(window.app_handle(), response_message_id, &activity);
+    let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+}
+
+fn persist_activity(app_handle: &tauri::AppHandle, message_id: i64, activity: &AgentActivityEvent) {
+    let Ok(db) = ConversationDatabase::new(app_handle) else { return };
+    let Ok(repo) = db.message_repo() else { return };
+    let Ok(Some(message)) = repo.read(message_id) else { return };
+    let mut metadata = message
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let activities = metadata
+        .as_object_mut()
+        .expect("metadata normalized to object")
+        .entry("agent_activities")
+        .or_insert_with(|| json!([]));
+    let Some(items) = activities.as_array_mut() else { return };
+    let replacement = serde_json::to_value(activity).unwrap_or(Value::Null);
+    if let Some(existing) = items.iter_mut().find(|candidate| {
+        candidate.get("agent_kind") == replacement.get("agent_kind")
+            && candidate.get("session_id") == replacement.get("session_id")
+            && candidate.get("item_id") == replacement.get("item_id")
+    }) {
+        if existing.get("sequence").and_then(Value::as_u64).unwrap_or(0) <= activity.sequence {
+            *existing = replacement;
+        }
+    } else {
+        items.push(replacement);
+    }
+    if let Ok(serialized) = serde_json::to_string(&metadata) {
+        let _ = repo.update_metadata(message_id, Some(&serialized));
+    }
+}
+
+fn persist_response(app_handle: &tauri::AppHandle, message_id: i64, content: &str, done: bool) {
+    if let Ok(db) = ConversationDatabase::new(app_handle) {
+        if let Ok(repo) = db.message_repo() {
+            let _ = repo.update_content(message_id, content);
+            if done {
+                if let Ok(Some(mut message)) = repo.read(message_id) {
+                    message.finish_time = Some(chrono::Utc::now());
+                    message.output_token_count = ((content.chars().count() + 3) / 4) as i32;
+                    message.token_count = message.output_token_count;
+                    let _ = repo.update(&message);
+                }
+            }
+        }
+    }
+}
+
+async fn spawn_process(config: &CodexAppServerConfig) -> Result<(Child, tokio::process::ChildStdin, Lines<BufReader<ChildStdout>>), String> {
+    let resolved_cli = resolve_acp_cli_path(&config.cli_command);
+    #[cfg(target_os = "windows")]
+    let resolved_cli = if resolved_cli.extension().is_none() {
+        let cmd_shim = resolved_cli.with_extension("cmd");
+        if cmd_shim.exists() { cmd_shim } else { resolved_cli }
+    } else {
+        resolved_cli
+    };
+    #[cfg(target_os = "windows")]
+    let (program, prefix_args): (PathBuf, Vec<String>) = match resolved_cli
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("cmd" | "bat") => (
+            PathBuf::from("cmd.exe"),
+            vec!["/D".to_string(), "/S".to_string(), "/C".to_string(), resolved_cli.display().to_string()],
+        ),
+        Some("ps1") => (
+            PathBuf::from("pwsh.exe"),
+            vec!["-NoProfile".to_string(), "-File".to_string(), resolved_cli.display().to_string()],
+        ),
+        _ => (resolved_cli.clone(), Vec::new()),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (program, prefix_args): (PathBuf, Vec<String>) = (resolved_cli, Vec::new());
+
+    let mut command = Command::new(&program);
+    command
+        .args(prefix_args)
+        .arg("app-server")
+        .arg("--listen")
+        .arg("stdio://")
+        .args(&config.additional_args)
+        .current_dir(&config.working_directory)
+        .envs(&config.env_vars)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| {
+        format!("启动 Codex app-server 失败（{}）：{error}", program.display())
+    })?;
+    let stdin = child.stdin.take().ok_or("Codex app-server stdin unavailable")?;
+    let stdout = child.stdout.take().ok_or("Codex app-server stdout unavailable")?;
+    Ok((child, stdin, BufReader::new(stdout).lines()))
+}
+
+pub fn spawn_codex_session_task(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+    config: CodexAppServerConfig,
+) -> CodexSessionHandle {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_session(app_handle.clone(), conversation_id, config, receiver).await {
+            error!(conversation_id, error = %error, "Codex app-server session exited");
+        }
+        if let Some(state) = app_handle.try_state::<crate::CodexSessionState>() {
+            state.sessions.lock().await.remove(&conversation_id);
+        }
+        emit_session_snapshot(&app_handle, conversation_id, None);
+    });
+    CodexSessionHandle { sender }
+}
+
+async fn run_session(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+    config: CodexAppServerConfig,
+    mut receiver: mpsc::UnboundedReceiver<CodexSessionCommand>,
+) -> Result<(), String> {
+    let (_child, mut stdin, mut lines) = spawn_process(&config).await?;
+    let mut pending_notifications = VecDeque::new();
+    write_frame(
+        &mut stdin,
+        &json_rpc_request(
+            1,
+            "initialize",
+            json!({
+                "clientInfo":{"name":"aipp","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
+                "capabilities":{"experimentalApi":true}
+            }),
+        ),
+    )
+    .await?;
+    read_rpc_response_with_approvals(
+        &app_handle,
+        conversation_id,
+        &mut stdin,
+        &mut lines,
+        1,
+        &mut pending_notifications,
+    )
+    .await?;
+    write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
+
+    let stored_thread = ConversationDatabase::new(&app_handle)
+        .ok()
+        .and_then(|db| {
+            db.get_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE)
+                .ok()
+                .flatten()
+        });
+    let mut request_id = 2_u64;
+    let thread_params = json!({
+        "model": config.model,
+        "cwd": config.working_directory,
+        "approvalPolicy": config.approval_policy,
+        "sandbox": config.sandbox,
+    });
+    let (thread_method, params) = if let Some(thread_id) = stored_thread.as_deref() {
+        ("thread/resume", json!({"threadId":thread_id,"model":config.model,"cwd":config.working_directory}))
+    } else {
+        ("thread/start", thread_params.clone())
+    };
+    write_frame(&mut stdin, &json_rpc_request(request_id, thread_method, params)).await?;
+    let thread_result = match read_rpc_response_with_approvals(
+        &app_handle,
+        conversation_id,
+        &mut stdin,
+        &mut lines,
+        request_id,
+        &mut pending_notifications,
+    )
+    .await {
+        Ok(result) => result,
+        Err(error) if stored_thread.is_some() => {
+            warn!(conversation_id, error = %error, "Codex thread resume failed; starting a new thread");
+            request_id += 1;
+            write_frame(&mut stdin, &json_rpc_request(request_id, "thread/start", thread_params)).await?;
+            read_rpc_response_with_approvals(
+                &app_handle,
+                conversation_id,
+                &mut stdin,
+                &mut lines,
+                request_id,
+                &mut pending_notifications,
+            )
+            .await?
+        }
+        Err(error) => return Err(error),
+    };
+    let thread_id = thread_id_from_result(&thread_result)
+        .ok_or_else(|| format!("Codex thread response missing thread id: {thread_result}"))?;
+    ConversationDatabase::new(&app_handle)
+        .map_err(|error| error.to_string())?
+        .upsert_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE, &thread_id)
+        .map_err(|error| error.to_string())?;
+    let mut snapshot = CodexConversationSessionState {
+        conversation_id,
+        agent_kind: CODEX_APP_SERVER_API_TYPE.to_string(),
+        session_id: Some(thread_id.clone()),
+        current_turn_id: None,
+        has_active_prompt: false,
+        model: config.model.clone(),
+    };
+    emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+
+    while let Some(command) = receiver.recv().await {
+        match command {
+            CodexSessionCommand::CancelCurrentPrompt { response } => {
+                let _ = response.send(Ok(()));
+            }
+            CodexSessionCommand::Prompt { message_id, prompt, window } => {
+                request_id += 1;
+                write_frame(
+                    &mut stdin,
+                    &json_rpc_request(
+                        request_id,
+                        "turn/start",
+                        json!({"threadId":thread_id,"input":[{"type":"text","text":prompt,"text_elements":[]}]}),
+                    ),
+                )
+                .await?;
+                let turn_result = read_rpc_response_with_approvals(
+                    &app_handle,
+                    conversation_id,
+                    &mut stdin,
+                    &mut lines,
+                    request_id,
+                    &mut pending_notifications,
+                )
+                .await?;
+                let mut turn_id = turn_result
+                    .pointer("/turn/id")
+                    .or_else(|| turn_result.get("turnId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                snapshot.current_turn_id = turn_id.clone();
+                snapshot.has_active_prompt = true;
+                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                let mut content = String::new();
+                let mut reasoning = String::new();
+                let mut reasoning_message_id: Option<i64> = None;
+                let mut sequence = 0_u64;
+                let mut activity_items = HashMap::<String, Value>::new();
+                loop {
+                    let frame = if let Some(frame) = pending_notifications.pop_front() {
+                        frame
+                    } else {
+                        tokio::select! {
+                            maybe_command = receiver.recv() => {
+                            match maybe_command {
+                                Some(CodexSessionCommand::CancelCurrentPrompt { response }) => {
+                                    if let Some(active_turn_id) = turn_id.as_deref() {
+                                        request_id += 1;
+                                        let result = write_frame(&mut stdin, &json_rpc_request(request_id, "turn/interrupt", json!({"threadId":thread_id,"turnId":active_turn_id}))).await;
+                                        let _ = response.send(result);
+                                    } else {
+                                        let _ = response.send(Ok(()));
+                                    }
+                                }
+                                Some(CodexSessionCommand::Prompt { .. }) => warn!(conversation_id, "Codex prompt received while another turn is active; queued prompt is not supported"),
+                                None => return Ok(()),
+                            }
+                            continue;
+                            }
+                            line = lines.next_line() => {
+                            let Some(line) = line.map_err(|error| error.to_string())? else {
+                                return Err("Codex app-server closed during turn".to_string());
+                            };
+                            match serde_json::from_str(&line) {
+                                Ok(frame) => frame,
+                                Err(error) => { warn!(error = %error, line = %line, "Invalid Codex app-server frame"); continue; }
+                            }
+                            }
+                        }
+                    };
+                    if frame.get("id").is_some() && frame.get("method").is_some() {
+                        if !handle_approval_request(
+                            &app_handle,
+                            conversation_id,
+                            &mut stdin,
+                            &frame,
+                        )
+                        .await? {
+                            write_frame(
+                                &mut stdin,
+                                &json!({
+                                    "jsonrpc":"2.0",
+                                    "id":frame.get("id").cloned().unwrap_or(Value::Null),
+                                    "error":{"code":-32601,"message":format!("AIPP does not support Codex server request {}", frame.get("method").and_then(Value::as_str).unwrap_or("unknown"))}
+                                }),
+                            )
+                            .await?;
+                        }
+                        continue;
+                    }
+                    let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
+                    let params = frame.get("params").cloned().unwrap_or(Value::Null);
+                    match method {
+                                "turn/started" => {
+                                    turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string).or(turn_id);
+                                    snapshot.current_turn_id = turn_id.clone();
+                                }
+                                "item/agentMessage/delta" => {
+                                    if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                                        content.push_str(delta);
+                                        persist_response(&app_handle, message_id, &content, false);
+                                        let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
+                                        let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+                                        if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await; }
+                                    }
+                                }
+                                "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                                    if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                                        reasoning.push_str(delta);
+                                        if reasoning_message_id.is_none() {
+                                            if let Ok(message) = crate::api::ai_api::add_message(
+                                                &app_handle,
+                                                Some(message_id),
+                                                conversation_id,
+                                                "reasoning".to_string(),
+                                                String::new(),
+                                                Some(0),
+                                                Some("codex-app-server".to_string()),
+                                                Some(chrono::Utc::now()),
+                                                None,
+                                                0,
+                                                None,
+                                                None,
+                                            ) {
+                                                reasoning_message_id = Some(message.id);
+                                                let add_event = ConversationEvent {
+                                                    r#type: "message_add".to_string(),
+                                                    data: json!({"message_id":message.id,"message_type":"reasoning"}),
+                                                };
+                                                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), add_event);
+                                            }
+                                        }
+                                        if let Some(reasoning_id) = reasoning_message_id {
+                                            persist_response(&app_handle, reasoning_id, &reasoning, false);
+                                            let event = ConversationEvent {
+                                                r#type: "message_update".to_string(),
+                                                data: serde_json::to_value(MessageUpdateEvent {
+                                                    message_id: reasoning_id,
+                                                    message_type: "reasoning".to_string(),
+                                                    content: reasoning.clone(),
+                                                    is_done: false,
+                                                    token_count: None,
+                                                    input_token_count: None,
+                                                    output_token_count: None,
+                                                    ttft_ms: None,
+                                                    tps: None,
+                                                }).unwrap(),
+                                            };
+                                            let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+                                        }
+                                    }
+                                }
+                                "item/started" | "item/completed" => {
+                                    sequence += 1;
+                                    if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) { emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }); }
+                                }
+                                "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" => {
+                                    sequence += 1;
+                                    if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) { emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing"); }
+                                }
+                                "turn/completed" => break,
+                                "error" => {
+                                    let message = params.get("message").and_then(Value::as_str).unwrap_or("Codex app-server error");
+                                    return Err(message.to_string());
+                                }
+                                _ => {}
+                    }
+                    }
+                persist_response(&app_handle, message_id, &content, true);
+                if let Some(reasoning_id) = reasoning_message_id {
+                    persist_response(&app_handle, reasoning_id, &reasoning, true);
+                    let _ = window.emit(
+                        format!("conversation_event_{conversation_id}").as_str(),
+                        ConversationEvent {
+                            r#type: "message_update".to_string(),
+                            data: serde_json::to_value(MessageUpdateEvent {
+                                message_id: reasoning_id,
+                                message_type: "reasoning".to_string(),
+                                content: reasoning.clone(),
+                                is_done: true,
+                                token_count: Some(((reasoning.chars().count() + 3) / 4) as i32),
+                                input_token_count: None,
+                                output_token_count: Some(((reasoning.chars().count() + 3) / 4) as i32),
+                                ttft_ms: None,
+                                tps: None,
+                            }).unwrap(),
+                        },
+                    );
+                }
+                let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(((content.chars().count()+3)/4) as i32), input_token_count: None, output_token_count: Some(((content.chars().count()+3)/4) as i32), ttft_ms: None, tps: None }).unwrap() };
+                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), done_event);
+                let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
+                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), complete_event);
+                if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_focus(&app_handle, conversation_id).await; }
+                snapshot.current_turn_id = None;
+                snapshot.has_active_prompt = false;
+                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+            }
+        }
+    }
+    info!(conversation_id, "Codex app-server session command channel closed");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_thread_id_from_v2_response() {
+        assert_eq!(thread_id_from_result(&json!({"thread":{"id":"thread-1"}})).as_deref(), Some("thread-1"));
+    }
+
+    #[test]
+    fn maps_command_item_without_numeric_id() {
+        let item = json!({"type":"commandExecution","id":"item-abc","command":"cargo check","cwd":"C:/repo","status":"inProgress"});
+        let (id, kind, title, input) = item_identity(&item);
+        assert_eq!(id, "item-abc");
+        assert_eq!(kind, "command");
+        assert_eq!(title.as_deref(), Some("cargo check"));
+        assert_eq!(input.unwrap()["cwd"], "C:/repo");
+        assert_eq!(activity_status(&item, "pending"), "executing");
+    }
+
+    #[test]
+    fn maps_codex_approval_decisions_to_protocol_responses() {
+        let params = json!({"availableDecisions":["accept","decline"]});
+        let options = codex_permission_options("item/commandExecution/requestApproval", &params);
+        assert_eq!(options.iter().map(|item| item.option_id.as_str()).collect::<Vec<_>>(), vec!["accept", "decline"]);
+        assert_eq!(
+            codex_approval_response(
+                "item/commandExecution/requestApproval",
+                &params,
+                AcpPermissionDecision::Selected("accept".to_string())
+            ),
+            json!({"decision":"accept"})
+        );
+        assert_eq!(
+            codex_approval_response(
+                "item/permissions/requestApproval",
+                &json!({"permissions":{"fileSystem":{"entries":[]}}}),
+                AcpPermissionDecision::Selected("acceptForSession".to_string())
+            )["scope"],
+            "session"
+        );
+    }
+
+    #[test]
+    fn merges_command_output_deltas_by_string_item_id() {
+        let mut items = HashMap::new();
+        let first = merge_activity_notification(
+            &mut items,
+            "item/commandExecution/outputDelta",
+            &json!({"itemId":"item-1","delta":"one\n"}),
+        )
+        .unwrap();
+        let second = merge_activity_notification(
+            &mut items,
+            "item/commandExecution/outputDelta",
+            &json!({"itemId":"item-1","delta":"two"}),
+        )
+        .unwrap();
+        assert_eq!(first["aggregatedOutput"], "one\n");
+        assert_eq!(second["aggregatedOutput"], "one\ntwo");
+    }
+}

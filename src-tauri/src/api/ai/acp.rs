@@ -730,6 +730,8 @@ pub(crate) struct AcpPermissionOptionPayload {
 pub(crate) struct AcpPermissionRequestEvent {
     pub(crate) request_id: String,
     pub(crate) conversation_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent_kind: Option<String>,
     pub(crate) tool_call_id: String,
     pub(crate) title: Option<String>,
     pub(crate) kind: Option<String>,
@@ -3568,6 +3570,7 @@ impl AcpClient for AcpTauriClient {
         let event = AcpPermissionRequestEvent {
             request_id: request_id.clone(),
             conversation_id: Some(self.conversation_id),
+            agent_kind: Some("acp".to_string()),
             tool_call_id: args.tool_call.tool_call_id.0.to_string(),
             title: args.tool_call.fields.title.clone(),
             kind,
@@ -5419,6 +5422,7 @@ mod tests {
                 AcpPermissionRequestEvent {
                     request_id: "request-1".to_string(),
                     conversation_id: Some(42),
+                    agent_kind: Some("acp".to_string()),
                     tool_call_id: "tool-1".to_string(),
                     title: Some("Read file".to_string()),
                     kind: Some("read_file".to_string()),

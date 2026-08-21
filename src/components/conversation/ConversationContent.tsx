@@ -3,7 +3,7 @@ import MessageList from "./MessageList";
 import VirtualizedMessageList from "./VirtualizedMessageList";
 import VirtuosoMessageList from "./VirtuosoMessageList";
 import NewChatComponent from "../NewChatComponent";
-import { Message, StreamEvent } from "../../data/Conversation";
+import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
 import type { InlineInteractionItem } from "../ConversationUI";
 
@@ -18,6 +18,7 @@ export interface ConversationContentProps {
     shiningMcpCallId: number | null;
     reasoningExpandStates: Map<number, boolean>;
     mcpToolCallStates: Map<number, any>;
+    agentActivities?: Map<string, AgentActivityEvent>;
     generationGroups: Map<string, any>;
     selectedVersions: Map<string, number>;
     getGenerationGroupControl: (message: Message) => any;
@@ -55,6 +56,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     shiningMcpCallId,
     reasoningExpandStates,
     mcpToolCallStates,
+    agentActivities = new Map(),
     generationGroups,
     selectedVersions,
     getGenerationGroupControl,
@@ -89,6 +91,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
         shiningMcpCallId,
         reasoningExpandStates,
         mcpToolCallStates,
+        agentActivities,
         generationGroups,
         selectedVersions,
         getGenerationGroupControl,

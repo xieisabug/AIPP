@@ -144,6 +144,22 @@ export interface MCPToolCallUpdateEvent {
     finished_time?: Date;
 }
 
+export interface AgentActivityEvent {
+    conversation_id: number;
+    response_message_id: number;
+    agent_kind: "codex_app_server" | "claude_sdk" | string;
+    session_id?: string | null;
+    item_id: string;
+    sequence: number;
+    kind: "tool" | "command" | "patch" | "approval" | "status" | "sub_agent" | string;
+    status: "pending" | "executing" | "success" | "failed" | "cancelled" | string;
+    title?: string | null;
+    input?: unknown;
+    output?: string | null;
+    error?: string | null;
+    metadata?: unknown;
+}
+
 export interface ConversationCancelEvent {
     conversation_id: number;
     cancelled_at: Date;

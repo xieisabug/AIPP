@@ -88,6 +88,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     const isCopilotProvider = apiType === "github_copilot";
     const isAcpProvider = apiType === "acp";
+    const isCodexAppServerProvider = apiType === "codex_app_server";
 
     // API 类型显示标签映射
     const apiTypeLabels: Record<string, string> = {
@@ -98,6 +99,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'deepseek': 'DeepSeek API',
         'github_copilot': 'GitHub Copilot',
         'acp': 'ACP(Agent Client Protocol)',
+        'codex_app_server': 'Codex（原生 app-server）',
     };
     const apiTypeLabel = apiTypeLabels[apiType] || apiType;
 
@@ -145,6 +147,12 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             acp_claude_env_vars: "",
             acp_codex_auth_mode: "codex_config_toml",
             acp_codex_env_vars: "",
+            codex_cli_command: "codex",
+            codex_additional_args: "",
+            codex_approval_policy: "on-request",
+            codex_sandbox: "workspace-write",
+            acp_working_directory: "",
+            acp_env_vars: "",
         }),
         [],
     );
@@ -522,6 +530,84 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         value: "",
                         customRender: () =>
                             renderProxyAdvancedConfig("启用后将使用全局网络代理配置进行模型请求"),
+                    },
+                },
+            ];
+        }
+
+        if (isCodexAppServerProvider) {
+            return [
+                {
+                    key: "apiType",
+                    config: {
+                        type: "static" as const,
+                        label: "提供商类型",
+                        value: "Codex（原生 app-server）",
+                    },
+                },
+                {
+                    key: "codex_cli_command",
+                    config: {
+                        type: "input" as const,
+                        label: "Codex CLI 命令",
+                        value: "codex",
+                        placeholder: "codex 或绝对路径",
+                        tooltip: "直接启动官方 codex app-server，不需要 codex-acp 适配器",
+                    },
+                },
+                {
+                    key: "acp_working_directory",
+                    config: {
+                        type: "input" as const,
+                        label: "默认工作目录",
+                        value: "",
+                        placeholder: "留空时使用用户目录",
+                    },
+                },
+                {
+                    key: "codex_approval_policy",
+                    config: {
+                        type: "select" as const,
+                        label: "审批策略",
+                        value: "on-request",
+                        options: [
+                            { value: "on-request", label: "按需询问" },
+                            { value: "never", label: "从不询问" },
+                            { value: "untrusted", label: "不可信操作询问" },
+                        ],
+                    },
+                },
+                {
+                    key: "codex_sandbox",
+                    config: {
+                        type: "select" as const,
+                        label: "沙箱模式",
+                        value: "workspace-write",
+                        options: [
+                            { value: "read-only", label: "只读" },
+                            { value: "workspace-write", label: "工作区可写" },
+                            { value: "danger-full-access", label: "完全访问" },
+                        ],
+                    },
+                },
+                {
+                    key: "codex_additional_args",
+                    config: {
+                        type: "input" as const,
+                        label: "额外启动参数",
+                        value: "",
+                        placeholder: "例如 --enable collaboration_modes",
+                    },
+                },
+                {
+                    key: "acp_env_vars",
+                    config: {
+                        type: "textarea" as const,
+                        label: "环境变量（JSON）",
+                        value: "",
+                        className: "min-h-24",
+                        placeholder: '{"OPENAI_BASE_URL":"..."}',
+                        tooltip: "默认复用 ~/.codex 登录态；这里只填写需要覆盖的环境变量",
                     },
                 },
             ];
@@ -943,7 +1029,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, codexAuthMode]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, codexAuthMode]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

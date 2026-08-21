@@ -24,6 +24,7 @@ import {
     AcpConversationSessionState,
     AcpSessionConfigChoice,
     AcpSessionConfigOption,
+    AgentActivityEvent,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -552,6 +553,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setShiningMessageIds,
             setManualShineMessage,
             mcpToolCallStates,
+            agentActivities,
             shiningMcpCallId,
             runtimeState,
             updateShiningMessages,
@@ -755,6 +757,34 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
         });
+        const displayAgentActivities = useMemo(() => {
+            const combined = new Map<string, AgentActivityEvent>();
+            for (const message of allDisplayMessages) {
+                if (!message.metadata_json) continue;
+                try {
+                    const metadata = JSON.parse(message.metadata_json) as {
+                        agent_activities?: AgentActivityEvent[];
+                    };
+                    for (const activity of metadata.agent_activities ?? []) {
+                        if (!activity?.item_id || !activity.agent_kind) continue;
+                        const key = `${activity.agent_kind}:${activity.session_id ?? ""}:${activity.item_id}`;
+                        const existing = combined.get(key);
+                        if (!existing || existing.sequence < activity.sequence) {
+                            combined.set(key, activity);
+                        }
+                    }
+                } catch {
+                    // Other message metadata is allowed to be non-Agent JSON.
+                }
+            }
+            for (const [key, activity] of agentActivities) {
+                const existing = combined.get(key);
+                if (!existing || existing.sequence < activity.sequence) {
+                    combined.set(key, activity);
+                }
+            }
+            return combined;
+        }, [agentActivities, allDisplayMessages]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -1792,6 +1822,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 shiningMcpCallId={shiningMcpCallId}
                                 reasoningExpandStates={reasoningExpandStates}
                                 mcpToolCallStates={mcpToolCallStates}
+                                agentActivities={displayAgentActivities}
                                 generationGroups={messageGroupsData.generationGroups}
                                 selectedVersions={messageGroupsData.selectedVersions}
                                 getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}

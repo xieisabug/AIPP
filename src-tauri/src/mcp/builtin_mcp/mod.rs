@@ -2851,6 +2851,7 @@ mod tests {
             event: AcpPermissionRequestEvent {
                 request_id: "req-2".to_string(),
                 conversation_id: Some(1),
+                agent_kind: Some("acp".to_string()),
                 tool_call_id: "tool-1".to_string(),
                 title: Some("Run shell command".to_string()),
                 kind: Some("bash".to_string()),
@@ -2878,6 +2879,7 @@ mod tests {
             event: AcpPermissionRequestEvent {
                 request_id: "req-3".to_string(),
                 conversation_id: Some(1),
+                agent_kind: Some("acp".to_string()),
                 tool_call_id: "tool-2".to_string(),
                 title: Some("Tool permission".to_string()),
                 kind: Some("tool".to_string()),
