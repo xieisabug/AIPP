@@ -66,6 +66,7 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
     return {
         ...state,
         conversation_id: state.conversation_id ?? state.conversationId,
+        agent_kind: state.agent_kind ?? state.agentKind ?? "acp",
         session_id: state.session_id ?? state.sessionId ?? null,
         updated_at: state.updated_at ?? state.updatedAt ?? null,
         load_session_supported: state.load_session_supported ?? state.loadSessionSupported ?? false,

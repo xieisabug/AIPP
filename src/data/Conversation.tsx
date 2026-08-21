@@ -274,6 +274,7 @@ export interface AcpAvailableCommand {
 
 export interface AcpConversationSessionState {
     conversation_id: number;
+    agent_kind?: "acp" | "codex_app_server" | string;
     session_id?: string | null;
     title?: string | null;
     updated_at?: string | null;

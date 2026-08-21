@@ -8,6 +8,10 @@ use crate::api::operation_api::{
 };
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::errors::AppError;
+use crate::mcp::builtin_mcp::interaction::{
+    request_ask_user_question, AskUserQuestionItem, AskUserQuestionMetadata,
+    AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
+};
 use crate::state::activity_state::ConversationActivityManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -39,6 +43,9 @@ pub struct CodexConversationSessionState {
     pub conversation_id: i64,
     pub agent_kind: String,
     pub session_id: Option<String>,
+    pub load_session_supported: bool,
+    pub session_resume_supported: bool,
+    pub restored_session_method: Option<String>,
     pub current_turn_id: Option<String>,
     pub has_active_prompt: bool,
     pub model: Option<String>,
@@ -347,6 +354,146 @@ async fn handle_approval_request(
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CodexTurnUsage {
+    input_tokens: i32,
+    output_tokens: i32,
+    total_tokens: i32,
+}
+
+fn codex_user_input_request(
+    params: &Value,
+) -> Result<(AskUserQuestionRequest, Vec<(String, String, bool)>), String> {
+    let questions = params
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or("Codex requestUserInput is missing questions")?;
+    let mut mappings = Vec::with_capacity(questions.len());
+    let mut converted = Vec::with_capacity(questions.len());
+    for question in questions {
+        let id = question
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("Codex requestUserInput question is missing id")?
+            .to_string();
+        let text = question
+            .get("question")
+            .and_then(Value::as_str)
+            .ok_or("Codex requestUserInput question is missing question")?
+            .to_string();
+        let header = question
+            .get("header")
+            .and_then(Value::as_str)
+            .unwrap_or("Codex")
+            .to_string();
+        let options = question
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        Some(AskUserQuestionOption {
+                            label: option.get("label")?.as_str()?.to_string(),
+                            description: option
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("选择此项")
+                                .to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let multi_select = question
+            .get("multiSelect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        mappings.push((id, text.clone(), multi_select));
+        converted.push(AskUserQuestionItem {
+            question: text,
+            header,
+            options,
+            multi_select,
+            is_secret: question
+                .get("isSecret")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    Ok((
+        AskUserQuestionRequest {
+            questions: converted,
+            answers: None,
+            metadata: Some(AskUserQuestionMetadata {
+                source: Some("codex_app_server".to_string()),
+            }),
+        },
+        mappings,
+    ))
+}
+
+fn codex_user_input_response(
+    mappings: &[(String, String, bool)],
+    answers: &HashMap<String, String>,
+) -> Value {
+    let answers = mappings
+        .iter()
+        .filter_map(|(id, question, multi_select)| {
+            let answer = answers.get(question)?.trim();
+            if answer.is_empty() {
+                return None;
+            }
+            let values = if *multi_select {
+                answer
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            } else {
+                vec![answer.to_string()]
+            };
+            Some((id.clone(), json!({"answers": values})))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    json!({"answers": answers})
+}
+
+async fn handle_server_request(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    stdin: &mut tokio::process::ChildStdin,
+    frame: &Value,
+) -> Result<bool, String> {
+    if handle_approval_request(app_handle, conversation_id, stdin, frame).await? {
+        return Ok(true);
+    }
+    if frame.get("method").and_then(Value::as_str) != Some("item/tool/requestUserInput") {
+        return Ok(false);
+    }
+    let rpc_id = frame.get("id").cloned().ok_or("Codex requestUserInput missing id")?;
+    let params = frame.get("params").cloned().unwrap_or(Value::Null);
+    let (request, mappings) = codex_user_input_request(&params)?;
+    let interaction_state = app_handle.state::<InteractionState>();
+    let result = match request_ask_user_question(
+        app_handle,
+        &interaction_state,
+        Some(conversation_id),
+        request,
+    )
+    .await
+    {
+        Ok(answers) => codex_user_input_response(&mappings, &answers),
+        Err(error) => {
+            warn!(conversation_id, error = %error, "Codex requestUserInput was cancelled");
+            json!({"answers": {}})
+        }
+    };
+    write_frame(stdin, &json!({"jsonrpc":"2.0","id":rpc_id,"result":result})).await?;
+    Ok(true)
+}
+
 async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<(), String> {
     let mut bytes = serde_json::to_vec(frame).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
@@ -366,7 +513,12 @@ async fn read_rpc_response_with_approvals(
         let frame: Value = serde_json::from_str(&line)
             .map_err(|error| format!("Invalid Codex app-server JSON: {error}: {line}"))?;
         if frame.get("method").is_some() && frame.get("id").is_some() {
-            if !handle_approval_request(app_handle, conversation_id, stdin, &frame).await? {
+            if !handle_server_request(app_handle, conversation_id, stdin, &frame).await? {
+                warn!(
+                    conversation_id,
+                    method = frame.get("method").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                    "Unsupported Codex server request"
+                );
                 write_frame(
                     stdin,
                     &json!({
@@ -464,16 +616,30 @@ fn merge_activity_notification(
         "item/commandExecution/outputDelta"
             | "item/fileChange/outputDelta"
             | "item/fileChange/patchUpdated"
+            | "item/mcpToolCall/progress"
+            | "item/plan/delta"
     ) {
         let item_id = params.get("itemId")?.as_str()?.to_string();
-        let kind = if method.contains("fileChange") { "fileChange" } else { "commandExecution" };
+        let kind = if method.contains("fileChange") {
+            "fileChange"
+        } else if method.contains("mcpToolCall") {
+            "mcpToolCall"
+        } else if method.contains("plan") {
+            "plan"
+        } else {
+            "commandExecution"
+        };
         let item = items
             .entry(item_id.clone())
             .or_insert_with(|| json!({"id":item_id,"type":kind}));
         let object = item.as_object_mut()?;
         if let Some(patch) = params.get("patch") {
             object.insert("aggregatedOutput".to_string(), patch.clone());
-        } else if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+        } else if let Some(delta) = params
+            .get("delta")
+            .or_else(|| params.get("message"))
+            .and_then(Value::as_str)
+        {
             let previous = object
                 .get("aggregatedOutput")
                 .and_then(Value::as_str)
@@ -483,6 +649,29 @@ fn merge_activity_notification(
         return Some(item.clone());
     }
     None
+}
+
+fn generic_item_notification(method: &str, params: &Value) -> Option<Value> {
+    if !method.starts_with("item/") {
+        return None;
+    }
+    let item_id = params.get("itemId").and_then(Value::as_str)?;
+    Some(json!({
+        "id": item_id,
+        "type": method.strip_prefix("item/").unwrap_or(method),
+        "status": "inProgress",
+        "notificationMethod": method,
+        "notificationParams": params,
+    }))
+}
+
+fn codex_turn_usage(params: &Value) -> Option<CodexTurnUsage> {
+    let last = params.pointer("/tokenUsage/last")?;
+    Some(CodexTurnUsage {
+        input_tokens: last.get("inputTokens")?.as_i64()?.try_into().ok()?,
+        output_tokens: last.get("outputTokens")?.as_i64()?.try_into().ok()?,
+        total_tokens: last.get("totalTokens")?.as_i64()?.try_into().ok()?,
+    })
 }
 
 /// 取 item 首次出现时已输出的正文字符数（Unicode 字符计），后续更新沿用同一偏移
@@ -574,15 +763,26 @@ fn persist_activity(app_handle: &tauri::AppHandle, message_id: i64, activity: &A
     }
 }
 
-fn persist_response(app_handle: &tauri::AppHandle, message_id: i64, content: &str, done: bool) {
+fn persist_response(
+    app_handle: &tauri::AppHandle,
+    message_id: i64,
+    content: &str,
+    done: bool,
+    usage: Option<CodexTurnUsage>,
+) {
     if let Ok(db) = ConversationDatabase::new(app_handle) {
         if let Ok(repo) = db.message_repo() {
             let _ = repo.update_content(message_id, content);
             if done {
                 if let Ok(Some(mut message)) = repo.read(message_id) {
                     message.finish_time = Some(chrono::Utc::now());
-                    message.output_token_count = ((content.chars().count() + 3) / 4) as i32;
-                    message.token_count = message.output_token_count;
+                    message.input_token_count = usage.map(|value| value.input_tokens).unwrap_or(0);
+                    message.output_token_count = usage
+                        .map(|value| value.output_tokens)
+                        .unwrap_or_else(|| ((content.chars().count() + 3) / 4) as i32);
+                    message.token_count = usage
+                        .map(|value| value.total_tokens)
+                        .unwrap_or(message.output_token_count);
                     let _ = repo.update(&message);
                 }
             }
@@ -709,7 +909,7 @@ async fn run_session(
         ("thread/start", thread_params.clone())
     };
     write_frame(&mut stdin, &json_rpc_request(request_id, thread_method, params)).await?;
-    let thread_result = match read_rpc_response_with_approvals(
+    let (thread_result, restored_session_method) = match read_rpc_response_with_approvals(
         &app_handle,
         conversation_id,
         &mut stdin,
@@ -718,12 +918,15 @@ async fn run_session(
         &mut pending_notifications,
     )
     .await {
-        Ok(result) => result,
+        Ok(result) => (
+            result,
+            stored_thread.as_ref().map(|_| "resume".to_string()),
+        ),
         Err(error) if stored_thread.is_some() => {
             warn!(conversation_id, error = %error, "Codex thread resume failed; starting a new thread");
             request_id += 1;
             write_frame(&mut stdin, &json_rpc_request(request_id, "thread/start", thread_params)).await?;
-            read_rpc_response_with_approvals(
+            let result = read_rpc_response_with_approvals(
                 &app_handle,
                 conversation_id,
                 &mut stdin,
@@ -731,7 +934,8 @@ async fn run_session(
                 request_id,
                 &mut pending_notifications,
             )
-            .await?
+            .await?;
+            (result, None)
         }
         Err(error) => return Err(error),
     };
@@ -745,6 +949,9 @@ async fn run_session(
         conversation_id,
         agent_kind: CODEX_APP_SERVER_API_TYPE.to_string(),
         session_id: Some(thread_id.clone()),
+        load_session_supported: false,
+        session_resume_supported: true,
+        restored_session_method,
         current_turn_id: None,
         has_active_prompt: false,
         model: config.model.clone(),
@@ -787,6 +994,8 @@ async fn run_session(
                 let mut content = String::new();
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
+                let mut turn_usage: Option<CodexTurnUsage> = None;
+                let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
                 // 记录每个 item 开始时的正文字符数，供前端把活动卡片穿插到正文对应位置
@@ -824,13 +1033,18 @@ async fn run_session(
                         }
                     };
                     if frame.get("id").is_some() && frame.get("method").is_some() {
-                        if !handle_approval_request(
+                        if !handle_server_request(
                             &app_handle,
                             conversation_id,
                             &mut stdin,
                             &frame,
                         )
                         .await? {
+                            warn!(
+                                conversation_id,
+                                method = frame.get("method").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                                "Unsupported Codex server request"
+                            );
                             write_frame(
                                 &mut stdin,
                                 &json!({
@@ -853,7 +1067,7 @@ async fn run_session(
                                 "item/agentMessage/delta" => {
                                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
                                         content.push_str(delta);
-                                        persist_response(&app_handle, message_id, &content, false);
+                                        persist_response(&app_handle, message_id, &content, false, None);
                                         let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
                                         let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
                                         if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await; }
@@ -886,7 +1100,7 @@ async fn run_session(
                                             }
                                         }
                                         if let Some(reasoning_id) = reasoning_message_id {
-                                            persist_response(&app_handle, reasoning_id, &reasoning, false);
+                                            persist_response(&app_handle, reasoning_id, &reasoning, false, None);
                                             let event = ConversationEvent {
                                                 r#type: "message_update".to_string(),
                                                 data: serde_json::to_value(MessageUpdateEvent {
@@ -912,24 +1126,45 @@ async fn run_session(
                                         emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
                                     }
                                 }
-                                "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" => {
+                                "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" | "item/mcpToolCall/progress" | "item/plan/delta" => {
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
                                         emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
                                     }
                                 }
-                                "turn/completed" => break,
+                                "thread/tokenUsage/updated" => {
+                                    turn_usage = codex_turn_usage(&params).or(turn_usage);
+                                }
+                                "turn/completed" => {
+                                    let turn = params.get("turn").unwrap_or(&params);
+                                    if turn.get("status").and_then(Value::as_str) == Some("failed") {
+                                        turn_error = turn
+                                            .pointer("/error/message")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string)
+                                            .or_else(|| Some("Codex turn failed".to_string()));
+                                    }
+                                    break;
+                                },
                                 "error" => {
                                     let message = params.get("message").and_then(Value::as_str).unwrap_or("Codex app-server error");
                                     return Err(message.to_string());
                                 }
-                                _ => {}
+                                _ => {
+                                    if let Some(item) = generic_item_notification(method, &params) {
+                                        sequence += 1;
+                                        let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
+                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                    } else if !method.is_empty() {
+                                        warn!(conversation_id, method, "Unhandled Codex notification");
+                                    }
+                                }
                     }
                     }
-                persist_response(&app_handle, message_id, &content, true);
+                persist_response(&app_handle, message_id, &content, true, turn_usage);
                 if let Some(reasoning_id) = reasoning_message_id {
-                    persist_response(&app_handle, reasoning_id, &reasoning, true);
+                    persist_response(&app_handle, reasoning_id, &reasoning, true, None);
                     let _ = window.emit(
                         format!("conversation_event_{conversation_id}").as_str(),
                         ConversationEvent {
@@ -948,7 +1183,8 @@ async fn run_session(
                         },
                     );
                 }
-                let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(((content.chars().count()+3)/4) as i32), input_token_count: None, output_token_count: Some(((content.chars().count()+3)/4) as i32), ttft_ms: None, tps: None }).unwrap() };
+                let estimated_output_tokens = ((content.chars().count() + 3) / 4) as i32;
+                let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(turn_usage.map(|usage| usage.total_tokens).unwrap_or(estimated_output_tokens)), input_token_count: turn_usage.map(|usage| usage.input_tokens), output_token_count: Some(turn_usage.map(|usage| usage.output_tokens).unwrap_or(estimated_output_tokens)), ttft_ms: None, tps: None }).unwrap() };
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), done_event);
                 let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), complete_event);
@@ -956,6 +1192,9 @@ async fn run_session(
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;
                 emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                if let Some(error) = turn_error {
+                    return Err(error);
+                }
             }
         }
     }
@@ -1021,6 +1260,67 @@ mod tests {
             )["scope"],
             "session"
         );
+    }
+
+    #[test]
+    fn maps_codex_request_user_input_to_aipp_and_back() {
+        let params = json!({
+            "questions": [
+                {
+                    "id": "scope",
+                    "header": "范围",
+                    "question": "选择范围",
+                    "options": [
+                        {"label": "当前文件", "description": "只处理当前文件"},
+                        {"label": "全部文件", "description": "处理所有文件"}
+                    ]
+                },
+                {
+                    "id": "note",
+                    "header": "备注",
+                    "question": "补充说明",
+                    "options": null,
+                    "isSecret": true
+                }
+            ]
+        });
+        let (request, mappings) = codex_user_input_request(&params).unwrap();
+        assert_eq!(request.questions.len(), 2);
+        assert!(request.questions[1].options.is_empty());
+        assert!(request.questions[1].is_secret);
+
+        let answers = HashMap::from([
+            ("选择范围".to_string(), "全部文件".to_string()),
+            ("补充说明".to_string(), "仅测试".to_string()),
+        ]);
+        let response = codex_user_input_response(&mappings, &answers);
+        assert_eq!(response["answers"]["scope"]["answers"], json!(["全部文件"]));
+        assert_eq!(response["answers"]["note"]["answers"], json!(["仅测试"]));
+    }
+
+    #[test]
+    fn reads_exact_turn_usage_and_degrades_unknown_item_notification() {
+        let usage = codex_turn_usage(&json!({
+            "tokenUsage": {
+                "last": {"inputTokens": 12, "outputTokens": 7, "totalTokens": 19}
+            }
+        }));
+        assert_eq!(
+            usage,
+            Some(CodexTurnUsage {
+                input_tokens: 12,
+                output_tokens: 7,
+                total_tokens: 19,
+            })
+        );
+
+        let item = generic_item_notification(
+            "item/futureFeature/progress",
+            &json!({"itemId":"future-1","value":42}),
+        )
+        .unwrap();
+        assert_eq!(item["id"], "future-1");
+        assert_eq!(item["type"], "futureFeature/progress");
     }
 
     #[test]

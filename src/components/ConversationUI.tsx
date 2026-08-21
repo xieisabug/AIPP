@@ -627,10 +627,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [streamingMessages]);
 
         useEffect(() => {
+            const isNativeCodex = acpSessionState?.agent_kind === "codex_app_server";
             const canRestoreAcpSession =
                 acpSessionState?.load_session_supported ||
                 acpSessionState?.session_resume_supported;
-            if (!acpSessionState?.session_id || canRestoreAcpSession) {
+            if (isNativeCodex || !acpSessionState?.session_id || canRestoreAcpSession) {
                 return;
             }
 
@@ -646,6 +647,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [
             acpSessionState?.load_session_supported,
             acpSessionState?.session_resume_supported,
+            acpSessionState?.agent_kind,
             acpSessionState?.session_id,
             conversationId,
         ]);
@@ -1532,6 +1534,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     </div>
                                 ) : null}
                                 {acpSessionState?.session_id &&
+                                    acpSessionState.agent_kind !== "codex_app_server" &&
                                     !(
                                         acpSessionState.load_session_supported ||
                                         acpSessionState.session_resume_supported

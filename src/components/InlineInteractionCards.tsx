@@ -25,6 +25,7 @@ export interface AskUserQuestionItem {
     header: string;
     options: AskUserQuestionOption[];
     multiSelect: boolean;
+    isSecret?: boolean;
 }
 
 export interface AskUserQuestionMetadata {
@@ -108,6 +109,9 @@ export function AskUserQuestionCard({
     }, [request, isOpen]);
 
     const isQuestionAnswered = (index: number) => {
+        if (request?.questions[index]?.options.length === 0) {
+            return Boolean((otherInputs[index] ?? "").trim());
+        }
         const values = selectedAnswers[index] ?? [];
         if (values.length === 0) return false;
         if (values.includes(OTHER_OPTION_VALUE)) {
@@ -164,6 +168,10 @@ export function AskUserQuestionCard({
         const answers: Record<string, string> = {};
 
         request.questions.forEach((question, index) => {
+            if (question.options.length === 0) {
+                answers[question.question] = (otherInputs[index] ?? "").trim();
+                return;
+            }
             const values = selectedAnswers[index] ?? [];
             const resolved = values
                 .map((value) => {
@@ -188,6 +196,7 @@ export function AskUserQuestionCard({
     const hasMultipleQuestions = request.questions.length > 1;
 
     const renderQuestionContent = (question: AskUserQuestionItem, index: number) => {
+        const isFreeform = question.options.length === 0;
         const selected = selectedAnswers[index] ?? [];
         const includesOther = selected.includes(OTHER_OPTION_VALUE);
         const options = [
@@ -209,7 +218,20 @@ export function AskUserQuestionCard({
                     {question.question}
                 </div>
                 <div className="max-h-[30vh] pr-2 overflow-y-auto">
-                    {question.multiSelect ? (
+                    {isFreeform ? (
+                        <Input
+                            type={question.isSecret ? "password" : "text"}
+                            value={otherInputs[index] ?? ""}
+                            disabled={readOnly}
+                            onChange={(event) =>
+                                setOtherInputs((prev) => ({
+                                    ...prev,
+                                    [index]: event.target.value,
+                                }))
+                            }
+                            placeholder="请输入答案"
+                        />
+                    ) : question.multiSelect ? (
                         <div className="space-y-2">
                             {options.map((option) => {
                                 const optionValue = option.label;

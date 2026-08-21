@@ -350,6 +350,7 @@ mod tests {
                         },
                     ],
                     multi_select: false,
+                    is_secret: false,
                 },
                 AskUserQuestionItem {
                     question: "选择输出格式".to_string(),
@@ -365,6 +366,7 @@ mod tests {
                         },
                     ],
                     multi_select: true,
+                    is_secret: false,
                 },
             ],
             metadata: None,
@@ -461,6 +463,7 @@ mod tests {
                     },
                 ],
                 multi_select: false,
+                is_secret: false,
             },
             AskUserQuestionItem {
                 question: "选择输出格式".to_string(),
@@ -476,6 +479,7 @@ mod tests {
                     },
                 ],
                 multi_select: true,
+                is_secret: false,
             },
         ];
         let form_value = Map::from_iter([

@@ -107,11 +107,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     // ACP CLI 命令选项
     // 注意：大多数 AI 需要安装专门的 ACP 适配器
     // - Claude Code: npm install -g @zed-industries/claude-code-acp -> 命令 claude-code-acp
-    // - Codex: npm install -g @zed-industries/codex-acp -> 命令 codex-acp  
     // - Gemini: 原生支持 ACP，直接使用 gemini 命令
     const acpCliOptions = [
         { value: "claude-code-acp", label: "Claude Code (需安装 @zed-industries/claude-code-acp)" },
-        { value: "codex-acp", label: "Codex (需安装 @zed-industries/codex-acp)" },
         { value: "gemini", label: "Gemini CLI (原生支持)" },
     ];
 
@@ -146,8 +144,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             acp_cli_command: "",
             acp_claude_auth_mode: "claude_settings",
             acp_claude_env_vars: "",
-            acp_codex_auth_mode: "codex_config_toml",
-            acp_codex_env_vars: "",
             codex_cli_command: "codex",
             codex_additional_args: "",
             codex_approval_policy: "on-request",
@@ -172,7 +168,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     // 监听 ACP CLI 命令变化
     const acpCliCommand = form.watch("acp_cli_command");
     const claudeAuthMode = form.watch("acp_claude_auth_mode") || "claude_settings";
-    const codexAuthMode = form.watch("acp_codex_auth_mode") || "codex_config_toml";
 
     // ACP 环境检测 Hook
     const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
@@ -226,8 +221,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             acp_cli_command: "",
             acp_claude_auth_mode: "claude_settings",
             acp_claude_env_vars: "",
-            acp_codex_auth_mode: "codex_config_toml",
-            acp_codex_env_vars: "",
         });
         setTags([]);
         setHasApiKey(false);
@@ -554,7 +547,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         label: "Codex CLI 命令",
                         value: "codex",
                         placeholder: "codex 或绝对路径",
-                        tooltip: "直接启动官方 codex app-server，不需要 codex-acp 适配器",
+                        tooltip: "启动 Codex app-server 使用的 CLI 命令或绝对路径",
                     },
                 },
                 {
@@ -718,50 +711,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                             : []),
                     ]
                     : []),
-                ...(acpCliCommand === "codex-acp"
-                    ? [
-                        {
-                            key: "acp_codex_auth_mode",
-                            config: {
-                                type: "radio" as const,
-                                label: "Codex 认证来源",
-                                value: "codex_config_toml",
-                                tooltip: "决定 codex-acp 启动时如何准备 Codex 配置和认证环境变量",
-                                options: [
-                                    {
-                                        value: "codex_config_toml",
-                                        label: "自动读取 ~/.codex/config.toml",
-                                        tooltip:
-                                            "使用 Codex 的本地配置目录，并读取 config.toml 中可选的 [env] 环境变量表",
-                                    },
-                                    {
-                                        value: "env_vars",
-                                        label: "手动填写环境变量",
-                                        tooltip:
-                                            "在下方按 KEY=VALUE 每行一条填写，将在启动 codex-acp 时注入",
-                                    },
-                                ],
-                            },
-                        },
-                        ...(codexAuthMode === "env_vars"
-                            ? [
-                                {
-                                    key: "acp_codex_env_vars",
-                                    config: {
-                                        type: "textarea" as const,
-                                        label: "Codex 环境变量",
-                                        value: "",
-                                        className: "min-h-32",
-                                        placeholder:
-                                            "OPENAI_API_KEY=sk-...\nOPENAI_BASE_URL=https://api.openai.com/v1",
-                                        tooltip:
-                                            "每行一个 KEY=VALUE；仅在“手动填写环境变量”模式下生效",
-                                    },
-                                },
-                            ]
-                            : []),
-                    ]
-                    : []),
                 {
                     key: "advanced_config",
                     config: {
@@ -823,7 +772,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, codexAuthMode, acpEnv, codexEnv]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

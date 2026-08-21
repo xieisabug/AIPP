@@ -1209,11 +1209,6 @@ fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
             false,
             "需要设置 ANTHROPIC_API_KEY 环境变量".to_string(),
         ),
-        "codex-acp" => (
-            "@zed-industries/codex-acp".to_string(),
-            false,
-            "需要设置 OPENAI_API_KEY 环境变量".to_string(),
-        ),
         // 官方 Codex CLI：可通过任意方式安装（npm/brew/bun），检测以实际运行为准；
         // requires_external_install=false 表示支持通过 Bun 一键安装
         "codex" => (

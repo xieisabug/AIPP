@@ -31,7 +31,7 @@
 
 经源码核实（2026-08-20），当前 ACP 通道的实际进程模型是：
 
-- AIPP spawn 的是 **zed 适配器进程**（`@zed-industries/claude-code-acp` / `codex-acp`，`acp.rs:4177`），而非用户本机的 `claude` / `codex` 二进制。适配器包内部自带 `@anthropic-ai/claude-code` SDK，不依赖用户安装的官方 CLI——用户只装官方 `claude` 而不装适配器时，AIPP 会报错提示 `bun add -g @zed-industries/claude-code-acp`（`acp.rs:4181`）。
+- ACP 通道启动配置的 CLI 由提供商配置决定；原生 Codex 使用独立的 app-server 通道。
 - **认证配置确实复用本机**：默认读 `~/.claude/settings.json`（`acp.rs:439`）与 `~/.codex/config.toml`（`acp.rs:395`），但这只是配置层面的复用。
 - 全仓库无 `stream-json` / `app-server` / `--output-format` 的任何实现，官方直连协议路径完全不存在。
 
@@ -48,7 +48,7 @@
 现有 ACP 通道的关键事实（详细调查结论见本节，行号以调查时为准）：
 
 - **通道身份由 `assistant_type == 4` 决定**，不是 api_type：`ask_ai` 在 `src-tauri/src/api/ai_api.rs:1244` 按 `assistant_type == Some(4)` 分发到 ACP 分支（:1246-1411），`cancel_ai` 在 :2719-2736 有平行分发。
-- 同一 `api_type = 'acp'` 下用 `acp_cli_command`（claude-code-acp / codex-acp / gemini）区分具体 agent；后端进程层（`acp.rs`，约 5700 行）已是 CLI 无关的通用 ACP 客户端。**注意：claude-code-acp / codex-acp 是 zed 适配器包，驱动的是适配器自带 SDK，不是用户本机的官方 CLI**（详见 §1.2.1）。
+- 同一 `api_type = 'acp'` 下用 `acp_cli_command` 区分具体 agent；后端进程层（`acp.rs`）是 CLI 无关的通用 ACP 客户端。
 - 会话模型：`AcpSessionState`（`src-tauri/src/lib.rs:250`）按 `conversation_id` 持有长驻会话；`AcpSessionEntry { handle, snapshot, last_activity, config_signature, run_id }`（`acp.rs:906`）；命令枚举 `AcpSessionCommand::{Start, Prompt, CancelCurrentPrompt, SetConfigOption}`（`acp.rs:826`）。
 - 快照事件：`AcpConversationSessionState`（`acp.rs:800`）经 `acp_session_state_snapshot` 推前端；前端监听在 `src/hooks/useConversationEvents.ts:953`，UI 在 `src/components/ConversationUI.tsx:1131-1580`。
 - 权限：`AcpPermissionState`（`acp.rs:521`）+ `acp-permission-request` 事件 + `confirm_acp_permission`（`operation_api.rs:164`）；飞书审批回流经 `feishu/api.rs:711`、`feishu/events.rs:296/565/595`。
@@ -283,7 +283,7 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 - 生命周期：`initialize` → `thread/start`（或 `thread/resume` 带 thread_id）→ `turn/started`、`item/*` 增量通知、`turn/completed`；`thread/read` 取历史；另有 `thread/fork`、`thread/rollback`、`thread/inject_items`、`thread/goal/set`。
 - 审批：exec/patch/mcp 审批请求以 JSON-RPC server→client request 形式到达（这是选 app-server 而非 `codex exec` 的原因），客户端回 allow/deny。
 - 用量：`thread/tokenUsage/updated` 通知。
-- 认证：复用现有 `acp_codex_auth_mode` 双模式（`codex_config_toml` 读 `~/.codex/config.toml` 注入 `CODEX_HOME` / env_vars 注入 `OPENAI_*`）。
+- 认证：原生 Codex app-server 使用其独立的配置与认证设置。
 - model：`thread/start` 参数或 `config` 相关方法指定。
 
 ### 5.2 实现清单
@@ -318,7 +318,7 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 
 - **修复 gemini 现状缺陷**：当前后端对 `gemini` 无启动参数特判，`--experimental-acp` 需用户手填 `acp_additional_args` 才能工作。改为后端按 CLI 自动带默认启动参数（用户配置可覆盖）。
 - **引入 per-agent 启动预设表**：参照 Paseo `packages/app/src/data/acp-provider-catalog.ts`（约 40 家：`gemini --experimental-acp`、`opencode acp`、`kimi`/`kiro`/`trae`/`copilot`/`cursor` 等各家 `acp` 子命令或 `--acp` 参数），把 `acpCliOptions`（`LLMProviderConfigForm.tsx:109`）从 3 项硬编码扩展为预设目录：每项含 CLI 命令、默认启动参数、认证提示文案、环境检测方式。后端 `acp.rs` 已有"任意 ACP CLI 字符串可用"的通用路径（`acp.rs:4829`），扩展主要是预设表 + 各家认证/env 特判的补齐。
-- **zed 适配器选项保留为 legacy**：`claude-code-acp` / `codex-acp` 在 acp provider 下继续可选（存量用户配置不破坏），UI 标注"推荐改用原生通道"（见 §9.6）。
+- ACP 提供商配置仅展示仍受支持的 ACP CLI；Codex 使用原生通道。
 - 扩展节奏建议放 M3，每个新 agent 的验收标准 = 能通过预设一键配好并完成一轮对话。
 
 ## 7. 测试计划
@@ -361,7 +361,7 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 3. **权限双轨**：Claude 通道的 canUseTool 是工具级审批，与 ACP 的 fs/terminal 桥接到内置 operation 工具的语义不同——UI 文案需区分，避免用户困惑。
 4. **`confirm_acp_permission` 命名**：若评审决定改为通用 `confirm_agent_permission`，需要旧命令别名兼容（前端、飞书回流、Butler MCP 内调用点 `mcp/builtin_mcp/mod.rs:2121`）。
 5. **开放问题**：快照事件是否改名（`acp_session_state_snapshot` → `agent_session_state_snapshot` 并保留旧事件一个版本周期）？`AcpConversationSessionState` 类型是否随 `agent_kind` 拆判别联合？建议 M1 评审时定。
-6. **zed 适配器的去留**：`claude-code-acp` / `codex-acp` 保留为 acp provider 下的 legacy 选项，不下线、不迁移存量用户配置；UI 标注"推荐改用原生通道"。长期是否移除，待原生通道覆盖度验证后再评估。
+6. **通道边界**：Codex 走原生 app-server，ACP 保持通用 ACP agent 支持。
 7. **原生活动与 MCP 的边界**：当前 MCP 卡片视觉可以复用，但 MCP 表/执行 API 不能作为外部 agent item 的通用存储，否则会暴露错误的执行/停止/重试行为。M0 使用独立 Agent Activity 持久化；`McpToolCall` 与 Agent Activity 都适配到共享的只展示 `ToolActivityCard`。
 8. **协议版本核验**：Codex app-server 的方法名、通知名、审批 request schema 需在实现时以目标 CLI 版本导出的 schema/官方文档为准，并记录 `codex --version`；计划中的方法名是设计基线，不能作为无版本约束的稳定 API。Claude stream-json/control schema 同样需要 fixture 锁定版本。
 
