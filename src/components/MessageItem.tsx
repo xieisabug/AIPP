@@ -7,7 +7,9 @@ import ImageAttachments from "./message-item/ImageAttachments";
 import RawTextRenderer from "./RawTextRenderer";
 import { ShineBorder } from "./magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
-import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversation";
+import { Message, StreamEvent, MCPToolCallUpdateEvent, AgentActivityEvent } from "../data/Conversation";
+import { AgentActivityList } from "./conversation/AgentActivityList";
+import { buildActivitySegments } from "./conversation/agent-activity/activitySegments";
 import { useCopyHandler } from "../hooks/useCopyHandler";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
 import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
@@ -44,6 +46,7 @@ interface MessageItemProps {
     allowFeishuDebugResend?: boolean;
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
     messageActions?: React.ReactNode;
+    agentActivities?: AgentActivityEvent[]; // Codex 等 Agent 的活动事件（收进气泡内展示）
 }
 
 interface QueueMessageMeta {
@@ -222,6 +225,7 @@ const MessageItem = React.memo<MessageItemProps>(
         allowFeishuDebugResend = false,
         mergedMode = false,
         messageActions,
+        agentActivities,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -317,6 +321,54 @@ const MessageItem = React.memo<MessageItemProps>(
             />
         );
 
+        // 将活动卡片按 content_offset 穿插到正文对应位置（offset 按 Unicode 字符计）；
+        // 无有效偏移的活动（旧数据）退化为统一列在正文之后
+        const renderSegmentContent = (text: string, isFinalSegment: boolean) => (
+            <div className="prose prose-sm max-w-none text-foreground break-all">
+                <RichMessageContent
+                    displayContent={text}
+                    onCodeRun={onCodeRun}
+                    isUserMessage={isUserMessage}
+                    isUserMessageMarkdownEnabled={isUserMessageMarkdownEnabled}
+                    isStreaming={isStreaming && isFinalSegment}
+                    isLastMessage={isLastMessage}
+                    useRawTextRenderer={shouldMaskContent}
+                    conversationId={conversationId}
+                    messageId={message.id}
+                    mcpToolCallStates={mcpToolCallStates}
+                    shiningMcpCallId={shiningMcpCallId}
+                    inlineInteractionItems={inlineInteractionItems}
+                />
+            </div>
+        );
+
+        const activitySegments = agentActivities && agentActivities.length > 0
+            ? buildActivitySegments(renderedDisplayContent, agentActivities)
+            : null;
+
+        const messageBodyContent = activitySegments ? (
+            <>
+                {activitySegments.map((segment, segmentIndex) => (
+                    <React.Fragment key={`activity-segment-${segmentIndex}`}>
+                        {segment.text.length > 0
+                            && renderSegmentContent(segment.text, segmentIndex === activitySegments.length - 1)}
+                        {segment.activities.length > 0 && (
+                            <AgentActivityList activities={segment.activities} />
+                        )}
+                    </React.Fragment>
+                ))}
+            </>
+        ) : (
+            <>
+                <div className="prose prose-sm max-w-none text-foreground break-all">
+                    {richMessageContent}
+                </div>
+                {agentActivities && agentActivities.length > 0 && (
+                    <AgentActivityList activities={agentActivities} />
+                )}
+            </>
+        );
+
         // 早期返回：reasoning 类型消息
         if (message.message_type === "reasoning") {
             // 不展示思考过程：思考中时显示加载指示器，思考完成后不渲染
@@ -364,9 +416,7 @@ const MessageItem = React.memo<MessageItemProps>(
         if (mergedMode && !isUserMessage) {
             return (
                 <div data-message-item data-message-id={message.id} data-message-type={message.message_type}>
-                    <div className="prose prose-sm max-w-none text-foreground break-all">
-                        {richMessageContent}
-                    </div>
+                    {messageBodyContent}
                     <ImageAttachments
                         attachments={message.attachment_list}
                         conversationId={message.conversation_id}
@@ -394,9 +444,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     </div>
                 )}
 
-                <div className="prose prose-sm max-w-none text-foreground break-all">
-                    {richMessageContent}
-                </div>
+                {messageBodyContent}
 
                 {shouldCollapseUserMessage && (
                     <button
@@ -513,6 +561,10 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.mergedMode !== nextProps.mergedMode) return false;
     if (prevProps.allowFeishuDebugResend !== nextProps.allowFeishuDebugResend) return false;
     if (prevProps.messageActions !== nextProps.messageActions) return false;
+
+    // Agent 活动数组引用比较：无活动的消息传 undefined 保持稳定，
+    // 有活动的消息随流式更新重建数组引用，需要重新渲染
+    if (prevProps.agentActivities !== nextProps.agentActivities) return false;
 
     return true;
 };

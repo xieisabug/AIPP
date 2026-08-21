@@ -28,7 +28,7 @@ interface McpToolCallProps {
     isStreaming?: boolean; // 流式工具调用（LLM正在生成参数）
 }
 
-type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed" | "streaming";
+export type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed" | "streaming" | "cancelled";
 
 const ToolErrorContinueContext = createContext(true);
 
@@ -36,7 +36,7 @@ export const ToolErrorContinueProvider = ToolErrorContinueContext.Provider;
 
 export const useToolErrorContinueEnabled = () => useContext(ToolErrorContinueContext);
 
-const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
+export const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
     content,
     maxHeight = "120px",
     className = "",
@@ -57,10 +57,16 @@ const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: s
     );
 };
 
-const StatusIndicator: React.FC<{ state: ExecutionState }> = ({ state }) => {
+export const StatusIndicator: React.FC<{ state: ExecutionState }> = ({ state }) => {
     switch (state) {
         case "idle":
             return null;
+        case "cancelled":
+            return (
+                <Badge variant="outline" className="flex items-center gap-1 ml-3">
+                    已取消
+                </Badge>
+            );
         case "streaming":
             return (
                 <Badge variant="secondary" className="flex items-center gap-1 ml-3">

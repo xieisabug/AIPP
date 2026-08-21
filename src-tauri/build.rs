@@ -23,7 +23,8 @@ fn main() {
     }
 }
 
-#[cfg(windows)]
+// 不按主机平台 cfg 掉这个函数：它和上面的 target_os 检查保持一致，在所有主机上都可编译，
+// 仅在目标平台是 Windows 时才真正执行（embed-resource 支持从任意主机为 Windows 目标嵌入资源）。
 fn embed_app_manifest_for_all_targets() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is set in build scripts");
     let manifest_path = std::path::Path::new(&out_dir).join("aipp-app.manifest");

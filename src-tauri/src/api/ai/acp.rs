@@ -184,7 +184,7 @@ pub fn refresh_acp_selected_mcp_tools_payload(
     Ok(())
 }
 
-fn merge_acp_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
+pub(crate) fn merge_acp_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -4749,13 +4749,23 @@ async fn run_acp_session(
 #[tauri::command]
 pub async fn get_acp_session_state(
     acp_session_state: tauri::State<'_, crate::AcpSessionState>,
+    codex_session_state: tauri::State<'_, crate::CodexSessionState>,
     conversation_id: i64,
-) -> Result<Option<AcpConversationSessionState>, String> {
-    let mut sessions = acp_session_state.sessions.lock().await;
-    Ok(sessions.get_mut(&conversation_id).map(|entry| {
-        entry.touch();
-        entry.snapshot.clone()
-    }))
+) -> Result<Option<serde_json::Value>, String> {
+    {
+        let mut sessions = acp_session_state.sessions.lock().await;
+        if let Some(entry) = sessions.get_mut(&conversation_id) {
+            entry.touch();
+            return Ok(Some(
+                serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null),
+            ));
+        }
+    }
+    // Codex app-server 通道的会话快照（与 acp_session_state_snapshot 事件载荷同形）
+    let sessions = codex_session_state.sessions.lock().await;
+    Ok(sessions
+        .get(&conversation_id)
+        .map(|entry| serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)))
 }
 
 #[tauri::command]

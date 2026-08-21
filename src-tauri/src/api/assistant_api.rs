@@ -3,6 +3,10 @@ use crate::api::ai::acp::{
     refresh_acp_config_signature, refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path,
     spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
 };
+use crate::api::ai::codex_app_server::{
+    extract_codex_app_server_config, spawn_codex_session_task, CodexSessionEntry,
+    CODEX_APP_SERVER_API_TYPE,
+};
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
     api::butler_api::{is_butler_system_assistant, is_butler_system_assistant_name},
@@ -708,14 +712,28 @@ pub fn get_acp_working_directory(
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
     let assistant_models =
         assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-    let provider_configs = if let Some(provider_id) =
+    let (provider_api_type, provider_configs) = if let Some(provider_id) =
         resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?
+        let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+        let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+        (provider.api_type, configs)
     } else {
-        Vec::new()
+        ("acp".to_string(), Vec::new())
     };
+
+    // Codex app-server 通道：使用 Codex 配置提取，不能走 ACP 的 acp_cli_command 配置
+    if provider_api_type == CODEX_APP_SERVER_API_TYPE {
+        let model_code = assistant_models
+            .first()
+            .map(|model| model.model_code.clone())
+            .filter(|value| !value.trim().is_empty());
+        let codex_config =
+            extract_codex_app_server_config(&model_configs, &provider_configs, model_code)
+                .map_err(|e| e.to_string())?;
+        return Ok(codex_config.working_directory.display().to_string());
+    }
 
     let acp_config = crate::api::ai::acp::extract_acp_config(&model_configs, &provider_configs)
         .map_err(|e| e.to_string())?;
@@ -724,14 +742,15 @@ pub fn get_acp_working_directory(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, window, acp_session_state), fields(conversation_id, assistant_id))]
+#[instrument(skip(app_handle, window, acp_session_state, codex_session_state), fields(conversation_id, assistant_id))]
 pub async fn ensure_acp_session_connected(
     window: tauri::Window,
     app_handle: tauri::AppHandle,
     acp_session_state: tauri::State<'_, crate::AcpSessionState>,
+    codex_session_state: tauri::State<'_, crate::CodexSessionState>,
     conversation_id: i64,
     assistant_id: i64,
-) -> Result<Option<crate::api::ai::acp::AcpConversationSessionState>, String> {
+) -> Result<Option<serde_json::Value>, String> {
     spawn_acp_idle_reaper_once(app_handle.clone());
 
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
@@ -745,14 +764,59 @@ pub async fn ensure_acp_session_connected(
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
     let assistant_models =
         assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-    let provider_configs = if let Some(provider_id) =
+    let (provider_api_type, provider_configs) = if let Some(provider_id) =
         resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?
+        let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+        let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+        (provider.api_type, configs)
     } else {
-        Vec::new()
+        ("acp".to_string(), Vec::new())
     };
+
+    // Codex app-server 通道：spawn 即自动 initialize + thread start/resume，
+    // 复用 ask_ai 的 config_signature 复用判断；快照通过 acp_session_state_snapshot 事件持续推送
+    if provider_api_type == CODEX_APP_SERVER_API_TYPE {
+        let model_code = assistant_models
+            .first()
+            .map(|model| model.model_code.clone())
+            .filter(|value| !value.trim().is_empty());
+        let codex_config =
+            extract_codex_app_server_config(&model_configs, &provider_configs, model_code)
+                .map_err(|e| e.to_string())?;
+        let snapshot = {
+            let mut sessions = codex_session_state.sessions.lock().await;
+            if sessions
+                .get(&conversation_id)
+                .is_some_and(|entry| entry.config_signature == codex_config.session_signature)
+            {
+                sessions.get(&conversation_id).map(|entry| entry.snapshot.clone())
+            } else {
+                if sessions.contains_key(&conversation_id) {
+                    info!(
+                        conversation_id,
+                        "Codex session config changed during auto-connect; replacing existing session"
+                    );
+                }
+                let handle = spawn_codex_session_task(
+                    app_handle.clone(),
+                    conversation_id,
+                    codex_config.clone(),
+                );
+                let entry = CodexSessionEntry::new(
+                    handle,
+                    conversation_id,
+                    codex_config.session_signature.clone(),
+                );
+                let snapshot = entry.snapshot.clone();
+                sessions.insert(conversation_id, entry);
+                Some(snapshot)
+            }
+        };
+        return Ok(snapshot
+            .map(|state| serde_json::to_value(state).unwrap_or(serde_json::Value::Null)));
+    }
 
     let proxy_enabled = provider_configs
         .iter()
@@ -809,7 +873,9 @@ pub async fn ensure_acp_session_connected(
     handle.start(window).await.map_err(|error| error.to_string())?;
 
     let sessions = acp_session_state.sessions.lock().await;
-    Ok(sessions.get(&conversation_id).map(|entry| entry.snapshot.clone()))
+    Ok(sessions
+        .get(&conversation_id)
+        .map(|entry| serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)))
 }
 
 #[tauri::command]

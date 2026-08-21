@@ -1214,6 +1214,13 @@ fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
             false,
             "需要设置 OPENAI_API_KEY 环境变量".to_string(),
         ),
+        // 官方 Codex CLI：可通过任意方式安装（npm/brew/bun），检测以实际运行为准；
+        // requires_external_install=false 表示支持通过 Bun 一键安装
+        "codex" => (
+            "@openai/codex".to_string(),
+            false,
+            "可点击下方“一键安装”（通过 Bun 安装 @openai/codex）；也可手动安装：npm i -g @openai/codex 或 brew install codex。安装后需执行 codex login 完成登录".to_string(),
+        ),
         "gemini" => {
             ("gemini".to_string(), true, "请参考 Google Gemini CLI 官方文档安装".to_string())
         }
@@ -1228,6 +1235,77 @@ fn resolve_installed_cli_path(cli_command: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// 解析 CLI 可执行文件路径，Windows 上处理 npm/bun 生成的 .cmd shim
+/// （与 codex_app_server::spawn_process 的启动逻辑保持一致）
+fn resolve_cli_executable(cli_command: &str) -> std::path::PathBuf {
+    let resolved = resolve_acp_cli_path(cli_command);
+    #[cfg(target_os = "windows")]
+    let resolved = if resolved.extension().is_none() {
+        let cmd_shim = resolved.with_extension("cmd");
+        if cmd_shim.exists() { cmd_shim } else { resolved }
+    } else {
+        resolved
+    };
+    resolved
+}
+
+/// 运行 CLI `--version` 检测官方 CLI 是否可用，返回 (版本号, 解析路径)
+///
+/// 官方 CLI（如 codex）可能通过 npm/brew/bun 等任意方式安装，
+/// 检测以实际运行结果为准，不依赖 bun 的全局包列表。
+fn detect_official_cli_version(cli_command: &str) -> Option<(String, String)> {
+    let resolved = resolve_cli_executable(cli_command);
+
+    #[cfg(target_os = "windows")]
+    let output = match resolved
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("cmd" | "bat") => Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", &resolved.display().to_string()])
+            .arg("--version")
+            .output(),
+        Some("ps1") => Command::new("pwsh.exe")
+            .args(["-NoProfile", "-File", &resolved.display().to_string()])
+            .arg("--version")
+            .output(),
+        _ => Command::new(&resolved).arg("--version").output(),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let output = Command::new(&resolved).arg("--version").output();
+
+    let out = output.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let version = extract_semver_token(&stdout).or_else(|| {
+        let trimmed = stdout.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })?;
+    Some((version, resolved.display().to_string()))
+}
+
+/// 从 `--version` 输出中提取第一个 x.y.z 形式的语义化版本号
+/// （例如 "codex-cli 0.148.0" -> "0.148.0"）
+fn extract_semver_token(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|token| {
+        let token = token.trim_matches(|c: char| !(c.is_ascii_digit() || c == '.'));
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        {
+            Some(token.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 fn extract_bun_global_package_version(stdout: &str, package_name: &str) -> Option<String> {
@@ -1245,6 +1323,22 @@ fn extract_bun_global_package_version(stdout: &str, package_name: &str) -> Optio
 
 fn detect_acp_library(app: &tauri::AppHandle, cli_command: &str) -> AcpLibraryInfo {
     let (package_name, requires_external, install_hint) = get_acp_library_config(cli_command);
+
+    // 官方 CLI（codex）：以实际运行 `--version` 为检测标准，兼容 npm/brew/bun 任意安装方式；
+    // 未检测到时继续走下方 Bun 流程，由前端决定展示"一键安装"还是"需要先安装 Bun"
+    if cli_command == "codex" {
+        if let Some((version, path)) = detect_official_cli_version(cli_command) {
+            return AcpLibraryInfo {
+                cli_command: cli_command.to_string(),
+                package_name,
+                installed: true,
+                version: Some(version),
+                installed_path: Some(path),
+                requires_external_install: false,
+                install_hint,
+            };
+        }
+    }
 
     if requires_external {
         let output = std::process::Command::new(cli_command).arg("--version").output();
@@ -1578,4 +1672,32 @@ pub async fn update_acp_library(
     });
 
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::extract_semver_token;
+
+    /// 从各种 `--version` 输出格式中提取语义化版本号
+    ///
+    /// 验证内容：
+    /// - 带前缀的输出（"codex-cli 0.148.0"）提取纯版本号
+    /// - 纯版本号输出原样返回
+    /// - 带 v 前缀（"v1.2.3"）去掉前缀
+    #[test]
+    fn extract_semver_from_version_output() {
+        assert_eq!(extract_semver_token("codex-cli 0.148.0"), Some("0.148.0".to_string()));
+        assert_eq!(extract_semver_token("0.148.0"), Some("0.148.0".to_string()));
+        assert_eq!(extract_semver_token("codex-cli 0.148.0\n"), Some("0.148.0".to_string()));
+        assert_eq!(extract_semver_token("version v1.2.3 (build)"), Some("1.2.3".to_string()));
+    }
+
+    /// 不含 x.y.z 版本号的输出返回 None
+    #[test]
+    fn extract_semver_returns_none_without_version() {
+        assert_eq!(extract_semver_token(""), None);
+        assert_eq!(extract_semver_token("codex-cli"), None);
+        assert_eq!(extract_semver_token("1.2"), None);
+    }
 }

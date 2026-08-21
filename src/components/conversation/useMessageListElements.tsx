@@ -3,7 +3,7 @@ import React, { useMemo, useRef } from "react";
 import MessageItem from "../MessageItem";
 import VersionPagination from "../VersionPagination";
 import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
-import { AgentActivityList } from "./AgentActivityList";
+import { isHiddenAgentActivity } from "./AgentActivityList";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
@@ -142,9 +142,9 @@ function collectPreviewCodePayloadLengths(content: string): number[] {
 
 function estimateMessageHeight(
     message: Message,
-    options: { isLastMessage?: boolean; isReasoningExpanded?: boolean } = {},
+    options: { isLastMessage?: boolean; isReasoningExpanded?: boolean; agentActivityCount?: number } = {},
 ): number {
-    const { isLastMessage = false, isReasoningExpanded = false } = options;
+    const { isLastMessage = false, isReasoningExpanded = false, agentActivityCount = 0 } = options;
     const rawContent = message.content ?? "";
     const content = normalizeCollapsedCodeBlocksForHeightEstimate(
         stripMcpToolCallMarkup(rawContent),
@@ -212,13 +212,15 @@ function estimateMessageHeight(
     const toolCallContribution = mcpToolCallCount > 0
         ? previewCodeContribution + genericToolCallCount * 88
         : 0;
+    // Agent 活动卡片收进气泡内，按每张卡片 88px 估算（与通用工具卡片一致）
+    const agentActivityContribution = agentActivityCount * 88;
 
     switch (message.message_type) {
         case "response":
             if (hasToolCall) {
-                return 112 + structureContribution + lengthContribution + toolCallContribution;
+                return 112 + structureContribution + lengthContribution + toolCallContribution + agentActivityContribution;
             }
-            return 180 + structureContribution + lengthContribution + toolCallContribution;
+            return 180 + structureContribution + lengthContribution + toolCallContribution + agentActivityContribution;
         case "tool_result":
             return 160 + structureContribution + lengthContribution + toolCallContribution;
         case "reasoning":
@@ -276,6 +278,18 @@ export function useMessageListElements({
         return map;
     }, [inlineInteractionItems]);
 
+    // Agent 活动按所属响应消息分组，收进对应消息气泡内展示；
+    // userMessage/agentMessage 这类已在正文体现的 kind 直接过滤掉（含历史数据）
+    const activitiesByMessageId = useMemo(() => {
+        const map = new Map<number, AgentActivityEvent[]>();
+        agentActivities.forEach((activity) => {
+            if (isHiddenAgentActivity(activity)) return;
+            const existing = map.get(activity.response_message_id) ?? [];
+            map.set(activity.response_message_id, [...existing, activity]);
+        });
+        return map;
+    }, [agentActivities]);
+
     const displayedMessageIdSet = useMemo(
         () => new Set(allDisplayMessages.map((message) => message.id)),
         [allDisplayMessages],
@@ -313,6 +327,7 @@ export function useMessageListElements({
                 largePreview: Message["large_message_preview"];
                 isLast: boolean;
                 expanded: boolean;
+                activityCount: number;
                 height: number;
             }
         >
@@ -327,6 +342,7 @@ export function useMessageListElements({
                 largePreview: Message["large_message_preview"];
                 isLast: boolean;
                 expanded: boolean;
+                activityCount: number;
                 height: number;
             }
         >();
@@ -336,6 +352,7 @@ export function useMessageListElements({
             const content = message.content ?? "";
             const isLast = message.id === lastMessageId;
             const expanded = reasoningExpandStates.get(message.id) || false;
+            const activityCount = activitiesByMessageId.get(message.id)?.length ?? 0;
             const cached = previousCache.get(message.id);
 
             let height: number;
@@ -346,12 +363,14 @@ export function useMessageListElements({
                 && cached.largePreview === message.large_message_preview
                 && cached.isLast === isLast
                 && cached.expanded === expanded
+                && cached.activityCount === activityCount
             ) {
                 height = cached.height;
             } else {
                 height = estimateMessageHeight(message, {
                     isLastMessage: isLast,
                     isReasoningExpanded: expanded,
+                    agentActivityCount: activityCount,
                 });
             }
 
@@ -362,13 +381,14 @@ export function useMessageListElements({
                 largePreview: message.large_message_preview,
                 isLast,
                 expanded,
+                activityCount,
                 height,
             });
         }
 
         estimatedHeightCacheRef.current = nextCache;
         return result;
-    }, [allDisplayMessages, lastMessageId, reasoningExpandStates]);
+    }, [allDisplayMessages, lastMessageId, reasoningExpandStates, activitiesByMessageId]);
 
     const messageElements = useMemo(() => {
         if (!isMergeAssistantMessages) {
@@ -388,9 +408,10 @@ export function useMessageListElements({
                             isLastMessage: message.id === lastMessageId,
                             isReasoningExpanded:
                                 reasoningExpandStates.get(message.id) || false,
+                            agentActivityCount:
+                                activitiesByMessageId.get(message.id)?.length ?? 0,
                         }),
                     messageElement: (
-                        <div className="flex flex-col gap-2">
                         <MessageItem
                             key={`message-${message.id}`}
                             message={message}
@@ -416,17 +437,8 @@ export function useMessageListElements({
                             )}
                             allowFeishuDebugResend={allowFeishuDebugResend}
                             messageActions={renderMessageActions?.(message)}
+                            agentActivities={activitiesByMessageId.get(message.id)}
                         />
-                        {message.message_type === "response" && (
-                            <AgentActivityList
-                                activities={new Map(
-                                    Array.from(agentActivities.entries()).filter(
-                                        ([, activity]) => activity.response_message_id === message.id,
-                                    ),
-                                )}
-                            />
-                        )}
-                        </div>
                     ),
                     groupControl,
                 } satisfies MessageElementEntry;
@@ -450,12 +462,6 @@ export function useMessageListElements({
             // 合并组使用最后一条消息的 groupControl
             const groupControl = getGenerationGroupControl(lastMsg);
             const anyShining = groupMessages.some((m) => shiningMessageIds.has(m.id));
-            const groupMessageIds = new Set(groupMessages.map((message) => message.id));
-            const groupActivities = new Map(
-                Array.from(agentActivities.entries()).filter(([, activity]) =>
-                    groupMessageIds.has(activity.response_message_id),
-                ),
-            );
 
             const mergedElement = (
                 <div
@@ -504,6 +510,7 @@ export function useMessageListElements({
                                         )}
                                         allowFeishuDebugResend={allowFeishuDebugResend}
                                         messageActions={renderMessageActions?.(message)}
+                                        agentActivities={activitiesByMessageId.get(message.id)}
                                         mergedMode
                                     />
                                 );
@@ -547,7 +554,6 @@ export function useMessageListElements({
                             );
                         })()}
                     </div>
-                    <AgentActivityList activities={groupActivities} />
                 </div>
             );
 
@@ -561,6 +567,8 @@ export function useMessageListElements({
                             isLastMessage: message.id === lastMessageId,
                             isReasoningExpanded:
                                 reasoningExpandStates.get(message.id) || false,
+                            agentActivityCount:
+                                activitiesByMessageId.get(message.id)?.length ?? 0,
                         })
                     );
                 }, 0),
@@ -630,7 +638,7 @@ export function useMessageListElements({
         reasoningExpandStates,
         onToggleReasoningExpand,
         mcpToolCallStates,
-        agentActivities,
+        activitiesByMessageId,
         shiningMcpCallId,
         messageInlineInteractionMap,
         estimatedHeightByMessageId,

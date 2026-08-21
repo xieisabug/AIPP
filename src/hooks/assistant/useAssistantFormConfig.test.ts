@@ -164,7 +164,7 @@ describe("useAssistantFormConfig ACP MCP option", () => {
         const { result } = renderHook(() =>
             useAssistantFormConfig({
                 currentAssistant: acpAssistant,
-                assistantTypeNameMap: new Map([[4, "ACP 助手"]]),
+                assistantTypeNameMap: new Map([[4, "Agent 助手"]]),
                 assistantTypeCustomField: [],
                 assistantTypeCustomLabel: new Map(),
                 assistantTypeCustomTips: new Map(),

@@ -64,6 +64,9 @@ pub struct AgentActivityEvent {
     pub output: Option<String>,
     pub error: Option<String>,
     pub metadata: Value,
+    /// item 开始时已输出的正文字符数（按 Unicode 字符计），用于前端把活动卡片穿插到正文对应位置；
+    /// 旧数据没有该字段时前端回退为「全部列在正文之后」
+    pub content_offset: Option<u64>,
 }
 
 enum CodexSessionCommand {
@@ -119,6 +122,16 @@ impl CodexSessionEntry {
     }
 }
 
+/// 解析环境变量配置：优先按 JSON 对象解析（provider 表单使用 JSON 格式），
+/// 否则按每行 KEY=VALUE 解析（与 ACP 通道及助手级配置的格式一致）
+fn merge_codex_env_blob(env_vars: &mut HashMap<String, String>, raw: &str) {
+    if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(raw) {
+        env_vars.extend(parsed);
+        return;
+    }
+    crate::api::ai::acp::merge_acp_env_blob(env_vars, raw);
+}
+
 pub fn extract_codex_app_server_config(
     model_configs: &[crate::db::assistant_db::AssistantModelConfig],
     provider_configs: &[crate::db::llm_db::LLMProviderConfig],
@@ -146,8 +159,9 @@ pub fn extract_codex_app_server_config(
         .or_else(|| provider_value("acp_working_directory"))
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
-    let additional_args = provider_value("codex_additional_args")
-        .or_else(|| model_value("acp_additional_args"))
+    // 与 ACP 通道一致：assistant_model_config（助手级）优先于 provider 默认值
+    let additional_args = model_value("acp_additional_args")
+        .or_else(|| provider_value("codex_additional_args"))
         .map(|raw| raw.split_whitespace().map(str::to_string).collect())
         .unwrap_or_default();
     let mut env_vars = HashMap::new();
@@ -158,9 +172,7 @@ pub fn extract_codex_app_server_config(
         }
     }
     for raw in [provider_value("acp_env_vars"), model_value("acp_env_vars")].into_iter().flatten() {
-        if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(&raw) {
-            env_vars.extend(parsed);
-        }
+        merge_codex_env_blob(&mut env_vars, &raw);
     }
     let approval_policy = model_value("codex_approval_policy")
         .or_else(|| provider_value("codex_approval_policy"));
@@ -473,6 +485,20 @@ fn merge_activity_notification(
     None
 }
 
+/// 取 item 首次出现时已输出的正文字符数（Unicode 字符计），后续更新沿用同一偏移
+fn activity_content_offset(
+    offsets: &mut HashMap<String, u64>,
+    item: &Value,
+    content: &str,
+) -> Option<u64> {
+    let item_id = item.get("id").and_then(Value::as_str)?.to_string();
+    Some(
+        *offsets
+            .entry(item_id)
+            .or_insert_with(|| content.chars().count() as u64),
+    )
+}
+
 fn emit_activity(
     window: &tauri::Window,
     conversation_id: i64,
@@ -481,8 +507,13 @@ fn emit_activity(
     sequence: u64,
     item: &Value,
     fallback_status: &str,
+    content_offset: Option<u64>,
 ) {
     let (item_id, kind, title, input) = item_identity(item);
+    // 用户输入与 agent 正文已经在消息气泡里展示，不再生成活动卡片
+    if matches!(kind.as_str(), "userMessage" | "agentMessage") {
+        return;
+    }
     let activity = AgentActivityEvent {
         conversation_id,
         response_message_id,
@@ -500,6 +531,7 @@ fn emit_activity(
             .map(|value| value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())),
         error: item.get("error").map(Value::to_string),
         metadata: item.clone(),
+        content_offset,
     };
     let event = ConversationEvent {
         r#type: "agent_activity".to_string(),
@@ -757,6 +789,8 @@ async fn run_session(
                 let mut reasoning_message_id: Option<i64> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
+                // 记录每个 item 开始时的正文字符数，供前端把活动卡片穿插到正文对应位置
+                let mut item_content_offsets = HashMap::<String, u64>::new();
                 loop {
                     let frame = if let Some(frame) = pending_notifications.pop_front() {
                         frame
@@ -873,11 +907,17 @@ async fn run_session(
                                 }
                                 "item/started" | "item/completed" => {
                                     sequence += 1;
-                                    if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) { emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }); }
+                                    if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
+                                        let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
+                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
+                                    }
                                 }
                                 "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" => {
                                     sequence += 1;
-                                    if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) { emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing"); }
+                                    if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
+                                        let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
+                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                    }
                                 }
                                 "turn/completed" => break,
                                 "error" => {
@@ -943,6 +983,23 @@ mod tests {
         assert_eq!(activity_status(&item, "pending"), "executing");
     }
 
+    /// item 首次出现时记录当前正文字符数，后续更新沿用同一偏移
+    #[test]
+    fn pins_content_offset_at_first_seen() {
+        let mut offsets = HashMap::new();
+        let item = json!({"id":"item-1","type":"commandExecution"});
+        let first = activity_content_offset(&mut offsets, &item, "你好");
+        assert_eq!(first, Some(2));
+        // 正文继续增长后再次取偏移，仍返回首次记录的值
+        let second = activity_content_offset(&mut offsets, &item, "你好世界");
+        assert_eq!(second, Some(2));
+        // 另一个 item 记录自己的偏移
+        let other = activity_content_offset(&mut offsets, &json!({"id":"item-2","type":"commandExecution"}), "你好世界");
+        assert_eq!(other, Some(4));
+        // 没有 id 的 item 拿不到偏移
+        assert_eq!(activity_content_offset(&mut offsets, &json!({"type":"commandExecution"}), "你好世界"), None);
+    }
+
     #[test]
     fn maps_codex_approval_decisions_to_protocol_responses() {
         let params = json!({"availableDecisions":["accept","decline"]});
@@ -983,5 +1040,74 @@ mod tests {
         .unwrap();
         assert_eq!(first["aggregatedOutput"], "one\n");
         assert_eq!(second["aggregatedOutput"], "one\ntwo");
+    }
+
+    fn model_config(name: &str, value: &str) -> crate::db::assistant_db::AssistantModelConfig {
+        crate::db::assistant_db::AssistantModelConfig {
+            id: 0,
+            assistant_id: 0,
+            assistant_model_id: 0,
+            name: name.to_string(),
+            value: Some(value.to_string()),
+            value_type: "string".to_string(),
+        }
+    }
+
+    fn provider_config(name: &str, value: &str) -> crate::db::llm_db::LLMProviderConfig {
+        crate::db::llm_db::LLMProviderConfig {
+            id: 0,
+            name: name.to_string(),
+            llm_provider_id: 0,
+            value: value.to_string(),
+            append_location: String::new(),
+            is_addition: false,
+        }
+    }
+
+    /// 助手级配置（assistant_model_config）应优先于 provider 默认值
+    ///
+    /// 验证内容：
+    /// - 工作目录/附加启动参数：助手级覆盖 provider 级
+    /// - 环境变量：provider 表单 JSON 格式与助手级 KEY=VALUE 行格式均可解析
+    /// - 同名环境变量助手级优先
+    #[test]
+    fn assistant_level_config_overrides_provider_defaults() {
+        let model_configs = vec![
+            model_config("acp_working_directory", "/tmp/assistant-cwd"),
+            model_config("acp_additional_args", "--enable collaboration_modes"),
+            model_config("acp_env_vars", "ASSISTANT_KEY=assistant\nSHARED_KEY=from-assistant"),
+        ];
+        let provider_configs = vec![
+            provider_config("acp_working_directory", "/tmp/provider-cwd"),
+            provider_config("codex_additional_args", "--profile provider"),
+            provider_config(
+                "acp_env_vars",
+                "{\"SHARED_KEY\":\"from-provider\",\"PROVIDER_KEY\":\"provider\"}",
+            ),
+        ];
+        let config = extract_codex_app_server_config(&model_configs, &provider_configs, None).unwrap();
+        assert_eq!(config.working_directory, PathBuf::from("/tmp/assistant-cwd"));
+        assert_eq!(
+            config.additional_args,
+            vec!["--enable".to_string(), "collaboration_modes".to_string()]
+        );
+        assert_eq!(config.env_vars.get("ASSISTANT_KEY").map(String::as_str), Some("assistant"));
+        assert_eq!(config.env_vars.get("SHARED_KEY").map(String::as_str), Some("from-assistant"));
+        assert_eq!(config.env_vars.get("PROVIDER_KEY").map(String::as_str), Some("provider"));
+    }
+
+    /// 未设置助手级覆盖时回退到 provider 默认值
+    #[test]
+    fn provider_defaults_apply_without_assistant_overrides() {
+        let provider_configs = vec![
+            provider_config("acp_working_directory", "/tmp/provider-cwd"),
+            provider_config("codex_additional_args", "--profile provider"),
+        ];
+        let config = extract_codex_app_server_config(&[], &provider_configs, None).unwrap();
+        assert_eq!(config.working_directory, PathBuf::from("/tmp/provider-cwd"));
+        assert_eq!(
+            config.additional_args,
+            vec!["--profile".to_string(), "provider".to_string()]
+        );
     }
 }

@@ -31,7 +31,7 @@ export const useAssistantTypePlugin = (pluginList: any[]) => {
     // 助手类型
     const [assistantTypes, setAssistantTypes] = useState<AssistantType[]>([
         { code: 0, name: "普通对话助手" },
-        { code: 4, name: "ACP 助手" },
+        { code: 4, name: "Agent 助手" },
     ]);
 
     // 使用 useMemo 缓存 assistantTypeApi

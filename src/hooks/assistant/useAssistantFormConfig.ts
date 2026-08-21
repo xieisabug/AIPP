@@ -118,7 +118,7 @@ export const useAssistantFormConfig = ({
                 );
             })();
 
-        // ACP 助手类型 (assistant_type === 4) 的专用配置
+        // Agent 助手类型 (assistant_type === 4) 的专用配置
         if (currentAssistant?.assistant.assistant_type === 4) {
             // 获取当前选择的提供商 ID
             const modelProviderId = currentAssistant.model[0]?.provider_id ?? 0;
@@ -137,7 +137,7 @@ export const useAssistantFormConfig = ({
                     config: {
                         type: "static" as const,
                         label: "助手类型",
-                        value: "ACP 助手",
+                        value: "Agent 助手",
                     },
                 },
                 {

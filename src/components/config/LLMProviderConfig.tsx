@@ -101,7 +101,7 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'deepseek', label: 'DeepSeek API' },
         { value: 'github_copilot', label: 'GitHub Copilot' },
         { value: 'acp', label: 'ACP (Agent Client Protocol)' },
-        { value: 'codex_app_server', label: 'Codex（原生 app-server）' },
+        { value: 'codex_app_server', label: 'Codex' },
     ]
 
     const openNewProviderDialog = useCallback(() => {

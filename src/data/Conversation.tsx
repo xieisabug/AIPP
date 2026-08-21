@@ -158,6 +158,8 @@ export interface AgentActivityEvent {
     output?: string | null;
     error?: string | null;
     metadata?: unknown;
+    /** item 开始时已输出的正文字符数，用于把活动卡片穿插到正文对应位置；旧数据缺失时列在正文之后 */
+    content_offset?: number | null;
 }
 
 export interface ConversationCancelEvent {
