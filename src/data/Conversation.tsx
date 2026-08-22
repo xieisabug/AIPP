@@ -290,6 +290,8 @@ export interface AcpConversationSessionState {
     has_active_prompt: boolean;
     context_tokens_used?: number | null;
     context_window_size?: number | null;
+    model?: string | null;
+    reasoning_effort?: string | null;
     session_cost_amount?: number | null;
     session_cost_currency?: string | null;
 }

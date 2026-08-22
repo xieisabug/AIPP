@@ -164,11 +164,20 @@ function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
                 <Input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="搜索配置"
+                    placeholder={option.options.length === 0 ? "输入值后按 Enter" : "搜索配置"}
                     className="mb-1 h-8"
+                    onKeyDown={(event) => {
+                        if (option.options.length === 0 && event.key === "Enter" && query.trim()) {
+                            handleSelect(query.trim());
+                        }
+                    }}
                 />
                 <div className="max-h-72 overflow-y-auto">
-                    {visibleChoices.length === 0 ? (
+                    {option.options.length === 0 ? (
+                        <div className="px-2 py-3 text-xs text-muted-foreground">
+                            {option.id === "reasoning_effort" ? "当前模型未返回 supportedReasoningEfforts" : "该配置支持直接输入值"}
+                        </div>
+                    ) : visibleChoices.length === 0 ? (
                         <div className="px-2 py-6 text-center text-sm text-muted-foreground">无匹配项</div>
                     ) : (
                         visibleChoices.map((choice) => {
@@ -1459,6 +1468,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 ? new Date(acpSessionState.updated_at).toLocaleString()
                 : null;
             const configOptionCount = acpSessionState?.config_options.length ?? 0;
+            const isCodexSession = acpSessionState?.agent_kind === "codex_app_server";
+            const sessionLabel = isCodexSession ? "Codex 会话" : "ACP 会话";
+            const configLabel = isCodexSession ? "Codex 配置" : "会话配置";
             const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
                 <div key={option.id} className="space-y-1.5">
                     <div className="flex items-center gap-2">
@@ -1503,7 +1515,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     }
                                     onClick={() => { }}
                                     border
-                                    title="ACP 会话控制"
+                                    title={`${sessionLabel}控制`}
                                     dataAippSlot="chat-conversation-title-acp"
                                 />
                             </span>
@@ -1511,7 +1523,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         <PopoverContent align="end" className="w-80 space-y-3">
                             <div className="space-y-1">
                                 <div className="flex items-center justify-between gap-2">
-                                    <span className="text-sm font-medium">ACP 会话</span>
+                                    <span className="text-sm font-medium">{sessionLabel}</span>
                                     {acpSessionState?.session_id ? (
                                         <Badge variant="outline">已连接</Badge>
                                     ) : (
@@ -1540,7 +1552,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         acpSessionState.session_resume_supported
                                     ) ? (
                                     <div className="text-xs text-muted-foreground">
-                                        该 Agent 不支持恢复历史 ACP 会话，新会话会使用 AIPP 对话上下文继续。
+                                        该 Agent 不支持恢复历史会话，新会话会使用 AIPP 对话上下文继续。
                                     </div>
                                 ) : null}
                             </div>
@@ -1549,14 +1561,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between gap-2">
-                                    <span className="text-xs font-medium">会话配置</span>
+                                    <span className="text-xs font-medium">{configLabel}</span>
                                     <Badge variant="secondary" className="text-[10px]">
                                         {configOptionCount} 项
                                     </Badge>
                                 </div>
                                 {!acpSessionState?.session_id ? (
                                     <div className="text-xs text-muted-foreground">
-                                        正在连接 ACP session；连接成功后会读取 Agent 返回的 configOptions。
+                                        正在连接 {isCodexSession ? "Codex" : "ACP"} session；连接成功后会读取 Agent 返回的配置项。
                                     </div>
                                 ) : configOptionCount === 0 ? (
                                     <div className="text-xs text-muted-foreground">
@@ -1602,7 +1614,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         <>
                                             <Separator />
                                             <div className="text-xs text-muted-foreground">
-                                                可用 ACP 命令：{acpSessionState.available_commands.length} 个，可在输入框输入 / 选择。
+                                                可用命令：{acpSessionState.available_commands.length} 个，可在输入框输入 / 选择。
                                             </div>
                                         </>
                                     ) : null}

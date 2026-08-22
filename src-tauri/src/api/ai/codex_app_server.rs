@@ -33,6 +33,7 @@ pub struct CodexAppServerConfig {
     pub env_vars: HashMap<String, String>,
     pub additional_args: Vec<String>,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub approval_policy: Option<String>,
     pub sandbox: Option<String>,
     pub session_signature: String,
@@ -49,6 +50,26 @@ pub struct CodexConversationSessionState {
     pub current_turn_id: Option<String>,
     pub has_active_prompt: bool,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub config_options: Vec<CodexSessionConfigOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexSessionConfigOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub current_value: String,
+    pub options: Vec<CodexSessionConfigChoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexSessionConfigChoice {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub group_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +100,7 @@ pub struct AgentActivityEvent {
 enum CodexSessionCommand {
     Prompt { message_id: i64, prompt: String, window: tauri::Window },
     CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
+    SetConfigOption { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
 }
 
 #[derive(Clone)]
@@ -105,6 +127,14 @@ impl CodexSessionHandle {
             .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?;
         rx.await
             .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?
+            .map_err(AppError::UnknownError)
+    }
+
+    pub async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender.send(CodexSessionCommand::SetConfigOption { config_id, value, response: tx })
+            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?;
+        rx.await.map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?
             .map_err(AppError::UnknownError)
     }
 }
@@ -189,6 +219,7 @@ pub fn extract_codex_app_server_config(
         "cwd": working_directory,
         "args": additional_args,
         "model": model,
+        "reasoning_effort": model_value("reasoning_effort"),
         "approval": approval_policy,
         "sandbox": sandbox,
         "env": env_vars,
@@ -200,6 +231,7 @@ pub fn extract_codex_app_server_config(
         env_vars,
         additional_args,
         model,
+        reasoning_effort: model_value("reasoning_effort"),
         approval_policy,
         sandbox,
         session_signature: signature,
@@ -352,6 +384,173 @@ async fn handle_approval_request(
     let result = codex_approval_response(method, &params, decision);
     write_frame(stdin, &json!({"jsonrpc":"2.0","id":rpc_id,"result":result})).await?;
     Ok(true)
+}
+
+fn supported_reasoning_efforts(value: &Value) -> Vec<String> {
+    let mut result = Vec::new();
+    fn visit(value: &Value, result: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    if key.eq_ignore_ascii_case("supportedReasoningEfforts") {
+                        if let Some(items) = child.as_array() {
+                            for item in items {
+                                if let Some(name) = item.as_str() {
+                                    if !result.iter().any(|existing| existing == name) {
+                                        result.push(name.to_string());
+                                    }
+                                } else if let Some(name) = item.get("effort").or_else(|| item.get("reasoningEffort")).and_then(Value::as_str) {
+                                    if !result.iter().any(|existing| existing == name) {
+                                        result.push(name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    visit(child, result);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| visit(item, result)),
+            _ => {}
+        }
+    }
+    visit(value, &mut result);
+    result
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexModelCatalogEntry {
+    id: String,
+    name: String,
+    supported_efforts: Vec<String>,
+    default_effort: Option<String>,
+}
+
+fn model_catalog(value: &Value) -> Vec<CodexModelCatalogEntry> {
+    let mut models = Vec::new();
+    fn visit(value: &Value, models: &mut Vec<CodexModelCatalogEntry>) {
+        match value {
+            Value::Object(map) => {
+                let id = map.get("id").or_else(|| map.get("model")).and_then(Value::as_str);
+                let label = map.get("displayName").or_else(|| map.get("name")).and_then(Value::as_str);
+                if let Some(id) = id {
+                    if map.contains_key("supportedReasoningEfforts") || label.is_some() {
+                        let entry = CodexModelCatalogEntry {
+                            id: id.to_string(),
+                            name: label.unwrap_or(id).to_string(),
+                            supported_efforts: supported_reasoning_efforts(value),
+                            default_effort: map.get("defaultReasoningEffort").and_then(Value::as_str).map(str::to_string),
+                        };
+                        if !models.iter().any(|existing| existing.id == entry.id) {
+                            models.push(entry);
+                        }
+                    }
+                }
+                map.values().for_each(|child| visit(child, models));
+            }
+            Value::Array(items) => items.iter().for_each(|item| visit(item, models)),
+            _ => {}
+        }
+    }
+    visit(value, &mut models);
+    models
+}
+
+fn first_string_for_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(value) = map.get(*key).and_then(Value::as_str) {
+                    return Some(value.to_string());
+                }
+            }
+            map.values().find_map(|child| first_string_for_keys(child, keys))
+        }
+        Value::Array(items) => items.iter().find_map(|item| first_string_for_keys(item, keys)),
+        _ => None,
+    }
+}
+
+fn codex_reasoning_options(efforts: &[String]) -> Vec<CodexSessionConfigChoice> {
+    efforts.iter().map(|value| CodexSessionConfigChoice {
+        value: value.clone(),
+        name: match value.as_str() {
+            "none" => "关闭思考".to_string(),
+            other => other.to_ascii_uppercase(),
+        },
+        description: None,
+        group_name: None,
+    }).collect()
+}
+
+fn codex_model_choices(
+    catalog: &[CodexModelCatalogEntry],
+    current_model: Option<&str>,
+) -> Vec<CodexSessionConfigChoice> {
+    let mut choices: Vec<_> = catalog.iter().map(|entry| CodexSessionConfigChoice {
+        value: entry.id.clone(),
+        name: entry.name.clone(),
+        description: None,
+        group_name: None,
+    }).collect();
+    if let Some(current_model) = current_model {
+        if !choices.iter().any(|choice| choice.value == current_model) {
+            choices.insert(0, CodexSessionConfigChoice {
+                value: current_model.to_string(),
+                name: format!("{}（当前线程）", current_model),
+                description: Some("该模型来自已恢复的 Codex 线程，当前 model/list 未返回它".to_string()),
+                group_name: None,
+            });
+        }
+    }
+    choices
+}
+
+fn apply_codex_config_option(
+    snapshot: &mut CodexConversationSessionState,
+    catalog: &[CodexModelCatalogEntry],
+    config_id: &str,
+    value: String,
+) -> Result<(), String> {
+    if config_id == "model" {
+        let model = catalog.iter().find(|model| model.id == value)
+            .ok_or_else(|| format!("Codex 模型不在 model/list 返回结果中：{value}"))?;
+        snapshot.model = Some(value.clone());
+        if let Some(option) = snapshot.config_options.iter_mut().find(|option| option.id == "model") {
+            option.current_value = value;
+        }
+        let current_effort_supported = snapshot.reasoning_effort.as_ref()
+            .is_some_and(|effort| model.supported_efforts.iter().any(|candidate| candidate == effort));
+        if !current_effort_supported {
+            snapshot.reasoning_effort = model.default_effort.clone().or_else(|| model.supported_efforts.first().cloned());
+        }
+        if let Some(option) = snapshot.config_options.iter_mut().find(|option| option.id == "reasoning_effort") {
+            option.options = codex_reasoning_options(&model.supported_efforts);
+            option.current_value = snapshot.reasoning_effort.clone().unwrap_or_default();
+        }
+        return Ok(());
+    }
+    if config_id == "reasoning_effort" || config_id == "thought_level" {
+        let model = snapshot.model.as_ref().and_then(|id| catalog.iter().find(|model| &model.id == id));
+        if !model.is_some_and(|model| model.supported_efforts.iter().any(|candidate| candidate == &value)) {
+            return Err(format!("当前 Codex 模型不支持思考强度：{value}"));
+        }
+        snapshot.reasoning_effort = Some(value.clone());
+        if let Some(option) = snapshot.config_options.iter_mut().find(|option| option.id == "reasoning_effort") {
+            option.current_value = value;
+        }
+        return Ok(());
+    }
+    Err(format!("Codex 不支持会话配置：{config_id}"))
+}
+
+fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionState, prompt: &str) -> Value {
+    json!({
+        "threadId": thread_id,
+        "model": snapshot.model,
+        "reasoningEffort": snapshot.reasoning_effort,
+        "input": [{"type":"text","text":prompt,"text_elements":[]}],
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -899,12 +1098,13 @@ async fn run_session(
     let mut request_id = 2_u64;
     let thread_params = json!({
         "model": config.model,
+        "reasoningEffort": config.reasoning_effort,
         "cwd": config.working_directory,
         "approvalPolicy": config.approval_policy,
         "sandbox": config.sandbox,
     });
     let (thread_method, params) = if let Some(thread_id) = stored_thread.as_deref() {
-        ("thread/resume", json!({"threadId":thread_id,"model":config.model,"cwd":config.working_directory}))
+        ("thread/resume", json!({"threadId":thread_id}))
     } else {
         ("thread/start", thread_params.clone())
     };
@@ -941,6 +1141,29 @@ async fn run_session(
     };
     let thread_id = thread_id_from_result(&thread_result)
         .ok_or_else(|| format!("Codex thread response missing thread id: {thread_result}"))?;
+    request_id += 1;
+    let (model_catalog, supported_efforts) = {
+        write_frame(&mut stdin, &json_rpc_request(request_id, "model/list", json!({}))).await?;
+        match read_rpc_response_with_approvals(
+            &app_handle, conversation_id, &mut stdin, &mut lines, request_id, &mut pending_notifications,
+        ).await {
+            Ok(result) => {
+                let catalog = model_catalog(&result);
+                let efforts = catalog.iter()
+                    .find(|entry| config.model.as_deref() == Some(entry.id.as_str()))
+                    .map(|entry| entry.supported_efforts.clone())
+                    .unwrap_or_else(|| supported_reasoning_efforts(&result));
+                if efforts.is_empty() {
+                    warn!(conversation_id, "Codex model/list returned no supportedReasoningEfforts");
+                }
+                (catalog, efforts)
+            }
+            Err(error) => {
+                warn!(conversation_id, error = %error, "Codex model/list failed; hiding reasoning effort choices");
+                (Vec::new(), Vec::new())
+            }
+        }
+    };
     ConversationDatabase::new(&app_handle)
         .map_err(|error| error.to_string())?
         .upsert_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE, &thread_id)
@@ -954,12 +1177,57 @@ async fn run_session(
         restored_session_method,
         current_turn_id: None,
         has_active_prompt: false,
-        model: config.model.clone(),
+        model: first_string_for_keys(&thread_result, &["model", "modelId"])
+            .or_else(|| stored_thread.is_none().then(|| config.model.clone()).flatten()),
+        reasoning_effort: first_string_for_keys(&thread_result, &["reasoningEffort", "reasoning_effort"])
+            .or_else(|| stored_thread.is_none().then(|| config.reasoning_effort.clone()).flatten()),
+        config_options: {
+            let mut options = Vec::new();
+            {
+                options.push(CodexSessionConfigOption {
+                    id: "model".to_string(), name: "模型".to_string(),
+                    description: Some("Codex 下一轮响应使用的模型；可输入模型 ID".to_string()),
+                    category: Some("model".to_string()), current_value: first_string_for_keys(&thread_result, &["model", "modelId"])
+                        .or_else(|| stored_thread.is_none().then(|| config.model.clone()).flatten()).unwrap_or_default(),
+                    options: codex_model_choices(&model_catalog,
+                        first_string_for_keys(&thread_result, &["model", "modelId"])
+                            .or_else(|| stored_thread.is_none().then(|| config.model.clone()).flatten())
+                            .as_deref()),
+                });
+            }
+            options.push(CodexSessionConfigOption {
+            id: "reasoning_effort".to_string(),
+            name: "思考强度".to_string(),
+            description: Some("Codex 下一轮响应使用的推理强度".to_string()),
+            category: Some("thought_level".to_string()),
+            current_value: first_string_for_keys(&thread_result, &["reasoningEffort", "reasoning_effort"])
+                .or_else(|| stored_thread.is_none().then(|| config.reasoning_effort.clone()).flatten())
+                .or_else(|| supported_efforts.first().cloned()).unwrap_or_default(),
+            options: codex_reasoning_options(&supported_efforts),
+            });
+            options
+        },
     };
+    if let Some(model) = snapshot.model.clone() {
+        if let Err(error) = apply_codex_config_option(&mut snapshot, &model_catalog, "model", model) {
+            warn!(conversation_id, error = %error, "Codex resumed model is absent from model/list");
+        }
+    }
     emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
 
     while let Some(command) = receiver.recv().await {
         match command {
+            CodexSessionCommand::SetConfigOption { config_id, value, response } => {
+                match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
+                    Ok(()) => {
+                        emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                        let _ = response.send(Ok(()));
+                    }
+                    Err(error) => {
+                        let _ = response.send(Err(error));
+                    }
+                }
+            }
             CodexSessionCommand::CancelCurrentPrompt { response } => {
                 let _ = response.send(Ok(()));
             }
@@ -970,7 +1238,7 @@ async fn run_session(
                     &json_rpc_request(
                         request_id,
                         "turn/start",
-                        json!({"threadId":thread_id,"input":[{"type":"text","text":prompt,"text_elements":[]}]}),
+                        codex_turn_start_params(&thread_id, &snapshot, &prompt),
                     ),
                 )
                 .await?;
@@ -1017,6 +1285,17 @@ async fn run_session(
                                     }
                                 }
                                 Some(CodexSessionCommand::Prompt { .. }) => warn!(conversation_id, "Codex prompt received while another turn is active; queued prompt is not supported"),
+                                Some(CodexSessionCommand::SetConfigOption { config_id, value, response }) => {
+                                    match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
+                                        Ok(()) => {
+                                            emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                                            let _ = response.send(Ok(()));
+                                        }
+                                        Err(error) => {
+                                            let _ = response.send(Err(error));
+                                        }
+                                    }
+                                }
                                 None => return Ok(()),
                             }
                             continue;
@@ -1260,6 +1539,40 @@ mod tests {
             )["scope"],
             "session"
         );
+    }
+
+    #[test]
+    fn parses_model_catalog_and_switches_reasoning_capabilities() {
+        let catalog = model_catalog(&json!({"data":[
+            {"id":"gpt-a","displayName":"GPT A","supportedReasoningEfforts":[{"effort":"low"},{"effort":"high"}],"defaultReasoningEffort":"low"},
+            {"id":"gpt-b","displayName":"GPT B","supportedReasoningEfforts":["none","medium"]}
+        ]}));
+        assert_eq!(catalog.len(), 2);
+        let mut snapshot = CodexConversationSessionState {
+            model: Some("gpt-a".to_string()), reasoning_effort: Some("high".to_string()), ..Default::default()
+        };
+        snapshot.config_options = vec![
+            CodexSessionConfigOption { id: "model".to_string(), name: "模型".to_string(), description: None, category: Some("model".to_string()), current_value: "gpt-a".to_string(), options: vec![] },
+            CodexSessionConfigOption { id: "reasoning_effort".to_string(), name: "思考强度".to_string(), description: None, category: Some("thought_level".to_string()), current_value: "high".to_string(), options: vec![] },
+        ];
+        apply_codex_config_option(&mut snapshot, &catalog, "model", "gpt-b".to_string()).unwrap();
+        assert_eq!(snapshot.model.as_deref(), Some("gpt-b"));
+        assert_eq!(snapshot.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(snapshot.config_options[1].options.len(), 2);
+    }
+
+    #[test]
+    fn preserves_resumed_model_when_catalog_does_not_contain_it() {
+        let choices = codex_model_choices(&[], Some("retired-model"));
+        assert_eq!(choices[0].value, "retired-model");
+        assert!(choices[0].name.contains("当前线程"));
+    }
+
+    #[test]
+    fn builds_turn_start_with_runtime_snapshot_values() {
+        let snapshot = CodexConversationSessionState { model: Some("gpt-a".to_string()), reasoning_effort: Some("ultra".to_string()), ..Default::default() };
+        assert_eq!(codex_turn_start_params("thread-1", &snapshot, "hello")["model"], "gpt-a");
+        assert_eq!(codex_turn_start_params("thread-1", &snapshot, "hello")["reasoningEffort"], "ultra");
     }
 
     #[test]

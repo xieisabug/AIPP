@@ -4650,6 +4650,14 @@ pub async fn set_acp_session_config_option(
     config_id: String,
     value: String,
 ) -> Result<(), String> {
+    let codex_state = app_handle.state::<crate::CodexSessionState>();
+    if let Some(handle) = {
+        let sessions = codex_state.sessions.lock().await;
+        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
+    } {
+        handle.set_config_option(config_id, value).await.map_err(|error| error.to_string())?;
+        return Ok(());
+    }
     let handle = {
         let mut sessions = acp_session_state.sessions.lock().await;
         sessions.get_mut(&conversation_id).map(|entry| {
