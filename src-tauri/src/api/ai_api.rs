@@ -13,6 +13,7 @@ use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
+use crate::api::ai::claude_sdk::{extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
     get_openai_responses_stateful_enabled, get_request_timeout_from_config,
@@ -54,7 +55,7 @@ use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::build_template_engine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
-use crate::{AcpSessionState, AppState, CodexSessionState, FeatureConfigState};
+use crate::{AcpSessionState, AppState, ClaudeSessionState, CodexSessionState, FeatureConfigState};
 use anyhow::Context;
 use genai::chat::Tool;
 use std::collections::{HashMap, HashSet};
@@ -1262,7 +1263,13 @@ pub async fn ask_ai(
                 AppError::UnknownError(format!("Failed to open LLM database: {}", e))
             })?;
 
-            let provider = llm_db.get_llm_provider(provider_id).map_err(AppError::from)?;
+            let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => AppError::UnknownError(format!(
+                    "Agent 助手 {} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商",
+                    assistant_detail.assistant.id
+                )),
+                other => AppError::from(other),
+            })?;
             let configs = llm_db.get_llm_provider_config(provider_id).unwrap_or_else(|e| {
                 warn!("ACP: Failed to get provider config: {}", e);
                 Vec::new()
@@ -1321,6 +1328,17 @@ pub async fn ask_ai(
                     handle
                 }
             };
+            handle.send_prompt(response_message.id, runtime_prompt_result.clone(), window_clone.clone())?;
+            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
+        }
+
+        if provider_api_type == CLAUDE_SDK_API_TYPE {
+            let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
+            let config = extract_claude_sdk_config(&assistant_detail.model_configs, &provider_configs, model_code)?;
+            let response_message = add_message(&app_handle, None, conversation_id, "response".to_string(), String::new(), Some(0), Some("claude-code".to_string()), Some(chrono::Utc::now()), None, 0, None, None)?;
+            let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), ConversationEvent { r#type: "message_add".to_string(), data: serde_json::to_value(MessageAddEvent { message_id: response_message.id, message_type: "response".to_string() }).unwrap() });
+            let claude_state = app_handle.state::<ClaudeSessionState>();
+            let handle = { let mut sessions = claude_state.sessions.lock().await; if let Some(entry)=sessions.get(&conversation_id).filter(|entry| entry.config_signature == config.session_signature) { entry.handle.clone() } else { let handle=spawn_claude_session_task(app_handle.clone(), conversation_id, config.clone()); sessions.insert(conversation_id, ClaudeSessionEntry::new(handle.clone(), conversation_id, config.session_signature.clone(), config.model.clone(), config.permission_mode.clone(), config.effort.clone())); handle } };
             handle.send_prompt(response_message.id, runtime_prompt_result.clone(), window_clone.clone())?;
             return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
         }
@@ -2786,6 +2804,7 @@ pub async fn cancel_ai(
     conversation_id: i64,
 ) -> Result<(), String> {
     let codex_session_state = app_handle.state::<CodexSessionState>();
+    let claude_session_state = app_handle.state::<ClaudeSessionState>();
     let acp_session_handle = {
         let sessions = acp_session_state.sessions.lock().await;
         sessions.get(&conversation_id).map(|entry| entry.handle.clone())
@@ -2795,8 +2814,11 @@ pub async fn cancel_ai(
         let sessions = codex_session_state.sessions.lock().await;
         sessions.get(&conversation_id).map(|entry| entry.handle.clone())
     };
+    let claude_session_handle = { let sessions = claude_session_state.sessions.lock().await; sessions.get(&conversation_id).map(|entry| entry.handle.clone()) };
 
-    if let Some(handle) = codex_session_handle {
+    if let Some(handle) = claude_session_handle {
+        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
+    } else if let Some(handle) = codex_session_handle {
         handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
     } else if let Some(handle) = acp_session_handle {
         handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;

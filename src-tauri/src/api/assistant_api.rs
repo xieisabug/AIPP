@@ -8,6 +8,10 @@ use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
+use crate::api::ai::claude_sdk::{
+    extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry,
+    CLAUDE_SDK_API_TYPE,
+};
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
     api::butler_api::{is_butler_system_assistant, is_butler_system_assistant_name},
@@ -265,6 +269,25 @@ pub async fn save_assistant(
     info!("save assistant start");
     debug!(?assistant_detail, "assistant detail incoming");
     reject_reserved_butler_assistant_name(&assistant_detail.assistant.name)?;
+    let assistant_id = assistant_detail.assistant.id;
+    let selected_agent_provider_id = if assistant_detail.assistant.assistant_type == Some(4) {
+        let provider_id = assistant_detail
+            .model
+            .first()
+            .map(|model| model.provider_id)
+            .filter(|provider_id| *provider_id > 0)
+            .ok_or_else(|| "Agent 助手尚未选择提供商，请先选择后再保存".to_string())?;
+        let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!(
+                "Agent 助手引用的提供商 ID {provider_id} 不存在，请重新选择提供商后再保存"
+            ),
+            other => other.to_string(),
+        })?;
+        Some(provider_id)
+    } else {
+        None
+    };
     if assistant_detail.assistant.id != 0 {
         let existing_assistant =
             assistant_db.get_assistant(assistant_detail.assistant.id).map_err(|e| e.to_string())?;
@@ -329,6 +352,25 @@ pub async fn save_assistant(
                     model.provider_id,
                     &model.model_code,
                     &model.alias,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 旧版本把 Agent provider 同时存进 acp_provider。若该字段仍存在，
+    // 保存时同步为权威的 assistant_model.provider_id，避免旧值再次污染表单。
+    if let Some(provider_id) = selected_agent_provider_id {
+        if let Some(legacy_config) = assistant_db
+            .get_assistant_model_configs(assistant_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|config| config.name == "acp_provider")
+        {
+            assistant_db
+                .update_assistant_model_config(
+                    legacy_config.id,
+                    "acp_provider",
+                    &provider_id.to_string(),
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -717,7 +759,12 @@ pub fn get_acp_working_directory(
         resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+        let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!(
+                "Agent 助手 {assistant_id} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商"
+            ),
+            other => other.to_string(),
+        })?;
         let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
         (provider.api_type, configs)
     } else {
@@ -736,6 +783,16 @@ pub fn get_acp_working_directory(
         return Ok(codex_config.working_directory.display().to_string());
     }
 
+    if provider_api_type == CLAUDE_SDK_API_TYPE {
+        let model_code = assistant_models
+            .first()
+            .map(|model| model.model_code.clone())
+            .filter(|value| !value.trim().is_empty());
+        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code)
+            .map_err(|e| e.to_string())?;
+        return Ok(claude_config.working_directory.display().to_string());
+    }
+
     let acp_config = crate::api::ai::acp::extract_acp_config(&model_configs, &provider_configs)
         .map_err(|e| e.to_string())?;
 
@@ -743,12 +800,13 @@ pub fn get_acp_working_directory(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, window, acp_session_state, codex_session_state), fields(conversation_id, assistant_id))]
+#[instrument(skip(app_handle, window, acp_session_state, codex_session_state, claude_session_state), fields(conversation_id, assistant_id))]
 pub async fn ensure_acp_session_connected(
     window: tauri::Window,
     app_handle: tauri::AppHandle,
     acp_session_state: tauri::State<'_, crate::AcpSessionState>,
     codex_session_state: tauri::State<'_, crate::CodexSessionState>,
+    claude_session_state: tauri::State<'_, crate::ClaudeSessionState>,
     conversation_id: i64,
     assistant_id: i64,
 ) -> Result<Option<serde_json::Value>, String> {
@@ -769,7 +827,12 @@ pub async fn ensure_acp_session_connected(
         resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+        let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!(
+                "Agent 助手 {assistant_id} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商"
+            ),
+            other => other.to_string(),
+        })?;
         let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
         (provider.api_type, configs)
     } else {
@@ -812,6 +875,43 @@ pub async fn ensure_acp_session_connected(
                     handle,
                     conversation_id,
                     codex_config.session_signature.clone(),
+                );
+                let snapshot = entry.snapshot.clone();
+                sessions.insert(conversation_id, entry);
+                Some(snapshot)
+            }
+        };
+        return Ok(snapshot
+            .map(|state| serde_json::to_value(state).unwrap_or(serde_json::Value::Null)));
+    }
+
+    if provider_api_type == CLAUDE_SDK_API_TYPE {
+        let model_code = assistant_models
+            .first()
+            .map(|model| model.model_code.clone())
+            .filter(|value| !value.trim().is_empty());
+        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code)
+            .map_err(|e| e.to_string())?;
+        let snapshot = {
+            let mut sessions = claude_session_state.sessions.lock().await;
+            if sessions
+                .get(&conversation_id)
+                .is_some_and(|entry| entry.config_signature == claude_config.session_signature)
+            {
+                sessions.get(&conversation_id).map(|entry| entry.snapshot.clone())
+            } else {
+                let handle = spawn_claude_session_task(
+                    app_handle.clone(),
+                    conversation_id,
+                    claude_config.clone(),
+                );
+                let entry = ClaudeSessionEntry::new(
+                    handle,
+                    conversation_id,
+                    claude_config.session_signature.clone(),
+                    claude_config.model.clone(),
+                    claude_config.permission_mode.clone(),
+                    claude_config.effort.clone(),
                 );
                 let snapshot = entry.snapshot.clone();
                 sessions.insert(conversation_id, entry);

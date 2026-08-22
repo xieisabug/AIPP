@@ -675,7 +675,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpRestoreNoticeRef.current = noticeKey;
             const methodLabel = method === "resume" ? "session/resume" : "session/load";
             const isCodexSession = acpSessionState.agent_kind === "codex_app_server";
-            const sessionLabel = isCodexSession ? "Codex" : "ACP";
+            const isClaudeSession = acpSessionState.agent_kind === "claude_sdk";
+            const sessionLabel = isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : "ACP";
             const description =
                 method === "resume"
                     ? isCodexSession
@@ -1251,7 +1252,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         value,
                     });
                 } catch (error) {
-                    toast.error("更新 ACP 配置失败", {
+                    toast.error("更新 Agent 配置失败", {
                         description: String(error),
                         position: "bottom-right",
                     });
@@ -1476,8 +1477,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 : null;
             const configOptionCount = acpSessionState?.config_options.length ?? 0;
             const isCodexSession = acpSessionState?.agent_kind === "codex_app_server";
-            const sessionLabel = isCodexSession ? "Codex 会话" : "ACP 会话";
-            const configLabel = isCodexSession ? "Codex 配置" : "会话配置";
+            const isClaudeSession = acpSessionState?.agent_kind === "claude_sdk";
+            const sessionLabel = isCodexSession ? "Codex 会话" : isClaudeSession ? "Claude Code 会话" : "ACP 会话";
+            const configLabel = isCodexSession ? "Codex 配置" : isClaudeSession ? "Claude Code 配置" : "会话配置";
             const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
                 <div key={option.id} className="space-y-1.5">
                     <div className="flex items-center gap-2">
@@ -1570,12 +1572,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 <div className="flex items-center justify-between gap-2">
                                     <span className="text-xs font-medium">{configLabel}</span>
                                     <Badge variant="secondary" className="text-[10px]">
-                                        {configOptionCount} 项
+                                        {isClaudeSession ? 2 : configOptionCount} 项
                                     </Badge>
                                 </div>
-                                {!acpSessionState?.session_id ? (
+                                {!acpSessionState?.session_id && !isClaudeSession ? (
                                     <div className="text-xs text-muted-foreground">
-                                        正在连接 {isCodexSession ? "Codex" : "ACP"} session；连接成功后会读取 Agent 返回的配置项。
+                                        正在连接 {isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : "ACP"} session；连接成功后会读取 Agent 返回的配置项。
+                                    </div>
+                                ) : isClaudeSession ? (
+                                    <div className="space-y-3">
+                                        {acpSessionState.config_options
+                                            .filter((option) => option.id === "model" || option.id === "effort")
+                                            .map(renderAcpConfigSelect)}
+                                        <div className="text-xs text-muted-foreground">
+                                            未指定模型时，首次响应开始后会回填 Claude CLI 实际使用的模型；修改配置会恢复当前会话，并从下一轮请求开始生效。
+                                        </div>
                                     </div>
                                 ) : configOptionCount === 0 ? (
                                     <div className="text-xs text-muted-foreground">

@@ -4625,6 +4625,7 @@ async fn run_acp_session(
 pub async fn get_acp_session_state(
     acp_session_state: tauri::State<'_, crate::AcpSessionState>,
     codex_session_state: tauri::State<'_, crate::CodexSessionState>,
+    claude_session_state: tauri::State<'_, crate::ClaudeSessionState>,
     conversation_id: i64,
 ) -> Result<Option<serde_json::Value>, String> {
     // A conversation can briefly have both entries while switching from the
@@ -4636,6 +4637,12 @@ pub async fn get_acp_session_state(
             return Ok(Some(
                 serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null),
             ));
+        }
+    }
+    {
+        let sessions = claude_session_state.sessions.lock().await;
+        if let Some(entry) = sessions.get(&conversation_id) {
+            return Ok(Some(serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)));
         }
     }
     {
@@ -4661,6 +4668,15 @@ pub async fn set_acp_session_config_option(
     let codex_state = app_handle.state::<crate::CodexSessionState>();
     if let Some(handle) = {
         let sessions = codex_state.sessions.lock().await;
+        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
+    } {
+        handle.set_config_option(config_id, value).await.map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let claude_state = app_handle.state::<crate::ClaudeSessionState>();
+    if let Some(handle) = {
+        let sessions = claude_state.sessions.lock().await;
         sessions.get(&conversation_id).map(|entry| entry.handle.clone())
     } {
         handle.set_config_option(config_id, value).await.map_err(|error| error.to_string())?;

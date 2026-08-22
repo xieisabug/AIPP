@@ -102,6 +102,7 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'github_copilot', label: 'GitHub Copilot' },
         { value: 'acp', label: 'ACP (Agent Client Protocol)' },
         { value: 'codex_app_server', label: 'Codex' },
+        { value: 'claude_sdk', label: 'Claude Code' },
     ]
 
     const openNewProviderDialog = useCallback(() => {

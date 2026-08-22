@@ -4,6 +4,7 @@ pub mod config;
 pub mod context_manager;
 pub mod conversation;
 pub mod codex_app_server;
+pub mod claude_sdk;
 pub mod events;
 pub mod summary;
 pub mod title;

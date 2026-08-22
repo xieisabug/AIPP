@@ -192,17 +192,19 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             assistantDetail.model.length > 0
                                 ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
                                 : "-1",
+                        prompt: assistantDetail.prompts[0].prompt,
+                        ...assistantDetail.model_configs.reduce((acc, config) => {
+                            acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
+                            return acc;
+                        }, {} as Record<string, any>),
+                        // assistant_model.provider_id 是 Agent 提供商绑定的权威来源。
+                        // 放在旧 model_configs 之后，避免遗留 acp_provider 覆盖当前绑定。
                         acp_provider:
                             assistantDetail.assistant.assistant_type === 4 &&
                             assistantDetail.model.length > 0 &&
                             assistantDetail.model[0].provider_id > 0
                                 ? assistantDetail.model[0].provider_id.toString()
                                 : "-1",
-                        prompt: assistantDetail.prompts[0].prompt,
-                        ...assistantDetail.model_configs.reduce((acc, config) => {
-                            acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
-                            return acc;
-                        }, {} as Record<string, any>),
                         ...assistantTypeCustomField.reduce((acc, field) => {
                             acc[field.key] =
                                 field.value.type === "checkbox"
@@ -540,17 +542,17 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     assistantDetail.model.length > 0
                         ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
                         : "-1",
+                prompt: assistantDetail.prompts[0]?.prompt || "",
+                ...assistantDetail.model_configs.reduce((acc, config) => {
+                    acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
+                    return acc;
+                }, {} as Record<string, any>),
                 acp_provider:
                     assistantDetail.assistant.assistant_type === 4 &&
                     assistantDetail.model.length > 0 &&
                     assistantDetail.model[0].provider_id > 0
                         ? assistantDetail.model[0].provider_id.toString()
                         : "-1",
-                prompt: assistantDetail.prompts[0]?.prompt || "",
-                ...assistantDetail.model_configs.reduce((acc, config) => {
-                    acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
-                    return acc;
-                }, {} as Record<string, any>),
             });
         },
         [addAssistant, form]

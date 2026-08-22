@@ -90,6 +90,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const isCopilotProvider = apiType === "github_copilot";
     const isAcpProvider = apiType === "acp";
     const isCodexAppServerProvider = apiType === "codex_app_server";
+    const isClaudeSdkProvider = apiType === "claude_sdk";
 
     // API 类型显示标签映射
     const apiTypeLabels: Record<string, string> = {
@@ -101,6 +102,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'github_copilot': 'GitHub Copilot',
         'acp': 'ACP(Agent Client Protocol)',
         'codex_app_server': 'Codex',
+        'claude_sdk': 'Claude Code',
     };
     const apiTypeLabel = apiTypeLabels[apiType] || apiType;
 
@@ -148,6 +150,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             codex_additional_args: "",
             codex_approval_policy: "on-request",
             codex_sandbox: "workspace-write",
+            claude_cli_command: "claude",
+            claude_permission_mode: "default",
+            claude_effort: "default",
             acp_env_vars: "",
         }),
         [],
@@ -173,6 +178,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
     // 官方 Codex CLI 环境检测 Hook（codex_app_server 提供商固定检测 codex 命令）
     const codexEnv = useAcpEnvironment(isCodexAppServerProvider ? "codex" : "");
+    const claudeEnv = useAcpEnvironment(isClaudeSdkProvider ? "claude" : "");
 
     // 更新字段
     const updateField = useCallback(
@@ -614,6 +620,84 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             ];
         }
 
+        if (isClaudeSdkProvider) {
+            return [
+                {
+                    key: "apiType",
+                    config: {
+                        type: "static" as const,
+                        label: "提供商类型",
+                        value: "Claude Code",
+                    },
+                },
+                {
+                    key: "claude_cli_command",
+                    config: {
+                        type: "input" as const,
+                        label: "Claude CLI 命令",
+                        value: "claude",
+                        placeholder: "claude 或绝对路径",
+                        tooltip: "启动官方 Claude Code stream-json 通道使用的命令",
+                    },
+                },
+                {
+                    key: "claude_environment",
+                    config: {
+                        type: "custom" as const,
+                        label: "环境状态",
+                        value: "",
+                        customRender: () => (
+                            <CliEnvironmentStatus
+                                env={claudeEnv}
+                                cliCommand="claude"
+                                displayName="Claude Code"
+                            />
+                        ),
+                    },
+                },
+                {
+                    key: "claude_permission_mode",
+                    config: {
+                        type: "select" as const,
+                        label: "权限模式",
+                        value: "default",
+                        options: [
+                            { value: "default", label: "默认询问" },
+                            { value: "acceptEdits", label: "自动接受编辑" },
+                            { value: "plan", label: "计划模式" },
+                            { value: "dontAsk", label: "不询问" },
+                        ],
+                    },
+                },
+                {
+                    key: "claude_effort",
+                    config: {
+                        type: "select" as const,
+                        label: "思考强度",
+                        value: "default",
+                        options: [
+                            { value: "default", label: "默认" },
+                            { value: "low", label: "低" },
+                            { value: "medium", label: "中" },
+                            { value: "high", label: "高" },
+                            { value: "max", label: "最大" },
+                        ],
+                    },
+                },
+                {
+                    key: "acp_env_vars",
+                    config: {
+                        type: "textarea" as const,
+                        label: "环境变量（JSON）",
+                        value: "",
+                        className: "min-h-24",
+                        placeholder: '{"ANTHROPIC_BASE_URL":"..."}',
+                        tooltip: "默认复用本机 Claude Code 登录态；这里只填写需要覆盖的环境变量",
+                    },
+                },
+            ];
+        }
+
         // ACP 提供商：特殊表单
         if (isAcpProvider) {
             // ACP 环境状态渲染
@@ -772,7 +856,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

@@ -262,6 +262,15 @@ struct CodexSessionState {
     sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::codex_app_server::CodexSessionEntry>>>,
 }
 
+#[derive(Clone)]
+struct ClaudeSessionState {
+    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::claude_sdk::ClaudeSessionEntry>>>,
+}
+
+impl ClaudeSessionState {
+    fn new() -> Self { Self { sessions: Arc::new(TokioMutex::new(HashMap::new())) } }
+}
+
 impl CodexSessionState {
     fn new() -> Self {
         Self { sessions: Arc::new(TokioMutex::new(HashMap::new())) }
@@ -925,6 +934,7 @@ pub fn run() {
         })
         .manage(AcpSessionState::new())
         .manage(CodexSessionState::new())
+        .manage(ClaudeSessionState::new())
         .manage(MessageTokenManager::new())
         .manage(ConversationActivityManager::new())
         .manage(crate::slash::SlashRegistryCacheState::default())

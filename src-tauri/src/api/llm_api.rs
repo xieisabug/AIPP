@@ -78,7 +78,7 @@ pub async fn get_llm_providers(app_handle: tauri::AppHandle) -> Result<Vec<LlmPr
 }
 
 /// 根据助手类型获取过滤后的提供商列表
-/// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商 (api_type = 'acp')
+/// Agent 助手 (assistant_type = 4): 返回 ACP 与原生 Agent 提供商
 /// 普通助手: 排除 ACP 提供商
 #[tauri::command]
 pub async fn get_filtered_providers(
