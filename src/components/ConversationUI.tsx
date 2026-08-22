@@ -1480,6 +1480,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             const isClaudeSession = acpSessionState?.agent_kind === "claude_sdk";
             const sessionLabel = isCodexSession ? "Codex 会话" : isClaudeSession ? "Claude Code 会话" : "ACP 会话";
             const configLabel = isCodexSession ? "Codex 配置" : isClaudeSession ? "Claude Code 配置" : "会话配置";
+            const currentModelLabel = modelOption?.options.find((choice) => choice.value === modelOption.current_value)?.name
+                ?? modelOption?.current_value
+                ?? acpSessionState?.model
+                ?? "未选择模型";
             const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
                 <div key={option.id} className="space-y-1.5">
                     <div className="flex items-center gap-2">
@@ -1513,7 +1517,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     {combinedHeaderActions}
                     <Popover>
                         <PopoverTrigger asChild>
-                            <span>
+                            <span className="inline-flex max-w-40 items-center gap-1.5">
                                 <IconButton
                                     icon={
                                         acpSessionState?.has_active_prompt ? (
@@ -1527,6 +1531,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     title={`${sessionLabel}控制`}
                                     dataAippSlot="chat-conversation-title-acp"
                                 />
+                                <span className="max-w-28 truncate text-xs text-muted-foreground" title={currentModelLabel}>
+                                    {currentModelLabel}
+                                </span>
                             </span>
                         </PopoverTrigger>
                         <PopoverContent align="end" className="w-80 space-y-3">
@@ -1538,6 +1545,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     ) : (
                                         <Badge variant="secondary">未启动</Badge>
                                     )}
+                                </div>
+                                <div className="text-xs text-muted-foreground truncate" title={currentModelLabel}>
+                                    当前模型：{currentModelLabel}
                                 </div>
                                 {acpSessionState?.title ? (
                                     <div className="text-xs text-muted-foreground break-all">
@@ -1572,21 +1582,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 <div className="flex items-center justify-between gap-2">
                                     <span className="text-xs font-medium">{configLabel}</span>
                                     <Badge variant="secondary" className="text-[10px]">
-                                        {isClaudeSession ? 2 : configOptionCount} 项
+                                        {configOptionCount} 项
                                     </Badge>
                                 </div>
                                 {!acpSessionState?.session_id && !isClaudeSession ? (
                                     <div className="text-xs text-muted-foreground">
                                         正在连接 {isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : "ACP"} session；连接成功后会读取 Agent 返回的配置项。
-                                    </div>
-                                ) : isClaudeSession ? (
-                                    <div className="space-y-3">
-                                        {acpSessionState.config_options
-                                            .filter((option) => option.id === "model" || option.id === "effort")
-                                            .map(renderAcpConfigSelect)}
-                                        <div className="text-xs text-muted-foreground">
-                                            未指定模型时，首次响应开始后会回填 Claude CLI 实际使用的模型；修改配置会恢复当前会话，并从下一轮请求开始生效。
-                                        </div>
                                     </div>
                                 ) : configOptionCount === 0 ? (
                                     <div className="text-xs text-muted-foreground">

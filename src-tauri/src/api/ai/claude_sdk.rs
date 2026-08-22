@@ -20,6 +20,20 @@ use tokio::{
 
 pub const CLAUDE_SDK_API_TYPE: &str = "claude_sdk";
 
+pub fn claude_model_choices(
+    models: &[(i64, String, i64, String, String, bool, bool, bool)],
+) -> Vec<AcpSessionConfigChoicePayload> {
+    models
+        .iter()
+        .map(|(_, name, _, code, description, _, _, _)| AcpSessionConfigChoicePayload {
+            value: code.clone(),
+            name: name.clone(),
+            description: (!description.trim().is_empty()).then(|| description.clone()),
+            group_name: None,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct ClaudeSdkConfig {
     pub cli_command: String,
@@ -28,6 +42,7 @@ pub struct ClaudeSdkConfig {
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub effort: Option<String>,
+    pub model_choices: Vec<AcpSessionConfigChoicePayload>,
     pub session_signature: String,
 }
 
@@ -147,7 +162,17 @@ pub fn extract_claude_sdk_config(
     models: &[crate::db::assistant_db::AssistantModelConfig],
     providers: &[crate::db::llm_db::LLMProviderConfig],
     model: Option<String>,
+    model_choices: Vec<AcpSessionConfigChoicePayload>,
 ) -> Result<ClaudeSdkConfig, AppError> {
+    let mut model_choices = model_choices;
+    if let Some(current) = model.as_deref() {
+        if !model_choices.iter().any(|choice| choice.value == current) {
+            model_choices.insert(0, AcpSessionConfigChoicePayload {
+                value: current.to_string(), name: format!("{}（当前模型）", current),
+                description: Some("当前助手配置或 Claude CLI 实际使用的模型".into()), group_name: None,
+            });
+        }
+    }
     let cli_command = model_value(models, "claude_cli_command")
         .or_else(|| provider_value(providers, "claude_cli_command"))
         .unwrap_or_else(|| "claude".into());
@@ -175,6 +200,7 @@ pub fn extract_claude_sdk_config(
         model,
         permission_mode,
         effort,
+        model_choices,
         session_signature,
     })
 }
@@ -324,7 +350,7 @@ fn claude_config_options(config: &ClaudeSdkConfig) -> Vec<AcpSessionConfigOption
     vec![
         AcpSessionConfigOptionPayload {
             id: "model".into(), name: "模型".into(), description: Some("下一轮 Claude Code 响应使用的模型".into()), category: Some("model".into()),
-            current_value: config.model.clone().unwrap_or_default(), options: Vec::new(),
+            current_value: config.model.clone().unwrap_or_default(), options: config.model_choices.clone(),
         },
         AcpSessionConfigOptionPayload {
             id: "effort".into(), name: "思考强度".into(), description: Some("下一轮 Claude Code 响应的思考强度".into()), category: Some("thought_level".into()),
@@ -440,7 +466,13 @@ pub fn spawn_claude_session_task(
                 }
                 SessionCommand::SetConfig { config_id, value, response } => {
                     match config_id.as_str() {
-                        "model" => config.model = Some(value),
+                        "model" => {
+                            if !config.model_choices.iter().any(|choice| choice.value == value) {
+                                let _ = response.send(Err(format!("Claude Code 模型不在当前提供商的模型列表中：{value}")));
+                                continue;
+                            }
+                            config.model = Some(value)
+                        }
                         "effort" => config.effort = (value != "default").then_some(value),
                         _ => { let _ = response.send(Err(format!("Claude Code 不支持会话配置项: {config_id}"))); continue; }
                     }
@@ -675,7 +707,7 @@ mod tests {
     use super::*;
     #[test]
     fn defaults_to_official_cli() {
-        assert_eq!(extract_claude_sdk_config(&[], &[], None).unwrap().cli_command, "claude");
+        assert_eq!(extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap().cli_command, "claude");
     }
 
     #[test]
@@ -697,7 +729,7 @@ mod tests {
             value_type: "string".into(),
         };
         assert_eq!(
-            extract_claude_sdk_config(&[model], &[provider], None).unwrap().cli_command,
+            extract_claude_sdk_config(&[model], &[provider], None, Vec::new()).unwrap().cli_command,
             "model-claude"
         );
     }

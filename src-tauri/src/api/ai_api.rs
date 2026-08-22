@@ -13,7 +13,7 @@ use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
-use crate::api::ai::claude_sdk::{extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
+use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
     get_openai_responses_stateful_enabled, get_request_timeout_from_config,
@@ -1334,7 +1334,16 @@ pub async fn ask_ai(
 
         if provider_api_type == CLAUDE_SDK_API_TYPE {
             let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
-            let config = extract_claude_sdk_config(&assistant_detail.model_configs, &provider_configs, model_code)?;
+            let model_provider_id = agent_provider_id.ok_or_else(|| {
+                AppError::UnknownError("Claude Code 助手没有配置模型提供商".to_string())
+            })?;
+            let model_choices = claude_model_choices(
+                &LLMDatabase::new(&app_handle)
+                    .map_err(|e| AppError::UnknownError(e.to_string()))?
+                    .get_llm_models(model_provider_id.to_string())
+                    .map_err(|e| AppError::UnknownError(e.to_string()))?,
+            );
+            let config = extract_claude_sdk_config(&assistant_detail.model_configs, &provider_configs, model_code, model_choices)?;
             let response_message = add_message(&app_handle, None, conversation_id, "response".to_string(), String::new(), Some(0), Some("claude-code".to_string()), Some(chrono::Utc::now()), None, 0, None, None)?;
             let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), ConversationEvent { r#type: "message_add".to_string(), data: serde_json::to_value(MessageAddEvent { message_id: response_message.id, message_type: "response".to_string() }).unwrap() });
             let claude_state = app_handle.state::<ClaudeSessionState>();

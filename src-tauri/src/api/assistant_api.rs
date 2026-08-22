@@ -9,7 +9,7 @@ use crate::api::ai::codex_app_server::{
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::claude_sdk::{
-    extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry,
+    claude_model_choices, extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry,
     CLAUDE_SDK_API_TYPE,
 };
 use crate::api::ai::config::get_network_proxy_from_config;
@@ -788,7 +788,15 @@ pub fn get_acp_working_directory(
             .first()
             .map(|model| model.model_code.clone())
             .filter(|value| !value.trim().is_empty());
-        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code)
+        let model_provider_id = resolve_acp_provider_id(&assistant_models, &model_configs)
+            .ok_or_else(|| "Claude Code 助手没有配置模型提供商".to_string())?;
+        let model_choices = claude_model_choices(
+            &LLMDatabase::new(&app_handle)
+                .map_err(|e| e.to_string())?
+                .get_llm_models(model_provider_id.to_string())
+                .map_err(|e| e.to_string())?,
+        );
+        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code, model_choices)
             .map_err(|e| e.to_string())?;
         return Ok(claude_config.working_directory.display().to_string());
     }
@@ -890,7 +898,15 @@ pub async fn ensure_acp_session_connected(
             .first()
             .map(|model| model.model_code.clone())
             .filter(|value| !value.trim().is_empty());
-        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code)
+        let model_provider_id = resolve_acp_provider_id(&assistant_models, &model_configs)
+            .ok_or_else(|| "Claude Code 助手没有配置模型提供商".to_string())?;
+        let model_choices = claude_model_choices(
+            &LLMDatabase::new(&app_handle)
+                .map_err(|e| e.to_string())?
+                .get_llm_models(model_provider_id.to_string())
+                .map_err(|e| e.to_string())?,
+        );
+        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code, model_choices)
             .map_err(|e| e.to_string())?;
         let snapshot = {
             let mut sessions = claude_session_state.sessions.lock().await;
