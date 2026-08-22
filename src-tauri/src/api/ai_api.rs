@@ -1,6 +1,7 @@
 use super::assistant_api::AssistantDetail;
 use crate::api::ai::acp::{
-    apply_network_proxy_to_env_vars, extract_acp_config, refresh_acp_config_signature,
+    apply_network_proxy_to_env_vars, build_selected_mcp_tools_payload, extract_acp_config,
+    refresh_acp_config_signature,
     refresh_acp_selected_mcp_tools_payload, spawn_acp_idle_reaper_once,
     spawn_acp_session_task,
 };
@@ -9,8 +10,8 @@ use crate::api::ai::chat::{
     handle_stream_chat as ai_handle_stream_chat,
 };
 use crate::api::ai::codex_app_server::{
-    extract_codex_app_server_config, spawn_codex_session_task, CodexSessionEntry,
-    CODEX_APP_SERVER_API_TYPE,
+    extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
+    CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
@@ -1277,11 +1278,16 @@ pub async fn ask_ai(
         if provider_api_type == CODEX_APP_SERVER_API_TYPE {
             info!(conversation_id, "Codex app-server provider detected");
             let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
-            let codex_config = extract_codex_app_server_config(
+            let mut codex_config = extract_codex_app_server_config(
                 &assistant_detail.model_configs,
                 &provider_configs,
                 model_code,
             )?;
+            // 与 ACP 通道一致：挂载助手绑定的 MCP 工具（桥接注入），payload 计入签名
+            codex_config.selected_mcp_tools_payload =
+                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id)
+                    .map_err(AppError::UnknownError)?;
+            refresh_codex_session_signature(&mut codex_config);
             let response_message = add_message(
                 &app_handle,
                 None,

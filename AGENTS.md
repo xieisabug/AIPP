@@ -246,6 +246,8 @@ let config = state.configs.lock().await;
 - **CLI resolution**: ACP CLI is resolved via absolute path, then `~/.bun/bin`, then `PATH` lookup, then raw command.
 - **Session task runtime**: ACP session task runs on a dedicated single-thread runtime with `LocalSet` to support non-`Send` futures.
 
+- **Codex MCP bridge injection**: the Codex app-server channel mounts the assistant's selected MCP tools by registering the AIPP bridge (`--aipp-acp-mcp-bridge`) as an `aipp` MCP server via the `config` overrides of `thread/start` / `thread/resume` (`mcp_servers.aipp.*`); tool execution flows back through the same TCP proxy and permission path as the ACP bridge, and the selected-tools payload is part of the session signature so binding changes rebuild the session while resuming the same thread.
+
 ### Known Limitations / Observations
 
 - **loadSession support varies**: `claude-code-acp` reports `agent_capabilities.load_session=false`, so session load is skipped and history is not restored by the agent.

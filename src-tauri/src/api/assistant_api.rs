@@ -1,11 +1,12 @@
 use crate::api::ai::acp::{
-    apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
+    apply_network_proxy_to_env_vars, build_acp_launch_plan, build_selected_mcp_tools_payload,
+    extract_acp_config,
     refresh_acp_config_signature, refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path,
     spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
 };
 use crate::api::ai::codex_app_server::{
-    extract_codex_app_server_config, spawn_codex_session_task, CodexSessionEntry,
-    CODEX_APP_SERVER_API_TYPE,
+    extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
+    CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
@@ -782,9 +783,12 @@ pub async fn ensure_acp_session_connected(
             .first()
             .map(|model| model.model_code.clone())
             .filter(|value| !value.trim().is_empty());
-        let codex_config =
+        let mut codex_config =
             extract_codex_app_server_config(&model_configs, &provider_configs, model_code)
                 .map_err(|e| e.to_string())?;
+        codex_config.selected_mcp_tools_payload =
+            build_selected_mcp_tools_payload(&app_handle, assistant_id)?;
+        refresh_codex_session_signature(&mut codex_config);
         let snapshot = {
             let mut sessions = codex_session_state.sessions.lock().await;
             if sessions

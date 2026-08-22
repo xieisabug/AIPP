@@ -6,7 +6,13 @@ use crate::api::ai::acp::{
 use crate::api::operation_api::{
     emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT,
 };
+use crate::acp_mcp_bridge::{
+    ensure_proxy_server, AcpMcpProxyConfig, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
+    ACP_MCP_DB_PATH_ENV, ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV,
+    ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_ENV,
+};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
+use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::mcp::builtin_mcp::interaction::{
     request_ask_user_question, AskUserQuestionItem, AskUserQuestionMetadata,
@@ -22,7 +28,7 @@ use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub const CODEX_APP_SERVER_API_TYPE: &str = "codex_app_server";
 
@@ -36,6 +42,7 @@ pub struct CodexAppServerConfig {
     pub reasoning_effort: Option<String>,
     pub approval_policy: Option<String>,
     pub sandbox: Option<String>,
+    pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
 
@@ -214,18 +221,7 @@ pub fn extract_codex_app_server_config(
     let approval_policy = model_value("codex_approval_policy")
         .or_else(|| provider_value("codex_approval_policy"));
     let sandbox = model_value("codex_sandbox").or_else(|| provider_value("codex_sandbox"));
-    let signature = serde_json::to_string(&json!({
-        "cli": cli_command,
-        "cwd": working_directory,
-        "args": additional_args,
-        "model": model,
-        "reasoning_effort": model_value("reasoning_effort"),
-        "approval": approval_policy,
-        "sandbox": sandbox,
-        "env": env_vars,
-    }))
-    .unwrap_or_default();
-    Ok(CodexAppServerConfig {
+    let mut config = CodexAppServerConfig {
         cli_command,
         working_directory,
         env_vars,
@@ -234,8 +230,30 @@ pub fn extract_codex_app_server_config(
         reasoning_effort: model_value("reasoning_effort"),
         approval_policy,
         sandbox,
-        session_signature: signature,
-    })
+        selected_mcp_tools_payload: String::new(),
+        session_signature: String::new(),
+    };
+    config.session_signature = codex_config_signature(&config);
+    Ok(config)
+}
+
+fn codex_config_signature(config: &CodexAppServerConfig) -> String {
+    serde_json::to_string(&json!({
+        "cli": config.cli_command,
+        "cwd": config.working_directory,
+        "args": config.additional_args,
+        "model": config.model,
+        "reasoning_effort": config.reasoning_effort,
+        "approval": config.approval_policy,
+        "sandbox": config.sandbox,
+        "env": config.env_vars,
+        "selected_mcp": config.selected_mcp_tools_payload,
+    }))
+    .unwrap_or_default()
+}
+
+pub fn refresh_codex_session_signature(config: &mut CodexAppServerConfig) {
+    config.session_signature = codex_config_signature(config);
 }
 
 fn emit_session_snapshot(
@@ -256,6 +274,54 @@ fn emit_session_snapshot(
 
 fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+}
+
+/// 构造 Codex thread 的 MCP config 覆盖：把 AIPP 桥接进程注册为名为 `aipp` 的 MCP server。
+/// 通过 thread/start 与 thread/resume 的 `config` 字段下发（Codex 0.149 已验证），
+/// 不修改用户 ~/.codex/config.toml；与 ACP 通道共用同一桥接与代理。
+fn build_codex_mcp_config_overrides(
+    bridge_command: &std::path::Path,
+    mcp_db_path: &std::path::Path,
+    conversation_id: i64,
+    proxy: &AcpMcpProxyConfig,
+    selected_mcp_tools_payload: &str,
+) -> serde_json::Map<String, Value> {
+    let mut env = serde_json::Map::new();
+    env.insert(ACP_MCP_DB_PATH_ENV.to_string(), json!(mcp_db_path.display().to_string()));
+    env.insert(ACP_MCP_CONVERSATION_ID_ENV.to_string(), json!(conversation_id.to_string()));
+    env.insert(ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV.to_string(), json!("1"));
+    env.insert(ACP_MCP_PROXY_ADDR_ENV.to_string(), json!(proxy.addr));
+    env.insert(ACP_MCP_PROXY_TOKEN_ENV.to_string(), json!(proxy.token));
+    env.insert(ACP_MCP_SELECTED_TOOLS_ENV.to_string(), json!(selected_mcp_tools_payload));
+    let mut overrides = serde_json::Map::new();
+    overrides.insert("mcp_servers.aipp.command".to_string(), json!(bridge_command.display().to_string()));
+    overrides.insert("mcp_servers.aipp.args".to_string(), json!([ACP_MCP_BRIDGE_ARG]));
+    overrides.insert("mcp_servers.aipp.env".to_string(), Value::Object(env));
+    overrides.insert("mcp_servers.aipp.startup_timeout_sec".to_string(), json!(20));
+    overrides
+}
+
+/// 助手选中了 MCP 工具时生成 thread 级 config 覆盖；未选中时不挂载桥接
+async fn codex_mcp_bridge_overrides(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    config: &CodexAppServerConfig,
+) -> Result<Option<serde_json::Map<String, Value>>, String> {
+    let payload = config.selected_mcp_tools_payload.trim();
+    if payload.is_empty() || payload == "[]" {
+        return Ok(None);
+    }
+    let bridge_command = std::env::current_exe()
+        .map_err(|error| format!("Failed to resolve AIPP executable for Codex MCP bridge: {error}"))?;
+    let mcp_db_path = MCPDatabase::db_path(app_handle)?;
+    let proxy = ensure_proxy_server(app_handle.clone()).await?;
+    Ok(Some(build_codex_mcp_config_overrides(
+        &bridge_command,
+        &mcp_db_path,
+        conversation_id,
+        &proxy,
+        &config.selected_mcp_tools_payload,
+    )))
 }
 
 fn rpc_id_key(id: &Value) -> String {
@@ -1150,15 +1216,23 @@ async fn run_session(
                 .flatten()
         });
     let mut request_id = 2_u64;
+    let mcp_config_overrides = match codex_mcp_bridge_overrides(&app_handle, conversation_id, &config).await {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            warn!(conversation_id, error = %error, "Codex MCP bridge setup failed; continuing without AIPP MCP tools");
+            None
+        }
+    };
     let thread_params = json!({
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
         "cwd": config.working_directory,
         "approvalPolicy": config.approval_policy,
         "sandbox": config.sandbox,
+        "config": mcp_config_overrides,
     });
     let (thread_method, params) = if let Some(thread_id) = stored_thread.as_deref() {
-        ("thread/resume", json!({"threadId":thread_id}))
+        ("thread/resume", json!({"threadId":thread_id,"config":mcp_config_overrides}))
     } else {
         ("thread/start", thread_params.clone())
     };
@@ -1488,6 +1562,15 @@ async fn run_session(
                                     }
                                     break;
                                 },
+                                "mcpServer/startupStatus/updated" => {
+                                    let server_name = params.get("name").and_then(Value::as_str).unwrap_or("unknown");
+                                    let status = params.get("status").and_then(Value::as_str).unwrap_or("unknown");
+                                    if status == "failed" {
+                                        warn!(conversation_id, server = server_name, error = ?params.get("error"), failure_reason = ?params.get("failureReason"), "Codex MCP server startup failed");
+                                    } else {
+                                        debug!(conversation_id, server = server_name, status, "Codex MCP server startup status");
+                                    }
+                                }
                                 "error" => {
                                     let message = params.get("message").and_then(Value::as_str).unwrap_or("Codex app-server error");
                                     return Err(message.to_string());
@@ -1801,6 +1884,86 @@ mod tests {
         assert_eq!(
             config.additional_args,
             vec!["--profile".to_string(), "provider".to_string()]
+        );
+    }
+
+    fn codex_test_config() -> CodexAppServerConfig {
+        CodexAppServerConfig {
+            cli_command: "codex".to_string(),
+            working_directory: PathBuf::from("/tmp/work"),
+            env_vars: HashMap::new(),
+            additional_args: Vec::new(),
+            model: None,
+            reasoning_effort: None,
+            approval_policy: None,
+            sandbox: None,
+            selected_mcp_tools_payload: String::new(),
+            session_signature: String::new(),
+        }
+    }
+
+    /// MCP 工具快照纳入签名：绑定变化会触发会话重建
+    #[test]
+    fn signature_changes_with_selected_mcp_payload() {
+        let mut config = codex_test_config();
+        config.session_signature = codex_config_signature(&config);
+        let without_mcp = config.session_signature.clone();
+        config.selected_mcp_tools_payload = "[{\"server_id\":1}]".to_string();
+        refresh_codex_session_signature(&mut config);
+        assert_ne!(without_mcp, config.session_signature);
+    }
+
+    /// 构造的 config 覆盖包含 aipp server 的命令、桥接参数与全部环境变量
+    #[test]
+    fn build_codex_mcp_config_overrides_contains_bridge_env() {
+        let proxy = AcpMcpProxyConfig {
+            addr: "127.0.0.1:1234".to_string(),
+            token: "tok".to_string(),
+        };
+        let overrides = build_codex_mcp_config_overrides(
+            std::path::Path::new("aipp.exe"),
+            std::path::Path::new("mcp.db"),
+            42,
+            &proxy,
+            "[{\"server_id\":1}]",
+        );
+        assert_eq!(
+            overrides.get("mcp_servers.aipp.command").and_then(Value::as_str),
+            Some("aipp.exe")
+        );
+        assert_eq!(
+            overrides.get("mcp_servers.aipp.args"),
+            Some(&json!([ACP_MCP_BRIDGE_ARG]))
+        );
+        assert_eq!(
+            overrides.get("mcp_servers.aipp.startup_timeout_sec"),
+            Some(&json!(20))
+        );
+        let env = overrides
+            .get("mcp_servers.aipp.env")
+            .and_then(Value::as_object)
+            .unwrap();
+        for key in [
+            ACP_MCP_DB_PATH_ENV,
+            ACP_MCP_CONVERSATION_ID_ENV,
+            ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV,
+            ACP_MCP_PROXY_ADDR_ENV,
+            ACP_MCP_PROXY_TOKEN_ENV,
+            ACP_MCP_SELECTED_TOOLS_ENV,
+        ] {
+            assert!(env.contains_key(key), "missing env {key}");
+        }
+        assert_eq!(
+            env.get(ACP_MCP_CONVERSATION_ID_ENV).and_then(Value::as_str),
+            Some("42")
+        );
+        assert_eq!(
+            env.get(ACP_MCP_PROXY_ADDR_ENV).and_then(Value::as_str),
+            Some("127.0.0.1:1234")
+        );
+        assert_eq!(
+            env.get(ACP_MCP_SELECTED_TOOLS_ENV).and_then(Value::as_str),
+            Some("[{\"server_id\":1}]")
         );
     }
 }

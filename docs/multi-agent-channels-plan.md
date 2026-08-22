@@ -288,6 +288,8 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 
 ### 5.2 实现清单
 
+> **MCP 注入状态（2026-08-22 已实现）**：Codex 通道已支持把助手绑定的 MCP 工具挂载进会话——复用 ACP 桥接（`--aipp-acp-mcp-bridge`），通过 `thread/start` / `thread/resume` 的 `config` 覆盖注册名为 `aipp` 的 MCP server（Codex 0.149 实测验证），工具执行经 TCP 代理回流主进程权限体系；payload 计入 session 签名，绑定变更会重建会话进程但 resume 同一 thread。配置入口复用现有助手级 MCP 绑定 UI，无新前端。
+
 - `src-tauri/src/api/ai/codex_app_server.rs`（新增）：结构同 WS1
   - ndjson JSON-RPC 帧编解码（分包重组、id 配对、超时）——参照 Paseo `providers/jsonl-rpc-process.ts`
   - `CodexSessionState`（thread_id 存 `acp_session.session_id`，`agent_kind='codex_app_server'`）

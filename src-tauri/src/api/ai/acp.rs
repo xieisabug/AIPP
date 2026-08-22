@@ -133,11 +133,12 @@ fn build_acp_manual_mcp_servers_from_parts(
     )]
 }
 
-pub fn refresh_acp_selected_mcp_tools_payload(
+/// 构建助手当前选中的 MCP server/tool 快照（JSON 字符串，无选中时为 "[]"）。
+/// ACP 与 Codex app-server 通道共用：快照通过桥接进程暴露给外部 agent。
+pub fn build_selected_mcp_tools_payload(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
-    config: &mut AcpConfig,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let assistant_db = AssistantDatabase::new(app_handle).map_err(|error| error.to_string())?;
     let servers = assistant_db
         .get_assistant_mcp_servers_with_tools(assistant_id)
@@ -179,8 +180,15 @@ pub fn refresh_acp_selected_mcp_tools_payload(
         })
         .collect::<Vec<_>>();
 
-    config.selected_mcp_tools_payload =
-        serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+    serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+pub fn refresh_acp_selected_mcp_tools_payload(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+    config: &mut AcpConfig,
+) -> Result<(), String> {
+    config.selected_mcp_tools_payload = build_selected_mcp_tools_payload(app_handle, assistant_id)?;
     Ok(())
 }
 
