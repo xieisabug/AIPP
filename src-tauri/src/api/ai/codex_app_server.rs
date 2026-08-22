@@ -557,6 +557,9 @@ fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionS
 struct CodexTurnUsage {
     input_tokens: i32,
     output_tokens: i32,
+    reasoning_tokens: i32,
+    cached_input_tokens: i32,
+    cache_write_input_tokens: i32,
     total_tokens: i32,
 }
 
@@ -869,6 +872,9 @@ fn codex_turn_usage(params: &Value) -> Option<CodexTurnUsage> {
     Some(CodexTurnUsage {
         input_tokens: last.get("inputTokens")?.as_i64()?.try_into().ok()?,
         output_tokens: last.get("outputTokens")?.as_i64()?.try_into().ok()?,
+        reasoning_tokens: last.get("reasoningOutputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
+        cached_input_tokens: last.get("cachedInputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
+        cache_write_input_tokens: last.get("cacheWriteInputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
         total_tokens: last.get("totalTokens")?.as_i64()?.try_into().ok()?,
     })
 }
@@ -982,11 +988,59 @@ fn persist_response(
                     message.token_count = usage
                         .map(|value| value.total_tokens)
                         .unwrap_or(message.output_token_count);
+                    if let Some(usage) = usage {
+                        let mut metadata = message.metadata_json.as_deref()
+                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
+                        if let Some(map) = metadata.as_object_mut() {
+                            map.insert("usage_source".to_string(), json!("reported"));
+                            map.insert("thought_tokens".to_string(), json!(usage.reasoning_tokens));
+                            map.insert("cached_input_tokens".to_string(), json!(usage.cached_input_tokens));
+                            map.insert("cached_read_tokens".to_string(), json!(usage.cached_input_tokens));
+                            map.insert("cached_write_tokens".to_string(), json!(usage.cache_write_input_tokens));
+                            map.insert("cache_creation_tokens".to_string(), json!(usage.cache_write_input_tokens));
+                        }
+                        message.metadata_json = serde_json::to_string(&metadata).ok();
+                    }
                     let _ = repo.update(&message);
                 }
             }
         }
     }
+}
+
+fn persist_codex_timing(
+    app_handle: &tauri::AppHandle,
+    message_id: i64,
+    start_time: chrono::DateTime<chrono::Utc>,
+    first_token_time: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let Ok(db) = ConversationDatabase::new(app_handle) else { return };
+    let Ok(repo) = db.message_repo() else { return };
+    let Ok(Some(mut message)) = repo.read(message_id) else { return };
+    message.start_time = Some(start_time);
+    message.first_token_time = first_token_time;
+    message.ttft_ms = first_token_time.map(|first| (first.timestamp_millis() - start_time.timestamp_millis()).max(0));
+    let _ = repo.update(&message);
+}
+
+fn persist_codex_reasoning(
+    app_handle: &tauri::AppHandle,
+    message_id: i64,
+    content: &str,
+) {
+    let Ok(db) = ConversationDatabase::new(app_handle) else { return };
+    let Ok(repo) = db.message_repo() else { return };
+    let Ok(Some(mut message)) = repo.read(message_id) else { return };
+    message.content = content.to_string();
+    message.finish_time = Some(chrono::Utc::now());
+    // Codex reports reasoningOutputTokens as part of the response usage. Keep
+    // the separate reasoning bubble informational so conversation totals are
+    // not counted twice.
+    message.input_token_count = 0;
+    message.output_token_count = 0;
+    message.token_count = 0;
+    let _ = repo.update(&message);
 }
 
 async fn spawn_process(config: &CodexAppServerConfig) -> Result<(Child, tokio::process::ChildStdin, Lines<BufReader<ChildStdout>>), String> {
@@ -1232,6 +1286,7 @@ async fn run_session(
                 let _ = response.send(Ok(()));
             }
             CodexSessionCommand::Prompt { message_id, prompt, window } => {
+                let turn_start_time = chrono::Utc::now();
                 request_id += 1;
                 write_frame(
                     &mut stdin,
@@ -1262,6 +1317,7 @@ async fn run_session(
                 let mut content = String::new();
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
+                let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
                 let mut turn_usage: Option<CodexTurnUsage> = None;
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
@@ -1345,6 +1401,9 @@ async fn run_session(
                                 }
                                 "item/agentMessage/delta" => {
                                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                                        if !delta.is_empty() && first_any_token_time.is_none() {
+                                            first_any_token_time = Some(chrono::Utc::now());
+                                        }
                                         content.push_str(delta);
                                         persist_response(&app_handle, message_id, &content, false, None);
                                         let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
@@ -1354,6 +1413,9 @@ async fn run_session(
                                 }
                                 "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
+                                        if !delta.is_empty() && first_any_token_time.is_none() {
+                                            first_any_token_time = Some(chrono::Utc::now());
+                                        }
                                         reasoning.push_str(delta);
                                         if reasoning_message_id.is_none() {
                                             if let Ok(message) = crate::api::ai_api::add_message(
@@ -1441,9 +1503,10 @@ async fn run_session(
                                 }
                     }
                     }
+                persist_codex_timing(&app_handle, message_id, turn_start_time, first_any_token_time);
                 persist_response(&app_handle, message_id, &content, true, turn_usage);
                 if let Some(reasoning_id) = reasoning_message_id {
-                    persist_response(&app_handle, reasoning_id, &reasoning, true, None);
+                    persist_codex_reasoning(&app_handle, reasoning_id, &reasoning);
                     let _ = window.emit(
                         format!("conversation_event_{conversation_id}").as_str(),
                         ConversationEvent {
@@ -1453,9 +1516,9 @@ async fn run_session(
                                 message_type: "reasoning".to_string(),
                                 content: reasoning.clone(),
                                 is_done: true,
-                                token_count: Some(((reasoning.chars().count() + 3) / 4) as i32),
+                                token_count: Some(0),
                                 input_token_count: None,
-                                output_token_count: Some(((reasoning.chars().count() + 3) / 4) as i32),
+                                output_token_count: Some(0),
                                 ttft_ms: None,
                                 tps: None,
                             }).unwrap(),
@@ -1463,7 +1526,14 @@ async fn run_session(
                     );
                 }
                 let estimated_output_tokens = ((content.chars().count() + 3) / 4) as i32;
-                let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(turn_usage.map(|usage| usage.total_tokens).unwrap_or(estimated_output_tokens)), input_token_count: turn_usage.map(|usage| usage.input_tokens), output_token_count: Some(turn_usage.map(|usage| usage.output_tokens).unwrap_or(estimated_output_tokens)), ttft_ms: None, tps: None }).unwrap() };
+                let finish_time = chrono::Utc::now();
+                let ttft_ms = first_any_token_time.map(|first| (first.timestamp_millis() - turn_start_time.timestamp_millis()).max(0));
+                let output_tokens = turn_usage.map(|usage| usage.output_tokens).unwrap_or(estimated_output_tokens);
+                let tps = first_any_token_time.and_then(|first| {
+                    let duration_ms = finish_time.timestamp_millis() - first.timestamp_millis();
+                    (output_tokens > 0 && duration_ms > 0).then(|| output_tokens as f64 * 1000.0 / duration_ms as f64)
+                });
+                let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(turn_usage.map(|usage| usage.total_tokens).unwrap_or(estimated_output_tokens)), input_token_count: turn_usage.map(|usage| usage.input_tokens), output_token_count: Some(output_tokens), ttft_ms, tps }).unwrap() };
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), done_event);
                 let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), complete_event);
@@ -1615,7 +1685,14 @@ mod tests {
     fn reads_exact_turn_usage_and_degrades_unknown_item_notification() {
         let usage = codex_turn_usage(&json!({
             "tokenUsage": {
-                "last": {"inputTokens": 12, "outputTokens": 7, "totalTokens": 19}
+                "last": {
+                    "inputTokens": 12,
+                    "outputTokens": 7,
+                    "reasoningOutputTokens": 3,
+                    "cachedInputTokens": 5,
+                    "cacheWriteInputTokens": 2,
+                    "totalTokens": 19
+                }
             }
         }));
         assert_eq!(
@@ -1623,6 +1700,9 @@ mod tests {
             Some(CodexTurnUsage {
                 input_tokens: 12,
                 output_tokens: 7,
+                reasoning_tokens: 3,
+                cached_input_tokens: 5,
+                cache_write_input_tokens: 2,
                 total_tokens: 19,
             })
         );

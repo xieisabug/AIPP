@@ -674,14 +674,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
             acpRestoreNoticeRef.current = noticeKey;
             const methodLabel = method === "resume" ? "session/resume" : "session/load";
+            const isCodexSession = acpSessionState.agent_kind === "codex_app_server";
+            const sessionLabel = isCodexSession ? "Codex" : "ACP";
             const description =
                 method === "resume"
-                    ? "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
-                    : "AIPP 已抑制历史回放，避免重复写入当前对话。";
-            toast.success(`已通过 ${methodLabel} 恢复 ACP 会话`, {
+                    ? isCodexSession
+                        ? "Codex 已恢复线程内部上下文，AIPP 保留本地对话展示。"
+                        : "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
+                    : isCodexSession
+                        ? "Codex 已恢复线程，AIPP 已抑制历史回放，避免重复写入当前对话。"
+                        : "AIPP 已抑制历史回放，避免重复写入当前对话。";
+            toast.success(`已通过 ${methodLabel} 恢复 ${sessionLabel} 会话`, {
                 description,
             });
         }, [
+            acpSessionState?.agent_kind,
             acpSessionState?.restored_session_method,
             acpSessionState?.session_id,
             conversationId,
