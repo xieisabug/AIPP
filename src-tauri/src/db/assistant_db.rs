@@ -358,6 +358,15 @@ impl AssistantDatabase {
         Ok(())
     }
 
+    /// Clear model bindings that point at a provider being deleted.
+    pub fn clear_provider_references(&self, provider_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE assistant_model SET provider_id = 0, model_code = '', alias = '' WHERE provider_id = ?",
+            params![provider_id],
+        )?;
+        Ok(())
+    }
+
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id, assistant_model_id = assistant_model_id, name = name))]
     pub fn add_assistant_model_config(
         &self,

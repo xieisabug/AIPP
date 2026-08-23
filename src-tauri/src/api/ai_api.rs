@@ -14,6 +14,7 @@ use crate::api::ai::codex_app_server::{
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
+use crate::api::assistant_api::CLAUDE_CODE_DEFAULT_MODEL;
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
     get_openai_responses_stateful_enabled, get_request_timeout_from_config,
@@ -1256,7 +1257,21 @@ pub async fn ask_ai(
         // 获取 provider 配置
         // ACP 配置可能在 llm_provider_config 表中（如 acp_cli_command）
         let agent_provider_id = resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs);
-        let (provider_api_type, provider_configs) = if let Some(provider_id) = agent_provider_id {
+        let override_provider_id = processed_request
+            .override_model_id
+            .as_deref()
+            .and_then(|value| value.split_once("%%"))
+            .and_then(|(_, provider_id)| provider_id.parse::<i64>().ok())
+            .filter(|provider_id| *provider_id > 0);
+        let routing_provider_id = override_provider_id.or(agent_provider_id);
+        if let Some(provider_id) = override_provider_id {
+            info!(
+                default_provider_id = ?agent_provider_id,
+                override_provider_id = provider_id,
+                "Agent model override selects provider for routing"
+            );
+        }
+        let (mut provider_api_type, provider_configs) = if let Some(provider_id) = routing_provider_id {
             debug!("ACP: Getting provider config for provider_id={}", provider_id);
 
             let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
@@ -1280,7 +1295,25 @@ pub async fn ask_ai(
             ("acp".to_string(), Vec::new())
         };
 
-        debug!("ACP: Loaded {} provider configs", provider_configs.len());
+        // Some existing user providers were created as generic `acp` rows but
+        // actually launch the official Claude CLI. That executable speaks
+        // Claude Code stream-json, not ACP; detect it before selecting a
+        // protocol so the selected provider/model are used correctly.
+        if provider_api_type == "acp"
+            && provider_configs.iter().any(|config| {
+                matches!(config.name.as_str(), "acp_cli_command" | "claude_cli_command")
+                    && config.value.to_ascii_lowercase().contains("claude")
+            })
+        {
+            info!("ACP provider launches Claude CLI; routing through Claude Code stream-json");
+            provider_api_type = CLAUDE_SDK_API_TYPE.to_string();
+        }
+
+        debug!(
+            provider_api_type = %provider_api_type,
+            config_names = ?provider_configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
+            "Agent provider configuration loaded"
+        );
 
         if provider_api_type == CODEX_APP_SERVER_API_TYPE {
             info!(conversation_id, "Codex app-server provider detected");
@@ -1338,25 +1371,50 @@ pub async fn ask_ai(
             return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
         }
 
-        if provider_api_type == CLAUDE_SDK_API_TYPE {
+        if provider_api_type == CLAUDE_SDK_API_TYPE || provider_api_type == "anthropic" {
+            info!(conversation_id, "Entering Claude Code stream-json provider branch");
+            let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
             let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
-            let model_provider_id = agent_provider_id.ok_or_else(|| {
+            let default_provider_id = agent_provider_id.ok_or_else(|| {
                 AppError::UnknownError("Claude Code 助手没有配置模型提供商".to_string())
             })?;
-            let model_choices = claude_model_choices(
-                &LLMDatabase::new(&app_handle)
-                    .map_err(|e| AppError::UnknownError(e.to_string()))?
-                    .get_llm_models(model_provider_id.to_string())
-                    .map_err(|e| AppError::UnknownError(e.to_string()))?,
+            let selected_provider_id = processed_request.override_model_id.as_deref()
+                .and_then(|value| value.split_once("%%"))
+                .and_then(|(_, provider_id)| provider_id.parse::<i64>().ok())
+                .unwrap_or(default_provider_id);
+            let selected_provider = llm_db.get_llm_provider(selected_provider_id).map_err(AppError::from)?;
+            if selected_provider.api_type != CLAUDE_SDK_API_TYPE && selected_provider.api_type != "anthropic" {
+                return Err(AppError::UnknownError("Claude Code 只能使用 Claude Code 默认配置或 Anthropic Provider".into()));
+            }
+            let selected_provider_configs = llm_db.get_llm_provider_config(selected_provider_id).map_err(AppError::from)?;
+            debug!(
+                provider_id = selected_provider_id,
+                config_names = ?selected_provider_configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
+                "Loaded Claude Code provider configs"
             );
-            let mut config = extract_claude_sdk_config(&assistant_detail.model_configs, &provider_configs, model_code, model_choices)?;
+            let model_choices = claude_model_choices(
+                &llm_db.get_llm_models(selected_provider_id.to_string()).map_err(|e| AppError::UnknownError(e.to_string()))?,
+            );
+            let selected_model = processed_request.override_model_id.as_deref()
+                .and_then(|value| value.split_once("%%"))
+                .map(|(model, _)| model.to_string())
+                .or(model_code);
+            let selected_model = selected_model.filter(|model| model != CLAUDE_CODE_DEFAULT_MODEL);
+            let mut config = extract_claude_sdk_config(&assistant_detail.model_configs, &selected_provider_configs, selected_model, model_choices)?;
             if let Some(override_model_id) = processed_request.override_model_id.as_deref() {
-                if let Some((model, _)) = override_model_id.split_once("%%") { config.model = Some(model.to_string()); }
+                if let Some((model, _)) = override_model_id.split_once("%%") { config.model = (model != CLAUDE_CODE_DEFAULT_MODEL).then(|| model.to_string()); }
             }
             if let Some(overrides) = override_model_config.as_ref() {
                 if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
             }
             refresh_claude_session_signature(&mut config);
+            info!(
+                conversation_id,
+                provider_id = selected_provider_id,
+                model = ?config.model,
+                cli = %config.cli_command,
+                "Claude Code provider selected; starting stream-json session"
+            );
             let response_message = add_message(&app_handle, None, conversation_id, "response".to_string(), String::new(), Some(0), Some("claude-code".to_string()), Some(chrono::Utc::now()), None, 0, None, None)?;
             let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), ConversationEvent { r#type: "message_add".to_string(), data: serde_json::to_value(MessageAddEvent { message_id: response_message.id, message_type: "response".to_string() }).unwrap() });
             let claude_state = app_handle.state::<ClaudeSessionState>();

@@ -128,6 +128,9 @@ pub async fn delete_llm_provider(
     llm_provider_id: i64,
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let assistant_db = crate::db::assistant_db::AssistantDatabase::new(&app_handle)
+        .map_err(|e| e.to_string())?;
+    assistant_db.clear_provider_references(llm_provider_id).map_err(|e| e.to_string())?;
     db.delete_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())

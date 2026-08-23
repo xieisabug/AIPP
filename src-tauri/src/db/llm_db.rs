@@ -131,6 +131,11 @@ impl LLMDatabase {
         )?;
         self.create_model_request_mode_preference_table()?;
 
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS llm_provider_init_state (id INTEGER PRIMARY KEY CHECK (id = 1))",
+            [],
+        )?;
+
         if let Err(err) = self.init_llm_provider() {
             warn!(error = ?err, "init_llm_provider failed (may already be initialized)");
         }
@@ -173,7 +178,7 @@ impl LLMDatabase {
     }
 
     /// 根据助手类型获取过滤后的提供商列表
-    /// ACP 助手 (assistant_type = 4): 只返回 ACP 提供商 (api_type = 'acp')
+    /// Agent 助手 (assistant_type = 4): 返回 Agent/Claude/Anthropic 提供商
     /// 普通助手: 排除 ACP 提供商
     #[instrument(level = "debug", skip(self))]
     pub fn get_filtered_providers(
@@ -182,7 +187,7 @@ impl LLMDatabase {
     ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool)>> {
         let where_clause = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
-            "api_type IN ('acp', 'codex_app_server', 'claude_sdk')"
+            "api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'anthropic')"
         } else {
             // 普通助手：排除 ACP 提供商
             "api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk')"
@@ -671,7 +676,14 @@ impl LLMDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn init_llm_provider(&self) -> rusqlite::Result<()> {
-        // 使用 INSERT OR IGNORE 避免重复初始化时触发 UNIQUE 约束错误
+        let initialized: bool = self
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM llm_provider_init_state WHERE id = 1)", [], |row| row.get(0))?;
+        if initialized {
+            return Ok(());
+        }
+
+        // Seed the built-in rows once. Deleting an official provider must remain permanent.
         self.conn.execute(
             "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (1, 'OpenAI', 'openai_api', 'OpenAI API', 1)",
             [],
@@ -688,6 +700,8 @@ impl LLMDatabase {
             "INSERT OR IGNORE INTO llm_provider (id, name, api_type, description, is_official) VALUES (30, 'DeepSeek', 'deepseek', 'DeepSeek API', 1);",
             [],
         )?;
+
+        self.conn.execute("INSERT OR IGNORE INTO llm_provider_init_state (id) VALUES (1)", [])?;
 
         Ok(())
     }

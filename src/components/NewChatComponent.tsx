@@ -10,7 +10,7 @@ interface AssistantListItem {
     assistant_type?: number;
 }
 
-interface AgentModelOption { code: string; name: string; provider_id: number; efforts: string[]; }
+interface AgentModelOption { code: string; name: string; provider_id: number; efforts: string[]; default_effort?: string | null; }
 
 interface NewChatComponentProps {
     selectedText: string;
@@ -65,9 +65,15 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                     : undefined;
                 const initialModel = configured ?? nextModels[0];
                 const firstEfforts = initialModel?.efforts ?? [];
+                const configuredEffort = detail?.model_configs?.find((config: { name?: string; value?: string | null }) => config.name === "reasoning_effort")?.value;
+                const initialEffort = initialModel?.default_effort && firstEfforts.includes(initialModel.default_effort)
+                    ? initialModel.default_effort
+                    : configuredEffort && firstEfforts.includes(configuredEffort)
+                        ? configuredEffort
+                        : (firstEfforts[0] ?? "");
                 setModels(nextModels);
                 setEfforts(firstEfforts);
-                onAgentConfigChange(initialModel?.code ?? "", firstEfforts[0] ?? "");
+                onAgentConfigChange(initialModel?.code ?? "", initialEffort);
             } catch {
                 if (!cancelled) { setIsAgentAssistant(selectedAssistantInfo?.assistant_type === 4); setModels([]); setEfforts([]); setConfigError("无法读取 Agent 可用模型，请检查对应 CLI 配置"); }
             } finally {
@@ -116,7 +122,10 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                         const model = models.find((item) => item.code === value);
                         const nextEfforts = model?.efforts ?? [];
                         setEfforts(nextEfforts);
-                        onAgentConfigChange(value, nextEfforts.includes(selectedEffort) ? selectedEffort : (nextEfforts[0] ?? ""));
+                        const nextEffort = model?.default_effort && nextEfforts.includes(model.default_effort)
+                            ? model.default_effort
+                            : nextEfforts.includes(selectedEffort) ? selectedEffort : (nextEfforts[0] ?? "");
+                        onAgentConfigChange(value, nextEffort);
                     }}>
                         <SelectTrigger className="min-w-0 flex-1" disabled={loadingConfig || models.length === 0}><SelectValue placeholder={loadingConfig ? "加载模型" : "选择模型"} /></SelectTrigger>
                         <SelectContent>{models.map((model) => <SelectItem key={model.code} value={model.code}>{model.name}</SelectItem>)}</SelectContent>

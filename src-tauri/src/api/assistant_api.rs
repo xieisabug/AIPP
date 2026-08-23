@@ -39,7 +39,10 @@ pub struct AgentModelOption {
     pub name: String,
     pub provider_id: i64,
     pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
 }
+
+pub const CLAUDE_CODE_DEFAULT_MODEL: &str = "__claude_code_default__";
 
 fn add_agent_model_option(options: &mut Vec<AgentModelOption>, option: AgentModelOption) {
     if !options.iter().any(|existing| existing.code == option.code) {
@@ -80,33 +83,60 @@ pub async fn get_agent_model_options(
                     name: entry.name,
                     provider_id,
                     efforts: entry.supported_efforts,
+                    default_effort: entry.default_effort,
                 });
             }
         }
         CLAUDE_SDK_API_TYPE => {
-            // Claude Code 没有公开的 model/list RPC；这些是 CLI 支持的稳定别名，
-            // 同时合并数据库和助手当前配置，避免配置了自定义模型时丢失。
             let efforts = ["default", "low", "medium", "high", "max"].into_iter().map(str::to_string).collect::<Vec<_>>();
             for (code, name) in [
                 ("sonnet", "Claude Sonnet"),
                 ("opus", "Claude Opus"),
                 ("haiku", "Claude Haiku"),
             ] {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: name.into(), provider_id, efforts: efforts.clone() });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · {name}"), provider_id, efforts: efforts.clone(), default_effort: None });
             }
-            for (_, name, _, code, _, _, _, _) in db_models {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: efforts.clone() });
+            add_agent_model_option(&mut options, AgentModelOption { code: format!("{CLAUDE_CODE_DEFAULT_MODEL}%%{provider_id}"), name: "Claude Code 默认配置 · 使用 CLI 默认模型".into(), provider_id, efforts: efforts.clone(), default_effort: None });
+            for (other_id, other_name, other_api_type, _, _, _) in llm_db.get_llm_providers().map_err(|e| e.to_string())? {
+                if other_api_type != "anthropic" { continue; }
+                for (_, model_name, _, code, _, _, _, _) in llm_db.get_llm_models(other_id.to_string()).map_err(|e| e.to_string())? {
+                    add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{other_id}"), name: format!("{other_name} / {model_name}"), provider_id: other_id, efforts: efforts.clone(), default_effort: None });
+                }
             }
             if let Some(code) = current_model {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · 当前模型 {code}"), provider_id, efforts, default_effort: None });
+            }
+        }
+        "anthropic" => {
+            let efforts = ["default", "low", "medium", "high", "max"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            for (_, name, _, code, _, _, _, _) in db_models {
+                add_agent_model_option(&mut options, AgentModelOption {
+                    code: format!("{code}%%{provider_id}"),
+                    name,
+                    provider_id,
+                    efforts: efforts.clone(),
+                    default_effort: None,
+                });
+            }
+            if let Some(code) = current_model {
+                add_agent_model_option(&mut options, AgentModelOption {
+                    code: format!("{code}%%{provider_id}"),
+                    name: code,
+                    provider_id,
+                    efforts,
+                    default_effort: None,
+                });
             }
         }
         "acp" => {
             for (_, name, _, code, _, _, _, _) in db_models {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: Vec::new() });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: Vec::new(), default_effort: None });
             }
             if let Some(code) = current_model {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: Vec::new() });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: Vec::new(), default_effort: None });
             }
         }
         other => return Err(format!("不支持的 Agent 提供商类型：{other}")),
@@ -911,6 +941,13 @@ pub async fn ensure_acp_session_connected(
         return Ok(None);
     }
 
+    // ask_ai may have just created the authoritative Claude session using a
+    // per-message provider/model override. Never auto-connect a second session
+    // for the same conversation and replace its state.
+    if let Some(entry) = claude_session_state.sessions.lock().await.get(&conversation_id) {
+        return Ok(Some(serde_json::to_value(entry.snapshot.clone()).unwrap_or(serde_json::Value::Null)));
+    }
+
     let model_configs =
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
     let assistant_models =
@@ -930,6 +967,10 @@ pub async fn ensure_acp_session_connected(
     } else {
         ("acp".to_string(), Vec::new())
     };
+
+    if provider_api_type == "anthropic" {
+        return Ok(None);
+    }
 
     // Codex app-server 通道：spawn 即自动 initialize + thread start/resume，
     // 复用 ask_ai 的 config_signature 复用判断；快照通过 acp_session_state_snapshot 事件持续推送

@@ -174,7 +174,9 @@ pub fn extract_claude_sdk_config(
         }
     }
     let cli_command = model_value(models, "claude_cli_command")
+        .or_else(|| model_value(models, "acp_cli_command"))
         .or_else(|| provider_value(providers, "claude_cli_command"))
+        .or_else(|| provider_value(providers, "acp_cli_command"))
         .unwrap_or_else(|| "claude".into());
     let working_directory = model_value(models, "acp_working_directory")
         .or_else(|| provider_value(providers, "acp_working_directory"))
@@ -186,6 +188,16 @@ pub fn extract_claude_sdk_config(
         .or_else(|| provider_value(providers, "claude_effort"))
         .filter(|value| value != "default");
     let mut env_vars = HashMap::new();
+    // A regular Anthropic provider stores credentials as API fields, while
+    // Claude Code consumes the corresponding environment variables.
+    if let Some(api_key) = provider_value(providers, "api_key") {
+        env_vars.insert("ANTHROPIC_API_KEY".into(), api_key);
+    }
+    if let Some(base_url) = provider_value(providers, "endpoint")
+        .or_else(|| provider_value(providers, "base_url"))
+    {
+        env_vars.insert("ANTHROPIC_BASE_URL".into(), base_url);
+    }
     for raw in [provider_value(providers, "acp_env_vars"), model_value(models, "acp_env_vars")]
         .into_iter()
         .flatten()
@@ -353,6 +365,30 @@ fn emit_snapshot(
     );
 }
 
+fn emit_claude_failure(
+    app: &tauri::AppHandle,
+    conversation_id: i64,
+    message_id: i64,
+    window: &tauri::Window,
+    error: &str,
+) {
+    let content = format!("Claude Code 运行失败：{error}");
+    persist(app, message_id, &content, true);
+    emit_update(window, conversation_id, message_id, &content, true);
+    let _ = window.emit(
+        &format!("conversation_event_{conversation_id}"),
+        ConversationEvent {
+            r#type: "stream_complete".into(),
+            data: json!({
+                "conversation_id": conversation_id,
+                "response_message_id": message_id,
+                "has_response": true,
+                "error": error,
+            }),
+        },
+    );
+}
+
 fn claude_config_options(config: &ClaudeSdkConfig) -> Vec<AcpSessionConfigOptionPayload> {
     vec![
         AcpSessionConfigOptionPayload {
@@ -423,14 +459,29 @@ async fn spawn_claude_process(
     #[cfg(not(target_os = "windows"))]
     let (program, prefix_args): (PathBuf, Vec<String>) = (resolved, Vec::new());
     let mut command = Command::new(program);
+    tracing::info!(
+        cli = %resolved.display(),
+        model = ?config.model,
+        has_anthropic_api_key = config.env_vars.contains_key("ANTHROPIC_API_KEY"),
+        has_anthropic_base_url = config.env_vars.contains_key("ANTHROPIC_BASE_URL"),
+        "Starting Claude Code stream-json process"
+    );
     command.args(prefix_args).args(["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"]);
     if let Some(session_id) = session_id { command.arg("--resume").arg(session_id); }
     if let Some(model) = &config.model { command.args(["--model", model]); }
     if let Some(mode) = &config.permission_mode { command.args(["--permission-mode", mode]); }
     if let Some(effort) = &config.effort { command.args(["--effort", effort]); }
-    let mut child = command.current_dir(&config.working_directory).envs(&config.env_vars).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).kill_on_drop(true).spawn().map_err(|e| e.to_string())?;
+    let mut child = command.current_dir(&config.working_directory).envs(&config.env_vars).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|e| e.to_string())?;
     let stdin = child.stdin.take().ok_or("Claude stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Claude stdout unavailable")?;
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::error!(target = "claude_code", "{line}");
+            }
+        });
+    }
     Ok((child, stdin, BufReader::new(stdout).lines()))
 }
 
@@ -446,7 +497,31 @@ pub fn spawn_claude_session_task(
             .ok()
             .and_then(|db| db.get_agent_session_id(_conversation_id, CLAUDE_SDK_API_TYPE).ok())
             .flatten();
-        let Ok((mut child, mut stdin, mut lines)) = spawn_claude_process(&config, stored_session.as_deref()).await else { return; };
+        let (mut child, mut stdin, mut lines) = match spawn_claude_process(&config, stored_session.as_deref()).await {
+            Ok(process) => process,
+            Err(error) => {
+                while let Some(message) = rx.recv().await {
+                    match message {
+                        SessionCommand::Prompt { message_id, window, .. } => {
+                            emit_claude_failure(&app, _conversation_id, message_id, &window, &error);
+                            break;
+                        }
+                        SessionCommand::Cancel { response } => {
+                            let _ = response.send(Ok(()));
+                        }
+                        SessionCommand::SetConfig { response, .. } => {
+                            let _ = response.send(Err(format!("Claude Code 尚未启动：{error}")));
+                        }
+                    }
+                }
+                return;
+            }
+        };
+        tracing::info!(
+            conversation_id = _conversation_id,
+            model = ?config.model,
+            "Claude Code stream-json process started"
+        );
         let mut session_id: Option<String> = stored_session.clone();
         emit_snapshot(
             &app,
@@ -504,8 +579,23 @@ pub fn spawn_claude_session_task(
                 }
                 SessionCommand::Prompt { message_id, prompt, window } => {
                     let input = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":prompt}]},"session_id":session_id});
-                    if stdin.write_all(format!("{input}\n").as_bytes()).await.is_err() {
-                        break;
+                    if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {
+                        let content = format!("写入 Claude Code 请求失败：{error}");
+                        persist(&app, message_id, &content, true);
+                        emit_update(&window, _conversation_id, message_id, &content, true);
+                        let _ = window.emit(
+                            &format!("conversation_event_{_conversation_id}"),
+                            ConversationEvent {
+                                r#type: "stream_complete".into(),
+                                data: json!({
+                                    "conversation_id": _conversation_id,
+                                    "response_message_id": message_id,
+                                    "has_response": true,
+                                    "error": content,
+                                }),
+                            },
+                        );
+                        continue;
                     }
                     let _ = stdin.flush().await;
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
@@ -530,9 +620,20 @@ pub fn spawn_claude_session_task(
                         },
                     );
                     let mut usage = Value::Null;
+                    let mut stream_error: Option<String> = None;
                     loop {
                         let line = tokio::select! {
-                            next = lines.next_line() => match next { Ok(Some(line)) => line, _ => break },
+                            next = lines.next_line() => match next {
+                                Ok(Some(line)) => line,
+                                Ok(None) => {
+                                    stream_error = Some("Claude Code 进程提前退出".into());
+                                    break;
+                                }
+                                Err(error) => {
+                                    stream_error = Some(format!("读取 Claude Code 输出失败：{error}"));
+                                    break;
+                                }
+                            },
                             command = rx.recv() => match command {
                                 Some(SessionCommand::Cancel { response }) => {
                                     let request_id = uuid::Uuid::new_v4().to_string();
@@ -660,11 +761,21 @@ pub fn spawn_claude_session_task(
                                         .and_then(Value::as_str)
                                         .unwrap_or_default()
                                         .into();
+                                    if content.is_empty() {
+                                        if let Some(error) = frame.get("error").and_then(Value::as_str) {
+                                            content = format!("Claude Code 返回错误：{error}");
+                                        }
+                                    }
                                 }
                                 usage = frame.get("usage").cloned().unwrap_or(Value::Null);
                                 break;
                             }
                             _ => {}
+                        }
+                    }
+                    if content.is_empty() {
+                        if let Some(error) = stream_error.as_deref() {
+                            content = format!("Claude Code 运行失败：{error}");
                         }
                     }
                     persist(&app, message_id, &content, true);
@@ -739,5 +850,54 @@ mod tests {
             extract_claude_sdk_config(&[model], &[provider], None, Vec::new()).unwrap().cli_command,
             "model-claude"
         );
+    }
+
+    #[test]
+    fn anthropic_provider_fields_become_claude_environment_variables() {
+        let providers = vec![
+            crate::db::llm_db::LLMProviderConfig {
+                id: 1,
+                name: "api_key".into(),
+                llm_provider_id: 1,
+                value: "provider-key".into(),
+                append_location: "".into(),
+                is_addition: false,
+            },
+            crate::db::llm_db::LLMProviderConfig {
+                id: 2,
+                name: "endpoint".into(),
+                llm_provider_id: 1,
+                value: "https://proxy.example/v1".into(),
+                append_location: "".into(),
+                is_addition: false,
+            },
+        ];
+        let config = extract_claude_sdk_config(&[], &providers, None, Vec::new()).unwrap();
+        assert_eq!(config.env_vars.get("ANTHROPIC_API_KEY"), Some(&"provider-key".to_string()));
+        assert_eq!(config.env_vars.get("ANTHROPIC_BASE_URL"), Some(&"https://proxy.example/v1".to_string()));
+    }
+
+    #[test]
+    fn explicit_claude_env_overrides_anthropic_provider_fields() {
+        let providers = vec![
+            crate::db::llm_db::LLMProviderConfig {
+                id: 1,
+                name: "api_key".into(),
+                llm_provider_id: 1,
+                value: "provider-key".into(),
+                append_location: "".into(),
+                is_addition: false,
+            },
+            crate::db::llm_db::LLMProviderConfig {
+                id: 2,
+                name: "acp_env_vars".into(),
+                llm_provider_id: 1,
+                value: "ANTHROPIC_API_KEY=explicit-key".into(),
+                append_location: "".into(),
+                is_addition: false,
+            },
+        ];
+        let config = extract_claude_sdk_config(&[], &providers, None, Vec::new()).unwrap();
+        assert_eq!(config.env_vars.get("ANTHROPIC_API_KEY"), Some(&"explicit-key".to_string()));
     }
 }
