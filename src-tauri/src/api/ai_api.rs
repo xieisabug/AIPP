@@ -13,7 +13,7 @@ use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
-use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
+use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, is_claude_code_provider, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
 use crate::api::assistant_api::CLAUDE_CODE_DEFAULT_MODEL;
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
@@ -67,6 +67,13 @@ use tracing::{debug, error, info, instrument, warn};
 
 const QUEUE_KIND_NORMAL: &str = "normal";
 const QUEUE_KIND_INTERRUPT: &str = "interrupt";
+
+fn parse_agent_model_override(value: &str) -> Option<(&str, i64)> {
+    let (model, provider_id) = value.split_once("%%")?;
+    let provider_id = provider_id.parse::<i64>().ok().filter(|id| *id > 0)?;
+    let model = model.trim();
+    (!model.is_empty()).then_some((model, provider_id))
+}
 
 /// 计算字符串的简短 hash（用于确保唯一性）
 fn short_hash(s: &str) -> String {
@@ -1260,9 +1267,8 @@ pub async fn ask_ai(
         let override_provider_id = processed_request
             .override_model_id
             .as_deref()
-            .and_then(|value| value.split_once("%%"))
-            .and_then(|(_, provider_id)| provider_id.parse::<i64>().ok())
-            .filter(|provider_id| *provider_id > 0);
+            .and_then(parse_agent_model_override)
+            .map(|(_, provider_id)| provider_id);
         let routing_provider_id = override_provider_id.or(agent_provider_id);
         if let Some(provider_id) = override_provider_id {
             info!(
@@ -1271,7 +1277,7 @@ pub async fn ask_ai(
                 "Agent model override selects provider for routing"
             );
         }
-        let (mut provider_api_type, provider_configs) = if let Some(provider_id) = routing_provider_id {
+        let (provider_api_type, provider_configs) = if let Some(provider_id) = routing_provider_id {
             debug!("ACP: Getting provider config for provider_id={}", provider_id);
 
             let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
@@ -1295,18 +1301,13 @@ pub async fn ask_ai(
             ("acp".to_string(), Vec::new())
         };
 
-        // Some existing user providers were created as generic `acp` rows but
-        // actually launch the official Claude CLI. That executable speaks
-        // Claude Code stream-json, not ACP; detect it before selecting a
-        // protocol so the selected provider/model are used correctly.
-        if provider_api_type == "acp"
-            && provider_configs.iter().any(|config| {
-                matches!(config.name.as_str(), "acp_cli_command" | "claude_cli_command")
-                    && config.value.to_ascii_lowercase().contains("claude")
-            })
-        {
-            info!("ACP provider launches Claude CLI; routing through Claude Code stream-json");
-            provider_api_type = CLAUDE_SDK_API_TYPE.to_string();
+        let provider_api_type = if is_claude_code_provider(&provider_api_type, &provider_configs) {
+            CLAUDE_SDK_API_TYPE.to_string()
+        } else {
+            provider_api_type
+        };
+        if provider_api_type == CLAUDE_SDK_API_TYPE {
+            info!("Agent provider routes through Claude Code stream-json");
         }
 
         debug!(
@@ -1323,8 +1324,8 @@ pub async fn ask_ai(
                 &provider_configs,
                 model_code,
             )?;
-            if let Some(override_model_id) = processed_request.override_model_id.as_deref() {
-                if let Some((model, _)) = override_model_id.split_once("%%") { codex_config.model = Some(model.to_string()); }
+            if let Some((model, _)) = processed_request.override_model_id.as_deref().and_then(parse_agent_model_override) {
+                codex_config.model = Some(model.to_string());
             }
             if let Some(config) = override_model_config.as_ref() {
                 if let Some(effort) = config.get("reasoning_effort").and_then(|value| value.as_str()) { codex_config.reasoning_effort = Some(effort.to_string()); }
@@ -1379,14 +1380,14 @@ pub async fn ask_ai(
                 AppError::UnknownError("Claude Code 助手没有配置模型提供商".to_string())
             })?;
             let selected_provider_id = processed_request.override_model_id.as_deref()
-                .and_then(|value| value.split_once("%%"))
-                .and_then(|(_, provider_id)| provider_id.parse::<i64>().ok())
+                .and_then(parse_agent_model_override)
+                .map(|(_, provider_id)| provider_id)
                 .unwrap_or(default_provider_id);
+            let selected_provider_configs = llm_db.get_llm_provider_config(selected_provider_id).map_err(AppError::from)?;
             let selected_provider = llm_db.get_llm_provider(selected_provider_id).map_err(AppError::from)?;
-            if selected_provider.api_type != CLAUDE_SDK_API_TYPE && selected_provider.api_type != "anthropic" {
+            if !is_claude_code_provider(&selected_provider.api_type, &selected_provider_configs) {
                 return Err(AppError::UnknownError("Claude Code 只能使用 Claude Code 默认配置或 Anthropic Provider".into()));
             }
-            let selected_provider_configs = llm_db.get_llm_provider_config(selected_provider_id).map_err(AppError::from)?;
             debug!(
                 provider_id = selected_provider_id,
                 config_names = ?selected_provider_configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
@@ -1396,13 +1397,13 @@ pub async fn ask_ai(
                 &llm_db.get_llm_models(selected_provider_id.to_string()).map_err(|e| AppError::UnknownError(e.to_string()))?,
             );
             let selected_model = processed_request.override_model_id.as_deref()
-                .and_then(|value| value.split_once("%%"))
+                .and_then(parse_agent_model_override)
                 .map(|(model, _)| model.to_string())
                 .or(model_code);
             let selected_model = selected_model.filter(|model| model != CLAUDE_CODE_DEFAULT_MODEL);
             let mut config = extract_claude_sdk_config(&assistant_detail.model_configs, &selected_provider_configs, selected_model, model_choices)?;
-            if let Some(override_model_id) = processed_request.override_model_id.as_deref() {
-                if let Some((model, _)) = override_model_id.split_once("%%") { config.model = (model != CLAUDE_CODE_DEFAULT_MODEL).then(|| model.to_string()); }
+            if let Some((model, _)) = processed_request.override_model_id.as_deref().and_then(parse_agent_model_override) {
+                config.model = (model != CLAUDE_CODE_DEFAULT_MODEL).then(|| model.to_string());
             }
             if let Some(overrides) = override_model_config.as_ref() {
                 if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
@@ -3781,7 +3782,8 @@ mod tests {
     use super::{
         apply_hook_messages, apply_openai_responses_stateful_request_options,
         collect_openai_responses_instructions, maybe_select_openai_responses_stateful_messages,
-        prepare_openai_responses_request_messages, resolve_tool_name, ToolNameMapping,
+        parse_agent_model_override, prepare_openai_responses_request_messages,
+        resolve_tool_name, ToolNameMapping,
     };
     use crate::db::conversation_db::{AttachmentType, Message, MessageAttachment};
     use crate::db::system_db::FeatureConfig;
@@ -3861,6 +3863,43 @@ mod tests {
             first_token_time: None,
             ttft_ms: None,
         }
+    }
+
+    #[test]
+    fn agent_model_override_resolves_model_and_provider() {
+        assert_eq!(
+            parse_agent_model_override("deepseek-v4-flash%%54"),
+            Some(("deepseek-v4-flash", 54))
+        );
+        assert_eq!(parse_agent_model_override("deepseek-v4-flash"), None);
+        assert_eq!(parse_agent_model_override("model%%0"), None);
+    }
+
+    #[test]
+    fn legacy_acp_claude_cli_provider_uses_stream_json_transport() {
+        let config = crate::db::llm_db::LLMProviderConfig {
+            id: 54,
+            name: "acp_cli_command".into(),
+            llm_provider_id: 54,
+            value: "C:\\Users\\admin\\.local\\bin\\claude.exe".into(),
+            append_location: "".into(),
+            is_addition: false,
+        };
+        assert!(super::is_claude_code_provider("acp", &[config]));
+    }
+
+    #[test]
+    fn regular_acp_provider_keeps_acp_transport() {
+        let config = crate::db::llm_db::LLMProviderConfig {
+            id: 1,
+            name: "acp_cli_command".into(),
+            llm_provider_id: 1,
+            value: "my-agent".into(),
+            append_location: "".into(),
+            is_addition: false,
+        };
+        assert!(!super::is_claude_code_provider("acp", &[config]));
+        assert!(super::is_claude_code_provider("anthropic", &[]));
     }
 
     #[test]

@@ -20,6 +20,19 @@ use tokio::{
 
 pub const CLAUDE_SDK_API_TYPE: &str = "claude_sdk";
 
+pub fn is_claude_code_provider(
+    provider_api_type: &str,
+    provider_configs: &[crate::db::llm_db::LLMProviderConfig],
+) -> bool {
+    provider_api_type.eq_ignore_ascii_case(CLAUDE_SDK_API_TYPE)
+        || provider_api_type.eq_ignore_ascii_case("anthropic")
+        || (provider_api_type.eq_ignore_ascii_case("acp")
+            && provider_configs.iter().any(|config| {
+                matches!(config.name.as_str(), "acp_cli_command" | "claude_cli_command")
+                    && config.value.to_ascii_lowercase().contains("claude")
+            }))
+}
+
 pub fn claude_model_choices(
     models: &[(i64, String, i64, String, String, bool, bool, bool)],
 ) -> Vec<AcpSessionConfigChoicePayload> {
@@ -449,16 +462,7 @@ async fn spawn_claude_process(
     tokio::process::ChildStdin,
     tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 ), String> {
-    let resolved = resolve_acp_cli_path(&config.cli_command);
-    #[cfg(target_os = "windows")]
-    let (program, prefix_args): (PathBuf, Vec<String>) = match resolved.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-        Some("cmd" | "bat") => (PathBuf::from("cmd.exe"), vec!["/D".into(), "/S".into(), "/C".into(), resolved.display().to_string()]),
-        Some("ps1") => (PathBuf::from("pwsh.exe"), vec!["-NoProfile".into(), "-File".into(), resolved.display().to_string()]),
-        _ => (resolved.clone(), Vec::new()),
-    };
-    #[cfg(not(target_os = "windows"))]
-    let (program, prefix_args): (PathBuf, Vec<String>) = (resolved, Vec::new());
-    let mut command = Command::new(program);
+    let (mut command, resolved) = build_claude_command(config, session_id);
     tracing::info!(
         cli = %resolved.display(),
         model = ?config.model,
@@ -466,12 +470,7 @@ async fn spawn_claude_process(
         has_anthropic_base_url = config.env_vars.contains_key("ANTHROPIC_BASE_URL"),
         "Starting Claude Code stream-json process"
     );
-    command.args(prefix_args).args(["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"]);
-    if let Some(session_id) = session_id { command.arg("--resume").arg(session_id); }
-    if let Some(model) = &config.model { command.args(["--model", model]); }
-    if let Some(mode) = &config.permission_mode { command.args(["--permission-mode", mode]); }
-    if let Some(effort) = &config.effort { command.args(["--effort", effort]); }
-    let mut child = command.current_dir(&config.working_directory).envs(&config.env_vars).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|e| e.to_string())?;
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
     let stdin = child.stdin.take().ok_or("Claude stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Claude stdout unavailable")?;
     if let Some(stderr) = child.stderr.take() {
@@ -483,6 +482,29 @@ async fn spawn_claude_process(
         });
     }
     Ok((child, stdin, BufReader::new(stdout).lines()))
+}
+
+fn build_claude_command(
+    config: &ClaudeSdkConfig,
+    session_id: Option<&str>,
+) -> (Command, PathBuf) {
+    let resolved = resolve_acp_cli_path(&config.cli_command);
+    #[cfg(target_os = "windows")]
+    let (program, prefix_args): (PathBuf, Vec<String>) = match resolved.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("cmd" | "bat") => (PathBuf::from("cmd.exe"), vec!["/D".into(), "/S".into(), "/C".into(), resolved.display().to_string()]),
+        Some("ps1") => (PathBuf::from("pwsh.exe"), vec!["-NoProfile".into(), "-File".into(), resolved.display().to_string()]),
+        _ => (resolved.clone(), Vec::new()),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (program, prefix_args): (PathBuf, Vec<String>) = (resolved, Vec::new());
+    let mut command = Command::new(program);
+    command.args(prefix_args).args(["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"]);
+    if let Some(session_id) = session_id { command.arg("--resume").arg(session_id); }
+    if let Some(model) = &config.model { command.args(["--model", model]); }
+    if let Some(mode) = &config.permission_mode { command.args(["--permission-mode", mode]); }
+    if let Some(effort) = &config.effort { command.args(["--effort", effort]); }
+    command.current_dir(&config.working_directory).envs(&config.env_vars).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    (command, resolved)
 }
 
 pub fn spawn_claude_session_task(
@@ -899,5 +921,49 @@ mod tests {
         ];
         let config = extract_claude_sdk_config(&[], &providers, None, Vec::new()).unwrap();
         assert_eq!(config.env_vars.get("ANTHROPIC_API_KEY"), Some(&"explicit-key".to_string()));
+    }
+
+    #[test]
+    fn claude_command_contains_stream_model_and_provider_environment() {
+        let providers = vec![
+            crate::db::llm_db::LLMProviderConfig {
+                id: 1,
+                name: "api_key".into(),
+                llm_provider_id: 1,
+                value: "provider-key".into(),
+                append_location: "".into(),
+                is_addition: false,
+            },
+            crate::db::llm_db::LLMProviderConfig {
+                id: 2,
+                name: "endpoint".into(),
+                llm_provider_id: 1,
+                value: "https://proxy.example/v1".into(),
+                append_location: "".into(),
+                is_addition: false,
+            },
+        ];
+        let config = extract_claude_sdk_config(
+            &[],
+            &providers,
+            Some("deepseek-v4-flash".into()),
+            Vec::new(),
+        )
+        .unwrap();
+        let (command, _) = build_claude_command(&config, None);
+        let command = command.as_std();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--input-format", "stream-json"]));
+        assert!(args.windows(2).any(|pair| pair == ["--output-format", "stream-json"]));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "deepseek-v4-flash"]));
+        let env = command
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key.to_string_lossy(), value.to_string_lossy())))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(env.get("ANTHROPIC_API_KEY").map(|value| value.as_ref()), Some("provider-key"));
+        assert_eq!(env.get("ANTHROPIC_BASE_URL").map(|value| value.as_ref()), Some("https://proxy.example/v1"));
     }
 }

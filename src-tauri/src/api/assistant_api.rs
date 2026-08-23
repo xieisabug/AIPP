@@ -9,7 +9,7 @@ use crate::api::ai::codex_app_server::{
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::claude_sdk::{
-    claude_model_choices, extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry,
+    claude_model_choices, extract_claude_sdk_config, is_claude_code_provider,
     CLAUDE_SDK_API_TYPE,
 };
 use crate::api::ai::config::get_network_proxy_from_config;
@@ -87,7 +87,11 @@ pub async fn get_agent_model_options(
                 });
             }
         }
-        CLAUDE_SDK_API_TYPE => {
+        api_type
+            if api_type == CLAUDE_SDK_API_TYPE
+                || (api_type == "acp"
+                    && is_claude_code_provider(api_type, &provider_configs)) =>
+        {
             let efforts = ["default", "low", "medium", "high", "max"].into_iter().map(str::to_string).collect::<Vec<_>>();
             for (code, name) in [
                 ("sonnet", "Claude Sonnet"),
@@ -897,7 +901,7 @@ pub fn get_acp_working_directory(
         return Ok(codex_config.working_directory.display().to_string());
     }
 
-    if provider_api_type == CLAUDE_SDK_API_TYPE {
+    if is_claude_code_provider(&provider_api_type, &provider_configs) {
         let model_code = assistant_models
             .first()
             .map(|model| model.model_code.clone())
@@ -968,7 +972,10 @@ pub async fn ensure_acp_session_connected(
         ("acp".to_string(), Vec::new())
     };
 
-    if provider_api_type == "anthropic" {
+    // Claude Code's stream-json process is demand-driven by ask_ai because the
+    // selected provider/model can be overridden per message. Auto-connect must
+    // not start a default process that can race with and replace that session.
+    if is_claude_code_provider(&provider_api_type, &provider_configs) {
         return Ok(None);
     }
 
@@ -1008,51 +1015,6 @@ pub async fn ensure_acp_session_connected(
                     handle,
                     conversation_id,
                     codex_config.session_signature.clone(),
-                );
-                let snapshot = entry.snapshot.clone();
-                sessions.insert(conversation_id, entry);
-                Some(snapshot)
-            }
-        };
-        return Ok(snapshot
-            .map(|state| serde_json::to_value(state).unwrap_or(serde_json::Value::Null)));
-    }
-
-    if provider_api_type == CLAUDE_SDK_API_TYPE {
-        let model_code = assistant_models
-            .first()
-            .map(|model| model.model_code.clone())
-            .filter(|value| !value.trim().is_empty());
-        let model_provider_id = resolve_acp_provider_id(&assistant_models, &model_configs)
-            .ok_or_else(|| "Claude Code 助手没有配置模型提供商".to_string())?;
-        let model_choices = claude_model_choices(
-            &LLMDatabase::new(&app_handle)
-                .map_err(|e| e.to_string())?
-                .get_llm_models(model_provider_id.to_string())
-                .map_err(|e| e.to_string())?,
-        );
-        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code, model_choices)
-            .map_err(|e| e.to_string())?;
-        let snapshot = {
-            let mut sessions = claude_session_state.sessions.lock().await;
-            if sessions
-                .get(&conversation_id)
-                .is_some_and(|entry| entry.config_signature == claude_config.session_signature)
-            {
-                sessions.get(&conversation_id).map(|entry| entry.snapshot.clone())
-            } else {
-                let handle = spawn_claude_session_task(
-                    app_handle.clone(),
-                    conversation_id,
-                    claude_config.clone(),
-                );
-                let entry = ClaudeSessionEntry::new(
-                    handle,
-                    conversation_id,
-                    claude_config.session_signature.clone(),
-                    claude_config.model.clone(),
-                    claude_config.permission_mode.clone(),
-                    claude_config.effort.clone(),
                 );
                 let snapshot = entry.snapshot.clone();
                 sessions.insert(conversation_id, entry);
