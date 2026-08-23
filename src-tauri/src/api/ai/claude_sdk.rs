@@ -637,7 +637,7 @@ fn build_claude_command(
         _ => (resolved.clone(), Vec::new()),
     };
     #[cfg(not(target_os = "windows"))]
-    let (program, prefix_args): (PathBuf, Vec<String>) = (resolved, Vec::new());
+    let (program, prefix_args): (PathBuf, Vec<String>) = (resolved.clone(), Vec::new());
     let mut command = Command::new(program);
     command.args(prefix_args).args(["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"]);
     if let Some(mcp_config_file) = &config.mcp_config_file {
