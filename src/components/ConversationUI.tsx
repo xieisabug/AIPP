@@ -271,6 +271,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [conversation, setConversation] = useState<Conversation>();
         const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
         const [selectedAssistant, setSelectedAssistant] = useState(-1);
+        const [selectedAgentModel, setSelectedAgentModel] = useState("");
+        const [selectedAgentEffort, setSelectedAgentEffort] = useState("");
+        const handleAgentConfigChange = useCallback((model: string, effort: string) => {
+            setSelectedAgentModel(model);
+            setSelectedAgentEffort(effort);
+        }, []);
 
         // 对话加载状态
         const [isLoadingShow, setIsLoadingShow] = useState(false);
@@ -987,6 +993,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             assistantTypePluginMap,
             assistantRunApi,
             busySendBehavior,
+            selectedAgentModel,
+            selectedAgentEffort,
         });
 
         // ============= 初始化和生命周期逻辑 =============
@@ -1517,7 +1525,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     {combinedHeaderActions}
                     <Popover>
                         <PopoverTrigger asChild>
-                            <span className="inline-flex max-w-40 items-center gap-1.5">
+                            <span>
                                 <IconButton
                                     icon={
                                         acpSessionState?.has_active_prompt ? (
@@ -1531,9 +1539,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     title={`${sessionLabel}控制`}
                                     dataAippSlot="chat-conversation-title-acp"
                                 />
-                                <span className="max-w-28 truncate text-xs text-muted-foreground" title={currentModelLabel}>
-                                    {currentModelLabel}
-                                </span>
                             </span>
                         </PopoverTrigger>
                         <PopoverContent align="end" className="w-80 space-y-3">
@@ -1883,6 +1888,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 selectedAssistant={selectedAssistant}
                                 assistants={assistants}
                                 setSelectedAssistant={setSelectedAssistant}
+                                selectedModel={selectedAgentModel}
+                                selectedEffort={selectedAgentEffort}
+                                onAgentConfigChange={handleAgentConfigChange}
                             />
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>

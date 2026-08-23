@@ -32,6 +32,8 @@ export interface UseConversationOperationsProps {
     assistantTypePluginMap: Map<number, any>;
     assistantRunApi: any;
     busySendBehavior?: "queue" | "interrupt";
+    selectedAgentModel?: string;
+    selectedAgentEffort?: string;
 }
 
 export interface UseConversationOperationsReturn {
@@ -77,6 +79,8 @@ export function useConversationOperations({
     assistantTypePluginMap,
     assistantRunApi,
     busySendBehavior = "queue",
+    selectedAgentModel = "",
+    selectedAgentEffort = "",
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
 
     // 对话标题管理相关状态
@@ -407,7 +411,11 @@ export function useConversationOperations({
                         conversation_id: conversationId,
                         assistant_id: parsedAssistantId,
                         attachment_list: fileInfoList?.map((i) => i.id),
+                        override_model_id: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,
                     },
+                    override_model_config: parsedAssistantId === +selectedAssistant && selectedAgentEffort
+                        ? { reasoning_effort: selectedAgentEffort, claude_effort: selectedAgentEffort }
+                        : undefined,
                 })
                     .then((res) => {
                         console.log("ask ai response", res);

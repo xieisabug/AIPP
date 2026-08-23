@@ -485,11 +485,11 @@ fn supported_reasoning_efforts(value: &Value) -> Vec<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CodexModelCatalogEntry {
-    id: String,
-    name: String,
-    supported_efforts: Vec<String>,
-    default_effort: Option<String>,
+pub struct CodexModelCatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub supported_efforts: Vec<String>,
+    pub default_effort: Option<String>,
 }
 
 fn model_catalog(value: &Value) -> Vec<CodexModelCatalogEntry> {
@@ -520,6 +520,53 @@ fn model_catalog(value: &Value) -> Vec<CodexModelCatalogEntry> {
     }
     visit(value, &mut models);
     models
+}
+
+/// 启动一次短生命周期 Codex app-server，仅探测真实的 model/list 目录。
+/// 不创建 thread，也不会写入会话数据库。
+pub async fn probe_codex_model_options(
+    app_handle: &tauri::AppHandle,
+    config: &CodexAppServerConfig,
+) -> Result<Vec<CodexModelCatalogEntry>, String> {
+    let (_child, mut stdin, mut lines) = spawn_process(config).await?;
+    let mut pending_notifications = VecDeque::new();
+    write_frame(
+        &mut stdin,
+        &json_rpc_request(
+            1,
+            "initialize",
+            json!({
+                "clientInfo":{"name":"aipp-model-probe","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
+                "capabilities":{"experimentalApi":true}
+            }),
+        ),
+    )
+    .await?;
+    read_rpc_response_with_approvals(
+        app_handle,
+        -1,
+        &mut stdin,
+        &mut lines,
+        1,
+        &mut pending_notifications,
+    )
+    .await?;
+    write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
+    write_frame(&mut stdin, &json_rpc_request(2, "model/list", json!({}))).await?;
+    let result = read_rpc_response_with_approvals(
+        app_handle,
+        -1,
+        &mut stdin,
+        &mut lines,
+        2,
+        &mut pending_notifications,
+    )
+    .await?;
+    let catalog = model_catalog(&result);
+    if catalog.is_empty() {
+        return Err(format!("Codex model/list 返回空模型列表：{result}"));
+    }
+    Ok(catalog)
 }
 
 fn first_string_for_keys(value: &Value, keys: &[&str]) -> Option<String> {

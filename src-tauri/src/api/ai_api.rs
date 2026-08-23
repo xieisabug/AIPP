@@ -13,7 +13,7 @@ use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
-use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
+use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
     get_openai_responses_stateful_enabled, get_request_timeout_from_config,
@@ -1290,6 +1290,12 @@ pub async fn ask_ai(
                 &provider_configs,
                 model_code,
             )?;
+            if let Some(override_model_id) = processed_request.override_model_id.as_deref() {
+                if let Some((model, _)) = override_model_id.split_once("%%") { codex_config.model = Some(model.to_string()); }
+            }
+            if let Some(config) = override_model_config.as_ref() {
+                if let Some(effort) = config.get("reasoning_effort").and_then(|value| value.as_str()) { codex_config.reasoning_effort = Some(effort.to_string()); }
+            }
             // 与 ACP 通道一致：挂载助手绑定的 MCP 工具（桥接注入），payload 计入签名
             codex_config.selected_mcp_tools_payload =
                 build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id)
@@ -1343,7 +1349,14 @@ pub async fn ask_ai(
                     .get_llm_models(model_provider_id.to_string())
                     .map_err(|e| AppError::UnknownError(e.to_string()))?,
             );
-            let config = extract_claude_sdk_config(&assistant_detail.model_configs, &provider_configs, model_code, model_choices)?;
+            let mut config = extract_claude_sdk_config(&assistant_detail.model_configs, &provider_configs, model_code, model_choices)?;
+            if let Some(override_model_id) = processed_request.override_model_id.as_deref() {
+                if let Some((model, _)) = override_model_id.split_once("%%") { config.model = Some(model.to_string()); }
+            }
+            if let Some(overrides) = override_model_config.as_ref() {
+                if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
+            }
+            refresh_claude_session_signature(&mut config);
             let response_message = add_message(&app_handle, None, conversation_id, "response".to_string(), String::new(), Some(0), Some("claude-code".to_string()), Some(chrono::Utc::now()), None, 0, None, None)?;
             let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), ConversationEvent { r#type: "message_add".to_string(), data: serde_json::to_value(MessageAddEvent { message_id: response_message.id, message_type: "response".to_string() }).unwrap() });
             let claude_state = app_handle.state::<ClaudeSessionState>();

@@ -5,7 +5,7 @@ use crate::api::ai::acp::{
     spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
 };
 use crate::api::ai::codex_app_server::{
-    extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
+    extract_codex_app_server_config, probe_codex_model_options, refresh_codex_session_signature, spawn_codex_session_task,
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::claude_sdk::{
@@ -32,6 +32,90 @@ use crate::{
 use std::collections::HashMap;
 use tauri::{Emitter, Manager};
 use tracing::{debug, info, instrument, warn};
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct AgentModelOption {
+    pub code: String,
+    pub name: String,
+    pub provider_id: i64,
+    pub efforts: Vec<String>,
+}
+
+fn add_agent_model_option(options: &mut Vec<AgentModelOption>, option: AgentModelOption) {
+    if !options.iter().any(|existing| existing.code == option.code) {
+        options.push(option);
+    }
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub async fn get_agent_model_options(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<Vec<AgentModelOption>, String> {
+    let detail = get_assistant(app_handle.clone(), assistant_id)?;
+    if detail.assistant.assistant_type != Some(4) {
+        return Ok(Vec::new());
+    }
+    let model = detail.model.first().ok_or("Agent 助手尚未配置提供商")?;
+    let provider_id = model.provider_id;
+    if provider_id <= 0 {
+        return Err("Agent 助手尚未配置提供商".into());
+    }
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+    let provider_configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    let current_model = (!model.model_code.trim().is_empty()).then(|| model.model_code.trim().to_string());
+    let db_models = llm_db.get_llm_models(provider_id.to_string()).map_err(|e| e.to_string())?;
+    let mut options = Vec::new();
+
+    match provider.api_type.as_str() {
+        CODEX_APP_SERVER_API_TYPE => {
+            let config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, current_model.clone())
+                .map_err(|e| e.to_string())?;
+            let catalog = probe_codex_model_options(&app_handle, &config).await?;
+            for entry in catalog {
+                add_agent_model_option(&mut options, AgentModelOption {
+                    code: format!("{}%%{}", entry.id, provider_id),
+                    name: entry.name,
+                    provider_id,
+                    efforts: entry.supported_efforts,
+                });
+            }
+        }
+        CLAUDE_SDK_API_TYPE => {
+            // Claude Code 没有公开的 model/list RPC；这些是 CLI 支持的稳定别名，
+            // 同时合并数据库和助手当前配置，避免配置了自定义模型时丢失。
+            let efforts = ["default", "low", "medium", "high", "max"].into_iter().map(str::to_string).collect::<Vec<_>>();
+            for (code, name) in [
+                ("sonnet", "Claude Sonnet"),
+                ("opus", "Claude Opus"),
+                ("haiku", "Claude Haiku"),
+            ] {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: name.into(), provider_id, efforts: efforts.clone() });
+            }
+            for (_, name, _, code, _, _, _, _) in db_models {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: efforts.clone() });
+            }
+            if let Some(code) = current_model {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts });
+            }
+        }
+        "acp" => {
+            for (_, name, _, code, _, _, _, _) in db_models {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: Vec::new() });
+            }
+            if let Some(code) = current_model {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: Vec::new() });
+            }
+        }
+        other => return Err(format!("不支持的 Agent 提供商类型：{other}")),
+    }
+    if options.is_empty() {
+        return Err(format!("提供商 {} 没有可用模型", provider.name));
+    }
+    Ok(options)
+}
 
 fn reject_reserved_butler_assistant_name(name: &str) -> Result<(), String> {
     if is_butler_system_assistant_name(name) {

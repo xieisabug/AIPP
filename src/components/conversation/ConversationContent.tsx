@@ -45,6 +45,9 @@ export interface ConversationContentProps {
     selectedAssistant: number;
     assistants: AssistantListItem[];
     setSelectedAssistant: (assistantId: number) => void;
+    selectedModel?: string;
+    selectedEffort?: string;
+    onAgentConfigChange?: (model: string, effort: string) => void;
 }
 
 const ConversationContent: React.FC<ConversationContentProps> = memo(({
@@ -83,6 +86,9 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     selectedAssistant,
     assistants,
     setSelectedAssistant,
+    selectedModel = "",
+    selectedEffort = "",
+    onAgentConfigChange = () => {},
 }) => {
     const sharedMessageListProps = {
         allDisplayMessages,
@@ -156,6 +162,9 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
             selectedAssistant={selectedAssistant}
             assistants={assistants}
             setSelectedAssistant={setSelectedAssistant}
+            selectedModel={selectedModel}
+            selectedEffort={selectedEffort}
+            onAgentConfigChange={onAgentConfigChange}
         />
     );
 });

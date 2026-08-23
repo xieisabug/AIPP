@@ -205,6 +205,13 @@ pub fn extract_claude_sdk_config(
     })
 }
 
+pub fn refresh_claude_session_signature(config: &mut ClaudeSdkConfig) {
+    config.session_signature = serde_json::to_string(&json!({
+        "cli": config.cli_command, "cwd": config.working_directory, "model": config.model,
+        "permission_mode": config.permission_mode, "effort": config.effort, "env": config.env_vars,
+    })).unwrap_or_default();
+}
+
 fn persist(app: &tauri::AppHandle, id: i64, content: &str, done: bool) {
     if let Ok(db) = ConversationDatabase::new(app) {
         if let Ok(repo) = db.message_repo() {
