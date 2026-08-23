@@ -13,7 +13,7 @@ use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
     CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
-use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, is_claude_code_provider, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
+use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, is_claude_code_provider, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
 use crate::api::assistant_api::CLAUDE_CODE_DEFAULT_MODEL;
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
@@ -1408,7 +1408,13 @@ pub async fn ask_ai(
             if let Some(overrides) = override_model_config.as_ref() {
                 if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
             }
+            config.selected_mcp_tools_payload =
+                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id)
+                    .map_err(AppError::UnknownError)?;
             refresh_claude_session_signature(&mut config);
+            prepare_claude_mcp_bridge(&app_handle, conversation_id, &mut config)
+                .await
+                .map_err(|error| AppError::UnknownError(format!("Claude Code MCP bridge 初始化失败：{error}")))?;
             info!(
                 conversation_id,
                 provider_id = selected_provider_id,

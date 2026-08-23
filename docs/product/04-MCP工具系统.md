@@ -63,6 +63,7 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 调用 MCP 服务器的 `tools/call` 方法
 - 处理调用结果
 - 超时与错误处理
+- Codex app-server 和 Claude Code 通过 AIPP stdio MCP bridge 使用助手绑定的工具，实际执行仍由 AIPP 的统一传输与权限链路处理
 
 ### 工具结果返回
 - 工具执行结果作为助手消息返回

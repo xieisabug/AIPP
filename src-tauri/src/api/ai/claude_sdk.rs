@@ -5,12 +5,25 @@ use crate::api::ai::acp::{
 };
 use crate::api::ai::codex_app_server::AgentActivityEvent;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
+use crate::acp_mcp_bridge::{
+    ensure_proxy_server, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
+    ACP_MCP_DB_PATH_ENV, ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV, ACP_MCP_PROXY_ADDR_ENV,
+    ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_ENV,
+};
 use crate::api::operation_api::{emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
+use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::state::activity_state::ConversationActivityManager;
 use serde_json::{json, Value};
-use std::{collections::HashMap, path::PathBuf, process::Stdio};
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    io::Write as _,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 use tauri::{Emitter, Manager};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -19,6 +32,23 @@ use tokio::{
 };
 
 pub const CLAUDE_SDK_API_TYPE: &str = "claude_sdk";
+
+#[derive(Debug)]
+struct ClaudeMcpConfigFile {
+    path: PathBuf,
+}
+
+impl ClaudeMcpConfigFile {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ClaudeMcpConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 pub fn is_claude_code_provider(
     provider_api_type: &str,
@@ -56,6 +86,8 @@ pub struct ClaudeSdkConfig {
     pub permission_mode: Option<String>,
     pub effort: Option<String>,
     pub model_choices: Vec<AcpSessionConfigChoicePayload>,
+    pub selected_mcp_tools_payload: String,
+    mcp_config_file: Option<Arc<ClaudeMcpConfigFile>>,
     pub session_signature: String,
 }
 
@@ -217,7 +249,7 @@ pub fn extract_claude_sdk_config(
     {
         crate::api::ai::acp::merge_acp_env_blob(&mut env_vars, &raw);
     }
-    let session_signature = serde_json::to_string(&json!({"cli":cli_command,"cwd":working_directory,"model":model,"permission_mode":permission_mode,"effort":effort,"env":env_vars})).unwrap_or_default();
+    let session_signature = serde_json::to_string(&json!({"cli":cli_command,"cwd":working_directory,"model":model,"permission_mode":permission_mode,"effort":effort,"env":env_vars,"selected_mcp":""})).unwrap_or_default();
     Ok(ClaudeSdkConfig {
         cli_command,
         working_directory,
@@ -226,6 +258,8 @@ pub fn extract_claude_sdk_config(
         permission_mode,
         effort,
         model_choices,
+        selected_mcp_tools_payload: String::new(),
+        mcp_config_file: None,
         session_signature,
     })
 }
@@ -234,7 +268,84 @@ pub fn refresh_claude_session_signature(config: &mut ClaudeSdkConfig) {
     config.session_signature = serde_json::to_string(&json!({
         "cli": config.cli_command, "cwd": config.working_directory, "model": config.model,
         "permission_mode": config.permission_mode, "effort": config.effort, "env": config.env_vars,
+        "selected_mcp": config.selected_mcp_tools_payload,
     })).unwrap_or_default();
+}
+
+fn build_claude_mcp_config(
+    bridge_command: &std::path::Path,
+    mcp_db_path: &std::path::Path,
+    conversation_id: i64,
+    proxy: &crate::acp_mcp_bridge::AcpMcpProxyConfig,
+    selected_mcp_tools_payload: &str,
+) -> Result<String, String> {
+    let mut env = serde_json::Map::new();
+    env.insert(ACP_MCP_DB_PATH_ENV.into(), json!(mcp_db_path.display().to_string()));
+    env.insert(ACP_MCP_CONVERSATION_ID_ENV.into(), json!(conversation_id.to_string()));
+    env.insert(ACP_MCP_NATIVE_DUPLICATE_FILTER_ENV.into(), json!("1"));
+    env.insert(ACP_MCP_PROXY_ADDR_ENV.into(), json!(proxy.addr));
+    env.insert(ACP_MCP_PROXY_TOKEN_ENV.into(), json!(proxy.token));
+    env.insert(ACP_MCP_SELECTED_TOOLS_ENV.into(), json!(selected_mcp_tools_payload));
+    serde_json::to_string(&json!({
+        "mcpServers": {
+            "aipp": {
+                "type": "stdio",
+                "command": bridge_command.display().to_string(),
+                "args": [ACP_MCP_BRIDGE_ARG],
+                "env": env,
+            }
+        }
+    }))
+    .map_err(|error| format!("Failed to serialize Claude Code MCP config: {error}"))
+}
+
+fn write_claude_mcp_config_file(content: &str) -> Result<Arc<ClaudeMcpConfigFile>, String> {
+    let path = std::env::temp_dir().join(format!(
+        "aipp-claude-mcp-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| format!("Failed to create Claude Code MCP config file: {error}"))?;
+    let config_file = Arc::new(ClaudeMcpConfigFile { path });
+    file.write_all(content.as_bytes())
+        .map_err(|error| format!("Failed to write Claude Code MCP config file: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("Failed to flush Claude Code MCP config file: {error}"))?;
+    Ok(config_file)
+}
+
+pub async fn prepare_claude_mcp_bridge(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    config: &mut ClaudeSdkConfig,
+) -> Result<(), String> {
+    let payload = config.selected_mcp_tools_payload.trim();
+    if payload.is_empty() || payload == "[]" {
+        config.mcp_config_file = None;
+        return Ok(());
+    }
+
+    let bridge_command = std::env::current_exe()
+        .map_err(|error| format!("Failed to resolve AIPP executable for Claude MCP bridge: {error}"))?;
+    let mcp_db_path = MCPDatabase::db_path(app_handle)?;
+    let proxy = ensure_proxy_server(app_handle.clone()).await?;
+    let mcp_config = build_claude_mcp_config(
+        &bridge_command,
+        &mcp_db_path,
+        conversation_id,
+        &proxy,
+        &config.selected_mcp_tools_payload,
+    )?;
+    config.mcp_config_file = Some(write_claude_mcp_config_file(&mcp_config)?);
+    Ok(())
 }
 
 fn persist(app: &tauri::AppHandle, id: i64, content: &str, done: bool) {
@@ -416,6 +527,35 @@ fn claude_config_options(config: &ClaudeSdkConfig) -> Vec<AcpSessionConfigOption
     ]
 }
 
+fn message_content_blocks(frame: &Value) -> &[Value] {
+    frame
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn tool_result_text(block: &Value) -> Option<String> {
+    let content = block.get("content")?;
+    match content {
+        Value::String(value) => Some(value.clone()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .map(|item| {
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| item.to_string())
+                })
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        Value::Null => None,
+        value => Some(value.to_string()),
+    }
+}
+
 fn emit_activity(
     window: &tauri::Window,
     conversation_id: i64,
@@ -428,6 +568,7 @@ fn emit_activity(
     title: Option<String>,
     input: Option<Value>,
     output: Option<String>,
+    error: Option<String>,
 ) {
     let event = AgentActivityEvent {
         conversation_id,
@@ -441,7 +582,7 @@ fn emit_activity(
         title,
         input,
         output,
-        error: None,
+        error,
         metadata: json!({"source":"claude"}),
         content_offset: None,
     };
@@ -499,6 +640,9 @@ fn build_claude_command(
     let (program, prefix_args): (PathBuf, Vec<String>) = (resolved, Vec::new());
     let mut command = Command::new(program);
     command.args(prefix_args).args(["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"]);
+    if let Some(mcp_config_file) = &config.mcp_config_file {
+        command.arg("--mcp-config").arg(mcp_config_file.path());
+    }
     if let Some(session_id) = session_id { command.arg("--resume").arg(session_id); }
     if let Some(model) = &config.model { command.args(["--model", model]); }
     if let Some(mode) = &config.permission_mode { command.args(["--permission-mode", mode]); }
@@ -717,7 +861,7 @@ pub fn spawn_claude_session_task(
                                 }
                             }
                             "assistant" => {
-                                if let Some(block) = frame.pointer("/message/content/0") {
+                                for block in message_content_blocks(&frame) {
                                     if block.get("type").and_then(Value::as_str) == Some("tool_use")
                                     {
                                         sequence += 1;
@@ -739,15 +883,21 @@ pub fn spawn_claude_session_task(
                                                 .map(str::to_string),
                                             block.get("input").cloned(),
                                             None,
+                                            None,
                                         );
                                     }
                                 }
                             }
                             "user" => {
-                                if let Some(block) = frame.pointer("/message/content/0") {
+                                for block in message_content_blocks(&frame) {
                                     if block.get("type").and_then(Value::as_str)
                                         == Some("tool_result")
                                     {
+                                        let result = tool_result_text(block);
+                                        let is_error = block
+                                            .get("is_error")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false);
                                         sequence += 1;
                                         emit_activity(
                                             &window,
@@ -760,13 +910,11 @@ pub fn spawn_claude_session_task(
                                                 .unwrap_or("tool"),
                                             sequence,
                                             "tool",
-                                            "success",
+                                            if is_error { "failed" } else { "success" },
                                             None,
                                             None,
-                                            block
-                                                .get("content")
-                                                .and_then(Value::as_str)
-                                                .map(str::to_string),
+                                            (!is_error).then(|| result.clone()).flatten(),
+                                            is_error.then(|| result.unwrap_or_else(|| "Claude Code tool failed".into())),
                                         );
                                     }
                                 }
@@ -965,5 +1113,82 @@ mod tests {
             .collect::<HashMap<_, _>>();
         assert_eq!(env.get("ANTHROPIC_API_KEY").map(|value| value.as_ref()), Some("provider-key"));
         assert_eq!(env.get("ANTHROPIC_BASE_URL").map(|value| value.as_ref()), Some("https://proxy.example/v1"));
+    }
+
+    #[test]
+    fn selected_mcp_tools_change_session_signature() {
+        let mut config = extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap();
+        let original = config.session_signature.clone();
+        config.selected_mcp_tools_payload = "[{\"server_id\":1}]".into();
+        refresh_claude_session_signature(&mut config);
+        assert_ne!(config.session_signature, original);
+        assert!(config.session_signature.contains("selected_mcp"));
+    }
+
+    #[test]
+    fn claude_command_contains_aipp_mcp_config() {
+        let proxy = crate::acp_mcp_bridge::AcpMcpProxyConfig {
+            addr: "127.0.0.1:3210".into(),
+            token: "proxy-token".into(),
+        };
+        let payload = "[{\"server_id\":1}]";
+        let mcp_config = build_claude_mcp_config(
+            std::path::Path::new("C:/Aipp/Aipp.exe"),
+            std::path::Path::new("C:/Aipp/mcp.db"),
+            42,
+            &proxy,
+            payload,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&mcp_config).unwrap();
+        let server = parsed.pointer("/mcpServers/aipp").unwrap();
+        assert_eq!(server.get("type").and_then(Value::as_str), Some("stdio"));
+        assert_eq!(
+            server.pointer(&format!("/env/{ACP_MCP_CONVERSATION_ID_ENV}")).and_then(Value::as_str),
+            Some("42")
+        );
+        assert_eq!(
+            server.pointer(&format!("/env/{ACP_MCP_SELECTED_TOOLS_ENV}")).and_then(Value::as_str),
+            Some(payload)
+        );
+
+        let config_file = write_claude_mcp_config_file(&mcp_config).unwrap();
+        let mut config = extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap();
+        config.mcp_config_file = Some(config_file.clone());
+        let (command, _) = build_claude_command(&config, None);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--mcp-config" && pair[1] == config_file.path().display().to_string()));
+    }
+
+    #[test]
+    fn parses_all_tool_blocks_and_structured_results() {
+        let frame = json!({
+            "message": {"content": [
+                {"type":"text","text":"before"},
+                {"type":"tool_use","id":"tool-1","name":"aipp_t1_search"},
+                {"type":"tool_use","id":"tool-2","name":"aipp_t2_fetch"}
+            ]}
+        });
+        let tools = message_content_blocks(&frame)
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .count();
+        assert_eq!(tools, 2);
+
+        let result = json!({
+            "content": [
+                {"type":"text","text":"first"},
+                {"type":"text","text":"second"}
+            ],
+            "is_error": true
+        });
+        assert_eq!(tool_result_text(&result).as_deref(), Some("first\nsecond"));
+        assert_eq!(result.get("is_error").and_then(Value::as_bool), Some(true));
     }
 }
