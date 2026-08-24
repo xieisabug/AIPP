@@ -157,6 +157,47 @@ pub async fn get_agent_model_options(
     Ok(options)
 }
 
+/// Codex 通道生效的审批策略/沙箱（新对话界面用于初始化选择）
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct CodexAgentDefaults {
+    pub approval_policy: String,
+    pub sandbox: String,
+}
+
+/// 返回 Codex 助手生效的审批策略/沙箱默认值（含助手/provider 覆盖与内置默认值）；
+/// 非 Codex 通道返回 None，前端据此决定是否展示对应选择项
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub async fn get_codex_agent_defaults(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<Option<CodexAgentDefaults>, String> {
+    let detail = get_assistant(app_handle.clone(), assistant_id)?;
+    if detail.assistant.assistant_type != Some(4) {
+        return Ok(None);
+    }
+    let Some(provider_id) = resolve_acp_provider_id(&detail.model, &detail.model_configs) else {
+        return Ok(None);
+    };
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+    if provider.api_type != CODEX_APP_SERVER_API_TYPE {
+        return Ok(None);
+    }
+    let provider_configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    let model_code = detail
+        .model
+        .first()
+        .map(|model| model.model_code.clone())
+        .filter(|value| !value.trim().is_empty());
+    let config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, model_code)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(CodexAgentDefaults {
+        approval_policy: config.approval_policy.unwrap_or_else(|| "on-request".to_string()),
+        sandbox: config.sandbox.unwrap_or_else(|| "workspace-write".to_string()),
+    }))
+}
+
 fn reject_reserved_butler_assistant_name(name: &str) -> Result<(), String> {
     if is_butler_system_assistant_name(name) {
         Err("该助手名称为系统保留名称，不能创建或修改".to_string())

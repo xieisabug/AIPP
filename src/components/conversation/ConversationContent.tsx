@@ -47,7 +47,9 @@ export interface ConversationContentProps {
     setSelectedAssistant: (assistantId: number) => void;
     selectedModel?: string;
     selectedEffort?: string;
-    onAgentConfigChange?: (model: string, effort: string) => void;
+    selectedApprovalPolicy?: string;
+    selectedSandbox?: string;
+    onAgentConfigChange?: (model: string, effort: string, approvalPolicy: string, sandbox: string) => void;
 }
 
 const ConversationContent: React.FC<ConversationContentProps> = memo(({
@@ -88,6 +90,8 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     setSelectedAssistant,
     selectedModel = "",
     selectedEffort = "",
+    selectedApprovalPolicy = "",
+    selectedSandbox = "",
     onAgentConfigChange = () => {},
 }) => {
     const sharedMessageListProps = {
@@ -164,6 +168,8 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
             setSelectedAssistant={setSelectedAssistant}
             selectedModel={selectedModel}
             selectedEffort={selectedEffort}
+            selectedApprovalPolicy={selectedApprovalPolicy}
+            selectedSandbox={selectedSandbox}
             onAgentConfigChange={onAgentConfigChange}
         />
     );

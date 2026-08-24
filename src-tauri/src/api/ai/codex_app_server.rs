@@ -42,6 +42,7 @@ pub struct CodexAppServerConfig {
     pub reasoning_effort: Option<String>,
     pub approval_policy: Option<String>,
     pub sandbox: Option<String>,
+    pub approvals_reviewer: Option<String>,
     pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
@@ -58,6 +59,9 @@ pub struct CodexConversationSessionState {
     pub has_active_prompt: bool,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub approval_policy: Option<String>,
+    pub sandbox: Option<String>,
+    pub approvals_reviewer: Option<String>,
     pub config_options: Vec<CodexSessionConfigOption>,
 }
 
@@ -263,9 +267,33 @@ pub fn extract_codex_app_server_config(
     for raw in [provider_value("acp_env_vars"), model_value("acp_env_vars")].into_iter().flatten() {
         merge_codex_env_blob(&mut env_vars, &raw);
     }
+    // 审批策略/沙箱模式的默认值与 provider 表单默认值保持一致，
+    // 保证存量 provider（从未保存过这两项配置）也能在界面上反显生效值
     let approval_policy = model_value("codex_approval_policy")
-        .or_else(|| provider_value("codex_approval_policy"));
-    let sandbox = model_value("codex_sandbox").or_else(|| provider_value("codex_sandbox"));
+        .or_else(|| provider_value("codex_approval_policy"))
+        .or_else(|| Some("on-request".to_string()));
+    let sandbox = model_value("codex_sandbox")
+        .or_else(|| provider_value("codex_sandbox"))
+        .or_else(|| Some("workspace-write".to_string()));
+    if let Some(value) = approval_policy.as_deref() {
+        if !CODEX_APPROVAL_POLICIES.contains(&value) {
+            return Err(AppError::UnknownError(format!("Codex 不支持审批策略：{value}")));
+        }
+    }
+    if let Some(value) = sandbox.as_deref() {
+        if !CODEX_SANDBOX_MODES.contains(&value) {
+            return Err(AppError::UnknownError(format!("Codex 不支持沙箱模式：{value}")));
+        }
+    }
+    // 审批人：默认人工（user），auto_review 表示由 Codex 子代理按风险框架自动审批
+    let approvals_reviewer = model_value("codex_approvals_reviewer")
+        .or_else(|| provider_value("codex_approvals_reviewer"))
+        .or_else(|| Some("user".to_string()));
+    if let Some(value) = approvals_reviewer.as_deref() {
+        if !CODEX_APPROVALS_REVIEWERS.contains(&value) {
+            return Err(AppError::UnknownError(format!("Codex 不支持审批人：{value}")));
+        }
+    }
     let mut config = CodexAppServerConfig {
         cli_command,
         working_directory,
@@ -275,6 +303,7 @@ pub fn extract_codex_app_server_config(
         reasoning_effort: model_value("reasoning_effort"),
         approval_policy,
         sandbox,
+        approvals_reviewer,
         selected_mcp_tools_payload: String::new(),
         session_signature: String::new(),
     };
@@ -291,6 +320,7 @@ fn codex_config_signature(config: &CodexAppServerConfig) -> String {
         "reasoning_effort": config.reasoning_effort,
         "approval": config.approval_policy,
         "sandbox": config.sandbox,
+        "approvals_reviewer": config.approvals_reviewer,
         "env": config.env_vars,
         "selected_mcp": config.selected_mcp_tools_payload,
     }))
@@ -642,11 +672,71 @@ fn codex_reasoning_options(efforts: &[String]) -> Vec<CodexSessionConfigChoice> 
         value: value.clone(),
         name: match value.as_str() {
             "none" => "关闭思考".to_string(),
-            other => other.to_ascii_uppercase(),
+            other => other.to_string(),
         },
         description: None,
         group_name: None,
     }).collect()
+}
+
+/// Codex 审批策略的合法取值（app-server v2 AskForApproval 枚举）
+pub(crate) const CODEX_APPROVAL_POLICIES: &[&str] = &["untrusted", "on-request", "never"];
+/// Codex 沙箱模式的合法取值（app-server v2 SandboxMode 枚举）
+pub(crate) const CODEX_SANDBOX_MODES: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
+/// Codex 审批人的合法取值（app-server v2 ApprovalsReviewer 枚举；guardian_subagent 为遗留别名，不暴露）
+pub(crate) const CODEX_APPROVALS_REVIEWERS: &[&str] = &["user", "auto_review"];
+
+fn codex_approval_policy_options() -> Vec<CodexSessionConfigChoice> {
+    CODEX_APPROVAL_POLICIES.iter().map(|value| CodexSessionConfigChoice {
+        value: value.to_string(),
+        name: match *value {
+            "untrusted" => "仅读命令自动执行（untrusted）".to_string(),
+            "on-request" => "由模型决定何时请求审批（on-request）".to_string(),
+            "never" => "从不请求审批（never）".to_string(),
+            other => other.to_string(),
+        },
+        description: None,
+        group_name: None,
+    }).collect()
+}
+
+fn codex_sandbox_options() -> Vec<CodexSessionConfigChoice> {
+    CODEX_SANDBOX_MODES.iter().map(|value| CodexSessionConfigChoice {
+        value: value.to_string(),
+        name: match *value {
+            "read-only" => "只读（read-only）".to_string(),
+            "workspace-write" => "工作区可写（workspace-write）".to_string(),
+            "danger-full-access" => "完全访问（danger-full-access）".to_string(),
+            other => other.to_string(),
+        },
+        description: None,
+        group_name: None,
+    }).collect()
+}
+
+fn codex_approvals_reviewer_options() -> Vec<CodexSessionConfigChoice> {
+    CODEX_APPROVALS_REVIEWERS.iter().map(|value| CodexSessionConfigChoice {
+        value: value.to_string(),
+        name: match *value {
+            "user" => "人工审批（user）".to_string(),
+            "auto_review" => "自动审批（auto_review）".to_string(),
+            other => other.to_string(),
+        },
+        description: None,
+        group_name: None,
+    }).collect()
+}
+
+/// turn/start 的 sandboxPolicy 是对象形式（camelCase type），
+/// 与 thread/start|resume 的 SandboxMode 字符串（kebab-case）不同，这里做映射
+fn codex_sandbox_policy_json(sandbox: Option<&str>) -> Option<Value> {
+    let policy_type = match sandbox? {
+        "read-only" => "readOnly",
+        "workspace-write" => "workspaceWrite",
+        "danger-full-access" => "dangerFullAccess",
+        _ => return None,
+    };
+    Some(json!({ "type": policy_type }))
 }
 
 fn codex_model_choices(
@@ -695,6 +785,36 @@ fn apply_codex_config_option(
         }
         return Ok(());
     }
+    if config_id == "approval_policy" {
+        if !CODEX_APPROVAL_POLICIES.contains(&value.as_str()) {
+            return Err(format!("Codex 不支持审批策略：{value}"));
+        }
+        snapshot.approval_policy = Some(value.clone());
+        if let Some(option) = snapshot.config_options.iter_mut().find(|option| option.id == "approval_policy") {
+            option.current_value = value;
+        }
+        return Ok(());
+    }
+    if config_id == "sandbox" {
+        if !CODEX_SANDBOX_MODES.contains(&value.as_str()) {
+            return Err(format!("Codex 不支持沙箱模式：{value}"));
+        }
+        snapshot.sandbox = Some(value.clone());
+        if let Some(option) = snapshot.config_options.iter_mut().find(|option| option.id == "sandbox") {
+            option.current_value = value;
+        }
+        return Ok(());
+    }
+    if config_id == "approvals_reviewer" {
+        if !CODEX_APPROVALS_REVIEWERS.contains(&value.as_str()) {
+            return Err(format!("Codex 不支持审批人：{value}"));
+        }
+        snapshot.approvals_reviewer = Some(value.clone());
+        if let Some(option) = snapshot.config_options.iter_mut().find(|option| option.id == "approvals_reviewer") {
+            option.current_value = value;
+        }
+        return Ok(());
+    }
     Err(format!("Codex 不支持会话配置：{config_id}"))
 }
 
@@ -703,6 +823,9 @@ fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionS
         "threadId": thread_id,
         "model": snapshot.model,
         "reasoningEffort": snapshot.reasoning_effort,
+        "approvalPolicy": snapshot.approval_policy,
+        "sandboxPolicy": codex_sandbox_policy_json(snapshot.sandbox.as_deref()),
+        "approvalsReviewer": snapshot.approvals_reviewer,
         "input": [{"type":"text","text":prompt,"text_elements":[]}],
     })
 }
@@ -1490,10 +1613,18 @@ async fn run_session(
         "cwd": config.working_directory,
         "approvalPolicy": config.approval_policy,
         "sandbox": config.sandbox,
+        "approvalsReviewer": config.approvals_reviewer,
         "config": mcp_config_overrides.clone(),
     });
     let (thread_method, params) = if let Some(thread_id) = stored_thread.as_deref() {
-        ("thread/resume", json!({"threadId":thread_id,"config":mcp_config_overrides}))
+        // thread/resume 也支持 approvalPolicy/sandbox 覆盖，否则恢复历史线程时新配置不生效
+        ("thread/resume", json!({
+            "threadId": thread_id,
+            "approvalPolicy": config.approval_policy,
+            "sandbox": config.sandbox,
+            "approvalsReviewer": config.approvals_reviewer,
+            "config": mcp_config_overrides,
+        }))
     } else {
         ("thread/start", thread_params.clone())
     };
@@ -1550,6 +1681,9 @@ async fn run_session(
             .or_else(|| stored_thread.is_none().then(|| config.model.clone()).flatten()),
         reasoning_effort: first_string_for_keys(&thread_result, &["reasoningEffort", "reasoning_effort"])
             .or_else(|| stored_thread.is_none().then(|| config.reasoning_effort.clone()).flatten()),
+        approval_policy: config.approval_policy.clone(),
+        sandbox: config.sandbox.clone(),
+        approvals_reviewer: config.approvals_reviewer.clone(),
         config_options: {
             let mut options = Vec::new();
             {
@@ -1570,6 +1704,30 @@ async fn run_session(
                 .or_else(|| stored_thread.is_none().then(|| config.reasoning_effort.clone()).flatten())
                 .or_else(|| supported_efforts.first().cloned()).unwrap_or_default(),
             options: codex_reasoning_options(&supported_efforts),
+            });
+            options.push(CodexSessionConfigOption {
+                id: "approval_policy".to_string(),
+                name: "审批策略".to_string(),
+                description: Some("Codex 何时请求用户审批；从下一轮起生效".to_string()),
+                category: Some("approval".to_string()),
+                current_value: config.approval_policy.clone().unwrap_or_default(),
+                options: codex_approval_policy_options(),
+            });
+            options.push(CodexSessionConfigOption {
+                id: "sandbox".to_string(),
+                name: "沙箱模式".to_string(),
+                description: Some("Codex 命令执行的沙箱范围；从下一轮起生效".to_string()),
+                category: Some("sandbox".to_string()),
+                current_value: config.sandbox.clone().unwrap_or_default(),
+                options: codex_sandbox_options(),
+            });
+            options.push(CodexSessionConfigOption {
+                id: "approvals_reviewer".to_string(),
+                name: "审批人".to_string(),
+                description: Some("Codex 审批请求由人工处理还是自动审批；从下一轮起生效".to_string()),
+                category: Some("approvals_reviewer".to_string()),
+                current_value: config.approvals_reviewer.clone().unwrap_or_default(),
+                options: codex_approvals_reviewer_options(),
             });
             options
         },
@@ -2039,6 +2197,72 @@ mod tests {
         assert_eq!(codex_turn_start_params("thread-1", &snapshot, "hello")["reasoningEffort"], "ultra");
     }
 
+    /// turn/start 的审批策略与沙箱覆盖
+    ///
+    /// 验证内容：
+    /// - 未设置时输出 null（schema 允许 null）
+    /// - 设置后 approvalPolicy 原样下发字符串
+    /// - sandboxPolicy 从 kebab-case 字符串映射为 camelCase type 对象
+    #[test]
+    fn builds_turn_start_with_approval_and_sandbox_overrides() {
+        let default_snapshot = CodexConversationSessionState::default();
+        let default_params = codex_turn_start_params("thread-1", &default_snapshot, "hello");
+        assert!(default_params["approvalPolicy"].is_null());
+        assert!(default_params["sandboxPolicy"].is_null());
+
+        let snapshot = CodexConversationSessionState {
+            approval_policy: Some("never".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            approvals_reviewer: Some("auto_review".to_string()),
+            ..Default::default()
+        };
+        let params = codex_turn_start_params("thread-1", &snapshot, "hello");
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandboxPolicy"], json!({"type": "workspaceWrite"}));
+        assert_eq!(params["approvalsReviewer"], "auto_review");
+    }
+
+    /// sandboxPolicy 的 kebab-case → 对象映射
+    ///
+    /// 验证内容：
+    /// - 三种合法沙箱模式分别映射到 readOnly / workspaceWrite / dangerFullAccess
+    /// - None 与非法值都返回 None
+    #[test]
+    fn maps_sandbox_mode_to_turn_sandbox_policy() {
+        assert_eq!(codex_sandbox_policy_json(Some("read-only")), Some(json!({"type": "readOnly"})));
+        assert_eq!(codex_sandbox_policy_json(Some("workspace-write")), Some(json!({"type": "workspaceWrite"})));
+        assert_eq!(codex_sandbox_policy_json(Some("danger-full-access")), Some(json!({"type": "dangerFullAccess"})));
+        assert_eq!(codex_sandbox_policy_json(None), None);
+        assert_eq!(codex_sandbox_policy_json(Some("bogus")), None);
+    }
+
+    /// 会话内切换审批策略与沙箱模式
+    ///
+    /// 验证内容：
+    /// - 合法值更新 snapshot 字段与对应 config_option 的 current_value
+    /// - 非法值直接报错且不修改 snapshot
+    #[test]
+    fn applies_approval_policy_and_sandbox_config_options() {
+        let mut snapshot = CodexConversationSessionState::default();
+        snapshot.config_options = vec![
+            CodexSessionConfigOption { id: "approval_policy".to_string(), name: "审批策略".to_string(), description: None, category: Some("approval".to_string()), current_value: "on-request".to_string(), options: codex_approval_policy_options() },
+            CodexSessionConfigOption { id: "sandbox".to_string(), name: "沙箱模式".to_string(), description: None, category: Some("sandbox".to_string()), current_value: "workspace-write".to_string(), options: codex_sandbox_options() },
+        ];
+
+        apply_codex_config_option(&mut snapshot, &[], "approval_policy", "untrusted".to_string()).unwrap();
+        assert_eq!(snapshot.approval_policy.as_deref(), Some("untrusted"));
+        assert_eq!(snapshot.config_options[0].current_value, "untrusted");
+
+        apply_codex_config_option(&mut snapshot, &[], "sandbox", "read-only".to_string()).unwrap();
+        assert_eq!(snapshot.sandbox.as_deref(), Some("read-only"));
+        assert_eq!(snapshot.config_options[1].current_value, "read-only");
+
+        assert!(apply_codex_config_option(&mut snapshot, &[], "approval_policy", "on-failure".to_string()).is_err());
+        assert!(apply_codex_config_option(&mut snapshot, &[], "sandbox", "full-access".to_string()).is_err());
+        assert_eq!(snapshot.approval_policy.as_deref(), Some("untrusted"));
+        assert_eq!(snapshot.sandbox.as_deref(), Some("read-only"));
+    }
+
     #[test]
     fn maps_codex_request_user_input_to_aipp_and_back() {
         let params = json!({
@@ -2198,6 +2422,36 @@ mod tests {
         );
     }
 
+    /// 审批策略/沙箱模式的兜底与校验
+    ///
+    /// 验证内容：
+    /// - 助手/provider 都未配置时使用内置默认值（on-request / workspace-write），保证界面可反显
+    /// - 助手级覆盖优先于 provider 级
+    /// - 非法值直接报错（不做回退）
+    #[test]
+    fn approval_policy_and_sandbox_defaults_and_validation() {
+        let config = extract_codex_app_server_config(&[], &[], None).unwrap();
+        assert_eq!(config.approval_policy.as_deref(), Some("on-request"));
+        assert_eq!(config.sandbox.as_deref(), Some("workspace-write"));
+        assert_eq!(config.approvals_reviewer.as_deref(), Some("user"));
+
+        let config = extract_codex_app_server_config(
+            &[model_config("codex_approval_policy", "never")],
+            &[provider_config("codex_approval_policy", "untrusted"), provider_config("codex_sandbox", "read-only")],
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.approval_policy.as_deref(), Some("never"));
+        assert_eq!(config.sandbox.as_deref(), Some("read-only"));
+
+        assert!(
+            extract_codex_app_server_config(&[], &[provider_config("codex_approval_policy", "on-failure")], None).is_err()
+        );
+        assert!(
+            extract_codex_app_server_config(&[model_config("codex_sandbox", "full-access")], &[], None).is_err()
+        );
+    }
+
     fn codex_test_config() -> CodexAppServerConfig {
         CodexAppServerConfig {
             cli_command: "codex".to_string(),
@@ -2208,6 +2462,7 @@ mod tests {
             reasoning_effort: None,
             approval_policy: None,
             sandbox: None,
+            approvals_reviewer: None,
             selected_mcp_tools_payload: String::new(),
             session_signature: String::new(),
         }

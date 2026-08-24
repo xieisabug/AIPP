@@ -34,6 +34,8 @@ export interface UseConversationOperationsProps {
     busySendBehavior?: "queue" | "interrupt";
     selectedAgentModel?: string;
     selectedAgentEffort?: string;
+    selectedAgentApprovalPolicy?: string;
+    selectedAgentSandbox?: string;
 }
 
 export interface UseConversationOperationsReturn {
@@ -81,6 +83,8 @@ export function useConversationOperations({
     busySendBehavior = "queue",
     selectedAgentModel = "",
     selectedAgentEffort = "",
+    selectedAgentApprovalPolicy = "",
+    selectedAgentSandbox = "",
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
 
     // 对话标题管理相关状态
@@ -405,6 +409,20 @@ export function useConversationOperations({
                     assistant_id: parsedAssistantId,
                     assistant_type: assistantData?.assistant_type,
                 });
+                // 新对话界面的 Agent 会话级覆盖（模型/思考强度/审批策略/沙箱），仅在当前选中助手一致时下发
+                const agentOverrideConfig: Record<string, string> = {};
+                if (parsedAssistantId === +selectedAssistant) {
+                    if (selectedAgentEffort) {
+                        agentOverrideConfig.reasoning_effort = selectedAgentEffort;
+                        agentOverrideConfig.claude_effort = selectedAgentEffort;
+                    }
+                    if (selectedAgentApprovalPolicy) {
+                        agentOverrideConfig.approval_policy = selectedAgentApprovalPolicy;
+                    }
+                    if (selectedAgentSandbox) {
+                        agentOverrideConfig.sandbox = selectedAgentSandbox;
+                    }
+                }
                 invoke<AiResponse>("ask_ai", {
                     request: {
                         prompt: finalPrompt,
@@ -413,8 +431,8 @@ export function useConversationOperations({
                         attachment_list: fileInfoList?.map((i) => i.id),
                         override_model_id: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,
                     },
-                    override_model_config: parsedAssistantId === +selectedAssistant && selectedAgentEffort
-                        ? { reasoning_effort: selectedAgentEffort, claude_effort: selectedAgentEffort }
+                    override_model_config: Object.keys(agentOverrideConfig).length > 0
+                        ? agentOverrideConfig
                         : undefined,
                 })
                     .then((res) => {

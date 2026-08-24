@@ -12,6 +12,7 @@ use crate::api::ai::chat::{
 use crate::api::ai::codex_app_server::{
     emit_codex_failure, extract_codex_app_server_config, refresh_codex_session_signature,
     spawn_codex_session_task, CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
+    CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES,
 };
 use crate::api::ai::claude_sdk::{claude_model_choices, emit_claude_failure, extract_claude_sdk_config, is_claude_code_provider, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
 use crate::api::assistant_api::CLAUDE_CODE_DEFAULT_MODEL;
@@ -1329,6 +1330,15 @@ pub async fn ask_ai(
             }
             if let Some(config) = override_model_config.as_ref() {
                 if let Some(effort) = config.get("reasoning_effort").and_then(|value| value.as_str()) { codex_config.reasoning_effort = Some(effort.to_string()); }
+                // 新对话界面传入的会话级审批策略/沙箱覆盖，非法值直接报错（不做回退）
+                if let Some(approval) = config.get("approval_policy").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
+                    if !CODEX_APPROVAL_POLICIES.contains(&approval) { return Err(AppError::UnknownError(format!("Codex 不支持审批策略：{approval}"))); }
+                    codex_config.approval_policy = Some(approval.to_string());
+                }
+                if let Some(sandbox) = config.get("sandbox").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
+                    if !CODEX_SANDBOX_MODES.contains(&sandbox) { return Err(AppError::UnknownError(format!("Codex 不支持沙箱模式：{sandbox}"))); }
+                    codex_config.sandbox = Some(sandbox.to_string());
+                }
             }
             // 与 ACP 通道一致：挂载助手绑定的 MCP 工具（桥接注入），payload 计入签名
             codex_config.selected_mcp_tools_payload =

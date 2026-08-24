@@ -7,6 +7,7 @@ import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDispl
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
 import AssistantWorkspaceFieldDisplay from "@/components/config/AssistantWorkspaceFieldDisplay";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import { useFilteredProviders } from "@/hooks/useFilteredProviders";
 import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 
 interface UseAssistantFormConfigProps {
@@ -46,6 +47,10 @@ export const useAssistantFormConfig = ({
     onPluginConfigChange,
 }: UseAssistantFormConfigProps) => {
     const { getConfigValue } = useFeatureConfig();
+
+    const isAgentAssistant = currentAssistant?.assistant.assistant_type === 4;
+    // Agent 助手需要知道所选提供商的 api_type，以便按通道（如 Codex）展示专用配置项
+    const { providers: agentProviders } = useFilteredProviders(isAgentAssistant ? 4 : null, isAgentAssistant);
 
     const resolvePluginFieldValue = useCallback(
         (
@@ -130,6 +135,9 @@ export const useAssistantFormConfig = ({
                     : Number.parseInt(legacyProviderId, 10) > 0
                       ? legacyProviderId
                       : "-1";
+            const isCodexProvider =
+                agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ===
+                "codex_app_server";
 
             return [
                 {
@@ -183,6 +191,72 @@ export const useAssistantFormConfig = ({
                             handleConfigChange("acp_additional_args", value, "string"),
                     },
                 },
+                ...(isCodexProvider
+                    ? [
+                          {
+                              key: "codex_approval_policy",
+                              config: {
+                                  type: "select" as const,
+                                  label: "审批策略",
+                                  value: getAcpConfigValue("codex_approval_policy", "") || "default",
+                                  options: [
+                                      { value: "default", label: "跟随提供商配置" },
+                                      { value: "untrusted", label: "仅读命令自动执行（untrusted）" },
+                                      { value: "on-request", label: "由模型决定何时请求审批（on-request）" },
+                                      { value: "never", label: "从不请求审批（never）" },
+                                  ],
+                                  tooltip: "Codex 何时请求用户审批；默认跟随提供商配置",
+                                  onChange: (value: string | boolean) =>
+                                      handleConfigChange(
+                                          "codex_approval_policy",
+                                          value === "default" ? "" : value,
+                                          "string"
+                                      ),
+                              },
+                          },
+                          {
+                              key: "codex_sandbox",
+                              config: {
+                                  type: "select" as const,
+                                  label: "沙箱模式",
+                                  value: getAcpConfigValue("codex_sandbox", "") || "default",
+                                  options: [
+                                      { value: "default", label: "跟随提供商配置" },
+                                      { value: "read-only", label: "只读（read-only）" },
+                                      { value: "workspace-write", label: "工作区可写（workspace-write）" },
+                                      { value: "danger-full-access", label: "完全访问（danger-full-access）" },
+                                  ],
+                                  tooltip: "Codex 命令执行的沙箱范围；默认跟随提供商配置",
+                                  onChange: (value: string | boolean) =>
+                                      handleConfigChange(
+                                          "codex_sandbox",
+                                          value === "default" ? "" : value,
+                                          "string"
+                                      ),
+                              },
+                          },
+                          {
+                              key: "codex_approvals_reviewer",
+                              config: {
+                                  type: "select" as const,
+                                  label: "审批人",
+                                  value: getAcpConfigValue("codex_approvals_reviewer", "") || "default",
+                                  options: [
+                                      { value: "default", label: "跟随提供商配置" },
+                                      { value: "user", label: "人工审批（user）" },
+                                      { value: "auto_review", label: "自动审批（auto_review）" },
+                                  ],
+                                  tooltip: "Codex 审批请求由人工处理还是由子代理自动审批；默认跟随提供商配置",
+                                  onChange: (value: string | boolean) =>
+                                      handleConfigChange(
+                                          "codex_approvals_reviewer",
+                                          value === "default" ? "" : value,
+                                          "string"
+                                      ),
+                              },
+                          },
+                      ]
+                    : []),
                 {
                     key: "mcp_config",
                     config: {

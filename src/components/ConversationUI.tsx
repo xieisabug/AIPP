@@ -278,9 +278,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [selectedAssistant, setSelectedAssistant] = useState(-1);
         const [selectedAgentModel, setSelectedAgentModel] = useState("");
         const [selectedAgentEffort, setSelectedAgentEffort] = useState("");
-        const handleAgentConfigChange = useCallback((model: string, effort: string) => {
+        const [selectedAgentApprovalPolicy, setSelectedAgentApprovalPolicy] = useState("");
+        const [selectedAgentSandbox, setSelectedAgentSandbox] = useState("");
+        const handleAgentConfigChange = useCallback((model: string, effort: string, approvalPolicy: string, sandbox: string) => {
             setSelectedAgentModel(model);
             setSelectedAgentEffort(effort);
+            setSelectedAgentApprovalPolicy(approvalPolicy);
+            setSelectedAgentSandbox(sandbox);
         }, []);
 
         // 对话加载状态
@@ -1006,6 +1010,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             busySendBehavior,
             selectedAgentModel,
             selectedAgentEffort,
+            selectedAgentApprovalPolicy,
+            selectedAgentSandbox,
         });
 
         // ============= 初始化和生命周期逻辑 =============
@@ -1919,6 +1925,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 setSelectedAssistant={setSelectedAssistant}
                                 selectedModel={selectedAgentModel}
                                 selectedEffort={selectedAgentEffort}
+                                selectedApprovalPolicy={selectedAgentApprovalPolicy}
+                                selectedSandbox={selectedAgentSandbox}
                                 onAgentConfigChange={handleAgentConfigChange}
                             />
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
