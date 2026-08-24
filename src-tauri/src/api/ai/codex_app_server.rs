@@ -108,41 +108,84 @@ enum CodexSessionCommand {
     Prompt { message_id: i64, prompt: String, window: tauri::Window },
     CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
     SetConfigOption { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
+    Shutdown { reason: String },
 }
+
+type CodexStderrBuffer = std::sync::Arc<std::sync::Mutex<VecDeque<String>>>;
+
+const CODEX_STDERR_MAX_LINES: usize = 40;
 
 #[derive(Clone)]
 pub struct CodexSessionHandle {
     sender: mpsc::UnboundedSender<CodexSessionCommand>,
+    run_id: String,
+    failure_context: std::sync::Arc<std::sync::Mutex<Option<(i64, tauri::Window)>>>,
 }
 
 impl CodexSessionHandle {
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     pub fn send_prompt(
         &self,
         message_id: i64,
         prompt: String,
         window: tauri::Window,
     ) -> Result<(), AppError> {
-        self.sender
+        *self.failure_context.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((message_id, window.clone()));
+        if self
+            .sender
             .send(CodexSessionCommand::Prompt { message_id, prompt, window })
-            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))
+            .is_err()
+        {
+            self.failure_context
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            return Err(AppError::UnknownError(
+                format!(
+                    "无法提交 Codex 请求：app-server 控制通道已关闭 [run_id={}]",
+                    self.run_id
+                ),
+            ));
+        }
+        Ok(())
     }
 
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(CodexSessionCommand::CancelCurrentPrompt { response: tx })
-            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?;
+            .map_err(|_| AppError::UnknownError(format!(
+                "无法取消 Codex 请求：app-server 控制通道已关闭 [run_id={}]",
+                self.run_id
+            )))?;
         rx.await
-            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?
+            .map_err(|_| AppError::UnknownError(format!(
+                "Codex 取消请求未返回结果：会话任务已退出 [run_id={}]",
+                self.run_id
+            )))?
             .map_err(AppError::UnknownError)
     }
 
     pub async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError> {
         let (tx, rx) = oneshot::channel();
         self.sender.send(CodexSessionCommand::SetConfigOption { config_id, value, response: tx })
-            .map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?;
-        rx.await.map_err(|_| AppError::UnknownError("Codex app-server session closed".to_string()))?
+            .map_err(|_| AppError::UnknownError(format!(
+                "无法更新 Codex 会话配置：app-server 控制通道已关闭 [run_id={}]",
+                self.run_id
+            )))?;
+        rx.await.map_err(|_| AppError::UnknownError(format!(
+            "Codex 配置更新未返回结果：会话任务已退出 [run_id={}]",
+            self.run_id
+        )))?
             .map_err(AppError::UnknownError)
+    }
+
+    pub(crate) fn shutdown(&self, reason: String) {
+        let _ = self.sender.send(CodexSessionCommand::Shutdown { reason });
     }
 }
 
@@ -150,11 +193,13 @@ pub struct CodexSessionEntry {
     pub handle: CodexSessionHandle,
     pub snapshot: CodexConversationSessionState,
     pub config_signature: String,
+    pub run_id: String,
 }
 
 impl CodexSessionEntry {
     pub fn new(handle: CodexSessionHandle, conversation_id: i64, config_signature: String) -> Self {
         Self {
+            run_id: handle.run_id.clone(),
             handle,
             snapshot: CodexConversationSessionState {
                 conversation_id,
@@ -528,45 +573,53 @@ pub async fn probe_codex_model_options(
     app_handle: &tauri::AppHandle,
     config: &CodexAppServerConfig,
 ) -> Result<Vec<CodexModelCatalogEntry>, String> {
-    let (_child, mut stdin, mut lines) = spawn_process(config).await?;
-    let mut pending_notifications = VecDeque::new();
-    write_frame(
-        &mut stdin,
-        &json_rpc_request(
+    let stderr_buffer = CodexStderrBuffer::default();
+    let result = async {
+        let (_child, mut stdin, mut lines) =
+            spawn_process(config, stderr_buffer.clone()).await?;
+        let mut pending_notifications = VecDeque::new();
+        write_frame(
+            &mut stdin,
+            &json_rpc_request(
+                1,
+                "initialize",
+                json!({
+                    "clientInfo":{"name":"aipp-model-probe","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
+                    "capabilities":{"experimentalApi":true}
+                }),
+            ),
+        )
+        .await?;
+        read_rpc_response_with_approvals(
+            app_handle,
+            -1,
+            &mut stdin,
+            &mut lines,
             1,
-            "initialize",
-            json!({
-                "clientInfo":{"name":"aipp-model-probe","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
-                "capabilities":{"experimentalApi":true}
-            }),
-        ),
-    )
-    .await?;
-    read_rpc_response_with_approvals(
-        app_handle,
-        -1,
-        &mut stdin,
-        &mut lines,
-        1,
-        &mut pending_notifications,
-    )
-    .await?;
-    write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
-    write_frame(&mut stdin, &json_rpc_request(2, "model/list", json!({}))).await?;
-    let result = read_rpc_response_with_approvals(
-        app_handle,
-        -1,
-        &mut stdin,
-        &mut lines,
-        2,
-        &mut pending_notifications,
-    )
-    .await?;
-    let catalog = model_catalog(&result);
-    if catalog.is_empty() {
-        return Err(format!("Codex model/list 返回空模型列表：{result}"));
+            &mut pending_notifications,
+        )
+        .await?;
+        write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
+        write_frame(&mut stdin, &json_rpc_request(2, "model/list", json!({}))).await?;
+        let result = read_rpc_response_with_approvals(
+            app_handle,
+            -1,
+            &mut stdin,
+            &mut lines,
+            2,
+            &mut pending_notifications,
+        )
+        .await?;
+        let catalog = model_catalog(&result);
+        if catalog.is_empty() {
+            return Err(format!("Codex model/list 返回空模型列表：{result}"));
+        }
+        Ok(catalog)
     }
-    Ok(catalog)
+    .await;
+    result.map_err(|error| {
+        codex_error_with_diagnostics(&error, -1, "model-probe", &stderr_buffer)
+    })
 }
 
 fn first_string_for_keys(value: &Value, keys: &[&str]) -> Option<String> {
@@ -598,25 +651,13 @@ fn codex_reasoning_options(efforts: &[String]) -> Vec<CodexSessionConfigChoice> 
 
 fn codex_model_choices(
     catalog: &[CodexModelCatalogEntry],
-    current_model: Option<&str>,
 ) -> Vec<CodexSessionConfigChoice> {
-    let mut choices: Vec<_> = catalog.iter().map(|entry| CodexSessionConfigChoice {
+    catalog.iter().map(|entry| CodexSessionConfigChoice {
         value: entry.id.clone(),
         name: entry.name.clone(),
         description: None,
         group_name: None,
-    }).collect();
-    if let Some(current_model) = current_model {
-        if !choices.iter().any(|choice| choice.value == current_model) {
-            choices.insert(0, CodexSessionConfigChoice {
-                value: current_model.to_string(),
-                name: format!("{}（当前线程）", current_model),
-                description: Some("该模型来自已恢复的 Codex 线程，当前 model/list 未返回它".to_string()),
-                group_name: None,
-            });
-        }
-    }
-    choices
+    }).collect()
 }
 
 fn apply_codex_config_option(
@@ -810,10 +851,17 @@ async fn handle_server_request(
 }
 
 async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<(), String> {
-    let mut bytes = serde_json::to_vec(frame).map_err(|error| error.to_string())?;
+    let mut bytes = serde_json::to_vec(frame)
+        .map_err(|error| format!("序列化 Codex JSON-RPC 请求失败：{error}"))?;
     bytes.push(b'\n');
-    stdin.write_all(&bytes).await.map_err(|error| error.to_string())?;
-    stdin.flush().await.map_err(|error| error.to_string())
+    stdin
+        .write_all(&bytes)
+        .await
+        .map_err(|error| format!("写入 Codex app-server stdin 失败：{error}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| format!("刷新 Codex app-server stdin 失败：{error}"))
 }
 
 async fn read_rpc_response_with_approvals(
@@ -824,7 +872,11 @@ async fn read_rpc_response_with_approvals(
     expected_id: u64,
     pending_notifications: &mut VecDeque<Value>,
 ) -> Result<Value, String> {
-    while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| format!("读取 Codex app-server stdout 失败：{error}"))?
+    {
         let frame: Value = serde_json::from_str(&line)
             .map_err(|error| format!("Invalid Codex app-server JSON: {error}: {line}"))?;
         if frame.get("method").is_some() && frame.get("id").is_some() {
@@ -856,7 +908,9 @@ async fn read_rpc_response_with_approvals(
             pending_notifications.push_back(frame);
         }
     }
-    Err("Codex app-server closed before replying".to_string())
+    Err(format!(
+        "Codex app-server stdout 在等待 JSON-RPC 响应 id={expected_id} 时关闭；进程未返回 JSON-RPC error，底层原因只能从附带的 Codex stderr 诊断"
+    ))
 }
 
 fn thread_id_from_result(result: &Value) -> Option<String> {
@@ -1122,6 +1176,56 @@ fn persist_response(
     }
 }
 
+pub(crate) fn emit_codex_failure(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    message_id: i64,
+    window: &tauri::Window,
+    error: &str,
+) {
+    let content = format!("Codex 运行失败：{error}");
+    if let Ok(db) = ConversationDatabase::new(app_handle) {
+        if let Ok(repo) = db.message_repo() {
+            if let Ok(Some(mut message)) = repo.read(message_id) {
+                message.message_type = "error".to_string();
+                message.content = content.clone();
+                message.finish_time = Some(chrono::Utc::now());
+                let _ = repo.update(&message);
+            }
+        }
+    }
+    let _ = window.emit(
+        format!("conversation_event_{conversation_id}").as_str(),
+        ConversationEvent {
+            r#type: "message_update".to_string(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id,
+                message_type: "error".to_string(),
+                content,
+                is_done: true,
+                token_count: Some(0),
+                input_token_count: Some(0),
+                output_token_count: Some(0),
+                ttft_ms: None,
+                tps: None,
+            })
+            .unwrap(),
+        },
+    );
+    let _ = window.emit(
+        format!("conversation_event_{conversation_id}").as_str(),
+        ConversationEvent {
+            r#type: "stream_complete".to_string(),
+            data: json!({
+                "conversation_id": conversation_id,
+                "response_message_id": message_id,
+                "has_response": false,
+                "error": error,
+            }),
+        },
+    );
+}
+
 fn persist_codex_timing(
     app_handle: &tauri::AppHandle,
     message_id: i64,
@@ -1156,7 +1260,44 @@ fn persist_codex_reasoning(
     let _ = repo.update(&message);
 }
 
-async fn spawn_process(config: &CodexAppServerConfig) -> Result<(Child, tokio::process::ChildStdin, Lines<BufReader<ChildStdout>>), String> {
+fn record_codex_stderr(buffer: &CodexStderrBuffer, line: String) {
+    let mut lines = buffer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if lines.len() == CODEX_STDERR_MAX_LINES {
+        lines.pop_front();
+    }
+    lines.push_back(line);
+}
+
+fn codex_error_with_diagnostics(
+    error: &str,
+    conversation_id: i64,
+    run_id: &str,
+    stderr_buffer: &CodexStderrBuffer,
+) -> String {
+    let stderr = stderr_buffer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if stderr.trim().is_empty() {
+        format!("{error} [conversation_id={conversation_id}, run_id={run_id}]")
+    } else {
+        format!(
+            "{error} [conversation_id={conversation_id}, run_id={run_id}]\nCodex stderr（最近 {} 行）：\n{}",
+            stderr.lines().count(),
+            stderr.trim()
+        )
+    }
+}
+
+async fn spawn_process(
+    config: &CodexAppServerConfig,
+    stderr_buffer: CodexStderrBuffer,
+) -> Result<(Child, tokio::process::ChildStdin, Lines<BufReader<ChildStdout>>), String> {
     let resolved_cli = resolve_acp_cli_path(&config.cli_command);
     #[cfg(target_os = "windows")]
     let resolved_cli = if resolved_cli.extension().is_none() {
@@ -1196,13 +1337,32 @@ async fn spawn_process(config: &CodexAppServerConfig) -> Result<(Child, tokio::p
         .envs(&config.env_vars)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn().map_err(|error| {
         format!("启动 Codex app-server 失败（{}）：{error}", program.display())
     })?;
     let stdin = child.stdin.take().ok_or("Codex app-server stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Codex app-server stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("Codex app-server stderr unavailable")?;
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    error!(target = "codex_app_server", "{line}");
+                    record_codex_stderr(&stderr_buffer, line);
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let detail = format!("读取 Codex stderr 失败：{error}");
+                    error!(target = "codex_app_server", "{detail}");
+                    record_codex_stderr(&stderr_buffer, detail);
+                    break;
+                }
+            }
+        }
+    });
     Ok((child, stdin, BufReader::new(stdout).lines()))
 }
 
@@ -1212,16 +1372,71 @@ pub fn spawn_codex_session_task(
     config: CodexAppServerConfig,
 ) -> CodexSessionHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let failure_context = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let task_failure_context = failure_context.clone();
+    let task_run_id = run_id.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = run_session(app_handle.clone(), conversation_id, config, receiver).await {
+        let stderr_buffer = CodexStderrBuffer::default();
+        let session_result = run_session(
+            app_handle.clone(),
+            conversation_id,
+            config,
+            receiver,
+            task_failure_context.clone(),
+            &task_run_id,
+            stderr_buffer.clone(),
+        )
+        .await;
+        let failed_prompt = {
+            task_failure_context
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+        };
+        if let Err(error) = session_result {
+            let error = codex_error_with_diagnostics(
+                &error,
+                conversation_id,
+                &task_run_id,
+                &stderr_buffer,
+            );
             error!(conversation_id, error = %error, "Codex app-server session exited");
+            if let Some((message_id, window)) = failed_prompt {
+                emit_codex_failure(&app_handle, conversation_id, message_id, &window, &error);
+                if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
+                    manager.clear_focus(&app_handle, conversation_id).await;
+                }
+            }
+        } else if let Some((message_id, window)) = failed_prompt {
+            let error = codex_error_with_diagnostics(
+                "AIPP Codex 会话任务在当前请求尚未完成时异常返回成功；这是内部状态错误",
+                conversation_id,
+                &task_run_id,
+                &stderr_buffer,
+            );
+            error!(conversation_id, error, "Codex app-server session stopped with an active prompt");
+            emit_codex_failure(&app_handle, conversation_id, message_id, &window, &error);
+            if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
+                manager.clear_focus(&app_handle, conversation_id).await;
+            }
         }
-        if let Some(state) = app_handle.try_state::<crate::CodexSessionState>() {
-            state.sessions.lock().await.remove(&conversation_id);
+        let removed_current_entry = if let Some(state) = app_handle.try_state::<crate::CodexSessionState>() {
+            let mut sessions = state.sessions.lock().await;
+            if sessions.get(&conversation_id).is_some_and(|entry| entry.run_id == task_run_id) {
+                sessions.remove(&conversation_id);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if removed_current_entry {
+            emit_session_snapshot(&app_handle, conversation_id, None);
         }
-        emit_session_snapshot(&app_handle, conversation_id, None);
     });
-    CodexSessionHandle { sender }
+    CodexSessionHandle { sender, run_id, failure_context }
 }
 
 async fn run_session(
@@ -1229,8 +1444,11 @@ async fn run_session(
     conversation_id: i64,
     config: CodexAppServerConfig,
     mut receiver: mpsc::UnboundedReceiver<CodexSessionCommand>,
+    failure_context: std::sync::Arc<std::sync::Mutex<Option<(i64, tauri::Window)>>>,
+    run_id: &str,
+    stderr_buffer: CodexStderrBuffer,
 ) -> Result<(), String> {
-    let (_child, mut stdin, mut lines) = spawn_process(&config).await?;
+    let (_child, mut stdin, mut lines) = spawn_process(&config, stderr_buffer).await?;
     let mut pending_notifications = VecDeque::new();
     write_frame(
         &mut stdin,
@@ -1263,20 +1481,16 @@ async fn run_session(
                 .flatten()
         });
     let mut request_id = 2_u64;
-    let mcp_config_overrides = match codex_mcp_bridge_overrides(&app_handle, conversation_id, &config).await {
-        Ok(overrides) => overrides,
-        Err(error) => {
-            warn!(conversation_id, error = %error, "Codex MCP bridge setup failed; continuing without AIPP MCP tools");
-            None
-        }
-    };
+    let mcp_config_overrides = codex_mcp_bridge_overrides(&app_handle, conversation_id, &config)
+        .await
+        .map_err(|error| format!("Codex MCP bridge 初始化失败：{error}"))?;
     let thread_params = json!({
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
         "cwd": config.working_directory,
         "approvalPolicy": config.approval_policy,
         "sandbox": config.sandbox,
-        "config": mcp_config_overrides,
+        "config": mcp_config_overrides.clone(),
     });
     let (thread_method, params) = if let Some(thread_id) = stored_thread.as_deref() {
         ("thread/resume", json!({"threadId":thread_id,"config":mcp_config_overrides}))
@@ -1284,7 +1498,7 @@ async fn run_session(
         ("thread/start", thread_params.clone())
     };
     write_frame(&mut stdin, &json_rpc_request(request_id, thread_method, params)).await?;
-    let (thread_result, restored_session_method) = match read_rpc_response_with_approvals(
+    let thread_result = read_rpc_response_with_approvals(
         &app_handle,
         conversation_id,
         &mut stdin,
@@ -1292,52 +1506,32 @@ async fn run_session(
         request_id,
         &mut pending_notifications,
     )
-    .await {
-        Ok(result) => (
-            result,
-            stored_thread.as_ref().map(|_| "resume".to_string()),
-        ),
-        Err(error) if stored_thread.is_some() => {
-            warn!(conversation_id, error = %error, "Codex thread resume failed; starting a new thread");
-            request_id += 1;
-            write_frame(&mut stdin, &json_rpc_request(request_id, "thread/start", thread_params)).await?;
-            let result = read_rpc_response_with_approvals(
-                &app_handle,
-                conversation_id,
-                &mut stdin,
-                &mut lines,
-                request_id,
-                &mut pending_notifications,
-            )
-            .await?;
-            (result, None)
-        }
-        Err(error) => return Err(error),
-    };
+    .await
+        .map_err(|error| {
+            if stored_thread.is_some() {
+                format!("Codex thread 恢复失败：{error}")
+            } else {
+                format!("Codex thread 启动失败：{error}")
+            }
+        })?;
+    let restored_session_method = stored_thread.as_ref().map(|_| "resume".to_string());
     let thread_id = thread_id_from_result(&thread_result)
         .ok_or_else(|| format!("Codex thread response missing thread id: {thread_result}"))?;
     request_id += 1;
     let (model_catalog, supported_efforts) = {
         write_frame(&mut stdin, &json_rpc_request(request_id, "model/list", json!({}))).await?;
-        match read_rpc_response_with_approvals(
+        let result = read_rpc_response_with_approvals(
             &app_handle, conversation_id, &mut stdin, &mut lines, request_id, &mut pending_notifications,
-        ).await {
-            Ok(result) => {
-                let catalog = model_catalog(&result);
-                let efforts = catalog.iter()
-                    .find(|entry| config.model.as_deref() == Some(entry.id.as_str()))
-                    .map(|entry| entry.supported_efforts.clone())
-                    .unwrap_or_else(|| supported_reasoning_efforts(&result));
-                if efforts.is_empty() {
-                    warn!(conversation_id, "Codex model/list returned no supportedReasoningEfforts");
-                }
-                (catalog, efforts)
-            }
-            Err(error) => {
-                warn!(conversation_id, error = %error, "Codex model/list failed; hiding reasoning effort choices");
-                (Vec::new(), Vec::new())
-            }
+        ).await.map_err(|error| format!("Codex model/list 失败：{error}"))?;
+        let catalog = model_catalog(&result);
+        if catalog.is_empty() {
+            return Err("Codex model/list 未返回任何模型".to_string());
         }
+        let efforts = catalog.iter()
+            .find(|entry| config.model.as_deref() == Some(entry.id.as_str()))
+            .map(|entry| entry.supported_efforts.clone())
+            .unwrap_or_else(|| supported_reasoning_efforts(&result));
+        (catalog, efforts)
     };
     ConversationDatabase::new(&app_handle)
         .map_err(|error| error.to_string())?
@@ -1364,10 +1558,7 @@ async fn run_session(
                     description: Some("Codex 下一轮响应使用的模型；可输入模型 ID".to_string()),
                     category: Some("model".to_string()), current_value: first_string_for_keys(&thread_result, &["model", "modelId"])
                         .or_else(|| stored_thread.is_none().then(|| config.model.clone()).flatten()).unwrap_or_default(),
-                    options: codex_model_choices(&model_catalog,
-                        first_string_for_keys(&thread_result, &["model", "modelId"])
-                            .or_else(|| stored_thread.is_none().then(|| config.model.clone()).flatten())
-                            .as_deref()),
+                    options: codex_model_choices(&model_catalog),
                 });
             }
             options.push(CodexSessionConfigOption {
@@ -1384,9 +1575,20 @@ async fn run_session(
         },
     };
     if let Some(model) = snapshot.model.clone() {
-        if let Err(error) = apply_codex_config_option(&mut snapshot, &model_catalog, "model", model) {
-            warn!(conversation_id, error = %error, "Codex resumed model is absent from model/list");
+        let catalog_model = model_catalog
+            .iter()
+            .find(|candidate| candidate.id == model)
+            .ok_or_else(|| format!("Codex 当前模型不在 model/list 返回结果中：{model}"))?;
+        if let Some(effort) = snapshot.reasoning_effort.as_deref() {
+            if !catalog_model
+                .supported_efforts
+                .iter()
+                .any(|candidate| candidate == effort)
+            {
+                return Err(format!("Codex 当前模型 {model} 不支持已配置的思考强度：{effort}"));
+            }
         }
+        apply_codex_config_option(&mut snapshot, &model_catalog, "model", model)?;
     }
     emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
 
@@ -1405,6 +1607,10 @@ async fn run_session(
             }
             CodexSessionCommand::CancelCurrentPrompt { response } => {
                 let _ = response.send(Ok(()));
+            }
+            CodexSessionCommand::Shutdown { reason } => {
+                info!(conversation_id, run_id, reason, "Codex session shutdown requested");
+                return Ok(());
             }
             CodexSessionCommand::Prompt { message_id, prompt, window } => {
                 let turn_start_time = chrono::Utc::now();
@@ -1473,13 +1679,24 @@ async fn run_session(
                                         }
                                     }
                                 }
-                                None => return Ok(()),
+                                Some(CodexSessionCommand::Shutdown { reason }) => {
+                                    return Err(format!(
+                                        "AIPP 在 Codex 请求执行期间关闭了控制通道：{reason}"
+                                    ));
+                                }
+                                None => return Err(
+                                    "AIPP Codex 控制通道意外关闭：当前请求仍在执行，但所有会话句柄已释放；这表示会话所有权发生错误".to_string()
+                                ),
                             }
                             continue;
                             }
                             line = lines.next_line() => {
-                            let Some(line) = line.map_err(|error| error.to_string())? else {
-                                return Err("Codex app-server closed during turn".to_string());
+                            let Some(line) = line.map_err(|error| {
+                                format!("读取 Codex app-server stdout 失败（当前 Codex turn 正在执行）：{error}")
+                            })? else {
+                                return Err(
+                                    "Codex app-server stdout 在当前 turn 完成前关闭，且未发送 turn/completed 或 turn/failed；底层原因只能从附带的 Codex stderr 诊断".to_string()
+                                );
                             };
                             match serde_json::from_str(&line) {
                                 Ok(frame) => frame,
@@ -1613,7 +1830,12 @@ async fn run_session(
                                     let server_name = params.get("name").and_then(Value::as_str).unwrap_or("unknown");
                                     let status = params.get("status").and_then(Value::as_str).unwrap_or("unknown");
                                     if status == "failed" {
-                                        warn!(conversation_id, server = server_name, error = ?params.get("error"), failure_reason = ?params.get("failureReason"), "Codex MCP server startup failed");
+                                        let reason = params
+                                            .get("error")
+                                            .or_else(|| params.get("failureReason"))
+                                            .map(Value::to_string)
+                                            .unwrap_or_else(|| "未知错误".to_string());
+                                        return Err(format!("Codex MCP server {server_name} 启动失败：{reason}"));
                                     } else {
                                         debug!(conversation_id, server = server_name, status, "Codex MCP server startup status");
                                     }
@@ -1633,6 +1855,12 @@ async fn run_session(
                                 }
                     }
                     }
+                if turn_error.is_none() && content.is_empty() && reasoning.is_empty() {
+                    turn_error = Some("Codex 本轮未返回任何内容".to_string());
+                }
+                if let Some(error) = turn_error {
+                    return Err(error);
+                }
                 persist_codex_timing(&app_handle, message_id, turn_start_time, first_any_token_time);
                 persist_response(&app_handle, message_id, &content, true, turn_usage);
                 if let Some(reasoning_id) = reasoning_message_id {
@@ -1671,14 +1899,23 @@ async fn run_session(
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;
                 emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
-                if let Some(error) = turn_error {
-                    return Err(error);
-                }
+                failure_context
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
             }
         }
     }
     info!(conversation_id, "Codex app-server session command channel closed");
-    Ok(())
+    if failure_context
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+    {
+        Err("AIPP Codex 控制通道意外关闭：当前请求尚未完成，但所有会话句柄已释放".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1688,6 +1925,35 @@ mod tests {
     #[test]
     fn extracts_thread_id_from_v2_response() {
         assert_eq!(thread_id_from_result(&json!({"thread":{"id":"thread-1"}})).as_deref(), Some("thread-1"));
+    }
+
+    #[test]
+    fn appends_bounded_stderr_and_runtime_ids_to_error() {
+        let stderr = CodexStderrBuffer::default();
+        for index in 0..=CODEX_STDERR_MAX_LINES {
+            record_codex_stderr(&stderr, format!("stderr-{index}"));
+        }
+        let error = codex_error_with_diagnostics("RPC initialize 失败", 792, "run-1", &stderr);
+        assert!(error.contains("RPC initialize 失败"));
+        assert!(error.contains("conversation_id=792"));
+        assert!(error.contains("run_id=run-1"));
+        assert!(!error.contains("stderr-0\n"));
+        assert!(error.contains(&format!("stderr-{}", CODEX_STDERR_MAX_LINES)));
+    }
+
+    #[tokio::test]
+    async fn shutdown_command_preserves_replacement_reason() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let handle = CodexSessionHandle {
+            sender,
+            run_id: "old-run".to_string(),
+            failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        handle.shutdown("auto-connect attempted replacement".to_string());
+        let Some(CodexSessionCommand::Shutdown { reason }) = receiver.recv().await else {
+            panic!("expected shutdown command");
+        };
+        assert_eq!(reason, "auto-connect attempted replacement");
     }
 
     #[test]
@@ -1762,10 +2028,8 @@ mod tests {
     }
 
     #[test]
-    fn preserves_resumed_model_when_catalog_does_not_contain_it() {
-        let choices = codex_model_choices(&[], Some("retired-model"));
-        assert_eq!(choices[0].value, "retired-model");
-        assert!(choices[0].name.contains("当前线程"));
+    fn does_not_invent_model_choice_when_catalog_is_empty() {
+        assert!(codex_model_choices(&[]).is_empty());
     }
 
     #[test]

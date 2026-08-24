@@ -521,6 +521,11 @@ npm run test:coverage  # 覆盖率报告
 
 # important-instruction-reminders
 
+## Failure and Fallback Policy
+
+- **禁止擅自降级**：Codex 必须始终使用 Codex 原生通道，Claude Code 必须始终使用 Claude Code 原生通道。启动、恢复、模型、MCP、权限、进程或协议任一环节失败时，必须立即报错并停止；禁止自动切换到 ACP、其他模型、其他 provider、新会话、无工具模式或任何能力缩减路径。只有用户针对当前需求明确要求某种降级方案时才允许实现。
+- **错误必须具体且可追溯**：禁止只返回“运行失败”“会话已停止”“未知错误”等笼统文案。用户可见错误与持久化错误必须包含原始失败环节和底层原因；进程型通道还应捕获并记录 stderr、退出状态或协议错误，并附带可关联的 conversation/session/run 标识。若底层没有提供原因，必须明确指出缺失的是哪一层诊断信息以及为何缺失，不能用泛化文案覆盖。
+
 Do what has been asked; nothing more, nothing less.
 NEVER create files unless they're absolutely necessary for achieving your goal.
 ALWAYS prefer editing an existing file to creating a new one.

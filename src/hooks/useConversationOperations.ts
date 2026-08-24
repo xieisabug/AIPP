@@ -427,6 +427,10 @@ export function useConversationOperations({
                         console.error("Send message error:", error);
                         setAiIsResponsing(false);
                         updateShiningMessages();
+                        const assistantName = assistantData?.name ?? "Agent";
+                        toast.error(`${assistantName} 运行失败`, {
+                            description: error instanceof Error ? error.message : String(error),
+                        });
                     });
             }
 

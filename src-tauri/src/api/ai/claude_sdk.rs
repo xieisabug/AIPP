@@ -114,12 +114,14 @@ enum SessionCommand {
 #[derive(Clone)]
 pub struct ClaudeSessionHandle {
     sender: mpsc::UnboundedSender<SessionCommand>,
+    run_id: String,
 }
 
 pub struct ClaudeSessionEntry {
     pub handle: ClaudeSessionHandle,
     pub snapshot: ClaudeConversationSessionState,
     pub config_signature: String,
+    pub run_id: String,
 }
 
 impl ClaudeSessionEntry {
@@ -132,6 +134,7 @@ impl ClaudeSessionEntry {
         effort: Option<String>,
     ) -> Self {
         Self {
+            run_id: handle.run_id.clone(),
             handle,
             config_signature,
             snapshot: ClaudeConversationSessionState {
@@ -489,7 +492,38 @@ fn emit_snapshot(
     );
 }
 
-fn emit_claude_failure(
+async fn cleanup_claude_session(
+    app: &tauri::AppHandle,
+    conversation_id: i64,
+    run_id: &str,
+) {
+    let removed_current_entry = if let Some(state) = app.try_state::<crate::ClaudeSessionState>() {
+        let mut sessions = state.sessions.lock().await;
+        if sessions
+            .get(&conversation_id)
+            .is_some_and(|entry| entry.run_id == run_id)
+        {
+            sessions.remove(&conversation_id);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if removed_current_entry {
+        let _ = crate::utils::window_utils::send_conversation_event_to_chat_windows(
+            app,
+            conversation_id,
+            ConversationEvent {
+                r#type: "acp_session_state_snapshot".into(),
+                data: json!({"state": Value::Null}),
+            },
+        );
+    }
+}
+
+pub(crate) fn emit_claude_failure(
     app: &tauri::AppHandle,
     conversation_id: i64,
     message_id: i64,
@@ -497,8 +531,34 @@ fn emit_claude_failure(
     error: &str,
 ) {
     let content = format!("Claude Code 运行失败：{error}");
-    persist(app, message_id, &content, true);
-    emit_update(window, conversation_id, message_id, &content, true);
+    if let Ok(db) = ConversationDatabase::new(app) {
+        if let Ok(repo) = db.message_repo() {
+            if let Ok(Some(mut message)) = repo.read(message_id) {
+                message.message_type = "error".to_string();
+                message.content = content.clone();
+                message.finish_time = Some(chrono::Utc::now());
+                let _ = repo.update(&message);
+            }
+        }
+    }
+    let _ = window.emit(
+        &format!("conversation_event_{conversation_id}"),
+        ConversationEvent {
+            r#type: "message_update".into(),
+            data: serde_json::to_value(MessageUpdateEvent {
+                message_id,
+                message_type: "error".into(),
+                content,
+                is_done: true,
+                token_count: Some(0),
+                input_token_count: Some(0),
+                output_token_count: Some(0),
+                ttft_ms: None,
+                tps: None,
+            })
+            .unwrap(),
+        },
+    );
     let _ = window.emit(
         &format!("conversation_event_{conversation_id}"),
         ConversationEvent {
@@ -506,7 +566,7 @@ fn emit_claude_failure(
             data: json!({
                 "conversation_id": conversation_id,
                 "response_message_id": message_id,
-                "has_response": true,
+                "has_response": false,
                 "error": error,
             }),
         },
@@ -657,7 +717,9 @@ pub fn spawn_claude_session_task(
     mut config: ClaudeSdkConfig,
 ) -> ClaudeSessionHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let handle = ClaudeSessionHandle { sender: tx };
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let task_run_id = run_id.clone();
+    let handle = ClaudeSessionHandle { sender: tx, run_id };
     tauri::async_runtime::spawn(async move {
         let stored_session: Option<String> = ConversationDatabase::new(&app)
             .ok()
@@ -670,6 +732,9 @@ pub fn spawn_claude_session_task(
                     match message {
                         SessionCommand::Prompt { message_id, window, .. } => {
                             emit_claude_failure(&app, _conversation_id, message_id, &window, &error);
+                            if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                                manager.clear_focus(&app, _conversation_id).await;
+                            }
                             break;
                         }
                         SessionCommand::Cancel { response } => {
@@ -680,6 +745,7 @@ pub fn spawn_claude_session_task(
                         }
                     }
                 }
+                cleanup_claude_session(&app, _conversation_id, &task_run_id).await;
                 return;
             }
         };
@@ -734,7 +800,7 @@ pub fn spawn_claude_session_task(
                         }
                         Err(error) => {
                             let _ = response.send(Err(format!("重启 Claude Code 会话失败: {error}")));
-                            continue;
+                            break;
                         }
                     }
                     emit_snapshot(&app, _conversation_id, ClaudeConversationSessionState {
@@ -746,24 +812,31 @@ pub fn spawn_claude_session_task(
                 SessionCommand::Prompt { message_id, prompt, window } => {
                     let input = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":prompt}]},"session_id":session_id});
                     if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {
-                        let content = format!("写入 Claude Code 请求失败：{error}");
-                        persist(&app, message_id, &content, true);
-                        emit_update(&window, _conversation_id, message_id, &content, true);
-                        let _ = window.emit(
-                            &format!("conversation_event_{_conversation_id}"),
-                            ConversationEvent {
-                                r#type: "stream_complete".into(),
-                                data: json!({
-                                    "conversation_id": _conversation_id,
-                                    "response_message_id": message_id,
-                                    "has_response": true,
-                                    "error": content,
-                                }),
-                            },
+                        emit_claude_failure(
+                            &app,
+                            _conversation_id,
+                            message_id,
+                            &window,
+                            &format!("写入 Claude Code 请求失败：{error}"),
                         );
-                        continue;
+                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                            manager.clear_focus(&app, _conversation_id).await;
+                        }
+                        break;
                     }
-                    let _ = stdin.flush().await;
+                    if let Err(error) = stdin.flush().await {
+                        emit_claude_failure(
+                            &app,
+                            _conversation_id,
+                            message_id,
+                            &window,
+                            &format!("提交 Claude Code 请求失败：{error}"),
+                        );
+                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                            manager.clear_focus(&app, _conversation_id).await;
+                        }
+                        break;
+                    }
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                         manager.set_assistant_streaming(&app, _conversation_id, message_id).await;
                     }
@@ -817,7 +890,10 @@ pub fn spawn_claude_session_task(
                                     let _ = response.send(Err("Claude Code 配置将在下一次会话启动时生效".into()));
                                     continue;
                                 }
-                                None => break,
+                                None => {
+                                    stream_error = Some("Claude Code 会话在完成当前请求前已关闭".into());
+                                    break;
+                                },
                             }
                         };
                         let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
@@ -920,11 +996,29 @@ pub fn spawn_claude_session_task(
                                 }
                             }
                             "control_request" => {
-                                let _ =
+                                if let Err(error) =
                                     handle_permission(&app, _conversation_id, &frame, &mut stdin)
-                                        .await;
+                                        .await
+                                {
+                                    stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
+                                    break;
+                                }
                             }
                             "result" => {
+                                if frame.get("is_error").and_then(Value::as_bool) == Some(true)
+                                    || frame.get("subtype").and_then(Value::as_str) == Some("error")
+                                    || frame.get("error").is_some_and(|value| !value.is_null())
+                                {
+                                    stream_error = Some(
+                                        frame
+                                            .get("error")
+                                            .and_then(Value::as_str)
+                                            .or_else(|| frame.get("result").and_then(Value::as_str))
+                                            .unwrap_or("Claude Code 返回错误")
+                                            .to_string(),
+                                    );
+                                    break;
+                                }
                                 if content.is_empty() {
                                     content = frame
                                         .get("result")
@@ -943,10 +1037,25 @@ pub fn spawn_claude_session_task(
                             _ => {}
                         }
                     }
-                    if content.is_empty() {
-                        if let Some(error) = stream_error.as_deref() {
-                            content = format!("Claude Code 运行失败：{error}");
+                    if let Some(error) = stream_error.as_deref() {
+                        emit_claude_failure(&app, _conversation_id, message_id, &window, error);
+                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                            manager.clear_focus(&app, _conversation_id).await;
                         }
+                        break;
+                    }
+                    if content.is_empty() {
+                        emit_claude_failure(
+                            &app,
+                            _conversation_id,
+                            message_id,
+                            &window,
+                            "Claude Code 本轮未返回任何内容",
+                        );
+                        if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                            manager.clear_focus(&app, _conversation_id).await;
+                        }
+                        break;
                     }
                     persist(&app, message_id, &content, true);
                     if !usage.is_null() {
@@ -986,6 +1095,7 @@ pub fn spawn_claude_session_task(
                 }
             }
         }
+        cleanup_claude_session(&app, _conversation_id, &task_run_id).await;
     });
     handle
 }

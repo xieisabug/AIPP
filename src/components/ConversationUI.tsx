@@ -39,6 +39,11 @@ import { useConversationEvents } from "@/hooks/useConversationEvents";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { AssistantListItem } from "@/data/Assistant";
 
+interface AgentRuntimeInfo {
+    agent_kind: string;
+    working_directory: string;
+}
+
 // 导入新创建的 hooks
 import { usePluginManagement } from "@/hooks/usePluginManagement";
 import { useScrollManagement } from "@/hooks/useScrollManagement";
@@ -283,6 +288,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // ACP assistant working directory (resolved by backend)
         const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
+        const [configuredAgentKind, setConfiguredAgentKind] = useState<string | null>(null);
         const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
 
         // 常规消息列表
@@ -616,7 +622,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [conversationId]);
 
         const showAcpConnectionError = useCallback(
-            (assistantId: number, error: unknown) => {
+            (assistantId: number, error: unknown, agentKind?: string | null) => {
                 const errorMessage =
                     error instanceof Error
                         ? error.message
@@ -629,7 +635,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 }
 
                 acpConnectionErrorNoticeRef.current = noticeKey;
-                toast.error("ACP 会话启动失败", {
+                const agentLabel = agentKind === "codex_app_server"
+                    ? "Codex"
+                    : agentKind === "claude_sdk"
+                        ? "Claude Code"
+                        : "Agent";
+                toast.error(`${agentLabel} 会话启动失败`, {
                     description: errorMessage,
                     position: "bottom-right",
                 });
@@ -1198,13 +1209,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             const assistantId = activeAssistantId;
             if (!assistantId || !isAcpAssistant) {
                 setAcpWorkingDirectory(null);
+                setConfiguredAgentKind(null);
                 applyAcpSessionState(null);
                 return;
             }
 
-            invoke<string>("get_acp_working_directory", { assistantId })
-                .then((workingDirectory) => {
-                    setAcpWorkingDirectory(workingDirectory);
+            invoke<AgentRuntimeInfo>("get_agent_runtime_info", { assistantId })
+                .then((runtimeInfo) => {
+                    setAcpWorkingDirectory(runtimeInfo.working_directory);
+                    setConfiguredAgentKind(runtimeInfo.agent_kind);
                     const conversationIdNum = Number(conversationId);
                     if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
                         return;
@@ -1230,11 +1243,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 acpAutoConnectKeyRef.current = null;
                             }
                             console.warn("[ACP] Auto connect failed", error);
-                            showAcpConnectionError(assistantId, error);
+                            showAcpConnectionError(assistantId, error, runtimeInfo.agent_kind);
                         });
                 })
                 .catch((error) => {
                     setAcpWorkingDirectory(null);
+                    setConfiguredAgentKind(null);
                     showAcpConnectionError(assistantId, error);
                 });
         }, [
@@ -1484,13 +1498,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 ? new Date(acpSessionState.updated_at).toLocaleString()
                 : null;
             const configOptionCount = acpSessionState?.config_options.length ?? 0;
-            const isCodexSession = acpSessionState?.agent_kind === "codex_app_server";
-            const isClaudeSession = acpSessionState?.agent_kind === "claude_sdk";
-            const sessionLabel = isCodexSession ? "Codex 会话" : isClaudeSession ? "Claude Code 会话" : "ACP 会话";
-            const configLabel = isCodexSession ? "Codex 配置" : isClaudeSession ? "Claude Code 配置" : "会话配置";
+            const effectiveAgentKind = acpSessionState?.agent_kind ?? configuredAgentKind;
+            const isCodexSession = effectiveAgentKind === "codex_app_server";
+            const isClaudeSession = effectiveAgentKind === "claude_sdk";
+            const isAcpSession = effectiveAgentKind === "acp";
+            const sessionLabel = isCodexSession
+                ? "Codex 会话"
+                : isClaudeSession
+                    ? "Claude Code 会话"
+                    : isAcpSession
+                        ? "ACP 会话"
+                        : "Agent 会话";
+            const configLabel = isCodexSession
+                ? "Codex 配置"
+                : isClaudeSession
+                    ? "Claude Code 配置"
+                    : "会话配置";
             const currentModelLabel = modelOption?.options.find((choice) => choice.value === modelOption.current_value)?.name
                 ?? modelOption?.current_value
                 ?? acpSessionState?.model
+                ?? (selectedAgentModel ? selectedAgentModel.split("%%")[0] : null)
                 ?? "未选择模型";
             const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
                 <div key={option.id} className="space-y-1.5">
@@ -1592,11 +1619,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 </div>
                                 {!acpSessionState?.session_id && !isClaudeSession ? (
                                     <div className="text-xs text-muted-foreground">
-                                        正在连接 {isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : "ACP"} session；连接成功后会读取 Agent 返回的配置项。
+                                        正在连接 {isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : isAcpSession ? "ACP" : "Agent"} session；连接成功后会读取 Agent 返回的配置项。
                                     </div>
                                 ) : configOptionCount === 0 ? (
                                     <div className="text-xs text-muted-foreground">
-                                        {acpSessionState.restored_session_method
+                                        {acpSessionState?.restored_session_method
                                             ? `该 Agent 本次通过 session/${acpSessionState.restored_session_method} 恢复，但没有返回可配置的 configOptions。`
                                             : "该 Agent 当前没有返回可配置的 configOptions。"}
                                     </div>
@@ -1653,8 +1680,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpSessionState,
             acpWorkingDirectory,
             combinedHeaderActions,
+            configuredAgentKind,
             handleAcpConfigChange,
             isAcpAssistant,
+            selectedAgentModel,
         ]);
 
         const sidebarTodos = useMemo<TodoItem[]>(() => {

@@ -10,10 +10,10 @@ use crate::api::ai::chat::{
     handle_stream_chat as ai_handle_stream_chat,
 };
 use crate::api::ai::codex_app_server::{
-    extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task,
-    CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
+    emit_codex_failure, extract_codex_app_server_config, refresh_codex_session_signature,
+    spawn_codex_session_task, CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
 };
-use crate::api::ai::claude_sdk::{claude_model_choices, extract_claude_sdk_config, is_claude_code_provider, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
+use crate::api::ai::claude_sdk::{claude_model_choices, emit_claude_failure, extract_claude_sdk_config, is_claude_code_provider, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
 use crate::api::assistant_api::CLAUDE_CODE_DEFAULT_MODEL;
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
@@ -1291,14 +1291,14 @@ pub async fn ask_ai(
                 )),
                 other => AppError::from(other),
             })?;
-            let configs = llm_db.get_llm_provider_config(provider_id).unwrap_or_else(|e| {
-                warn!("ACP: Failed to get provider config: {}", e);
-                Vec::new()
-            });
+            let configs = llm_db
+                .get_llm_provider_config(provider_id)
+                .map_err(AppError::from)?;
             (provider.api_type, configs)
         } else {
-            debug!("ACP: No ACP provider found, using empty provider configs");
-            ("acp".to_string(), Vec::new())
+            return Err(AppError::UnknownError(
+                "Agent 助手尚未配置模型提供商".to_string(),
+            ));
         };
 
         let provider_api_type = if is_claude_code_provider(&provider_api_type, &provider_configs) {
@@ -1364,11 +1364,34 @@ pub async fn ask_ai(
                     sessions.get(&conversation_id).unwrap().handle.clone()
                 } else {
                     let handle = spawn_codex_session_task(app_handle.clone(), conversation_id, codex_config.clone());
+                    if let Some(previous) = sessions.get(&conversation_id) {
+                        let reason = format!(
+                            "ask_ai 因用户本次请求的 Codex 配置发生变化而替换现有会话（old_run_id={}, new_run_id={}）",
+                            previous.run_id,
+                            handle.run_id()
+                        );
+                        warn!(conversation_id, reason, "Replacing Codex session from ask_ai");
+                        previous.handle.shutdown(reason);
+                    }
                     sessions.insert(conversation_id, CodexSessionEntry::new(handle.clone(), conversation_id, codex_config.session_signature.clone()));
                     handle
                 }
             };
-            handle.send_prompt(response_message.id, runtime_prompt_result.clone(), window_clone.clone())?;
+            if let Err(error) = handle.send_prompt(
+                response_message.id,
+                runtime_prompt_result.clone(),
+                window_clone.clone(),
+            ) {
+                emit_codex_failure(
+                    &app_handle,
+                    conversation_id,
+                    response_message.id,
+                    &window_clone,
+                    &error.to_string(),
+                );
+                activity_manager.clear_focus(&app_handle, conversation_id).await;
+                return Err(error);
+            }
             return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
         }
 
@@ -1426,7 +1449,21 @@ pub async fn ask_ai(
             let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), ConversationEvent { r#type: "message_add".to_string(), data: serde_json::to_value(MessageAddEvent { message_id: response_message.id, message_type: "response".to_string() }).unwrap() });
             let claude_state = app_handle.state::<ClaudeSessionState>();
             let handle = { let mut sessions = claude_state.sessions.lock().await; if let Some(entry)=sessions.get(&conversation_id).filter(|entry| entry.config_signature == config.session_signature) { entry.handle.clone() } else { let handle=spawn_claude_session_task(app_handle.clone(), conversation_id, config.clone()); sessions.insert(conversation_id, ClaudeSessionEntry::new(handle.clone(), conversation_id, config.session_signature.clone(), config.model.clone(), config.permission_mode.clone(), config.effort.clone())); handle } };
-            handle.send_prompt(response_message.id, runtime_prompt_result.clone(), window_clone.clone())?;
+            if let Err(error) = handle.send_prompt(
+                response_message.id,
+                runtime_prompt_result.clone(),
+                window_clone.clone(),
+            ) {
+                emit_claude_failure(
+                    &app_handle,
+                    conversation_id,
+                    response_message.id,
+                    &window_clone,
+                    &error.to_string(),
+                );
+                activity_manager.clear_focus(&app_handle, conversation_id).await;
+                return Err(error);
+            }
             return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
         }
 

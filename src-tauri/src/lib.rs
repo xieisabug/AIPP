@@ -39,7 +39,7 @@ use crate::api::ai_api::{
 use crate::api::assistant_api::{
     add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
     delete_assistant, ensure_acp_session_connected, export_assistant, get_acp_launch_diagnostics,
-    get_acp_working_directory, get_assistant, get_assistant_field_value,
+    get_acp_working_directory, get_agent_runtime_info, get_assistant, get_assistant_field_value,
     get_agent_model_options,
     get_assistant_mcp_servers_with_tools,
     get_assistant_workspaces, get_assistants, import_assistant, remove_assistant_workspace,
@@ -1018,6 +1018,7 @@ pub fn run() {
             get_assistants,
             get_assistant,
             get_agent_model_options,
+            get_agent_runtime_info,
             get_assistant_field_value,
             get_acp_working_directory,
             ensure_acp_session_connected,

@@ -42,6 +42,12 @@ pub struct AgentModelOption {
     pub default_effort: Option<String>,
 }
 
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct AgentRuntimeInfo {
+    pub agent_kind: String,
+    pub working_directory: String,
+}
+
 pub const CLAUDE_CODE_DEFAULT_MODEL: &str = "__claude_code_default__";
 
 fn add_agent_model_option(options: &mut Vec<AgentModelOption>, option: AgentModelOption) {
@@ -177,6 +183,17 @@ pub(crate) fn resolve_acp_provider_id(
         })
 }
 
+fn get_or_insert_codex_auto_connect_session<T, F>(
+    sessions: &mut HashMap<i64, T>,
+    conversation_id: i64,
+    create_session: F,
+) -> &T
+where
+    F: FnOnce() -> T,
+{
+    sessions.entry(conversation_id).or_insert_with(create_session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +233,42 @@ mod tests {
         let model_configs = vec![model_config("acp_provider", Some("9"))];
 
         assert_eq!(resolve_acp_provider_id(&models, &model_configs), Some(9));
+    }
+
+    #[test]
+    fn codex_auto_connect_never_replaces_ask_ai_session_with_different_signature() {
+        #[derive(Debug, PartialEq)]
+        struct SessionIdentity {
+            run_id: &'static str,
+            signature: &'static str,
+        }
+
+        let conversation_id = 792;
+        let mut sessions = HashMap::from([(
+            conversation_id,
+            SessionIdentity {
+                run_id: "ask-ai-run",
+                signature: "message-model-override",
+            },
+        )]);
+        let mut auto_connect_created_session = false;
+
+        let selected = get_or_insert_codex_auto_connect_session(
+            &mut sessions,
+            conversation_id,
+            || {
+                auto_connect_created_session = true;
+                SessionIdentity {
+                    run_id: "auto-connect-run",
+                    signature: "assistant-default-model",
+                }
+            },
+        );
+
+        assert_eq!(selected.run_id, "ask-ai-run");
+        assert_eq!(selected.signature, "message-model-override");
+        assert!(!auto_connect_created_session);
+        assert_eq!(sessions[&conversation_id].run_id, "ask-ai-run");
     }
 }
 
@@ -886,7 +939,7 @@ pub fn get_acp_working_directory(
         let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
         (provider.api_type, configs)
     } else {
-        ("acp".to_string(), Vec::new())
+        return Err("Agent 助手尚未配置模型提供商".to_string());
     };
 
     // Codex app-server 通道：使用 Codex 配置提取，不能走 ACP 的 acp_cli_command 配置
@@ -923,6 +976,47 @@ pub fn get_acp_working_directory(
         .map_err(|e| e.to_string())?;
 
     Ok(acp_config.working_directory.display().to_string())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub fn get_agent_runtime_info(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<AgentRuntimeInfo, String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if assistant.assistant_type != Some(4) {
+        return Err("Assistant is not Agent type".to_string());
+    }
+    let model_configs = assistant_db
+        .get_assistant_model_configs(assistant_id)
+        .map_err(|e| e.to_string())?;
+    let assistant_models = assistant_db
+        .get_assistant_model(assistant_id)
+        .map_err(|e| e.to_string())?;
+    let provider_id = resolve_acp_provider_id(&assistant_models, &model_configs)
+        .ok_or_else(|| "Agent 助手尚未配置提供商".to_string())?;
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => format!(
+            "Agent 助手 {assistant_id} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商"
+        ),
+        other => other.to_string(),
+    })?;
+    let provider_configs = llm_db
+        .get_llm_provider_config(provider_id)
+        .map_err(|e| e.to_string())?;
+    let agent_kind = if is_claude_code_provider(&provider.api_type, &provider_configs) {
+        CLAUDE_SDK_API_TYPE.to_string()
+    } else {
+        provider.api_type
+    };
+    let working_directory = get_acp_working_directory(app_handle, assistant_id)?;
+    Ok(AgentRuntimeInfo {
+        agent_kind,
+        working_directory,
+    })
 }
 
 #[tauri::command]
@@ -969,7 +1063,7 @@ pub async fn ensure_acp_session_connected(
         let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
         (provider.api_type, configs)
     } else {
-        ("acp".to_string(), Vec::new())
+        return Err("Agent 助手尚未配置模型提供商".to_string());
     };
 
     // Claude Code's stream-json process is demand-driven by ask_ai because the
@@ -979,8 +1073,8 @@ pub async fn ensure_acp_session_connected(
         return Ok(None);
     }
 
-    // Codex app-server 通道：spawn 即自动 initialize + thread start/resume，
-    // 复用 ask_ai 的 config_signature 复用判断；快照通过 acp_session_state_snapshot 事件持续推送
+    // 自动连接只负责填补空会话。ask_ai 可能已按本次消息的模型覆盖创建了权威会话，
+    // 此处绝不能用助手默认配置替换它，否则会中断正在执行的 Codex turn。
     if provider_api_type == CODEX_APP_SERVER_API_TYPE {
         let model_code = assistant_models
             .first()
@@ -994,32 +1088,26 @@ pub async fn ensure_acp_session_connected(
         refresh_codex_session_signature(&mut codex_config);
         let snapshot = {
             let mut sessions = codex_session_state.sessions.lock().await;
-            if sessions
-                .get(&conversation_id)
-                .is_some_and(|entry| entry.config_signature == codex_config.session_signature)
-            {
-                sessions.get(&conversation_id).map(|entry| entry.snapshot.clone())
-            } else {
-                if sessions.contains_key(&conversation_id) {
-                    info!(
-                        conversation_id,
-                        "Codex session config changed during auto-connect; replacing existing session"
-                    );
-                }
-                let handle = spawn_codex_session_task(
-                    app_handle.clone(),
+            Some(
+                get_or_insert_codex_auto_connect_session(
+                    &mut sessions,
                     conversation_id,
-                    codex_config.clone(),
-                );
-                let entry = CodexSessionEntry::new(
-                    handle,
-                    conversation_id,
-                    codex_config.session_signature.clone(),
-                );
-                let snapshot = entry.snapshot.clone();
-                sessions.insert(conversation_id, entry);
-                Some(snapshot)
-            }
+                    || {
+                        let handle = spawn_codex_session_task(
+                            app_handle.clone(),
+                            conversation_id,
+                            codex_config.clone(),
+                        );
+                        CodexSessionEntry::new(
+                            handle,
+                            conversation_id,
+                            codex_config.session_signature.clone(),
+                        )
+                    },
+                )
+                .snapshot
+                .clone(),
+            )
         };
         return Ok(snapshot
             .map(|state| serde_json::to_value(state).unwrap_or(serde_json::Value::Null)));
