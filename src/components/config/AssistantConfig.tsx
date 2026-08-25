@@ -419,8 +419,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     const config = currentAssistant.model_configs.find((config) => config.name === key);
                     const customField = assistantTypeCustomField.find((field) => field.key === key);
 
-                    // ACP 助手专用字段（assistant_type === 4）
-                    const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
+                    // ACP/Codex 助手专用字段（assistant_type === 4）
+                    const isAcpField =
+                        (key.startsWith("acp_") || key.startsWith("codex_")) &&
+                        currentAssistant.assistant.assistant_type === 4;
                     if (isAcpField) {
                         return true;
                     }
@@ -455,8 +457,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     // 为插件自定义字段和内置字段确定正确的 value_type
                     let valueType = config?.value_type ?? "string";
 
-                    // ACP 助手专用字段
-                    const isAcpField = key.startsWith("acp_") && currentAssistant.assistant.assistant_type === 4;
+                    // ACP/Codex 助手专用字段
+                    const isAcpField =
+                        (key.startsWith("acp_") || key.startsWith("codex_")) &&
+                        currentAssistant.assistant.assistant_type === 4;
                     if (isAcpField) {
                         valueType = "string";
                     } else if (key === "use_native_toolcall") {
@@ -476,9 +480,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         valueType = "string";
                     }
 
+                    // Codex 字段的 "default" 表示跟随提供商配置，落库时归一化为空字符串
+                    const normalizedValue = key.startsWith("codex_") && value === "default" ? "" : value;
+
                     return {
                         name: key,
-                        value: value != null ? value.toString() : null,
+                        value: normalizedValue != null ? normalizedValue.toString() : null,
                         value_type: valueType,
                         id: config?.id ?? 0,
                         assistant_id: currentAssistant.assistant.id,
