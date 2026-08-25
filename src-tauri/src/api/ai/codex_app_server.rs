@@ -119,6 +119,67 @@ type CodexStderrBuffer = std::sync::Arc<std::sync::Mutex<VecDeque<String>>>;
 
 const CODEX_STDERR_MAX_LINES: usize = 40;
 
+/// 剥离 ANSI 转义序列（CSI/OSC 等），避免 Codex 彩色 tracing 日志在用户界面显示为乱码
+fn strip_ansi_escapes(line: &str) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            // CSI: ESC [ + 参数字节，以 0x40-0x7E 的结束字节收尾
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] + 内容，以 BEL 或 ESC \ 收尾
+            Some(']') => {
+                let mut prev_was_esc = false;
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || (prev_was_esc && c == '\\') {
+                        break;
+                    }
+                    prev_was_esc = c == '\u{1b}';
+                }
+            }
+            // 其他 ESC + 单字符序列；孤立的末尾 ESC 一并丢弃
+            Some(_) | None => {}
+        }
+    }
+    output
+}
+
+/// 判断剥离 ANSI 后的行是否为 tracing fmt 的 TRACE/DEBUG/INFO 级噪音（如 span 的 enter/exit）。
+/// WARN/ERROR 以及不符合 tracing 格式的行（panic、进程原生输出）一律保留，保证错误可追溯。
+fn is_tracing_noise(line: &str) -> bool {
+    // tracing fmt 默认格式：`<RFC3339 时间戳>  <LEVEL> <spans>: <target>: <message>`
+    let Some(timestamp_end) = line.find(char::is_whitespace) else {
+        return false;
+    };
+    let timestamp = &line[..timestamp_end];
+    let bytes = timestamp.as_bytes();
+    let looks_like_rfc3339 = bytes.len() >= 20
+        && bytes[0..4].iter().all(|b| b.is_ascii_digit())
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && timestamp.ends_with('Z');
+    if !looks_like_rfc3339 {
+        return false;
+    }
+    let level = line[timestamp_end..].trim_start();
+    ["TRACE", "DEBUG", "INFO"].iter().any(|token| {
+        level
+            .strip_prefix(token)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    })
+}
+
 #[derive(Clone)]
 pub struct CodexSessionHandle {
     sender: mpsc::UnboundedSender<CodexSessionCommand>,
@@ -1383,14 +1444,21 @@ fn persist_codex_reasoning(
     let _ = repo.update(&message);
 }
 
-fn record_codex_stderr(buffer: &CodexStderrBuffer, line: String) {
+/// 记录一行 Codex stderr：先剥离 ANSI 转义，再过滤 tracing 的 TRACE/DEBUG/INFO 噪音，
+/// 让缓冲只保留对用户诊断有意义的行。返回 true 表示该行已记入缓冲。
+fn record_codex_stderr(buffer: &CodexStderrBuffer, line: String) -> bool {
+    let cleaned = strip_ansi_escapes(&line);
+    if cleaned.trim().is_empty() || is_tracing_noise(&cleaned) {
+        return false;
+    }
     let mut lines = buffer
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if lines.len() == CODEX_STDERR_MAX_LINES {
         lines.pop_front();
     }
-    lines.push_back(line);
+    lines.push_back(cleaned);
+    true
 }
 
 fn codex_error_with_diagnostics(
@@ -1410,7 +1478,7 @@ fn codex_error_with_diagnostics(
         format!("{error} [conversation_id={conversation_id}, run_id={run_id}]")
     } else {
         format!(
-            "{error} [conversation_id={conversation_id}, run_id={run_id}]\nCodex stderr（最近 {} 行）：\n{}",
+            "{error} [conversation_id={conversation_id}, run_id={run_id}]\nCodex 关键日志（最近 {} 行，已过滤 INFO/DEBUG 噪音）：\n{}",
             stderr.lines().count(),
             stderr.trim()
         )
@@ -1473,8 +1541,12 @@ async fn spawn_process(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    error!(target = "codex_app_server", "{line}");
-                    record_codex_stderr(&stderr_buffer, line);
+                    // 缓冲只保留清洗后的关键行；被过滤的噪音行降级到 debug 日志，原文仍可查
+                    if record_codex_stderr(&stderr_buffer, line.clone()) {
+                        error!(target = "codex_app_server", "{line}");
+                    } else {
+                        debug!(target = "codex_app_server", "{line}");
+                    }
                 }
                 Ok(None) => break,
                 Err(error) => {
@@ -2097,6 +2169,50 @@ mod tests {
         assert!(error.contains("run_id=run-1"));
         assert!(!error.contains("stderr-0\n"));
         assert!(error.contains(&format!("stderr-{}", CODEX_STDERR_MAX_LINES)));
+    }
+
+    /// 剥离 ANSI 转义：含颜色码的 tracing 行变为纯文本，普通文本原样保留
+    #[test]
+    fn strips_ansi_escape_sequences_from_tracing_lines() {
+        let colored = "\u{1b}[2m2026-08-25T08:27:29.183809Z\u{1b}[0m \u{1b}[33m WARN\u{1b}[0m \u{1b}[1msession_loop\u{1b}[0m\u{1b}[2m:\u{1b}[0m \u{1b}[2mcodex_core::responses_retry\u{1b}[0m\u{1b}[2m:\u{1b}[0m stream disconnected";
+        assert_eq!(
+            strip_ansi_escapes(colored),
+            "2026-08-25T08:27:29.183809Z  WARN session_loop: codex_core::responses_retry: stream disconnected"
+        );
+        assert_eq!(strip_ansi_escapes("plain output"), "plain output");
+        // 孤立的末尾 ESC 不产生乱码
+        assert_eq!(strip_ansi_escapes("truncated\u{1b}"), "truncated");
+    }
+
+    /// 噪音判定：tracing 的 TRACE/DEBUG/INFO 行被过滤，WARN/ERROR 与非 tracing 格式行保留
+    #[test]
+    fn filters_tracing_info_noise_but_keeps_warnings_and_plain_output() {
+        assert!(is_tracing_noise("2026-08-25T08:27:29.181105Z  INFO session_loop{thread_id=abc}: codex_core::tasks: enter"));
+        assert!(is_tracing_noise("2026-08-25T08:27:29.181105Z DEBUG codex_core: detail"));
+        assert!(is_tracing_noise("2026-08-25T08:27:29.181105Z TRACE codex_core: detail"));
+        assert!(!is_tracing_noise("2026-08-25T08:27:29.183809Z  WARN codex_core::responses_retry: stream disconnected"));
+        assert!(!is_tracing_noise("2026-08-25T08:27:29.183809Z ERROR codex_core: fatal"));
+        assert!(!is_tracing_noise("thread 'main' panicked at 'boom', src/main.rs:10:5"));
+        assert!(!is_tracing_noise("random process output"));
+    }
+
+    /// 缓冲只保留清洗后的关键行：INFO 噪音与空行不进缓冲，错误消息带过滤说明
+    #[test]
+    fn stderr_buffer_keeps_only_meaningful_lines() {
+        let stderr = CodexStderrBuffer::default();
+        let noise = "2026-08-25T08:27:29.181105Z  INFO session_loop: codex_core::tasks: enter";
+        let warning = "\u{1b}[2m2026-08-25T08:27:29.183809Z\u{1b}[0m \u{1b}[33m WARN\u{1b}[0m codex_core::responses_retry: stream disconnected";
+        assert!(!record_codex_stderr(&stderr, noise.to_string()));
+        assert!(!record_codex_stderr(&stderr, "\u{1b}[2m\u{1b}[0m".to_string()));
+        assert!(record_codex_stderr(&stderr, warning.to_string()));
+        assert!(record_codex_stderr(&stderr, "plain stderr output".to_string()));
+
+        let error = codex_error_with_diagnostics("turn 失败", 1, "run-1", &stderr);
+        assert!(error.contains("WARN codex_core::responses_retry: stream disconnected"));
+        assert!(error.contains("plain stderr output"));
+        assert!(!error.contains("codex_core::tasks: enter"));
+        assert!(!error.contains('\u{1b}'));
+        assert!(error.contains("已过滤 INFO/DEBUG 噪音"));
     }
 
     #[tokio::test]
