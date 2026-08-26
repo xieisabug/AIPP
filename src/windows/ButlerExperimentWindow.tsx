@@ -81,6 +81,7 @@ import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "@/hooks/useAppShortcuts";
 import { useTheme } from "@/hooks/useTheme";
 import { useAcpPermission, useOperationPermission } from "@/hooks/useOperationPermission";
+import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
 import { pluginRuntime } from "@/services/PluginRuntime";
 
@@ -384,6 +385,15 @@ function ButlerExperimentWindow() {
         conversationIds: permissionConversationIds,
     });
     const {
+        questionRequest: elicitationQuestionRequest,
+        decisionError: elicitationDecisionError,
+        handleSubmit: handleElicitationSubmit,
+        handleCancel: handleElicitationCancel,
+    } = useAcpElicitation({
+        conversationId: conversationIdNumber,
+        conversationIds: permissionConversationIds,
+    });
+    const {
         pendingRequest: pendingAskUserRequest,
         isDialogOpen: isAskUserDialogOpen,
         viewMode: askUserViewMode,
@@ -429,6 +439,23 @@ function ButlerExperimentWindow() {
                     readOnly={isAskUserReadOnly}
                     onSubmit={handleAskUserSubmit}
                     onCancel={handleAskUserCancel}
+                />
+            ),
+        });
+    }
+    if (elicitationQuestionRequest) {
+        inlineInteractionItems.push({
+            key: `butler-acp-elicitation-${elicitationQuestionRequest.request_id}`,
+            callId: null,
+            messageId: null,
+            content: (
+                <AskUserQuestionCard
+                    request={elicitationQuestionRequest}
+                    isOpen
+                    viewMode="questionnaire"
+                    errorMessage={elicitationDecisionError}
+                    onSubmit={handleElicitationSubmit}
+                    onCancel={handleElicitationCancel}
                 />
             ),
         });

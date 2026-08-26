@@ -558,6 +558,10 @@ pub fn delete_conversation(
     app_handle: tauri::AppHandle,
     conversation_id: i64,
 ) -> Result<(), String> {
+    // ACP 对话：尽力通知 agent 删除其侧 session，并清理本地 acp_session 记录。
+    // 失败只记录日志，不影响本地删除。
+    crate::api::ai::acp::schedule_acp_session_delete(&app_handle, conversation_id);
+
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.conversation_repo().unwrap().delete(conversation_id).map_err(|e| e.to_string())?;
 

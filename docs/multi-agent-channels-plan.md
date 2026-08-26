@@ -323,6 +323,14 @@ ALTER TABLE acp_session ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'acp';
 - ACP 提供商配置仅展示仍受支持的 ACP CLI；Codex 使用原生通道。
 - 扩展节奏建议放 M3，每个新 agent 的验收标准 = 能通过预设一键配好并完成一轮对话。
 
+**2026-08 进展（kimi / dsh 已接入，pi / antigravity 评估后暂不接）：**
+
+- **kimi（Kimi Code CLI）**：原生支持 ACP（`kimi acp` 子命令），已加入 `acpCliOptions` 预设，后端 `acp_cli_preset_default_args` 自动附加 `acp` 参数；需用户按官方文档安装并 `/login`。
+- **dsh（DeepSeek Harness）**：通过社区插件 `dsh-acp-server` 提供完整 ACP server（session/list/resume/load、permission、mode 均支持），已加入预设；依赖 Node.js >= 22 + `@deepseek-ai/dsh`，按外部安装检测（`requires_external_install`）。
+- **node-shebang 启动处理已泛化**：`build_acp_launch_plan` 不再只特判 `claude-code-acp`，任何 npm/bun 全局 bin 的 node 脚本（如 `dsh-acp-server`）都走显式 node 运行时启动，保证 Windows 可用。
+- **pi**：官方无原生 ACP（仅 interactive/print/JSON/RPC/SDK 模式），仅有第三方适配器 `svkozak/pi-acp`（桥接 `pi --mode rpc`），成熟度待验证，暂不做预设。
+- **antigravity cli（agy）**：Google 官方不支持 ACP 且无明确计划；第三方桥（`antigravity-acp`、`agy-acp`）自带 ToS 风险声明，暂不做预设。
+
 ## 7. 测试计划
 
 后端（内存 SQLite，参照 `src-tauri/src/api/tests/`、`db/tests/` 现有组织）：

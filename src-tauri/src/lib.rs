@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use crate::api::ai::acp::{
-    get_acp_session_state, set_acp_session_config_option, AcpPermissionState,
+    get_acp_session_state, set_acp_session_config_option, AcpElicitationState, AcpPermissionState,
 };
 use crate::api::ai_api::{
     ask_ai, cancel_ai, enqueue_conversation_message, get_activity_focus,
@@ -72,7 +72,7 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_model_request_mode, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
-use crate::api::operation_api::{confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
+use crate::api::operation_api::{confirm_acp_elicitation, confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
     disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
     get_plugin_assistant_configs, get_plugin_config, get_plugin_data, get_plugin_detail,
@@ -940,6 +940,7 @@ pub fn run() {
         .manage(crate::slash::SlashRegistryCacheState::default())
         .manage(OperationState::new())
         .manage(AcpPermissionState::new())
+        .manage(AcpElicitationState::new())
         .manage(TodoState::new())
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
@@ -1193,6 +1194,7 @@ pub fn run() {
             submit_preview_code_response,
             confirm_operation_permission,
             confirm_acp_permission,
+            confirm_acp_elicitation,
             confirm_codex_permission,
             highlight_code,
             ensure_hidden_search_window,

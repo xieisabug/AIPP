@@ -110,9 +110,13 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     // 注意：大多数 AI 需要安装专门的 ACP 适配器
     // - Claude Code: npm install -g @zed-industries/claude-code-acp -> 命令 claude-code-acp
     // - Gemini: 原生支持 ACP，直接使用 gemini 命令
+    // - Kimi Code CLI: 原生支持 ACP，参考官方文档安装 kimi（启动时自动附加 acp 子命令）
+    // - DeepSeek Harness: npm install -g @deepseek-ai/dsh dsh-acp-server -> 命令 dsh-acp-server
     const acpCliOptions = [
         { value: "claude-code-acp", label: "Claude Code (需安装 @zed-industries/claude-code-acp)" },
         { value: "gemini", label: "Gemini CLI (原生支持)" },
+        { value: "kimi", label: "Kimi Code CLI (原生支持)" },
+        { value: "dsh-acp-server", label: "DeepSeek Harness (需安装 dsh-acp-server)" },
     ];
 
     // GitHub Copilot 授权管理

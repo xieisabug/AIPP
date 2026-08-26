@@ -26,6 +26,17 @@ export interface AskUserQuestionItem {
     options: AskUserQuestionOption[];
     multiSelect: boolean;
     isSecret?: boolean;
+    /**
+     * 结构化来源（如 ACP elicitation）的稳定答案键。
+     * 缺省时答案以 question 文本为键，保持 ask_user_question 既有行为。
+     */
+    answerKey?: string;
+    /** 结构化值类型，缺省为 string；仅用于提交方的类型化转换，卡片本身仍按文本采集 */
+    valueType?: "string" | "number" | "integer" | "boolean" | "stringArray";
+    /** option label → 原始值的映射（如 oneOf 的 title → const 值），缺省时 label 即值 */
+    optionValues?: Record<string, string>;
+    /** 是否必填，缺省 true（保持既有行为：所有问题都必须回答） */
+    required?: boolean;
 }
 
 export interface AskUserQuestionMetadata {
@@ -67,6 +78,8 @@ interface AskUserQuestionCardProps {
     viewMode?: "questionnaire" | "summary";
     completedAnswers?: Record<string, string> | null;
     readOnly?: boolean;
+    /** 提交方（如 ACP elicitation 类型化转换）反馈的错误信息，展示在操作行上方 */
+    errorMessage?: string | null;
     onSubmit: (requestId: string, answers: Record<string, string>) => void;
     onCancel: (requestId: string) => void;
 }
@@ -85,12 +98,14 @@ export function AskUserQuestionCard({
     viewMode = "questionnaire",
     completedAnswers = null,
     readOnly = false,
+    errorMessage: errorMessageProp = null,
     onSubmit,
     onCancel,
 }: AskUserQuestionCardProps) {
     const [selectedAnswers, setSelectedAnswers] = useState<Record<number, string[]>>({});
     const [otherInputs, setOtherInputs] = useState<Record<number, string>>({});
     const [activeTab, setActiveTab] = useState("0");
+    const errorMessage = errorMessageProp ?? null;
 
     useEffect(() => {
         if (!request || !isOpen) {
@@ -108,7 +123,7 @@ export function AskUserQuestionCard({
         setActiveTab("0");
     }, [request, isOpen]);
 
-    const isQuestionAnswered = (index: number) => {
+    const hasAnswerValue = (index: number) => {
         if (request?.questions[index]?.options.length === 0) {
             return Boolean((otherInputs[index] ?? "").trim());
         }
@@ -118,6 +133,12 @@ export function AskUserQuestionCard({
             return Boolean((otherInputs[index] ?? "").trim());
         }
         return true;
+    };
+
+    const isQuestionAnswered = (index: number) => {
+        // 选填问题（required === false）允许留空，其余问题维持原有必填行为
+        if (request?.questions[index]?.required === false) return true;
+        return hasAnswerValue(index);
     };
 
     const canSubmit = useMemo(() => {
@@ -168,8 +189,11 @@ export function AskUserQuestionCard({
         const answers: Record<string, string> = {};
 
         request.questions.forEach((question, index) => {
+            // 选填且未作答的问题不上报，由提交方决定语义（如 ACP elicitation 直接省略该字段）
+            if (question.required === false && !hasAnswerValue(index)) return;
+            const answerKey = question.answerKey ?? question.question;
             if (question.options.length === 0) {
-                answers[question.question] = (otherInputs[index] ?? "").trim();
+                answers[answerKey] = (otherInputs[index] ?? "").trim();
                 return;
             }
             const values = selectedAnswers[index] ?? [];
@@ -181,7 +205,7 @@ export function AskUserQuestionCard({
                     return value;
                 })
                 .filter((value) => value.length > 0);
-            answers[question.question] =
+            answers[answerKey] =
                 question.multiSelect ? resolved.join(", ") : (resolved[0] ?? "");
         });
 
@@ -207,7 +231,12 @@ export function AskUserQuestionCard({
         return (
             <div className="rounded-md border border-border p-3 space-y-3">
                 <div className="flex items-center justify-between gap-2">
-                    <Badge variant="outline">{question.header}</Badge>
+                    <div className="flex items-center gap-2">
+                        <Badge variant="outline">{question.header}</Badge>
+                        {question.required === false && (
+                            <span className="text-xs text-muted-foreground">选填</span>
+                        )}
+                    </div>
                     {hasMultipleQuestions && (
                         <span className="text-xs text-muted-foreground">
                             {index + 1} / {request.questions.length}
@@ -418,6 +447,9 @@ export function AskUserQuestionCard({
                                     暂无可回答的问题。
                                 </div>
                             )
+                    )}
+                    {errorMessage && (
+                        <div className="text-sm text-destructive">{errorMessage}</div>
                     )}
                     <div className="flex items-center justify-between border-t border-border pt-3">
                         {readOnly ? <div /> : (

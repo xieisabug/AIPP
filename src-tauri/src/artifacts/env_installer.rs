@@ -1219,6 +1219,19 @@ fn get_acp_library_config(cli_command: &str) -> (String, bool, String) {
         "gemini" => {
             ("gemini".to_string(), true, "请参考 Google Gemini CLI 官方文档安装".to_string())
         }
+        // Kimi Code CLI：单二进制分发（官方安装脚本），检测以 `kimi --version` 实际运行为准；
+        // ACP 会话启动时会自动附加 acp 子命令（见 acp_cli_preset_default_args）
+        "kimi" => (
+            "kimi".to_string(),
+            true,
+            "请参考 Kimi Code CLI 官方文档安装（https://github.com/MoonshotAI/kimi-code），安装后需先运行 kimi 并 /login 完成登录".to_string(),
+        ),
+        // DeepSeek Harness ACP 插件：依赖 Node.js >= 22 和 dsh CLI 本体，不适合 Bun 一键安装
+        "dsh-acp-server" => (
+            "dsh-acp-server".to_string(),
+            true,
+            "需要 Node.js >= 22，并执行 npm install -g @deepseek-ai/dsh dsh-acp-server；模型与密钥在 dsh 中配置".to_string(),
+        ),
         _ => (cli_command.to_string(), true, "请手动安装该 CLI 工具".to_string()),
     }
 }

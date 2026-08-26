@@ -205,10 +205,15 @@ acp::TerminalExitStatus::new()
     .signal(Some("TERM".to_string()))
 ```
 
-### 7. LocalSet 用于 !Send futures
+### 7. LocalSet 用于 !Send futures（仅 v0.x SDK）
+
+> ⚠️ 已过时：自 agent-client-protocol v2.0.0 起，SDK 不再绑定 tokio，所有 future 均为 `Send`，
+> AIPP 已改用普通 `tokio::spawn`，无需 `LocalSet`。v2 的连接模型见官方 `md/migration_v2.0.md`：
+> 客户端/服务端用 `Client.builder()` / `Agent.builder()` 注册 `on_receive_request` / `on_receive_notification`
+> 回调，`connect_with(transport, main_fn)` 建立连接，请求通过 `ConnectionTo::send_request(...).block_task()` 发送。
 
 ```rust
-// ACP 的 futures 是 !Send，需要使用 LocalSet
+// v0.x 时代：ACP 的 futures 是 !Send，需要使用 LocalSet
 let local_set = tokio::task::LocalSet::new();
 local_set.run_until(async move {
     // ... ACP 代码

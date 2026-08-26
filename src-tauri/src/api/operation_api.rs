@@ -2,7 +2,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{info, instrument, warn};
 
-use crate::api::ai::acp::{AcpPermissionDecision, AcpPermissionState};
+use crate::api::ai::acp::{AcpElicitationDecision, AcpElicitationState, AcpPermissionDecision, AcpPermissionState};
 use crate::api::butler_api::emit_butler_task_permission_state_changed;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::operation::types::PermissionDecision;
@@ -12,6 +12,8 @@ pub(crate) const OPERATION_PERMISSION_REQUEST_EVENT: &str = "operation-permissio
 pub(crate) const OPERATION_PERMISSION_RESOLVED_EVENT: &str = "operation-permission-resolved";
 pub(crate) const ACP_PERMISSION_REQUEST_EVENT: &str = "acp-permission-request";
 pub(crate) const ACP_PERMISSION_RESOLVED_EVENT: &str = "acp-permission-resolved";
+pub(crate) const ACP_ELICITATION_REQUEST_EVENT: &str = "acp-elicitation-request";
+pub(crate) const ACP_ELICITATION_RESOLVED_EVENT: &str = "acp-elicitation-resolved";
 
 const BUTLER_WINDOW_LABEL: &str = "butler_experiment";
 const BUTLER_MAIN_KIND: &str = "butler_main";
@@ -208,6 +210,68 @@ pub async fn confirm_acp_permission(
     } else {
         warn!(request_id = %request_id, "ACP permission request not found or already resolved");
         Err("ACP permission request not found or already resolved".to_string())
+    }
+}
+
+/// 确认 ACP elicitation（结构化提问）
+///
+/// action: "accept"（携带 values）/ "decline" / "cancel"。
+/// values 的 JSON 值按类型映射为 ACP ElicitationContentValue
+/// （string/number/integer/boolean/string-array）。
+#[tauri::command]
+#[instrument(skip(app_handle, values))]
+pub async fn confirm_acp_elicitation(
+    app_handle: AppHandle,
+    request_id: String,
+    action: String,
+    values: Option<std::collections::HashMap<String, serde_json::Value>>,
+) -> Result<bool, String> {
+    info!(request_id = %request_id, action = %action, "Processing ACP elicitation confirmation");
+
+    let state = app_handle
+        .try_state::<AcpElicitationState>()
+        .ok_or_else(|| "AcpElicitationState not found".to_string())?;
+
+    let decision = match action.as_str() {
+        "accept" => {
+            let mut content = std::collections::BTreeMap::new();
+            for (key, value) in values.unwrap_or_default() {
+                content.insert(
+                    key.clone(),
+                    crate::api::ai::acp::json_to_acp_elicitation_value(value)
+                        .map_err(|error| format!("elicitation value '{key}' invalid: {error}"))?,
+                );
+            }
+            AcpElicitationDecision::Accepted(content)
+        }
+        "decline" => AcpElicitationDecision::Declined,
+        "cancel" => AcpElicitationDecision::Cancelled,
+        other => return Err(format!("Unknown ACP elicitation action: {other}")),
+    };
+
+    let resolved = state.resolve_request(&request_id, decision).await;
+
+    if let Some(resolution) = resolved {
+        if let Err(error) = emit_permission_resolved_event(
+            &app_handle,
+            ACP_ELICITATION_RESOLVED_EVENT,
+            &PermissionResolvedEvent {
+                request_id: request_id.clone(),
+                conversation_id: resolution.conversation_id,
+            },
+        ) {
+            warn!(request_id = %request_id, error = %error, "Failed to emit ACP elicitation resolution event");
+        }
+        if resolution.delivered {
+            info!(request_id = %request_id, "ACP elicitation request resolved successfully");
+            Ok(true)
+        } else {
+            warn!(request_id = %request_id, "ACP elicitation receiver dropped before resolution");
+            Err("ACP elicitation receiver dropped before resolution".to_string())
+        }
+    } else {
+        warn!(request_id = %request_id, "ACP elicitation request not found or already resolved");
+        Err("ACP elicitation request not found or already resolved".to_string())
     }
 }
 

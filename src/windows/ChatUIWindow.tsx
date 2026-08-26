@@ -25,6 +25,7 @@ import {
     useAcpPermission,
     useOperationPermission,
 } from "../hooks/useOperationPermission";
+import { useAcpElicitation } from "../hooks/useAcpElicitation";
 import { useAskUserQuestion, usePreviewFile } from "../hooks/useInlineInteraction";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
@@ -211,6 +212,14 @@ function ChatUIWindow() {
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
     const {
+        questionRequest: elicitationQuestionRequest,
+        decisionError: elicitationDecisionError,
+        handleSubmit: handleElicitationSubmit,
+        handleCancel: handleElicitationCancel,
+    } = useAcpElicitation({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
+    const {
         pendingRequest: pendingAskUserRequest,
         isDialogOpen: isAskUserDialogOpen,
         viewMode: askUserViewMode,
@@ -248,6 +257,23 @@ function ChatUIWindow() {
                     readOnly={isAskUserReadOnly}
                     onSubmit={handleAskUserSubmit}
                     onCancel={handleAskUserCancel}
+                />
+            ),
+        });
+    }
+    if (elicitationQuestionRequest) {
+        inlineInteractionItems.push({
+            key: `acp-elicitation-${elicitationQuestionRequest.request_id}`,
+            callId: null,
+            messageId: null,
+            content: (
+                <AskUserQuestionCard
+                    request={elicitationQuestionRequest}
+                    isOpen
+                    viewMode="questionnaire"
+                    errorMessage={elicitationDecisionError}
+                    onSubmit={handleElicitationSubmit}
+                    onCancel={handleElicitationCancel}
                 />
             ),
         });
