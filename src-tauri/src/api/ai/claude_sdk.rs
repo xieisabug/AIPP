@@ -11,6 +11,10 @@ use crate::acp_mcp_bridge::{
     ACP_MCP_PROXY_TOKEN_ENV, ACP_MCP_SELECTED_TOOLS_ENV,
 };
 use crate::api::operation_api::{emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT};
+use crate::mcp::builtin_mcp::interaction::{
+    request_ask_user_question, AskUserQuestionItem, AskUserQuestionMetadata,
+    AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
+};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
@@ -388,6 +392,116 @@ fn persist_usage(app: &tauri::AppHandle, id: i64, usage: &Value) {
     let _ = repo.update(&message);
 }
 
+/// 将 Claude Code AskUserQuestion 工具的 input 转成统一的 AskUserQuestion 请求。
+/// Claude Code 的 questions 结构与 Codex requestUserInput 类似，但没有 id/isSecret。
+fn claude_ask_user_question_payload(input: &Value) -> Result<AskUserQuestionRequest, String> {
+    let questions = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or("Claude Code AskUserQuestion is missing questions")?;
+    let mut converted = Vec::with_capacity(questions.len());
+    for question in questions {
+        let text = question
+            .get("question")
+            .and_then(Value::as_str)
+            .ok_or("Claude Code AskUserQuestion question is missing question")?
+            .to_string();
+        let header = question
+            .get("header")
+            .and_then(Value::as_str)
+            .unwrap_or("Claude Code")
+            .to_string();
+        let options = question
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        Some(AskUserQuestionOption {
+                            label: option.get("label")?.as_str()?.to_string(),
+                            description: option
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("选择此项")
+                                .to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let multi_select = question
+            .get("multiSelect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        converted.push(AskUserQuestionItem {
+            question: text,
+            header,
+            options,
+            multi_select,
+            is_secret: false,
+        });
+    }
+    Ok(AskUserQuestionRequest {
+        questions: converted,
+        answers: None,
+        metadata: Some(AskUserQuestionMetadata {
+            source: Some("claude_sdk".to_string()),
+        }),
+    })
+}
+
+/// 将用户答案以 问题文本 -> 答案 的形式注入 updatedInput.answers，回给 Claude Code CLI。
+fn inject_answers_into_input(input: &Value, answers: &HashMap<String, String>) -> Value {
+    let mut updated = input.clone();
+    if let Some(obj) = updated.as_object_mut() {
+        obj.insert("answers".to_string(), json!(answers));
+    }
+    updated
+}
+
+/// Claude Code 的 AskUserQuestion 工具经由 can_use_tool 控制请求到达，
+/// 这里接到统一的 AskUserQuestion 内联卡片上，用户作答后通过
+/// updatedInput.answers（问题文本 -> 答案）回给 CLI。
+async fn handle_ask_user_question(
+    app: &tauri::AppHandle,
+    conversation_id: i64,
+    request: &Value,
+    request_id: &str,
+    stdin: &mut tokio::process::ChildStdin,
+) -> Result<(), String> {
+    let input = request.get("input").cloned().unwrap_or(Value::Null);
+    let interaction_state = app.state::<InteractionState>();
+    let result = match claude_ask_user_question_payload(&input) {
+        Ok(payload) => {
+            request_ask_user_question(app, &interaction_state, Some(conversation_id), payload)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    let (behavior, updated_input, message) = match result {
+        Ok(answers) => ("allow", inject_answers_into_input(&input, &answers), Value::Null),
+        Err(error) => {
+            tracing::warn!(
+                conversation_id,
+                error = %error,
+                "Claude Code AskUserQuestion was cancelled"
+            );
+            (
+                "deny",
+                input.clone(),
+                json!({"message": format!("用户未回答提问：{error}")}),
+            )
+        }
+    };
+    let response = json!({
+        "type": "control_response",
+        "response": {"subtype":"success", "request_id": request_id, "response": {"behavior":behavior, "updatedInput": updated_input, "message":message}}
+    });
+    stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+    stdin.flush().await.map_err(|e| e.to_string())
+}
+
 async fn handle_permission(
     app: &tauri::AppHandle,
     conversation_id: i64,
@@ -398,6 +512,9 @@ async fn handle_permission(
         frame.get("request_id").and_then(Value::as_str).unwrap_or("unknown").to_string();
     let request = frame.get("request").cloned().unwrap_or(Value::Null);
     let tool_name = request.get("tool_name").and_then(Value::as_str).unwrap_or("Claude Code tool");
+    if tool_name == "AskUserQuestion" {
+        return handle_ask_user_question(app, conversation_id, &request, &request_id, stdin).await;
+    }
     let event = AcpPermissionRequestEvent {
         request_id: format!("claude:{conversation_id}:{request_id}"),
         conversation_id: Some(conversation_id),
@@ -1300,5 +1417,60 @@ mod tests {
         });
         assert_eq!(tool_result_text(&result).as_deref(), Some("first\nsecond"));
         assert_eq!(result.get("is_error").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn test_claude_ask_user_question_payload_maps_questions() {
+        let input = json!({
+            "questions": [
+                {
+                    "question": "选择发布环境？",
+                    "header": "环境",
+                    "multiSelect": false,
+                    "options": [
+                        {"label": "staging", "description": "预发环境"},
+                        {"label": "prod"}
+                    ]
+                },
+                {
+                    "question": "需要哪些通知渠道？",
+                    "multiSelect": true,
+                    "options": [
+                        {"label": "邮件", "description": "email"},
+                        {"label": "飞书", "description": "feishu"}
+                    ]
+                }
+            ]
+        });
+        let payload = claude_ask_user_question_payload(&input).unwrap();
+        assert_eq!(payload.questions.len(), 2);
+        assert_eq!(payload.questions[0].header, "环境");
+        assert!(!payload.questions[0].multi_select);
+        assert_eq!(payload.questions[0].options.len(), 2);
+        assert_eq!(payload.questions[0].options[1].label, "prod");
+        // 缺 description 时填充兜底文案，避免校验失败
+        assert_eq!(payload.questions[0].options[1].description, "选择此项");
+        assert_eq!(payload.questions[1].header, "Claude Code");
+        assert!(payload.questions[1].multi_select);
+        payload.validate().unwrap();
+
+        // 缺少 questions 时必须报错而不是降级
+        assert!(claude_ask_user_question_payload(&json!({})).is_err());
+    }
+
+    #[test]
+    fn test_claude_ask_user_question_updated_input_injects_answers() {
+        // 用户作答后，answers 以 问题文本 -> 答案 的形式写回 updatedInput
+        let input = json!({
+            "questions": [{"question": "继续吗？", "header": "确认", "options": []}]
+        });
+        let mut answers = HashMap::new();
+        answers.insert("继续吗？".to_string(), "继续".to_string());
+        let updated = inject_answers_into_input(&input, &answers);
+        assert_eq!(
+            updated.pointer("/answers/继续吗？").and_then(Value::as_str),
+            Some("继续")
+        );
+        assert!(updated.get("questions").is_some());
     }
 }
