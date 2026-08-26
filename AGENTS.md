@@ -1,18 +1,11 @@
 ## Project Overview
 
-AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 2.0 that serves as a comprehensive AI assistant platform. The application enables users to interact with multiple large language models, execute scripts, manage conversations/artifacts, run scheduled AI tasks, orchestrate work through Butler, and extend functionality through MCP/Skills/Plugins. The current product surface also includes experimental Feishu integration for Butler-driven external messaging.
+AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 2.0 — Rust backend with SQLite (rusqlite), React 19 + TypeScript + Vite frontend, shadcn/ui + Tailwind CSS v4. It lets users chat with multiple LLMs, execute scripts, manage conversations/artifacts, run scheduled AI tasks, orchestrate work through Butler, and extend functionality through MCP/Skills/Plugins, plus experimental Feishu integration.
 
-**Core Technologies:**
-
--   **Backend**: Rust with Tauri 2.0 framework, SQLite via rusqlite
--   **Frontend**: React 19 with TypeScript, Vite build system
--   **UI Framework**: shadcn/ui components, Radix UI primitives, Tailwind CSS v4
--   **AI Integration**: Custom forked genai client with streaming support
--   **MCP Protocol**: rmcp crate for Model Context Protocol integration
--   **State Management**: React hooks for frontend, Arc<TokioMutex<>> for Rust backend
--   **Content Execution**: Support for HTML, SVG, React, Vue, Python, Bash/PowerShell, AppleScript
--   **Platform Features**: System tray, global shortcuts (Ctrl+Shift+I/O), multi-window architecture
--   **Testing**: Comprehensive test suite with integration tests for AI functionality
+- 详细架构（技术栈、窗口列表、前后端目录结构、API 模块、内置 MCP 工具、关键产品面）：[docs/architecture.md](./docs/architecture.md)
+- 常见开发任务操作步骤（新增 API/组件/助手类型/表结构）：[docs/development-guide.md](./docs/development-guide.md)
+- 测试框架与编写规范：[docs/testing-guidelines.md](./docs/testing-guidelines.md)
+- 各功能用户向文档：[docs/product/](./docs/product/README.md)（ACP 集成细节见 `docs/product/11-ACP集成.md`）
 
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
 
@@ -46,102 +39,6 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - If you add a standalone Rust binary under `src-tauri/src/bin/` (for example, a debug/preview CLI), keep `src-tauri/Cargo.toml` aligned with `default-run = "Aipp"`.
 - Otherwise `cargo run` becomes ambiguous once multiple binaries exist, which breaks the default Tauri dev flow with errors like: `cargo run could not determine which binary to run`.
 - Run auxiliary CLIs explicitly with `--bin`, for example: `cargo run --manifest-path src-tauri/Cargo.toml --bin feishu_markdown_debug -- --help`.
-
-## Architecture Overview
-
-### Window-Based Architecture
-
-The application uses multiple Tauri windows for different features:
-
--   **Ask Window**: Quick AI query interface
--   **Config Window**: Settings and configuration
--   **ChatUI Window**: Main chat interface
--   **Schedule Window**: Scheduled task management and run logs
--   **ButlerExperiment Window**: Butler main conversation, task board, approvals, Feishu status
--   **Sidebar Window**: Conversation side panel for todo/context/artifact preview
--   **ArtifactPreview Window**: Content preview (HTML, SVG, components)
--   **Artifact Window**: Standalone artifact rendering window
--   **ArtifactCollections Window**: Manage artifact collections
--   **Plugin Window**: Plugin UI host window
-
-### Frontend Structure
-
-```
-src/
-├── components/
-│   ├── ui/          # shadcn/ui primitives
-│   ├── common/      # Shared components (ConfigPageLayout, EmptyState, etc.)
-│   ├── config/      # Configuration-related components
-│   │   ├── assistant/     # Assistant form rendering
-│   │   └── feature/       # Feature-specific forms
-│   ├── conversation/      # Chat conversation components
-│   ├── message-item/      # Message display components
-│   └── magicui/     # Animation components
-├── hooks/           # Custom React hooks
-│   ├── assistant/   # Assistant management hooks
-│   └── feature/     # Feature configuration hooks
-├── data/            # TypeScript types and data models
-├── lib/             # Utility functions
-├── services/        # Runtime services (PluginRuntime, search/export, token stats)
-├── windows/         # Window entry points (ask/chat/config/schedule/butler/sidebar/artifacts)
-└── artifacts/       # React/Vue artifact templates
-```
-
-Key patterns:
-
--   Use `@/` import alias for `./src/`
--   Component-specific CSS modules alongside Tailwind
--   React Hook Form with Zod for form validation
--   Domain-specific hook organization (assistant/, feature/)
-
-### Backend Structure
-
-```
-src-tauri/
-├── src/
-│   ├── api/                 # Tauri command handlers
-│   │   ├── ai/              # AI modules (chat/acp/config/summary/title/types)
-│   │   ├── scheduled_task_api.rs  # 定时任务（once/interval 调度、执行、日志、停止）
-│   │   ├── skill_api.rs     # Skills 扫描、安装、助手绑定
-│   │   ├── butler_api.rs    # Butler 主会话、任务派发、结果回流
-│   │   ├── plugin_api.rs    # 插件安装、启停、配置与数据
-│   │   ├── token_statistics_api.rs # Token 统计
-│   │   ├── export_api.rs    # Markdown -> PDF / DOCX 导出
-│   │   ├── copilot_api.rs & copilot_lsp.rs # GitHub Copilot 集成
-│   │   └── [other apis]...
-│   ├── mcp/                 # MCP 核心（注册/执行/检测/总结）
-│   │   ├── builtin_mcp/     # 内置 MCP 工具（agent/ui/search/operation/artifact）
-│   │   ├── registry_api.rs  # MCP server 管理
-│   │   ├── execution_api.rs # MCP tool call 执行与状态
-│   │   └── detection.rs     # AI 响应中的 tool call 检测
-│   ├── artifacts/           # Artifact 渲染、运行与集合管理
-│   ├── feishu/              # 飞书运行时、消息接入、回发与卡片回调
-│   ├── external_channels/   # 外部渠道消息渲染抽象
-│   ├── scheduler/           # 定时任务调度运行时
-│   ├── skills/              # Skills 扫描、解析、提示词拼装
-│   ├── db/                  # Database operations (SQLite)
-│   ├── sync.rs              # 自建同步客户端（outbox/shadow/cursor、推拉、冲突与死信）
-│   ├── state/               # Application state management
-│   ├── template_engine/     # Prompt templating with bang commands
-│   └── window.rs            # Window management
-```
-
-**Key API modules:**
-
--   `ai_api.rs`: Main AI entry points (ask/regenerate/cancel/runtime state/title generation)
--   `assistant_api.rs`: Assistant CRUD + model/MCP binding
--   `conversation_api.rs`: Conversation/message management with versioning
--   `llm_api.rs`: Provider/model management and model list sync
--   `scheduled_task_api.rs`: Scheduled task CRUD, structured scheduling, run, logs, cancellation
--   `skill_api.rs`: Skill scanning/installing and assistant skill configuration
--   `butler_api.rs`: Butler main conversation, task orchestration, task detail/result flow
--   `export_api.rs`: Markdown to PDF / DOCX export helpers
--   `plugin_api.rs`: Plugin registry, lifecycle, config and data storage
--   `token_statistics_api.rs`: Conversation/message token statistics
--   `copilot_api.rs` & `copilot_lsp.rs`: GitHub Copilot auth and LSP lifecycle
--   `mcp/registry_api.rs`, `mcp/execution_api.rs`, `mcp/detection.rs`: MCP server/tool orchestration
--   `sync.rs`: Self-hosted sync client (settings/token, outbox push, cursor pull, conflict/dead-letter handling, domain change events); server side lives in `sync-server/` (FastAPI + SQLite, alembic migrations)
--   `artifacts/collection_api.rs` & `artifacts/artifact_bridge_api.rs`: Artifact collections + plugin bridge calls
 
 ## Key Development Patterns
 
@@ -206,55 +103,6 @@ let config = state.configs.lock().await;
     -   **在自定义容器内**：需要指定颜色类 `text-muted-foreground`
         -   示例：`<ServerCrash className="w-full h-full text-muted-foreground" />`（侧边栏菜单项）
 
-## Critical Features to Maintain
-
-1. **Multi-Model Support**: Integration with various LLM providers through genai client
-2. **Local Data Storage**: All user data stored locally via SQLite; optional self-hosted sync (`src-tauri/src/sync.rs` + `sync-server/`) for users who run their own server
-3. **Bang Commands**: Input starting with `!` for quick actions via template engine
-4. **Message Versioning & Runtime State**: Response regeneration, parent/child chains, runtime state snapshots
-5. **Content Preview & Artifact Workspace**: Rendering HTML/SVG/React/Vue and managing artifact collections
-6. **Script Execution**: Running AI-generated code in configured environments
-7. **System Tray + Multi-Window UX**: Global shortcuts and coordinated Ask/Chat/Config/Schedule/Butler/Sidebar windows
-8. **MCP Integration**: MCP server registry, tool-call execution state, and built-in MCP tool suites
-9. **Built-in MCP Tool Suites**: agent, ui_interaction, search, operation, artifact
-10. **Scheduled Tasks**: Structured `once` / `interval` schedules, next-run calculation, run logs, notify decision, and stop support
-11. **Skills System**: File-system based skills, official/install-recipe/archive installs, assistant-skill binding, Agent `load_skill` dependency
-12. **Plugin Runtime**: Plugin loading/config/data + theme registration (`extraCss`/`windowCss`)
-13. **GitHub Copilot Integration**: Device flow auth and optional Copilot LSP integration
-14. **Token Statistics & Export**: Message/conversation token stats and conversation export to Markdown / PNG / PDF / DOCX
-15. **Assistant Types**: Different assistant configurations with custom forms
-16. **Butler Orchestration**: Main hidden conversation, task conversations, result callback injection, approval-aware task board
-17. **Feishu Integration**: Experimental Butler-driven Feishu ingress, relay workers, card callbacks, menu-triggered context reset
-18. **Self-Hosted Data Sync**: Outbox/shadow/cursor sync of config-domain data (llm providers/models, assistants, MCP servers) to a user-run sync-server; server-wins conflict resolution, delete propagation, dead-letter replay, deterministic ids for official seed rows, OS-keychain master key, whitelist-based exclusion of sensitive provider config; see `docs/sync-remediation-plan.md` for the design
-
-## ACP Integration Notes
-
-### Current Implementation
-
-- **Per-conversation process model**: ACP runs one long-lived process per conversation, stored in `AcpSessionState` (keyed by `conversation_id`).
-- **Session handle routing**: ACP prompts, `session/cancel`, mode changes, and config option updates are sent through `AcpSessionHandle` to a background task that keeps a single `ClientSideConnection` alive.
-- **Session persistence**: `session_id` is stored in `conversation.db` table `acp_session` keyed by `conversation_id` and updated on session creation/load.
-- **Session load logic**: On ACP startup, the client checks `initialize` capabilities. If `loadSession` is supported and a stored `session_id` exists, it calls `session/load`; otherwise it falls back to `session/new`.
-- **Replay suppression**: During `session/load`, ACP `session/update` notifications are suppressed to avoid replay content polluting UI/DB.
-- **Prompt flow**: Each new user request creates a new response message; ACP streams content into that message, emits `message_update` events, and persists content to DB.
-- **Client capabilities**: ACP initialize now advertises `fs/read_text_file`, `fs/write_text_file`, and `terminal` support.
-- **Tool call mapping**: ACP tool calls are translated to MCP tool call UI events; tool status is mapped to `pending/executing/success/failed`.
-- **File/terminal operations**: ACP file read/write and terminal commands are bridged to built-in operations with permission manager.
-- **Session metadata sync**: `AcpSessionState` stores both the live handle and a frontend snapshot (`session_id`, title, updated_at, current mode, modes, config options, active prompt state); `SessionInfoUpdate` also updates the local conversation title and emits the global `title_change` event.
-- **Conversation UI controls**: Chat/Butler headers expose ACP session state and allow inline mode/config changes through Tauri commands, without adding `session/list`.
-- **Config inputs**: ACP CLI command, working directory, env vars, and additional args are read from `llm_provider_config` and `assistant_model_config` (provider defaults, assistant overrides).
-- **CLI resolution**: ACP CLI is resolved via absolute path, then `~/.bun/bin`, then `PATH` lookup, then raw command.
-- **Session task runtime**: ACP session task runs on a dedicated single-thread runtime with `LocalSet` to support non-`Send` futures.
-
-- **Codex MCP bridge injection**: the Codex app-server channel mounts the assistant's selected MCP tools by registering the AIPP bridge (`--aipp-acp-mcp-bridge`) as an `aipp` MCP server via the `config` overrides of `thread/start` / `thread/resume` (`mcp_servers.aipp.*`); tool execution flows back through the same TCP proxy and permission path as the ACP bridge, and the selected-tools payload is part of the session signature so binding changes rebuild the session while resuming the same thread.
-
-### Known Limitations / Observations
-
-- **loadSession support varies**: `claude-code-acp` reports `agent_capabilities.load_session=false`, so session load is skipped and history is not restored by the agent.
-- **Session persistence is local**: Stored `session_id` only helps if the agent supports `loadSession` and maintains session state.
-- **Cancel behavior**: `cancel_ai` sends `session/cancel` for ACP conversations instead of aborting the whole ACP session task; the process is only torn down when the session task really exits.
-- **History fallback**: If `loadSession` is unsupported or fails, AIPP builds a prompt from stored conversation history and sends it as context on the next ACP prompt.
-
 ## Development Guidelines
 
 1. **Cross-Platform**: Ensure compatibility across Windows, macOS, and Linux
@@ -267,11 +115,10 @@ let config = state.configs.lock().await;
 8. **No Model Fallback**: 当用户配置的模型（如对话总结模型、助手模型等）在数据库中不存在时，禁止自动回退到其他模型。应该直接返回错误信息，在界面上提示用户检查配置，而不是随意选择其他模型执行任务
 9. **工作日志**：干活的时候边干活边写工作日志，只要有一定的成果了就要更新一下，方便后续交接。日志文件放在 `tmp/worklog/` 目录下（按主题/分支命名，如 `mobile-optimization.md`），记录：做了什么（文件、关键改动）、验证结果、未完成事项与下一步。
 
-## Documentation Sync Guidelines
+## Failure and Fallback Policy
 
-- When a user-facing feature changes, update the matching file under `docs/product/` in the same task when practical.
-- Keep `docs/product/README.md` aligned with the actual set of product docs and major user-visible features.
-- Keep this `AGENTS.md` aligned with major architecture/product-surface changes that affect future engineering tasks, especially Butler, Feishu, export formats, scheduling model, and Skills behavior.
+- **禁止擅自降级**：Codex 必须始终使用 Codex 原生通道，Claude Code 必须始终使用 Claude Code 原生通道。启动、恢复、模型、MCP、权限、进程或协议任一环节失败时，必须立即报错并停止；禁止自动切换到 ACP、其他模型、其他 provider、新会话、无工具模式或任何能力缩减路径。只有用户针对当前需求明确要求某种降级方案时才允许实现。
+- **错误必须具体且可追溯**：禁止只返回“运行失败”“会话已停止”“未知错误”等笼统文案。用户可见错误与持久化错误必须包含原始失败环节和底层原因；进程型通道还应捕获并记录 stderr、退出状态或协议错误，并附带可关联的 conversation/session/run 标识。若底层没有提供原因，必须明确指出缺失的是哪一层诊断信息以及为何缺失，不能用泛化文案覆盖。
 
 ## Testing Changes
 
@@ -285,8 +132,14 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 
 # Run Rust tests，When running Rust tests, please run them with precise, minimal scope—for example, by method or by file.
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml [test_name]
 ```
+
+红线与规范（完整版见 [docs/testing-guidelines.md](./docs/testing-guidelines.md)）：
+
+- 所有后端测试必须使用**内存数据库**（`Connection::open_in_memory()`），禁止在测试中使用文件路径
+- 测试按功能域分文件：源文件名 + `_tests.rs`（后端）/ `.test.tsx`（前端），前端测试与源文件同级放置
+- 测试函数命名: `test_[功能]_[场景]` (Rust) / `should [行为] when [条件]` (TS)
 
 ### Validation runner note
 
@@ -298,238 +151,11 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ### Chat scroll perf reproduction
 
-- For long-conversation scroll lag/jump issues, prefer the built-in **desktop Tauri ChatUIWindow harness** over `npm run dev`. It opens the real desktop window, switches to a target conversation, runs the in-app scroll probe, and writes a JSON result file.
-- Run the harness with `cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol` plus `AIPP_CHAT_SCROLL_PERF_*` env vars. Example:
+长对话滚动卡顿/跳动问题的复现与调试，统一走内置 ChatUIWindow 自跑 harness（`AIPP_CHAT_SCROLL_PERF_*` 环境变量），完整方法、命令与结果字段说明见 [docs/chat-scroll-perf-playbook.md](./docs/chat-scroll-perf-playbook.md)。
 
-```bash
-# First conversation in the current ChatUI list order
-AIPP_CHAT_SCROLL_PERF_AUTORUN=1 \
-AIPP_CHAT_SCROLL_PERF_INDEX=0 \
-AIPP_CHAT_SCROLL_PERF_DURATION_MS=2200 \
-AIPP_CHAT_SCROLL_PERF_SETTLE_FRAMES=4 \
-AIPP_CHAT_SCROLL_PERF_TIMEOUT_SECS=45 \
-AIPP_CHAT_SCROLL_PERF_RESULT_PATH=tmp/chat-scroll-perf-result-conv1.json \
-cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
+## Documentation Sync Guidelines
 
-# Fourth conversation in the current ChatUI list order
-AIPP_CHAT_SCROLL_PERF_AUTORUN=1 \
-AIPP_CHAT_SCROLL_PERF_INDEX=3 \
-AIPP_CHAT_SCROLL_PERF_DURATION_MS=2200 \
-AIPP_CHAT_SCROLL_PERF_SETTLE_FRAMES=4 \
-AIPP_CHAT_SCROLL_PERF_TIMEOUT_SECS=45 \
-AIPP_CHAT_SCROLL_PERF_RESULT_PATH=tmp/chat-scroll-perf-result-conv4.json \
-cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
-```
-
-- `AIPP_CHAT_SCROLL_PERF_INDEX` is **zero-based in the current ChatUI conversation list order**. Confirm the target conversation name from the JSON result instead of assuming the ordinal matches what the user meant.
-- Do **not** run multiple harness commands in parallel. They compete for Cargo's default build/output locks; run them sequentially and wait for each one to finish.
-- Read the JSON result first. Useful fields: `conversationName`, `messageItemCount`, `p95FrameMs`, `worstFrameMs`, `estimatedDroppedFrameCount`, `maxScrollTop`, `finalMaxScrollTop`, and `rowHeightDrift`.
-- A large gap between `maxScrollTop` and `finalMaxScrollTop` means the scrollable height shrank during the probe, which is a strong signal for scrollbar jump caused by virtualization height corrections.
-- For the 2026-04 long-conversation regression, the main causes were:
-  1. historical merged assistant groups were under-estimated because virtualization used only the last message's estimate instead of the whole merged group;
-  2. `ResizeObserver` height shrink updates were applied immediately while the user was actively scrolling, so virtualized total height collapsed mid-scroll and yanked the scrollbar.
-
-## Common Development Tasks
-
-### Adding a New API Endpoint
-
-1. Create Tauri command in `src-tauri/src/api/[module].rs`
-2. Export command in `src-tauri/src/api/mod.rs`
-3. Register in `src-tauri/src/lib.rs` `invoke_handler` list
-4. Create TypeScript types in `src/data/`
-5. Call from frontend using `invoke()`
-6. Add tests in `src-tauri/src/api/tests/`
-
-### Working with AI Features
-
--   Core AI logic is in `ai_api.rs` with modular implementations in `ai/` subdirectory
--   Stream processing uses genai client with event emission for real-time UI updates
--   MCP tools are automatically detected via `mcp/detection.rs` and can be called natively
--   All AI responses support versioning through `generation_group_id` and `parent_group_id`
--   Built-in MCP tools are organized under `mcp/builtin_mcp/`
-
-### Adding a New UI Component
-
-1. Check if shadcn/ui has the component
-2. Follow existing component patterns in `src/components/`
-3. Use domain-specific directories (config/, conversation/, etc.)
-4. Use Tailwind classes for styling
-5. Add component-specific styles in CSS modules if needed
-6. 编写界面的时候，注意样式风格要和现在的界面一致，使用 ShadcnUI 的组件和 tailwind css 的写法，我的主色调是黑白灰，尽量少使用别的颜色
-
-### Adding New Assistant Types
-
-1. Define assistant type in `src/data/Assistant.tsx`
-2. Create form configuration in `src/hooks/assistant/useAssistantFormConfig.ts`
-3. Add form renderer in `src/components/config/assistant/AssistantFormRenderer.tsx`
-4. Handle backend logic in `assistant_api.rs`
-
-### Database Schema Changes
-
-1. Update schema in `src-tauri/src/db/[entity].rs`
-2. Handle migrations in `src-tauri/src/db/mod.rs`
-3. Update corresponding TypeScript types
-4. Key tables: conversations, messages (with versioning), assistants, mcp_servers, llm_models, artifacts
-
-### MCP Integration Guidelines
-
--   MCP servers are managed through `mcp/registry_api.rs` and stored in SQLite
--   Tool detection happens automatically via `mcp/detection.rs::detect_and_process_mcp_calls`
--   Tool call creation/execution/state sync is handled in `mcp/execution_api.rs`
--   Built-in MCP command suites: `aipp:agent`, `aipp:ui_interaction`, `aipp:search`, `aipp:operation`, `aipp:artifact`
--   MCP auto-run should respect assistant/server/tool config (`is_auto_run` + overrides)
-
-### Built-in MCP Tools
-
-The application includes built-in MCP tools in `mcp/builtin_mcp/`:
-
--   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`)
--   **UI Interaction Tools**: `ask_user_question`, `preview_file`
--   **Search Tools**: `search_web`, `fetch_url` with browser profile/fingerprint support
--   **Operation Tools**: `read_file`, `write_file`, `edit_file`, `list_directory`, `execute_bash`, `get_bash_output`
--   **Artifact Tools**: `get_artifact_workspace`, `show_artifact`
--   **Template Management**: Built-in MCP template registration and sync
-
-### Artifact Management
-
--   Artifacts support HTML, SVG, React, Vue components
--   Collections for organizing related artifacts
--   Preview windows with live rendering
--   Script execution environments (Python, Node.js, etc.)
-
-## Testing Framework
-
-### Technology Stack
-
-**Backend (Rust):**
--   `#[tokio::test]` - 异步测试
--   `rstest` - 参数化测试
--   `tempfile` - 临时数据库
--   `tauri::test` - Tauri 集成测试
-
-**Frontend (React/TypeScript):**
--   `Vitest` - 测试框架（Vite 集成）
--   `@testing-library/react` - 组件测试
--   `@testing-library/user-event` - 用户交互模拟
--   `happy-dom` - DOM 环境
--   Mock `@tauri-apps/api/core` invoke 调用
-
-### Test Organization
-
-> ⚠️ **重要**: 测试代码必须按功能域分离到独立文件，禁止将所有测试写在单一文件中
-
-**测试文件命名规范：**
-- 测试文件名 = 源文件名 + `_tests.rs`（后端）或 `.test.tsx`（前端）
-- 例如：`conversation_db.rs` → `conversation_db_tests.rs`
-- 例如：`ConversationList.tsx` → `ConversationList.test.tsx`
-
-**后端测试 (Rust):**
-```
-src-tauri/src/
-├── api/tests/               # API 集成测试
-│   ├── mod.rs
-│   ├── ai_api_tests.rs
-│   ├── conversation_api_tests.rs
-│   └── regenerate_tests.rs
-├── db/tests/                # 数据库 CRUD 测试（模块化目录）
-│   ├── mod.rs              # 测试模块入口
-│   ├── test_helpers.rs     # 共享辅助函数
-│   ├── conversation_db_tests.rs   # 对应 conversation_db.rs
-│   ├── message_db_tests.rs        # 对应 conversation_db.rs 中的 MessageRepository
-│   ├── attachment_db_tests.rs     # TODO
-│   └── assistant_db_tests.rs      # TODO
-└── template_engine/tests.rs  # 小模块可用单文件
-```
-
-**前端测试 (React/TypeScript):**
-```
-src/
-├── __tests__/               # 全局测试配置
-│   ├── setup.ts            # 测试环境初始化
-│   └── mocks/tauri.ts      # Mock Tauri invoke
-├── components/
-│   └── [Component]/
-│       ├── Component.tsx
-│       └── Component.test.tsx  # 组件测试（同级放置）
-├── hooks/
-│   └── useXxx.test.ts      # Hook 测试（同级放置）
-└── utils/
-    └── utils.test.ts       # 工具函数测试
-```
-
-**测试文件规则:**
-1. 每个功能域一个测试文件（禁止单一大文件）
-2. 共享辅助函数放入 `test_helpers.rs` / `mocks/` 目录
-3. 测试函数命名: `test_[功能]_[场景]` (Rust) / `should [行为] when [条件]` (TS)
-4. 前端测试与源文件同级放置
-
-### Testing Guidelines
-
-1. **后端测试**: 使用内存 SQLite 数据库，测试 CRUD、版本管理、消息过滤逻辑
-2. **前端测试**: Mock Tauri invoke，测试组件渲染、用户交互、Hook 状态管理
-3. **集成测试**: 测试完整用户流程（配置修改→保存→读取）
-4. **测试命名**: `test_[功能]_[场景]` (Rust) / `should [行为] when [条件]` (TS)
-
-### Test Data Isolation (重要)
-
-> ⚠️ **关键**: 所有后端测试必须使用内存数据库，确保不影响真实的 db 文件
-
-**内存数据库使用:**
-```rust
-// ✅ 正确：使用内存数据库
-let conn = Connection::open_in_memory().unwrap();
-
-// ❌ 错误：绝对不要在测试中使用文件路径
-// let conn = Connection::open("path/to/db.sqlite").unwrap();
-```
-
-**测试隔离特性:**
-- 每次 `open_in_memory()` 创建独立的数据库实例
-- 测试结束后自动销毁，无需清理
-- 不同测试之间完全隔离，互不影响
-
-### Test Documentation (Rust)
-
-> Rust 没有类似 Jest 的 `describe` 块，使用文档注释描述测试用例
-
-**注释规范:**
-```rust
-/// 测试消息的完整 CRUD 生命周期
-///
-/// 验证内容：
-/// - Create: 创建消息后返回有效 ID
-/// - Read: 能够根据 ID 读取完整消息信息
-/// - Update: 修改消息内容后持久化成功
-/// - Delete: 删除后无法再读取到该消息
-#[test]
-fn test_message_crud() {
-    // ...
-}
-```
-
-### Running Tests
-
-```bash
-# 后端测试（精确范围运行）
-cargo test --manifest-path src-tauri/Cargo.toml [test_name]
-
-# 前端测试
-npm run test        # 运行所有测试
-npm run test:watch  # 监听模式
-npm run test:coverage  # 覆盖率报告
-```
-
-# important-instruction-reminders
-
-## Failure and Fallback Policy
-
-- **禁止擅自降级**：Codex 必须始终使用 Codex 原生通道，Claude Code 必须始终使用 Claude Code 原生通道。启动、恢复、模型、MCP、权限、进程或协议任一环节失败时，必须立即报错并停止；禁止自动切换到 ACP、其他模型、其他 provider、新会话、无工具模式或任何能力缩减路径。只有用户针对当前需求明确要求某种降级方案时才允许实现。
-- **错误必须具体且可追溯**：禁止只返回“运行失败”“会话已停止”“未知错误”等笼统文案。用户可见错误与持久化错误必须包含原始失败环节和底层原因；进程型通道还应捕获并记录 stderr、退出状态或协议错误，并附带可关联的 conversation/session/run 标识。若底层没有提供原因，必须明确指出缺失的是哪一层诊断信息以及为何缺失，不能用泛化文案覆盖。
-
-Do what has been asked; nothing more, nothing less.
-NEVER create files unless they're absolutely necessary for achieving your goal.
-ALWAYS prefer editing an existing file to creating a new one.
-NEVER proactively create documentation files (\*.md) or README files. Only create documentation files if explicitly requested by the User.
-NEVER add fallback logic to features unless explicitly requested by the user. When a feature fails, it should return an error rather than silently degrading to a fallback behavior.
-
-IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+- When a user-facing feature changes, update the matching file under `docs/product/` in the same task when practical.
+- Keep `docs/product/README.md` aligned with the actual set of product docs and major user-visible features.
+- 架构、开发任务、测试规范的细节分别维护在 `docs/architecture.md`、`docs/development-guide.md`、`docs/testing-guidelines.md`；改动对应内容时同步更新这些文件，`AGENTS.md` 只保留规范红线与索引。
+- Keep this `AGENTS.md` aligned with major architecture/product-surface changes that affect future engineering tasks, especially Butler, Feishu, export formats, scheduling model, and Skills behavior.

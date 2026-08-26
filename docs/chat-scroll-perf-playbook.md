@@ -67,8 +67,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 
 说明：
 
-- `AIPP_CHAT_SCROLL_PERF_INDEX` 从 `0` 开始
+- `AIPP_CHAT_SCROLL_PERF_INDEX` 从 `0` 开始，且是**当前 ChatUI 会话列表顺序**里的下标；先从结果 JSON 的 `conversationName` 确认目标会话，不要凭序号想当然
 - 结果会写到 `tmp/*.json`
+- **不要并行跑多个 harness**：它们会竞争 Cargo 默认构建/输出锁，必须串行执行、等上一个结束再跑下一个
 - 如果以后排查别的 UI 问题，没有现成入口，就按同样模式补一个：
   - 前端暴露测试 API
   - 前端上报 progress

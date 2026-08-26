@@ -14,16 +14,19 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 ### 会话句柄路由
 - `AcpSessionHandle` 会话句柄
-- 后台任务保持单个 `ClientSideConnection` 连接活跃
+- 后台任务保持单个 `ConnectionTo<Agent>` 连接活跃（agent-client-protocol v2 SDK）
 - ACP 启动连接、提示、取消、配置项更新都通过会话句柄路由到后台任务
 - 用户打开 ACP 对话时会自动建立 session 连接，用于提前获取 `configOptions`、Plan 和可用命令
 - 自动连接不会创建空消息，也不会向 Agent 发送 prompt
 - ACP session 空闲 15 分钟且没有活跃 prompt 时会自动释放，之后再次打开对话或发送消息时重新连接
 
 ### 会话任务运行时
-- ACP 会话任务运行在专用单线程运行时上
-- 使用 `LocalSet` 支持非 `Send` 的 futures
-- 独立的 Tokio 运行时避免阻塞主线程
+- ACP 会话任务是普通的 `tokio::spawn` 任务
+- agent-client-protocol v2 SDK（crates.io `agent-client-protocol` v2.0.0，schema 类型位于 `agent_client_protocol::schema::v1 as acp`）不绑定具体异步运行时，所有 future 均为 `Send`
+- 不再需要专用单线程运行时和 `LocalSet`
+- 客户端通过 `Client.builder()` + `on_receive_request` / `on_receive_notification` 回调构建；请求通过 `cx.send_request(...).block_task().await` 在 `ConnectionTo<Agent>` 上发送
+- v2 `on_receive_*` 回调内联运行在连接调度循环上，因此每个客户端请求处理器（权限/文件/终端/elicitation）必须立即通过 `AcpTauriClient::spawn_request_task` 转发到 `cx.spawn` 任务，并在该任务里经由 `Responder` 响应——禁止在处理器内 `block_task`（死锁）
+- 未知扩展方法/通知由 SDK 内建 fallback 处理（method-not-found / 忽略），不再保留旧的 `ext_method` / `ext_notification` 桩
 
 ---
 
@@ -107,7 +110,35 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 ---
 
+## 会话生命周期清理
+
+### session/close
+- Agent 声明 `session_capabilities.close` 时，会话任务退出前（空闲释放/切换对话等）会先发送 `session/close`（5 秒超时）
+- 失败只记录日志，进程仍按原逻辑退出
+
+### session/delete
+- 删除 ACP 对话时，`schedule_acp_session_delete` 会结束本地活跃会话、启动一次性 agent 进程按能力调用 `session/delete`，并删除本地 `acp_session` 记录
+- Agent 不支持 `session/delete` 时跳过 agent 侧清理；任何失败都不影响本地对话删除
+
+## 结构化提问（Elicitation）
+
+- 客户端通过 `elicitation.form` 能力声明支持表单式结构化提问（依赖 SDK `unstable_elicitation` feature）
+- Agent 发起 `elicitation/create` 时，前端复用 ask_user_question 的内联卡片（`AskUserQuestionCard`）渲染：JSON Schema 的文本/数字/整数/布尔/单选/多选字段转换为问题列表，提交时还原为类型化键值
+- 选填字段（不在 schema `required` 中）可留空跳过；卡片取消按钮对应拒绝（decline）
+- URL 模式、request 作用域和未知模式统一回复 decline 并记录原因
+- 取消 prompt 或会话任务退出时，挂起的 elicitation 请求会随权限请求一起取消
+
+---
+
 ## 配置输入
+
+### 支持的 ACP CLI
+- `claude-code-acp`：Claude Code 的 ACP 适配器（`@zed-industries/claude-code-acp`），支持 Bun 一键安装
+- `gemini`：Gemini CLI 原生支持 ACP，需用户自行安装
+- `kimi`：Kimi Code CLI 原生支持 ACP，启动时自动附加 `acp` 子命令（即 `kimi acp`），需用户按官方文档安装并先 `/login`
+- `dsh-acp-server`：DeepSeek Harness 的 ACP 插件，需 Node.js >= 22 并手动安装 `@deepseek-ai/dsh` 与 `dsh-acp-server`，模型与密钥在 dsh 中配置
+- node-shebang 脚本类 CLI（如 npm/bun 全局 bin）统一通过显式 node 运行时启动，保证 Windows 可用
+- 启动失败时会按 CLI 给出对应的安装提示
 
 ### ACP CLI 命令配置
 - 从 `llm_provider_config` 读取 ACP CLI 命令
@@ -166,6 +197,14 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 - 部分代理只支持 `session/resume`，不能通过 `session/load` 回放历史消息
 - 会话持久化仅在代理支持 `loadSession` 或 `session/resume` 时有效
 - 当代理不支持恢复能力或恢复失败时，AIPP 会使用本地 conversation 历史构建一次 history fallback prompt
+
+---
+
+## Codex MCP 桥接注入
+
+- Codex app-server 通道通过 `thread/start` / `thread/resume` 的 `config` 覆盖（`mcp_servers.aipp.*`）把 AIPP 桥（`--aipp-acp-mcp-bridge`）注册为 `aipp` MCP server，以此挂载助手选中的 MCP 工具
+- 工具执行经由与 ACP 桥相同的 TCP 代理和权限路径回流
+- 选中工具负载是 session 签名的一部分：绑定变更会重建 session，同时恢复同一线程
 
 ---
 相关源码:
