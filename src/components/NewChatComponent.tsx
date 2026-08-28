@@ -1,8 +1,11 @@
 import AskWindowPrepare from "./AskWindowPrepare";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { useIsMobile } from "../hooks/use-mobile";
 import { invoke } from "@tauri-apps/api/core";
+import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
 interface AssistantListItem {
     id: number;
@@ -11,6 +14,61 @@ interface AssistantListItem {
 }
 
 interface AgentModelOption { code: string; name: string; provider_id: number; efforts: string[]; default_effort?: string | null; }
+
+interface AgentSelectOption {
+    value: string;
+    label: string;
+}
+
+interface AgentCompactSelectProps {
+    value: string;
+    options: AgentSelectOption[];
+    placeholder: string;
+    icon: ReactNode;
+    disabled?: boolean;
+    onChange: (value: string) => void;
+}
+
+function AgentCompactSelect({ value, options, placeholder, icon, disabled, onChange }: AgentCompactSelectProps) {
+    const [open, setOpen] = useState(false);
+    const currentLabel = options.find((option) => option.value === value)?.label ?? (value || placeholder);
+
+    return (
+        <Popover open={open} onOpenChange={setOpen}>
+            <PopoverTrigger asChild>
+                <button
+                    type="button"
+                    disabled={disabled}
+                    className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={placeholder}
+                >
+                    <span className="shrink-0 text-foreground/70">{icon}</span>
+                    <span className="min-w-0 flex-1 truncate text-left">{currentLabel}</span>
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-56 p-1">
+                {options.map((option) => {
+                    const selected = option.value === value;
+                    return (
+                        <button
+                            key={option.value}
+                            type="button"
+                            className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground ${selected ? "bg-accent text-accent-foreground" : ""}`}
+                            onClick={() => {
+                                onChange(option.value);
+                                setOpen(false);
+                            }}
+                        >
+                            <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                            {selected ? <Check className="h-4 w-4 shrink-0" /> : null}
+                        </button>
+                    );
+                })}
+            </PopoverContent>
+        </Popover>
+    );
+}
 
 interface NewChatComponentProps {
     selectedText: string;
@@ -112,7 +170,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                 value={selectedAssistant.toString()}
                 onValueChange={(value) => setSelectedAssistant(Number(value))}
             >
-                <SelectTrigger className="w-100 mt-4" data-aipp-slot="chat-new-conversation-assistant-select">
+                <SelectTrigger className="mt-4 w-88" data-aipp-slot="chat-new-conversation-assistant-select">
                     <SelectValue placeholder="选择一个助手" />
                 </SelectTrigger>
                 <SelectContent>
@@ -124,43 +182,57 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                 </SelectContent>
             </Select>
             {isAgentAssistant ? (
-                <div className="mt-3 flex w-100 flex-col gap-1">
+                <div className="mt-3 flex w-88 flex-col gap-1">
                     <div className="flex items-center gap-2">
-                    <Select value={selectedModel} onValueChange={(value) => {
-                        const model = models.find((item) => item.code === value);
-                        const nextEfforts = model?.efforts ?? [];
-                        setEfforts(nextEfforts);
-                        const nextEffort = model?.default_effort && nextEfforts.includes(model.default_effort)
-                            ? model.default_effort
-                            : nextEfforts.includes(selectedEffort) ? selectedEffort : (nextEfforts[0] ?? "");
-                        onAgentConfigChange(value, nextEffort, codexDefaults?.approval_policy ?? "", codexDefaults?.sandbox ?? "");
-                    }}>
-                        <SelectTrigger className="min-w-0 flex-1" disabled={loadingConfig || models.length === 0}><SelectValue placeholder={loadingConfig ? "加载模型" : "选择模型"} /></SelectTrigger>
-                        <SelectContent>{models.map((model) => <SelectItem key={model.code} value={model.code}>{model.name}</SelectItem>)}</SelectContent>
-                    </Select>
-                    <Select value={selectedEffort} onValueChange={(value) => onAgentConfigChange(selectedModel, value, selectedApprovalPolicy, selectedSandbox)}>
-                        <SelectTrigger className="min-w-0 flex-1" disabled={loadingConfig || efforts.length === 0}><SelectValue placeholder={loadingConfig ? "加载强度" : "选择强度"} /></SelectTrigger>
-                        <SelectContent>{efforts.map((effort) => <SelectItem key={effort} value={effort}>{effort}</SelectItem>)}</SelectContent>
-                    </Select>
+                        <AgentCompactSelect
+                            value={selectedModel}
+                            options={models.map((model) => ({ value: model.code, label: model.name }))}
+                            placeholder={loadingConfig ? "加载模型" : "选择模型"}
+                            icon={<Cpu className="h-3.5 w-3.5" />}
+                            disabled={loadingConfig || models.length === 0}
+                            onChange={(value) => {
+                                const model = models.find((item) => item.code === value);
+                                const nextEfforts = model?.efforts ?? [];
+                                setEfforts(nextEfforts);
+                                const nextEffort = model?.default_effort && nextEfforts.includes(model.default_effort)
+                                    ? model.default_effort
+                                    : nextEfforts.includes(selectedEffort) ? selectedEffort : (nextEfforts[0] ?? "");
+                                onAgentConfigChange(value, nextEffort, codexDefaults?.approval_policy ?? "", codexDefaults?.sandbox ?? "");
+                            }}
+                        />
+                        <AgentCompactSelect
+                            value={selectedEffort}
+                            options={efforts.map((effort) => ({ value: effort, label: effort }))}
+                            placeholder={loadingConfig ? "加载强度" : "选择强度"}
+                            icon={<Brain className="h-3.5 w-3.5" />}
+                            disabled={loadingConfig || efforts.length === 0}
+                            onChange={(value) => onAgentConfigChange(selectedModel, value, selectedApprovalPolicy, selectedSandbox)}
+                        />
                     </div>
                     {codexDefaults ? (
                         <div className="flex items-center gap-2">
-                            <Select value={selectedApprovalPolicy} onValueChange={(value) => onAgentConfigChange(selectedModel, selectedEffort, value, selectedSandbox)}>
-                                <SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="审批策略" /></SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="untrusted">仅读命令自动执行（untrusted）</SelectItem>
-                                    <SelectItem value="on-request">由模型决定何时请求审批（on-request）</SelectItem>
-                                    <SelectItem value="never">从不请求审批（never）</SelectItem>
-                                </SelectContent>
-                            </Select>
-                            <Select value={selectedSandbox} onValueChange={(value) => onAgentConfigChange(selectedModel, selectedEffort, selectedApprovalPolicy, value)}>
-                                <SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="沙箱模式" /></SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="read-only">只读（read-only）</SelectItem>
-                                    <SelectItem value="workspace-write">工作区可写（workspace-write）</SelectItem>
-                                    <SelectItem value="danger-full-access">完全访问（danger-full-access）</SelectItem>
-                                </SelectContent>
-                            </Select>
+                            <AgentCompactSelect
+                                value={selectedApprovalPolicy}
+                                options={[
+                                    { value: "untrusted", label: "仅读命令自动执行" },
+                                    { value: "on-request", label: "按需请求审批" },
+                                    { value: "never", label: "从不请求审批" },
+                                ]}
+                                placeholder="审批策略"
+                                icon={<Box className="h-3.5 w-3.5" />}
+                                onChange={(value) => onAgentConfigChange(selectedModel, selectedEffort, value, selectedSandbox)}
+                            />
+                            <AgentCompactSelect
+                                value={selectedSandbox}
+                                options={[
+                                    { value: "read-only", label: "只读" },
+                                    { value: "workspace-write", label: "工作区可写" },
+                                    { value: "danger-full-access", label: "完全访问" },
+                                ]}
+                                placeholder="沙箱模式"
+                                icon={<ShieldCheck className="h-3.5 w-3.5" />}
+                                onChange={(value) => onAgentConfigChange(selectedModel, selectedEffort, selectedApprovalPolicy, value)}
+                            />
                         </div>
                     ) : null}
                     {configError ? <span className="text-xs text-muted-foreground">{configError}</span> : null}
