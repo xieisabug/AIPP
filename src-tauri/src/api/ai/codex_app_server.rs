@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
@@ -55,6 +56,7 @@ pub struct CodexConversationSessionState {
     pub load_session_supported: bool,
     pub session_resume_supported: bool,
     pub restored_session_method: Option<String>,
+    pub connection_event_id: Option<String>,
     pub current_turn_id: Option<String>,
     pub has_active_prompt: bool,
     pub model: Option<String>,
@@ -259,6 +261,7 @@ pub struct CodexSessionEntry {
     pub snapshot: CodexConversationSessionState,
     pub config_signature: String,
     pub run_id: String,
+    pub last_activity: Instant,
 }
 
 impl CodexSessionEntry {
@@ -272,7 +275,20 @@ impl CodexSessionEntry {
                 ..Default::default()
             },
             config_signature,
+            last_activity: Instant::now(),
         }
+    }
+
+    pub fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    pub fn is_idle_for(&self, idle_timeout: Duration) -> bool {
+        super::agent_session_lifecycle::should_release_idle_session(
+            self.snapshot.has_active_prompt,
+            self.last_activity.elapsed(),
+            idle_timeout,
+        )
     }
 }
 
@@ -392,11 +408,20 @@ pub fn refresh_codex_session_signature(config: &mut CodexAppServerConfig) {
     config.session_signature = codex_config_signature(config);
 }
 
-fn emit_session_snapshot(
+async fn emit_session_snapshot(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     state: Option<CodexConversationSessionState>,
 ) {
+    if let (Some(codex_state), Some(state_for_cache)) = (
+        app_handle.try_state::<crate::CodexSessionState>(),
+        state.clone(),
+    ) {
+        if let Some(entry) = codex_state.sessions.lock().await.get_mut(&conversation_id) {
+            entry.snapshot = state_for_cache;
+            entry.touch();
+        }
+    }
     let event = ConversationEvent {
         r#type: "acp_session_state_snapshot".to_string(),
         data: serde_json::to_value(CodexSessionStateSnapshotEvent { state }).unwrap(),
@@ -1628,7 +1653,7 @@ pub fn spawn_codex_session_task(
             false
         };
         if removed_current_entry {
-            emit_session_snapshot(&app_handle, conversation_id, None);
+            emit_session_snapshot(&app_handle, conversation_id, None).await;
         }
     });
     CodexSessionHandle { sender, run_id, failure_context }
@@ -1718,6 +1743,9 @@ async fn run_session(
             }
         })?;
     let restored_session_method = stored_thread.as_ref().map(|_| "resume".to_string());
+    let connection_event_id = restored_session_method
+        .as_ref()
+        .map(|method| format!("{run_id}:{method}"));
     let thread_id = thread_id_from_result(&thread_result)
         .ok_or_else(|| format!("Codex thread response missing thread id: {thread_result}"))?;
     request_id += 1;
@@ -1747,6 +1775,7 @@ async fn run_session(
         load_session_supported: false,
         session_resume_supported: true,
         restored_session_method,
+        connection_event_id,
         current_turn_id: None,
         has_active_prompt: false,
         model: first_string_for_keys(&thread_result, &["model", "modelId"])
@@ -1820,14 +1849,14 @@ async fn run_session(
         }
         apply_codex_config_option(&mut snapshot, &model_catalog, "model", model)?;
     }
-    emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+    emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
 
     while let Some(command) = receiver.recv().await {
         match command {
             CodexSessionCommand::SetConfigOption { config_id, value, response } => {
                 match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                     Ok(()) => {
-                        emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                        emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
                         let _ = response.send(Ok(()));
                     }
                     Err(error) => {
@@ -1870,7 +1899,7 @@ async fn run_session(
                     .map(str::to_string);
                 snapshot.current_turn_id = turn_id.clone();
                 snapshot.has_active_prompt = true;
-                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
                 let mut content = String::new();
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
@@ -1901,7 +1930,7 @@ async fn run_session(
                                 Some(CodexSessionCommand::SetConfigOption { config_id, value, response }) => {
                                     match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                                         Ok(()) => {
-                                            emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                                            emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
                                             let _ = response.send(Ok(()));
                                         }
                                         Err(error) => {
@@ -2128,7 +2157,7 @@ async fn run_session(
                 if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_focus(&app_handle, conversation_id).await; }
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;
-                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone()));
+                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
                 failure_context
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())

@@ -112,6 +112,15 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 ## 会话生命周期清理
 
+### 原生 Codex / Claude Code
+
+- 打开或切换到历史对话不会仅因浏览而启动 Codex / Claude Code 进程；首次发送消息时才连接，已有热会话继续复用
+- 切换离开对话不会中断正在生成、等待权限或执行工具的会话
+- ACP、Codex、Claude Code 的本地运行实例统一在无活跃请求且空闲 15 分钟后释放；持久化的 session/thread ID 保留，下次请求通过原生恢复能力继续
+- Codex 空闲释放只关闭本地 app-server 进程，不调用 `thread/archive` 或 `thread/delete`；Claude Code 空闲释放只关闭本地 stream-json 进程
+- 恢复成功提示按连接代次去重：Codex 在 `thread/resume` 成功响应后确认，Claude Code 在 CLI 返回并核对原 session ID 后确认
+- 删除 AIPP 对话时会停止三类本地运行实例并清理本地 session 映射；Codex / Claude Code 的 CLI 侧历史不会被隐式归档或删除
+
 ### session/close
 - Agent 声明 `session_capabilities.close` 时，会话任务退出前（空闲释放/切换对话等）会先发送 `session/close`（5 秒超时）
 - 失败只记录日志，进程仍按原逻辑退出

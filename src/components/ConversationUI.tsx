@@ -38,6 +38,7 @@ import useFileManagement from "@/hooks/useFileManagement";
 import { useConversationEvents } from "@/hooks/useConversationEvents";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { AssistantListItem } from "@/data/Assistant";
+import { claimAgentConnectionEvent } from "./conversation/agentSessionNotice";
 
 interface AgentRuntimeInfo {
     agent_kind: string;
@@ -689,20 +690,35 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
 
             const noticeKey = `${conversationId}:${acpSessionState.session_id}:${method}`;
-            if (acpRestoreNoticeRef.current === noticeKey) {
-                return;
+            const connectionEventId = acpSessionState.connection_event_id;
+            if (connectionEventId) {
+                if (!claimAgentConnectionEvent(connectionEventId)) {
+                    return;
+                }
+            } else {
+                if (acpRestoreNoticeRef.current === noticeKey) {
+                    return;
+                }
+                acpRestoreNoticeRef.current = noticeKey;
             }
 
-            acpRestoreNoticeRef.current = noticeKey;
-            const methodLabel = method === "resume" ? "session/resume" : "session/load";
             const isCodexSession = acpSessionState.agent_kind === "codex_app_server";
             const isClaudeSession = acpSessionState.agent_kind === "claude_sdk";
             const sessionLabel = isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : "ACP";
+            const methodLabel = method === "resume"
+                ? isCodexSession
+                    ? "thread/resume"
+                    : isClaudeSession
+                        ? "--resume"
+                        : "session/resume"
+                : "session/load";
             const description =
                 method === "resume"
                     ? isCodexSession
                         ? "Codex 已恢复线程内部上下文，AIPP 保留本地对话展示。"
-                        : "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
+                        : isClaudeSession
+                            ? "Claude Code 已确认恢复原 session，AIPP 保留本地对话展示。"
+                            : "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
                     : isCodexSession
                         ? "Codex 已恢复线程，AIPP 已抑制历史回放，避免重复写入当前对话。"
                         : "AIPP 已抑制历史回放，避免重复写入当前对话。";
@@ -711,6 +727,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             });
         }, [
             acpSessionState?.agent_kind,
+            acpSessionState?.connection_event_id,
             acpSessionState?.restored_session_method,
             acpSessionState?.session_id,
             conversationId,
@@ -1623,9 +1640,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         {configOptionCount} 项
                                     </Badge>
                                 </div>
-                                {!acpSessionState?.session_id && !isClaudeSession ? (
+                                {!acpSessionState?.session_id ? (
                                     <div className="text-xs text-muted-foreground">
-                                        正在连接 {isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : isAcpSession ? "ACP" : "Agent"} session；连接成功后会读取 Agent 返回的配置项。
+                                        {isCodexSession || isClaudeSession
+                                            ? `发送消息时连接 ${isCodexSession ? "Codex" : "Claude Code"} session；连接成功后会读取会话配置。`
+                                            : `正在连接 ${isAcpSession ? "ACP" : "Agent"} session；连接成功后会读取 Agent 返回的配置项。`}
                                     </div>
                                 ) : configOptionCount === 0 ? (
                                     <div className="text-xs text-muted-foreground">

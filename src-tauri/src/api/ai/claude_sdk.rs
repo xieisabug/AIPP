@@ -27,6 +27,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tauri::{Emitter, Manager};
 use tokio::{
@@ -106,6 +107,7 @@ pub struct ClaudeConversationSessionState {
     pub load_session_supported: bool,
     pub session_resume_supported: bool,
     pub restored_session_method: Option<String>,
+    pub connection_event_id: Option<String>,
     pub config_options: Vec<AcpSessionConfigOptionPayload>,
 }
 
@@ -126,6 +128,7 @@ pub struct ClaudeSessionEntry {
     pub snapshot: ClaudeConversationSessionState,
     pub config_signature: String,
     pub run_id: String,
+    pub last_activity: Instant,
 }
 
 impl ClaudeSessionEntry {
@@ -158,7 +161,20 @@ impl ClaudeSessionEntry {
                 ],
                 ..Default::default()
             },
+            last_activity: Instant::now(),
         }
+    }
+
+    pub fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    pub fn is_idle_for(&self, idle_timeout: Duration) -> bool {
+        super::agent_session_lifecycle::should_release_idle_session(
+            self.snapshot.has_active_prompt,
+            self.last_activity.elapsed(),
+            idle_timeout,
+        )
     }
 }
 
@@ -585,19 +601,16 @@ fn emit_update(window: &tauri::Window, conversation_id: i64, id: i64, content: &
     );
 }
 
-fn emit_snapshot(
+async fn emit_snapshot(
     app: &tauri::AppHandle,
     conversation_id: i64,
     state: ClaudeConversationSessionState,
 ) {
     if let Some(claude_state) = app.try_state::<crate::ClaudeSessionState>() {
-        let sessions = claude_state.sessions.clone();
-        let state_for_cache = state.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Some(entry) = sessions.lock().await.get_mut(&conversation_id) {
-                entry.snapshot = state_for_cache;
-            }
-        });
+        if let Some(entry) = claude_state.sessions.lock().await.get_mut(&conversation_id) {
+            entry.snapshot = state.clone();
+            entry.touch();
+        }
     }
     let _ = crate::utils::window_utils::send_conversation_event_to_chat_windows(
         app,
@@ -828,6 +841,22 @@ fn build_claude_command(
     (command, resolved)
 }
 
+pub(crate) fn confirm_claude_resume(
+    expected_session_id: Option<&str>,
+    actual_session_id: &str,
+    run_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let Some(expected_session_id) = expected_session_id else {
+        return Ok(None);
+    };
+    if actual_session_id != expected_session_id {
+        return Err(format!(
+            "Claude Code 恢复会话失败：请求恢复 session_id={expected_session_id}，CLI 返回 session_id={actual_session_id}"
+        ));
+    }
+    Ok(Some(("resume".into(), format!("{run_id}:resume"))))
+}
+
 pub fn spawn_claude_session_task(
     app: tauri::AppHandle,
     _conversation_id: i64,
@@ -872,6 +901,9 @@ pub fn spawn_claude_session_task(
             "Claude Code stream-json process started"
         );
         let mut session_id: Option<String> = stored_session.clone();
+        let mut pending_resume_session_id = stored_session.clone();
+        let mut restored_session_method: Option<String> = None;
+        let mut connection_event_id: Option<String> = None;
         emit_snapshot(
             &app,
             _conversation_id,
@@ -884,10 +916,12 @@ pub fn spawn_claude_session_task(
                 permission_mode: config.permission_mode.clone(),
                 load_session_supported: false,
                 session_resume_supported: true,
-                restored_session_method: stored_session.as_ref().map(|_| "resume".into()),
+                restored_session_method: None,
+                connection_event_id: None,
                 config_options: claude_config_options(&config),
             },
-        );
+        )
+        .await;
         while let Some(message) = rx.recv().await {
             match message {
                 SessionCommand::Cancel { response } => {
@@ -913,6 +947,9 @@ pub fn spawn_claude_session_task(
                             child = new_child;
                             stdin = new_stdin;
                             lines = new_lines;
+                            pending_resume_session_id = session_id.clone();
+                            restored_session_method = None;
+                            connection_event_id = None;
                             let _ = response.send(Ok(()));
                         }
                         Err(error) => {
@@ -923,8 +960,9 @@ pub fn spawn_claude_session_task(
                     emit_snapshot(&app, _conversation_id, ClaudeConversationSessionState {
                         conversation_id: _conversation_id, agent_kind: CLAUDE_SDK_API_TYPE.into(), session_id: session_id.clone(), has_active_prompt: false,
                         model: config.model.clone(), permission_mode: config.permission_mode.clone(), load_session_supported: false, session_resume_supported: true,
-                        restored_session_method: None, config_options: claude_config_options(&config),
-                    });
+                        restored_session_method: restored_session_method.clone(), connection_event_id: connection_event_id.clone(), config_options: claude_config_options(&config),
+                    })
+                    .await;
                 }
                 SessionCommand::Prompt { message_id, prompt, window } => {
                     let input = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":prompt}]},"session_id":session_id});
@@ -971,10 +1009,12 @@ pub fn spawn_claude_session_task(
                             permission_mode: config.permission_mode.clone(),
                             load_session_supported: false,
                             session_resume_supported: true,
-                            restored_session_method: None,
+                            restored_session_method: restored_session_method.clone(),
+                            connection_event_id: connection_event_id.clone(),
                             config_options: claude_config_options(&config),
                         },
-                    );
+                    )
+                    .await;
                     let mut usage = Value::Null;
                     let mut stream_error: Option<String> = None;
                     loop {
@@ -1015,6 +1055,30 @@ pub fn spawn_claude_session_task(
                         };
                         let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
                         if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
+                            match confirm_claude_resume(
+                                pending_resume_session_id.as_deref(),
+                                id,
+                                &task_run_id,
+                            ) {
+                                Ok(Some((method, event_id))) => {
+                                    restored_session_method = Some(method);
+                                    connection_event_id = Some(event_id);
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    stream_error = Some(error);
+                                    break;
+                                }
+                            }
+                            if pending_resume_session_id.is_some() {
+                                pending_resume_session_id = None;
+                                emit_snapshot(&app, _conversation_id, ClaudeConversationSessionState {
+                                    conversation_id: _conversation_id, agent_kind: CLAUDE_SDK_API_TYPE.into(), session_id: Some(id.into()), has_active_prompt: true,
+                                    model: config.model.clone(), permission_mode: config.permission_mode.clone(), load_session_supported: false, session_resume_supported: true,
+                                    restored_session_method: restored_session_method.clone(), connection_event_id: connection_event_id.clone(), config_options: claude_config_options(&config),
+                                })
+                                .await;
+                            }
                             session_id = Some(id.into());
                             if let Ok(db) = ConversationDatabase::new(&app) {
                                 let _ = db.upsert_agent_session_id(
@@ -1035,8 +1099,9 @@ pub fn spawn_claude_session_task(
                                 emit_snapshot(&app, _conversation_id, ClaudeConversationSessionState {
                                     conversation_id: _conversation_id, agent_kind: CLAUDE_SDK_API_TYPE.into(), session_id: session_id.clone(), has_active_prompt: true,
                                     model: config.model.clone(), permission_mode: config.permission_mode.clone(), load_session_supported: false, session_resume_supported: true,
-                                    restored_session_method: None, config_options: claude_config_options(&config),
-                                });
+                                    restored_session_method: restored_session_method.clone(), connection_event_id: connection_event_id.clone(), config_options: claude_config_options(&config),
+                                })
+                                .await;
                             }
                             "stream_event" => {
                                 if let Some(delta) =
@@ -1205,10 +1270,12 @@ pub fn spawn_claude_session_task(
                             permission_mode: config.permission_mode.clone(),
                             load_session_supported: false,
                             session_resume_supported: true,
-                            restored_session_method: None,
+                            restored_session_method: restored_session_method.clone(),
+                            connection_event_id: connection_event_id.clone(),
                             config_options: claude_config_options(&config),
                         },
-                    );
+                    )
+                    .await;
                 }
             }
         }

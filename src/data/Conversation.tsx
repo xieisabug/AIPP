@@ -281,6 +281,7 @@ export interface AcpConversationSessionState {
     load_session_supported: boolean;
     session_resume_supported?: boolean;
     restored_session_method?: "resume" | "load" | string | null;
+    connection_event_id?: string | null;
     prompt_capabilities: AcpPromptCapabilities;
     current_mode_id?: string | null;
     modes: AcpSessionMode[];

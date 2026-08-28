@@ -1,12 +1,10 @@
 use crate::api::ai::acp::{
-    apply_network_proxy_to_env_vars, build_acp_launch_plan, build_selected_mcp_tools_payload,
-    extract_acp_config,
+    apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
     refresh_acp_config_signature, refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path,
-    spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
+    spawn_agent_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
 };
 use crate::api::ai::codex_app_server::{
-    extract_codex_app_server_config, probe_codex_model_options, refresh_codex_session_signature, spawn_codex_session_task,
-    CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
+    extract_codex_app_server_config, probe_codex_model_options, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::claude_sdk::{
     claude_model_choices, extract_claude_sdk_config, is_claude_code_provider,
@@ -224,17 +222,6 @@ pub(crate) fn resolve_acp_provider_id(
         })
 }
 
-fn get_or_insert_codex_auto_connect_session<T, F>(
-    sessions: &mut HashMap<i64, T>,
-    conversation_id: i64,
-    create_session: F,
-) -> &T
-where
-    F: FnOnce() -> T,
-{
-    sessions.entry(conversation_id).or_insert_with(create_session)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,41 +263,6 @@ mod tests {
         assert_eq!(resolve_acp_provider_id(&models, &model_configs), Some(9));
     }
 
-    #[test]
-    fn codex_auto_connect_never_replaces_ask_ai_session_with_different_signature() {
-        #[derive(Debug, PartialEq)]
-        struct SessionIdentity {
-            run_id: &'static str,
-            signature: &'static str,
-        }
-
-        let conversation_id = 792;
-        let mut sessions = HashMap::from([(
-            conversation_id,
-            SessionIdentity {
-                run_id: "ask-ai-run",
-                signature: "message-model-override",
-            },
-        )]);
-        let mut auto_connect_created_session = false;
-
-        let selected = get_or_insert_codex_auto_connect_session(
-            &mut sessions,
-            conversation_id,
-            || {
-                auto_connect_created_session = true;
-                SessionIdentity {
-                    run_id: "auto-connect-run",
-                    signature: "assistant-default-model",
-                }
-            },
-        );
-
-        assert_eq!(selected.run_id, "ask-ai-run");
-        assert_eq!(selected.signature, "message-model-override");
-        assert!(!auto_connect_created_session);
-        assert_eq!(sessions[&conversation_id].run_id, "ask-ai-run");
-    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -1071,7 +1023,7 @@ pub async fn ensure_acp_session_connected(
     conversation_id: i64,
     assistant_id: i64,
 ) -> Result<Option<serde_json::Value>, String> {
-    spawn_acp_idle_reaper_once(app_handle.clone());
+    spawn_agent_idle_reaper_once(app_handle.clone());
 
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
@@ -1117,41 +1069,10 @@ pub async fn ensure_acp_session_connected(
     // 自动连接只负责填补空会话。ask_ai 可能已按本次消息的模型覆盖创建了权威会话，
     // 此处绝不能用助手默认配置替换它，否则会中断正在执行的 Codex turn。
     if provider_api_type == CODEX_APP_SERVER_API_TYPE {
-        let model_code = assistant_models
-            .first()
-            .map(|model| model.model_code.clone())
-            .filter(|value| !value.trim().is_empty());
-        let mut codex_config =
-            extract_codex_app_server_config(&model_configs, &provider_configs, model_code)
-                .map_err(|e| e.to_string())?;
-        codex_config.selected_mcp_tools_payload =
-            build_selected_mcp_tools_payload(&app_handle, assistant_id)?;
-        refresh_codex_session_signature(&mut codex_config);
-        let snapshot = {
-            let mut sessions = codex_session_state.sessions.lock().await;
-            Some(
-                get_or_insert_codex_auto_connect_session(
-                    &mut sessions,
-                    conversation_id,
-                    || {
-                        let handle = spawn_codex_session_task(
-                            app_handle.clone(),
-                            conversation_id,
-                            codex_config.clone(),
-                        );
-                        CodexSessionEntry::new(
-                            handle,
-                            conversation_id,
-                            codex_config.session_signature.clone(),
-                        )
-                    },
-                )
-                .snapshot
-                .clone(),
-            )
-        };
-        return Ok(snapshot
-            .map(|state| serde_json::to_value(state).unwrap_or(serde_json::Value::Null)));
+        let sessions = codex_session_state.sessions.lock().await;
+        return Ok(sessions.get(&conversation_id).map(|entry| {
+            serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)
+        }));
     }
 
     let proxy_enabled = provider_configs

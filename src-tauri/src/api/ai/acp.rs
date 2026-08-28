@@ -960,7 +960,11 @@ impl AcpSessionEntry {
     }
 
     pub fn is_idle_for(&self, idle_timeout: Duration) -> bool {
-        !self.snapshot.has_active_prompt && self.last_activity.elapsed() >= idle_timeout
+        super::agent_session_lifecycle::should_release_idle_session(
+            self.snapshot.has_active_prompt,
+            self.last_activity.elapsed(),
+            idle_timeout,
+        )
     }
 }
 
@@ -1129,27 +1133,27 @@ fn emit_acp_session_state_snapshot(
     );
 }
 
-static ACP_IDLE_REAPER_STARTED: OnceLock<()> = OnceLock::new();
-const ACP_IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const ACP_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(60);
+static AGENT_IDLE_REAPER_STARTED: OnceLock<()> = OnceLock::new();
+const AGENT_IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const AGENT_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
-pub fn spawn_acp_idle_reaper_once(app_handle: tauri::AppHandle) {
-    if ACP_IDLE_REAPER_STARTED.set(()).is_err() {
+pub fn spawn_agent_idle_reaper_once(app_handle: tauri::AppHandle) {
+    if AGENT_IDLE_REAPER_STARTED.set(()).is_err() {
         return;
     }
 
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(ACP_IDLE_REAPER_INTERVAL);
+        let mut interval = tokio::time::interval(AGENT_IDLE_REAPER_INTERVAL);
         loop {
             interval.tick().await;
 
-            let expired_conversation_ids = {
+            let expired_acp_conversation_ids = {
                 let session_state = app_handle.state::<crate::AcpSessionState>();
                 let mut sessions = session_state.sessions.lock().await;
                 let expired = sessions
                     .iter()
                     .filter_map(|(conversation_id, entry)| {
-                        entry.is_idle_for(ACP_IDLE_SESSION_TIMEOUT).then_some(*conversation_id)
+                        entry.is_idle_for(AGENT_IDLE_SESSION_TIMEOUT).then_some(*conversation_id)
                     })
                     .collect::<Vec<_>>();
 
@@ -1160,12 +1164,55 @@ pub fn spawn_acp_idle_reaper_once(app_handle: tauri::AppHandle) {
                 expired
             };
 
-            for conversation_id in expired_conversation_ids {
+            for conversation_id in expired_acp_conversation_ids {
                 info!(
                     conversation_id,
                     idle_minutes = 15,
                     "ACP session idle timeout reached; releasing session"
                 );
+                emit_acp_session_state_snapshot(&app_handle, conversation_id, None);
+            }
+
+            let expired_codex_sessions = {
+                let session_state = app_handle.state::<crate::CodexSessionState>();
+                let mut sessions = session_state.sessions.lock().await;
+                let expired = sessions
+                    .iter()
+                    .filter_map(|(conversation_id, entry)| {
+                        entry
+                            .is_idle_for(AGENT_IDLE_SESSION_TIMEOUT)
+                            .then_some((*conversation_id, entry.handle.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for (conversation_id, handle) in &expired {
+                    handle.shutdown("15 分钟无活跃请求，释放本地 Codex app-server 进程".to_string());
+                    sessions.remove(conversation_id);
+                }
+                expired
+            };
+            for (conversation_id, _) in expired_codex_sessions {
+                info!(conversation_id, idle_minutes = 15, "Codex session idle timeout reached; releasing local process");
+                emit_acp_session_state_snapshot(&app_handle, conversation_id, None);
+            }
+
+            let expired_claude_conversation_ids = {
+                let session_state = app_handle.state::<crate::ClaudeSessionState>();
+                let mut sessions = session_state.sessions.lock().await;
+                let expired = sessions
+                    .iter()
+                    .filter_map(|(conversation_id, entry)| {
+                        entry
+                            .is_idle_for(AGENT_IDLE_SESSION_TIMEOUT)
+                            .then_some(*conversation_id)
+                    })
+                    .collect::<Vec<_>>();
+                for conversation_id in &expired {
+                    sessions.remove(conversation_id);
+                }
+                expired
+            };
+            for conversation_id in expired_claude_conversation_ids {
+                info!(conversation_id, idle_minutes = 15, "Claude Code session idle timeout reached; releasing local process");
                 emit_acp_session_state_snapshot(&app_handle, conversation_id, None);
             }
         }
@@ -5040,10 +5087,10 @@ async fn run_acp_connected_session(
     Ok(())
 }
 
-/// 删除对话时调度 agent 侧会话清理：
-/// 1. 结束本地活跃 ACP 会话（会话任务退出时会按能力发送 session/close）
-/// 2. 启动一次性 agent 进程，按能力调用 session/delete
-/// 3. 删除本地 acp_session 记录（conversation 删除不会级联清这张表）
+/// 删除对话时调度 agent 会话清理：
+/// 1. 结束 ACP、Codex、Claude Code 的本地运行实例
+/// 2. ACP 按能力调用 session/delete
+/// 3. 删除全部 agent_kind 的本地 session 映射
 ///
 /// 任何一步失败只记录日志，不影响本地对话删除。
 pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_id: i64) {
@@ -5065,12 +5112,22 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
                 error = %error,
                 "ACP: session delete skipped, failed to open conversation database"
             );
-            return;
+            None
         }
     };
-    let Some(session_id) = stored_session_id else {
-        return;
-    };
+    let acp_delete_config = stored_session_id.as_ref().and_then(|_| {
+        match prepare_acp_session_delete_config(app_handle, conversation_id) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                warn!(
+                    conversation_id,
+                    error = %error,
+                    "ACP: failed to snapshot session delete config before conversation deletion"
+                );
+                None
+            }
+        }
+    });
 
     let app_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
@@ -5085,24 +5142,52 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
             }
         }
 
-        if let Err(error) = run_acp_session_delete(&app_handle, conversation_id, &session_id).await
         {
-            warn!(
+            let session_state = app_handle.state::<crate::CodexSessionState>();
+            let mut sessions = session_state.sessions.lock().await;
+            if let Some(entry) = sessions.remove(&conversation_id) {
+                entry.handle.shutdown("用户删除 AIPP 对话，释放本地 Codex app-server 进程".to_string());
+                info!(conversation_id, "Codex: removed live session entry for deleted conversation");
+            }
+        }
+
+        {
+            let session_state = app_handle.state::<crate::ClaudeSessionState>();
+            let mut sessions = session_state.sessions.lock().await;
+            if sessions.remove(&conversation_id).is_some() {
+                info!(conversation_id, "Claude Code: removed live session entry for deleted conversation");
+            }
+        }
+
+        if let (Some(session_id), Some(acp_config)) = (stored_session_id, acp_delete_config) {
+            if let Err(error) = run_acp_session_delete(
+                &app_handle,
                 conversation_id,
-                session_id = %session_id,
-                error = %error,
-                "ACP: agent-side session/delete failed; local cleanup continues"
-            );
+                &session_id,
+                acp_config,
+            )
+            .await
+            {
+                warn!(
+                    conversation_id,
+                    session_id = %session_id,
+                    error = %error,
+                    "ACP: agent-side session/delete failed; local cleanup continues"
+                );
+            }
         }
 
         match ConversationDatabase::new(&app_handle) {
             Ok(db) => {
-                if let Err(error) = db.delete_acp_session_id(conversation_id) {
-                    warn!(
-                        conversation_id,
-                        error = %error,
-                        "ACP: failed to delete stored session id"
-                    );
+                for agent_kind in ["acp", "codex_app_server", "claude_sdk"] {
+                    if let Err(error) = db.delete_agent_session_id(conversation_id, agent_kind) {
+                        warn!(
+                            conversation_id,
+                            agent_kind,
+                            error = %error,
+                            "Agent: failed to delete stored session id"
+                        );
+                    }
                 }
             }
             Err(error) => {
@@ -5116,23 +5201,18 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
     });
 }
 
-/// 启动一次性 agent 进程执行 session/delete（能力门控），完成后尽量 session/close 并退出。
-async fn run_acp_session_delete(
+fn prepare_acp_session_delete_config(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
-    session_id: &str,
-) -> Result<(), AppError> {
+) -> Result<AcpConfig, AppError> {
     let conversation_db = ConversationDatabase::new(app_handle)?;
     let conversation = conversation_db
         .conversation_repo()?
         .read(conversation_id)?
-        .ok_or_else(|| {
-            AppError::UnknownError(format!("conversation {conversation_id} not found"))
-        })?;
+        .ok_or_else(|| AppError::UnknownError(format!("conversation {conversation_id} not found")))?;
     let assistant_id = conversation.assistant_id.ok_or_else(|| {
         AppError::UnknownError(format!("conversation {conversation_id} has no assistant"))
     })?;
-
     let assistant_db = AssistantDatabase::new(app_handle)?;
     let assistant = assistant_db.get_assistant(assistant_id)?;
     if assistant.assistant_type != Some(4) {
@@ -5146,8 +5226,16 @@ async fn run_acp_session_delete(
         .ok_or_else(|| AppError::UnknownError("ACP assistant has no provider configured".into()))?;
     let llm_db = LLMDatabase::new(app_handle)?;
     let provider_configs = llm_db.get_llm_provider_config(provider_id)?;
-    let acp_config = extract_acp_config(&model_configs, &provider_configs)?;
+    extract_acp_config(&model_configs, &provider_configs)
+}
 
+/// 启动一次性 agent 进程执行 session/delete（能力门控），完成后尽量 session/close 并退出。
+async fn run_acp_session_delete(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    session_id: &str,
+    acp_config: AcpConfig,
+) -> Result<(), AppError> {
     let resolved_cli_command = resolve_acp_cli_path(&acp_config.cli_command);
     let launch_plan = build_acp_launch_plan(
         &acp_config.cli_command,

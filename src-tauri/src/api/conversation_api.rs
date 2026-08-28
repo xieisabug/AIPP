@@ -558,7 +558,8 @@ pub fn delete_conversation(
     app_handle: tauri::AppHandle,
     conversation_id: i64,
 ) -> Result<(), String> {
-    // ACP 对话：尽力通知 agent 删除其侧 session，并清理本地 acp_session 记录。
+    // Agent 对话：释放本地运行实例；ACP 尽力通知 agent 删除其侧 session；
+    // Codex / Claude Code 只清理 AIPP 映射，不擅自归档或删除 CLI 侧历史。
     // 失败只记录日志，不影响本地删除。
     crate::api::ai::acp::schedule_acp_session_delete(&app_handle, conversation_id);
 

@@ -2,7 +2,7 @@ use super::assistant_api::AssistantDetail;
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_selected_mcp_tools_payload, extract_acp_config,
     refresh_acp_config_signature,
-    refresh_acp_selected_mcp_tools_payload, spawn_acp_idle_reaper_once,
+    refresh_acp_selected_mcp_tools_payload, spawn_agent_idle_reaper_once,
     spawn_acp_session_task,
 };
 use crate::api::ai::chat::{
@@ -1318,6 +1318,7 @@ pub async fn ask_ai(
         );
 
         if provider_api_type == CODEX_APP_SERVER_API_TYPE {
+            spawn_agent_idle_reaper_once(app_handle.clone());
             info!(conversation_id, "Codex app-server provider detected");
             let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
             let mut codex_config = extract_codex_app_server_config(
@@ -1371,7 +1372,9 @@ pub async fn ask_ai(
             let handle = {
                 let mut sessions = codex_session_state.sessions.lock().await;
                 if sessions.get(&conversation_id).is_some_and(|entry| entry.config_signature == codex_config.session_signature) {
-                    sessions.get(&conversation_id).unwrap().handle.clone()
+                    let entry = sessions.get_mut(&conversation_id).expect("checked above");
+                    entry.touch();
+                    entry.handle.clone()
                 } else {
                     let handle = spawn_codex_session_task(app_handle.clone(), conversation_id, codex_config.clone());
                     if let Some(previous) = sessions.get(&conversation_id) {
@@ -1406,6 +1409,7 @@ pub async fn ask_ai(
         }
 
         if provider_api_type == CLAUDE_SDK_API_TYPE || provider_api_type == "anthropic" {
+            spawn_agent_idle_reaper_once(app_handle.clone());
             info!(conversation_id, "Entering Claude Code stream-json provider branch");
             let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
             let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
@@ -1458,7 +1462,31 @@ pub async fn ask_ai(
             let response_message = add_message(&app_handle, None, conversation_id, "response".to_string(), String::new(), Some(0), Some("claude-code".to_string()), Some(chrono::Utc::now()), None, 0, None, None)?;
             let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), ConversationEvent { r#type: "message_add".to_string(), data: serde_json::to_value(MessageAddEvent { message_id: response_message.id, message_type: "response".to_string() }).unwrap() });
             let claude_state = app_handle.state::<ClaudeSessionState>();
-            let handle = { let mut sessions = claude_state.sessions.lock().await; if let Some(entry)=sessions.get(&conversation_id).filter(|entry| entry.config_signature == config.session_signature) { entry.handle.clone() } else { let handle=spawn_claude_session_task(app_handle.clone(), conversation_id, config.clone()); sessions.insert(conversation_id, ClaudeSessionEntry::new(handle.clone(), conversation_id, config.session_signature.clone(), config.model.clone(), config.permission_mode.clone(), config.effort.clone())); handle } };
+            let handle = {
+                let mut sessions = claude_state.sessions.lock().await;
+                if sessions
+                    .get(&conversation_id)
+                    .is_some_and(|entry| entry.config_signature == config.session_signature)
+                {
+                    let entry = sessions.get_mut(&conversation_id).expect("checked above");
+                    entry.touch();
+                    entry.handle.clone()
+                } else {
+                    let handle = spawn_claude_session_task(app_handle.clone(), conversation_id, config.clone());
+                    sessions.insert(
+                        conversation_id,
+                        ClaudeSessionEntry::new(
+                            handle.clone(),
+                            conversation_id,
+                            config.session_signature.clone(),
+                            config.model.clone(),
+                            config.permission_mode.clone(),
+                            config.effort.clone(),
+                        ),
+                    );
+                    handle
+                }
+            };
             if let Err(error) = handle.send_prompt(
                 response_message.id,
                 runtime_prompt_result.clone(),
@@ -1550,7 +1578,7 @@ pub async fn ask_ai(
             .map(|(_, _, attachments)| attachments.clone())
             .unwrap_or_default();
 
-        spawn_acp_idle_reaper_once(app_handle_clone.clone());
+        spawn_agent_idle_reaper_once(app_handle_clone.clone());
 
         let session_handle = {
             let mut sessions = acp_session_state.sessions.lock().await;

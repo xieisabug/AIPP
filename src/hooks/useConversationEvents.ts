@@ -72,6 +72,7 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
         load_session_supported: state.load_session_supported ?? state.loadSessionSupported ?? false,
         session_resume_supported: state.session_resume_supported ?? state.sessionResumeSupported ?? false,
         restored_session_method: state.restored_session_method ?? state.restoredSessionMethod ?? null,
+        connection_event_id: state.connection_event_id ?? state.connectionEventId ?? null,
         permission_mode: state.permission_mode ?? state.permissionMode ?? null,
         prompt_capabilities: {
             image: Boolean(promptCapabilities.image),
