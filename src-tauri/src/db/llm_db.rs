@@ -178,7 +178,7 @@ impl LLMDatabase {
     }
 
     /// 根据助手类型获取过滤后的提供商列表
-    /// Agent 助手 (assistant_type = 4): 返回 Agent/Claude/Anthropic 提供商
+    /// Agent 助手 (assistant_type = 4): 返回 Agent/Claude 提供商
     /// 普通助手: 排除 ACP 提供商
     #[instrument(level = "debug", skip(self))]
     pub fn get_filtered_providers(
@@ -187,7 +187,7 @@ impl LLMDatabase {
     ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool)>> {
         let where_clause = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
-            "api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'anthropic')"
+            "api_type IN ('acp', 'codex_app_server', 'claude_sdk')"
         } else {
             // 普通助手：排除 ACP 提供商
             "api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk')"

@@ -115,30 +115,6 @@ pub async fn get_agent_model_options(
                 add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · 当前模型 {code}"), provider_id, efforts, default_effort: None });
             }
         }
-        "anthropic" => {
-            let efforts = ["default", "low", "medium", "high", "max"]
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            for (_, name, _, code, _, _, _, _) in db_models {
-                add_agent_model_option(&mut options, AgentModelOption {
-                    code: format!("{code}%%{provider_id}"),
-                    name,
-                    provider_id,
-                    efforts: efforts.clone(),
-                    default_effort: None,
-                });
-            }
-            if let Some(code) = current_model {
-                add_agent_model_option(&mut options, AgentModelOption {
-                    code: format!("{code}%%{provider_id}"),
-                    name: code,
-                    provider_id,
-                    efforts,
-                    default_effort: None,
-                });
-            }
-        }
         "acp" => {
             for (_, name, _, code, _, _, _, _) in db_models {
                 add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: Vec::new(), default_effort: None });

@@ -1408,7 +1408,7 @@ pub async fn ask_ai(
             return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
         }
 
-        if provider_api_type == CLAUDE_SDK_API_TYPE || provider_api_type == "anthropic" {
+        if provider_api_type == CLAUDE_SDK_API_TYPE {
             spawn_agent_idle_reaper_once(app_handle.clone());
             info!(conversation_id, "Entering Claude Code stream-json provider branch");
             let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
