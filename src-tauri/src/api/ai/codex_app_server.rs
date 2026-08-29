@@ -652,6 +652,14 @@ pub struct CodexModelCatalogEntry {
     pub name: String,
     pub supported_efforts: Vec<String>,
     pub default_effort: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexModelProbe {
+    pub models: Vec<CodexModelCatalogEntry>,
+    pub default_model: Option<String>,
+    pub default_effort: Option<String>,
 }
 
 fn model_catalog(value: &Value) -> Vec<CodexModelCatalogEntry> {
@@ -668,6 +676,7 @@ fn model_catalog(value: &Value) -> Vec<CodexModelCatalogEntry> {
                             name: label.unwrap_or(id).to_string(),
                             supported_efforts: supported_reasoning_efforts(value),
                             default_effort: map.get("defaultReasoningEffort").and_then(Value::as_str).map(str::to_string),
+                            is_default: map.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
                         };
                         if !models.iter().any(|existing| existing.id == entry.id) {
                             models.push(entry);
@@ -684,12 +693,23 @@ fn model_catalog(value: &Value) -> Vec<CodexModelCatalogEntry> {
     models
 }
 
-/// 启动一次短生命周期 Codex app-server，仅探测真实的 model/list 目录。
+fn codex_config_model_defaults(value: &Value) -> (Option<String>, Option<String>) {
+    let config = value.get("config").unwrap_or(value);
+    (
+        config.get("model").and_then(Value::as_str).map(str::to_string),
+        config
+            .get("model_reasoning_effort")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    )
+}
+
+/// 启动一次短生命周期 Codex app-server，读取生效配置并探测真实的 model/list 目录。
 /// 不创建 thread，也不会写入会话数据库。
 pub async fn probe_codex_model_options(
     app_handle: &tauri::AppHandle,
     config: &CodexAppServerConfig,
-) -> Result<Vec<CodexModelCatalogEntry>, String> {
+) -> Result<CodexModelProbe, String> {
     let stderr_buffer = CodexStderrBuffer::default();
     let result = async {
         let (_child, mut stdin, mut lines) =
@@ -717,8 +737,19 @@ pub async fn probe_codex_model_options(
         )
         .await?;
         write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
-        write_frame(&mut stdin, &json_rpc_request(2, "model/list", json!({}))).await?;
-        let result = read_rpc_response_with_approvals(
+        write_frame(
+            &mut stdin,
+            &json_rpc_request(
+                2,
+                "config/read",
+                json!({
+                    "cwd": config.working_directory,
+                    "includeLayers": false,
+                }),
+            ),
+        )
+        .await?;
+        let config_result = read_rpc_response_with_approvals(
             app_handle,
             -1,
             &mut stdin,
@@ -726,12 +757,44 @@ pub async fn probe_codex_model_options(
             2,
             &mut pending_notifications,
         )
-        .await?;
-        let catalog = model_catalog(&result);
+        .await
+        .map_err(|error| format!("Codex config/read 失败：{error}"))?;
+        let (configured_model, configured_effort) = codex_config_model_defaults(&config_result);
+
+        write_frame(&mut stdin, &json_rpc_request(3, "model/list", json!({}))).await?;
+        let model_result = read_rpc_response_with_approvals(
+            app_handle,
+            -1,
+            &mut stdin,
+            &mut lines,
+            3,
+            &mut pending_notifications,
+        )
+        .await
+        .map_err(|error| format!("Codex model/list 失败：{error}"))?;
+        let catalog = model_catalog(&model_result);
         if catalog.is_empty() {
-            return Err(format!("Codex model/list 返回空模型列表：{result}"));
+            return Err(format!("Codex model/list 返回空模型列表：{model_result}"));
         }
-        Ok(catalog)
+        let default_model = configured_model.or_else(|| {
+            catalog
+                .iter()
+                .find(|entry| entry.is_default)
+                .map(|entry| entry.id.clone())
+        });
+        let default_effort = configured_effort.or_else(|| {
+            default_model.as_deref().and_then(|model_id| {
+                catalog
+                    .iter()
+                    .find(|entry| entry.id == model_id)
+                    .and_then(|entry| entry.default_effort.clone())
+            })
+        });
+        Ok(CodexModelProbe {
+            models: catalog,
+            default_model,
+            default_effort,
+        })
     }
     .await;
     result.map_err(|error| {
@@ -2315,10 +2378,11 @@ mod tests {
     #[test]
     fn parses_model_catalog_and_switches_reasoning_capabilities() {
         let catalog = model_catalog(&json!({"data":[
-            {"id":"gpt-a","displayName":"GPT A","supportedReasoningEfforts":[{"effort":"low"},{"effort":"high"}],"defaultReasoningEffort":"low"},
-            {"id":"gpt-b","displayName":"GPT B","supportedReasoningEfforts":["none","medium"]}
+            {"id":"gpt-a","displayName":"GPT A","supportedReasoningEfforts":[{"effort":"low"},{"effort":"high"}],"defaultReasoningEffort":"low","isDefault":true},
+            {"id":"gpt-b","displayName":"GPT B","supportedReasoningEfforts":["none","medium"],"isDefault":false}
         ]}));
         assert_eq!(catalog.len(), 2);
+        assert!(catalog[0].is_default);
         let mut snapshot = CodexConversationSessionState {
             model: Some("gpt-a".to_string()), reasoning_effort: Some("high".to_string()), ..Default::default()
         };
@@ -2330,6 +2394,18 @@ mod tests {
         assert_eq!(snapshot.model.as_deref(), Some("gpt-b"));
         assert_eq!(snapshot.reasoning_effort.as_deref(), Some("none"));
         assert_eq!(snapshot.config_options[1].options.len(), 2);
+    }
+
+    #[test]
+    fn parses_effective_codex_config_model_defaults() {
+        let defaults = codex_config_model_defaults(&json!({
+            "config": {
+                "model": "gpt-configured",
+                "model_reasoning_effort": "high"
+            }
+        }));
+        assert_eq!(defaults.0.as_deref(), Some("gpt-configured"));
+        assert_eq!(defaults.1.as_deref(), Some("high"));
     }
 
     #[test]

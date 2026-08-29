@@ -38,6 +38,7 @@ pub struct AgentModelOption {
     pub provider_id: i64,
     pub efforts: Vec<String>,
     pub default_effort: Option<String>,
+    pub is_default: bool,
 }
 
 #[derive(Debug, serde::Serialize, Clone)]
@@ -59,20 +60,35 @@ fn add_agent_model_option(options: &mut Vec<AgentModelOption>, option: AgentMode
 pub async fn get_agent_model_options(
     app_handle: tauri::AppHandle,
     assistant_id: i64,
+    provider_id: Option<i64>,
 ) -> Result<Vec<AgentModelOption>, String> {
     let detail = get_assistant(app_handle.clone(), assistant_id)?;
     if detail.assistant.assistant_type != Some(4) {
         return Ok(Vec::new());
     }
     let model = detail.model.first().ok_or("Agent 助手尚未配置提供商")?;
-    let provider_id = model.provider_id;
+    let persisted_provider_id = model.provider_id;
+    let provider_id = provider_id.filter(|value| *value > 0).unwrap_or(persisted_provider_id);
     if provider_id <= 0 {
         return Err("Agent 助手尚未配置提供商".into());
     }
     let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
     let provider_configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
-    let current_model = (!model.model_code.trim().is_empty()).then(|| model.model_code.trim().to_string());
+    let current_model = (provider_id == persisted_provider_id && !model.model_code.trim().is_empty())
+        .then(|| model.model_code.trim().to_string());
+    let configured_effort = (provider_id == persisted_provider_id && current_model.is_some())
+        .then(|| {
+            detail
+                .model_configs
+                .iter()
+                .find(|config| config.name == "reasoning_effort")
+                .and_then(|config| config.value.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .flatten();
     let db_models = llm_db.get_llm_models(provider_id.to_string()).map_err(|e| e.to_string())?;
     let mut options = Vec::new();
 
@@ -80,14 +96,33 @@ pub async fn get_agent_model_options(
         CODEX_APP_SERVER_API_TYPE => {
             let config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, current_model.clone())
                 .map_err(|e| e.to_string())?;
-            let catalog = probe_codex_model_options(&app_handle, &config).await?;
-            for entry in catalog {
+            let probe = probe_codex_model_options(&app_handle, &config).await?;
+            let effective_default_model = current_model.clone().or_else(|| probe.default_model.clone());
+            for entry in probe.models {
+                let is_default = effective_default_model.as_deref() == Some(entry.id.as_str())
+                    || (effective_default_model.is_none() && entry.is_default);
+                let default_effort = if is_default {
+                    configured_effort
+                        .as_ref()
+                        .filter(|effort| entry.supported_efforts.contains(effort))
+                        .cloned()
+                        .or_else(|| {
+                            (probe.default_model.as_deref() == Some(entry.id.as_str()))
+                                .then(|| probe.default_effort.clone())
+                                .flatten()
+                                .filter(|effort| entry.supported_efforts.contains(effort))
+                        })
+                        .or(entry.default_effort)
+                } else {
+                    entry.default_effort
+                };
                 add_agent_model_option(&mut options, AgentModelOption {
                     code: format!("{}%%{}", entry.id, provider_id),
                     name: entry.name,
                     provider_id,
                     efforts: entry.supported_efforts,
-                    default_effort: entry.default_effort,
+                    default_effort,
+                    is_default,
                 });
             }
         }
@@ -102,25 +137,26 @@ pub async fn get_agent_model_options(
                 ("opus", "Claude Opus"),
                 ("haiku", "Claude Haiku"),
             ] {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · {name}"), provider_id, efforts: efforts.clone(), default_effort: None });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · {name}"), provider_id, efforts: efforts.clone(), default_effort: None, is_default: current_model.as_deref() == Some(code) });
             }
-            add_agent_model_option(&mut options, AgentModelOption { code: format!("{CLAUDE_CODE_DEFAULT_MODEL}%%{provider_id}"), name: "Claude Code 默认配置 · 使用 CLI 默认模型".into(), provider_id, efforts: efforts.clone(), default_effort: None });
+            add_agent_model_option(&mut options, AgentModelOption { code: format!("{CLAUDE_CODE_DEFAULT_MODEL}%%{provider_id}"), name: "Claude Code 默认配置 · 使用 CLI 默认模型".into(), provider_id, efforts: efforts.clone(), default_effort: None, is_default: current_model.is_none() });
             for (other_id, other_name, other_api_type, _, _, _) in llm_db.get_llm_providers().map_err(|e| e.to_string())? {
                 if other_api_type != "anthropic" { continue; }
                 for (_, model_name, _, code, _, _, _, _) in llm_db.get_llm_models(other_id.to_string()).map_err(|e| e.to_string())? {
-                    add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{other_id}"), name: format!("{other_name} / {model_name}"), provider_id: other_id, efforts: efforts.clone(), default_effort: None });
+                    add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{other_id}"), name: format!("{other_name} / {model_name}"), provider_id: other_id, efforts: efforts.clone(), default_effort: None, is_default: false });
                 }
             }
             if let Some(code) = current_model {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · 当前模型 {code}"), provider_id, efforts, default_effort: None });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · 当前模型 {code}"), provider_id, efforts, default_effort: None, is_default: true });
             }
         }
         "acp" => {
             for (_, name, _, code, _, _, _, _) in db_models {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: Vec::new(), default_effort: None });
+                let is_default = current_model.as_deref() == Some(code.as_str());
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: Vec::new(), default_effort: None, is_default });
             }
             if let Some(code) = current_model {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: Vec::new(), default_effort: None });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: Vec::new(), default_effort: None, is_default: true });
             }
         }
         other => return Err(format!("不支持的 Agent 提供商类型：{other}")),

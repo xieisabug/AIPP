@@ -6,14 +6,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { getErrorMessage } from "@/utils/error";
+import { resolveAgentDefaultSelection } from "@/utils/agentDefaults";
+import type { AgentModelOption } from "@/utils/agentDefaults";
 
 interface AssistantListItem {
     id: number;
     name: string;
     assistant_type?: number;
 }
-
-interface AgentModelOption { code: string; name: string; provider_id: number; efforts: string[]; default_effort?: string | null; }
 
 interface AgentSelectOption {
     value: string;
@@ -119,29 +120,30 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                 if (!isAgent) {
                     setModels([]); setEfforts([]); setCodexDefaults(null); onAgentConfigChange("", "", "", ""); return;
                 }
-                const modelList = await invoke<AgentModelOption[]>("get_agent_model_options", { assistantId: selectedAssistant });
+                const modelList = await invoke<AgentModelOption[]>("get_agent_model_options", {
+                    assistantId: selectedAssistant,
+                    providerId: null,
+                });
                 if (cancelled) return;
                 const nextModels = modelList;
                 const configuredCode = detail?.model?.[0]?.model_code;
-                const configured = configuredCode
-                    ? nextModels.find((model) => model.code.startsWith(`${configuredCode}%%`))
-                    : undefined;
-                const initialModel = configured ?? nextModels[0];
-                const firstEfforts = initialModel?.efforts ?? [];
                 const configuredEffort = detail?.model_configs?.find((config: { name?: string; value?: string | null }) => config.name === "reasoning_effort")?.value;
-                const initialEffort = initialModel?.default_effort && firstEfforts.includes(initialModel.default_effort)
-                    ? initialModel.default_effort
-                    : configuredEffort && firstEfforts.includes(configuredEffort)
-                        ? configuredEffort
-                        : (firstEfforts[0] ?? "");
+                const { model: initialModel, efforts: firstEfforts, effort: initialEffort } =
+                    resolveAgentDefaultSelection(nextModels, configuredCode, configuredEffort);
                 const codex = await invoke<{ approval_policy: string; sandbox: string } | null>("get_codex_agent_defaults", { assistantId: selectedAssistant });
                 if (cancelled) return;
                 setCodexDefaults(codex ?? null);
                 setModels(nextModels);
                 setEfforts(firstEfforts);
                 onAgentConfigChange(initialModel?.code ?? "", initialEffort, codex?.approval_policy ?? "", codex?.sandbox ?? "");
-            } catch {
-                if (!cancelled) { setIsAgentAssistant(selectedAssistantInfo?.assistant_type === 4); setModels([]); setEfforts([]); setCodexDefaults(null); setConfigError("无法读取 Agent 可用模型，请检查对应 CLI 配置"); }
+            } catch (error) {
+                if (!cancelled) {
+                    setIsAgentAssistant(selectedAssistantInfo?.assistant_type === 4);
+                    setModels([]);
+                    setEfforts([]);
+                    setCodexDefaults(null);
+                    setConfigError(`无法读取 Agent 可用模型：${getErrorMessage(error)}`);
+                }
             } finally {
                 if (!cancelled) setLoadingConfig(false);
             }

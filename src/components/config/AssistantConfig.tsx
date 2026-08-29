@@ -23,6 +23,9 @@ import { AssistantFormRenderer } from "./assistant/AssistantFormRenderer";
 import { AssistantDialogs } from "./assistant/AssistantDialogs";
 import { AssistantConfigApi } from "@/types/forms";
 import type { LoadedPlugin, PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
+import { getErrorMessage } from "@/utils/error";
+import { resolveAgentDefaultSelection } from "@/utils/agentDefaults";
+import type { AgentModelOption } from "@/utils/agentDefaults";
 
 interface AssistantConfigProps {
     pluginList: LoadedPlugin[];
@@ -66,6 +69,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
     const [pluginAssistantConfigValues, setPluginAssistantConfigValues] = useState<Record<string, string | boolean>>({});
+    const [agentModelOptions, setAgentModelOptions] = useState<AgentModelOption[]>([]);
+    const [agentModelLoading, setAgentModelLoading] = useState(false);
+    const [agentModelError, setAgentModelError] = useState<string | null>(null);
 
     const {
         assistantTypes,
@@ -170,6 +176,123 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [currentAssistant]
     );
 
+    const applyAgentModelSelection = useCallback(
+        (modelValue: string, effort: string) => {
+            const [modelCode, providerValue] = modelValue.split("%%");
+            const providerId = Number.parseInt(providerValue, 10);
+            form.setValue("agent_model", modelValue);
+            form.setValue("reasoning_effort", effort);
+            setCurrentAssistant((previous) => {
+                if (!previous || !Number.isFinite(providerId) || providerId <= 0) return previous;
+                const existingModel = previous.model[0];
+                const nextModel = {
+                    id: existingModel?.id ?? 0,
+                    assistant_id: existingModel?.assistant_id ?? previous.assistant.id,
+                    model_code: modelCode,
+                    provider_id: providerId,
+                    alias: existingModel?.alias ?? "",
+                };
+                const configIndex = previous.model_configs.findIndex(
+                    (config) => config.name === "reasoning_effort"
+                );
+                const nextConfig = {
+                    id: configIndex >= 0 ? previous.model_configs[configIndex].id : 0,
+                    assistant_id: previous.assistant.id,
+                    assistant_model_id: existingModel?.id ?? 0,
+                    name: "reasoning_effort",
+                    value: effort,
+                    value_type: "string",
+                };
+                const modelConfigs = configIndex >= 0
+                    ? previous.model_configs.map((config, index) => index === configIndex ? nextConfig : config)
+                    : [...previous.model_configs, nextConfig];
+                return { ...previous, model: [nextModel], model_configs: modelConfigs };
+            });
+        },
+        [form, setCurrentAssistant]
+    );
+
+    const loadAgentModelOptions = useCallback(
+        async (assistantDetail: AssistantDetail, providerId: number | null = null) => {
+            const selectedProviderId = providerId ?? assistantDetail.model[0]?.provider_id ?? 0;
+            if (assistantDetail.assistant.assistant_type !== 4 || selectedProviderId <= 0) {
+                setAgentModelOptions([]);
+                setAgentModelError(null);
+                return;
+            }
+            setAgentModelLoading(true);
+            setAgentModelError(null);
+            try {
+                const options = await invoke<AgentModelOption[]>("get_agent_model_options", {
+                    assistantId: assistantDetail.assistant.id,
+                    providerId,
+                });
+                const useConfiguredValues = providerId == null
+                    || providerId === assistantDetail.model[0]?.provider_id;
+                const configuredModel = useConfiguredValues
+                    ? assistantDetail.model[0]?.model_code
+                    : null;
+                const configuredEffort = useConfiguredValues
+                    ? assistantDetail.model_configs.find((config) => config.name === "reasoning_effort")?.value
+                    : null;
+                const selection = resolveAgentDefaultSelection(
+                    options,
+                    configuredModel,
+                    configuredEffort,
+                );
+                setAgentModelOptions(options);
+                if (selection.model) {
+                    applyAgentModelSelection(selection.model.code, selection.effort);
+                }
+            } catch (error) {
+                const message = `无法读取 Agent 默认配置：${getErrorMessage(error)}`;
+                setAgentModelOptions([]);
+                setAgentModelError(message);
+                toast.error(message);
+            } finally {
+                setAgentModelLoading(false);
+            }
+        },
+        [applyAgentModelSelection]
+    );
+
+    const handleAgentProviderChange = useCallback(
+        (providerValue: string, apiType?: string) => {
+            const providerId = Number.parseInt(providerValue, 10);
+            form.setValue("acp_provider", providerValue);
+            setAgentModelOptions([]);
+            setAgentModelError(null);
+            setCurrentAssistant((previous) => {
+                if (!previous || !Number.isFinite(providerId) || providerId <= 0) return previous;
+                const existingModel = previous.model[0];
+                return {
+                    ...previous,
+                    model: [{
+                        id: existingModel?.id ?? 0,
+                        assistant_id: existingModel?.assistant_id ?? previous.assistant.id,
+                        model_code: "",
+                        provider_id: providerId,
+                        alias: existingModel?.alias ?? "",
+                    }],
+                };
+            });
+            if (apiType === "codex_app_server") {
+                form.setValue("codex_approval_policy", "default");
+                form.setValue("codex_sandbox", "default");
+                form.setValue("codex_approvals_reviewer", "default");
+            }
+            if (
+                apiType === "codex_app_server"
+                && currentAssistant
+                && Number.isFinite(providerId)
+                && providerId > 0
+            ) {
+                void loadAgentModelOptions(currentAssistant, providerId);
+            }
+        },
+        [currentAssistant, form, loadAgentModelOptions, setCurrentAssistant]
+    );
+
     // 初始化助手列表
     useEffect(() => {
         loadAssistants().then((assistantList) => {
@@ -192,6 +315,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             assistantDetail.model.length > 0
                                 ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
                                 : "-1",
+                        agent_model:
+                            assistantDetail.model[0]?.model_code && assistantDetail.model[0]?.provider_id > 0
+                                ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
+                                : "",
                         prompt: assistantDetail.prompts[0].prompt,
                         ...assistantDetail.model_configs.reduce((acc, config) => {
                             acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
@@ -205,6 +332,15 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             assistantDetail.model[0].provider_id > 0
                                 ? assistantDetail.model[0].provider_id.toString()
                                 : "-1",
+                        codex_approval_policy:
+                            assistantDetail.model_configs.find((config) => config.name === "codex_approval_policy")
+                                ?.value || "default",
+                        codex_sandbox:
+                            assistantDetail.model_configs.find((config) => config.name === "codex_sandbox")
+                                ?.value || "default",
+                        codex_approvals_reviewer:
+                            assistantDetail.model_configs.find((config) => config.name === "codex_approvals_reviewer")
+                                ?.value || "default",
                         ...assistantTypeCustomField.reduce((acc, field) => {
                             acc[field.key] =
                                 field.value.type === "checkbox"
@@ -216,6 +352,28 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         }, {} as Record<string, any>),
                         ...pluginConfigValues,
                     });
+                    if (
+                        assistantDetail.assistant.assistant_type === 4
+                        && (assistantDetail.model[0]?.provider_id ?? 0) > 0
+                    ) {
+                        try {
+                            const runtime = await invoke<{ agent_kind: string }>("get_agent_runtime_info", {
+                                assistantId: assistantDetail.assistant.id,
+                            });
+                            if (runtime.agent_kind === "codex_app_server") {
+                                await loadAgentModelOptions(assistantDetail);
+                            } else {
+                                setAgentModelOptions([]);
+                                setAgentModelError(null);
+                            }
+                        } catch (error) {
+                            setAgentModelOptions([]);
+                            setAgentModelError(`无法识别 Agent 提供商：${getErrorMessage(error)}`);
+                        }
+                    } else {
+                        setAgentModelOptions([]);
+                        setAgentModelError(null);
+                    }
                     setAssistantTypeCustomField([]);
                     const plugin = assistantTypePluginMap.get(assistantDetail.assistant.assistant_type);
                     plugin?.onAssistantTypeSelect?.(assistantTypeApi);
@@ -230,6 +388,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             form,
             loadAssistantDetail,
             loadPluginAssistantConfigValues,
+            loadAgentModelOptions,
         ]
     );
 
@@ -350,6 +509,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         pluginAssistantFormFields,
         pluginAssistantConfigValues,
         onPluginConfigChange: handlePluginConfigChange,
+        agentModelOptions,
+        agentModelLoading,
+        agentModelError,
+        onAgentProviderChange: handleAgentProviderChange,
+        onAgentModelChange: applyAgentModelSelection,
     });
 
     // 保存助手
@@ -371,10 +535,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     const providerId = parseInt(String(values.acp_provider ?? ""), 10);
                     if (Number.isFinite(providerId) && providerId > 0) {
                         const existingModel = currentAssistant.model[0];
+                        const selectedAgentModel = String(values.agent_model ?? "").split("%%")[0];
                         return [{
                             id: existingModel?.id ?? 0,
                             assistant_id: existingModel?.assistant_id ?? currentAssistant.assistant.id,
-                            model_code: "",
+                            model_code: selectedAgentModel || existingModel?.model_code || "",
                             provider_id: providerId,
                             alias: "",
                         }];
@@ -410,6 +575,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         && !key.startsWith("acp_session_")
                         && key !== "assistantType"
                         && key !== "model"
+                        && key !== "agent_model"
                         && key !== "acp_provider"
                         && key !== "prompt"
                         && key !== "mcp_config"
@@ -541,6 +707,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         (assistantDetail: AssistantDetail) => {
             addAssistant(assistantDetail);
             setPluginAssistantConfigValues({});
+            setAgentModelOptions([]);
+            setAgentModelError(null);
 
             // 重置表单状态为新助手的配置
             form.reset({
@@ -549,6 +717,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     assistantDetail.model.length > 0
                         ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
                         : "-1",
+                agent_model: "",
                 prompt: assistantDetail.prompts[0]?.prompt || "",
                 ...assistantDetail.model_configs.reduce((acc, config) => {
                     acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
@@ -560,6 +729,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     assistantDetail.model[0].provider_id > 0
                         ? assistantDetail.model[0].provider_id.toString()
                         : "-1",
+                codex_approval_policy: "default",
+                codex_sandbox: "default",
+                codex_approvals_reviewer: "default",
             });
         },
         [addAssistant, form]

@@ -250,7 +250,10 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         <Select
                             disabled={field.disabled || providersLoading}
                             value={fieldRenderData.value}
-                            onValueChange={fieldRenderData.onChange}
+                            onValueChange={(value) => {
+                                fieldRenderData.onChange(value);
+                                field.onChange?.(value);
+                            }}
                         >
                             <SelectTrigger className="w-full max-w-full focus:ring-ring/20 focus:border-ring overflow-hidden">
                                 <SelectValue

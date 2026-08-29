@@ -105,6 +105,11 @@ describe("useAssistantFormConfig plugin field visibility", () => {
                     pluginAssistantFormFields,
                     pluginAssistantConfigValues,
                     onPluginConfigChange,
+                    agentModelOptions: [],
+                    agentModelLoading: false,
+                    agentModelError: null,
+                    onAgentProviderChange: vi.fn(),
+                    onAgentModelChange: vi.fn(),
                 }),
             {
                 initialProps: {
@@ -175,6 +180,11 @@ describe("useAssistantFormConfig ACP MCP option", () => {
                 pluginAssistantFormFields: [],
                 pluginAssistantConfigValues: {},
                 onPluginConfigChange: vi.fn(),
+                agentModelOptions: [],
+                agentModelLoading: false,
+                agentModelError: null,
+                onAgentProviderChange: vi.fn(),
+                onAgentModelChange: vi.fn(),
             })
         );
 
@@ -193,5 +203,84 @@ describe("useAssistantFormConfig ACP MCP option", () => {
         expect(
             result.current.formConfig.some((item) => item.key === "dynamic_mcp_loading_enabled")
         ).toBe(false);
+    });
+});
+
+describe("useAssistantFormConfig Codex fields", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_all_feature_config", () => []);
+        mockInvokeHandler("get_filtered_providers", () => [
+            {
+                id: 7,
+                name: "Codex",
+                api_type: "codex_app_server",
+                description: "",
+                is_official: true,
+                is_enabled: true,
+            },
+        ]);
+    });
+
+    it("shows Codex fields immediately and reports provider changes", async () => {
+        const onAgentProviderChange = vi.fn();
+        const codexAssistant: AssistantDetail = {
+            ...baseAssistantDetail,
+            assistant: {
+                ...baseAssistantDetail.assistant,
+                assistant_type: 4,
+            },
+            model: [{ ...baseAssistantDetail.model[0], provider_id: 7, model_code: "gpt-configured" }],
+            model_configs: [
+                {
+                    id: 2,
+                    assistant_id: 1,
+                    assistant_model_id: 1,
+                    name: "reasoning_effort",
+                    value: "high",
+                    value_type: "string",
+                },
+            ],
+        };
+
+        const { result } = renderHook(() =>
+            useAssistantFormConfig({
+                currentAssistant: codexAssistant,
+                assistantTypeNameMap: new Map([[4, "Agent 助手"]]),
+                assistantTypeCustomField: [],
+                assistantTypeCustomLabel: new Map(),
+                assistantTypeCustomTips: new Map(),
+                assistantTypeHideField: [],
+                navigateTo: vi.fn(),
+                onConfigChange: vi.fn(),
+                onPromptChange: vi.fn(),
+                pluginAssistantFormFields: [],
+                pluginAssistantConfigValues: {},
+                onPluginConfigChange: vi.fn(),
+                agentModelOptions: [
+                    {
+                        code: "gpt-configured%%7",
+                        name: "Configured",
+                        provider_id: 7,
+                        efforts: ["medium", "high"],
+                        default_effort: "high",
+                        is_default: true,
+                    },
+                ],
+                agentModelLoading: false,
+                agentModelError: null,
+                onAgentProviderChange,
+                onAgentModelChange: vi.fn(),
+            })
+        );
+
+        await waitFor(() => {
+            expect(result.current.formConfig.some((item) => item.key === "agent_model")).toBe(true);
+        });
+        expect(result.current.formConfig.some((item) => item.key === "reasoning_effort")).toBe(true);
+        expect(result.current.formConfig.some((item) => item.key === "codex_sandbox")).toBe(true);
+
+        result.current.formConfig.find((item) => item.key === "acp_provider")?.config.onChange?.("7");
+        expect(onAgentProviderChange).toHaveBeenCalledWith("7", "codex_app_server");
     });
 });

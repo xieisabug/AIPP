@@ -9,6 +9,7 @@ import AssistantWorkspaceFieldDisplay from "@/components/config/AssistantWorkspa
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useFilteredProviders } from "@/hooks/useFilteredProviders";
 import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
+import type { AgentModelOption } from "@/utils/agentDefaults";
 
 interface UseAssistantFormConfigProps {
     currentAssistant: AssistantDetail | null;
@@ -30,6 +31,11 @@ interface UseAssistantFormConfigProps {
     >;
     pluginAssistantConfigValues: Record<string, string | boolean>;
     onPluginConfigChange: (formKey: string, value: string | boolean) => void;
+    agentModelOptions: AgentModelOption[];
+    agentModelLoading: boolean;
+    agentModelError: string | null;
+    onAgentProviderChange: (providerId: string, apiType?: string) => void;
+    onAgentModelChange: (model: string, effort: string) => void;
 }
 
 export const useAssistantFormConfig = ({
@@ -45,6 +51,11 @@ export const useAssistantFormConfig = ({
     pluginAssistantFormFields,
     pluginAssistantConfigValues,
     onPluginConfigChange,
+    agentModelOptions,
+    agentModelLoading,
+    agentModelError,
+    onAgentProviderChange,
+    onAgentModelChange,
 }: UseAssistantFormConfigProps) => {
     const { getConfigValue } = useFeatureConfig();
 
@@ -154,8 +165,61 @@ export const useAssistantFormConfig = ({
                         type: "provider-select" as const,
                         label: "选择提供商",
                         value: currentProviderId,
+                        onChange: (value: string | boolean) => {
+                            const providerId = String(value);
+                            const apiType = agentProviders.find(
+                                (provider) => provider.id.toString() === providerId
+                            )?.api_type;
+                            onAgentProviderChange(providerId, apiType);
+                        },
                     },
                 },
+                ...(isCodexProvider
+                    ? [
+                          {
+                              key: "agent_model",
+                              config: {
+                                  type: "select" as const,
+                                  label: "默认模型",
+                                  value:
+                                      currentAssistant.model[0]?.model_code
+                                          ? `${currentAssistant.model[0].model_code}%%${currentProviderId}`
+                                          : agentModelOptions.find((option) => option.is_default)?.code ?? "",
+                                  options: agentModelOptions.map((option) => ({
+                                      value: option.code,
+                                      label: option.name,
+                                  })),
+                                  disabled: agentModelLoading || agentModelOptions.length === 0,
+                                  tooltip: agentModelError ?? "默认读取 Codex config/read 的生效配置",
+                                  onChange: (value: string | boolean) => {
+                                      const model = agentModelOptions.find((option) => option.code === value);
+                                      const effort = model?.default_effort && model.efforts.includes(model.default_effort)
+                                          ? model.default_effort
+                                          : (model?.efforts[0] ?? "");
+                                      onAgentModelChange(String(value), effort);
+                                  },
+                              },
+                          },
+                          {
+                              key: "reasoning_effort",
+                              config: {
+                                  type: "select" as const,
+                                  label: "默认思考强度",
+                                  value: getAcpConfigValue("reasoning_effort", ""),
+                                  options: (() => {
+                                      const currentModel = currentAssistant.model[0]?.model_code;
+                                      return agentModelOptions
+                                          .find((option) => option.code.startsWith(`${currentModel}%%`))
+                                          ?.efforts.map((effort) => ({ value: effort, label: effort })) ?? [];
+                                  })(),
+                                  disabled: agentModelLoading || agentModelOptions.length === 0,
+                                  tooltip: agentModelError ?? "默认读取 Codex config/read 的生效配置",
+                                  onChange: (value: string | boolean) =>
+                                      handleConfigChange("reasoning_effort", value, "string"),
+                              },
+                          },
+                      ]
+                    : []),
                 {
                     key: "acp_working_directory",
                     config: {
@@ -578,6 +642,11 @@ export const useAssistantFormConfig = ({
         navigateTo,
         onPromptChange,
         onPluginConfigChange,
+        agentModelOptions,
+        agentModelLoading,
+        agentModelError,
+        onAgentProviderChange,
+        onAgentModelChange,
         resolvePluginFieldValue,
         pluginAssistantConfigValues,
         pluginAssistantFormFields,
