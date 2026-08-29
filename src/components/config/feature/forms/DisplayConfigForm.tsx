@@ -197,7 +197,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
                 // 权限获取成功，发送测试通知
                 sendNotification({
                     title: "AIPP - 系统通知已开启",
-                    body: "AI 消息完成时将发送系统通知",
+                    body: "AI 消息或 Agent 任务完成时将发送系统通知",
                 });
                 toast.success("通知权限获取成功，已发送测试通知");
             } catch (e) {
@@ -289,7 +289,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
             config: {
                 type: "switch" as const,
                 label: "消息完成时发送系统通知",
-                tooltip: "AI消息生成完成时发送系统通知提醒",
+                tooltip: "AI 消息或 Agent 任务（Codex、Claude Code、ACP）完成时发送系统通知提醒，窗口聚焦时不弹出",
             },
         },
         {

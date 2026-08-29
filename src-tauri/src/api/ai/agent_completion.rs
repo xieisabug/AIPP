@@ -16,14 +16,6 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
-    fn notification_config_key(self) -> &'static str {
-        match self {
-            Self::Codex => "codex_notification_on_success",
-            Self::ClaudeCode => "claude_code_notification_on_success",
-            Self::Acp => "acp_notification_on_success",
-        }
-    }
-
     fn display_name(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
@@ -35,11 +27,10 @@ impl AgentKind {
 
 fn notification_enabled(
     config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
-    agent_kind: AgentKind,
 ) -> bool {
     config_feature_map
-        .get("agent")
-        .and_then(|config| config.get(agent_kind.notification_config_key()))
+        .get("display")
+        .and_then(|config| config.get("notification_on_completion"))
         .is_some_and(|config| matches!(config.value.as_str(), "true" | "1"))
 }
 
@@ -84,7 +75,7 @@ pub async fn handle_agent_success(
         warn!(conversation_id, agent = agent_kind.display_name(), error = %error, "failed to schedule Agent title generation");
     }
 
-    if !notification_enabled(&config_feature_map, agent_kind) {
+    if !notification_enabled(&config_feature_map) {
         return;
     }
     if crate::utils::window_utils::is_chat_or_ask_window_focused(app_handle) {
@@ -108,7 +99,7 @@ mod tests {
     fn feature_config(key: &str, value: &str) -> FeatureConfig {
         FeatureConfig {
             id: None,
-            feature_code: "agent".to_string(),
+            feature_code: "display".to_string(),
             key: key.to_string(),
             value: value.to_string(),
             data_type: "boolean".to_string(),
@@ -118,22 +109,29 @@ mod tests {
 
     #[test]
     fn test_agent_notification_is_disabled_by_default() {
-        assert!(!notification_enabled(&HashMap::new(), AgentKind::Codex));
+        assert!(!notification_enabled(&HashMap::new()));
     }
 
     #[test]
-    fn test_agent_notification_uses_channel_specific_switch() {
+    fn test_agent_notification_uses_unified_display_switch() {
         let config = HashMap::from([(
-            "agent".to_string(),
+            "display".to_string(),
             HashMap::from([(
-                "codex_notification_on_success".to_string(),
-                feature_config("codex_notification_on_success", "true"),
+                "notification_on_completion".to_string(),
+                feature_config("notification_on_completion", "true"),
             )]),
         )]);
 
-        assert!(notification_enabled(&config, AgentKind::Codex));
-        assert!(!notification_enabled(&config, AgentKind::ClaudeCode));
-        assert!(!notification_enabled(&config, AgentKind::Acp));
+        assert!(notification_enabled(&config));
+
+        let disabled = HashMap::from([(
+            "display".to_string(),
+            HashMap::from([(
+                "notification_on_completion".to_string(),
+                feature_config("notification_on_completion", "false"),
+            )]),
+        )]);
+        assert!(!notification_enabled(&disabled));
     }
 
     #[test]

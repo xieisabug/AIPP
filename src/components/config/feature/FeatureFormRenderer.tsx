@@ -9,7 +9,6 @@ import { ShortcutsConfigForm } from "./forms/ShortcutsConfigForm";
 import { OtherConfigForm } from "./forms/OtherConfigForm";
 import { AboutConfigForm } from "./forms/AboutConfigForm";
 import { ExperimentalConfigForm } from "./forms/ExperimentalConfigForm";
-import { AgentConfigForm } from "./forms/AgentConfigForm";
 
 interface FeatureItem {
     id: string;
@@ -23,7 +22,6 @@ interface FeatureFormRendererProps {
     selectedFeature: FeatureItem;
     forms: {
         displayForm: UseFormReturn<any>;
-        agentForm: UseFormReturn<any>;
         summaryForm: UseFormReturn<any>;
         previewForm: UseFormReturn<any>;
         networkForm: UseFormReturn<any>;
@@ -63,7 +61,6 @@ interface FeatureFormRendererProps {
         installPython3: () => void;
     };
     onSaveDisplay: () => Promise<void>;
-    onSaveAgent: () => Promise<void>;
     onSaveSummary: () => Promise<void>;
     onSaveNetwork: () => Promise<void>;
     onSaveShortcuts: () => Promise<void>;
@@ -79,7 +76,6 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
     forms,
     versionManager,
     onSaveDisplay,
-    onSaveAgent,
     onSaveSummary,
     onSaveNetwork,
     onSaveShortcuts,
@@ -104,13 +100,6 @@ export const FeatureFormRenderer: React.FC<FeatureFormRendererProps> = ({
                 <SummaryConfigForm
                     form={forms.summaryForm}
                     onSave={onSaveSummary}
-                />
-            );
-        case "agent":
-            return (
-                <AgentConfigForm
-                    form={forms.agentForm}
-                    onSave={onSaveAgent}
                 />
             );
         case "preview":
