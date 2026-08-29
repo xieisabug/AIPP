@@ -7,7 +7,6 @@ use tracing::{error, info, warn};
 use crate::db::connection::{params, OptionalExtension};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
-use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
 
 use super::api::{
     render_message_for_feishu_delivery, resolve_preview_file_tool_call_for_message,

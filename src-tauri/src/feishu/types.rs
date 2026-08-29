@@ -21,8 +21,6 @@ pub(super) const RELAY_ORIGIN_INTERNAL: &str = "internal";
 pub(super) const FEISHU_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const FEISHU_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) const FEISHU_SETTLE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-pub(super) const FEISHU_SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
-pub(super) const FEISHU_SETTLE_STATUS_INTERVAL_STEPS: usize = 10;
 pub(super) const FEISHU_RELAY_IDLE_STABLE_CHECKS: usize = 2;
 pub(super) const FEISHU_STATUS_READY_DETAIL: &str =
     "飞书 SDK 已启用心跳与内部重连；若长连接退出，AIPP 还会在 5 秒后自动重试";
@@ -278,7 +276,6 @@ pub(super) struct FeishuReplyOutcome {
     pub(super) message_id: String,
     pub(super) payload_type: &'static str,
     pub(super) interactive_error: Option<String>,
-    pub(super) interactive_card: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -473,14 +470,4 @@ pub(super) fn build_acp_permission_fallback_text(
     }
     lines.push(format!("- 取消 {}", request.review_code));
     lines.join("\n")
-}
-
-pub(super) fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic payload".to_string()
-    }
 }

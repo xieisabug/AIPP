@@ -23,20 +23,6 @@ impl SkillScanner {
         Self { home_dir, app_data_dir, sources: SkillSourceConfig::builtin_sources() }
     }
 
-    /// Create a scanner with custom sources
-    pub fn with_sources(
-        home_dir: PathBuf,
-        app_data_dir: PathBuf,
-        sources: Vec<SkillSourceConfig>,
-    ) -> Self {
-        Self { home_dir, app_data_dir, sources }
-    }
-
-    /// Add a custom source configuration
-    pub fn add_source(&mut self, source: SkillSourceConfig) {
-        self.sources.push(source);
-    }
-
     /// Get all configured sources
     pub fn get_sources(&self) -> &[SkillSourceConfig] {
         &self.sources

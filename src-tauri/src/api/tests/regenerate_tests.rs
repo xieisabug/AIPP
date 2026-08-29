@@ -42,6 +42,7 @@ fn create_test_message(
 }
 
 /// 创建测试用的 Conversation
+#[allow(dead_code)]
 fn create_test_conversation(id: i64, assistant_id: Option<i64>) -> Conversation {
     Conversation {
         id,
@@ -73,7 +74,7 @@ async fn test_regenerate_user_message_creates_new_generation() {
     // 3. Reasoning message (id=3, generation_group_id=original_group_id)
     // 4. Response message (id=4, generation_group_id=original_group_id)
 
-    let system_msg = create_test_message(
+    let _system_msg = create_test_message(
         1,
         None,
         1,
@@ -99,7 +100,7 @@ async fn test_regenerate_user_message_creates_new_generation() {
         base_time + chrono::Duration::seconds(1),
     );
 
-    let reasoning_msg = create_test_message(
+    let _reasoning_msg = create_test_message(
         3,
         None,
         1,
@@ -112,7 +113,7 @@ async fn test_regenerate_user_message_creates_new_generation() {
         base_time + chrono::Duration::seconds(2),
     );
 
-    let response_msg = create_test_message(
+    let _response_msg = create_test_message(
         4,
         None,
         1,
@@ -156,7 +157,7 @@ async fn test_regenerate_ai_message_reuses_generation_group_id() {
     // 3. Reasoning message (id=3, generation_group_id=original_group_id) <- 重新生成这个
     // 4. Response message (id=4, generation_group_id=original_group_id)
 
-    let system_msg = create_test_message(
+    let _system_msg = create_test_message(
         1,
         None,
         1,
@@ -169,7 +170,7 @@ async fn test_regenerate_ai_message_reuses_generation_group_id() {
         base_time,
     );
 
-    let user_msg = create_test_message(
+    let _user_msg = create_test_message(
         2,
         None,
         1,
@@ -195,7 +196,7 @@ async fn test_regenerate_ai_message_reuses_generation_group_id() {
         base_time + chrono::Duration::seconds(2),
     );
 
-    let response_msg = create_test_message(
+    let _response_msg = create_test_message(
         4,
         None,
         1,

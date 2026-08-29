@@ -10,7 +10,6 @@
 
 use crate::db::conversation_db::*;
 use crate::db::tests::test_helpers::*;
-use rusqlite::Connection;
 
 // ============================================================================
 // 辅助函数
@@ -208,10 +207,11 @@ fn test_attachment_type_conversion() {
     assert_eq!(AttachmentType::try_from(4i64).unwrap(), AttachmentType::Word);
     assert_eq!(AttachmentType::try_from(5i64).unwrap(), AttachmentType::PowerPoint);
     assert_eq!(AttachmentType::try_from(6i64).unwrap(), AttachmentType::Excel);
+    assert_eq!(AttachmentType::try_from(7i64).unwrap(), AttachmentType::Skill);
 
     // 无效转换
     assert!(AttachmentType::try_from(0i64).is_err());
-    assert!(AttachmentType::try_from(7i64).is_err());
+    assert!(AttachmentType::try_from(8i64).is_err());
     assert!(AttachmentType::try_from(100i64).is_err());
 }
 
@@ -254,9 +254,9 @@ fn test_attachment_list_by_id() {
 /// 测试批量查询空列表
 #[test]
 fn test_attachment_list_by_id_empty() {
-    let (repo, _) = create_attachment_test_db();
+    let (_repo, _) = create_attachment_test_db();
 
-    let ids: Vec<i64> = Vec::new();
+    let _ids: Vec<i64> = Vec::new();
     // 注意：空列表可能导致 SQL 语法错误 (IN ())
     // 根据实现可能需要特殊处理
     // 这里我们跳过空列表测试，因为当前实现可能不支持

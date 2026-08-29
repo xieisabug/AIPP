@@ -379,7 +379,7 @@ fn test_list_reconcilable_butler_task_conversation_ids_filters_terminal_tasks() 
     finished_task.butler_task_status = Some("succeeded".to_string());
     finished_task.butler_task_finalized_at = Some(Utc::now());
 
-    let running_task = conn
+    let _ = conn
         .execute(
             "INSERT INTO conversation (
                 name, assistant_id, created_time, updated_time, conversation_kind,
@@ -467,7 +467,7 @@ fn test_list_reconcilable_butler_task_conversation_ids_filters_terminal_tasks() 
     let mut ids = repo.list_reconcilable_butler_task_conversation_ids().unwrap();
     ids.sort_unstable();
 
-    assert_eq!(ids, vec![cancelled_task_id, running_task_id]);
+    assert_eq!(ids, vec![running_task_id, cancelled_task_id]);
 }
 
 #[test]

@@ -14,9 +14,7 @@ use genai::chat::{
 };
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tauri::Emitter;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 fn strip_skill_attachment_tags(content: &str) -> String {
@@ -724,7 +722,6 @@ fn build_native_toolcall_paired_messages(
 
 #[derive(Clone, Copy, Debug)]
 pub enum BranchSelection {
-    All,
     LatestBranch,
 }
 
@@ -846,28 +843,11 @@ pub fn build_message_list_with_metadata_from_db(
                 (messages, metadata)
             }
         }
-        BranchSelection::All => {
-            let mut seen = HashSet::new();
-            let mut message_ids = Vec::new();
-            let mut db_token_counts = Vec::new();
-            let messages = all_messages
-                .iter()
-                .filter(|(message, _)| seen.insert(message.id))
-                .map(|(message, attachment)| {
-                    message_ids.push(message.id);
-                    db_token_counts.push(message.input_token_count);
-                    (
-                        message.message_type.clone(),
-                        message.content.clone(),
-                        attachment.clone().map(|a| vec![a]).unwrap_or_else(Vec::new),
-                    )
-                })
-                .collect();
-            (messages, MessageListMetadata { message_ids, db_token_counts })
-        }
     }
 }
 
+/// 目前仅被分支相关测试使用。
+#[allow(dead_code)]
 pub fn build_message_list_from_db(
     all_messages: &[(Message, Option<MessageAttachment>)],
     branch_selection: BranchSelection,
@@ -903,6 +883,8 @@ pub fn extract_tool_result(content: &str) -> Option<String> {
 }
 
 // Helper function to reconstruct assistant message with tool calls from MCP_TOOL_CALL comments
+// 目前仅被测试使用。
+#[allow(dead_code)]
 pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Option<ChatMessage> {
     reconstruct_assistant_with_tool_calls_and_reasoning(content, None)
 }
@@ -1041,14 +1023,6 @@ pub fn parse_data_url(data_url: &str) -> Option<(String, String)> {
         return None;
     }
     Some((mime_type.to_string(), content.to_string()))
-}
-
-pub async fn cleanup_token(
-    tokens: &Arc<tokio::sync::Mutex<HashMap<i64, CancellationToken>>>,
-    message_id: i64,
-) {
-    let mut map = tokens.lock().await;
-    map.remove(&message_id);
 }
 
 pub async fn handle_message_type_end(

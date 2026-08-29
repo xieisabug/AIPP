@@ -1,5 +1,5 @@
 use crate::db::conversation_db::{ConversationDatabase, ConversationTokenStats, MessageTokenStats};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// 获取对话的token统计信息
 #[tauri::command]

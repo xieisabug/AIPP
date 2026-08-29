@@ -113,10 +113,6 @@ impl SearchHandler {
                 .get("POOL_ACQUIRE_TIMEOUT_MS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10_000),
-            page_idle_timeout_secs: config
-                .get("PAGE_IDLE_TIMEOUT_SECS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
             user_data_dir: Some(user_data_dir.to_string_lossy().to_string()),
             browser_path,
             headless: config

@@ -227,6 +227,7 @@ struct PullChange {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RemoteStatus {
+    #[allow(dead_code)]
     latest_cursor: i64,
     remote_empty: bool,
     #[allow(dead_code)]

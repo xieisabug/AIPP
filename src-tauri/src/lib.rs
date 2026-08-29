@@ -292,7 +292,6 @@ struct FeatureConfigState {
 #[derive(Clone)]
 struct NameCacheState {
     assistant_names: Arc<TokioMutex<HashMap<i64, String>>>,
-    model_names: Arc<TokioMutex<HashMap<i64, String>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -531,29 +530,13 @@ fn request_app_exit(app_handle: &tauri::AppHandle) {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn query_accessibility_permissions() -> bool {
-    let trusted = macos_accessibility_client::accessibility::application_is_trusted();
-    if trusted {
-        print!("Application is totally trusted!");
-    } else {
-        print!("Application isn't trusted :(");
-        // let trusted = macos_accessibility_client::accessibility::application_is_trusted_with_prompt();
-        // return trusted;
-    }
-    trusted
-}
-
-#[cfg(not(target_os = "macos"))]
-fn query_accessibility_permissions() -> bool {
-    return true;
-}
-
 #[tauri::command]
 async fn get_selected() -> Result<String, String> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         // First try native selected-text crate
+        // mut 仅在 macOS 的剪贴板回退分支中需要
+        #[allow(unused_mut)]
         let mut result = get_selected_text().unwrap_or_default();
 
         // Fallback on macOS: simulate Cmd+C and read from clipboard, then restore clipboard
@@ -1375,16 +1358,8 @@ fn initialize_name_cache_state(app_handle: &tauri::AppHandle) -> NameCacheState 
         assistant_names.insert(assistant.id, assistant.name.clone());
     }
 
-    let llm_db = LLMDatabase::new(app_handle).expect("Failed to connect to database");
-    let models = llm_db.get_models_for_select().expect("Failed to load models");
-    let mut model_names = HashMap::new();
-    for model in models.clone().into_iter() {
-        model_names.insert(model.2, model.0);
-    }
-
     NameCacheState {
         assistant_names: Arc::new(TokioMutex::new(assistant_names)),
-        model_names: Arc::new(TokioMutex::new(model_names)),
     }
 }
 

@@ -276,12 +276,6 @@ pub struct AssistantDetail {
     pub mcp_tool_configs: Vec<AssistantMCPToolConfig>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
-pub struct MCPServerInfo {
-    pub id: i64,
-    pub name: String,
-    pub is_enabled: bool,
-}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct MCPToolInfo {

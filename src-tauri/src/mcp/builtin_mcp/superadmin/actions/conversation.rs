@@ -407,9 +407,9 @@ impl ActionHandler for ConversationInjectSystemMessageHandler {
 
     async fn undo(
         &self,
-        app_handle: &AppHandle,
+        _app_handle: &AppHandle,
         _snapshot: &serde_json::Value,
-        original_args: &serde_json::Value,
+        _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         // The original execution result_json should contain message_id
         // We get the message_id from the execute result stored in audit

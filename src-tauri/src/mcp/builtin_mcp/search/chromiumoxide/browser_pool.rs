@@ -37,8 +37,6 @@ pub struct BrowserPoolConfig {
     pub max_pages: usize,
     /// 获取页面 permit 的等待超时（毫秒）
     pub acquire_timeout_ms: u64,
-    /// 页面空闲超时（秒），暂未实现
-    pub page_idle_timeout_secs: u64,
     /// 用户数据目录
     pub user_data_dir: Option<String>,
     /// 浏览器路径
@@ -400,11 +398,6 @@ impl PooledPage {
         self.page.as_ref().expect("Page not available")
     }
 
-    /// 获取底层页面可变引用
-    pub fn page_mut(&mut self) -> &mut chromiumoxide::page::Page {
-        self.page.as_mut().expect("Page not available")
-    }
-
     /// 消费 self，不归还页面（用于出错时）
     pub fn consume(mut self) -> chromiumoxide::page::Page {
         let page = self.page.take().expect("Page not available");
@@ -433,7 +426,6 @@ mod tests {
         BrowserPool::new(BrowserPoolConfig {
             max_pages,
             acquire_timeout_ms: 250,
-            page_idle_timeout_secs: 60,
             user_data_dir: None,
             browser_path: PathBuf::from("/tmp/nonexistent-chromium"),
             headless: true,

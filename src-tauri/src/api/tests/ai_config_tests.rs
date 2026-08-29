@@ -13,7 +13,7 @@ use crate::api::ai::config::{
     OpenAiCacheContext, DEFAULT_REQUEST_TIMEOUT_SECS, MAX_RETRY_ATTEMPTS, RETRY_DELAY_BASE_MS,
 };
 use crate::db::assistant_db::AssistantModelConfig;
-use crate::db::llm_db::{LLMModel, LLMProvider, LLMProviderConfig, ModelDetail};
+use crate::db::llm_db::{LLMModel, LLMProvider, ModelDetail};
 use crate::db::system_db::FeatureConfig;
 use std::collections::HashMap;
 

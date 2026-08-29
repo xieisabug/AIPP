@@ -219,11 +219,8 @@ impl FingerprintManager {
     /// 获取随机但一致的延时配置
     pub fn get_timing_config() -> TimingConfig {
         TimingConfig {
-            typing_delay_min: 50 + fastrand::u64(0..50),
-            typing_delay_max: 120 + fastrand::u64(0..80),
             action_delay_min: 200 + fastrand::u64(0..100),
             action_delay_max: 500 + fastrand::u64(0..200),
-            page_load_timeout: 15000 + fastrand::u64(0..5000),
         }
     }
 
@@ -264,17 +261,13 @@ struct DeviceTemplate {
 
 #[derive(Debug, Clone)]
 pub struct TimingConfig {
-    pub typing_delay_min: u64,
-    pub typing_delay_max: u64,
     pub action_delay_min: u64,
     pub action_delay_max: u64,
-    pub page_load_timeout: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     // ============================================
@@ -415,19 +408,10 @@ mod tests {
     fn test_get_timing_config_valid_ranges() {
         let config = FingerprintManager::get_timing_config();
 
-        // Typing delay should be in reasonable range
-        assert!(config.typing_delay_min >= 50);
-        assert!(config.typing_delay_max >= config.typing_delay_min);
-        assert!(config.typing_delay_max <= 300);
-
         // Action delay should be in reasonable range
         assert!(config.action_delay_min >= 200);
         assert!(config.action_delay_max >= config.action_delay_min);
         assert!(config.action_delay_max <= 900);
-
-        // Page load timeout should be reasonable
-        assert!(config.page_load_timeout >= 15000);
-        assert!(config.page_load_timeout <= 25000);
     }
 
     #[test]
@@ -439,12 +423,13 @@ mod tests {
         }
 
         // Check that not all values are identical (would indicate no randomness)
-        let first_typing_min = configs[0].typing_delay_min;
-        let all_same = configs.iter().all(|c| c.typing_delay_min == first_typing_min);
+        let first_action_min = configs[0].action_delay_min;
+        let all_same = configs.iter().all(|c| c.action_delay_min == first_action_min);
         // With 10 samples, it's very unlikely all would be the same if there's randomness
         // But we allow for the possibility in case of test flakiness
         // The main goal is to ensure the config is valid
-        assert!(configs.iter().all(|c| c.typing_delay_min >= 50));
+        let _ = all_same;
+        assert!(configs.iter().all(|c| c.action_delay_min >= 200));
     }
 
     // ============================================
@@ -453,16 +438,10 @@ mod tests {
 
     #[test]
     fn test_timing_config_struct() {
-        let config = TimingConfig {
-            typing_delay_min: 50,
-            typing_delay_max: 100,
-            action_delay_min: 200,
-            action_delay_max: 500,
-            page_load_timeout: 15000,
-        };
+        let config = TimingConfig { action_delay_min: 200, action_delay_max: 500 };
 
-        assert_eq!(config.typing_delay_min, 50);
-        assert_eq!(config.page_load_timeout, 15000);
+        assert_eq!(config.action_delay_min, 200);
+        assert_eq!(config.action_delay_max, 500);
     }
 
     // ============================================

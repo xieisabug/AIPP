@@ -1,8 +1,5 @@
-use std::collections::HashMap;
-
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
-use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::api::ai::acp::AcpPermissionState;
@@ -807,50 +804,6 @@ pub(super) fn build_feishu_system_message(event: &IncomingTextEvent) -> String {
         event.parent_id.as_deref().unwrap_or(""),
         event.root_id.as_deref().unwrap_or(""),
     )
-}
-
-pub(super) async fn wait_for_butler_to_settle(
-    app_handle: &AppHandle,
-    butler_conversation_id: i64,
-) -> Result<(), String> {
-    let activity_manager =
-        app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
-    let mut idle_checks = 0;
-    let max_checks =
-        (FEISHU_SETTLE_TIMEOUT.as_millis() / FEISHU_SETTLE_CHECK_INTERVAL.as_millis()) as usize;
-    for attempt in 0..max_checks {
-        let runtime_state = activity_manager.get_runtime_state(butler_conversation_id).await;
-        let pending_tasks = count_pending_butler_tasks(app_handle, butler_conversation_id)?;
-        if !runtime_state.is_running && pending_tasks == 0 {
-            idle_checks += 1;
-            if idle_checks >= 2 {
-                return Ok(());
-            }
-        } else {
-            idle_checks = 0;
-            if attempt % FEISHU_SETTLE_STATUS_INTERVAL_STEPS == 0 {
-                let waited_seconds =
-                    (((attempt + 1) as u128) * FEISHU_SETTLE_CHECK_INTERVAL.as_millis()) / 1000;
-                mutate_status(app_handle, |status| {
-                    status.running = true;
-                    status.connected = true;
-                    status.status_text = "总管家仍在处理飞书消息".to_string();
-                    status.status_detail = Some(format!(
-                        "正在等待总管家完成当前消息（运行中={}, 待完成任务={}，已等待 {} 秒）",
-                        runtime_state.is_running, pending_tasks, waited_seconds
-                    ));
-                })
-                .await;
-            }
-        }
-        sleep(FEISHU_SETTLE_CHECK_INTERVAL).await;
-    }
-    let pending_tasks = count_pending_butler_tasks(app_handle, butler_conversation_id)?;
-    let runtime_state = activity_manager.get_runtime_state(butler_conversation_id).await;
-    Err(format!(
-        "等待总管家处理飞书消息超时（运行中={}，待完成任务={}）",
-        runtime_state.is_running, pending_tasks
-    ))
 }
 
 pub(super) fn count_pending_butler_tasks(

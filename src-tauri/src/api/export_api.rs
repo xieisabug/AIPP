@@ -17,7 +17,6 @@ use docx_rs::*;
 use futures::StreamExt;
 use image::GenericImageView;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use regex::Regex;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -306,39 +305,6 @@ fn escape_pdf_html(raw: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
-}
-
-#[cfg(desktop)]
-fn inline_html_images_as_data_uri(html: &str) -> String {
-    let img_regex =
-        Regex::new(r#"(?is)<img([^>]*?)src="([^"]+)"([^>]*)>"#).expect("invalid image regex");
-    img_regex
-        .replace_all(html, |caps: &regex::Captures| {
-            let before = caps.get(1).map_or("", |m| m.as_str());
-            let src = caps.get(2).map_or("", |m| m.as_str());
-            let after = caps.get(3).map_or("", |m| m.as_str());
-            if let Some(bytes) = load_markdown_image_bytes(src) {
-                let mime = detect_image_mime_type(&bytes);
-                let data_uri = format!("data:{mime};base64,{}", STANDARD.encode(bytes));
-                format!(r#"<img{before}src="{data_uri}"{after}>"#)
-            } else {
-                caps.get(0).map_or("", |m| m.as_str()).to_string()
-            }
-        })
-        .into_owned()
-}
-
-#[cfg(desktop)]
-fn detect_image_mime_type(image_bytes: &[u8]) -> &'static str {
-    match image::guess_format(image_bytes) {
-        Ok(image::ImageFormat::Jpeg) => "image/jpeg",
-        Ok(image::ImageFormat::Png) => "image/png",
-        Ok(image::ImageFormat::Gif) => "image/gif",
-        Ok(image::ImageFormat::WebP) => "image/webp",
-        Ok(image::ImageFormat::Bmp) => "image/bmp",
-        Ok(image::ImageFormat::Tiff) => "image/tiff",
-        _ => "image/png",
-    }
 }
 
 const DOCX_BODY_FONT_SIZE: usize = 22; // 11pt

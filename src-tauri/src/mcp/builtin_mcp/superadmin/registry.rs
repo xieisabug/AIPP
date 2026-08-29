@@ -86,6 +86,7 @@ impl ActionRegistry {
         ds
     }
 
+    #[allow(dead_code)] // 目前仅被 registry 单元测试使用
     pub fn all_metas(&self) -> Vec<&ActionMeta> {
         let mut metas: Vec<&ActionMeta> = self.actions.values().map(|r| &r.meta).collect();
         metas.sort_by(|a, b| a.action_id.cmp(&b.action_id));

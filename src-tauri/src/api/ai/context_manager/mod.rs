@@ -50,6 +50,9 @@ const MICROCOMPACT_KEEP_RECENT: usize = 6;
 ///
 /// Estimates tokens and logs warnings if over budget. Returns messages
 /// unmodified. Use `fit_to_budget_with_compaction` for active LLM compression.
+///
+/// 目前仅被测试使用。
+#[allow(dead_code)]
 pub fn fit_to_budget(
     messages: Vec<MessageTuple>,
     budget: &ContextBudget,
@@ -577,7 +580,7 @@ mod tests {
     fn microcompact_truncates_old_tool_results() {
         let mut messages = vec![msg("system", "sys")];
         // Add 10 tool results
-        for i in 0..10 {
+        for _ in 0..10 {
             messages.push(msg("tool_result", &format!("tool output {}", "x".repeat(1000))));
         }
         messages.push(msg("user", "latest"));

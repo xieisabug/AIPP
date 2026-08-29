@@ -1,4 +1,4 @@
-use rusqlite::{params_from_iter, Connection, Result};
+use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
@@ -8,7 +8,6 @@ use tauri::Manager;
 /// 每个 db_id 对应一个独立的 SQLite 数据库文件
 pub struct ArtifactDataDatabase {
     pub conn: Connection,
-    pub db_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -69,7 +68,7 @@ impl ArtifactDataDatabase {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
             .map_err(|e| format!("Failed to set pragmas: {}", e))?;
 
-        Ok(ArtifactDataDatabase { conn, db_id: db_id.to_string() })
+        Ok(ArtifactDataDatabase { conn })
     }
 
     /// 执行查询语句 (SELECT)

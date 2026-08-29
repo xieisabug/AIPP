@@ -9,6 +9,4 @@ pub mod types;
 #[cfg(desktop)]
 pub mod chromiumoxide;
 
-#[cfg(desktop)]
-pub use chromiumoxide::{BrowserPool, BrowserPoolConfig, ContentFetcher, FetchConfig, PooledPage};
 pub use handler::SearchHandler;

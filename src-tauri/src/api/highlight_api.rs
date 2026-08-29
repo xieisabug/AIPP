@@ -363,7 +363,7 @@ pub fn highlight_code(
     let theme = theme_ref.unwrap_or_else(|| pick_theme(is_dark));
 
     // Figure out theme name for logging
-    let ts = theme_set();
+    let _ts = theme_set();
 
     // Try by token, then by extension, else plain text
     let raw_token = normalize_lang_token(&lang);

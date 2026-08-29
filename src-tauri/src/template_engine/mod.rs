@@ -309,25 +309,6 @@ impl TemplateEngine {
         TemplateEngine { commands }
     }
 
-    // 注册命令
-    pub fn register_command(&mut self, name: &str, handler: CommandFn) {
-        self.register_bang(Bang {
-            name: name.to_string(),
-            complete: name.to_string(),
-            description: "Custom command".to_string(),
-            bang_type: BangType::Text,
-            command: handler,
-        });
-    }
-
-    pub fn register_builtin_command(
-        &mut self,
-        name: &str,
-        handler: fn(TemplateEngine, String, HashMap<String, String>) -> BoxFuture<'static, String>,
-    ) {
-        self.register_command(name, wrap_command(handler));
-    }
-
     pub fn register_bang(&mut self, bang: Bang) {
         self.commands.insert(bang.name.clone(), bang);
     }

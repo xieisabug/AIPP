@@ -189,29 +189,6 @@ impl SystemDatabase {
     }
 
     // 查询特定模块的所有配置
-    #[instrument(level = "debug", skip(self), fields(feature_code))]
-    fn get_feature_config_by_module(&self, feature_code: &str) -> Result<Vec<FeatureConfig>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, feature_code, key, value, data_type, description
-             FROM feature_config WHERE feature_code = ?1",
-        )?;
-        let configs = stmt
-            .query_map(params![feature_code], |row| {
-                Ok(FeatureConfig {
-                    id: Some(row.get(0)?),
-                    feature_code: row.get(1)?,
-                    key: row.get(2)?,
-                    value: row.get(3)?,
-                    data_type: row.get(4)?,
-                    description: row.get(5)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        trace!(count = configs.len(), "Fetched feature configs by module");
-        Ok(configs)
-    }
-
-    // 查询特定模块的所有配置
     #[instrument(level = "debug", skip(self))]
     pub fn get_all_feature_config(&self) -> Result<Vec<FeatureConfig>> {
         let mut stmt = self.conn.prepare(

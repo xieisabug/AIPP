@@ -12,9 +12,12 @@ use crate::FeatureConfigState;
 use crate::db::system_db::{FeatureConfig, SystemDatabase};
 
 /// 移动端不支持功能的统一错误前缀，前端可据此识别并给出一致提示
+// 注意：仅在 cfg(mobile) / 非桌面端的代码路径中使用，桌面端编译会报 dead_code，故保留并豁免。
+#[allow(dead_code)]
 pub const MOBILE_UNSUPPORTED_PREFIX: &str = "MOBILE_UNSUPPORTED";
 
 /// 生成统一的"移动端不支持"错误信息
+#[allow(dead_code)]
 pub fn mobile_unsupported_error(feature: &str) -> String {
     format!("{MOBILE_UNSUPPORTED_PREFIX}: {feature} 不支持移动平台")
 }

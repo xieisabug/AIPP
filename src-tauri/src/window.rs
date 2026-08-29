@@ -1,6 +1,5 @@
 use crate::artifacts::artifacts_db::ArtifactCollection;
 use crate::db::system_db::SystemDatabase;
-use serde::{Deserialize, Serialize};
 use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::{LogicalPosition, LogicalSize};
@@ -773,12 +772,6 @@ pub async fn open_plugin_window(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-struct ReactComponentPayload {
-    code: String,
-    css: String,
-}
-
 pub fn handle_open_ask_window(app_handle: &AppHandle) {
     use chrono::Local;
     let t_handle = std::time::Instant::now();
@@ -812,6 +805,8 @@ pub fn handle_open_ask_window(app_handle: &AppHandle) {
     info!(elapsed_ms=%t_handle.elapsed().as_millis(), "handle_open_ask_window done");
 }
 
+// 目前仅被 macOS 的 RunEvent::Reopen 分支调用
+#[allow(dead_code)]
 pub fn awaken_aipp(app_handle: &AppHandle) {
     use chrono::Local;
 

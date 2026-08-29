@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -99,7 +98,6 @@ fn scheduled_task_run_from_row(row: &Row) -> rusqlite::Result<ScheduledTaskRun> 
 
 pub struct ScheduledTaskDatabase {
     pub conn: Connection,
-    pub db_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -109,15 +107,7 @@ impl ScheduledTaskDatabase {
         let db_path = get_db_path(app_handle, "conversation.db").unwrap();
         let conn = Connection::open(&db_path)?;
         let write_lock = get_db_write_lock(&db_path);
-        Ok(ScheduledTaskDatabase { conn, db_path, write_lock })
-    }
-
-    pub fn get_connection(&self) -> rusqlite::Result<Connection> {
-        Connection::open(&self.db_path)
-    }
-
-    pub fn write_lock(&self) -> Arc<Mutex<()>> {
-        self.write_lock.clone()
+        Ok(ScheduledTaskDatabase { conn, write_lock })
     }
 
     fn with_write_lock<T, F>(&self, f: F) -> Result<T>
@@ -507,16 +497,11 @@ mod tests {
     use super::{ScheduledTask, ScheduledTaskDatabase};
     use chrono::Utc;
     use rusqlite::Connection;
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     fn build_test_db() -> ScheduledTaskDatabase {
         let conn = Connection::open_in_memory().unwrap();
-        let db = ScheduledTaskDatabase {
-            conn,
-            db_path: PathBuf::from(":memory:"),
-            write_lock: Arc::new(Mutex::new(())),
-        };
+        let db = ScheduledTaskDatabase { conn, write_lock: Arc::new(Mutex::new(())) };
         db.create_tables().unwrap();
         db
     }

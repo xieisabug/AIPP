@@ -337,62 +337,6 @@ fn render_markdown_table_separator(width: usize) -> String {
     format!("| {} |", vec!["---"; width].join(" | "))
 }
 
-pub(super) async fn reply_markdown_message(
-    app_handle: &AppHandle,
-    config: &FeishuRuntimeConfig,
-    reply_to_message_id: &str,
-    markdown: &str,
-) -> Result<FeishuReplyOutcome, String> {
-    let token = fetch_tenant_access_token(app_handle, config).await?;
-    let client = feishu_http_client(app_handle);
-    let mut interactive_error = None;
-    let interactive_card = match build_feishu_markdown_card(markdown) {
-        Ok(card) => Some(card),
-        Err(error) => {
-            let error = format!("构建飞书卡片失败: {error}");
-            debug!(error = %error, "failed to build feishu markdown card, falling back to raw text");
-            interactive_error = Some(error);
-            None
-        }
-    };
-
-    if let Some(card) = interactive_card.as_ref() {
-        match send_reply_message_request(
-            &client,
-            config,
-            &token,
-            reply_to_message_id,
-            build_feishu_interactive_payload(card),
-        )
-        .await
-        {
-            Ok(message_id) => {
-                return Ok(FeishuReplyOutcome {
-                    message_id,
-                    payload_type: "interactive",
-                    interactive_error,
-                    interactive_card,
-                })
-            }
-            Err(error) => {
-                warn!(error = %error, "failed to send feishu interactive reply, falling back to raw text");
-                interactive_error = Some(format!("发送飞书 interactive 卡片失败: {error}"));
-            }
-        }
-    }
-
-    let message_id = send_reply_message_request(
-        &client,
-        config,
-        &token,
-        reply_to_message_id,
-        build_feishu_text_payload(markdown),
-    )
-    .await?;
-
-    Ok(FeishuReplyOutcome { message_id, payload_type: "text", interactive_error, interactive_card })
-}
-
 pub(super) async fn send_message_request(
     client: &reqwest::Client,
     config: &FeishuRuntimeConfig,
@@ -516,7 +460,6 @@ pub(super) async fn send_permission_review_to_target(
             message_id,
             payload_type: "interactive",
             interactive_error: None,
-            interactive_card: Some(card.clone()),
         }),
         Err(error) => {
             warn!(error = %error, "failed to send permission review card, falling back to raw text");
@@ -526,7 +469,6 @@ pub(super) async fn send_permission_review_to_target(
                 message_id,
                 payload_type: "text",
                 interactive_error: Some(format!("发送飞书 interactive 卡片失败: {error}")),
-                interactive_card: Some(card.clone()),
             })
         }
     }

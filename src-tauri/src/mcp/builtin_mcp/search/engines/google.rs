@@ -380,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)]
     fn test_parse_search_results_with_tF2Cxc_class() {
         let html = r#"
             <html>

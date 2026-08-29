@@ -283,6 +283,7 @@ pub struct ConversationRepository {
 
 impl ConversationRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }
@@ -699,6 +700,7 @@ pub struct MessageRepository {
 
 impl MessageRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }
@@ -960,6 +962,7 @@ pub struct MessageAttachmentRepository {
 
 impl MessageAttachmentRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }
@@ -1855,10 +1858,6 @@ impl ConversationDatabase {
         })
     }
 
-    #[instrument(level = "debug", skip(self), err)]
-    pub fn delete_acp_session_id(&self, conversation_id: i64) -> Result<(), AppError> {
-        self.delete_agent_session_id(conversation_id, "acp")
-    }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn delete_agent_session_id(
@@ -2527,11 +2526,6 @@ pub struct ConversationSummaryRepository {
 }
 
 impl ConversationSummaryRepository {
-    #[instrument(level = "debug", skip(conn))]
-    pub fn new(conn: Connection) -> Self {
-        Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
-    }
-
     #[instrument(level = "debug", skip(conn, write_lock))]
     pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
         ConversationSummaryRepository { conn, write_lock }
@@ -2572,30 +2566,6 @@ impl ConversationSummaryRepository {
             })
         })
     }
-
-    #[instrument(level = "debug", skip(self))]
-    pub fn get_by_conversation_id(
-        &self,
-        conversation_id: i64,
-    ) -> Result<Option<ConversationSummary>> {
-        self.conn
-            .query_row(
-                "SELECT id, conversation_id, summary, user_intent, key_outcomes, created_time FROM conversation_summary WHERE conversation_id = ?",
-                &[&conversation_id],
-                |row| {
-                    Ok(ConversationSummary {
-                        id: row.get(0)?,
-                        conversation_id: row.get(1)?,
-                        summary: row.get(2)?,
-                        user_intent: row.get(3)?,
-                        key_outcomes: row.get(4)?,
-                        created_time: get_required_datetime_from_row(row, 5, "created_time")?,
-                    })
-                },
-            )
-            .optional()
-    }
-
     #[instrument(level = "debug", skip(self))]
     pub fn exists(&self, conversation_id: i64) -> Result<bool> {
         let count: i64 = self.conn.query_row(
@@ -2679,6 +2649,7 @@ pub struct ButlerRepository {
 
 impl ButlerRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }

@@ -19,7 +19,7 @@ pub(crate) use api::{
     try_deliver_acp_permission_to_feishu, try_deliver_operation_permission_to_feishu,
 };
 pub(crate) use config::{
-    clear_feishu_secret, migrate_secure_storage_if_needed, save_feishu_secret,
+    clear_feishu_secret, save_feishu_secret,
 };
 pub(crate) use debug::resend_message_to_feishu_for_debug;
 pub(crate) use interaction::try_deliver_ask_user_question_to_feishu;

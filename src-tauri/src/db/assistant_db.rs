@@ -259,26 +259,6 @@ impl AssistantDatabase {
         debug!(assistant_id = id, "assistant inserted");
         Ok(id)
     }
-
-    #[instrument(level = "debug", skip(self), fields(assistant_type = assistant_type))]
-    pub fn get_assistants_by_type(&self, assistant_type: i64) -> Result<Vec<Assistant>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, assistant_type, is_addition, created_time FROM assistant WHERE assistant_type = ? ORDER BY created_time DESC",
-        )?;
-        let rows = stmt.query_map([assistant_type], |row| {
-            Ok(Assistant {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                assistant_type: row.get(3)?,
-                is_addition: row.get(4)?,
-                created_time: row.get(5)?,
-            })
-        })?;
-        let assistants: Vec<Assistant> = rows.collect::<Result<Vec<_>>>()?;
-        Ok(assistants)
-    }
-
     #[instrument(level = "debug", skip(self), fields(id = id, name = name))]
     pub fn update_assistant(&self, id: i64, name: &str, description: &str) -> Result<()> {
         self.conn.execute(
@@ -913,18 +893,6 @@ impl AssistantDatabase {
         debug!("assistant workspace deleted");
         Ok(())
     }
-
-    /// Remove all workspace paths for an assistant
-    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
-    pub fn remove_assistant_workspaces_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM assistant_workspace WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
-        debug!("assistant workspaces deleted by assistant_id");
-        Ok(())
-    }
-
     /// Check if a path is in the assistant's workspace (prefix match)
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn is_path_in_assistant_workspace(&self, assistant_id: i64, path: &str) -> Result<bool> {
@@ -965,28 +933,6 @@ impl AssistantDatabase {
             )
             .optional()
     }
-
-    #[instrument(level = "debug", skip(self))]
-    pub fn list_assistant_summaries(&self) -> Result<Vec<AssistantSummary>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, assistant_id, summary, tags_json, source_hash, created_time, updated_time
-             FROM assistant_summary
-             ORDER BY updated_time DESC, id DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(AssistantSummary {
-                id: row.get(0)?,
-                assistant_id: row.get(1)?,
-                summary: row.get(2)?,
-                tags_json: row.get(3)?,
-                source_hash: row.get(4)?,
-                created_time: row.get(5)?,
-                updated_time: row.get(6)?,
-            })
-        })?;
-        rows.collect()
-    }
-
     #[instrument(level = "debug", skip(self, summary, tags_json, source_hash), fields(assistant_id = assistant_id))]
     pub fn upsert_assistant_summary(
         &self,
@@ -1008,14 +954,5 @@ impl AssistantDatabase {
         )?;
         self.get_assistant_summary(assistant_id)?
             .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
-    }
-
-    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
-    pub fn delete_assistant_summary_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM assistant_summary WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
-        Ok(())
     }
 }

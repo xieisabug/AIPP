@@ -7,8 +7,7 @@ use crate::api::ai::title::{
 };
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{
-    resolve_tool_name, sanitize_tool_name, try_dispatch_queued_message_after_completion,
-    ToolNameMapping,
+    resolve_tool_name, try_dispatch_queued_message_after_completion, ToolNameMapping,
 };
 use crate::db::assistant_db::Assistant;
 use crate::db::conversation_db::{
@@ -397,15 +396,6 @@ enum OutputType {
 impl Default for OutputType {
     fn default() -> Self {
         OutputType::None
-    }
-}
-
-/// 工具名分割助手
-fn split_tool_name(fn_name: &str) -> (String, String) {
-    if let Some((s, t)) = fn_name.split_once("__") {
-        (s.to_string(), t.to_string())
-    } else {
-        (String::from("default"), fn_name.to_string())
     }
 }
 
@@ -1029,22 +1019,9 @@ fn build_streaming_tool_call_display(
     display
 }
 
-/// 用于测试的公共模块
-#[cfg(test)]
-pub(crate) use self::tests::build_streaming_tool_call_display_pub;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 公开 build_streaming_tool_call_display 给测试模块使用
-    pub(crate) fn build_streaming_tool_call_display_pub(
-        response_content: &str,
-        streaming_tool_calls: &HashMap<String, ToolCall>,
-        tool_name_mapping: &ToolNameMapping,
-    ) -> String {
-        build_streaming_tool_call_display(response_content, streaming_tool_calls, tool_name_mapping)
-    }
 
     #[test]
     fn test_merge_chat_usage_metadata_records_cache_and_reasoning() {
@@ -1406,216 +1383,6 @@ mod tests {
             Some("data:image/png;base64,ZmFrZV9pbWFnZQ==")
         );
     }
-}
-
-/// 统一处理捕获到的工具调用：创建DB记录、插入UI注释、更新消息、可选自动执行、可选向UI发事件
-async fn handle_captured_tool_calls_common(
-    app_handle: &tauri::AppHandle,
-    conversation_db: &ConversationDatabase,
-    window: &tauri::Window,
-    conversation_id: i64,
-    response_message_id: i64,
-    captured_tool_calls: &[ToolCall],
-    response_content: &mut String,
-    emit_tool_call_events: bool,
-    mcp_override_config: Option<&McpOverrideConfig>,
-    tool_name_mapping: &ToolNameMapping,
-) -> anyhow::Result<()> {
-    // 先将完整的 tool_calls JSON 覆盖保存到消息，保证数据源一致
-    if let Ok(Some(mut msg)) = conversation_db
-        .message_repo()
-        .context("failed to get message_repo")?
-        .read(response_message_id)
-    {
-        msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
-        let _ = conversation_db
-            .message_repo()
-            .context("failed to get message_repo for update")?
-            .update(&msg);
-    }
-
-    for tool_call in captured_tool_calls {
-        // 使用映射表还原原始名称，用于 UI 显示和数据库记录
-        let (server_name, tool_name) = resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
-        let raw_params_str = tool_call.fn_arguments.to_string();
-        let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
-        info!(
-            conversation_id,
-            response_message_id,
-            llm_call_id = %tool_call.call_id,
-            fn_name = %tool_call.fn_name,
-            server_name = %server_name,
-            tool_name = %tool_name,
-            raw_arguments = %raw_params_str,
-            normalized_arguments = %params_str,
-            "captured native tool call"
-        );
-
-        // 创建工具调用记录（使用原始名称）
-        match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
-            app_handle.clone(),
-            conversation_id,
-            Some(response_message_id),
-            server_name.clone(),
-            tool_name.clone(),
-            params_str.clone(),
-            Some(&tool_call.call_id),
-            Some(response_message_id),
-        )
-        .await
-        {
-            Ok(tool_call_record) => {
-                // 追加 UI hint（使用原始名称）
-                let ui_hint = format!(
-                    "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
-                    serde_json::json!({
-                        "server_name": server_name,
-                        "tool_name": tool_name,
-                        "parameters": params_str,
-                        "call_id": tool_call_record.id,
-                        "llm_call_id": tool_call.call_id.clone(),
-                    })
-                );
-                response_content.push_str(&ui_hint);
-
-                // 持久化内容并发出更新
-                if let Ok(Some(mut msg)) = conversation_db
-                    .message_repo()
-                    .context("failed to get message_repo for read")?
-                    .read(response_message_id)
-                {
-                    msg.content = response_content.clone();
-                    // 覆盖保存 tool_calls JSON（再次确保一致）
-                    msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
-                    let _ = conversation_db
-                        .message_repo()
-                        .context("failed to get message_repo for update")?
-                        .update(&msg);
-
-                    let update_event = ConversationEvent {
-                        r#type: "message_update".to_string(),
-                        data: serde_json::to_value(MessageUpdateEvent {
-                            message_id: response_message_id,
-                            message_type: "response".to_string(),
-                            content: response_content.clone(),
-                            is_done: false,
-                            token_count: None,
-                            input_token_count: None,
-                            output_token_count: None,
-                            ttft_ms: None,
-                            tps: None,
-                        })
-                        .unwrap(),
-                    };
-                    send_conversation_event_to_chat_windows(
-                        window.app_handle(),
-                        conversation_id,
-                        update_event,
-                    );
-                }
-
-                // 自动执行（若配置）
-                if let Ok(conv) = conversation_db
-                    .conversation_repo()
-                    .context("failed to get conversation_repo")?
-                    .read(conversation_id)
-                {
-                    if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-                        if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
-                            app_handle,
-                            assistant_id,
-                            None,
-                            None,
-                        )
-                        .await
-                        {
-                            let servers = mcp_info.enabled_servers;
-                            let mut should_auto_run = false;
-                            for s in servers.iter() {
-                                // 支持精确匹配和清理后名称匹配
-                                let name_matches = s.name == server_name
-                                    || sanitize_tool_name(&s.name) == server_name;
-                                if name_matches && s.is_enabled {
-                                    if let Some(t) =
-                                        s.tools.iter().find(|t| t.name == tool_name && t.is_enabled)
-                                    {
-                                        // Check for override auto-run setting
-                                        // Priority: all_tool_auto_run > tool_auto_run > default
-                                        let tool_key = format!("{}/{}", server_name, tool_name);
-                                        let auto_run = if let Some(all_auto_run) =
-                                            mcp_override_config
-                                                .and_then(|config| config.all_tool_auto_run)
-                                        {
-                                            // all_tool_auto_run has highest priority
-                                            all_auto_run
-                                        } else {
-                                            // Check individual tool override
-                                            *mcp_override_config
-                                                .and_then(|config| config.tool_auto_run.as_ref())
-                                                .and_then(|auto_run_map| {
-                                                    auto_run_map.get(&tool_key)
-                                                })
-                                                .unwrap_or(&t.is_auto_run)
-                                        };
-
-                                        if auto_run {
-                                            should_auto_run = true;
-                                        }
-                                    }
-                                }
-                            }
-                            if should_auto_run {
-                                let state = app_handle.state::<crate::AppState>();
-                                let feature_config_state =
-                                    app_handle.state::<crate::FeatureConfigState>();
-                                if let Err(e) = crate::mcp::execution_api::execute_mcp_tool_call(
-                                    app_handle.clone(),
-                                    state,
-                                    feature_config_state,
-                                    window.clone(),
-                                    tool_call_record.id,
-                                    true, // trigger_continuation
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "Auto-execute MCP tool failed (call_id={}): {}",
-                                        tool_call_record.id, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if emit_tool_call_events {
-                    let tool_call_event = serde_json::json!({
-                        "type": "tool_call",
-                        "data": {
-                            "conversation_id": conversation_id,
-                            "call_id": tool_call.call_id,
-                            "function_name": tool_call.fn_name,
-                            "arguments": tool_call.fn_arguments,
-                            "response_message_id": response_message_id
-                        }
-                    });
-                    send_conversation_event_to_chat_windows(
-                        window.app_handle(),
-                        conversation_id,
-                        ConversationEvent {
-                            r#type: "tool_call".to_string(),
-                            data: tool_call_event["data"].clone(),
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to create MCP tool call record");
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn build_native_tool_call_hint(
@@ -3274,7 +3041,7 @@ async fn attempt_stream_chat(
 
                         // 累积流式工具调用数据
                         let tc = &tool_call_chunk.tool_call;
-                        let (stream_server_name, stream_tool_name) =
+                        let (_stream_server_name, _stream_tool_name) =
                             resolve_tool_name(&tc.fn_name, &tool_name_mapping);
                         debug!(
                             llm_call_id = %tc.call_id,
@@ -3461,7 +3228,6 @@ async fn attempt_stream_chat(
                                                 data: group_merge_event["data"].clone(),
                                             },
                                         );
-                                        group_merge_event_emitted = true;
                                     }
                                 }
                             }
@@ -3800,11 +3566,6 @@ async fn attempt_stream_chat(
                                 if let (Some(msg_id), Some(start_time)) =
                                     (reasoning_message_id, reasoning_start_time)
                                 {
-                                    // 记录 reasoning 结束时间
-                                    if reasoning_end_time.is_none() {
-                                        reasoning_end_time = Some(chrono::Utc::now());
-                                    }
-
                                     if let Err(e) = super::conversation::handle_message_type_end(
                                         msg_id,
                                         "reasoning",
@@ -3875,8 +3636,6 @@ async fn attempt_stream_chat(
                                 }
                             }
                         }
-
-                        // 工具调用事件已在 handle_captured_tool_calls_common 中按需发出
 
                         if need_generate_title && !response_content.is_empty() {
                             spawn_title_generation(
@@ -4001,8 +3760,6 @@ async fn attempt_stream_chat(
             }
         }
     }
-
-    Ok(())
 }
 
 // 辅助函数：创建错误消息

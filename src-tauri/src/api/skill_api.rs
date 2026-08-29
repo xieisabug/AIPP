@@ -534,7 +534,7 @@ pub async fn cleanup_orphaned_skill_configs(app_handle: tauri::AppHandle) -> Res
 
 /// Open the skills folder in the system file manager
 #[tauri::command]
-pub async fn open_skills_folder(app_handle: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_skills_folder(_app_handle: tauri::AppHandle) -> Result<(), String> {
     let skills_dir = get_home_dir().join(".agents/skills");
 
     // Create if not exists
@@ -596,7 +596,7 @@ pub async fn open_skill_parent_folder(file_path: String) -> Result<(), String> {
 
 /// Get skills directory path
 #[tauri::command]
-pub async fn get_skills_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
+pub async fn get_skills_directory(_app_handle: tauri::AppHandle) -> Result<String, String> {
     let skills_dir = get_home_dir().join(".agents/skills");
     Ok(skills_dir.to_string_lossy().to_string())
 }

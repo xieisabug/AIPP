@@ -2301,11 +2301,11 @@ pub async fn stop_mcp_tool_call(
 /// - 只在最后一个工具结果处理后触发 AI 续写
 /// - 使用 llm_call_id 作为工具调用标识（用于原生 toolcall 模式匹配）
 #[tauri::command]
-#[instrument(skip(app_handle, _state, feature_config_state, window), fields(message_id))]
+#[instrument(skip(app_handle, _state, _feature_config_state, window), fields(message_id))]
 pub async fn send_mcp_tool_results(
     app_handle: tauri::AppHandle,
     _state: tauri::State<'_, crate::AppState>,
-    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    _feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     message_id: i64,
 ) -> std::result::Result<(), String> {
@@ -2996,9 +2996,9 @@ pub async fn execute_tool_by_transport(
 use crate::mcp::util::{parse_server_headers, sanitize_headers_for_log};
 /// 通过 stdio 传输执行工具（外部进程）。
 /// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
-#[instrument(skip(app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
+#[instrument(skip(_app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_stdio_tool(
-    app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,

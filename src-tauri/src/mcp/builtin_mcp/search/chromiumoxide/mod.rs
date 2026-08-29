@@ -5,7 +5,7 @@ use tracing::{info, warn};
 pub mod browser_pool;
 pub mod fetcher;
 
-pub use browser_pool::{BrowserPool, BrowserPoolConfig, PooledPage};
+pub use browser_pool::{BrowserPool, BrowserPoolConfig};
 pub use fetcher::{ContentFetcher, FetchConfig};
 
 pub(crate) fn cleanup_profile_locks(user_data_dir: &Path, context: &str) {

@@ -5247,7 +5247,7 @@ fn prepare_acp_session_delete_config(
 
 /// 启动一次性 agent 进程执行 session/delete（能力门控），完成后尽量 session/close 并退出。
 async fn run_acp_session_delete(
-    app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle,
     conversation_id: i64,
     session_id: &str,
     acp_config: AcpConfig,
@@ -5739,7 +5739,8 @@ mod tests {
                                 ))?;
                             }
                             release_prompt.notified().await;
-                            responder.respond(acp::PromptResponse::new(acp::StopReason::EndTurn));
+                            let _ =
+                                responder.respond(acp::PromptResponse::new(acp::StopReason::EndTurn));
                             Ok(())
                         })
                     },

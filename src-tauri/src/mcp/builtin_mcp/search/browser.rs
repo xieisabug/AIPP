@@ -1,36 +1,11 @@
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::info;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum BrowserType {
-    Chrome,
-}
-
-impl BrowserType {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "chrome" => Some(BrowserType::Chrome),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            BrowserType::Chrome => "chrome",
-        }
-    }
-}
-
-pub struct BrowserManager {
-    preferred_type: Option<BrowserType>,
-}
+pub struct BrowserManager;
 
 impl BrowserManager {
-    pub fn new(browser_type_config: Option<&str>) -> Self {
-        let preferred_type = browser_type_config.and_then(|s| BrowserType::from_str(s));
-
-        Self { preferred_type }
+    pub fn new(_browser_type_config: Option<&str>) -> Self {
+        Self
     }
 
     /// 获取 Chrome 浏览器路径

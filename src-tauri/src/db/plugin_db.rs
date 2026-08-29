@@ -377,15 +377,6 @@ impl PluginDatabase {
             Ok(id)
         }
     }
-
-    #[instrument(level = "debug", skip(self), fields(status_id))]
-    pub fn delete_plugin_status(&self, status_id: i64) -> Result<()> {
-        let affected =
-            self.conn.execute("DELETE FROM PluginStatus WHERE status_id = ?", [status_id])?;
-        debug!(affected, "Deleted plugin status");
-        Ok(())
-    }
-
     // Configurations
     #[instrument(level = "debug", skip(self), fields(plugin_id))]
     pub fn get_plugin_configurations(&self, plugin_id: i64) -> Result<Vec<PluginConfiguration>> {
@@ -441,16 +432,6 @@ impl PluginDatabase {
             }
         }
     }
-
-    #[instrument(level = "debug", skip(self), fields(config_id))]
-    pub fn delete_plugin_configuration(&self, config_id: i64) -> Result<()> {
-        let affected = self
-            .conn
-            .execute("DELETE FROM PluginConfigurations WHERE config_id = ?", [config_id])?;
-        debug!(affected, "Deleted plugin config");
-        Ok(())
-    }
-
     #[instrument(level = "debug", skip(self), fields(plugin_id, assistant_id))]
     pub fn get_plugin_assistant_configurations(
         &self,
@@ -504,6 +485,7 @@ impl PluginDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(plugin_id, assistant_id))]
+    #[allow(dead_code)]
     pub fn delete_plugin_assistant_configurations(
         &self,
         plugin_id: i64,
@@ -576,6 +558,7 @@ impl PluginDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(data_id))]
+    #[allow(dead_code)]
     pub fn delete_plugin_data(&self, data_id: i64) -> Result<()> {
         let affected = self.conn.execute("DELETE FROM PluginData WHERE data_id = ?", [data_id])?;
         debug!(affected, "Deleted plugin data");
@@ -611,6 +594,7 @@ impl PluginDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(plugin_id))]
+    #[allow(dead_code)]
     pub fn get_plugin_runtime(&self, plugin_id: i64) -> Result<Option<PluginRuntime>> {
         self.conn
             .query_row(

@@ -87,16 +87,6 @@ impl ToolPresentationRegistry {
             .unwrap_or_else(|| self.fallback.present_call(tool_call).unwrap_or_default())
     }
 
-    fn present_result(&self, tool_result: &ExternalToolResult) -> String {
-        let server_name = tool_result.server_name.as_deref().unwrap_or_default();
-        let tool_name = tool_result.tool_name.as_deref().unwrap_or_default();
-        self.presenters
-            .iter()
-            .find(|presenter| presenter.matches(server_name, tool_name))
-            .and_then(|presenter| presenter.present_result(tool_result))
-            .unwrap_or_else(|| self.fallback.present_result(tool_result).unwrap_or_default())
-    }
-
     fn present_result_vec(&self, tool_result: &ExternalToolResult) -> Vec<String> {
         let server_name = tool_result.server_name.as_deref().unwrap_or_default();
         let tool_name = tool_result.tool_name.as_deref().unwrap_or_default();

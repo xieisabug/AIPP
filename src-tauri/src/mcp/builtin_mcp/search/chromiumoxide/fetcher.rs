@@ -729,67 +729,6 @@ impl ContentFetcher {
             .to_string())
     }
 
-    /// 主要的内容抓取方法，按优先级尝试不同策略
-    pub async fn fetch_content(
-        &mut self,
-        url: &str,
-        browser_manager: &BrowserManager,
-        browser_pool: Option<&BrowserPool>,
-    ) -> Result<String, String> {
-        info!(%url, "Starting content fetch");
-
-        // 策略1: Chromiumoxide（最优，支持复杂动态内容）
-        match self.fetch_with_chromiumoxide(url, browser_manager, browser_pool).await {
-            Ok(html) => {
-                info!(strategy = "chromiumoxide", bytes = html.len(), "Fetched content");
-                return Ok(html);
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
-                    strategy = "chromiumoxide",
-                    "Fetch attempt failed"
-                );
-            }
-        }
-
-        // 策略2: Headless Browser（次优，轻量级）
-        match self.fetch_with_headless_browser(url, browser_manager).await {
-            Ok(html) => {
-                info!(strategy = "headless", bytes = html.len(), "Fetched content");
-                return Ok(html);
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
-                    strategy = "headless",
-                    "Fetch attempt failed"
-                );
-            }
-        }
-
-        // 策略3: HTTP直接请求（兜底，适合静态内容）
-        match self.fetch_with_http(url).await {
-            Ok(http_result) => {
-                info!(strategy = "http", bytes = http_result.body.len(), "Fetched content");
-                return Ok(http_result.body);
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
-                    strategy = "http",
-                    "Fetch attempt failed"
-                );
-            }
-        }
-
-        // 策略4: WebView兜底（不提取内容，仅导航）
-        self.fallback_webview_navigation(url).await
-    }
-
     pub async fn fetch_content_http_first(
         &mut self,
         url: &str,

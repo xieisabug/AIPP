@@ -43,6 +43,7 @@ fn create_ai_api_test_db() -> Connection {
             generation_group_id TEXT,
             parent_group_id TEXT,
             tool_calls_json TEXT,
+            metadata_json TEXT,
             first_token_time TEXT,
             ttft_ms INTEGER
         )",
@@ -243,7 +244,7 @@ mod ai_api_tests {
         let conversation_id = create_test_conversation_for_ai_api(&conn, "Test Conversation", 1);
 
         // 创建消息链: User -> AI -> AI_v2 -> User
-        let msg1_id = create_test_message_for_ai_api(
+        let _msg1_id = create_test_message_for_ai_api(
             &conn,
             conversation_id,
             "user",
@@ -262,7 +263,7 @@ mod ai_api_tests {
         );
 
         // 创建Message 2的重发版本 (AI消息的重发版本应该以原消息为parent)
-        let msg2_v2_id = create_test_message_for_ai_api(
+        let _msg2_v2_id = create_test_message_for_ai_api(
             &conn,
             conversation_id,
             "assistant",
@@ -344,7 +345,7 @@ mod ai_api_tests {
         let conversation_id = create_test_conversation_for_ai_api(&conn, "Test Conversation", 1);
 
         // 创建复杂的版本链：A -> B -> C -> D (其中C有多个版本)
-        let msg_a_id = create_test_message_for_ai_api(
+        let _msg_a_id = create_test_message_for_ai_api(
             &conn,
             conversation_id,
             "user",
@@ -353,7 +354,7 @@ mod ai_api_tests {
             Some(Uuid::new_v4().to_string()),
         );
 
-        let msg_b_id = create_test_message_for_ai_api(
+        let _msg_b_id = create_test_message_for_ai_api(
             &conn,
             conversation_id,
             "assistant",
@@ -382,7 +383,7 @@ mod ai_api_tests {
         );
 
         // Message C的第三个版本（最新）(重发版本以前一个版本为parent)
-        let msg_c_v3_id = create_test_message_for_ai_api(
+        let _msg_c_v3_id = create_test_message_for_ai_api(
             &conn,
             conversation_id,
             "user",
@@ -463,7 +464,7 @@ mod ai_api_tests {
             create_test_conversation_for_ai_api(&conn, "Reasoning Test Conversation", 1);
 
         // 创建初始对话链：System -> User -> Reasoning -> Response
-        let system_msg_id = create_test_message_for_ai_api(
+        let _system_msg_id = create_test_message_for_ai_api(
             &conn,
             conversation_id,
             "system",

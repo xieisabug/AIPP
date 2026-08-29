@@ -807,14 +807,6 @@ impl InteractionState {
         pending_events.insert(event.request_id.clone(), event);
     }
 
-    pub async fn get_preview_code_request(
-        &self,
-        request_id: &str,
-    ) -> Option<PreviewCodeRequestEvent> {
-        let pending_events = self.pending_preview_code_events.lock().await;
-        pending_events.get(request_id).cloned()
-    }
-
     pub async fn remove_preview_code_request(&self, request_id: &str) {
         let mut pending = self.pending_preview_code.lock().await;
         pending.remove(request_id);

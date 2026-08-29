@@ -198,15 +198,6 @@ pub enum PermissionDecision {
     Deny,
 }
 
-/// 权限确认请求
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PermissionConfirmRequest {
-    /// 请求 ID
-    pub request_id: String,
-    /// 用户决策
-    pub decision: PermissionDecision,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

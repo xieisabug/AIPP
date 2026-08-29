@@ -1137,27 +1137,6 @@ fn parse_start_time(start_time: Option<&str>) -> Option<(u32, u32)> {
     })
 }
 
-pub fn compute_next_run_at(
-    schedule_type: &str,
-    interval_value: Option<i64>,
-    interval_unit: Option<&str>,
-    run_at: Option<DateTime<Utc>>,
-    base_time: DateTime<Utc>,
-) -> Result<Option<DateTime<Utc>>, String> {
-    compute_next_run_at_with_config(
-        ScheduleConfig {
-            schedule_type,
-            interval_value,
-            interval_unit,
-            start_time: None,
-            week_days: None,
-            month_days: None,
-            run_at,
-        },
-        base_time,
-    )
-}
-
 pub fn compute_next_run_at_with_config(
     config: ScheduleConfig,
     base_time: DateTime<Utc>,
@@ -1259,7 +1238,7 @@ pub fn compute_next_run_at_with_config(
                 return Err("无效的星期几配置".to_string());
             }
 
-            let current_weekday = local_base.weekday().num_days_from_sunday();
+            let _current_weekday = local_base.weekday().num_days_from_sunday();
 
             // Find next valid day in this week or next weeks
             let mut candidate: Option<DateTime<Local>> = None;

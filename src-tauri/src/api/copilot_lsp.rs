@@ -1,14 +1,12 @@
-use crate::utils::bun_utils::BunUtils;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// LSP 请求 ID 计数器
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -87,8 +85,6 @@ pub struct CopilotLspServer {
     process: Child,
     stdin: std::process::ChildStdin,
     stdout_reader: BufReader<std::process::ChildStdout>,
-    is_initialized: bool,
-    pending_requests: HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>,
 }
 
 /// Copilot LSP 管理器状态

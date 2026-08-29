@@ -15,23 +15,6 @@ pub struct PythonInfo {
 pub struct PythonUtils;
 
 impl PythonUtils {
-    /// 获取 Python 可执行文件名（根据操作系统）
-    fn get_python_executable_name(version: u8) -> &'static str {
-        if cfg!(target_os = "windows") {
-            // Windows: python.exe, python3.exe
-            match version {
-                3 => "python3.exe",
-                _ => "python.exe",
-            }
-        } else {
-            // Unix-like: python3, python2
-            match version {
-                3 => "python3",
-                _ => "python2",
-            }
-        }
-    }
-
     /// 运行命令获取 Python 版本
     fn get_version_from_command(exe: &str, version_flag: &str) -> Option<String> {
         match Command::new(exe).arg(version_flag).output() {

@@ -51,12 +51,6 @@ pub struct MCPToolCallUpdateEvent {
     pub finished_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationCancelEvent {
-    pub conversation_id: i64,
-    pub cancelled_at: chrono::DateTime<chrono::Utc>,
-}
-
 /// 错误通知事件的 payload 结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorNotificationPayload {
