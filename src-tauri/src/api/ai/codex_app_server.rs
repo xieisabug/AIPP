@@ -1,3 +1,4 @@
+use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::api::ai::acp::{
     resolve_acp_cli_path, AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
@@ -2154,6 +2155,7 @@ async fn run_session(
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), done_event);
                 let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), complete_event);
+                handle_agent_success(&app_handle, &window, conversation_id, &content, AgentKind::Codex).await;
                 if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_focus(&app_handle, conversation_id).await; }
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;

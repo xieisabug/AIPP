@@ -7,6 +7,7 @@ use crate::acp_mcp_bridge::{
     ACP_MCP_SELECTED_TOOLS_ENV,
 };
 use crate::api::ai::config::build_proxy_env_vars;
+use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::conversation::{
     extract_tool_result, infer_media_type_from_url, parse_data_url,
 };
@@ -4143,6 +4144,10 @@ async fn process_acp_prompt(
     client_handle
         .persist_message_usage_in_db(&usage_summary, &final_content)
         .await?;
+    let prompt_succeeded = !matches!(
+        prompt_response.stop_reason,
+        acp::StopReason::Cancelled | acp::StopReason::Refusal
+    );
     match prompt_response.stop_reason {
         acp::StopReason::Cancelled => {
             client_handle
@@ -4167,6 +4172,17 @@ async fn process_acp_prompt(
     client_handle
         .send_done_event("response", &final_content, Some(&usage_summary))
         .await;
+    if prompt_succeeded {
+        let completion_window = client_handle.window.lock().await.clone();
+        handle_agent_success(
+            &client_handle.app_handle,
+            &completion_window,
+            conversation_id,
+            &final_content,
+            AgentKind::Acp,
+        )
+        .await;
+    }
     let (assistant_id, model_id, model_code, user_message_id) = ConversationDatabase::new(&client_handle.app_handle)
         .ok()
         .and_then(|db| {

@@ -1,4 +1,5 @@
 pub mod acp;
+pub(crate) mod agent_completion;
 pub(crate) mod agent_session_lifecycle;
 pub mod chat;
 pub mod config;

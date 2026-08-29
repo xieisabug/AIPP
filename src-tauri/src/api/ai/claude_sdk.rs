@@ -3,6 +3,7 @@ use crate::api::ai::acp::{
     AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
     AcpPermissionState, AcpSessionConfigChoicePayload, AcpSessionConfigOptionPayload,
 };
+use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::codex_app_server::AgentActivityEvent;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::acp_mcp_bridge::{
@@ -1255,6 +1256,7 @@ pub fn spawn_claude_session_task(
                             }),
                         },
                     );
+                    handle_agent_success(&app, &window, _conversation_id, &content, AgentKind::ClaudeCode).await;
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                         manager.clear_focus(&app, _conversation_id).await;
                     }

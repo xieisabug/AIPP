@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useMemo, useEffect } from "react";
-import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power, Info, FlaskConical } from "lucide-react";
+import { Bot, MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Power, Info, FlaskConical } from "lucide-react";
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
@@ -21,6 +21,10 @@ import {
     ExperimentalConfigFormState,
     saveExperimentalConfigValues,
 } from "./feature/forms/experimentalConfigShared";
+import {
+    buildAgentConfigFormValues,
+    serializeAgentConfigFormValues,
+} from "./agentConfigFormValues";
 
 interface FeatureItem {
     id: string;
@@ -49,6 +53,13 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             description: "配置系统外观主题、深浅色模式和用户消息渲染方式",
             icon: <Monitor className="h-5 w-5" />,
             code: "display",
+        },
+        {
+            id: "agent",
+            name: "Agent",
+            description: "配置 Codex、Claude Code 和 ACP Agent 的完成通知",
+            icon: <Bot className="h-5 w-5" />,
+            code: "agent",
         },
         {
             id: "conversation_summary",
@@ -166,6 +177,10 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         },
     });
 
+    const agentForm = useForm({
+        defaultValues: buildAgentConfigFormValues(),
+    });
+
     const previewForm = useForm({
         defaultValues: {
             preview_type: "service",
@@ -230,6 +245,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             const displayConfig = featureConfig.get("display");
             const experimentalConfig = featureConfig.get("experimental");
             displayForm.reset(buildDisplayFormValues(displayConfig, experimentalConfig));
+            agentForm.reset(buildAgentConfigFormValues(featureConfig.get("agent")));
 
             // 更新 summary 表单 - 支持新旧配置键兼容
             const summaryConfig = featureConfig.get("conversation_summary");
@@ -386,7 +402,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 tool_error_continue_enabled: toolErrorContinueEnabled,
             });
         }
-    }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm, defaultAppShortcutValues]);
+    }, [loading, featureConfig, displayForm, agentForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm, defaultAppShortcutValues]);
 
     // 选择功能
     const handleSelectFeature = useCallback((feature: FeatureItem) => {
@@ -474,6 +490,13 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             context_tail_ratio: String(values.context_tail_ratio || "0.30"),
         });
     }, [summaryForm, saveFeatureConfig, featureConfig]);
+
+    const handleSaveAgentConfig = useCallback(async () => {
+        await saveFeatureConfig(
+            "agent",
+            serializeAgentConfigFormValues(agentForm.getValues())
+        );
+    }, [agentForm, saveFeatureConfig]);
 
     const handleSaveNetworkConfig = useCallback(async () => {
         const values = networkForm.getValues();
@@ -581,6 +604,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 selectedFeature={selectedFeature}
                 forms={{
                     displayForm,
+                    agentForm,
                     summaryForm,
                     previewForm,
                     networkForm,
@@ -592,6 +616,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 }}
                 versionManager={versionManager}
                 onSaveDisplay={handleSaveDisplayConfig}
+                onSaveAgent={handleSaveAgentConfig}
                 onSaveSummary={handleSaveSummaryConfig}
                 onSaveNetwork={handleSaveNetworkConfig}
                 onSaveShortcuts={handleSaveShortcutsConfig}
@@ -600,7 +625,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 onConfigRefresh={handleOnboardingRefresh}
             />
         </div>
-    ), [selectedFeature, displayForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, experimentalForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveExperimentalConfig, saveFeatureConfig, handleOnboardingRefresh]);
+    ), [selectedFeature, displayForm, agentForm, summaryForm, previewForm, networkForm, dataFolderForm, shortcutsForm, otherForm, experimentalForm, aboutForm, versionManager, handleSaveDisplayConfig, handleSaveAgentConfig, handleSaveSummaryConfig, handleSaveNetworkConfig, handleSaveShortcutsConfig, handleSaveExperimentalConfig, saveFeatureConfig, handleOnboardingRefresh]);
 
     return (
         <ConfigPageLayout
