@@ -59,6 +59,9 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 - ACP 会话控制 UI 以 `session_config_options` / `configOptions` 为唯一配置来源
 - `configOptions` 来自 `session/new`、`session/load`、`session/resume` 或后续配置更新，不来自 `initialize`
 - `category=model`、`category=mode`、`category=thought_level` 会优先显示为模型、运行模式、思考强度配置
+- Agent 助手配置与新对话界面会启动一次短生命周期 ACP 探测会话，从 `session/new` 的 `category=model` / `category=thought_level` 选项读取真实可用模型和思考强度；探测会话会按 Agent 能力调用 `session/delete` 或 `session/close` 清理
+- 新对话选中的模型和思考强度会在首条 prompt 前通过 `session/set_config_option` 应用；Agent 未返回对应配置、拒绝该值或更新失败时会显示底层协议错误并停止，不会静默使用其他模型
+- Agent 未提供协议模型目录时，仍可显示该提供商已录入的数据库模型；协议探测和数据库都没有模型时，界面会报告包含命令、工作目录及 stderr 的发现错误
 - 用户修改配置时调用 `session/set_config_option`
 - 成功后使用 Agent 返回的完整 `configOptions` 替换本地状态，避免只在本地猜测单个选项的新值
 - 不再暴露旧的 `session/set_mode` UI/命令入口
@@ -144,7 +147,7 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 ### 支持的 ACP CLI
 - `claude-code-acp`：Claude Code 的 ACP 适配器（`@zed-industries/claude-code-acp`），支持 Bun 一键安装
 - `gemini`：Gemini CLI 原生支持 ACP，需用户自行安装
-- `kimi`：Kimi Code CLI 原生支持 ACP，启动时自动附加 `acp` 子命令（即 `kimi acp`），需用户按官方文档安装并先 `/login`
+- `kimi`：Kimi Code CLI 原生支持 ACP，启动时自动附加 `acp` 子命令（即 `kimi acp`），需用户按官方文档安装并先 `/login`；Kimi 在 `session/new` 返回的模型与 Thinking 选项可直接用于助手默认值和新对话选择
 - `dsh-acp-server`：DeepSeek Harness 的 ACP 插件，需 Node.js >= 22 并手动安装 `@deepseek-ai/dsh` 与 `dsh-acp-server`，模型与密钥在 dsh 中配置
 - node-shebang 脚本类 CLI（如 npm/bun 全局 bin）统一通过显式 node 运行时启动，保证 Windows 可用
 - 启动失败时会按 CLI 给出对应的安装提示

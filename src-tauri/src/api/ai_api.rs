@@ -1519,6 +1519,28 @@ pub async fn ask_ai(
             proxy_enabled.then(|| get_network_proxy_from_config(&_config_feature_map)).flatten();
         let mut acp_config =
             extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
+        acp_config.model = processed_request
+            .override_model_id
+            .as_deref()
+            .and_then(parse_agent_model_override)
+            .map(|(model, _)| model.to_string())
+            .or_else(|| {
+                assistant_detail
+                    .model
+                    .first()
+                    .map(|model| model.model_code.trim())
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string)
+            });
+        if let Some(thought_level) = override_model_config
+            .as_ref()
+            .and_then(|config| config.get("reasoning_effort"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            acp_config.thought_level = Some(thought_level.to_string());
+        }
         if let Some(proxy_url) = network_proxy.as_deref() {
             let injected = apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
             info!(

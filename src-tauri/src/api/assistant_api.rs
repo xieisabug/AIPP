@@ -1,7 +1,8 @@
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
-    refresh_acp_config_signature, refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path,
-    spawn_agent_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
+    probe_acp_session_config_options, refresh_acp_config_signature,
+    refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path, spawn_agent_idle_reaper_once,
+    spawn_acp_session_task, AcpSessionConfigOptionPayload, AcpSessionEntry,
 };
 use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, probe_codex_model_options, CODEX_APP_SERVER_API_TYPE,
@@ -55,6 +56,57 @@ fn add_agent_model_option(options: &mut Vec<AgentModelOption>, option: AgentMode
     }
 }
 
+fn add_acp_protocol_model_options(
+    options: &mut Vec<AgentModelOption>,
+    config_options: &[AcpSessionConfigOptionPayload],
+    provider_id: i64,
+    current_model: Option<&str>,
+    configured_effort: Option<&str>,
+) {
+    let model_option =
+        config_options.iter().find(|option| option.category.as_deref() == Some("model"));
+    let thought_option = config_options
+        .iter()
+        .find(|option| option.category.as_deref() == Some("thought_level"));
+    let efforts = thought_option
+        .map(|option| {
+            option
+                .options
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let effective_default_model =
+        current_model.or_else(|| model_option.map(|option| option.current_value.as_str()));
+    let effective_default_effort = configured_effort
+        .filter(|effort| efforts.iter().any(|candidate| candidate == effort))
+        .map(str::to_string)
+        .or_else(|| {
+            thought_option
+                .map(|option| option.current_value.clone())
+                .filter(|effort| efforts.contains(effort))
+        });
+    if let Some(model_option) = model_option {
+        for choice in &model_option.options {
+            let is_default = effective_default_model == Some(choice.value.as_str());
+            add_agent_model_option(
+                options,
+                AgentModelOption {
+                    code: format!("{}%%{}", choice.value, provider_id),
+                    name: choice.name.clone(),
+                    provider_id,
+                    efforts: efforts.clone(),
+                    default_effort: is_default
+                        .then(|| effective_default_effort.clone())
+                        .flatten(),
+                    is_default,
+                },
+            );
+        }
+    }
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle), fields(assistant_id))]
 pub async fn get_agent_model_options(
@@ -91,6 +143,7 @@ pub async fn get_agent_model_options(
         .flatten();
     let db_models = llm_db.get_llm_models(provider_id.to_string()).map_err(|e| e.to_string())?;
     let mut options = Vec::new();
+    let mut discovery_error = None;
 
     match provider.api_type.as_str() {
         CODEX_APP_SERVER_API_TYPE => {
@@ -151,17 +204,63 @@ pub async fn get_agent_model_options(
             }
         }
         "acp" => {
+            let mut config = extract_acp_config(&detail.model_configs, &provider_configs)
+                .map_err(|error| error.to_string())?;
+            config.model = current_model.clone();
+            config.thought_level = configured_effort.clone();
+            let proxy_enabled = provider_configs
+                .iter()
+                .find(|config| config.name == "proxy_enabled")
+                .and_then(|config| config.value.parse::<bool>().ok())
+                .unwrap_or(false);
+            if proxy_enabled {
+                let feature_config_state = app_handle.state::<FeatureConfigState>();
+                let config_feature_map =
+                    feature_config_state.config_feature_map.lock().await.clone();
+                if let Some(proxy_url) = get_network_proxy_from_config(&config_feature_map) {
+                    apply_network_proxy_to_env_vars(&mut config.env_vars, &proxy_url);
+                }
+            }
+
+            match probe_acp_session_config_options(&config).await {
+                Ok(config_options) => {
+                    add_acp_protocol_model_options(
+                        &mut options,
+                        &config_options,
+                        provider_id,
+                        current_model.as_deref(),
+                        configured_effort.as_deref(),
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        provider_id,
+                        provider_name = %provider.name,
+                        error = %error,
+                        "ACP protocol model discovery failed; checking configured models"
+                    );
+                    discovery_error = Some(error);
+                }
+            }
+            let discovered_efforts =
+                options.first().map(|option| option.efforts.clone()).unwrap_or_default();
             for (_, name, _, code, _, _, _, _) in db_models {
                 let is_default = current_model.as_deref() == Some(code.as_str());
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: Vec::new(), default_effort: None, is_default });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: discovered_efforts.clone(), default_effort: None, is_default });
             }
             if let Some(code) = current_model {
-                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: Vec::new(), default_effort: None, is_default: true });
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: discovered_efforts, default_effort: configured_effort, is_default: true });
             }
         }
         other => return Err(format!("不支持的 Agent 提供商类型：{other}")),
     }
     if options.is_empty() {
+        if let Some(error) = discovery_error {
+            return Err(format!(
+                "提供商 {} 无法通过 ACP 读取可用模型，且没有配置数据库模型：{error}",
+                provider.name
+            ));
+        }
         return Err(format!("提供商 {} 没有可用模型", provider.name));
     }
     Ok(options)
@@ -237,6 +336,7 @@ pub(crate) fn resolve_acp_provider_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ai::acp::AcpSessionConfigChoicePayload;
 
     fn assistant_model(provider_id: i64) -> AssistantModel {
         AssistantModel {
@@ -273,6 +373,59 @@ mod tests {
         let model_configs = vec![model_config("acp_provider", Some("9"))];
 
         assert_eq!(resolve_acp_provider_id(&models, &model_configs), Some(9));
+    }
+
+    #[test]
+    fn add_acp_protocol_model_options_uses_agent_models_and_thought_levels() {
+        let config_options = vec![
+            AcpSessionConfigOptionPayload {
+                id: "model".to_string(),
+                name: "Model".to_string(),
+                category: Some("model".to_string()),
+                current_value: "kimi-code/k3-256k".to_string(),
+                options: vec![
+                    AcpSessionConfigChoicePayload {
+                        value: "kimi-code/k3".to_string(),
+                        name: "K3".to_string(),
+                        ..Default::default()
+                    },
+                    AcpSessionConfigChoicePayload {
+                        value: "kimi-code/k3-256k".to_string(),
+                        name: "K3-256k".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            AcpSessionConfigOptionPayload {
+                id: "thinking".to_string(),
+                name: "Thinking".to_string(),
+                category: Some("thought_level".to_string()),
+                current_value: "high".to_string(),
+                options: vec![
+                    AcpSessionConfigChoicePayload {
+                        value: "low".to_string(),
+                        name: "Thinking Low".to_string(),
+                        ..Default::default()
+                    },
+                    AcpSessionConfigChoicePayload {
+                        value: "high".to_string(),
+                        name: "Thinking High".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+        let mut options = Vec::new();
+
+        add_acp_protocol_model_options(&mut options, &config_options, 55, None, None);
+
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].code, "kimi-code/k3%%55");
+        assert_eq!(options[0].efforts, vec!["low", "high"]);
+        assert!(options[1].is_default);
+        assert_eq!(options[1].default_effort.as_deref(), Some("high"));
     }
 
 }
@@ -1094,6 +1247,11 @@ pub async fn ensure_acp_session_connected(
 
     let mut acp_config = extract_acp_config(&model_configs, &provider_configs)
         .map_err(|e| e.to_string())?;
+    acp_config.model = assistant_models
+        .first()
+        .map(|model| model.model_code.trim())
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
     if let Some(proxy_url) = network_proxy.as_deref() {
         apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
     }

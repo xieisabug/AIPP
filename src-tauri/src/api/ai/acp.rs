@@ -70,6 +70,8 @@ pub struct AcpConfig {
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
     pub additional_args: Vec<String>,
+    pub model: Option<String>,
+    pub thought_level: Option<String>,
     pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
@@ -1034,9 +1036,11 @@ fn acp_config_signature(config: &AcpConfig) -> String {
     env_entries.sort();
 
     format!(
-        "cli={}\ncwd={}\nselected_mcp={}\nargs={}\nenv={}",
+        "cli={}\ncwd={}\nmodel={}\nthought_level={}\nselected_mcp={}\nargs={}\nenv={}",
         config.cli_command,
         config.working_directory.display(),
+        config.model.as_deref().unwrap_or_default(),
+        config.thought_level.as_deref().unwrap_or_default(),
         config.selected_mcp_tools_payload,
         config.additional_args.join("\u{1f}"),
         env_entries.join("\u{1f}")
@@ -1056,6 +1060,217 @@ fn apply_config_options_to_snapshot(
         .iter()
         .filter_map(session_config_option_payload)
         .collect();
+}
+
+pub async fn probe_acp_session_config_options(
+    config: &AcpConfig,
+) -> Result<Vec<AcpSessionConfigOptionPayload>, String> {
+    if !config.working_directory.exists() {
+        return Err(format!(
+            "ACP 模型发现失败：工作目录不存在 ({})",
+            config.working_directory.display()
+        ));
+    }
+    if !config.working_directory.is_dir() {
+        return Err(format!(
+            "ACP 模型发现失败：工作目录不是目录 ({})",
+            config.working_directory.display()
+        ));
+    }
+
+    let resolved_cli_command = resolve_acp_cli_path(&config.cli_command);
+    let launch_plan = build_acp_launch_plan(
+        &config.cli_command,
+        &resolved_cli_command,
+        &config.additional_args,
+        &config.env_vars,
+    );
+    let mut command = Command::new(&launch_plan.program);
+    command
+        .current_dir(&config.working_directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .envs(&config.env_vars)
+        .envs(&launch_plan.extra_env)
+        .args(&launch_plan.args);
+
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "ACP 模型发现无法启动进程 '{}' (resolved: {}, cwd: {}): {error}",
+            config.cli_command,
+            resolved_cli_command.display(),
+            config.working_directory.display()
+        )
+    })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "ACP 模型发现无法打开进程 stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ACP 模型发现无法打开进程 stdout".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "ACP 模型发现无法打开进程 stderr".to_string())?;
+    let stderr_task = tokio::spawn(async move {
+        let mut output = Vec::new();
+        let _ = stderr.read_to_end(&mut output).await;
+        String::from_utf8_lossy(&output).trim().to_string()
+    });
+
+    let connect_result = agent_client_protocol::Client
+        .builder()
+        .name("AIPP model probe")
+        .connect_with(
+            agent_client_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat()),
+            async move |cx| {
+                let to_acp_error = |message: String| {
+                    agent_client_protocol::Error::internal_error()
+                        .data(serde_json::Value::String(message))
+                };
+                let init_response = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    cx.send_request(
+                        acp::InitializeRequest::new(ProtocolVersion::V1)
+                            .client_info(acp::Implementation::new("AIPP", "0.4.3")),
+                    )
+                    .block_task(),
+                )
+                .await
+                .map_err(|_| to_acp_error("initialize timed out after 15 seconds".to_string()))?
+                .map_err(|error| to_acp_error(format!("initialize failed: {error:?}")))?;
+
+                let session_response = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    cx.send_request(acp::NewSessionRequest::new(config.working_directory.clone()))
+                        .block_task(),
+                )
+                .await
+                .map_err(|_| to_acp_error("session/new timed out after 20 seconds".to_string()))?
+                .map_err(|error| to_acp_error(format!("session/new failed: {error:?}")))?;
+                let session_id = session_response.session_id.to_string();
+                let options = session_response
+                    .config_options
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(session_config_option_payload)
+                    .collect::<Vec<_>>();
+
+                if init_response
+                    .agent_capabilities
+                    .session_capabilities
+                    .delete
+                    .is_some()
+                {
+                    if let Err(error) = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        cx.send_request(acp::DeleteSessionRequest::new(session_id.clone()))
+                            .block_task(),
+                    )
+                    .await
+                    {
+                        warn!(session_id, error = ?error, "ACP model probe session/delete timed out");
+                    }
+                } else if init_response
+                    .agent_capabilities
+                    .session_capabilities
+                    .close
+                    .is_some()
+                {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        cx.send_request(acp::CloseSessionRequest::new(session_id)).block_task(),
+                    )
+                    .await;
+                }
+
+                Ok(options)
+            },
+        )
+        .await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let stderr = stderr_task.await.unwrap_or_default();
+
+    connect_result.map_err(|error| {
+        let stderr_detail = if stderr.is_empty() {
+            "Agent stderr 未提供额外诊断".to_string()
+        } else {
+            format!("Agent stderr: {stderr}")
+        };
+        format!(
+            "ACP 模型发现失败 (command: {}, cwd: {}): {error:?}; {stderr_detail}",
+            config.cli_command,
+            config.working_directory.display()
+        )
+    })
+}
+
+async fn apply_initial_session_config_override(
+    cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    session_id: &str,
+    config_options: &mut Option<Vec<acp::SessionConfigOption>>,
+    category: &str,
+    requested_value: Option<&str>,
+) -> Result<(), String> {
+    let Some(requested_value) = requested_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let option = config_options
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|option| {
+            option
+                .category
+                .as_ref()
+                .is_some_and(|value| session_config_category_to_string(value) == category)
+        })
+        .and_then(session_config_option_payload)
+        .ok_or_else(|| {
+            format!(
+                "ACP Agent 未在会话 configOptions 中提供 {category} 配置，无法应用请求值 '{requested_value}'"
+            )
+        })?;
+    if option.current_value == requested_value {
+        return Ok(());
+    }
+    if !option.options.iter().any(|choice| choice.value == requested_value) {
+        let available = option
+            .options
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "ACP Agent 不支持 {category} 配置值 '{requested_value}'；可用值：{available}"
+        ));
+    }
+
+    let response = cx
+        .send_request(acp::SetSessionConfigOptionRequest::new(
+            session_id.to_string(),
+            option.id,
+            requested_value,
+        ))
+        .block_task()
+        .await
+        .map_err(|error| {
+            format!(
+                "ACP session/set_config_option 应用 {category}='{requested_value}' 失败：{error:?}"
+            )
+        })?;
+    *config_options = Some(response.config_options);
+    Ok(())
 }
 
 fn prompt_capabilities_payload(
@@ -4817,6 +5032,31 @@ async fn run_acp_connected_session(
         session_id
     };
 
+    if let Err(error) = apply_initial_session_config_override(
+        &cx,
+        &session_id,
+        &mut initial_config_options,
+        "model",
+        acp_config.model.as_deref(),
+    )
+    .await
+    {
+        error!(conversation_id, session_id, error = %error, "ACP initial model override failed");
+        fail_connected_startup!(error);
+    }
+    if let Err(error) = apply_initial_session_config_override(
+        &cx,
+        &session_id,
+        &mut initial_config_options,
+        "thought_level",
+        acp_config.thought_level.as_deref(),
+    )
+    .await
+    {
+        error!(conversation_id, session_id, error = %error, "ACP initial thought-level override failed");
+        fail_connected_startup!(error);
+    }
+
     client_handle
         .set_session_bootstrap(
             &session_id,
@@ -5593,6 +5833,8 @@ pub fn extract_acp_config(
         working_directory,
         env_vars,
         additional_args,
+        model: None,
+        thought_level: get_model_config("reasoning_effort"),
         selected_mcp_tools_payload: "[]".to_string(),
         session_signature: String::new(),
     };
@@ -5605,9 +5847,11 @@ pub fn extract_acp_config(
 mod tests {
     use super::{
         acp_tool_status_to_aipp_status, acp_tool_update_status_to_aipp_status,
-        append_buffered_content, apply_network_proxy_to_env_vars, build_acp_manual_mcp_servers_from_parts,
-        build_acp_launch_plan, build_prompt_to_send, extract_acp_config, extract_content_text, get_claude_model_override,
-        load_claude_settings_env_vars_from_path,
+        acp_config_signature, append_buffered_content, apply_initial_session_config_override,
+        apply_network_proxy_to_env_vars, build_acp_manual_mcp_servers_from_parts,
+        build_acp_launch_plan, build_prompt_to_send, extract_acp_config, extract_content_text,
+        get_claude_model_override,
+        load_claude_settings_env_vars_from_path, session_config_option_payload,
         merge_acp_usage_metadata, summarize_acp_prompt_usage, AcpPromptUsageSummary,
         AcpElicitationDecision, AcpElicitationState,
         AcpPermissionDecision, AcpPermissionRequestEvent, AcpPermissionState, AcpSessionEntry,
@@ -5791,6 +6035,153 @@ mod tests {
             error.to_string().contains("没有拿到有效的 provider CLI 配置"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn extract_acp_config_carries_thought_level_and_signature_changes_with_model() {
+        let provider_configs = vec![provider_config("acp_cli_command", "kimi")];
+        let model_configs = vec![model_config("reasoning_effort", "high")];
+        let mut config = extract_acp_config(&model_configs, &provider_configs).unwrap();
+        let default_signature = config.session_signature.clone();
+
+        assert_eq!(config.thought_level.as_deref(), Some("high"));
+        config.model = Some("kimi-code/k3-256k".to_string());
+
+        assert_ne!(acp_config_signature(&config), default_signature);
+    }
+
+    #[test]
+    fn session_config_option_payload_parses_kimi_model_and_thought_choices() {
+        let options: Vec<acp::SessionConfigOption> = serde_json::from_value(serde_json::json!([
+            {
+                "type": "select",
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "currentValue": "kimi-code/k3-256k",
+                "options": [
+                    {"value": "kimi-code/k3", "name": "K3"},
+                    {"value": "kimi-code/k3-256k", "name": "K3-256k"}
+                ]
+            },
+            {
+                "type": "select",
+                "id": "thinking",
+                "name": "Thinking",
+                "category": "thought_level",
+                "currentValue": "high",
+                "options": [
+                    {"value": "low", "name": "Thinking Low"},
+                    {"value": "high", "name": "Thinking High"},
+                    {"value": "max", "name": "Thinking Max"}
+                ]
+            }
+        ]))
+        .unwrap();
+        let payloads = options
+            .iter()
+            .filter_map(session_config_option_payload)
+            .collect::<Vec<_>>();
+
+        assert_eq!(payloads[0].category.as_deref(), Some("model"));
+        assert_eq!(payloads[0].current_value, "kimi-code/k3-256k");
+        assert_eq!(payloads[0].options[0].name, "K3");
+        assert_eq!(payloads[1].category.as_deref(), Some("thought_level"));
+        assert_eq!(payloads[1].options.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn apply_initial_session_config_override_sets_kimi_model_before_prompt() {
+        let initial_options: Vec<acp::SessionConfigOption> =
+            serde_json::from_value(serde_json::json!([{
+                "type": "select",
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "currentValue": "kimi-code/k3-256k",
+                "options": [
+                    {"value": "kimi-code/k3", "name": "K3"},
+                    {"value": "kimi-code/k3-256k", "name": "K3-256k"}
+                ]
+            }]))
+            .unwrap();
+        let updated_options: Vec<acp::SessionConfigOption> =
+            serde_json::from_value(serde_json::json!([{
+                "type": "select",
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "currentValue": "kimi-code/k3",
+                "options": [
+                    {"value": "kimi-code/k3", "name": "K3"},
+                    {"value": "kimi-code/k3-256k", "name": "K3-256k"}
+                ]
+            }]))
+            .unwrap();
+        let (client_channel, agent_channel) = Channel::duplex();
+        let recorded_request = Arc::new(Mutex::new(None));
+        let agent_task = {
+            let recorded_request = recorded_request.clone();
+            tokio::spawn(async move {
+                agent_client_protocol::Agent
+                    .builder()
+                    .name("fake-config-agent")
+                    .on_receive_request(
+                        move |request: acp::SetSessionConfigOptionRequest,
+                              responder: Responder<acp::SetSessionConfigOptionResponse>,
+                              _cx| {
+                            let recorded_request = recorded_request.clone();
+                            let updated_options = updated_options.clone();
+                            async move {
+                                *recorded_request.lock().unwrap() =
+                                    Some(serde_json::to_value(&request).unwrap());
+                                responder.respond(acp::SetSessionConfigOptionResponse::new(
+                                    updated_options,
+                                ))
+                            }
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .connect_with(agent_channel, async move |cx| {
+                        cx.incoming_closed().await;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        let client_task = tokio::spawn(async move {
+            agent_client_protocol::Client
+                .builder()
+                .name("aipp-config-test-client")
+                .connect_with(client_channel, async move |cx| {
+                    let mut config_options = Some(initial_options);
+                    apply_initial_session_config_override(
+                        &cx,
+                        "test-session",
+                        &mut config_options,
+                        "model",
+                        Some("kimi-code/k3"),
+                    )
+                    .await
+                    .expect("model override should succeed");
+                    let payload = config_options
+                        .as_deref()
+                        .unwrap()
+                        .iter()
+                        .find_map(session_config_option_payload)
+                        .unwrap();
+                    assert_eq!(payload.current_value, "kimi-code/k3");
+                    Ok(())
+                })
+                .await
+        });
+
+        client_task.await.unwrap().unwrap();
+        agent_task.await.unwrap().unwrap();
+        let request = recorded_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request["sessionId"], "test-session");
+        assert_eq!(request["configId"], "model");
+        assert_eq!(request["value"], "kimi-code/k3");
     }
 
     #[test]
