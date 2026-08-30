@@ -293,7 +293,9 @@ export interface AcpConversationSessionState {
     context_window_size?: number | null;
     model?: string | null;
     permission_mode?: string | null;
+    collaboration_mode?: string | null;
     reasoning_effort?: string | null;
+    plan_explanation?: string | null;
     session_cost_amount?: number | null;
     session_cost_currency?: string | null;
 }

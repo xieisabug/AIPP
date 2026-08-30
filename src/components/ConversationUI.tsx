@@ -31,6 +31,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import FileDropArea from "./FileDropArea";
 import useFileDropHandler from "../hooks/useFileDropHandler";
 import InputArea, { InputAreaRef } from "./conversation/InputArea";
+import { AgentPlanCard } from "./conversation/AgentPlanCard";
 import MessageEditDialog from "./MessageEditDialog";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
 import { useMessageGroups } from "../hooks/useMessageGroups";
@@ -1286,7 +1287,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             async (option: AcpSessionConfigOption, value: string) => {
                 const conversationIdNum = Number(conversationId);
                 if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
-                    return;
+                    return false;
                 }
 
                 setAcpMutationKey(`config:${option.id}`);
@@ -1296,17 +1297,69 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         configId: option.id,
                         value,
                     });
+                    return true;
                 } catch (error) {
                     toast.error("更新 Agent 配置失败", {
                         description: String(error),
                         position: "bottom-right",
                     });
+                    return false;
                 } finally {
                     setAcpMutationKey(null);
                 }
             },
             [conversationId]
         );
+
+        const planModeOption = useMemo(
+            () => acpSessionState?.config_options.find((option) =>
+                option.category === "mode" &&
+                option.options.some((choice) => choice.value.toLowerCase() === "plan")
+            ) ?? null,
+            [acpSessionState?.config_options]
+        );
+        const planModeChoice = planModeOption?.options.find(
+            (choice) => choice.value.toLowerCase() === "plan"
+        ) ?? null;
+        const executionModeChoice = planModeOption?.options.find(
+            (choice) => choice.value.toLowerCase() === "default"
+        ) ?? planModeOption?.options.find((choice) => choice.value !== planModeChoice?.value) ?? null;
+        const isPlanMode = Boolean(
+            planModeOption && planModeChoice && planModeOption.current_value === planModeChoice.value
+        );
+        const planModeSwitching = Boolean(
+            planModeOption && acpMutationKey === `config:${planModeOption.id}`
+        );
+
+        const setAgentPlanMode = useCallback(
+            async (enabled: boolean) => {
+                if (enabled === isPlanMode) return true;
+                const choice = enabled ? planModeChoice : executionModeChoice;
+                if (!planModeOption || !choice) return false;
+                return handleAcpConfigChange(planModeOption, choice.value);
+            },
+            [executionModeChoice, handleAcpConfigChange, isPlanMode, planModeChoice, planModeOption]
+        );
+
+        const pendingPlanExecutionRef = useRef(false);
+        const planExecutionPrompt = "请按已确认的 Plan 开始执行。";
+        const handleContinuePlanning = useCallback(async () => {
+            if (await setAgentPlanMode(true)) {
+                inputAreaRef.current?.focus();
+            }
+        }, [setAgentPlanMode]);
+        const handleStartPlanExecution = useCallback(async () => {
+            if (!isPlanMode || await setAgentPlanMode(false)) {
+                pendingPlanExecutionRef.current = true;
+                setInputText(planExecutionPrompt);
+            }
+        }, [isPlanMode, setAgentPlanMode, setInputText]);
+
+        useEffect(() => {
+            if (!pendingPlanExecutionRef.current || inputText !== planExecutionPrompt) return;
+            pendingPlanExecutionRef.current = false;
+            handleSend();
+        }, [handleSend, inputText]);
 
         const pluginHeaderActions = useMemo(() => {
             const actionContext = {
@@ -1564,12 +1617,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     />
                 </div>
             );
-            const statusLabel = (status: string) => {
-                if (status === "completed") return "完成";
-                if (status === "in_progress") return "进行中";
-                return "待处理";
-            };
-
             return (
                 <>
                     {combinedHeaderActions}
@@ -1665,27 +1712,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                             {acpSessionState?.session_id ? (
                                 <>
-                                    {acpSessionState.plan.length > 0 ? (
-                                        <>
-                                            <Separator />
-                                            <div className="space-y-2">
-                                                <div className="text-xs font-medium">执行计划</div>
-                                                <div className="space-y-1.5">
-                                                    {acpSessionState.plan.map((entry, index) => (
-                                                        <div key={`${entry.content}:${index}`} className="flex items-start gap-2 text-xs">
-                                                            <Badge variant="outline" className="mt-0.5 text-[10px]">
-                                                                {statusLabel(entry.status)}
-                                                            </Badge>
-                                                            <span className="min-w-0 flex-1 text-muted-foreground">
-                                                                {entry.content}
-                                                            </span>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        </>
-                                    ) : null}
-
                                     {acpSessionState.available_commands.length > 0 ? (
                                         <>
                                             <Separator />
@@ -1712,7 +1738,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         ]);
 
         const sidebarTodos = useMemo<TodoItem[]>(() => {
-            const acpPlanTodos: TodoItem[] = (acpSessionState?.plan ?? []).map((entry) => ({
+            if (!isAcpAssistant) return todos;
+            return (acpSessionState?.plan ?? []).map((entry) => ({
                 content: entry.content,
                 status:
                     entry.status === "completed"
@@ -1720,10 +1747,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         : entry.status === "in_progress"
                             ? "in_progress"
                             : "pending",
-                activeForm: entry.priority ? `ACP ${entry.priority}` : "ACP Plan",
+                activeForm: "正在执行",
             }));
-            return [...acpPlanTodos, ...todos];
-        }, [acpSessionState?.plan, todos]);
+        }, [acpSessionState?.plan, isAcpAssistant, todos]);
 
         // 监听错误通知事件
         useEffect(() => {
@@ -1948,6 +1974,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 selectedSandbox={selectedAgentSandbox}
                                 onAgentConfigChange={handleAgentConfigChange}
                             />
+                            {isAcpAssistant && acpSessionState ? (
+                                <AgentPlanCard
+                                    plan={acpSessionState.plan}
+                                    explanation={acpSessionState.plan_explanation}
+                                    hasActivePrompt={acpSessionState.has_active_prompt}
+                                    isPlanMode={isPlanMode}
+                                    modeSwitching={planModeSwitching}
+                                    onContinuePlanning={() => void handleContinuePlanning()}
+                                    onStartExecution={() => void handleStartPlanExecution()}
+                                />
+                            ) : null}
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>
 
@@ -1970,6 +2007,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             sendButtonIcon={sendButtonIconSlot}
                             sendButtonVisual={sendButtonVisualSlot}
                             acpAvailableCommands={acpSessionState?.available_commands ?? []}
+                            planMode={isPlanMode}
+                            planModeSwitching={planModeSwitching}
+                            onPlanModeToggle={planModeOption
+                                ? () => void setAgentPlanMode(!isPlanMode)
+                                : undefined}
                         />
                     </div>
 

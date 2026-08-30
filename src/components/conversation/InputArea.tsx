@@ -52,7 +52,7 @@
 import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
-import { Plus, Square, ArrowUp } from "lucide-react";
+import { Plus, Square, ArrowUp, ListChecks, Loader2 } from "lucide-react";
 import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -98,6 +98,9 @@ interface InputAreaProps {
     sendButtonIcon?: ReactNode;
     sendButtonVisual?: ReactNode;
     acpAvailableCommands?: AcpAvailableCommand[];
+    planMode?: boolean;
+    planModeSwitching?: boolean;
+    onPlanModeToggle?: () => void;
 }
 const IMAGE_AREA_HEIGHT = 80;
 // 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
@@ -122,6 +125,9 @@ const InputArea = React.memo(
                 sendButtonIcon,
                 sendButtonVisual,
                 acpAvailableCommands = EMPTY_ACP_COMMANDS,
+                planMode = false,
+                planModeSwitching = false,
+                onPlanModeToggle,
             },
             ref
         ) => {
@@ -1294,6 +1300,25 @@ const InputArea = React.memo(
                             }}
                         />
                     </div>
+
+                    {onPlanModeToggle ? (
+                        <button
+                            type="button"
+                            className={`input-area-plan-mode-button ${planMode ? "active" : ""}`}
+                            onClick={onPlanModeToggle}
+                            disabled={planModeSwitching || aiIsResponsing}
+                            aria-pressed={planMode}
+                            title={planMode ? "切换到执行模式" : "切换到 Plan 模式"}
+                            data-aipp-slot="chat-input-plan-mode"
+                        >
+                            {planModeSwitching ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                                <ListChecks className="h-4 w-4" />
+                            )}
+                            <span>{planMode ? "Plan 中" : "Plan"}</span>
+                        </button>
+                    ) : null}
 
                     <CircleButton
                         onClick={handleChooseFile}

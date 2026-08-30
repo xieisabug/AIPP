@@ -74,6 +74,7 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
         restored_session_method: state.restored_session_method ?? state.restoredSessionMethod ?? null,
         connection_event_id: state.connection_event_id ?? state.connectionEventId ?? null,
         permission_mode: state.permission_mode ?? state.permissionMode ?? null,
+        collaboration_mode: state.collaboration_mode ?? state.collaborationMode ?? null,
         prompt_capabilities: {
             image: Boolean(promptCapabilities.image),
             audio: Boolean(promptCapabilities.audio),
@@ -92,6 +93,7 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
             })),
         })),
         plan: state.plan ?? [],
+        plan_explanation: state.plan_explanation ?? state.planExplanation ?? null,
         available_commands: availableCommands.map((command: any) => ({
             ...command,
             input_hint: command.input_hint ?? command.inputHint ?? null,

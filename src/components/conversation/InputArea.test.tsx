@@ -13,7 +13,17 @@ vi.mock("../../utils/caretCoordinates", () => ({
     }),
 }));
 
-function InputAreaHarness({ initialText = "" }: { initialText?: string }) {
+function InputAreaHarness({
+    initialText = "",
+    planMode = false,
+    planModeSwitching = false,
+    onPlanModeToggle,
+}: {
+    initialText?: string;
+    planMode?: boolean;
+    planModeSwitching?: boolean;
+    onPlanModeToggle?: () => void;
+}) {
     const [inputText, setInputText] = useState(initialText);
 
     return (
@@ -26,6 +36,9 @@ function InputAreaHarness({ initialText = "" }: { initialText?: string }) {
             handleDeleteFile={() => {}}
             handleSend={() => {}}
             aiIsResponsing={false}
+            planMode={planMode}
+            planModeSwitching={planModeSwitching}
+            onPlanModeToggle={onPlanModeToggle}
         />
     );
 }
@@ -124,5 +137,40 @@ describe("InputArea slash completion", () => {
         expect(
             await screen.findByText("执行一段 shell 命令，并将输出直接注入到提示词上下文。"),
         ).toBeInTheDocument();
+    });
+});
+
+describe("InputArea Plan mode", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_bang_list", () => []);
+        mockInvokeHandler("get_assistants", () => []);
+        mockInvokeHandler("get_artifacts_for_completion", () => []);
+        mockInvokeHandler("get_skills_for_slash_completion", () => []);
+    });
+
+    it("toggles Plan mode from the input toolbar", async () => {
+        const onPlanModeToggle = vi.fn();
+        const user = userEvent.setup();
+        render(<InputAreaHarness onPlanModeToggle={onPlanModeToggle} />);
+
+        const button = screen.getByRole("button", { name: "Plan" });
+        expect(button).toHaveAttribute("aria-pressed", "false");
+        await user.click(button);
+        expect(onPlanModeToggle).toHaveBeenCalledOnce();
+    });
+
+    it("shows and disables the Plan control while switching", () => {
+        render(
+            <InputAreaHarness
+                planMode
+                planModeSwitching
+                onPlanModeToggle={() => {}}
+            />,
+        );
+
+        const button = screen.getByRole("button", { name: "Plan 中" });
+        expect(button).toHaveAttribute("aria-pressed", "true");
+        expect(button).toBeDisabled();
     });
 });

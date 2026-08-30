@@ -175,6 +175,44 @@
     right: 190px;
 }
 
+.input-area-plan-mode-button {
+    position: absolute;
+    left: 16px;
+    bottom: 76px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid hsl(var(--border));
+    border-radius: 16px;
+    background: hsl(var(--background));
+    color: hsl(var(--muted-foreground));
+    font-size: 12px;
+    font-weight: 500;
+    transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+
+.input-area-plan-mode-button:hover:not(:disabled) {
+    border-color: hsl(var(--primary));
+    color: hsl(var(--foreground));
+}
+
+.input-area-plan-mode-button.active {
+    border-color: hsl(var(--primary));
+    background: hsl(var(--primary) / 0.12);
+    color: hsl(var(--primary));
+}
+
+.input-area-plan-mode-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+.input-area.mobile .input-area-plan-mode-button {
+    bottom: calc(70px + env(safe-area-inset-bottom));
+}
+
 .top .input-area-send-button {
     position: absolute;
     bottom: 10px;

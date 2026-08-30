@@ -24,7 +24,7 @@ const TodoList: React.FC<TodoListProps> = ({ todos, className }) => {
     if (todos.length === 0) {
         return (
             <div className={cn("p-3 text-sm text-muted-foreground text-center", className)}>
-                暂无计划
+                暂无规划
             </div>
         );
     }

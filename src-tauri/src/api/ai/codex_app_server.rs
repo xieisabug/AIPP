@@ -2,7 +2,7 @@ use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::api::ai::acp::{
     resolve_acp_cli_path, AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
-    AcpPermissionState,
+    AcpPermissionState, AcpPlanEntryPayload,
 };
 use crate::api::operation_api::{
     emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT,
@@ -65,6 +65,9 @@ pub struct CodexConversationSessionState {
     pub approval_policy: Option<String>,
     pub sandbox: Option<String>,
     pub approvals_reviewer: Option<String>,
+    pub collaboration_mode: Option<String>,
+    pub plan: Vec<AcpPlanEntryPayload>,
+    pub plan_explanation: Option<String>,
     pub config_options: Vec<CodexSessionConfigOption>,
 }
 
@@ -877,6 +880,66 @@ fn codex_approvals_reviewer_options() -> Vec<CodexSessionConfigChoice> {
     }).collect()
 }
 
+fn codex_collaboration_mode_options() -> Vec<CodexSessionConfigChoice> {
+    [
+        ("default", "执行模式", "允许 Codex 调查、修改文件并执行工具"),
+        ("plan", "Plan 模式", "只调查、澄清并形成可确认的实施计划"),
+    ]
+    .into_iter()
+    .map(|(value, name, description)| CodexSessionConfigChoice {
+        value: value.to_string(),
+        name: name.to_string(),
+        description: Some(description.to_string()),
+        group_name: None,
+    })
+    .collect()
+}
+
+fn codex_supports_plan_mode(value: &Value) -> bool {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|modes| {
+            modes.iter().any(|mode| {
+                mode.get("mode").and_then(Value::as_str) == Some("plan")
+            })
+        })
+}
+
+fn codex_collaboration_mode_json(snapshot: &CodexConversationSessionState) -> Option<Value> {
+    let mode = snapshot.collaboration_mode.as_deref()?;
+    Some(json!({
+        "mode": mode,
+        "settings": {
+            "model": snapshot.model.clone().unwrap_or_default(),
+            "reasoning_effort": snapshot.reasoning_effort,
+            "developer_instructions": null,
+        }
+    }))
+}
+
+fn codex_plan_payload(params: &Value) -> Vec<AcpPlanEntryPayload> {
+    params
+        .get("plan")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let content = entry.get("step").and_then(Value::as_str)?.to_string();
+            let status = match entry.get("status").and_then(Value::as_str).unwrap_or("pending") {
+                "inProgress" => "in_progress",
+                "completed" => "completed",
+                _ => "pending",
+            };
+            Some(AcpPlanEntryPayload {
+                content,
+                priority: "medium".to_string(),
+                status: status.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// turn/start 的 sandboxPolicy 是对象形式（camelCase type），
 /// 与 thread/start|resume 的 SandboxMode 字符串（kebab-case）不同，这里做映射
 fn codex_sandbox_policy_json(sandbox: Option<&str>) -> Option<Value> {
@@ -965,6 +1028,27 @@ fn apply_codex_config_option(
         }
         return Ok(());
     }
+    if config_id == "collaboration_mode" {
+        if !matches!(value.as_str(), "default" | "plan") {
+            return Err(format!("Codex 不支持协作模式：{value}"));
+        }
+        if !snapshot
+            .config_options
+            .iter()
+            .any(|option| option.id == "collaboration_mode")
+        {
+            return Err("当前 Codex app-server 未提供 Plan 模式".to_string());
+        }
+        snapshot.collaboration_mode = Some(value.clone());
+        if let Some(option) = snapshot
+            .config_options
+            .iter_mut()
+            .find(|option| option.id == "collaboration_mode")
+        {
+            option.current_value = value;
+        }
+        return Ok(());
+    }
     Err(format!("Codex 不支持会话配置：{config_id}"))
 }
 
@@ -976,6 +1060,7 @@ fn codex_turn_start_params(thread_id: &str, snapshot: &CodexConversationSessionS
         "approvalPolicy": snapshot.approval_policy,
         "sandboxPolicy": codex_sandbox_policy_json(snapshot.sandbox.as_deref()),
         "approvalsReviewer": snapshot.approvals_reviewer,
+        "collaborationMode": codex_collaboration_mode_json(snapshot),
         "input": [{"type":"text","text":prompt,"text_elements":[]}],
     })
 }
@@ -1344,8 +1429,8 @@ fn emit_activity(
     content_offset: Option<u64>,
 ) {
     let (item_id, kind, title, input) = item_identity(item);
-    // 用户输入与 agent 正文已经在消息气泡里展示，不再生成活动卡片
-    if matches!(kind.as_str(), "userMessage" | "agentMessage") {
+    // 用户输入、agent 正文和 Plan 都有专属展示，不再生成通用活动卡片
+    if matches!(kind.as_str(), "userMessage" | "agentMessage" | "plan") {
         return;
     }
     let activity = AgentActivityEvent {
@@ -1828,6 +1913,23 @@ async fn run_session(
             .unwrap_or_else(|| supported_reasoning_efforts(&result));
         (catalog, efforts)
     };
+    request_id += 1;
+    write_frame(
+        &mut stdin,
+        &json_rpc_request(request_id, "collaborationMode/list", json!({})),
+    )
+    .await?;
+    let collaboration_modes = read_rpc_response_with_approvals(
+        &app_handle,
+        conversation_id,
+        &mut stdin,
+        &mut lines,
+        request_id,
+        &mut pending_notifications,
+    )
+    .await
+    .map_err(|error| format!("Codex collaborationMode/list 失败：{error}"))?;
+    let plan_mode_supported = codex_supports_plan_mode(&collaboration_modes);
     ConversationDatabase::new(&app_handle)
         .map_err(|error| error.to_string())?
         .upsert_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE, &thread_id)
@@ -1849,6 +1951,9 @@ async fn run_session(
         approval_policy: config.approval_policy.clone(),
         sandbox: config.sandbox.clone(),
         approvals_reviewer: config.approvals_reviewer.clone(),
+        collaboration_mode: plan_mode_supported.then(|| "default".to_string()),
+        plan: Vec::new(),
+        plan_explanation: None,
         config_options: {
             let mut options = Vec::new();
             {
@@ -1894,6 +1999,16 @@ async fn run_session(
                 current_value: config.approvals_reviewer.clone().unwrap_or_default(),
                 options: codex_approvals_reviewer_options(),
             });
+            if plan_mode_supported {
+                options.push(CodexSessionConfigOption {
+                    id: "collaboration_mode".to_string(),
+                    name: "工作模式".to_string(),
+                    description: Some("控制 Codex 下一轮是先制定计划还是直接执行".to_string()),
+                    category: Some("mode".to_string()),
+                    current_value: "default".to_string(),
+                    options: codex_collaboration_mode_options(),
+                });
+            }
             options
         },
     };
@@ -2134,6 +2249,19 @@ async fn run_session(
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
                                         emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
                                     }
+                                }
+                                "turn/plan/updated" => {
+                                    snapshot.plan = codex_plan_payload(&params);
+                                    snapshot.plan_explanation = params
+                                        .get("explanation")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string);
+                                    emit_session_snapshot(
+                                        &app_handle,
+                                        conversation_id,
+                                        Some(snapshot.clone()),
+                                    )
+                                    .await;
                                 }
                                 "thread/tokenUsage/updated" => {
                                     turn_usage = codex_turn_usage(&params).or(turn_usage);
@@ -2415,9 +2543,75 @@ mod tests {
 
     #[test]
     fn builds_turn_start_with_runtime_snapshot_values() {
-        let snapshot = CodexConversationSessionState { model: Some("gpt-a".to_string()), reasoning_effort: Some("ultra".to_string()), ..Default::default() };
-        assert_eq!(codex_turn_start_params("thread-1", &snapshot, "hello")["model"], "gpt-a");
-        assert_eq!(codex_turn_start_params("thread-1", &snapshot, "hello")["reasoningEffort"], "ultra");
+        let snapshot = CodexConversationSessionState {
+            model: Some("gpt-a".to_string()),
+            reasoning_effort: Some("ultra".to_string()),
+            collaboration_mode: Some("plan".to_string()),
+            ..Default::default()
+        };
+        let params = codex_turn_start_params("thread-1", &snapshot, "hello");
+        assert_eq!(params["model"], "gpt-a");
+        assert_eq!(params["reasoningEffort"], "ultra");
+        assert_eq!(params["collaborationMode"]["mode"], "plan");
+        assert_eq!(params["collaborationMode"]["settings"]["model"], "gpt-a");
+    }
+
+    #[test]
+    fn detects_and_parses_codex_plan_capabilities() {
+        assert!(codex_supports_plan_mode(&json!({
+            "data": [{"mode": "default"}, {"mode": "plan"}]
+        })));
+        assert!(!codex_supports_plan_mode(&json!({
+            "data": [{"mode": "default"}]
+        })));
+
+        let plan = codex_plan_payload(&json!({
+            "explanation": "先确认再执行",
+            "plan": [
+                {"step": "检查现状", "status": "completed"},
+                {"step": "实现交互", "status": "inProgress"},
+                {"step": "验证结果", "status": "pending"}
+            ]
+        }));
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan[0].content, "检查现状");
+        assert_eq!(plan[0].status, "completed");
+        assert_eq!(plan[1].status, "in_progress");
+        assert_eq!(plan[2].status, "pending");
+    }
+
+    #[test]
+    fn applies_codex_collaboration_mode_only_when_supported() {
+        let mut snapshot = CodexConversationSessionState {
+            collaboration_mode: Some("default".to_string()),
+            config_options: vec![CodexSessionConfigOption {
+                id: "collaboration_mode".to_string(),
+                name: "工作模式".to_string(),
+                description: None,
+                category: Some("mode".to_string()),
+                current_value: "default".to_string(),
+                options: codex_collaboration_mode_options(),
+            }],
+            ..Default::default()
+        };
+        apply_codex_config_option(
+            &mut snapshot,
+            &[],
+            "collaboration_mode",
+            "plan".to_string(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.collaboration_mode.as_deref(), Some("plan"));
+        assert_eq!(snapshot.config_options[0].current_value, "plan");
+
+        let mut unsupported = CodexConversationSessionState::default();
+        assert!(apply_codex_config_option(
+            &mut unsupported,
+            &[],
+            "collaboration_mode",
+            "plan".to_string(),
+        )
+        .is_err());
     }
 
     /// turn/start 的审批策略与沙箱覆盖
