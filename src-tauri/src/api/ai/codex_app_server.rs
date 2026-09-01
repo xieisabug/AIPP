@@ -45,6 +45,7 @@ pub struct CodexAppServerConfig {
     pub approval_policy: Option<String>,
     pub sandbox: Option<String>,
     pub approvals_reviewer: Option<String>,
+    pub collaboration_mode: Option<String>,
     pub selected_mcp_tools_payload: String,
     pub session_signature: String,
 }
@@ -385,6 +386,7 @@ pub fn extract_codex_app_server_config(
         approval_policy,
         sandbox,
         approvals_reviewer,
+        collaboration_mode: None,
         selected_mcp_tools_payload: String::new(),
         session_signature: String::new(),
     };
@@ -402,6 +404,7 @@ fn codex_config_signature(config: &CodexAppServerConfig) -> String {
         "approval": config.approval_policy,
         "sandbox": config.sandbox,
         "approvals_reviewer": config.approvals_reviewer,
+        "collaboration_mode": config.collaboration_mode,
         "env": config.env_vars,
         "selected_mcp": config.selected_mcp_tools_payload,
     }))
@@ -1951,7 +1954,9 @@ async fn run_session(
         approval_policy: config.approval_policy.clone(),
         sandbox: config.sandbox.clone(),
         approvals_reviewer: config.approvals_reviewer.clone(),
-        collaboration_mode: plan_mode_supported.then(|| "default".to_string()),
+        collaboration_mode: plan_mode_supported.then(|| {
+            config.collaboration_mode.clone().unwrap_or_else(|| "default".to_string())
+        }),
         plan: Vec::new(),
         plan_explanation: None,
         config_options: {
@@ -2005,13 +2010,16 @@ async fn run_session(
                     name: "工作模式".to_string(),
                     description: Some("控制 Codex 下一轮是先制定计划还是直接执行".to_string()),
                     category: Some("mode".to_string()),
-                    current_value: "default".to_string(),
+                    current_value: config.collaboration_mode.clone().unwrap_or_else(|| "default".to_string()),
                     options: codex_collaboration_mode_options(),
                 });
             }
             options
         },
     };
+    if config.collaboration_mode.as_deref() == Some("plan") && !plan_mode_supported {
+        return Err("当前 Codex app-server 未提供 Plan 模式".to_string());
+    }
     if let Some(model) = snapshot.model.clone() {
         let catalog_model = model_catalog
             .iter()
@@ -2880,6 +2888,7 @@ mod tests {
             approval_policy: None,
             sandbox: None,
             approvals_reviewer: None,
+            collaboration_mode: None,
             selected_mcp_tools_payload: String::new(),
             session_signature: String::new(),
         }

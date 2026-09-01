@@ -169,7 +169,7 @@ describe("InputArea Plan mode", () => {
             />,
         );
 
-        const button = screen.getByRole("button", { name: "Plan 中" });
+        const button = screen.getByRole("button", { name: "Plan" });
         expect(button).toHaveAttribute("aria-pressed", "true");
         expect(button).toBeDisabled();
     });

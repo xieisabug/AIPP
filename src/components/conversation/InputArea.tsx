@@ -52,7 +52,7 @@
 import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
-import { Plus, Square, ArrowUp, ListChecks, Loader2 } from "lucide-react";
+import { Plus, Square, ArrowUp, Loader2 } from "lucide-react";
 import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -1313,10 +1313,8 @@ const InputArea = React.memo(
                         >
                             {planModeSwitching ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                                <ListChecks className="h-4 w-4" />
-                            )}
-                            <span>{planMode ? "Plan 中" : "Plan"}</span>
+                            ) : null}
+                            <span>Plan</span>
                         </button>
                     ) : null}
 

@@ -200,7 +200,7 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 ### 会话控制 UI
 - Chat/Butler 的对话标题栏会显示 ACP 会话入口
 - 用户可以查看当前 session 状态、工作目录、config options 和可用命令数量
-- Codex、Claude Code 与支持 mode config option 的 ACP Agent 会在输入区提供 Plan 模式切换；切换失败时保留原模式并展示底层错误，不降级到其他通道
+- Codex、Claude Code 与支持 mode config option 的 ACP Agent 会在输入区提供 Plan 模式切换；新对话页可在发送首条消息前选择 Codex/Claude Code 的 Plan 模式，切换失败时保留原模式并展示底层错误，不降级到其他通道
 - Agent 返回结构化 Plan 后，聊天流展示 Plan 摘要卡片与完整 Plan 弹窗，并提供“继续完善”“开始执行”操作；开始执行会先切回执行模式，再发送确认后的执行请求
 - 右侧栏统一命名为“规划”：Agent 对话只投影当前 Agent Plan 的步骤，普通对话只展示 AIPP Todo，不拼接两种来源，也不显示来源标签
 - 支持直接在标题栏更新 ACP config option

@@ -1340,6 +1340,10 @@ pub async fn ask_ai(
                     if !CODEX_SANDBOX_MODES.contains(&sandbox) { return Err(AppError::UnknownError(format!("Codex 不支持沙箱模式：{sandbox}"))); }
                     codex_config.sandbox = Some(sandbox.to_string());
                 }
+                if let Some(mode) = config.get("collaboration_mode").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
+                    if !matches!(mode, "default" | "plan") { return Err(AppError::UnknownError(format!("Codex 不支持协作模式：{mode}"))); }
+                    codex_config.collaboration_mode = Some(mode.to_string());
+                }
             }
             // 与 ACP 通道一致：挂载助手绑定的 MCP 工具（桥接注入），payload 计入签名
             codex_config.selected_mcp_tools_payload =
@@ -1444,6 +1448,10 @@ pub async fn ask_ai(
             }
             if let Some(overrides) = override_model_config.as_ref() {
                 if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
+                if let Some(mode) = overrides.get("permission_mode").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
+                    if !matches!(mode, "default" | "plan") { return Err(AppError::UnknownError(format!("Claude Code 不支持工作模式：{mode}"))); }
+                    config.permission_mode = Some(mode.to_string());
+                }
             }
             config.selected_mcp_tools_payload =
                 build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id)

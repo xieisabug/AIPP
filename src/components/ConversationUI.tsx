@@ -282,6 +282,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [selectedAgentEffort, setSelectedAgentEffort] = useState("");
         const [selectedAgentApprovalPolicy, setSelectedAgentApprovalPolicy] = useState("");
         const [selectedAgentSandbox, setSelectedAgentSandbox] = useState("");
+        const [selectedAgentMode, setSelectedAgentMode] = useState("default");
         const handleAgentConfigChange = useCallback((model: string, effort: string, approvalPolicy: string, sandbox: string) => {
             setSelectedAgentModel(model);
             setSelectedAgentEffort(effort);
@@ -1030,6 +1031,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             selectedAgentEffort,
             selectedAgentApprovalPolicy,
             selectedAgentSandbox,
+            selectedAgentMode,
         });
 
         // ============= 初始化和生命周期逻辑 =============
@@ -1972,6 +1974,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 selectedEffort={selectedAgentEffort}
                                 selectedApprovalPolicy={selectedAgentApprovalPolicy}
                                 selectedSandbox={selectedAgentSandbox}
+                                selectedMode={selectedAgentMode}
+                                onAgentModeChange={setSelectedAgentMode}
                                 onAgentConfigChange={handleAgentConfigChange}
                             />
                             {isAcpAssistant && acpSessionState ? (

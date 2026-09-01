@@ -36,6 +36,7 @@ export interface UseConversationOperationsProps {
     selectedAgentEffort?: string;
     selectedAgentApprovalPolicy?: string;
     selectedAgentSandbox?: string;
+    selectedAgentMode?: string;
 }
 
 export interface UseConversationOperationsReturn {
@@ -85,6 +86,7 @@ export function useConversationOperations({
     selectedAgentEffort = "",
     selectedAgentApprovalPolicy = "",
     selectedAgentSandbox = "",
+    selectedAgentMode = "",
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
 
     // 对话标题管理相关状态
@@ -421,6 +423,10 @@ export function useConversationOperations({
                     }
                     if (selectedAgentSandbox) {
                         agentOverrideConfig.sandbox = selectedAgentSandbox;
+                    }
+                    if (selectedAgentMode) {
+                        agentOverrideConfig.collaboration_mode = selectedAgentMode;
+                        agentOverrideConfig.permission_mode = selectedAgentMode;
                     }
                 }
                 invoke<AiResponse>("ask_ai", {

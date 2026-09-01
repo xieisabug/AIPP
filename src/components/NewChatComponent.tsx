@@ -80,6 +80,8 @@ interface NewChatComponentProps {
     selectedEffort: string;
     selectedApprovalPolicy: string;
     selectedSandbox: string;
+    selectedMode: string;
+    onAgentModeChange: (mode: string) => void;
     onAgentConfigChange: (model: string, effort: string, approvalPolicy: string, sandbox: string) => void;
 }
 
@@ -92,6 +94,8 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
     selectedEffort,
     selectedApprovalPolicy,
     selectedSandbox,
+    selectedMode,
+    onAgentModeChange,
     onAgentConfigChange,
 }: NewChatComponentProps) => {
     const isMobile = useIsMobile();
@@ -101,13 +105,16 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
     const [codexDefaults, setCodexDefaults] = useState<{ approval_policy: string; sandbox: string } | null>(null);
     const [loadingConfig, setLoadingConfig] = useState(false);
     const [configError, setConfigError] = useState<string | null>(null);
+    const [agentKind, setAgentKind] = useState<string | null>(null);
     const selectedAssistantInfo = assistants.find((assistant) => assistant.id === selectedAssistant);
 
     useEffect(() => {
         let cancelled = false;
         const load = async () => {
+            onAgentModeChange("default");
             if (!selectedAssistant || selectedAssistant < 0) {
                 setIsAgentAssistant(false);
+                setAgentKind(null);
                 setConfigError(null);
                 setModels([]); setEfforts([]); setCodexDefaults(null); onAgentConfigChange("", "", "", ""); return;
             }
@@ -118,8 +125,12 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                 const isAgent = detail?.assistant?.assistant_type === 4 || detail?.assistant_type === 4 || selectedAssistantInfo?.assistant_type === 4;
                 setIsAgentAssistant(isAgent);
                 if (!isAgent) {
+                    setAgentKind(null);
                     setModels([]); setEfforts([]); setCodexDefaults(null); onAgentConfigChange("", "", "", ""); return;
                 }
+                const runtime = await invoke<{ agent_kind: string }>("get_agent_runtime_info", { assistantId: selectedAssistant });
+                if (cancelled) return;
+                setAgentKind(runtime.agent_kind);
                 const modelList = await invoke<AgentModelOption[]>("get_agent_model_options", {
                     assistantId: selectedAssistant,
                     providerId: null,
@@ -139,6 +150,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
             } catch (error) {
                 if (!cancelled) {
                     setIsAgentAssistant(selectedAssistantInfo?.assistant_type === 4);
+                    setAgentKind(null);
                     setModels([]);
                     setEfforts([]);
                     setCodexDefaults(null);
@@ -236,6 +248,21 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                                 onChange={(value) => onAgentConfigChange(selectedModel, selectedEffort, selectedApprovalPolicy, value)}
                             />
                         </div>
+                    ) : null}
+                    {agentKind === "codex_app_server" || agentKind === "claude_sdk" ? (
+                        <button
+                            type="button"
+                            className={`inline-flex h-8 items-center gap-1.5 self-start rounded-full border px-2.5 text-xs font-medium transition-colors hover:border-primary hover:text-foreground ${
+                                selectedMode === "plan"
+                                    ? "border-primary bg-primary/10 text-primary"
+                                    : "border-border bg-background text-muted-foreground"
+                            }`}
+                            aria-pressed={selectedMode === "plan"}
+                            onClick={() => onAgentModeChange(selectedMode === "plan" ? "default" : "plan")}
+                            title={selectedMode === "plan" ? "切换到执行模式" : "切换到 Plan 模式"}
+                        >
+                            <span>Plan</span>
+                        </button>
                     ) : null}
                     {configError ? <span className="text-xs text-muted-foreground">{configError}</span> : null}
                 </div>
