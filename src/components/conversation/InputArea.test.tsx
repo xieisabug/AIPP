@@ -155,9 +155,28 @@ describe("InputArea Plan mode", () => {
         render(<InputAreaHarness onPlanModeToggle={onPlanModeToggle} />);
 
         const button = screen.getByRole("button", { name: "Plan" });
+        expect(button).toHaveTextContent("Plan");
         expect(button).toHaveAttribute("aria-pressed", "false");
+        expect(button).toHaveClass("input-area-plan-mode-button");
+        expect(button).not.toHaveClass("bg-primary");
+        expect(button).toHaveAttribute("data-aipp-slot", "chat-input-plan-mode");
         await user.click(button);
         expect(onPlanModeToggle).toHaveBeenCalledOnce();
+    });
+
+    it("fills the Plan chip with primary color while mode is on", () => {
+        render(
+            <InputAreaHarness
+                planMode
+                onPlanModeToggle={() => {}}
+            />,
+        );
+
+        const button = screen.getByRole("button", { name: "Plan" });
+        expect(button).toHaveTextContent("Plan");
+        expect(button).toHaveAttribute("aria-pressed", "true");
+        expect(button).toHaveClass("bg-primary");
+        expect(button).toHaveClass("text-primary-foreground");
     });
 
     it("shows and disables the Plan control while switching", () => {

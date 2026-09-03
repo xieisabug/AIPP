@@ -52,6 +52,7 @@
 import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
+import { Button } from "@/components/ui/button";
 import { Plus, Square, ArrowUp, Loader2 } from "lucide-react";
 import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
@@ -1245,6 +1246,9 @@ const InputArea = React.memo(
                 textareaRef.current?.focus();
             }, [textareaRef]);
 
+            const showPlanModeButton = Boolean(onPlanModeToggle);
+            const addButtonRight = (sidebarVisible ? 150 : 190) + sidebarWidth;
+            const planButtonRight = addButtonRight + 40;
             const baseRight = sidebarVisible ? 130 : 170;
             const defaultSendButtonIcon = aiIsResponsing && !inputText.trim() ? (
                 <Square size={20} className="text-action-foreground" />
@@ -1254,12 +1258,12 @@ const InputArea = React.memo(
 
             return (
                 <div
-                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''}`}
+                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeButton ? 'has-plan-mode' : ''}`}
                     data-theme-slot="input-area"
                     data-aipp-slot="chat-input-area"
                 >
                     <div
-                        className="input-area-textarea-container"
+                        className={`input-area-textarea-container ${showPlanModeButton ? 'has-plan-mode' : ''}`}
                         style={{ right: baseRight}}
                         data-theme-slot="input-area-container"
                         data-aipp-slot="chat-input-area-container"
@@ -1301,21 +1305,29 @@ const InputArea = React.memo(
                         />
                     </div>
 
-                    {onPlanModeToggle ? (
-                        <button
+                    {showPlanModeButton ? (
+                        <Button
                             type="button"
-                            className={`input-area-plan-mode-button ${planMode ? "active" : ""}`}
-                            onClick={onPlanModeToggle}
+                            size="sm"
+                            variant={planMode ? "default" : "outline"}
+                            onClick={() => onPlanModeToggle?.()}
+                            className={`input-area-plan-mode-button ${placement}${planMode ? " active" : " text-muted-foreground"}`}
                             disabled={planModeSwitching || aiIsResponsing}
+                            aria-label="Plan"
                             aria-pressed={planMode}
                             title={planMode ? "切换到执行模式" : "切换到 Plan 模式"}
+                            data-theme-slot="input-area-plan-mode-button"
                             data-aipp-slot="chat-input-plan-mode"
+                            data-state={planMode ? "active" : "idle"}
+                            style={
+                                placement === "bottom" && !isMobile
+                                    ? { right: planButtonRight }
+                                    : undefined
+                            }
                         >
-                            {planModeSwitching ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : null}
-                            <span>Plan</span>
-                        </button>
+                            {planModeSwitching ? <Loader2 className="animate-spin" /> : null}
+                            Plan
+                        </Button>
                     ) : null}
 
                     <CircleButton
@@ -1326,7 +1338,7 @@ const InputArea = React.memo(
                         dataAippSlot="chat-input-add-button"
                         style={
                             placement === "bottom" && !isMobile
-                                ? { right: (sidebarVisible ? 150 : 190) + sidebarWidth }
+                                ? { right: addButtonRight }
                                 : undefined
                         }
                     />
