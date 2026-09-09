@@ -31,7 +31,6 @@ import { listen, emit } from "@tauri-apps/api/event";
 import FileDropArea from "./FileDropArea";
 import useFileDropHandler from "../hooks/useFileDropHandler";
 import InputArea, { InputAreaRef } from "./conversation/InputArea";
-import { AgentPlanCard } from "./conversation/AgentPlanCard";
 import MessageEditDialog from "./MessageEditDialog";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
 import { useMessageGroups } from "../hooks/useMessageGroups";
@@ -40,6 +39,7 @@ import { useConversationEvents } from "@/hooks/useConversationEvents";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { AssistantListItem } from "@/data/Assistant";
 import { claimAgentConnectionEvent } from "./conversation/agentSessionNotice";
+import { agentSupportsPlanToggle } from "@/utils/agentPlanMode";
 
 interface AgentRuntimeInfo {
     agent_kind: string;
@@ -283,6 +283,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [selectedAgentApprovalPolicy, setSelectedAgentApprovalPolicy] = useState("");
         const [selectedAgentSandbox, setSelectedAgentSandbox] = useState("");
         const [selectedAgentMode, setSelectedAgentMode] = useState("default");
+        useEffect(() => {
+            setSelectedAgentMode("default");
+        }, [selectedAssistant]);
         const handleAgentConfigChange = useCallback((model: string, effort: string, approvalPolicy: string, sandbox: string) => {
             setSelectedAgentModel(model);
             setSelectedAgentEffort(effort);
@@ -1347,9 +1350,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const executionModeChoice = planModeOption?.options.find(
             (choice) => choice.value.toLowerCase() === "default"
         ) ?? planModeOption?.options.find((choice) => choice.value !== planModeChoice?.value) ?? null;
-        const isPlanMode = Boolean(
-            planModeOption && planModeChoice && planModeOption.current_value === planModeChoice.value
+        const showPlanModeToggle = agentSupportsPlanToggle(
+            acpSessionState?.agent_kind ?? configuredAgentKind,
+            Boolean(planModeOption),
         );
+        const isPlanMode = planModeOption && planModeChoice
+            ? planModeOption.current_value === planModeChoice.value
+            : selectedAgentMode === "plan";
         const planModeSwitching = Boolean(
             planModeOption && acpMutationKey === `config:${planModeOption.id}`
         );
@@ -1357,15 +1364,19 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const setAgentPlanMode = useCallback(
             async (enabled: boolean) => {
                 if (enabled === isPlanMode) return true;
+                if (!planModeOption) {
+                    setSelectedAgentMode(enabled ? "plan" : "default");
+                    return true;
+                }
                 const choice = enabled ? planModeChoice : executionModeChoice;
-                if (!planModeOption || !choice) return false;
+                if (!choice) return false;
                 return handleAcpConfigChange(planModeOption, choice.value);
             },
             [executionModeChoice, handleAcpConfigChange, isPlanMode, planModeChoice, planModeOption]
         );
 
         const pendingPlanExecutionRef = useRef(false);
-        const planExecutionPrompt = "请按已确认的 Plan 开始执行。";
+        const planExecutionPrompt = "通过";
         const handleContinuePlanning = useCallback(async () => {
             if (await setAgentPlanMode(true)) {
                 inputAreaRef.current?.focus();
@@ -1377,6 +1388,46 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 setInputText(planExecutionPrompt);
             }
         }, [isPlanMode, setAgentPlanMode, setInputText]);
+
+        const actionableAgentPlanMessageId = useMemo(() => {
+            if (!isPlanMode) return null;
+            return [...allDisplayMessages]
+                .reverse()
+                .find((message) =>
+                    message.message_type === "agent_plan"
+                    && Boolean(message.finish_time)
+                    && Boolean(message.content.trim())
+                )?.id ?? null;
+        }, [allDisplayMessages, isPlanMode]);
+
+        useEffect(() => {
+            const planMessages = allDisplayMessages
+                .filter((message) => message.message_type === "agent_plan")
+                .map((message) => ({
+                    id: message.id,
+                    parentId: message.parent_id,
+                    contentLength: message.content.length,
+                    hasContent: Boolean(message.content.trim()),
+                    finishTime: message.finish_time,
+                }));
+            console.info("[AIPP Plan] action state", {
+                conversationId,
+                isAcpAssistant,
+                isPlanMode,
+                planModeSwitching,
+                hasActivePrompt: acpSessionState?.has_active_prompt ?? null,
+                actionableAgentPlanMessageId,
+                planMessages,
+            });
+        }, [
+            acpSessionState?.has_active_prompt,
+            actionableAgentPlanMessageId,
+            allDisplayMessages,
+            conversationId,
+            isAcpAssistant,
+            isPlanMode,
+            planModeSwitching,
+        ]);
 
         useEffect(() => {
             if (!pendingPlanExecutionRef.current || inputText !== planExecutionPrompt) return;
@@ -1979,6 +2030,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}
                                 renderMessageActions={renderPluginMessageActions}
+                                actionableAgentPlanMessageId={actionableAgentPlanMessageId}
+                                agentPlanModeSwitching={planModeSwitching}
+                                onContinueAgentPlan={() => void handleContinuePlanning()}
+                                onApproveAgentPlan={() => void handleStartPlanExecution()}
                                 virtualizeMessages={virtualizeMessages}
                                 virtualizedListEngine={virtualizedListEngine}
                                 scrollContainerRef={scrollContainerRef}
@@ -1996,21 +2051,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 selectedEffort={selectedAgentEffort}
                                 selectedApprovalPolicy={selectedAgentApprovalPolicy}
                                 selectedSandbox={selectedAgentSandbox}
-                                selectedMode={selectedAgentMode}
-                                onAgentModeChange={setSelectedAgentMode}
                                 onAgentConfigChange={handleAgentConfigChange}
                             />
-                            {isAcpAssistant && acpSessionState ? (
-                                <AgentPlanCard
-                                    plan={acpSessionState.plan}
-                                    explanation={acpSessionState.plan_explanation}
-                                    hasActivePrompt={acpSessionState.has_active_prompt}
-                                    isPlanMode={isPlanMode}
-                                    modeSwitching={planModeSwitching}
-                                    onContinuePlanning={() => void handleContinuePlanning()}
-                                    onStartExecution={() => void handleStartPlanExecution()}
-                                />
-                            ) : null}
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>
 
@@ -2035,7 +2077,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             acpAvailableCommands={acpSessionState?.available_commands ?? []}
                             planMode={isPlanMode}
                             planModeSwitching={planModeSwitching}
-                            onPlanModeToggle={planModeOption
+                            onPlanModeToggle={showPlanModeToggle
                                 ? () => void setAgentPlanMode(!isPlanMode)
                                 : undefined}
                         />

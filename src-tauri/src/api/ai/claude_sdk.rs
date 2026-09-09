@@ -5,6 +5,7 @@ use crate::api::ai::acp::{
     AcpSessionConfigOptionPayload,
 };
 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
+use crate::api::ai::agent_plan::AgentPlanMessage;
 use crate::api::ai::codex_app_server::AgentActivityEvent;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::acp_mcp_bridge::{
@@ -766,6 +767,14 @@ fn claude_plan_from_tool_use(block: &Value) -> Option<Vec<AcpPlanEntryPayload>> 
     )
 }
 
+fn claude_full_plan_from_tool_use(block: &Value) -> Option<&str> {
+    let tool_name = block.get("name").and_then(Value::as_str)?;
+    if !matches!(tool_name, "ExitPlanMode" | "exit_plan_mode") {
+        return None;
+    }
+    block.pointer("/input/plan").and_then(Value::as_str).filter(|plan| !plan.trim().is_empty())
+}
+
 fn claude_session_snapshot(
     conversation_id: i64,
     session_id: Option<String>,
@@ -1083,6 +1092,7 @@ pub fn spawn_claude_session_task(
                         manager.set_assistant_streaming(&app, _conversation_id, message_id).await;
                     }
                     let mut content = String::new();
+                    let mut agent_plan_message: Option<AgentPlanMessage> = None;
                     let mut sequence = 0_u64;
                     emit_snapshot(
                         &app,
@@ -1237,6 +1247,31 @@ pub fn spawn_claude_session_task(
                                         .await;
                                         continue;
                                     }
+                                    if let Some(plan) = claude_full_plan_from_tool_use(block) {
+                                        let item_id = block.get("id").and_then(Value::as_str);
+                                        if let Ok(mut plan_message) = AgentPlanMessage::create(
+                                            &app,
+                                            &window,
+                                            _conversation_id,
+                                            message_id,
+                                            CLAUDE_SDK_API_TYPE,
+                                            session_id.as_deref(),
+                                            None,
+                                            item_id,
+                                        ) {
+                                            plan_message.replace_content(
+                                                &app,
+                                                &window,
+                                                _conversation_id,
+                                                plan.to_string(),
+                                                true,
+                                            );
+                                            agent_plan_message = Some(plan_message);
+                                        } else {
+                                            stream_error = Some("Claude Code Plan 已返回，但 AIPP 创建 Plan 消息失败".to_string());
+                                        }
+                                        continue;
+                                    }
                                     if block.get("type").and_then(Value::as_str) == Some("tool_use")
                                     {
                                         sequence += 1;
@@ -1343,7 +1378,7 @@ pub fn spawn_claude_session_task(
                         }
                         break;
                     }
-                    if content.is_empty() {
+                    if content.is_empty() && agent_plan_message.is_none() {
                         emit_claude_failure(
                             &app,
                             _conversation_id,
@@ -1372,7 +1407,12 @@ pub fn spawn_claude_session_task(
                             }),
                         },
                     );
-                    handle_agent_success(&app, &window, _conversation_id, &content, AgentKind::ClaudeCode).await;
+                    let success_content = if content.is_empty() {
+                        agent_plan_message.as_ref().map(|plan| plan.content.as_str()).unwrap_or_default()
+                    } else {
+                        content.as_str()
+                    };
+                    handle_agent_success(&app, &window, _conversation_id, success_content, AgentKind::ClaudeCode).await;
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                         manager.clear_focus(&app, _conversation_id).await;
                     }
@@ -1636,6 +1676,24 @@ mod tests {
             "type": "tool_use",
             "name": "Read",
             "input": {}
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn parses_claude_exit_plan_mode_body_separately_from_todos() {
+        let frame = json!({
+            "type": "tool_use",
+            "id": "plan-1",
+            "name": "ExitPlanMode",
+            "input": {"plan": "# 实施方案\n\n1. 修改后端"}
+        });
+        let plan = claude_full_plan_from_tool_use(&frame);
+        assert_eq!(plan, Some("# 实施方案\n\n1. 修改后端"));
+        assert!(claude_full_plan_from_tool_use(&json!({
+            "type": "tool_use",
+            "name": "TodoWrite",
+            "input": {"plan": "不是完整 Plan"}
         }))
         .is_none());
     }

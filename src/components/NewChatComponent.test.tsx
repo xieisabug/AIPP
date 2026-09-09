@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import NewChatComponent from "./NewChatComponent";
@@ -25,13 +25,10 @@ describe("NewChatComponent Agent Plan mode", () => {
     it.each([
         ["codex_app_server", "Codex"],
         ["claude_sdk", "Claude Code"],
-    ])("shows the Plan control for %s", async (agentKind) => {
+    ])("keeps Plan out of the new-chat config row for %s", async () => {
         invokeMock.mockImplementation((command: string) => {
             if (command === "get_assistant") {
                 return Promise.resolve({ assistant: { assistant_type: 4 }, model: [], model_configs: [] });
-            }
-            if (command === "get_agent_runtime_info") {
-                return Promise.resolve({ agent_kind: agentKind });
             }
             if (command === "get_agent_model_options") {
                 return Promise.resolve([]);
@@ -41,7 +38,6 @@ describe("NewChatComponent Agent Plan mode", () => {
             }
             return Promise.reject(new Error(`unexpected command: ${command}`));
         });
-        const onAgentModeChange = vi.fn();
 
         render(
             <NewChatComponent
@@ -53,15 +49,11 @@ describe("NewChatComponent Agent Plan mode", () => {
                 selectedEffort=""
                 selectedApprovalPolicy=""
                 selectedSandbox=""
-                selectedMode="default"
-                onAgentModeChange={onAgentModeChange}
                 onAgentConfigChange={vi.fn()}
             />,
         );
 
-        const button = await screen.findByRole("button", { name: "Plan" });
-        fireEvent.click(button);
-        expect(onAgentModeChange).toHaveBeenLastCalledWith("plan");
-        await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_agent_runtime_info", { assistantId: 1 }));
+        await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_assistant", { assistantId: 1 }));
+        expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
     });
 });

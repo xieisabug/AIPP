@@ -1,4 +1,5 @@
 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
+use crate::api::ai::agent_plan::AgentPlanMessage;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::api::ai::acp::{
     resolve_acp_cli_path, AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
@@ -2095,6 +2096,7 @@ async fn run_session(
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
+                let mut plan_messages = HashMap::<String, AgentPlanMessage>::new();
                 // 记录每个 item 开始时的正文字符数，供前端把活动卡片穿插到正文对应位置
                 let mut item_content_offsets = HashMap::<String, u64>::new();
                 loop {
@@ -2247,11 +2249,66 @@ async fn run_session(
                                 "item/started" | "item/completed" => {
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
-                                        let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
+                                        let item_type = item.get("type").and_then(Value::as_str);
+                                        if item_type == Some("plan") {
+                                            let item_id = item.get("id").and_then(Value::as_str).unwrap_or("plan").to_string();
+                                            if method == "item/completed" {
+                                                let authoritative_text = item.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                                                if !authoritative_text.is_empty() {
+                                                    if !plan_messages.contains_key(&item_id) {
+                                                        let plan_message = AgentPlanMessage::create(
+                                                            &app_handle,
+                                                            &window,
+                                                            conversation_id,
+                                                            message_id,
+                                                            CODEX_APP_SERVER_API_TYPE,
+                                                            Some(&thread_id),
+                                                            turn_id.as_deref(),
+                                                            Some(&item_id),
+                                                        )?;
+                                                        plan_messages.insert(item_id.clone(), plan_message);
+                                                    }
+                                                    if let Some(plan_message) = plan_messages.get_mut(&item_id) {
+                                                        plan_message.replace_content(
+                                                            &app_handle,
+                                                            &window,
+                                                            conversation_id,
+                                                            authoritative_text,
+                                                            true,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
+                                            emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
+                                        }
                                     }
                                 }
-                                "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" | "item/mcpToolCall/progress" | "item/plan/delta" => {
+                                "item/plan/delta" => {
+                                    if let (Some(item_id), Some(delta)) = (
+                                        params.get("itemId").and_then(Value::as_str),
+                                        params.get("delta").and_then(Value::as_str),
+                                    ) {
+                                        if !plan_messages.contains_key(item_id) {
+                                            let plan_message = AgentPlanMessage::create(
+                                                &app_handle,
+                                                &window,
+                                                conversation_id,
+                                                message_id,
+                                                CODEX_APP_SERVER_API_TYPE,
+                                                Some(&thread_id),
+                                                params.get("turnId").and_then(Value::as_str).or(turn_id.as_deref()),
+                                                Some(item_id),
+                                            )?;
+                                            plan_messages.insert(item_id.to_string(), plan_message);
+                                        }
+                                        if let Some(plan_message) = plan_messages.get_mut(item_id) {
+                                            plan_message.append_delta(&app_handle, &window, conversation_id, delta);
+                                        }
+                                    }
+                                }
+                                "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" | "item/mcpToolCall/progress" => {
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
@@ -2314,13 +2371,24 @@ async fn run_session(
                                 }
                     }
                     }
-                if turn_error.is_none() && content.is_empty() && reasoning.is_empty() {
+                if turn_error.is_none() && content.is_empty() && reasoning.is_empty() && plan_messages.is_empty() {
                     turn_error = Some("Codex 本轮未返回任何内容".to_string());
                 }
                 if let Some(error) = turn_error {
                     return Err(error);
                 }
                 persist_codex_timing(&app_handle, message_id, turn_start_time, first_any_token_time);
+                for plan_message in plan_messages.values_mut() {
+                    if !plan_message.content.is_empty() {
+                        plan_message.replace_content(
+                            &app_handle,
+                            &window,
+                            conversation_id,
+                            plan_message.content.clone(),
+                            true,
+                        );
+                    }
+                }
                 persist_response(&app_handle, message_id, &content, true, turn_usage);
                 if let Some(reasoning_id) = reasoning_message_id {
                     persist_codex_reasoning(&app_handle, reasoning_id, &reasoning);
@@ -2352,9 +2420,14 @@ async fn run_session(
                 });
                 let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(turn_usage.map(|usage| usage.total_tokens).unwrap_or(estimated_output_tokens)), input_token_count: turn_usage.map(|usage| usage.input_tokens), output_token_count: Some(output_tokens), ttft_ms, tps }).unwrap() };
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), done_event);
-                let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
+                let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"has_plan":!plan_messages.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
                 let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), complete_event);
-                handle_agent_success(&app_handle, &window, conversation_id, &content, AgentKind::Codex).await;
+                let success_content = if content.is_empty() {
+                    plan_messages.values().max_by_key(|plan| plan.message_id).map(|plan| plan.content.as_str()).unwrap_or_default()
+                } else {
+                    content.as_str()
+                };
+                handle_agent_success(&app_handle, &window, conversation_id, success_content, AgentKind::Codex).await;
                 if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_focus(&app_handle, conversation_id).await; }
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;

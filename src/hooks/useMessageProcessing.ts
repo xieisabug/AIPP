@@ -87,10 +87,22 @@ export function useMessageProcessing({
 
     // 智能排序逻辑：先过滤可见消息，再基于分组基准时间排序
     const allDisplayMessages = useMemo(() => {
+        const planParentMessageIds = new Set(
+            combinedMessagesForGrouping
+                .filter((message) => message.message_type === "agent_plan" && message.parent_id)
+                .map((message) => message.parent_id as number),
+        );
         // 首先过滤出可见的消息
         const visibleMessages = combinedMessagesForGrouping.filter((message) => {
             // 跳过系统消息和工具结果
             if (message.message_type === "system" || message.message_type === "tool_result") {
+                return false;
+            }
+            if (
+                message.message_type === "response"
+                && !message.content.trim()
+                && planParentMessageIds.has(message.id)
+            ) {
                 return false;
             }
             

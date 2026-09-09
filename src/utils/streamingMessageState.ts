@@ -14,6 +14,7 @@ const STREAMING_MESSAGE_TYPES = new Set<Message["message_type"]>([
     "response",
     "reasoning",
     "error",
+    "agent_plan",
 ]);
 
 function shouldPreferLocalContent(baseMessage: Message, localMessage: Message): boolean {

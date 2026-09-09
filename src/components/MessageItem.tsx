@@ -9,6 +9,7 @@ import { ShineBorder } from "./magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { Message, StreamEvent, MCPToolCallUpdateEvent, AgentActivityEvent } from "../data/Conversation";
 import { AgentActivityList } from "./conversation/AgentActivityList";
+import { AgentPlanCard } from "./conversation/AgentPlanCard";
 import { buildActivitySegments } from "./conversation/agent-activity/activitySegments";
 import { useCopyHandler } from "../hooks/useCopyHandler";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
@@ -47,6 +48,10 @@ interface MessageItemProps {
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
     messageActions?: React.ReactNode;
     agentActivities?: AgentActivityEvent[]; // Codex 等 Agent 的活动事件（收进气泡内展示）
+    canActOnAgentPlan?: boolean;
+    agentPlanModeSwitching?: boolean;
+    onContinueAgentPlan?: () => void;
+    onApproveAgentPlan?: () => void;
 }
 
 interface QueueMessageMeta {
@@ -226,6 +231,10 @@ const MessageItem = React.memo<MessageItemProps>(
         mergedMode = false,
         messageActions,
         agentActivities,
+        canActOnAgentPlan = false,
+        agentPlanModeSwitching = false,
+        onContinueAgentPlan,
+        onApproveAgentPlan,
     }) => {
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
@@ -411,6 +420,37 @@ const MessageItem = React.memo<MessageItemProps>(
             return <ErrorMessage content={message.content} messageId={message.id} />;
         }
 
+        if (message.message_type === "agent_plan") {
+            console.info("[AIPP Plan] card render", {
+                conversationId: message.conversation_id,
+                messageId: message.id,
+                contentLength: displayContent.length,
+                messageFinishTime: message.finish_time,
+                streamIsDone: streamEvent?.is_done ?? null,
+                isStreaming,
+                canActOnAgentPlan,
+                effectiveCanAct: canActOnAgentPlan && !isStreaming,
+                agentPlanModeSwitching,
+            });
+            return (
+                <div
+                    className="flex justify-start"
+                    data-message-item
+                    data-message-id={message.id}
+                    data-message-type="agent_plan"
+                >
+                    <AgentPlanCard
+                        content={displayContent}
+                        isStreaming={isStreaming}
+                        canAct={canActOnAgentPlan && !isStreaming}
+                        modeSwitching={agentPlanModeSwitching}
+                        onContinuePlanning={onContinueAgentPlan}
+                        onApprove={onApproveAgentPlan}
+                    />
+                </div>
+            );
+        }
+
         // 常规消息渲染
         // 合并模式下不渲染外层气泡包装，只渲染内容
         if (mergedMode && !isUserMessage) {
@@ -565,6 +605,10 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     // Agent 活动数组引用比较：无活动的消息传 undefined 保持稳定，
     // 有活动的消息随流式更新重建数组引用，需要重新渲染
     if (prevProps.agentActivities !== nextProps.agentActivities) return false;
+    if (prevProps.canActOnAgentPlan !== nextProps.canActOnAgentPlan) return false;
+    if (prevProps.agentPlanModeSwitching !== nextProps.agentPlanModeSwitching) return false;
+    if (prevProps.onContinueAgentPlan !== nextProps.onContinueAgentPlan) return false;
+    if (prevProps.onApproveAgentPlan !== nextProps.onApproveAgentPlan) return false;
 
     return true;
 };

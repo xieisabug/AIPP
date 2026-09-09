@@ -43,6 +43,10 @@ export interface UseMessageListElementsProps {
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
     renderMessageActions?: (message: Message) => React.ReactNode;
+    actionableAgentPlanMessageId?: number | null;
+    agentPlanModeSwitching?: boolean;
+    onContinueAgentPlan?: () => void;
+    onApproveAgentPlan?: () => void;
 }
 
 export interface MessageElementEntry {
@@ -235,6 +239,8 @@ function estimateMessageHeight(
                 return 112 + structureContribution + lengthContribution + toolCallContribution + agentActivityContribution;
             }
             return 180 + structureContribution + lengthContribution + toolCallContribution + agentActivityContribution;
+        case "agent_plan":
+            return 180 + structureContribution + lengthContribution;
         case "tool_result":
             return 160 + structureContribution + lengthContribution + toolCallContribution;
         case "reasoning":
@@ -276,6 +282,10 @@ export function useMessageListElements({
     inlineInteractionItems,
     allowFeishuDebugResend = false,
     renderMessageActions,
+    actionableAgentPlanMessageId = null,
+    agentPlanModeSwitching = false,
+    onContinueAgentPlan,
+    onApproveAgentPlan,
 }: UseMessageListElementsProps) {
     const { isMergeAssistantMessages } = useDisplayConfig();
     const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
@@ -452,6 +462,10 @@ export function useMessageListElements({
                             allowFeishuDebugResend={allowFeishuDebugResend}
                             messageActions={renderMessageActions?.(message)}
                             agentActivities={activitiesByMessageId.get(message.id)}
+                            canActOnAgentPlan={message.id === actionableAgentPlanMessageId}
+                            agentPlanModeSwitching={agentPlanModeSwitching}
+                            onContinueAgentPlan={onContinueAgentPlan}
+                            onApproveAgentPlan={onApproveAgentPlan}
                         />
                     ),
                     groupControl,
@@ -525,6 +539,10 @@ export function useMessageListElements({
                                         allowFeishuDebugResend={allowFeishuDebugResend}
                                         messageActions={renderMessageActions?.(message)}
                                         agentActivities={activitiesByMessageId.get(message.id)}
+                                        canActOnAgentPlan={message.id === actionableAgentPlanMessageId}
+                                        agentPlanModeSwitching={agentPlanModeSwitching}
+                                        onContinueAgentPlan={onContinueAgentPlan}
+                                        onApproveAgentPlan={onApproveAgentPlan}
                                         mergedMode
                                     />
                                 );
@@ -594,7 +612,7 @@ export function useMessageListElements({
         };
 
         for (const message of allDisplayMessages) {
-            if (message.message_type === "user") {
+            if (message.message_type === "user" || message.message_type === "agent_plan") {
                 flushGroup({ keepExpanded: false });
                 const streamEvent = streamingMessages.get(message.id);
                 const groupControl = getGenerationGroupControl(message);
@@ -628,6 +646,10 @@ export function useMessageListElements({
                                 message.id,
                             )}
                             allowFeishuDebugResend={allowFeishuDebugResend}
+                            canActOnAgentPlan={message.id === actionableAgentPlanMessageId}
+                            agentPlanModeSwitching={agentPlanModeSwitching}
+                            onContinueAgentPlan={onContinueAgentPlan}
+                            onApproveAgentPlan={onApproveAgentPlan}
                         />
                     ),
                     groupControl,
@@ -662,6 +684,10 @@ export function useMessageListElements({
         pendingMessageId,
         resendMessageToFeishuDebug,
         renderMessageActions,
+        actionableAgentPlanMessageId,
+        agentPlanModeSwitching,
+        onContinueAgentPlan,
+        onApproveAgentPlan,
     ]);
 
     const versionControlElements = useMemo(() => {
