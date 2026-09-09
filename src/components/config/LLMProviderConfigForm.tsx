@@ -61,7 +61,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     apiType,
     name,
     description,
-    isOffical,
     enabled,
     onDelete,
     onToggleEnabled,
@@ -900,19 +899,17 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     </div>
                 )}
 
-                {!isOffical && (
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={onDelete}
-                        className="hover:bg-red-50 hover:border-red-300 hover:text-red-700"
-                    >
-                        <Trash2 className="h-4 w-4 mr-1" />
-                    </Button>
-                )}
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={onDelete}
+                    className="hover:bg-red-50 hover:border-red-300 hover:text-red-700"
+                >
+                    <Trash2 className="h-4 w-4 mr-1" />
+                </Button>
             </div>
         ),
-        [enabled, onToggleEnabled, index, isOffical, onDelete, onShare],
+        [enabled, onToggleEnabled, index, onDelete, onShare],
     );
 
     // 表单部分结束
