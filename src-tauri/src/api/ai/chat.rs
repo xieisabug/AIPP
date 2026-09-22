@@ -3537,7 +3537,7 @@ async fn attempt_stream_chat(
                                                 .await;
                                             });
                                         });
-                                    } else if setup_error_result_count > 0 {
+                                    } else if setup_error_result_count > 0 && _all_ids.is_empty() {
                                         debug!(
                                             setup_error_result_count,
                                             "triggering continuation after native tool setup errors"
@@ -4189,7 +4189,7 @@ pub async fn handle_non_stream_chat(
                         {
                             warn!(error = %e, "batch continuation failed after non-stream concurrent tool execution");
                         }
-                    } else if setup_error_result_count > 0 {
+                    } else if setup_error_result_count > 0 && _all_ids.is_empty() {
                         debug!(
                             setup_error_result_count,
                             "triggering batch continuation after non-stream native tool setup errors"

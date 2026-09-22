@@ -519,7 +519,7 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             }
 
             // 添加 MCP 工具调用组件
-            // 只有最后一个工具调用在执行成功后才触发续写
+            // 保留位置信息供渲染使用；续写由后端按整轮完成状态判断。
             const isLastCall = index === mcpCalls.length - 1;
             const toolCallKey = getMcpToolCallKey(data, messageId, index);
             parts.push(

@@ -229,7 +229,7 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
 
             const result = await invoke<MCPToolCall>("execute_mcp_tool_call", {
                 callId: currentCallId,
-                triggerContinuation: props.isLastCall,
+                triggerContinuation: true,
             });
             setLocalState(result.status);
             setLocalError(result.error ?? null);
@@ -244,7 +244,6 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
         props.serverName,
         props.toolName,
         props.parameters,
-        props.isLastCall,
     ]);
 
     const handleStop = useCallback(async () => {

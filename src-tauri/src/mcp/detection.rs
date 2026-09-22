@@ -68,6 +68,7 @@ pub async fn detect_and_process_mcp_calls(
         let mcp_regex = regex::Regex::new(r"<mcp_tool_call>\s*<server_name>([^<]*)</server_name>\s*<tool_name>([^<]*)</tool_name>\s*<parameters>([\s\S]*?)</parameters>\s*</mcp_tool_call>").unwrap();
         let mut updated_content: Option<String> = None;
         let mut temp_content = content.to_string();
+        let mut auto_run_ids = Vec::new();
 
         // 处理所有匹配的 MCP 调用，支持多工具并发执行
         for cap in mcp_regex.captures_iter(content) {
@@ -162,36 +163,7 @@ pub async fn detect_and_process_mcp_calls(
                                             }
 
                                             if should_auto_run {
-                                                let app_handle_clone = app_handle.clone();
-                                                let window_clone = window.clone();
-                                                let tool_call_id = tool_call.id;
-                                                tauri::async_runtime::spawn_blocking(move || {
-                                                    let app_handle_for_state = app_handle_clone.clone();
-                                                    tauri::async_runtime::block_on(async move {
-                                                        let state =
-                                                            app_handle_for_state.state::<crate::AppState>();
-                                                        let feature_config_state =
-                                                            app_handle_for_state
-                                                                .state::<crate::FeatureConfigState>();
-                                                        if let Err(e) =
-                                                            crate::mcp::execution_api::execute_mcp_tool_call(
-                                                                app_handle_clone,
-                                                                state,
-                                                                feature_config_state,
-                                                                window_clone,
-                                                                tool_call_id,
-                                                                true, // trigger_continuation
-                                                            )
-                                                            .await
-                                                        {
-                                                            error!(
-                                                                call_id = tool_call_id,
-                                                                error = %e,
-                                                                "Auto-execute MCP tool failed"
-                                                            );
-                                                        }
-                                                    });
-                                                });
+                                                auto_run_ids.push(tool_call.id);
                                             } else {
                                                 debug!(server = %server_name, tool = %tool_name, "MCP tool auto-run disabled");
                                             }
@@ -209,6 +181,22 @@ pub async fn detect_and_process_mcp_calls(
                     error!(error = %e, "Failed to create MCP tool call");
                 }
             }
+        }
+
+        // Register the whole round before a fast auto-run tool can finish and continue.
+        for tool_call_id in auto_run_ids {
+            let app = app_handle.clone();
+            let window = window.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                tauri::async_runtime::block_on(async move {
+                    if let Err(error) = crate::mcp::execution_api::execute_mcp_tool_call(
+                        app.clone(), app.state::<crate::AppState>(),
+                        app.state::<crate::FeatureConfigState>(), window, tool_call_id, true,
+                    ).await {
+                        error!(call_id = tool_call_id, error = %error, "Auto-execute MCP tool failed");
+                    }
+                });
+            });
         }
 
         // 如果没有检测到任何工具调用，输出日志

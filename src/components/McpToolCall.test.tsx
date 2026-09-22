@@ -142,6 +142,19 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.queryByTestId("shine-border")).not.toBeInTheDocument();
     });
 
+    it("should request a round completion check when a non-last tool is executed", async () => {
+        const user = userEvent.setup();
+        mockInvokeHandler("get_mcp_tool_call", () => ({ id: 52, status: "pending" }));
+        mockInvokeHandler("execute_mcp_tool_call", () => ({ id: 52, status: "success", result: "ok" }));
+        render(<McpToolCall conversationId={8} messageId={12} callId={52}
+            serverName="demo-server" toolName="demo-tool" parameters="{}" isLastCall={false} />);
+        await flushEffects();
+        await user.click(screen.getByTitle("执行"));
+        expect(invoke).toHaveBeenCalledWith("execute_mcp_tool_call", {
+            callId: 52, triggerContinuation: true,
+        });
+    });
+
     it("keeps a successful result when a later success update omits result", async () => {
         const conversationId = 18;
         const callId = 152;

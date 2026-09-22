@@ -1150,6 +1150,62 @@ fn newest_continuation_anchor_message_id(tool_calls: &[MCPToolCall]) -> Option<i
     tool_calls.iter().rev().find_map(continuation_anchor_message_id)
 }
 
+fn expand_tool_call_round(db: &MCPDatabase, calls: &mut Vec<MCPToolCall>) -> Result<()> {
+    let message_ids: HashSet<_> = calls.iter().filter_map(|call| call.message_id).collect();
+    for message_id in message_ids {
+        for sibling in db.get_mcp_tool_calls_by_message(message_id)? {
+            if !calls.iter().any(|call| call.id == sibling.id) {
+                calls.push(sibling);
+            }
+        }
+    }
+    calls.sort_by_key(|call| call.id);
+    Ok(())
+}
+
+fn tool_round_ready(calls: &[MCPToolCall], continue_on_error: bool) -> bool {
+    !calls.is_empty() && calls.iter().all(|call| {
+        call.status == "success" || (continue_on_error && call.status == "failed")
+    })
+}
+
+// Manual completion can happen in any order; multi-call rounds use the same barrier as auto-run.
+async fn dispatch_multi_tool_round(
+    app_handle: &tauri::AppHandle,
+    window: &tauri::Window,
+    tool_call: &MCPToolCall,
+    allow_error: bool,
+) -> Result<bool> {
+    let db = MCPDatabase::new(app_handle)?;
+    let mut calls = vec![tool_call.clone()];
+    expand_tool_call_round(&db, &mut calls)?;
+    if calls.len() < 2 {
+        return Ok(false);
+    }
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager.finish_mcp_call(app_handle, tool_call.conversation_id, tool_call.id).await;
+    }
+    let app = app_handle.clone();
+    let window = window.clone();
+    let conversation_id = tool_call.conversation_id;
+    let ids = calls.iter().map(|call| call.id).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move {
+            if let Err(error) = continue_tool_round(
+                &app, app.state::<crate::FeatureConfigState>(), window,
+                conversation_id, ids, allow_error,
+            ).await {
+                warn!(conversation_id, error = %error, "manual tool round continuation failed");
+            }
+        });
+    });
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "execution_api_tests.rs"]
+mod execution_api_tests;
+
 fn validate_continue_with_error_request(
     tool_call: &MCPToolCall,
 ) -> std::result::Result<(), String> {
@@ -1338,7 +1394,6 @@ async fn handle_tool_execution_result(
 
             // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
             if trigger_continuation {
-                handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
                 info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
                 if let Err(e) = handle_tool_success_continuation(
                     app_handle,
@@ -1421,7 +1476,6 @@ async fn handle_tool_execution_result(
                         "Skip continuation for user-cancelled tool error"
                     );
                 } else {
-                    handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
                     info!("准备触发工具失败续写，call_id={}", call_id);
                     if let Err(e) = trigger_conversation_continuation_with_error(
                         app_handle,
@@ -2225,9 +2279,6 @@ pub async fn continue_with_error(
     // 获取错误信息，优先使用前端传入的错误文本（用于兜底保留细节）
     let error_message = resolve_continue_with_error_message(&tool_call, error_message.as_deref());
 
-    // 让续写的流式响应接管；若首 token 启动较慢，先切回工具所属的消息边框。
-    handoff_mcp_focus_to_origin_message(&app_handle, &tool_call).await;
-
     // 触发续写
     if let Err(error) = trigger_conversation_continuation_with_error(
         &app_handle,
@@ -2483,6 +2534,11 @@ async fn trigger_conversation_continuation(
         return Ok(());
     }
 
+    if dispatch_multi_tool_round(app_handle, window, tool_call, false).await? {
+        return Ok(());
+    }
+    handoff_mcp_focus_to_origin_message(app_handle, tool_call).await;
+
     // 使用数据库中保存的 llm_call_id（若存在），否则退回到兼容格式
     let tool_call_id =
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
@@ -2599,6 +2655,11 @@ async fn trigger_conversation_continuation_with_error(
     let tool_call_id =
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
 
+    if dispatch_multi_tool_round(app_handle, window, tool_call, true).await? {
+        return Ok(());
+    }
+    handoff_mcp_focus_to_origin_message(app_handle, tool_call).await;
+
     // 格式化错误消息作为 tool_result，与成功结果的格式保持一致但标识为错误
     // 限制错误消息长度，避免请求过大导致 400 错误
     let error_preview = if error_message.chars().count() > 5000 {
@@ -2710,6 +2771,24 @@ async fn run_batch_continuation_once(
         return Ok(());
     }
 
+    // Recheck under the conversation lock: another completion may already have continued this round.
+    if let Some(message_id) = anchor_message_id {
+        let db = MCPDatabase::new(&app_handle)?;
+        let calls = db.get_mcp_tool_calls_by_message(message_id)?;
+        if !calls.is_empty() {
+            if !tool_round_ready(&calls, true) {
+                return Ok(());
+            }
+            let conversation_db = ConversationDatabase::new(&app_handle)?;
+            let messages = conversation_db.message_repo()?.list_by_conversation_id(conversation_id)?;
+            let branch = crate::api::ai::summary::get_latest_branch_messages(&messages);
+            let result_ids = calls.iter().map(tool_call_history_id).collect();
+            if has_followup_response_after_tool_results(&branch, &result_ids) {
+                return Ok(());
+            }
+        }
+    }
+
     mark_continuation_running_on_message(&app_handle, conversation_id, anchor_message_id).await;
     match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
@@ -2747,6 +2826,17 @@ pub async fn trigger_conversation_continuation_batch(
     conversation_id: i64,
     tool_call_ids: Vec<i64>,
 ) -> Result<()> {
+    continue_tool_round(app_handle, feature_config_state, window, conversation_id, tool_call_ids, false).await
+}
+
+async fn continue_tool_round(
+    app_handle: &tauri::AppHandle,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    window: tauri::Window,
+    conversation_id: i64,
+    tool_call_ids: Vec<i64>,
+    allow_error: bool,
+) -> Result<()> {
     use crate::db::conversation_db::Repository;
 
     if tool_call_ids.is_empty() {
@@ -2756,7 +2846,7 @@ pub async fn trigger_conversation_continuation_batch(
 
     let continue_on_error = {
         let config_map = feature_config_state.config_feature_map.lock().await;
-        get_continue_on_tool_error_from_config(&config_map)
+        allow_error || get_continue_on_tool_error_from_config(&config_map)
     };
 
     info!(
@@ -2783,8 +2873,7 @@ pub async fn trigger_conversation_continuation_batch(
         }
     }
 
-    // 按 tool_call_id 升序排序，确保与 AI 返回顺序一致
-    tool_calls.sort_by_key(|tc| tc.id);
+    expand_tool_call_round(&db, &mut tool_calls)?;
 
     // 检查是否所有工具都执行成功（有任何失败则默认不续写）
     let all_success = tool_calls.iter().all(|tc| tc.status == "success");
@@ -2793,7 +2882,7 @@ pub async fn trigger_conversation_continuation_batch(
         tool_statuses = ?tool_calls.iter().map(|tc| (&tc.id, &tc.status)).collect::<Vec<_>>(),
         "checking tool call statuses for batch continuation"
     );
-    if !all_success && !continue_on_error {
+    if !tool_round_ready(&tool_calls, continue_on_error) {
         let failed_calls: Vec<_> = tool_calls
             .iter()
             .filter(|tc| tc.status != "success")

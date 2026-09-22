@@ -121,7 +121,6 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     callId,
     mcpToolCallStates,
     shiningMcpCallId = null,
-    isLastCall = true, // 默认为 true，向后兼容
     isStreaming = false, // 默认非流式
 }) => {
     const continueOnToolErrorEnabled = useToolErrorContinueEnabled();
@@ -408,10 +407,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             }
 
             // Execute the tool call
-            // 只有当这是消息中最后一个工具调用时才触发续写
+            // 后端根据整轮工具状态决定是否续写，与卡片位置无关。
             const result = await invoke<MCPToolCall>("execute_mcp_tool_call", {
                 callId: currentCallId,
-                triggerContinuation: isLastCall,
+                triggerContinuation: true,
             });
 
             if (result.status === "success") {
@@ -438,7 +437,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionState("failed");
             setAutoExpanded(!continueOnToolErrorEnabled);
         }
-    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isLastCall, continueOnToolErrorEnabled, setAutoExpanded]);
+    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, continueOnToolErrorEnabled, setAutoExpanded]);
 
     const handleStop = useCallback(async () => {
         if (!effectiveCallId) {

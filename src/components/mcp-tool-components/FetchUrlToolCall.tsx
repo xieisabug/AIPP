@@ -358,7 +358,7 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
 
             const result = await invoke<MCPToolCall>("execute_mcp_tool_call", {
                 callId: currentCallId,
-                triggerContinuation: props.isLastCall,
+                triggerContinuation: true,
             });
             setLocalState(result.status);
             setLocalError(result.error ?? null);
@@ -373,7 +373,6 @@ const FetchUrlToolCall: React.FC<McpToolComponentProps> = (props) => {
         props.serverName,
         props.toolName,
         props.parameters,
-        props.isLastCall,
     ]);
 
     const handleStop = useCallback(async (event?: React.MouseEvent) => {
