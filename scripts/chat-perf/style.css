@@ -1,0 +1,16 @@
+.benchmark { height:100dvh; display:flex; flex-direction:column; background:var(--background); color:var(--foreground); }
+.benchmark header { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:10px 16px; border-bottom:1px solid #d1d5db; }
+.benchmark header strong { font-size:15px; }
+.benchmark select { max-width:340px; min-width:140px; flex:1; }
+.benchmark select,.benchmark input[type=number],.benchmark button { border:1px solid #aaa; border-radius:4px; padding:5px; background:var(--background); }
+.benchmark input[type=number] { width:64px; }
+.benchmark button { display:inline-flex; align-items:center; justify-content:center; gap:5px; min-height:32px; min-width:32px; }
+.benchmark button:disabled { opacity:.45; }
+.benchmark label { display:flex; align-items:center; gap:4px; font-size:13px; }
+.benchmark .stats { padding:6px 16px; font-size:12px; color:#526052; }
+.benchmark-scroll { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:16px 24px; }
+.benchmark footer { min-height:30px; max-height:165px; overflow:auto; border-top:1px solid #ddd; font-size:12px; padding:4px 16px; }
+.benchmark table { width:100%; text-align:left; border-collapse:collapse; }
+.benchmark th,.benchmark td { padding:2px 8px; }
+.benchmark .error { color:#b42318; padding:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+@media(max-width:600px) { .benchmark-scroll { padding:10px; } .benchmark header { padding:8px; } }

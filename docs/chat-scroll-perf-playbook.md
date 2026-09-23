@@ -1,5 +1,14 @@
 # UI 性能问题调试方法（以 Chat 滚动为例）
 
+## 浏览器内核对照
+
+独立的 Safari / Chrome 历史消息渲染基准见
+[浏览器对照测试指南](./chat-browser-perf.md)（技术细节见
+[scripts/chat-perf/README.md](../scripts/chat-perf/README.md)）。它支持只读筛选复杂对话、
+导出完整消息及 MCP 工具记录、校验样本哈希和下载滚动指标。私有样本与构建产物均放在
+`tmp/chat-perf/`，不要提交或发布。该入口替换了 Tauri API 和 Rust 高亮服务，
+不代表完整应用性能；外部预览资源等未适配能力会在结果中标记为不完整。
+
 ## 目的
 
 这份文档只记录**调试方法**，不记录某一次问题的复盘。  
