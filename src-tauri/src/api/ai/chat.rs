@@ -1746,19 +1746,13 @@ async fn setup_captured_tool_calls(
                             if let Some(t) =
                                 s.tools.iter().find(|t| t.name == *tool_name && t.is_enabled)
                             {
-                                let tool_key = format!("{}/{}", server_name, tool_name);
-                                let auto_run = if let Some(all_auto_run) =
-                                    mcp_override_config.and_then(|config| config.all_tool_auto_run)
-                                {
-                                    all_auto_run
-                                } else {
-                                    *mcp_override_config
-                                        .and_then(|config| config.tool_auto_run.as_ref())
-                                        .and_then(|auto_run_map| auto_run_map.get(&tool_key))
-                                        .unwrap_or(&t.is_auto_run)
-                                };
-
-                                if auto_run {
+                                if crate::mcp::detection::should_auto_run_tool(
+                                    mcp_override_config,
+                                    server_name,
+                                    tool_name,
+                                    t.is_auto_run,
+                                    s.command.as_deref(),
+                                ) {
                                     should_auto_run = true;
                                 }
                             }

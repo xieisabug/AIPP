@@ -825,8 +825,9 @@ pub async fn persist_terminal_tool_result_message(
         collect_existing_tool_result_messages(&existing_messages);
     let tool_result_group_id = existing_messages
         .iter()
-        .filter(|(message, _)| message.message_type == "response")
-        .max_by_key(|(message, _)| message.id)
+        .find(|(message, _)| {
+            Some(message.id) == tool_call.assistant_message_id.or(tool_call.message_id)
+        })
         .and_then(|(message, _)| message.generation_group_id.clone());
 
     let _ = persist_single_tool_result_message(
@@ -850,8 +851,8 @@ pub fn collect_required_tool_call_ids_from_message_list(
 ) -> HashSet<String> {
     let mut ids = HashSet::new();
     for (message_type, content, _) in message_list {
-        if message_type == "response" {
-            ids.extend(crate::api::ai::conversation::extract_tool_call_ids_from_mcp_comments(
+        if message_type == "response" || message_type == "assistant" {
+            ids.extend(crate::api::ai::conversation::extract_request_tool_call_ids(
                 content,
             ));
         }
@@ -865,8 +866,35 @@ pub fn collect_tool_result_ids_from_message_list(
     message_list
         .iter()
         .filter(|(message_type, _, _)| message_type == "tool_result")
-        .filter_map(|(_, content, _)| crate::api::ai::conversation::extract_tool_call_id(content))
+        .filter_map(|(_, content, _)| {
+            crate::api::ai::conversation::extract_tool_result(content)?;
+            crate::api::ai::conversation::extract_tool_call_id(content)
+        })
+        .flat_map(|id| {
+            let mut ids = vec![id.clone()];
+            if id.parse::<u64>().is_ok() { ids.push(format!("mcp_tool_call_{}", id)); }
+            ids
+        })
         .collect()
+}
+
+fn validate_tool_result_pairing(
+    conversation_id: i64,
+    message_list: &[(String, String, Vec<crate::db::conversation_db::MessageAttachment>)],
+) -> Result<()> {
+    let mut unresolved = collect_required_tool_call_ids_from_message_list(message_list)
+        .difference(&collect_tool_result_ids_from_message_list(message_list))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+        unresolved.sort();
+        bail!(
+            "对话 {} 的工具结果配对校验失败，缺少结果的调用 ID：{}。调用可能仍在执行，或缺少对应记录。",
+            conversation_id,
+            unresolved.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn find_tool_result_insert_index(
@@ -875,9 +903,9 @@ fn find_tool_result_insert_index(
 ) -> Option<usize> {
     let mut response_idx = None;
     for (idx, (message_type, content, _)) in message_list.iter().enumerate() {
-        if message_type == "response" {
+        if message_type == "response" || message_type == "assistant" {
             let ids =
-                crate::api::ai::conversation::extract_tool_call_ids_from_mcp_comments(content);
+                crate::api::ai::conversation::extract_request_tool_call_ids(content);
             if ids.contains(tool_call_id) {
                 response_idx = Some(idx);
             }
@@ -896,6 +924,7 @@ pub async fn backfill_missing_tool_results(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     message_list: &mut Vec<(String, String, Vec<crate::db::conversation_db::MessageAttachment>)>,
+    resolve_pending: bool,
 ) -> Result<usize> {
     let required = collect_required_tool_call_ids_from_message_list(message_list);
     let existing = collect_tool_result_ids_from_message_list(message_list);
@@ -910,12 +939,24 @@ pub async fn backfill_missing_tool_results(
         .map_err(|e| anyhow!("获取工具调用列表失败: {}", e))?;
 
     let mut backfilled = 0usize;
-    for call in calls {
-        if call.status != "success" && call.status != "failed" {
-            continue;
-        }
+    for mut call in calls {
         let history_id = tool_call_history_id(&call);
         if !missing.contains(&history_id) {
+            continue;
+        }
+        if resolve_pending && call.status == "pending" {
+            if mcp_db.skip_unstarted_mcp_tool_call(
+                call.id,
+                crate::db::mcp_db::UNSTARTED_TOOL_CALL_SKIP_REASON,
+            )? {
+                call = mcp_db.get_mcp_tool_call(call.id)?;
+                warn!(conversation_id, call_id = call.id, llm_call_id = ?call.llm_call_id, "skipped unstarted MCP call before new user request");
+                broadcast_mcp_tool_call_update(app_handle, &call);
+            } else {
+                call = mcp_db.get_mcp_tool_call(call.id)?;
+            }
+        }
+        if call.status != "success" && call.status != "failed" {
             continue;
         }
         let Some(content) = persist_terminal_tool_result_message(app_handle, &call).await? else {
@@ -931,6 +972,8 @@ pub async fn backfill_missing_tool_results(
         }
         backfilled += 1;
     }
+
+    validate_tool_result_pairing(conversation_id, message_list)?;
 
     Ok(backfilled)
 }
@@ -1318,6 +1361,11 @@ fn validate_tool_call_execution(tool_call: &MCPToolCall) -> Result<bool> {
     let is_retry = tool_call.status == "failed";
     if tool_call.status != "pending" && tool_call.status != "failed" {
         bail!("工具调用状态为 {} 时无法重新执行", tool_call.status);
+    }
+    if tool_call.error.as_deref()
+        == Some(crate::db::mcp_db::UNSTARTED_TOOL_CALL_SKIP_REASON)
+    {
+        bail!("工具调用 {} 已因用户发送后续消息而跳过，不能重新执行", tool_call.id);
     }
     Ok(is_retry)
 }
@@ -1960,6 +2008,22 @@ pub async fn execute_mcp_tool_call(
     let is_retry = validate_tool_call_execution(&tool_call).map_err(|e| e.to_string())?;
     debug!(retry=?is_retry, status=%tool_call.status, "validated tool call status");
 
+    if !db
+        .mark_mcp_tool_call_executing_if_pending(call_id)
+        .map_err(|e| format!("更新工具调用状态失败: {}", e))?
+    {
+        return db
+            .get_mcp_tool_call(call_id)
+            .map_err(|e| format!("获取当前工具调用状态失败: {}", e));
+    }
+    tool_call = db
+        .get_mcp_tool_call(call_id)
+        .map_err(|e| format!("重新加载工具调用信息失败: {}", e))?;
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager.set_mcp_executing(&app_handle, tool_call.conversation_id, call_id).await;
+    }
+    broadcast_mcp_tool_call_update(&app_handle, &tool_call);
+
     // 获取并验证服务器状态；前置校验失败也写入 failed/error，便于 UI 展示和错误续写
     let server = match db.get_mcp_server(tool_call.server_id) {
         Ok(server) => server,
@@ -2168,28 +2232,6 @@ pub async fn execute_mcp_tool_call(
             .await;
         }
     }
-
-    // 原子性地将状态转为执行中，避免并发重复执行
-    if !db
-        .mark_mcp_tool_call_executing_if_pending(call_id)
-        .map_err(|e| format!("更新工具调用状态失败: {}", e))?
-    {
-        let current = db
-            .get_mcp_tool_call(call_id)
-            .map_err(|e| format!("获取当前工具调用状态失败: {}", e))?;
-        return Ok(current);
-    }
-
-    // 重新加载工具调用以获取更新后的状态并同步活动状态
-    tool_call =
-        db.get_mcp_tool_call(call_id).map_err(|e| format!("重新加载工具调用信息失败: {}", e))?;
-    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-        activity_manager.set_mcp_executing(&app_handle, tool_call.conversation_id, call_id).await;
-    }
-
-    // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
-    broadcast_mcp_tool_call_update(&app_handle, &tool_call);
-    debug!(call_id=call_id, status=%tool_call.status, "broadcasted executing status event");
 
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;
@@ -2919,6 +2961,13 @@ async fn continue_tool_round(
     }
 
     expand_tool_call_round(&db, &mut tool_calls)?;
+
+    if tool_calls.iter().any(|call| {
+        call.error.as_deref() == Some(crate::db::mcp_db::UNSTARTED_TOOL_CALL_SKIP_REASON)
+    }) {
+        info!(conversation_id, "Skipping continuation for a tool round superseded by a user message");
+        return Ok(());
+    }
 
     // 检查是否所有工具都执行成功（有任何失败则默认不续写）
     let all_success = tool_calls.iter().all(|tc| tc.status == "success");

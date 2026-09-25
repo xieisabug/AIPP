@@ -1,5 +1,71 @@
 use super::*;
 
+fn pairing_message(kind: &str, content: String) -> (String, String, Vec<crate::db::conversation_db::MessageAttachment>) {
+    (kind.to_string(), content, Vec::new())
+}
+
+fn pairing_call(id: u64, llm_id: Option<&str>) -> String {
+    format!("<!-- MCP_TOOL_CALL:{} -->", serde_json::json!({
+        "call_id": id, "llm_call_id": llm_id,
+        "server_name": "ui_interaction", "tool_name": "preview_code", "parameters": "{}"
+    }))
+}
+
+#[test]
+fn test_tool_result_pairing_native_id_does_not_require_database_aliases() {
+    let messages = vec![
+        pairing_message("response", pairing_call(2379, Some("call_preview"))),
+        pairing_message("tool_result", "Tool Call ID: call_preview\nResult:\nError: Cancelled by user".into()),
+        pairing_message("user", "Continue".into()),
+    ];
+    assert_eq!(collect_required_tool_call_ids_from_message_list(&messages), HashSet::from(["call_preview".to_string()]));
+    validate_tool_result_pairing(772, &messages).unwrap();
+    let built = crate::api::ai::conversation::build_chat_request_from_messages(
+        &messages, crate::api::ai::conversation::ToolCallStrategy::NativeWithToolResponsePairing, None,
+    );
+    assert_eq!(built.chat_request.messages.len(), 3);
+}
+
+#[test]
+fn test_tool_result_pairing_missing_one_result_reports_only_real_call() {
+    let messages = vec![
+        pairing_message("response", format!("{}{}", pairing_call(1, Some("call_one")), pairing_call(2, Some("call_two")))),
+        pairing_message("tool_result", "Tool Call ID: call_one\nResult:\nok".into()),
+    ];
+    let error = validate_tool_result_pairing(772, &messages).unwrap_err().to_string();
+    assert!(error.contains("call_two"));
+    assert!(!error.contains("call_one"));
+    assert!(!error.contains("mcp_tool_call_"));
+}
+
+#[test]
+fn test_tool_result_pairing_legacy_ids_match_request_builder() {
+    for llm_id in [None, Some("")] {
+        for result_id in ["mcp_tool_call_23", "23"] {
+            let messages = vec![
+                pairing_message("response", pairing_call(23, llm_id)),
+                pairing_message("tool_result", format!("Tool Call ID: {}\nResult:\nok", result_id)),
+            ];
+            assert_eq!(collect_required_tool_call_ids_from_message_list(&messages), HashSet::from(["mcp_tool_call_23".to_string()]));
+            validate_tool_result_pairing(772, &messages).unwrap();
+            let built = crate::api::ai::conversation::build_chat_request_from_messages(
+                &messages, crate::api::ai::conversation::ToolCallStrategy::NativeWithToolResponsePairing, None,
+            );
+            assert_eq!(built.chat_request.messages.len(), 2);
+            assert_eq!(built.chat_request.messages[0].content.tool_calls()[0].call_id, "mcp_tool_call_23");
+        }
+    }
+}
+
+#[test]
+fn test_tool_result_pairing_incomplete_result_is_not_accepted() {
+    let messages = vec![
+        pairing_message("response", pairing_call(1, Some("call_one"))),
+        pairing_message("tool_result", "Tool Call ID: call_one\ntruncated".into()),
+    ];
+    assert!(validate_tool_result_pairing(772, &messages).is_err());
+}
+
 fn call(id: i64, status: &str) -> MCPToolCall {
     MCPToolCall {
         id, conversation_id: 1, message_id: Some(10), assistant_message_id: Some(10),

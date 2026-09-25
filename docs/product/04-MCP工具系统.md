@@ -165,6 +165,7 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 聊天界面的 MCP 工具调用统一通过前端组件注册表解析
 - 默认回退组件是通用工具调用卡片，内置组件也通过同一注册表注册
 - 特定工具可注册专属组件，例如 `preview_code` 使用内联代码预览卡片，`load_mcp_server` / `load_mcp_tool` 使用轻量加载卡片
+- 内置 `preview_code` 和 `preview_file` 只要已启用，就会自动执行并返回预览结果，不受自动执行开关影响。发送新消息或重新生成时，请求历史中尚未开始的工具调用会记录为未执行并跳过，避免未配对的工具调用阻断对话。重新生成在准备请求阶段失败时，会显示具体错误并结束运行状态。
 - 插件注册的工具调用组件由「显示」设置控制，不写入 MCP 服务器或工具配置
 - 组件匹配支持 `serverName`、`toolName`，自动匹配时按 `priority` 选择优先级更高的匹配组件
 - 渲染前会为组件 props 注入 `currentToolCall`，优先来自全局 MCP 工具调用状态；如果状态尚未同步，则根据当前注释中的 `callId`、`conversationId`、工具名和参数构造一个 partial 记录

@@ -15,12 +15,18 @@ static CONVERSATION_MCP_DEPTH: OnceLock<ConversationMcpState> = OnceLock::new();
 
 const MAX_MCP_RECURSION_DEPTH: u32 = 3;
 
-fn should_auto_run_tool(
+pub(crate) fn should_auto_run_tool(
     mcp_override_config: Option<&McpOverrideConfig>,
     server_name: &str,
     tool_name: &str,
     default_auto_run: bool,
+    server_command: Option<&str>,
 ) -> bool {
+    if server_command == Some("aipp:ui_interaction")
+        && matches!(tool_name, "preview_code" | "preview_file")
+    {
+        return true;
+    }
     if let Some(all_auto_run) = mcp_override_config.and_then(|cfg| cfg.all_tool_auto_run) {
         return all_auto_run;
     }
@@ -39,6 +45,56 @@ fn should_auto_run_tool(
     }
 
     default_auto_run
+}
+
+#[cfg(test)]
+mod auto_run_tests {
+    use super::*;
+
+    #[test]
+    fn test_builtin_preview_tools_auto_run_even_when_disabled_by_config() {
+        let override_config = McpOverrideConfig {
+            all_tool_auto_run: Some(false),
+            tool_auto_run: None,
+            use_native_toolcall: None,
+            tool_call_timeout: None,
+        };
+        assert!(should_auto_run_tool(
+            Some(&override_config),
+            "UI交互工具",
+            "preview_code",
+            false,
+            Some("aipp:ui_interaction"),
+        ));
+        assert!(should_auto_run_tool(
+            Some(&override_config),
+            "UI交互工具",
+            "preview_file",
+            false,
+            Some("aipp:ui_interaction"),
+        ));
+        assert!(!should_auto_run_tool(
+            Some(&override_config),
+            "UI交互工具",
+            "ask_user_question",
+            true,
+            Some("aipp:ui_interaction"),
+        ));
+        assert!(!should_auto_run_tool(
+            Some(&override_config),
+            "other",
+            "preview_code",
+            false,
+            Some("external-command"),
+        ));
+        assert!(!should_auto_run_tool(
+            Some(&override_config),
+            "other",
+            "preview_file",
+            false,
+            Some("external-command"),
+        ));
+    }
 }
 
 #[instrument(level = "debug", skip(app_handle, window, content), fields(conversation_id, message_id, content_len = content.len()))]
@@ -162,6 +218,7 @@ pub async fn detect_and_process_mcp_calls(
                                                             &record_server,
                                                             &record_tool,
                                                             tool.is_auto_run,
+                                                            s.command.as_deref(),
                                                         );
                                                         if auto_run {
                                                             should_auto_run = true;

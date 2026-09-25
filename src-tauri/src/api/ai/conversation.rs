@@ -235,6 +235,8 @@ fn build_user_message_with_attachments(
     ChatMessage::user(parts)
 }
 
+// History filtering needs every legacy alias. Request validation must instead use
+// the single ID that will actually be sent for each tool call.
 pub fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String> {
     let mcp_call_regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").unwrap();
     let mut ids = HashSet::new();
@@ -254,6 +256,27 @@ pub fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String>
         }
     }
     ids
+}
+
+fn request_tool_call_id(tool_data: &serde_json::Value) -> Option<String> {
+    tool_data["llm_call_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| tool_data["call_id"].as_u64().map(|id| format!("mcp_tool_call_{}", id)))
+}
+
+pub fn extract_request_tool_call_ids(content: &str) -> HashSet<String> {
+    let regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").unwrap();
+    regex.captures_iter(content)
+        .filter_map(|capture| serde_json::from_str::<serde_json::Value>(&capture[1]).ok())
+        .filter(|data| {
+            data["server_name"].is_string()
+                && data["tool_name"].is_string()
+                && data["parameters"].is_string()
+        })
+        .filter_map(|data| request_tool_call_id(&data))
+        .collect()
 }
 
 fn collect_valid_tool_call_ids(messages: &[Message]) -> HashSet<String> {
@@ -654,6 +677,11 @@ fn build_native_toolcall_paired_messages(
         if message_type == "tool_result" {
             if let Some(call_id) = extract_tool_call_id(content) {
                 if let Some(result) = extract_tool_result(content) {
+                    // Old histories may use a bare database ID instead of the
+                    // prefixed ID used by persisted non-native tool results.
+                    if call_id.parse::<u64>().is_ok() {
+                        tool_call_to_response.insert(format!("mcp_tool_call_{}", call_id), result.clone());
+                    }
                     tool_call_to_response.insert(call_id, result);
                 }
             }
@@ -949,11 +977,8 @@ fn reconstruct_assistant_with_tool_calls_and_reasoning(
                     .filter(|value| value.is_object())
                     .unwrap_or_else(|| serde_json::json!({}));
 
-                // 优先使用 llm_call_id，如果没有则使用 call_id 转换为字符串
-                let call_id = tool_data["llm_call_id"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| tool_data["call_id"].as_u64().map(|n| n.to_string()))
+                // Use the same ID as request validation and persisted tool results.
+                let call_id = request_tool_call_id(&tool_data)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
                 tool_calls.push(ToolCall {

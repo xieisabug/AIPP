@@ -10,6 +10,8 @@ use tracing::{instrument, warn};
 
 use crate::db::get_db_path;
 
+pub const UNSTARTED_TOOL_CALL_SKIP_REASON: &str = "未执行：用户发送了后续消息，已跳过工具调用";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPServer {
     pub id: i64,
@@ -1301,11 +1303,26 @@ impl MCPDatabase {
     #[instrument(level = "trace", skip(self), fields(id))]
     pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> Result<bool> {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        // 允许从 pending/failed 进入 executing；对于 failed 的重试，覆盖 started_time 即可
+        // A skipped call has already produced a terminal tool result and must not run later.
         let rows = self.retry_if_busy(|| {
             self.conn.execute(
-                "UPDATE mcp_tool_call SET status = 'executing', started_time = ? WHERE id = ? AND status IN ('pending', 'failed')",
-                params![now.clone(), id],
+                "UPDATE mcp_tool_call SET status = 'executing', started_time = ? \
+                 WHERE id = ? AND status IN ('pending', 'failed') \
+                 AND (error IS NULL OR error != ?)",
+                params![now.clone(), id, UNSTARTED_TOOL_CALL_SKIP_REASON],
+            )
+        })?;
+        Ok(rows > 0)
+    }
+
+    /// Resolve an unstarted call when the user has moved on to a new prompt.
+    pub fn skip_unstarted_mcp_tool_call(&self, id: i64, reason: &str) -> Result<bool> {
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let rows = self.retry_if_busy(|| {
+            self.conn.execute(
+                "UPDATE mcp_tool_call SET status = 'failed', error = ?, finished_time = ? \
+                 WHERE id = ? AND status = 'pending' AND started_time IS NULL",
+                params![reason, now.clone(), id],
             )
         })?;
         Ok(rows > 0)

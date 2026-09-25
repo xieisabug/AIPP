@@ -267,11 +267,13 @@ async fn backfill_request_message_list(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     mut message_list: Vec<(String, String, Vec<MessageAttachment>)>,
+    resolve_pending: bool,
 ) -> Result<Vec<(String, String, Vec<MessageAttachment>)>, AppError> {
     crate::mcp::execution_api::backfill_missing_tool_results(
         app_handle,
         conversation_id,
         &mut message_list,
+        resolve_pending,
     )
     .await
     .map_err(|error| AppError::DatabaseError(format!("回填工具结果失败: {}", error)))?;
@@ -1952,6 +1954,7 @@ pub async fn ask_ai(
             &app_handle_clone,
             conversation_id,
             request_message_list,
+            true,
         )
         .await?;
 
@@ -2479,6 +2482,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         &app_handle,
         conversation_id_i64,
         request_message_list,
+        false,
     )
     .await?;
 
@@ -2880,7 +2884,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         instructions,
     );
     let request_message_list =
-        backfill_request_message_list(&app_handle, conversation_id, request_message_list).await?;
+        backfill_request_message_list(&app_handle, conversation_id, request_message_list, false).await?;
 
     let ChatRequestBuildResult { chat_request, tool_name_mapping } =
         build_chat_request_from_messages(&request_message_list, tool_call_strategy, tool_config);
@@ -3186,8 +3190,11 @@ pub async fn regenerate_ai(
     // 获取网络配置
     let _config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
     let regenerate_task_handle = tokio::spawn(async move {
+        let mut model_request_started = false;
+        let task_result = async {
         // 直接创建数据库连接（避免线程安全问题）
-        let conversation_db = ConversationDatabase::new(&app_handle_clone).unwrap();
+        let conversation_db = ConversationDatabase::new(&app_handle_clone)
+            .context("重新生成：初始化对话数据库失败")?;
 
         // 构建聊天配置
         // 从配置中获取网络代理和超时设置
@@ -3401,6 +3408,7 @@ pub async fn regenerate_ai(
             &app_handle_clone,
             conversation_id,
             request_message_list,
+            true,
         )
         .await?;
         let ChatRequestBuildResult { chat_request, tool_name_mapping } =
@@ -3412,6 +3420,7 @@ pub async fn regenerate_ai(
             instructions,
         );
 
+        model_request_started = true;
         if chat_config.stream {
             // 使用 genai 流式处理
             ai_handle_stream_chat(
@@ -3459,6 +3468,62 @@ pub async fn regenerate_ai(
         }
 
         Ok::<(), anyhow::Error>(())
+        }.await;
+
+        if let Err(ref failure) = task_result {
+            let error_message = format!(
+                "重新生成失败（conversation_id={}, message_id={}, phase={}）：{:#}",
+                conversation_id,
+                message_id,
+                if model_request_started { "model_request" } else { "prepare_request" },
+                failure,
+            );
+            error!(conversation_id, message_id, error = %error_message, "regeneration task failed");
+            // Model handlers persist their own errors. Preparation failures happen
+            // before those handlers and must also be visible in the conversation.
+            if !model_request_started {
+                let now = chrono::Utc::now();
+                match add_message(
+                    &app_handle_clone, None, conversation_id, "error".to_string(),
+                    error_message.clone(), Some(regenerate_model_id),
+                    Some(regenerate_model_code.clone()), Some(now), Some(now), 0,
+                    regenerate_generation_group_id.clone(), regenerate_parent_group_id.clone(),
+                ) {
+                    Ok(message) => {
+                        send_conversation_event_to_chat_windows(
+                            &app_handle_clone, conversation_id,
+                            ConversationEvent {
+                                r#type: "message_add".to_string(),
+                                data: serde_json::json!({"message_id": message.id, "message_type": "error"}),
+                            },
+                        );
+                        send_conversation_event_to_chat_windows(
+                            &app_handle_clone, conversation_id,
+                            ConversationEvent {
+                                r#type: "message_update".to_string(),
+                                data: serde_json::json!({
+                                    "message_id": message.id, "message_type": "error",
+                                    "content": error_message, "is_done": true,
+                                }),
+                            },
+                        );
+                    }
+                    Err(persist_error) => {
+                        error!(conversation_id, message_id, error = %persist_error, "failed to persist regeneration error");
+                    }
+                }
+            }
+            if let Some(manager) = app_handle_clone.try_state::<ConversationActivityManager>() {
+                manager.clear_focus(&app_handle_clone, conversation_id).await;
+            }
+            let _ = app_handle_clone.emit(
+                crate::api::ai::events::ERROR_NOTIFICATION_EVENT,
+                crate::api::ai::events::ErrorNotificationPayload {
+                    conversation_id: Some(conversation_id), error_message,
+                },
+            );
+        }
+        task_result
     });
 
     // Store the task handle for proper cancellation

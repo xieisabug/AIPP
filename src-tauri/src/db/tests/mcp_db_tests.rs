@@ -608,6 +608,25 @@ fn test_mcp_tool_call_atomic_transition() {
     assert!(transitioned3);
 }
 
+#[test]
+fn test_skip_unstarted_mcp_tool_call_does_not_override_execution() {
+    let db = create_mcp_db();
+    let server_id = create_test_server(&db);
+    let pending = db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
+    assert!(db.skip_unstarted_mcp_tool_call(pending.id, UNSTARTED_TOOL_CALL_SKIP_REASON).unwrap());
+    let skipped = db.get_mcp_tool_call(pending.id).unwrap();
+    assert_eq!(skipped.status, "failed");
+    assert_eq!(skipped.error.as_deref(), Some(UNSTARTED_TOOL_CALL_SKIP_REASON));
+    assert!(skipped.finished_time.is_some());
+    assert!(!db.skip_unstarted_mcp_tool_call(pending.id, "Again").unwrap());
+    assert!(!db.mark_mcp_tool_call_executing_if_pending(pending.id).unwrap());
+
+    let executing = db.create_mcp_tool_call(1, None, server_id, "server", "tool", "{}").unwrap();
+    assert!(db.mark_mcp_tool_call_executing_if_pending(executing.id).unwrap());
+    assert!(!db.skip_unstarted_mcp_tool_call(executing.id, "Skipped").unwrap());
+    assert_eq!(db.get_mcp_tool_call(executing.id).unwrap().status, "executing");
+}
+
 // ============================================================================
 // 异常和边界情况测试
 // ============================================================================
