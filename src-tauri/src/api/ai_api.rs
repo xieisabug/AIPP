@@ -60,7 +60,7 @@ use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use crate::{AcpSessionState, AppState, ClaudeSessionState, CodexSessionState, FeatureConfigState};
 use anyhow::Context;
 use genai::chat::Tool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
@@ -871,6 +871,7 @@ fn build_tool_config(
 ) -> Option<ToolConfig> {
     use crate::mcp::builtin_mcp::templates::{
         is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
+        is_dynamic_loading_fixed_tool,
     };
 
     if !enable_tools {
@@ -889,42 +890,22 @@ fn build_tool_config(
         .unwrap_or(false);
 
     let servers_for_injection = if mcp_info.dynamic_loading_enabled {
-        let mut allowed: HashSet<(i64, String)> = HashSet::new();
-        if let Some(cid) = conversation_id {
-            if let Ok(db) = MCPDatabase::new(app_handle) {
-                let _ = db.refresh_conversation_loaded_tool_statuses(cid);
-                if let Ok(loaded) = db.get_valid_loaded_tools_for_conversation(cid) {
-                    for tool in loaded {
-                        allowed.insert((tool.server_id, tool.tool_name));
-                    }
-                }
-            }
-        }
-
+        // Keep the tools array stable: always-available tools, loaders, and call_mcp_tool.
+        // Loaded MCP tools stay out of tools; their descriptions come back from load_mcp_tool.
         let mut filtered = Vec::new();
         for server in &mcp_info.enabled_servers {
-            // Skip entire server if butler-only and not butler
             if !is_butler && server.command.as_deref().map_or(false, is_butler_only_builtin_command)
             {
                 continue;
             }
-            let mut tools = Vec::new();
-            let is_dynamic_builtin = server.command.as_deref() == Some("aipp:dynamic_mcp");
-            let is_agent_server = server.command.as_deref() == Some("aipp:agent");
-            for tool in &server.tools {
-                // Skip butler-only agent tools in non-butler conversations
-                if !is_butler && is_agent_server && is_butler_only_agent_tool(&tool.name) {
-                    continue;
-                }
-                let is_agent_loader_tool = is_agent_server
-                    && (tool.name == "load_mcp_server" || tool.name == "load_mcp_tool");
-                if is_dynamic_builtin
-                    || is_agent_loader_tool
-                    || allowed.contains(&(server.id, tool.name.clone()))
-                {
-                    tools.push(tool.clone());
-                }
-            }
+            let tools: Vec<_> = server
+                .tools
+                .iter()
+                .filter(|tool| {
+                    is_dynamic_loading_fixed_tool(server.command.as_deref(), &tool.name, is_butler)
+                })
+                .cloned()
+                .collect();
             if !tools.is_empty() {
                 let mut server_cloned = server.clone();
                 server_cloned.tools = tools;

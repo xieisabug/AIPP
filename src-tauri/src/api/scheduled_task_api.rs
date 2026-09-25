@@ -997,10 +997,38 @@ fn build_tool_config_for_mcp(
     mcp_info: &MCPInfoForAssistant,
     enable_tools: bool,
 ) -> Option<ToolConfig> {
+    use crate::mcp::builtin_mcp::templates::{
+        is_butler_only_builtin_command, is_dynamic_loading_fixed_tool,
+    };
+
     if !enable_tools {
         return None;
     }
-    let (tools, tool_name_mapping) = build_tools_with_mapping(&mcp_info.enabled_servers);
+    let servers_for_injection = if mcp_info.dynamic_loading_enabled {
+        let mut filtered = Vec::new();
+        for server in &mcp_info.enabled_servers {
+            if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
+                continue;
+            }
+            let tools: Vec<_> = server
+                .tools
+                .iter()
+                .filter(|tool| {
+                    is_dynamic_loading_fixed_tool(server.command.as_deref(), &tool.name, false)
+                })
+                .cloned()
+                .collect();
+            if !tools.is_empty() {
+                let mut server_cloned = server.clone();
+                server_cloned.tools = tools;
+                filtered.push(server_cloned);
+            }
+        }
+        filtered
+    } else {
+        mcp_info.enabled_servers.clone()
+    };
+    let (tools, tool_name_mapping) = build_tools_with_mapping(&servers_for_injection);
     Some(ToolConfig { tools, tool_name_mapping })
 }
 

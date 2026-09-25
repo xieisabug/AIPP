@@ -1766,6 +1766,20 @@ pub async fn execute_aipp_builtin_tool(
                 "load_mcp_server" | "load_mcp_tool" => {
                     execute_dynamic_mcp_tool(&app_handle, &tool_name, &args, conversation_id)?
                 }
+                "call_mcp_tool" => {
+                    let server_name = args.get("server_name").and_then(|v| v.as_str()).unwrap_or("");
+                    let target_tool = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                    serde_json::json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "无法调用 {}::{}。call_mcp_tool 需要 server_name、tool_name 和 parameters；目标工具必须先通过 load_mcp_tool 加载。",
+                                server_name, target_tool
+                            )
+                        }],
+                        "isError": true
+                    })
+                }
                 "spawn_task_conversation" => {
                     let butler_conversation_id = args
                         .get("butler_conversation_id")

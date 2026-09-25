@@ -125,6 +125,7 @@ pub struct ConversationLoadedMCPTool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConversationLoadedMCPToolResolved {
     pub id: i64,
     pub conversation_id: i64,
@@ -1837,6 +1838,7 @@ impl MCPDatabase {
         Ok(found.is_some())
     }
 
+    #[allow(dead_code)]
     pub fn get_valid_loaded_tools_for_conversation(
         &self,
         conversation_id: i64,

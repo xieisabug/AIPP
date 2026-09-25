@@ -997,14 +997,31 @@ fn build_streaming_tool_call_display(
     for tc in sorted_calls {
         let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, tool_name_mapping);
         let params_str = serialize_streaming_tool_arguments(&tc.fn_arguments);
+        let projected = crate::mcp::execution_api::project_call_mcp_tool(&tool_name, &params_str);
         let mut marker_payload = serde_json::json!({
             "server_name": server_name,
             "tool_name": tool_name,
             "fn_arguments": params_str,
             "llm_call_id": tc.call_id,
         });
-        if server_name == "ui_interaction" && tool_name == "preview_code" {
-            if let Some(preview_state) = extract_preview_code_streaming_state(&tc.fn_arguments) {
+        if let Some((display_server, display_tool, display_parameters)) = &projected {
+            if let Some(marker_object) = marker_payload.as_object_mut() {
+                marker_object.insert("display_server_name".to_string(), serde_json::json!(display_server));
+                marker_object.insert("display_tool_name".to_string(), serde_json::json!(display_tool));
+                marker_object.insert(
+                    "display_parameters".to_string(),
+                    serde_json::json!(display_parameters),
+                );
+            }
+        }
+        let (preview_server, preview_tool, preview_arguments) = projected
+            .as_ref()
+            .map(|(server, tool, parameters)| (server.as_str(), tool.as_str(), parameters.as_str()))
+            .unwrap_or((server_name.as_str(), tool_name.as_str(), params_str.as_str()));
+        if preview_server == "ui_interaction" && preview_tool == "preview_code" {
+            let preview_value = serde_json::from_str::<serde_json::Value>(preview_arguments)
+                .unwrap_or(serde_json::Value::Null);
+            if let Some(preview_state) = extract_preview_code_streaming_state(&preview_value) {
                 if let Some(marker_object) = marker_payload.as_object_mut() {
                     marker_object.insert(
                         "preview_state".to_string(),
@@ -1160,6 +1177,7 @@ mod tests {
             None,
             "call_setup_failed",
             Some("服务器 'default' 未找到或已禁用"),
+            None,
         );
 
         assert!(hint.contains("\"status\":\"failed\""));
@@ -1173,6 +1191,29 @@ mod tests {
         assert_eq!(tool_calls[0].call_id, "call_setup_failed");
         assert_eq!(tool_calls[0].fn_name, "default__todo_write");
         assert_eq!(tool_calls[0].fn_arguments, serde_json::json!({"todos": []}));
+    }
+
+    #[test]
+    fn test_call_mcp_tool_hint_keeps_protocol_name_and_exposes_display_target() {
+        let hint = build_native_tool_call_hint(
+            "Agent 工具",
+            "call_mcp_tool",
+            r#"{"server_name":"Search","tool_name":"search_web","parameters":{"query":"aipp"}}"#,
+            Some(9),
+            "call_projected",
+            None,
+            Some(("Search", "search_web", r#"{"query":"aipp"}"#)),
+        );
+
+        assert!(hint.contains("\"tool_name\":\"call_mcp_tool\""));
+        assert!(hint.contains("\"display_tool_name\":\"search_web\""));
+        assert!(hint.contains("\"display_server_name\":\"Search\""));
+        let message =
+            crate::api::ai::conversation::reconstruct_assistant_with_tool_calls_from_content(&hint)
+                .unwrap();
+        let tool_calls = message.content.tool_calls();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].fn_name, "Agent__call_mcp_tool");
     }
 
     #[test]
@@ -1392,6 +1433,7 @@ fn build_native_tool_call_hint(
     call_id: Option<i64>,
     llm_call_id: &str,
     error: Option<&str>,
+    display: Option<(&str, &str, &str)>,
 ) -> String {
     let mut payload = serde_json::json!({
         "server_name": server_name,
@@ -1399,6 +1441,11 @@ fn build_native_tool_call_hint(
         "parameters": parameters,
         "llm_call_id": llm_call_id,
     });
+    if let Some((display_server, display_tool, display_parameters)) = display {
+        payload["display_server_name"] = serde_json::json!(display_server);
+        payload["display_tool_name"] = serde_json::json!(display_tool);
+        payload["display_parameters"] = serde_json::json!(display_parameters);
+    }
     if let Some(call_id) = call_id {
         payload["call_id"] = serde_json::json!(call_id);
     }
@@ -1580,6 +1627,14 @@ async fn setup_captured_tool_calls(
             crate::api::ai_api::resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
         let raw_params_str = tool_call.fn_arguments.to_string();
         let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
+        let projected =
+            crate::mcp::execution_api::project_call_mcp_tool(&tool_name, &params_str);
+        let (record_server, record_tool, record_params) = projected.clone().unwrap_or_else(|| {
+            (server_name.clone(), tool_name.clone(), params_str.clone())
+        });
+        let display = projected
+            .as_ref()
+            .map(|(server, tool, parameters)| (server.as_str(), tool.as_str(), parameters.as_str()));
         info!(
             conversation_id,
             response_message_id,
@@ -1597,9 +1652,9 @@ async fn setup_captured_tool_calls(
             app_handle.clone(),
             conversation_id,
             Some(response_message_id),
-            server_name.clone(),
-            tool_name.clone(),
-            params_str.clone(),
+            record_server.clone(),
+            record_tool.clone(),
+            record_params.clone(),
             Some(&tool_call.call_id),
             Some(response_message_id),
         )
@@ -1608,12 +1663,12 @@ async fn setup_captured_tool_calls(
             Ok(tool_call_record) => {
                 tool_call_records.push((
                     tool_call_record.id,
-                    server_name.clone(),
-                    tool_name.clone(),
+                    record_server.clone(),
+                    record_tool.clone(),
                 ));
                 all_tool_call_ids.push(tool_call_record.id);
 
-                // 追加 UI hint（使用原始名称）
+                // 协议层保留 call_mcp_tool，展示层使用目标工具。
                 let ui_hint = build_native_tool_call_hint(
                     &server_name,
                     &tool_name,
@@ -1621,6 +1676,7 @@ async fn setup_captured_tool_calls(
                     Some(tool_call_record.id),
                     &tool_call.call_id,
                     None,
+                    display,
                 );
                 response_content.push_str(&ui_hint);
 
@@ -1641,6 +1697,7 @@ async fn setup_captured_tool_calls(
                     None,
                     &tool_call.call_id,
                     Some(&e),
+                    display,
                 );
                 response_content.push_str(&ui_hint);
                 persist_captured_tool_call_response(

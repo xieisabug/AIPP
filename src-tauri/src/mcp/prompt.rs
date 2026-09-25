@@ -327,17 +327,17 @@ pub async fn format_mcp_prompt_with_filters(
 1. 只能调用系统已加载的工具，禁止虚构工具名或参数
 2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
 3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
-4. **Agent 工具始终可用，无需加载；非 Agent 工具在调用前必须先通过 `load_mcp_tool` 加载**
+4. **Agent 工具和 UI 交互工具始终可用，直接调用；其他工具必须先 `load_mcp_tool`，再用 `call_mcp_tool` 调用**
 5. 当用户明确要求使用某个 Skill / Agent 工作流时，应先调用 `load_skill` 读取该 Skill 的详细说明，再按说明执行
 
 ## 动态加载流程（必须按顺序执行）
 1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
 2. **查看工具列表**：调用 `load_mcp_server` 获取目标工具集的工具列表及摘要
-3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）
-4. **调用工具**：工具加载成功后，在后续轮次直接调用该工具
-5. 当工具调用失败提示"未加载"时，先 `load_mcp_tool` 再重试
+3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）。描述和参数只出现在该次工具返回里
+4. **调用工具**：使用 `call_mcp_tool`，传入返回中的 `server_name`、`tool_name` 和参数对象。不要直接调用目标工具名
+5. 当调用失败提示"未加载"时，先 `load_mcp_tool` 再通过 `call_mcp_tool` 重试
 
-⚠ 严禁跳过步骤直接调用未加载的工具——这样的调用会被系统忽略。
+⚠ 严禁直接调用未出现在当前工具列表中的工具名。
 "#
         } else {
             r#"
@@ -348,7 +348,7 @@ pub async fn format_mcp_prompt_with_filters(
 2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
 3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
 4. 工具调用必须放在消息的最末尾，调用之后禁止再输出任何文字
-5. **Agent 工具始终可用，无需加载；非 Agent 工具在调用前必须先通过 `load_mcp_tool` 加载**
+5. **Agent 工具和 UI 交互工具始终可用，直接调用；其他工具必须先 `load_mcp_tool`，再用 `call_mcp_tool` 调用**
 6. 当用户明确要求使用某个 Skill / Agent 工作流时，应先调用 `load_skill` 读取该 Skill 的详细说明，再按说明执行
 
 ## 输出格式（强制）
@@ -374,11 +374,11 @@ pub async fn format_mcp_prompt_with_filters(
 ## 动态加载流程（必须按顺序执行）
 1. **浏览目录**：查看下方"工具集目录摘要"，确定目标工具集
 2. **查看工具列表**：调用 `load_mcp_server` 获取目标工具集的工具列表及摘要
-3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）
-4. **调用工具**：工具加载成功后，在后续轮次直接调用该工具
-5. 当工具调用失败提示"未加载"时，先 `load_mcp_tool` 再重试
+3. **加载工具**：调用 `load_mcp_tool` 将目标工具加载到当前会话（推荐 `server::tool` 格式）。描述和参数只出现在该次工具返回里
+4. **调用工具**：使用 `call_mcp_tool`，传入返回中的 `server_name`、`tool_name` 和参数对象。不要直接调用目标工具名
+5. 当调用失败提示"未加载"时，先 `load_mcp_tool` 再通过 `call_mcp_tool` 重试
 
-⚠ 严禁跳过步骤直接调用未加载的工具——这样的调用会被系统忽略。
+⚠ 严禁直接调用未出现在当前工具列表中的工具名。
 "#
         };
 
@@ -386,7 +386,8 @@ pub async fn format_mcp_prompt_with_filters(
         load_tools_info.push_str("### 工具集: Agent\n\n");
         let mut has_load_tools = false;
         for server_details in &mcp_info.enabled_servers {
-            if !is_agent_server(server_details.command.as_deref()) {
+            let command = server_details.command.as_deref();
+            if !is_agent_server(command) && command != Some("aipp:ui_interaction") {
                 continue;
             }
             for tool in &server_details.tools {
@@ -434,6 +435,13 @@ pub async fn format_mcp_prompt_with_filters(
   <server_name>Agent</server_name>
   <tool_name>load_mcp_tool</tool_name>
   <parameters>{"names":["Search::web_fetch"]}</parameters>
+</mcp_tool_call>
+
+加载返回描述后，用 call_mcp_tool 调用目标工具：
+<mcp_tool_call>
+  <server_name>Agent</server_name>
+  <tool_name>call_mcp_tool</tool_name>
+  <parameters>{"server_name":"Search","tool_name":"web_fetch","parameters":{"url":"https://example.com"}}</parameters>
 </mcp_tool_call>
 "#,
             );
@@ -584,6 +592,9 @@ mod tests {
         assert!(prompt.contains("load_skill"));
         assert!(prompt.contains("\"source_type\""));
         assert!(prompt.contains("todo_write"));
+        assert!(prompt.contains("call_mcp_tool"));
+        assert!(prompt.contains("不要直接调用目标工具名"));
+        assert!(!prompt.contains("在后续轮次直接调用该工具"));
     }
 
     #[tokio::test]

@@ -55,6 +55,18 @@ pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
     BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
 }
 
+/// Tools whose schemas stay in the model `tools` list while MCP dynamic loading is on.
+/// Other tools are discovered through load results and invoked via `call_mcp_tool`.
+pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_butler: bool) -> bool {
+    match command {
+        Some("aipp:agent") => is_butler || !is_butler_only_agent_tool(tool_name),
+        Some("aipp:ui_interaction") => {
+            matches!(tool_name, "ask_user_question" | "preview_file" | "preview_code")
+        }
+        _ => false,
+    }
+}
+
 /// Returns true if the conversation is in butler mode.
 pub fn is_butler_conversation_kind(kind: &str) -> bool {
     kind == "butler_main" || kind == "butler_task"
@@ -467,8 +479,30 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 }),
             },
             BuiltinToolInfo {
+                name: "call_mcp_tool".into(),
+                description: "调用一个已经通过 load_mcp_tool 加载到当前会话的 MCP 工具。不要用它调用始终可用的 Agent 或 UI 工具。参数校验、权限和执行与直接调用该工具相同。".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "server_name": {
+                            "type": "string",
+                            "description": "目标工具集名称，使用 load_mcp_tool 返回的 server_name"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "目标工具名称，使用 load_mcp_tool 返回的 tool_name"
+                        },
+                        "parameters": {
+                            "type": "object",
+                            "description": "传给目标工具的参数对象。无参数时传 {}"
+                        }
+                    },
+                    "required": ["server_name", "tool_name", "parameters"]
+                }),
+            },
+            BuiltinToolInfo {
                 name: "load_mcp_tool".into(),
-                description: "按关键词加载 MCP 工具到当前会话，并返回这些工具的完整定义（含 description 与 parameters schema）。".into(),
+                description: "按关键词加载 MCP 工具到当前会话，并在本次工具返回中给出这些工具的描述和参数定义。不会把它们的 schema 加入模型 tools。加载后用 call_mcp_tool 调用。".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1569,9 +1603,32 @@ mod tests {
     }
 
     #[test]
+    fn test_dynamic_loading_fixed_tool_keeps_agent_and_ui_tools_only() {
+        assert!(is_dynamic_loading_fixed_tool(Some("aipp:agent"), "load_skill", false));
+        assert!(is_dynamic_loading_fixed_tool(Some("aipp:agent"), "call_mcp_tool", false));
+        assert!(is_dynamic_loading_fixed_tool(Some("aipp:agent"), "load_mcp_tool", false));
+        assert!(!is_dynamic_loading_fixed_tool(
+            Some("aipp:agent"),
+            "spawn_task_conversation",
+            false
+        ));
+        assert!(is_dynamic_loading_fixed_tool(
+            Some("aipp:agent"),
+            "spawn_task_conversation",
+            true
+        ));
+        assert!(is_dynamic_loading_fixed_tool(
+            Some("aipp:ui_interaction"),
+            "preview_code",
+            false
+        ));
+        assert!(!is_dynamic_loading_fixed_tool(Some("aipp:search"), "search_web", true));
+    }
+
+    #[test]
     fn test_get_tools_for_agent_command() {
         let tools = get_builtin_tools_for_command("aipp:agent");
-        assert_eq!(tools.len(), 6, "Agent command should have 6 tools");
+        assert_eq!(tools.len(), 8, "Agent command should have 8 tools");
     }
 
     #[test]

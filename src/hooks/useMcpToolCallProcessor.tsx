@@ -82,10 +82,13 @@ function normalizeToolCallData(raw: unknown): ToolCallData {
             : undefined;
     const setupError = typeof value.setup_error === "string" ? value.setup_error : undefined;
     const error = typeof value.error === "string" ? value.error : setupError;
+    const displayServer = typeof value.display_server_name === "string" ? value.display_server_name : undefined;
+    const displayTool = typeof value.display_tool_name === "string" ? value.display_tool_name : undefined;
+    const displayParameters = typeof value.display_parameters === "string" ? value.display_parameters : undefined;
     return {
-        server_name: typeof value.server_name === "string" ? value.server_name : undefined,
-        tool_name: typeof value.tool_name === "string" ? value.tool_name : undefined,
-        parameters: typeof value.parameters === "string" ? value.parameters : undefined,
+        server_name: displayServer ?? (typeof value.server_name === "string" ? value.server_name : undefined),
+        tool_name: displayTool ?? (typeof value.tool_name === "string" ? value.tool_name : undefined),
+        parameters: displayParameters ?? (typeof value.parameters === "string" ? value.parameters : undefined),
         call_id: callId,
         llm_call_id: typeof llmCallIdRaw === "string" ? llmCallIdRaw : undefined,
         status: status ?? (setupError ? "failed" : undefined),
@@ -114,6 +117,18 @@ function parsePartialToolCallPayload(rawPayload: string): ToolCallData {
     const toolMatch = rawPayload.match(/"tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
     if (toolMatch) {
         result.tool_name = decodeJsonString(toolMatch[1]);
+    }
+    const displayServerMatch = rawPayload.match(/"display_server_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (displayServerMatch) {
+        result.server_name = decodeJsonString(displayServerMatch[1]);
+    }
+    const displayToolMatch = rawPayload.match(/"display_tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (displayToolMatch) {
+        result.tool_name = decodeJsonString(displayToolMatch[1]);
+    }
+    const displayParametersMatch = rawPayload.match(/"display_parameters"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (displayParametersMatch) {
+        result.parameters = decodeJsonString(displayParametersMatch[1]);
     }
     const callIdMatch = rawPayload.match(/"call_id"\s*:\s*(\d+)/);
     if (callIdMatch) {

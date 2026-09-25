@@ -146,6 +146,31 @@ fn is_dynamic_mode_agent_tool(server_command: Option<&str>) -> bool {
     server_command == Some("aipp:agent")
 }
 
+fn is_dynamic_mode_direct_tool(server_command: Option<&str>) -> bool {
+    matches!(server_command, Some("aipp:agent") | Some("aipp:ui_interaction"))
+}
+
+/// When the model calls `call_mcp_tool`, project the inner target so execution,
+/// audit, and the chat card use the real tool. Returns None when the arguments
+/// do not name a target.
+pub fn project_call_mcp_tool(tool_name: &str, parameters: &str) -> Option<(String, String, String)> {
+    if tool_name != "call_mcp_tool" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(parameters).ok()?;
+    let server_name = value.get("server_name").and_then(|item| item.as_str())?.trim();
+    let target_tool = value.get("tool_name").and_then(|item| item.as_str())?.trim();
+    if server_name.is_empty() || target_tool.is_empty() {
+        return None;
+    }
+    let inner = match value.get("parameters") {
+        Some(inner) if inner.is_string() => inner.as_str().unwrap_or("{}").to_string(),
+        Some(inner) => inner.to_string(),
+        None => "{}".to_string(),
+    };
+    Some((server_name.to_string(), target_tool.to_string(), inner))
+}
+
 async fn drain_pending_batch_continuations<F, Fut>(
     conversation_id: i64,
     mut run_once: F,
@@ -423,6 +448,26 @@ mod continuation_queue_tests {
         assert!(is_dynamic_mode_agent_tool(Some("aipp:agent")));
         assert!(!is_dynamic_mode_agent_tool(Some("other")));
         assert!(!is_dynamic_mode_agent_tool(None));
+        assert!(is_dynamic_mode_direct_tool(Some("aipp:ui_interaction")));
+        assert!(!is_dynamic_mode_direct_tool(Some("aipp:search")));
+    }
+
+    #[test]
+    fn project_call_mcp_tool_extracts_target_identity() {
+        let projected = project_call_mcp_tool(
+            "call_mcp_tool",
+            r#"{"server_name":"Search","tool_name":"search_web","parameters":{"query":"aipp"}}"#,
+        );
+        assert_eq!(
+            projected,
+            Some((
+                "Search".to_string(),
+                "search_web".to_string(),
+                r#"{"query":"aipp"}"#.to_string()
+            ))
+        );
+        assert!(project_call_mcp_tool("search_web", r#"{"query":"aipp"}"#).is_none());
+        assert!(project_call_mcp_tool("call_mcp_tool", r#"{"tool_name":"search_web"}"#).is_none());
     }
 
     #[test]
@@ -2033,7 +2078,7 @@ pub async fn execute_mcp_tool_call(
                 .await;
             };
             let resolved_tool_name = resolved_tool.tool_name.clone();
-            let is_agent_loader_tool = is_dynamic_mode_agent_tool(server.command.as_deref());
+            let is_agent_loader_tool = is_dynamic_mode_direct_tool(server.command.as_deref());
             let is_loaded = match db.is_tool_loaded_for_conversation(
                 tool_call.conversation_id,
                 tool_call.server_id,
@@ -2057,7 +2102,7 @@ pub async fn execute_mcp_tool_call(
             };
             if !is_loaded && !is_agent_loader_tool {
                 let not_loaded_error = format!(
-                    "工具 {}::{} 尚未加载。请先调用 Agent::load_mcp_tool。",
+                    "工具 {}::{} 尚未加载。请先调用 load_mcp_tool 获取描述，再通过 call_mcp_tool 调用。",
                     tool_call.server_name, resolved_tool_name
                 );
                 return handle_tool_execution_result(

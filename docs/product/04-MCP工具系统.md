@@ -147,8 +147,10 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 支持重试机制和 JSON 解析回退
 
 ### 动态 MCP 加载（实验性）
-- 功能开关：`dynamic_mcp_loading_enabled` 特性标志控制
-- 减少 prompt 中注入的工具 schema 量，降低上下文浪费
+- 功能开关：`dynamic_mcp_loading_enabled` 特性标志控制，可在助手上覆盖。关闭时仍把该助手选中的工具 schema 直接注入
+- 开启后，模型 `tools` 只保留始终可用工具（Agent 工具、提问和预览）、`load_mcp_server`、`load_mcp_tool` 和 `call_mcp_tool`。会话过程中不因加载而追加 schema，系统提示词也不随加载改写
+- 加载结果里的描述和参数定义只出现在 `load_mcp_tool` 的工具返回中。之后用 `call_mcp_tool` 调用已加载工具
+- 聊天里按目标工具展示这次调用，权限、失败态和审计也落在目标工具上
 - 仅暴露已生成摘要的工具目录条目
 - 未生成摘要的服务器/工具自动隐藏
 - 能力纪元（capability epoch）变更时自动重置摘要

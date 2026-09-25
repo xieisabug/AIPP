@@ -75,6 +75,11 @@ pub async fn detect_and_process_mcp_calls(
             let server_name = cap[1].trim().to_string();
             let tool_name = cap[2].trim().to_string();
             let parameters = cap[3].trim().to_string();
+            let projected =
+                crate::mcp::execution_api::project_call_mcp_tool(&tool_name, &parameters);
+            let (record_server, record_tool, record_params) = projected.clone().unwrap_or_else(|| {
+                (server_name.clone(), tool_name.clone(), parameters.clone())
+            });
 
             debug!(server = %server_name, tool = %tool_name, "Detected MCP call in message");
 
@@ -85,9 +90,9 @@ pub async fn detect_and_process_mcp_calls(
                     .and_then(|calls| {
                         calls.into_iter().find(|c| {
                             c.message_id == Some(message_id)
-                                && c.server_name == server_name
-                                && c.tool_name == tool_name
-                                && c.parameters.trim() == parameters.trim()
+                                && c.server_name == record_server
+                                && c.tool_name == record_tool
+                                && c.parameters.trim() == record_params.trim()
                         })
                     })
             };
@@ -99,9 +104,9 @@ pub async fn detect_and_process_mcp_calls(
                     app_handle.clone(),
                     conversation_id,
                     Some(message_id),
-                    server_name.clone(),
-                    tool_name.clone(),
-                    parameters.clone(),
+                    record_server.clone(),
+                    record_tool.clone(),
+                    record_params.clone(),
                     None,
                     None,
                 )
@@ -113,16 +118,19 @@ pub async fn detect_and_process_mcp_calls(
                     debug!(call_id = tool_call.id, "Created MCP tool call");
 
                     // 将 MCP 标签替换为包含 call_id 的 UI 注释，确保前端能正确匹配工具调用的状态
-                    let ui_hint = format!(
-                        "<!-- MCP_TOOL_CALL:{} -->",
-                        json!({
-                            "server_name": server_name,
-                            "tool_name": tool_name,
-                            "parameters": parameters,
-                            "call_id": tool_call.id,
-                            "llm_call_id": tool_call.llm_call_id,
-                        })
-                    );
+                    let mut hint_payload = json!({
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "parameters": parameters,
+                        "call_id": tool_call.id,
+                        "llm_call_id": tool_call.llm_call_id,
+                    });
+                    if let Some((display_server, display_tool, display_parameters)) = &projected {
+                        hint_payload["display_server_name"] = json!(display_server);
+                        hint_payload["display_tool_name"] = json!(display_tool);
+                        hint_payload["display_parameters"] = json!(display_parameters);
+                    }
+                    let ui_hint = format!("<!-- MCP_TOOL_CALL:{} -->", hint_payload);
                     // 替换当前内容中的第一个匹配（使用 temp_content 累积更新）
                     temp_content = mcp_regex.replacen(&temp_content, 1, &ui_hint).to_string();
                     updated_content = Some(temp_content.clone());
@@ -145,14 +153,14 @@ pub async fn detect_and_process_mcp_calls(
                                             let mut should_auto_run = false;
                                             for s in servers_with_tools.iter() {
                                                 // 支持精确匹配和清理后名称匹配
-                                                let name_matches = s.name == server_name
-                                                    || sanitize_tool_name(&s.name) == server_name;
+                                                let name_matches = s.name == record_server
+                                                    || sanitize_tool_name(&s.name) == record_server;
                                                 if name_matches && s.is_enabled {
-                                                    if let Some(tool) = s.tools.iter().find(|t| t.name == tool_name && t.is_enabled) {
+                                                    if let Some(tool) = s.tools.iter().find(|t| t.name == record_tool && t.is_enabled) {
                                                         let auto_run = should_auto_run_tool(
                                                             mcp_override_config,
-                                                            &server_name,
-                                                            &tool_name,
+                                                            &record_server,
+                                                            &record_tool,
                                                             tool.is_auto_run,
                                                         );
                                                         if auto_run {
