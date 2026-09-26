@@ -53,7 +53,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         {
             id: "conversation_summary",
             name: "辅助AI",
-            description: "配置AI辅助功能：对话标题生成、表单自动填写和上下文压缩",
+            description: "配置AI辅助功能：对话标题生成、表单自动填写、上下文压缩和工具调用自动审核",
             icon: <MessageSquare className="h-5 w-5" />,
             code: "conversation_summary",
         },
@@ -109,6 +109,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
     ].filter((feature) => platform !== "android" || feature.id !== "shortcuts"), [platform]);
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
+    const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
 
     useEffect(() => {
         if (platform === "android" && selectedFeature.id === "shortcuts") {
@@ -119,13 +120,26 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
     // 消费来自父组件的 subNav 导航指令
     useEffect(() => {
         if (subNav) {
-            const target = featureList.find(f => f.id === subNav);
+            const [featureId, anchor] = subNav.split("#");
+            const target = featureList.find(f => f.id === featureId);
             if (target) {
                 setSelectedFeature(target);
+                setPendingAnchor(anchor || null);
             }
             onSubNavConsumed?.();
         }
     }, [featureList, onSubNavConsumed, subNav]);
+
+    useEffect(() => {
+        if (!pendingAnchor) {
+            return;
+        }
+        const timer = window.setTimeout(() => {
+            document.getElementById(pendingAnchor)?.scrollIntoView({ behavior: "smooth", block: "center" });
+            setPendingAnchor(null);
+        }, 0);
+        return () => window.clearTimeout(timer);
+    }, [pendingAnchor, selectedFeature.id]);
 
     // 使用新的 hooks
     const { featureConfig, saveFeatureConfig, loadFeatureConfig, loading } = useFeatureConfig();
@@ -158,6 +172,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             // 记忆总结（实验功能，默认关闭）
             memory_summary_enabled: false,
             memory_summary_model: "",
+            auto_review_model: "",
             // 上下文压缩（底层仍存储在 experimental）
             context_compaction_enabled: false,
             context_max_input_tokens: "128000",
@@ -263,6 +278,11 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),
+                    auto_review_model: (() => {
+                        const model = summaryConfig.get("auto_review_model") || "";
+                        const providerId = summaryConfig.get("auto_review_provider_id") || "";
+                        return model && providerId ? `${model}%%${providerId}` : "";
+                    })(),
                     // 上下文压缩（全局实验配置，展示在辅助AI）
                     context_compaction_enabled:
                         experimentalConfig?.get("context_compaction_enabled") === "true",
@@ -284,6 +304,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                     form_autofill_model: "",
                     memory_summary_enabled: false,
                     memory_summary_model: "",
+                    auto_review_model: "",
                     context_compaction_enabled:
                         experimentalConfig?.get("context_compaction_enabled") === "true",
                     context_max_input_tokens:
@@ -432,6 +453,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         const titleModel = parseModel(values.title_model as string);
         const formAutofillModel = parseModel(values.form_autofill_model as string);
         const memorySummaryModel = parseModel(values.memory_summary_model as string);
+        const autoReviewModel = parseModel(values.auto_review_model as string);
 
         // 验证标题模型
         if (values.title_summary_enabled && (!titleModel.provider_id || isNaN(Number(titleModel.provider_id)))) {
@@ -455,6 +477,8 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             memory_summary_enabled: values.memory_summary_enabled.toString(),
             memory_summary_model: memorySummaryModel.model_code,
             memory_summary_provider_id: memorySummaryModel.provider_id,
+            auto_review_model: autoReviewModel.model_code,
+            auto_review_provider_id: autoReviewModel.provider_id,
         });
 
         const currentExperimentalConfig = featureConfig.get("experimental");

@@ -2016,6 +2016,7 @@ pub async fn execute_mcp_tool_call(
             .get_mcp_tool_call(call_id)
             .map_err(|e| format!("获取当前工具调用状态失败: {}", e));
     }
+    crate::mcp::tool_review::record_user_allow_if_review_held(&app_handle, call_id);
     tool_call = db
         .get_mcp_tool_call(call_id)
         .map_err(|e| format!("重新加载工具调用信息失败: {}", e))?;
@@ -2384,6 +2385,68 @@ pub async fn continue_with_error(
     }
 
     info!(call_id = call_id, "continued conversation with tool error");
+    Ok(())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, state, feature_config_state, window), fields(call_id))]
+pub async fn reject_mcp_tool_call(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    window: tauri::Window,
+    call_id: i64,
+) -> std::result::Result<(), String> {
+    let db = MCPDatabase::new(&app_handle).map_err(|error| error.to_string())?;
+    let tool_call = db.get_mcp_tool_call(call_id).map_err(|error| error.to_string())?;
+    if tool_call.status != "pending" {
+        return Err(format!("工具调用状态为 {} 时不能拒绝", tool_call.status));
+    }
+
+    let review_reason = db
+        .get_tool_review_by_call_id(call_id)
+        .ok()
+        .flatten()
+        .map(|review| review.reason)
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| "用户拒绝执行".to_string());
+    let error_message = format!("用户拒绝执行：{review_reason}");
+    db.update_mcp_tool_call_status(call_id, "failed", None, Some(&error_message))
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = db.set_tool_review_user_decision(call_id, "deny") {
+        warn!(call_id, error = %error, "failed to record tool review deny");
+    }
+
+    let updated = db.get_mcp_tool_call(call_id).map_err(|error| error.to_string())?;
+    broadcast_mcp_tool_call_update(&app_handle, &updated);
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .finish_mcp_call(&app_handle, updated.conversation_id, call_id)
+            .await;
+    }
+
+    if let Err(error) = trigger_conversation_continuation_with_error(
+        &app_handle,
+        &state,
+        &feature_config_state,
+        &window,
+        &updated,
+        &error_message,
+    )
+    .await
+    {
+        if let Err(persist_error) = persist_terminal_tool_result_message(&app_handle, &updated).await
+        {
+            warn!(
+                call_id,
+                error = %persist_error,
+                "failed to persist tool result after rejected tool call continuation failed"
+            );
+        }
+        return Err(format!("拒绝已记录，但续写失败: {error}"));
+    }
+
+    info!(call_id, "rejected MCP tool call after review");
     Ok(())
 }
 

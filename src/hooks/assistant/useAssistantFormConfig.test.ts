@@ -1,5 +1,8 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import React from "react";
+import { render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "@tauri-apps/api/event";
 
 import type { AssistantDetail } from "@/data/Assistant";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
@@ -282,5 +285,102 @@ describe("useAssistantFormConfig Codex fields", () => {
 
         result.current.formConfig.find((item) => item.key === "acp_provider")?.config.onChange?.("7");
         expect(onAgentProviderChange).toHaveBeenCalledWith("7", "codex_app_server");
+    });
+});
+
+describe("useAssistantFormConfig tool review mode", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_all_feature_config", () => []);
+    });
+
+    it("should report auto_model when the review mode select changes", async () => {
+        const onConfigChange = vi.fn();
+        const { result } = renderHook(() =>
+            useAssistantFormConfig({
+                currentAssistant: baseAssistantDetail,
+                assistantTypeNameMap: new Map([[0, "普通对话助手"]]),
+                assistantTypeCustomField: [],
+                assistantTypeCustomLabel: new Map(),
+                assistantTypeCustomTips: new Map(),
+                assistantTypeHideField: [],
+                navigateTo: vi.fn(),
+                onConfigChange,
+                onPromptChange: vi.fn(),
+                pluginAssistantFormFields: [],
+                pluginAssistantConfigValues: {},
+                onPluginConfigChange: vi.fn(),
+                agentModelOptions: [],
+                agentModelLoading: false,
+                agentModelError: null,
+                onAgentProviderChange: vi.fn(),
+                onAgentModelChange: vi.fn(),
+            })
+        );
+
+        await waitFor(() => {
+            expect(result.current.formConfig.some((item) => item.key === "tool_review_mode")).toBe(true);
+        });
+
+        const reviewField = result.current.formConfig.find((item) => item.key === "tool_review_mode");
+        expect(reviewField?.config.value).toBe("off");
+        expect(reviewField?.config.options).toEqual([
+            { value: "off", label: "人工审核" },
+            { value: "auto_model", label: "模型自动审核" },
+        ]);
+        expect(result.current.formConfig.some((item) => item.key === "tool_review_model_hint")).toBe(false);
+
+        reviewField?.config.onChange?.("auto_model");
+        expect(onConfigChange).toHaveBeenCalledWith("tool_review_mode", "auto_model", "string");
+    });
+
+    it("should offer a jump to auto review model settings when model review is selected and no model is configured", async () => {
+        const assistant: AssistantDetail = {
+            ...baseAssistantDetail,
+            model_configs: [
+                {
+                    id: 3,
+                    assistant_id: 1,
+                    assistant_model_id: 1,
+                    name: "tool_review_mode",
+                    value: "auto_model",
+                    value_type: "string",
+                },
+            ],
+        };
+        const { result } = renderHook(() =>
+            useAssistantFormConfig({
+                currentAssistant: assistant,
+                assistantTypeNameMap: new Map([[0, "普通对话助手"]]),
+                assistantTypeCustomField: [],
+                assistantTypeCustomLabel: new Map(),
+                assistantTypeCustomTips: new Map(),
+                assistantTypeHideField: [],
+                navigateTo: vi.fn(),
+                onConfigChange: vi.fn(),
+                onPromptChange: vi.fn(),
+                pluginAssistantFormFields: [],
+                pluginAssistantConfigValues: {},
+                onPluginConfigChange: vi.fn(),
+                agentModelOptions: [],
+                agentModelLoading: false,
+                agentModelError: null,
+                onAgentProviderChange: vi.fn(),
+                onAgentModelChange: vi.fn(),
+            })
+        );
+
+        await waitFor(() => {
+            expect(result.current.formConfig.some((item) => item.key === "tool_review_model_hint")).toBe(true);
+        });
+
+        const hint = result.current.formConfig.find((item) => item.key === "tool_review_model_hint");
+        render(React.createElement(React.Fragment, null, hint?.config.customRender?.()));
+        const user = userEvent.setup();
+        await user.click(screen.getByRole("button", { name: "前往配置自动审核模型" }));
+        expect(emit).toHaveBeenCalledWith("config-navigate-to", {
+            menu: "feature-assistant-config",
+            subNav: "conversation_summary#auto-review-model",
+        });
     });
 });

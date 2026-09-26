@@ -175,8 +175,10 @@ use crate::mcp::builtin_mcp::{
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
     get_conversation_loaded_mcp_tools, get_mcp_tool_call, get_mcp_tool_calls_by_conversation,
-    report_preview_code_runtime_error, send_mcp_tool_results, stop_mcp_tool_call,
+    reject_mcp_tool_call, report_preview_code_runtime_error, send_mcp_tool_results,
+    stop_mcp_tool_call,
 };
+use crate::mcp::tool_review::{get_tool_review, list_tool_reviews};
 use crate::mcp::registry_api::{
     add_mcp_server,
     build_mcp_prompt,
@@ -1155,6 +1157,9 @@ pub fn run() {
             test_copilot_token_exchange,
             create_mcp_tool_call,
             execute_mcp_tool_call,
+            reject_mcp_tool_call,
+            get_tool_review,
+            list_tool_reviews,
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
             get_conversation_loaded_mcp_tools,

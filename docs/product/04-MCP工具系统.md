@@ -94,6 +94,17 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 
 ## 工具调用 UI
 
+### 工具调用自动审核
+- 已开启自动运行的工具不进入审核，直接执行
+- 未开启自动运行且助手审核方式为「模型自动审核」时，原生 ToolCall 与提示词模式在执行前由审核模型判断
+- `call_mcp_tool` 先投影成真实工具，再把目标工具名和参数交给审核模型
+- 判定安全则直接执行；有风险或审核失败则保持 pending
+- 人工审核时，未开启自动运行的工具仍等待用户确认
+- 审核进行时卡片显示「自动审核中」。结束后无论通过、有风险还是失败，都在展开的详情里展示审核意见；工具卡片收起时，审核信息一并收起。确认执行走 `execute_mcp_tool_call`，拒绝走 `reject_mcp_tool_call`：调用记为 failed，理由写入 `tool_review_log.user_decision`，并回写工具结果后续写
+- 留痕表 `tool_review_log` 可按 `conversation_id` 或 `mcp_tool_call_id` 查询，记录模型、结论、理由、耗时和用户决定
+- 是否自动运行仍看工具的 `is_auto_run` 和会话覆盖；自动运行优先于审核方式
+- 文件路径信任确认仍在工具执行内部生效，审核放行不会跳过工作区检查
+
 ### 工具调用状态展示
 - 工具调用卡片 UI
 - 状态流转：pending → executing → success/failed

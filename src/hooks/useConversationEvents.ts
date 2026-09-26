@@ -24,6 +24,7 @@ import {
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
+import { noteToolReview } from "@/hooks/toolReviewStore";
 
 export interface UseConversationEventsOptions {
     conversationId: string | number;
@@ -836,6 +837,28 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     typeEndData.message_type === "reasoning"
                 ) {
                     void refreshMcpToolCalls();
+                }
+            } else if (conversationEvent.type === "tool_review_update") {
+                const reviewUpdate = conversationEvent.data as {
+                    call_id?: number;
+                    phase?: string;
+                    verdict?: string;
+                    reason?: string;
+                };
+                if (typeof reviewUpdate?.call_id === "number") {
+                    if (reviewUpdate.phase === "reviewing") {
+                        noteToolReview(reviewUpdate.call_id, {
+                            phase: "reviewing",
+                            callId: reviewUpdate.call_id,
+                        });
+                    } else if (reviewUpdate.phase === "done" && reviewUpdate.verdict) {
+                        noteToolReview(reviewUpdate.call_id, {
+                            phase: "done",
+                            callId: reviewUpdate.call_id,
+                            verdict: reviewUpdate.verdict,
+                            reason: reviewUpdate.reason?.trim() || "",
+                        });
+                    }
                 }
             } else if (conversationEvent.type === "mcp_tool_call_update") {
                 // 处理MCP工具调用状态更新事件

@@ -3,6 +3,7 @@
 pub mod builtin_mcp;
 pub mod detection;
 pub mod execution_api;
+pub mod tool_review;
 pub mod prompt;
 pub mod registry_api;
 pub mod summarizer;

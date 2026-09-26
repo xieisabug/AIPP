@@ -117,4 +117,48 @@ describe("FeatureAssistantConfig network config", () => {
         await screen.findByRole("button", { name: /网络配置/ });
         expect(screen.queryByRole("button", { name: /快捷键/ })).not.toBeInTheDocument();
     });
+
+    it("should save an empty auto review model when auxiliary AI config is saved", async () => {
+        window.innerWidth = 1400;
+        window.dispatchEvent(new Event("resize"));
+
+        mockInvokeHandler("get_all_feature_config", () => [
+            { id: 1, feature_code: "conversation_summary", key: "assistant_ai_enabled", value: "true" },
+            { id: 2, feature_code: "conversation_summary", key: "title_summary_enabled", value: "true" },
+            { id: 3, feature_code: "conversation_summary", key: "title_model", value: "title-model" },
+            { id: 4, feature_code: "conversation_summary", key: "title_provider_id", value: "2" },
+            { id: 5, feature_code: "conversation_summary", key: "title_summary_length", value: "100" },
+            { id: 6, feature_code: "conversation_summary", key: "auto_review_model", value: "" },
+            { id: 7, feature_code: "conversation_summary", key: "auto_review_provider_id", value: "" },
+        ]);
+        mockInvokeHandler("save_feature_config", () => undefined);
+        mockInvokeHandler("get_models_for_select", () => []);
+        mockInvokeHandler("list_syntect_themes", () => []);
+        mockInvokeHandler("get_enabled_plugins", () => []);
+
+        render(<FeatureAssistantConfig />);
+
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole("button", { name: /辅助AI/ }));
+        await user.click(await screen.findByRole("button", { name: "保存配置" }));
+
+        await waitFor(() => {
+            const saveCalls = vi.mocked(invoke).mock.calls.filter(([command, args]) => {
+                const payload = args as { featureCode?: string } | undefined;
+                return command === "save_feature_config" && payload?.featureCode === "conversation_summary";
+            });
+            expect(saveCalls).toHaveLength(1);
+            expect(saveCalls[0][1]).toEqual(
+                expect.objectContaining({
+                    featureCode: "conversation_summary",
+                    config: expect.objectContaining({
+                        auto_review_model: "",
+                        auto_review_provider_id: "",
+                        title_model: "title-model",
+                        title_provider_id: "2",
+                    }),
+                })
+            );
+        });
+    });
 });

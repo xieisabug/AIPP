@@ -77,12 +77,15 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({
     );
 };
 
+const CLEAR_MODEL_VALUE = "__none__";
+
 // 模型选择组件
 interface ModelSelectProps {
     value: string;
     onChange: (value: string) => void;
     placeholder?: string;
     disabled?: boolean;
+    allowClear?: boolean;
 }
 
 const ModelSelect: React.FC<ModelSelectProps> = ({
@@ -90,6 +93,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
     onChange,
     placeholder = "选择模型",
     disabled,
+    allowClear = false,
 }) => {
     const { models, loading, error } = useModels(!disabled);
 
@@ -100,11 +104,13 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
         }));
     }, [models]);
 
+    const selectValue = allowClear && !value ? CLEAR_MODEL_VALUE : value;
+
     return (
         <Select
             disabled={disabled || loading}
-            value={value}
-            onValueChange={onChange}
+            value={selectValue}
+            onValueChange={(next) => onChange(next === CLEAR_MODEL_VALUE ? "" : next)}
         >
             <SelectTrigger className="w-full">
                 <SelectValue
@@ -114,6 +120,9 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
                 />
             </SelectTrigger>
             <SelectContent>
+                {allowClear && (
+                    <SelectItem value={CLEAR_MODEL_VALUE}>不使用</SelectItem>
+                )}
                 {modelOptions.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
                         {option.label}
@@ -305,6 +314,39 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                         )}
                     />
                 </ConfigSection> */}
+
+                <Card id="auto-review-model" className="border-l-4 border-l-muted shadow-sm">
+                    <CardHeader className="py-3">
+                        <CardTitle className="text-base font-medium">自动审核模型</CardTitle>
+                        <p className="text-sm text-muted-foreground mt-0.5">
+                            助手选择「模型自动审核」后，用这里的模型判断未开启自动运行的工具能否直接执行。已开启自动运行的工具不经过审核。清空后视为未配置，这些调用会转为需要人工确认。
+                        </p>
+                    </CardHeader>
+                    <CardContent className="pt-0 pb-4">
+                        <Controller
+                            control={form.control}
+                            name="auto_review_model"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>审核模型</FormLabel>
+                                    <FormControl>
+                                        <ModelSelect
+                                            value={field.value || ""}
+                                            onChange={field.onChange}
+                                            placeholder="选择自动审核模型"
+                                            allowClear
+                                            disabled={!form.watch("assistant_ai_enabled")}
+                                        />
+                                    </FormControl>
+                                    <FormDescription>
+                                        只使用所选模型，不会在缺失时改用其他模型。
+                                    </FormDescription>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+                    </CardContent>
+                </Card>
 
                 <ConfigSection
                     title="上下文压缩"

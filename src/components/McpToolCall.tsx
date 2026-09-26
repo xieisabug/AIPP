@@ -11,6 +11,7 @@ import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import { maskToolCall } from "@/utils/antiLeakage";
 import { getErrorMessage } from "@/utils/error";
+import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -35,6 +36,16 @@ const ToolErrorContinueContext = createContext(true);
 export const ToolErrorContinueProvider = ToolErrorContinueContext.Provider;
 
 export const useToolErrorContinueEnabled = () => useContext(ToolErrorContinueContext);
+
+interface ToolReviewLog {
+    verdict?: string;
+    reason?: string;
+    user_decision?: string | null;
+}
+
+function isReviewHold(review: ToolReviewLog | null): review is ToolReviewLog {
+    return review?.verdict === "risky" || review?.verdict === "error";
+}
 
 export const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
     content,
@@ -171,6 +182,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [executionError, setExecutionError] = useState<string | null>(
         initialProtocolState === "failed" ? (error || "执行失败") : null
     );
+    const [toolReview, setToolReview] = useState<ToolReviewLog | null>(null);
     // 默认展开：流式调用和新工具调用默认展开，历史调用根据状态决定
     const shouldInitiallyExpand = isStreaming || !callId || initialProtocolState === "failed";
     const [isExpanded, setIsExpanded] = useState<boolean>(shouldInitiallyExpand);
@@ -304,6 +316,29 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     }, [effectiveCallId, executionState, continueOnToolErrorEnabled, setAutoExpanded]);
 
     useEffect(() => {
+        if (!effectiveCallId) {
+            setToolReview(null);
+            return;
+        }
+        let cancelled = false;
+        invoke<ToolReviewLog | null>("get_tool_review", { callId: effectiveCallId })
+            .then((review) => {
+                if (cancelled) return;
+                if (review && typeof review.verdict === "string" && review.verdict) {
+                    setToolReview(review);
+                } else {
+                    setToolReview(null);
+                }
+            })
+            .catch(() => {
+                if (!cancelled) setToolReview(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [effectiveCallId, executionState]);
+
+    useEffect(() => {
         if (executionState === "failed") {
             setAutoExpanded(!effectiveCallId && (status === "failed" || Boolean(error))
                 ? true
@@ -376,6 +411,22 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             return nextExpanded;
         });
     }, []);
+
+    const reviewNeedsConfirmation = isReviewHold(toolReview) && executionState === "pending";
+    const reviewReason = toolReview?.reason?.trim() || "";
+
+    const handleReject = useCallback(async () => {
+        if (!effectiveCallId) return;
+        try {
+            await invoke("reject_mcp_tool_call", { callId: effectiveCallId });
+            const reason = reviewReason || "用户拒绝执行";
+            setExecutionState("failed");
+            setExecutionError(reason.startsWith("用户拒绝执行") ? reason : `用户拒绝执行：${reason}`);
+            setToolReview((current) => current ? { ...current, user_decision: "deny" } : current);
+        } catch (rejectError) {
+            setExecutionError(getErrorMessage(rejectError) || "拒绝失败");
+        }
+    }, [effectiveCallId, reviewReason]);
 
     const handleExecute = useCallback(async () => {
         if (!conversationId) {
@@ -581,6 +632,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             >
                 {shouldRenderDetails ? (
                     <div ref={innerContentRef} className="mt-2 space-y-2 max-w-full overflow-hidden">
+                        <ToolReviewNotice callId={effectiveCallId} />
                         <div className="max-w-full overflow-hidden">
                             <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
                             <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
@@ -612,8 +664,19 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                             ) : (
                                                 <Play className="h-3 w-3" />
                                             )}
-                                            {isFailed ? "重新执行" : "执行"}
+                                            {isFailed ? "重新执行" : reviewNeedsConfirmation ? "确认执行" : "执行"}
                                         </Button>
+                                        {reviewNeedsConfirmation && (
+                                            <Button
+                                                onClick={handleReject}
+                                                size="sm"
+                                                variant="outline"
+                                                className="flex items-center gap-1 h-7 text-xs"
+                                            >
+                                                <XCircle className="h-3 w-3" />
+                                                拒绝
+                                            </Button>
+                                        )}
                                         {isFailed && !shouldHideFailedActions && (
                                             <Button
                                                 onClick={handleContinueWithError}

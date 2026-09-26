@@ -1,5 +1,7 @@
 import { useMemo, useCallback } from "react";
 import React from "react";
+import { emit } from "@tauri-apps/api/event";
+import { Button } from "@/components/ui/button";
 import { AssistantDetail } from "@/data/Assistant";
 import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
@@ -10,6 +12,24 @@ import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useFilteredProviders } from "@/hooks/useFilteredProviders";
 import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 import type { AgentModelOption } from "@/utils/agentDefaults";
+
+function AutoReviewModelMissingHint() {
+    return React.createElement(
+        Button,
+        {
+            type: "button",
+            variant: "outline",
+            size: "sm",
+            onClick: () => {
+                void emit("config-navigate-to", {
+                    menu: "feature-assistant-config",
+                    subNav: "conversation_summary#auto-review-model",
+                });
+            },
+        },
+        "前往配置自动审核模型",
+    );
+}
 
 interface UseAssistantFormConfigProps {
     currentAssistant: AssistantDetail | null;
@@ -478,6 +498,42 @@ export const useAssistantFormConfig = ({
                         handleConfigChange("use_native_toolcall", value, "boolean"),
                 },
             });
+
+            const toolReviewMode = currentAssistant?.model_configs?.find(
+                (c) => c.name === "tool_review_mode"
+            )?.value === "auto_model"
+                ? "auto_model"
+                : "off";
+            const autoReviewModelConfigured = Boolean(
+                getConfigValue("conversation_summary", "auto_review_model").trim()
+                && getConfigValue("conversation_summary", "auto_review_provider_id").trim()
+            );
+            baseConfigs.push({
+                key: "tool_review_mode",
+                config: {
+                    type: "select" as const,
+                    label: "审核方式",
+                    value: toolReviewMode,
+                    options: [
+                        { value: "off", label: "人工审核" },
+                        { value: "auto_model", label: "模型自动审核" },
+                    ],
+                    tooltip:
+                        "已开启自动运行的工具直接执行，不经过审核。未开启自动运行时，人工审核等待确认；模型自动审核由「设置 → 辅助AI」中的自动审核模型判断能否直接执行。",
+                    onChange: (value: string | boolean) =>
+                        handleConfigChange("tool_review_mode", value, "string"),
+                },
+            });
+            if (toolReviewMode === "auto_model" && !autoReviewModelConfigured) {
+                baseConfigs.push({
+                    key: "tool_review_model_hint",
+                    config: {
+                        type: "custom" as const,
+                        label: "尚未配置自动审核模型，模型自动审核会转为需要人工确认",
+                        customRender: () => React.createElement(AutoReviewModelMissingHint),
+                    },
+                });
+            }
         }
 
         if (!assistantTypeHideField.includes("mcp_config") && !assistantDynamicEnabled) {

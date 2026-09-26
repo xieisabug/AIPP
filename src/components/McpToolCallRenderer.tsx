@@ -1,5 +1,6 @@
 import React from "react";
 import McpToolCall from "@/components/McpToolCall";
+import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { ensureBuiltinMcpToolComponentsRegistered } from "@/services/builtinMcpToolComponents";
 import {
@@ -106,12 +107,15 @@ const McpToolCallRenderer: React.FC<McpToolComponentProps> = (props) => {
     }
 
     return (
-        <McpToolComponentErrorBoundary
-            key={resolvedComponent.id}
-            fallback={fallback}
-        >
-            {resolvedComponent.render(enhancedProps)}
-        </McpToolComponentErrorBoundary>
+        <div className="space-y-2">
+            <ToolReviewNotice callId={enhancedProps.callId} />
+            <McpToolComponentErrorBoundary
+                key={resolvedComponent.id}
+                fallback={fallback}
+            >
+                {resolvedComponent.render(enhancedProps)}
+            </McpToolComponentErrorBoundary>
+        </div>
     );
 };
 

@@ -1618,7 +1618,7 @@ async fn setup_captured_tool_calls(
 ) -> anyhow::Result<(Vec<i64>, Vec<i64>, usize)> {
     // 第一步：为所有工具调用创建 DB 记录和 UI hints（保持原有顺序）
     let mut all_tool_call_ids = Vec::new();
-    let mut tool_call_records: Vec<(i64, String, String)> = Vec::new(); // (id, server_name, tool_name)
+    let mut tool_call_records: Vec<(i64, String, String, String)> = Vec::new(); // (id, server, tool, parameters)
     let mut setup_error_result_count = 0usize;
 
     for tool_call in captured_tool_calls {
@@ -1665,6 +1665,7 @@ async fn setup_captured_tool_calls(
                     tool_call_record.id,
                     record_server.clone(),
                     record_tool.clone(),
+                    record_params.clone(),
                 ));
                 all_tool_call_ids.push(tool_call_record.id);
 
@@ -1732,14 +1733,15 @@ async fn setup_captured_tool_calls(
         .read(conversation_id)
     {
         if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-            if let Ok(mcp_info) =
+            let mcp_info =
                 crate::mcp::collect_mcp_info_for_assistant(app_handle, assistant_id, None, None)
                     .await
-            {
-                let servers = mcp_info.enabled_servers;
-                for (call_id, server_name, tool_name) in &tool_call_records {
-                    let mut should_auto_run = false;
-                    for s in servers.iter() {
+                    .ok();
+            let servers = mcp_info.as_ref().map(|info| info.enabled_servers.as_slice());
+            for (call_id, server_name, tool_name, parameters) in &tool_call_records {
+                let mut legacy_auto_run = false;
+                if let Some(servers) = servers {
+                    for s in servers {
                         let name_matches = s.name == *server_name
                             || crate::api::ai_api::sanitize_tool_name(&s.name) == *server_name;
                         if name_matches && s.is_enabled {
@@ -1753,15 +1755,26 @@ async fn setup_captured_tool_calls(
                                     t.is_auto_run,
                                     s.command.as_deref(),
                                 ) {
-                                    should_auto_run = true;
+                                    legacy_auto_run = true;
                                 }
                             }
                         }
                     }
+                }
 
-                    if should_auto_run {
-                        auto_run_ids.push(*call_id);
-                    }
+                if crate::mcp::tool_review::should_auto_execute_after_review(
+                    app_handle,
+                    assistant_id,
+                    conversation_id,
+                    *call_id,
+                    server_name,
+                    tool_name,
+                    parameters,
+                    legacy_auto_run,
+                )
+                .await
+                {
+                    auto_run_ids.push(*call_id);
                 }
             }
         }

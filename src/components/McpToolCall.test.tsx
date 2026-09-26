@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import McpToolCall, { ToolErrorContinueProvider } from "@/components/McpToolCall";
 import type { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
+import { noteToolReview, resetToolReviewsForTests } from "@/hooks/toolReviewStore";
 
 vi.mock("@/contexts/AntiLeakageContext", () => ({
     useAntiLeakage: () => ({
@@ -42,6 +43,7 @@ describe("McpToolCall call_id binding", () => {
 
     afterEach(() => {
         clearAllMockHandlers();
+        resetToolReviewsForTests();
         vi.clearAllMocks();
     });
 
@@ -149,7 +151,7 @@ describe("McpToolCall call_id binding", () => {
         render(<McpToolCall conversationId={8} messageId={12} callId={52}
             serverName="demo-server" toolName="demo-tool" parameters="{}" isLastCall={false} />);
         await flushEffects();
-        await user.click(screen.getByTitle("执行"));
+        await user.click(await screen.findByRole("button", { name: "执行" }));
         expect(invoke).toHaveBeenCalledWith("execute_mcp_tool_call", {
             callId: 52, triggerContinuation: true,
         });
@@ -532,5 +534,149 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.queryByTitle("以错误继续对话")).not.toBeInTheDocument();
         expect(screen.queryByText("重新执行")).not.toBeInTheDocument();
         expect(screen.queryByText("以错误继续")).not.toBeInTheDocument();
+    });
+
+    it("should show the review reason and reject button when the review is risky", async () => {
+        const user = userEvent.setup();
+        mockInvokeHandler("get_tool_review", () => ({
+            id: 1,
+            conversation_id: 8,
+            mcp_tool_call_id: 52,
+            verdict: "risky",
+            reason: "会删除文件",
+            user_decision: null,
+        }));
+        mockInvokeHandler("reject_mcp_tool_call", () => undefined);
+
+        render(
+            <McpToolCall
+                conversationId={8}
+                messageId={12}
+                callId={52}
+                serverName="demo-server"
+                toolName="bash"
+                parameters='{"cmd":"rm"}'
+                status="pending"
+                mcpToolCallStates={new Map([
+                    [52, {
+                        call_id: 52,
+                        conversation_id: 8,
+                        status: "pending",
+                        server_name: "demo-server",
+                        tool_name: "bash",
+                        parameters: "{\"cmd\":\"rm\"}",
+                    }],
+                ])}
+            />
+        );
+
+        expect(await screen.findByText(/会删除文件/)).toBeInTheDocument();
+        expect(screen.getByText("审核认为有风险")).toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: "拒绝" }));
+        expect(invoke).toHaveBeenCalledWith("reject_mcp_tool_call", { callId: 52 });
+    });
+
+    it("should show the failure reason when automatic review errors", async () => {
+        mockInvokeHandler("get_tool_review", () => ({
+            id: 2,
+            conversation_id: 8,
+            mcp_tool_call_id: 53,
+            verdict: "error",
+            reason: "自动审核模型超时（20秒）",
+            user_decision: null,
+        }));
+
+        render(
+            <McpToolCall
+                conversationId={8}
+                messageId={12}
+                callId={53}
+                serverName="demo-server"
+                toolName="bash"
+                parameters="{}"
+                status="pending"
+                mcpToolCallStates={new Map([
+                    [53, {
+                        call_id: 53,
+                        conversation_id: 8,
+                        status: "pending",
+                        server_name: "demo-server",
+                        tool_name: "bash",
+                        parameters: "{}",
+                    }],
+                ])}
+            />
+        );
+
+        expect(await screen.findByText("自动审核失败")).toBeInTheDocument();
+        expect(screen.getByText(/自动审核模型超时（20秒）/)).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+    });
+
+    it("should show the approval reason when automatic review passes", async () => {
+        mockInvokeHandler("get_tool_review", () => ({
+            id: 3,
+            conversation_id: 8,
+            mcp_tool_call_id: 54,
+            verdict: "safe",
+            reason: "只读查询",
+            user_decision: null,
+        }));
+
+        render(
+            <McpToolCall
+                conversationId={8}
+                messageId={12}
+                callId={54}
+                serverName="demo-server"
+                toolName="search_web"
+                parameters='{"query":"大连"}'
+                status="success"
+                mcpToolCallStates={new Map([
+                    [54, {
+                        call_id: 54,
+                        conversation_id: 8,
+                        status: "success",
+                        server_name: "demo-server",
+                        tool_name: "search_web",
+                        parameters: "{\"query\":\"大连\"}",
+                    }],
+                ])}
+            />
+        );
+
+        expect(screen.queryByText("审核通过")).not.toBeInTheDocument();
+        await userEvent.setup().click(screen.getByTitle("展开详情"));
+        expect(await screen.findByText("审核通过")).toBeInTheDocument();
+        expect(screen.getByText(/只读查询/)).toBeInTheDocument();
+    });
+
+    it("should show that automatic review is in progress", async () => {
+        noteToolReview(55, { phase: "reviewing", callId: 55 });
+
+        render(
+            <McpToolCall
+                conversationId={8}
+                messageId={12}
+                callId={55}
+                serverName="demo-server"
+                toolName="bash"
+                parameters="{}"
+                status="pending"
+                mcpToolCallStates={new Map([
+                    [55, {
+                        call_id: 55,
+                        conversation_id: 8,
+                        status: "pending",
+                        server_name: "demo-server",
+                        tool_name: "bash",
+                        parameters: "{}",
+                    }],
+                ])}
+            />
+        );
+
+        expect(await screen.findByText("自动审核中")).toBeInTheDocument();
     });
 });

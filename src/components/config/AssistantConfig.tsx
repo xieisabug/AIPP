@@ -598,7 +598,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         return true;
                     }
 
-                    if (key === "use_native_toolcall") {
+                    if (key === "use_native_toolcall" || key === "tool_review_mode") {
                         return true;
                     }
 
@@ -631,6 +631,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         valueType = "string";
                     } else if (key === "use_native_toolcall") {
                         valueType = "boolean";
+                    } else if (key === "tool_review_mode") {
+                        valueType = "string";
                     } else if (customField) {
                         // 根据插件字段的类型映射到数据库的 value_type
                         const fieldType = customField.value.type;

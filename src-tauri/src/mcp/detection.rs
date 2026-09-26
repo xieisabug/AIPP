@@ -206,7 +206,7 @@ pub async fn detect_and_process_mcp_calls(
                                     {
                                         Ok(mcp_info) => {
                                             let servers_with_tools = mcp_info.enabled_servers;
-                                            let mut should_auto_run = false;
+                                            let mut legacy_auto_run = false;
                                             for s in servers_with_tools.iter() {
                                                 // 支持精确匹配和清理后名称匹配
                                                 let name_matches = s.name == record_server
@@ -221,20 +221,45 @@ pub async fn detect_and_process_mcp_calls(
                                                             s.command.as_deref(),
                                                         );
                                                         if auto_run {
-                                                            should_auto_run = true;
+                                                            legacy_auto_run = true;
                                                         }
                                                     }
                                                 }
                                             }
 
-                                            if should_auto_run {
+                                            if crate::mcp::tool_review::should_auto_execute_after_review(
+                                                app_handle,
+                                                assistant_id,
+                                                conversation_id,
+                                                tool_call.id,
+                                                &record_server,
+                                                &record_tool,
+                                                &record_params,
+                                                legacy_auto_run,
+                                            )
+                                            .await
+                                            {
                                                 auto_run_ids.push(tool_call.id);
-                                            } else {
+                                            } else if !legacy_auto_run {
                                                 debug!(server = %server_name, tool = %tool_name, "MCP tool auto-run disabled");
                                             }
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to load MCP configs for auto-run");
+                                            if crate::mcp::tool_review::should_auto_execute_after_review(
+                                                app_handle,
+                                                assistant_id,
+                                                conversation_id,
+                                                tool_call.id,
+                                                &record_server,
+                                                &record_tool,
+                                                &record_params,
+                                                false,
+                                            )
+                                            .await
+                                            {
+                                                auto_run_ids.push(tool_call.id);
+                                            }
                                         }
                                     }
                                 }
