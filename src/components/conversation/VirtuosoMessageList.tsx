@@ -17,7 +17,10 @@ import {
     VIRTUAL_OVERSCAN_PX,
     VIRTUAL_ROW_GAP_PX,
 } from "./virtualizedMessageListLayout";
-import { pinScrollContainerToBottom } from "./pinScrollToBottom";
+import {
+    followScrollContainerBottom,
+    pinScrollContainerToBottom,
+} from "./pinScrollToBottom";
 import {
     findFirstLiveSuffixIndex,
     useMessageListElements,
@@ -211,6 +214,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 }) => {
     const { renderItems } = useMessageListElements(messageListProps);
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+    const listWrapperRef = useRef<HTMLDivElement | null>(null);
     const scrollSyncFrameRef = useRef<number | null>(null);
     const initialBottomConversationRef = useRef<string | null>(null);
     const initialBottomPinConversationRef = useRef<string | null>(null);
@@ -399,6 +403,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
         initialBottomPinConversationRef.current = conversationId;
 
+        let stopFollow: (() => void) | null = null;
         const stopPin = pinScrollContainerToBottom({
             container,
             onScrollStateChange,
@@ -411,6 +416,13 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                     lastPinnedUserMessageIdRef.current = tailUserMessageIdRef.current;
                 }
                 setInitialBottomVisibleConversationId(conversationId);
+                stopFollow = followScrollContainerBottom({
+                    container,
+                    contentElements: [listWrapperRef.current],
+                    onScrollStateChange,
+                    shouldContinue: () =>
+                        initialBottomConversationRef.current === conversationId,
+                });
             },
             minFrameCount: INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT,
             stableFrameCount: INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT,
@@ -424,6 +436,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 initialBottomPinConversationRef.current = null;
             }
             stopPin();
+            stopFollow?.();
         };
     }, [
         conversationId,
@@ -596,6 +609,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
     return (
         <div
+            ref={listWrapperRef}
             data-aipp-initial-bottom-positioning={
                 shouldHideInitialBottomPositioning ? "true" : undefined
             }
