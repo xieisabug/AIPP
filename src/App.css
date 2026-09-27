@@ -404,6 +404,17 @@ body {
     @apply p-0 bg-transparent;
 }
 
+/* Plain and highlighted code must occupy the same box. Otherwise every
+   virtual-list remount changes row height when async highlighting resolves. */
+.aipp-code-content pre,
+.prose .aipp-code-content pre {
+    margin: 0;
+    padding: 0.5rem;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+}
+
 .prose a {
     @apply text-primary hover:text-primary/80 underline;
 }

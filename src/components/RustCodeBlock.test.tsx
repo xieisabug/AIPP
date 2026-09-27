@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import RustCodeBlock from "./RustCodeBlock";
 
@@ -21,9 +21,35 @@ vi.mock("@/hooks/useCodeTheme", () => ({
 }));
 
 describe("RustCodeBlock", () => {
+    let notifyResize: (height: number) => void;
+    beforeEach(() => {
+        vi.stubGlobal("ResizeObserver", class {
+            constructor(callback: ResizeObserverCallback) {
+                notifyResize = (height) => callback([
+                    { borderBoxSize: [{ blockSize: height }] } as unknown as ResizeObserverEntry,
+                ], this as unknown as ResizeObserver);
+            }
+            observe() {}
+            disconnect() {}
+        });
+    });
     afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
         clearAllMockHandlers();
         vi.clearAllMocks();
+    });
+
+    it("should measure asynchronously and preserve manual expansion when code resizes", async () => {
+        const readHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get");
+        render(<RustCodeBlock language="text">short code</RustCodeBlock>);
+        expect(readHeight).not.toHaveBeenCalled();
+        act(() => notifyResize(400));
+        expect(screen.getByRole("button", { name: "展开代码" })).toBeInTheDocument();
+        await userEvent.click(screen.getByRole("button", { name: "展开代码" }));
+        act(() => notifyResize(500));
+        expect(screen.getByRole("button", { name: "收起代码" })).toBeInTheDocument();
+        expect(readHeight).not.toHaveBeenCalled();
     });
 
     it("highlights only a preview while collapsed and highlights the full code after expand", async () => {
@@ -69,5 +95,14 @@ describe("RustCodeBlock", () => {
 
         expect(screen.getByText(/ascii box/)).toBeInTheDocument();
         expect(invoke).not.toHaveBeenCalledWith("highlight_code", expect.anything());
+    });
+
+    it("should reuse highlighted markup on the first render when a code block remounts", async () => {
+        mockInvokeHandler("highlight_code", () => '<pre><code><span data-testid="cached-highlight">cached remount</span></code></pre>');
+        const first = render(<RustCodeBlock language="ts">cached remount</RustCodeBlock>);
+        await screen.findByTestId("cached-highlight");
+        first.unmount();
+        render(<RustCodeBlock language="ts">cached remount</RustCodeBlock>);
+        expect(screen.getByTestId("cached-highlight")).toBeInTheDocument();
     });
 });

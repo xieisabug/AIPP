@@ -3,7 +3,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useTheme } from "@/hooks/useTheme";
 import IconButton from "./IconButton";
 import { Copy, Check, SquareTerminal } from "lucide-react";
-import { useRustHighlight } from "@/hooks/highlight/useRustHighlight";
+import { getCachedRustHighlight, useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
 import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
@@ -69,7 +69,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const { resolvedTheme } = useTheme();
     // 脚本执行依赖 shell 环境，移动端不支持，隐藏"运行"按钮
     const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
-    const [html, setHtml] = useState<string>("");
+    const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null);
     const [copyState, setCopyState] = useState<"copy" | "ok">("copy");
     const [isHovered, setIsHovered] = useState(false);
     const [isSticky, setIsSticky] = useState(false);
@@ -92,6 +92,16 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const hasInitialDecisionRef = useRef(false); // 非流式时仅在首次渲染做一次自动判断
     const collapsedPreview = useMemo(() => getCollapsedPreviewCode(code), [code]);
     const renderCode = !disableCollapse && isCollapsed ? collapsedPreview.code : code;
+    const highlightKey = useMemo(
+        () => JSON.stringify([language, renderCode, resolvedTheme, currentTheme]),
+        [language, renderCode, resolvedTheme, currentTheme],
+    );
+    const cachedHtml = useMemo(
+        () => shouldUsePlainText ? undefined : getCachedRustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme),
+        [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText],
+    );
+    const html = shouldUsePlainText ? "" : cachedHtml
+        ?? (highlighted?.key === highlightKey ? highlighted.html : "");
     const isPreviewTruncated = !disableCollapse && isCollapsed && collapsedPreview.truncated;
     const canCollapse = !disableCollapse && (isOverflow || isPreviewTruncated || shouldCollapseInitially);
     const metaLabel = useMemo(() => {
@@ -106,25 +116,25 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
 
     useEffect(() => {
         if (shouldUsePlainText) {
-            setHtml("");
             return;
         }
 
+        if (cachedHtml !== undefined) return;
+
         let cancelled = false;
-        setHtml("");
         (async () => {
             try {
                 const result = await rustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme);
-                if (!cancelled) setHtml(result);
+                if (!cancelled) setHighlighted({ key: highlightKey, html: result });
             } catch (e) {
                 console.warn("[RustCodeBlock] highlight failed, fallback to plain text", e);
-                if (!cancelled) setHtml("");
+                if (!cancelled) setHighlighted(null);
             }
         })();
         return () => {
             cancelled = true;
         };
-    }, [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText, rustHighlight]);
+    }, [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText, rustHighlight, cachedHtml, highlightKey]);
 
     // 计算是否超出折叠阈值，并在需要时进行自动折叠
     useEffect(() => {
@@ -137,8 +147,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
         const el = codeRef.current;
         if (!el) return;
 
-        const measure = () => {
-            const contentHeight = el.scrollHeight; // 实际内容高度
+        const measure = (contentHeight: number) => {
             const overflow = contentHeight > COLLAPSED_MAX_HEIGHT + 4 || shouldCollapseInitially; // 允许少量误差
             setIsOverflow(overflow);
 
@@ -166,18 +175,18 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
             }
         };
 
-        // 首次测量
-        measure();
-
-        // 监听窗口大小变化，重新测量（避免布局变化导致判断不准）
-        const onResize = () => {
-            // 使用 RAF，避免高频触发
-            if (rafRef.current) cancelAnimationFrame(rafRef.current);
-            rafRef.current = requestAnimationFrame(measure);
-        };
-        window.addEventListener('resize', onResize);
+        // The inner code element is not height-clamped (its parent is). Observe
+        // its laid-out border box instead of forcing layout with scrollHeight in
+        // every code block's passive effect after each highlight result.
+        const observer = new ResizeObserver((entries) => {
+            const entry = entries[0];
+            if (entry) {
+                measure(entry.borderBoxSize[0]?.blockSize ?? entry.contentRect.height);
+            }
+        });
+        observer.observe(el, { box: "border-box" });
         return () => {
-            window.removeEventListener('resize', onResize);
+            observer.disconnect();
         };
         // 依赖 html 与 code，在代码或高亮结果变化时重新测量
     }, [html, code, renderCode, isStreaming, disableCollapse, shouldCollapseInitially]);
@@ -297,13 +306,13 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 {html ? (
                     <div
                         ref={codeRef}
-                        className="text-sm font-mono"
+                        className="aipp-code-content text-sm font-mono leading-5"
                         dangerouslySetInnerHTML={{ __html: html }}
                     />
                 ) : (
-                    <pre ref={codeRef as any} className="text-sm font-mono p-3 bg-transparent">
-                        <code>{renderCode}</code>
-                    </pre>
+                    <div ref={codeRef} className="aipp-code-content text-sm font-mono leading-5">
+                        <pre><code>{renderCode}</code></pre>
+                    </div>
                 )}
                 {/* Gradient overlay when collapsed */}
                 {!disableCollapse && isCollapsed && canCollapse && (

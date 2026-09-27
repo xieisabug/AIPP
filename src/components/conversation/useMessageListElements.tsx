@@ -146,6 +146,20 @@ function estimateMessageHeight(
 ): number {
     const { isLastMessage = false, isReasoningExpanded = false, agentActivityCount = 0 } = options;
     const rawContent = message.content ?? "";
+
+    // Completed collapsed reasoning is represented by a compact status row. Do
+    // not scan its full transcript just to estimate a height; long reasoning
+    // transcripts are common and are not rendered until the user expands them.
+    if (
+        message.message_type === "reasoning"
+        && !isReasoningExpanded
+        && message.finish_time !== null
+        && !rawContent.includes("MCP_TOOL_CALL")
+        && !rawContent.includes("<mcp_tool_call")
+    ) {
+        return 72;
+    }
+
     const content = normalizeCollapsedCodeBlocksForHeightEstimate(
         stripMcpToolCallMarkup(rawContent),
     );

@@ -58,6 +58,8 @@ interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
     conversationIndex: number;
     conversationName: string;
     messageItemCount: number;
+    messagesRenderedMs: number;
+    initialSettleMs: number;
     initialScrollTop: number;
     initialMaxScrollTop: number;
     initialDistanceToBottom: number;
@@ -326,6 +328,7 @@ function ChatUIWindow() {
             options: ChatScrollPerfTestOptions = {},
         ): Promise<ChatScrollPerfTestResult> => {
             const conversationIndex = Math.max(0, options.conversationIndex ?? 1);
+            const testStartedAt = performance.now();
             const emitProgress = (
                 phase: string,
                 extra: Record<string, unknown> = {},
@@ -381,7 +384,8 @@ function ChatUIWindow() {
                         .length > 0
                     );
                 }, { timeoutMs: 10000, intervalMs: 50 });
-                emitProgress("messages-rendered");
+                const messagesRenderedMs = performance.now() - testStartedAt;
+                emitProgress("messages-rendered", { messagesRenderedMs });
 
                 const scrollContainer = document.querySelector(
                     "[data-aipp-slot='chat-conversation-scroll']",
@@ -394,6 +398,7 @@ function ChatUIWindow() {
                     scrollContainer,
                     72,
                 );
+                const initialSettleMs = performance.now() - testStartedAt - messagesRenderedMs;
                 const lastInitialSample =
                     initialSettleSamples[initialSettleSamples.length - 1];
                 const initialMaxScrollTop = Math.max(
@@ -444,6 +449,9 @@ function ChatUIWindow() {
                     initialFirstVisibleAwayFromBottomFrame,
                 });
 
+                // Match real user scrolling: cancel initial bottom-follow before
+                // programmatically driving the probe, otherwise it fights the test.
+                scrollContainer.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
                 scrollContainer.scrollTop = 0;
                 await waitForAnimationFrames(2);
                 window.__AIPP_CHAT_PERF_CAPTURE__?.resetVirtualRowHeightDrift?.();
@@ -471,6 +479,8 @@ function ChatUIWindow() {
                     conversationName: targetConversation.name,
                     messageItemCount,
                     initialScrollTop,
+                    messagesRenderedMs,
+                    initialSettleMs,
                     initialMaxScrollTop,
                     initialDistanceToBottom,
                     initialAtBottom: initialDistanceToBottom <= 4,

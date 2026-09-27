@@ -78,6 +78,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 
 - `AIPP_CHAT_SCROLL_PERF_INDEX` 从 `0` 开始，且是**当前 ChatUI 会话列表顺序**里的下标；先从结果 JSON 的 `conversationName` 确认目标会话，不要凭序号想当然
 - 结果会写到 `tmp/*.json`
+- `messagesRenderedMs` 表示 harness 启动到出现消息 DOM 的耗时（不是完整可交互耗时）；`initialSettleMs` 是随后 72 帧采样所用时间。滚动探针会先发出 wheel 事件解除初始贴底跟随，避免程序滚动被跟随逻辑拉回。
+- `VirtuosoMessageList` 当前在展示消息不超过80条且正文总量不超过500,000字符时保留节点；超过任一阈值时使用虚拟列表。回归时应覆盖两条路径，并分别记录冷打开、Loading关闭和真实滚轮往返。只看预热后的程序滚动帧率，不能证明首次滚动不跳动；流式新增消息跨阈值也应单独验证。
 - **不要并行跑多个 harness**：它们会竞争 Cargo 默认构建/输出锁，必须串行执行、等上一个结束再跑下一个
 - 如果以后排查别的 UI 问题，没有现成入口，就按同样模式补一个：
   - 前端暴露测试 API

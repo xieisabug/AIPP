@@ -32,6 +32,12 @@ function storeHighlightResult(key: string, html: string) {
     }
 }
 
+export function getCachedRustHighlight(
+    lang: string, code: string, isDark: boolean, themeHint?: string,
+): string | undefined {
+    return highlightResultCache.get(buildHighlightCacheKey(lang, code, isDark, themeHint));
+}
+
 export function useRustHighlight(): RustHighlightFn {
     return useCallback(async (lang, code, isDark, themeHint) => {
         const cacheKey = buildHighlightCacheKey(lang, code, isDark, themeHint);

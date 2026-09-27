@@ -292,6 +292,26 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 对话加载状态
         const [isLoadingShow, setIsLoadingShow] = useState(false);
+        const [renderingConversationId, setRenderingConversationId] = useState<string | null>(null);
+
+        useEffect(() => {
+            if (renderingConversationId !== conversationId || isLoadingShow) return;
+            const deadline = performance.now() + 2000;
+            const finishAfterPositioning = () => {
+                const isPositioning = scrollContainerRef.current?.querySelector(
+                    "[data-aipp-initial-bottom-positioning='true']",
+                );
+                if (isPositioning && performance.now() < deadline) {
+                    frame = requestAnimationFrame(finishAfterPositioning);
+                } else {
+                    setRenderingConversationId(null);
+                }
+            };
+            let frame = requestAnimationFrame(() => {
+                frame = requestAnimationFrame(finishAfterPositioning);
+            });
+            return () => cancelAnimationFrame(frame);
+        }, [renderingConversationId, conversationId, isLoadingShow]);
 
         // ACP assistant working directory (resolved by backend)
         const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
@@ -1162,6 +1182,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     const setStateStartTime = performance.now();
                     setMessages(res.messages);
                     setConversation(res.conversation);
+                    setRenderingConversationId(conversationId);
                     setIsLoadingShow(false); // 这里会触发 useLayoutEffect 中的聚焦
 
                     if (res.messages.length === 2) {
@@ -1933,6 +1954,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onScroll={virtualizeMessages ? undefined : handleScroll}
                             className={`conversation-scroll-transparent-track min-h-0 h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                             data-aipp-slot="chat-conversation-scroll"
+                            style={virtualizeMessages ? { overflowAnchor: "none" } : undefined}
                         >
                             <ConversationContent
                                 conversationId={conversationId}
@@ -2052,13 +2074,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         onSaveAndRegenerate={handleEditSaveAndRegenerate}
                     />
 
-                    {isLoadingShow ? (
+                    {isLoadingShow || renderingConversationId === conversationId ? (
                         <div
-                            className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl"
+                            className="bg-background/95 inset-0 absolute z-20 flex items-center justify-center gap-2 rounded-xl"
                             data-aipp-slot="chat-loading-overlay"
+                            role="status"
+                            aria-live="polite"
                         >
                             <div className="loading-icon"></div>
-                            <div className="text-primary text-base font-medium">加载中...</div>
+                            <div className="text-primary text-base font-medium">
+                                {isLoadingShow ? "正在读取对话…" : "正在排版消息…"}
+                            </div>
                         </div>
                     ) : null}
                 </div>

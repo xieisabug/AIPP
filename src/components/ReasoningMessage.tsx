@@ -40,9 +40,16 @@ const ReasoningMessage = React.memo(
         const isThinking = message.start_time !== null && !isComplete;
 
         const { parseCustomTags } = useCustomTagParser();
+        // 折叠完成的 reasoning 只需要状态行；MCP 标记仍需保留预览。
+        const mayContainMcpToolCall = useMemo(
+            () => /<!--\s*MCP_TOOL_CALL:|<mcp_tool_call\b/.test(displayedContent),
+            [displayedContent],
+        );
+        const shouldParseContent =
+            !isComplete || isReasoningExpanded || mayContainMcpToolCall;
         const parsedContent = useMemo(
-            () => parseCustomTags(displayedContent),
-            [displayedContent, parseCustomTags],
+            () => shouldParseContent ? parseCustomTags(displayedContent) : "",
+            [displayedContent, parseCustomTags, shouldParseContent],
         );
         const hasMcpToolCall = useMemo(
             () => /<!--\s*MCP_TOOL_CALL:/.test(parsedContent),
@@ -147,17 +154,27 @@ const ReasoningMessage = React.memo(
 
         // 缓存内容分割结果
         const contentLines = useMemo(() => {
+            if (!shouldParseContent) {
+                return {
+                    lines: [],
+                    previewLines: [],
+                    hasMoreThanThreeLines: false,
+                };
+            }
             const lines = parsedContent.split("\n");
             return {
                 lines,
                 previewLines: lines.slice(-3), // 思考中时显示最后3行
                 hasMoreThanThreeLines: lines.length > 3,
             };
-        }, [parsedContent]);
+        }, [parsedContent, shouldParseContent]);
 
         // 渲染内容（统一使用 useMcpToolCallProcessor，避免重复实现）
         const renderedContent = useMemo(
             () => {
+                if (!shouldParseContent) {
+                    return null;
+                }
                 // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
                 if (useRawTextRenderer) {
                     return <span className="whitespace-pre-wrap break-words">{parsedContent}</span>;
@@ -175,11 +192,14 @@ const ReasoningMessage = React.memo(
                     ),
                 );
             },
-            [useRawTextRenderer, processContent, parsedContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]
+            [useRawTextRenderer, processContent, parsedContent, shouldParseContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]
         );
 
         // 渲染预览内容（思考中显示最后 3 行，同样支持 MCP）
         const renderedPreviewContent = useMemo(() => {
+            if (!shouldParseContent) {
+                return null;
+            }
             const previewText = contentLines.previewLines.join("\n");
             // 脱敏内容使用纯文本渲染
             if (useRawTextRenderer) {
@@ -197,7 +217,7 @@ const ReasoningMessage = React.memo(
                     </ReactMarkdown>
                 ),
             );
-        }, [useRawTextRenderer, contentLines.previewLines, processContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]);
+        }, [useRawTextRenderer, contentLines.previewLines, processContent, shouldParseContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]);
 
         // 思考完成时的小模块展示
         if (isComplete && !isReasoningExpanded) {

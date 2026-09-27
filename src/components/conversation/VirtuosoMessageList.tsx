@@ -61,33 +61,24 @@ function itemMatchesMessageId(
     );
 }
 
-function recordVirtualRowHeight(key: string, element: HTMLElement | null) {
-    if (!element) {
-        return;
-    }
-
-    const height = element.offsetHeight;
-    if (height > 0) {
-        window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight?.(key, height);
-    }
-}
-
 function useRecordedHeight(
     key: string,
     elementRef: React.RefObject<HTMLDivElement | null>,
 ) {
     useEffect(() => {
         const element = elementRef.current;
-        if (!element) {
+        const recordHeight = window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight;
+        if (!element || !recordHeight) {
             return;
         }
 
-        recordVirtualRowHeight(key, element);
-
-        const observer = new ResizeObserver(() => {
-            recordVirtualRowHeight(key, element);
+        const observer = new ResizeObserver((entries) => {
+            const entry = entries[0];
+            if (!entry) return;
+            const height = entry.borderBoxSize[0]?.blockSize ?? entry.contentRect.height;
+            if (height > 0) recordHeight(key, height);
         });
-        observer.observe(element);
+        observer.observe(element, { box: "border-box" });
 
         return () => {
             observer.disconnect();
@@ -213,6 +204,12 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     ...messageListProps
 }) => {
     const { renderItems } = useMessageListElements(messageListProps);
+    // Keep bounded rich transcripts mounted: viewport crossings must not
+    // repeatedly recreate code blocks and change the reader's scroll anchor.
+    const retainHistory = messageListProps.allDisplayMessages.length <= 80
+        && messageListProps.allDisplayMessages.reduce(
+            (total, message) => total + (message.content?.length ?? 0), 0,
+        ) <= 500_000;
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
     const listWrapperRef = useRef<HTMLDivElement | null>(null);
     const scrollSyncFrameRef = useRef<number | null>(null);
@@ -503,10 +500,11 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return sum + item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0);
         }, 0);
     }, [liveItems]);
-    // 仅 Virtuoso history 路径需要 hide 掩盖 initialTopMostItemIndex 闪动；
+    // history 在初始贴底时暂时隐藏；无滚动容器时不会启动 pin，不能隐藏消息。
     // live-only（短会话 / 总管家常见）没有 Virtuoso 定位，绝不能藏气泡。
     const shouldHideInitialBottomPositioning =
         historyItems.length > 0
+        && !!effectiveScrollParent
         && pendingScrollMessageId === null
         && hasCurrentConversationMessages
         && initialBottomVisibleConversationId !== conversationId;
@@ -540,7 +538,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         const targetIsLive = liveItems.some((item) =>
             itemMatchesMessageId(item, pendingScrollMessageId),
         );
-        if (targetIsLive) {
+        if (targetIsLive || retainHistory) {
             const existingTarget = container.querySelector(
                 `[data-message-id='${pendingScrollMessageId}']`,
             ) as HTMLElement | null;
@@ -591,11 +589,24 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         pendingScrollMessageId,
         effectiveScrollParent,
         setShiningMessageIds,
+        retainHistory,
     ]);
 
     // live-only：不依赖 scrollParent，直接渲染（总管家短会话常见路径）
     if (historyItems.length === 0) {
         return <VirtuosoLiveFooter context={{ liveItems }} />;
+    }
+
+    if (retainHistory) {
+        return (
+            <div
+                ref={listWrapperRef}
+                data-aipp-initial-bottom-positioning={shouldHideInitialBottomPositioning ? "true" : undefined}
+                style={initialBottomPositioningStyle}
+            >
+                <VirtuosoLiveFooter context={{ liveItems: renderItems }} />
+            </div>
+        );
     }
 
     // history 路径需要 customScrollParent；ref 尚未就绪时：

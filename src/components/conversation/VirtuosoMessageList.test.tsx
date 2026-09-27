@@ -79,10 +79,12 @@ function makeMessage(overrides: Partial<Message>): Message {
     } as Message;
 }
 
-function makeProps(messages: Message[]) {
+function makeProps(messages: Message[], forceVirtualized = false) {
     return {
         conversationId: "1",
-        allDisplayMessages: messages,
+        allDisplayMessages: forceVirtualized
+            ? [...Array.from({ length: 81 }, (_, i) => makeMessage({ id: 10000 + i, message_type: "user" })), ...messages]
+            : messages,
         streamingMessages: new Map<number, never>(),
         shiningMessageIds: new Set<number>(),
         shiningMcpCallId: null,
@@ -123,6 +125,61 @@ describe("VirtuosoMessageList row height reservation", () => {
         ).toBe(240);
     });
 
+    it("should keep bounded history mounted when messages are rich but few", () => {
+        render(<VirtuosoMessageList {...makeProps([
+            makeMessage({ id: 1, message_type: "user" }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+            makeMessage({ id: 4 }),
+        ])} />);
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        for (const id of [1, 2, 3, 4]) expect(screen.getByTestId(`message-${id}`)).toBeInTheDocument();
+    });
+
+    it("should keep virtualization when a few messages exceed the text budget", () => {
+        render(<VirtuosoMessageList {...makeProps([
+            makeMessage({ id: 1, message_type: "user", content: "x".repeat(500001) }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+        ])} />);
+        expect(screen.getByTestId("virtuoso")).toBeInTheDocument();
+    });
+
+    it("should keep retained history visible when the scroll parent is unavailable", () => {
+        render(<VirtuosoMessageList {...makeProps([
+            makeMessage({ id: 1, message_type: "user" }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+            makeMessage({ id: 4 }),
+        ])} scrollContainerRef={{ current: null }} />);
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        expect(screen.getByTestId("message-1")).toBeVisible();
+        expect(screen.getByTestId("message-4")).toBeVisible();
+        expect(document.querySelector("[data-aipp-initial-bottom-positioning='true']")).toBeNull();
+    });
+
+    it("should navigate to mounted history when a message is selected", async () => {
+        const props = makeProps([
+            makeMessage({ id: 1, message_type: "user" }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+            makeMessage({ id: 4 }),
+        ]);
+        const scrollIntoView = vi.fn();
+        const target = document.createElement("div");
+        target.dataset.messageId = "1";
+        target.scrollIntoView = scrollIntoView;
+        props.scrollContainerRef.current!.append(target);
+
+        render(<VirtuosoMessageList {...props} pendingScrollMessageId={1} />);
+
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", behavior: "smooth" });
+        await waitFor(() => expect(props.clearPendingScrollMessageId).toHaveBeenCalledWith(null));
+        expect(props.setShiningMessageIds).toHaveBeenCalled();
+        expect(document.querySelector("[data-aipp-initial-bottom-positioning='true']")).toBeNull();
+    });
+
     it("does not force estimated min height on later history rows", () => {
         expect(
             getVirtuosoRowMinHeight(1, { estimatedHeight: 240 }),
@@ -160,7 +217,7 @@ describe("VirtuosoMessageList row height reservation", () => {
                         message_type: "user",
                         content: "user-2",
                     }),
-                ])}
+                ], true)}
                 scrollContainerRef={{
                     current: scrollContainer,
                 }}
@@ -343,7 +400,7 @@ describe("VirtuosoMessageList row height reservation", () => {
                         message_type: "response",
                         content: "response-2",
                     }),
-                ])}
+                ], true)}
                 scrollContainerRef={{
                     current: scrollContainer,
                 }}
@@ -438,7 +495,7 @@ describe("VirtuosoMessageList row height reservation", () => {
                         message_type: "user",
                         content: "user-2",
                     }),
-                ])}
+                ], true)}
                 scrollContainerRef={{
                     current: scrollContainer,
                 }}
