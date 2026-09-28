@@ -1,12 +1,6 @@
-import React, { useEffect } from "react";
+import React from "react";
 import { Loader2 } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
-import { noteToolReview, useToolReview } from "@/hooks/toolReviewStore";
-
-interface ToolReviewLog {
-    verdict?: string;
-    reason?: string;
-}
+import { useToolReview } from "@/hooks/toolReviewStore";
 
 const verdictLabel = (verdict: string): string => {
     switch (verdict) {
@@ -23,29 +17,6 @@ const verdictLabel = (verdict: string): string => {
 
 export const ToolReviewNotice: React.FC<{ callId?: number | null }> = ({ callId }) => {
     const review = useToolReview(callId);
-
-    useEffect(() => {
-        if (!callId) {
-            return;
-        }
-        let cancelled = false;
-        invoke<ToolReviewLog | null>("get_tool_review", { callId })
-            .then((loaded) => {
-                if (cancelled || !loaded?.verdict) {
-                    return;
-                }
-                noteToolReview(callId, {
-                    phase: "done",
-                    callId,
-                    verdict: loaded.verdict,
-                    reason: loaded.reason?.trim() || "",
-                });
-            })
-            .catch(() => undefined);
-        return () => {
-            cancelled = true;
-        };
-    }, [callId]);
 
     if (!review) {
         return null;

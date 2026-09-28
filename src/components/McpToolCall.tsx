@@ -12,6 +12,7 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import { maskToolCall } from "@/utils/antiLeakage";
 import { getErrorMessage } from "@/utils/error";
 import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
+import { useToolReview } from "@/hooks/toolReviewStore";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -36,16 +37,6 @@ const ToolErrorContinueContext = createContext(true);
 export const ToolErrorContinueProvider = ToolErrorContinueContext.Provider;
 
 export const useToolErrorContinueEnabled = () => useContext(ToolErrorContinueContext);
-
-interface ToolReviewLog {
-    verdict?: string;
-    reason?: string;
-    user_decision?: string | null;
-}
-
-function isReviewHold(review: ToolReviewLog | null): review is ToolReviewLog {
-    return review?.verdict === "risky" || review?.verdict === "error";
-}
 
 export const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
     content,
@@ -182,7 +173,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [executionError, setExecutionError] = useState<string | null>(
         initialProtocolState === "failed" ? (error || "执行失败") : null
     );
-    const [toolReview, setToolReview] = useState<ToolReviewLog | null>(null);
+    const toolReview = useToolReview(effectiveCallId);
+    const isReviewing = toolReview?.phase === "reviewing";
+    const [isRejecting, setIsRejecting] = useState(false);
     // 默认展开：流式调用和新工具调用默认展开，历史调用根据状态决定
     const shouldInitiallyExpand = isStreaming || !callId || initialProtocolState === "failed";
     const [isExpanded, setIsExpanded] = useState<boolean>(shouldInitiallyExpand);
@@ -271,7 +264,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const canExecute = executionState === "idle" || executionState === "pending" || executionState === "failed"; // idle/pending/failed 状态都可以执行
     const isProtocolFailureWithoutCall = !effectiveCallId && isFailed && (status === "failed" || Boolean(error));
     const shouldHideFailedActions = isFailed && continueOnToolErrorEnabled;
-    const canShowExecutionActions = canExecute && !shouldHideFailedActions && !isProtocolFailureWithoutCall;
+    const canShowExecutionActions = canExecute && !shouldHideFailedActions && !isProtocolFailureWithoutCall && !isReviewing;
+    const canReject = executionState === "pending" && Boolean(effectiveCallId) && !isReviewing;
     const isRunning = effectiveCallId !== null && shiningMcpCallId === effectiveCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
@@ -314,29 +308,6 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             fetchExistingResult();
         }
     }, [effectiveCallId, executionState, continueOnToolErrorEnabled, setAutoExpanded]);
-
-    useEffect(() => {
-        if (!effectiveCallId) {
-            setToolReview(null);
-            return;
-        }
-        let cancelled = false;
-        invoke<ToolReviewLog | null>("get_tool_review", { callId: effectiveCallId })
-            .then((review) => {
-                if (cancelled) return;
-                if (review && typeof review.verdict === "string" && review.verdict) {
-                    setToolReview(review);
-                } else {
-                    setToolReview(null);
-                }
-            })
-            .catch(() => {
-                if (!cancelled) setToolReview(null);
-            });
-        return () => {
-            cancelled = true;
-        };
-    }, [effectiveCallId, executionState]);
 
     useEffect(() => {
         if (executionState === "failed") {
@@ -412,21 +383,25 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         });
     }, []);
 
-    const reviewNeedsConfirmation = isReviewHold(toolReview) && executionState === "pending";
-    const reviewReason = toolReview?.reason?.trim() || "";
+    const reviewNeedsConfirmation = toolReview?.phase === "done"
+        && (toolReview.verdict === "risky" || toolReview.verdict === "error")
+        && executionState === "pending";
+    const reviewReason = toolReview?.phase === "done" ? toolReview.reason.trim() : "";
 
     const handleReject = useCallback(async () => {
-        if (!effectiveCallId) return;
+        if (!canReject || !effectiveCallId || isRejecting) return;
+        setIsRejecting(true);
         try {
             await invoke("reject_mcp_tool_call", { callId: effectiveCallId });
             const reason = reviewReason || "用户拒绝执行";
             setExecutionState("failed");
             setExecutionError(reason.startsWith("用户拒绝执行") ? reason : `用户拒绝执行：${reason}`);
-            setToolReview((current) => current ? { ...current, user_decision: "deny" } : current);
         } catch (rejectError) {
             setExecutionError(getErrorMessage(rejectError) || "拒绝失败");
+        } finally {
+            setIsRejecting(false);
         }
-    }, [effectiveCallId, reviewReason]);
+    }, [canReject, effectiveCallId, isRejecting, reviewReason]);
 
     const handleExecute = useCallback(async () => {
         if (!conversationId) {
@@ -583,7 +558,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     {!isExpanded && canShowExecutionActions && (
                         <Button
                             onClick={handleExecute}
-                            disabled={isExecuting}
+                            disabled={isExecuting || isRejecting}
                             size="sm"
                             variant="ghost"
                             className="h-7 w-7 p-0 flex-shrink-0"
@@ -607,6 +582,19 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             title="以错误继续对话"
                         >
                             <ArrowRight className="h-3 w-3" />
+                        </Button>
+                    )}
+                    {!isExpanded && canReject && (
+                        <Button
+                            onClick={handleReject}
+                            disabled={isRejecting}
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0 flex-shrink-0"
+                            title="拒绝执行"
+                            aria-label="拒绝执行"
+                        >
+                            <XCircle className="h-3 w-3" />
                         </Button>
                     )}
                     <Button
@@ -656,6 +644,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                     <>
                                         <Button
                                             onClick={handleExecute}
+                                            disabled={isRejecting}
                                             size="sm"
                                             className="flex items-center gap-1 h-7 text-xs"
                                         >
@@ -666,9 +655,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                             )}
                                             {isFailed ? "重新执行" : reviewNeedsConfirmation ? "确认执行" : "执行"}
                                         </Button>
-                                        {reviewNeedsConfirmation && (
+                                        {canReject && (
                                             <Button
                                                 onClick={handleReject}
+                                                disabled={isRejecting}
                                                 size="sm"
                                                 variant="outline"
                                                 className="flex items-center gap-1 h-7 text-xs"

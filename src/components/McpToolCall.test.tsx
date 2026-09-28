@@ -678,5 +678,51 @@ describe("McpToolCall call_id binding", () => {
         );
 
         expect(await screen.findByText("自动审核中")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "执行" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
+    });
+
+    it.each(["risky", "error"])("should update both actions when a live %s review finishes while the call stays pending", async (verdict) => {
+        const user = userEvent.setup();
+        mockInvokeHandler("get_tool_review", () => null);
+        mockInvokeHandler("reject_mcp_tool_call", () => undefined);
+        noteToolReview(56, { phase: "reviewing", callId: 56 });
+        render(<McpToolCall callId={56} conversationId={8} status="pending" />);
+        await user.click(screen.getByTitle("展开详情"));
+        expect(screen.getByText("自动审核中")).toBeInTheDocument();
+        await act(async () => {
+            noteToolReview(56, { phase: "done", callId: 56, verdict, reason: "需要人工判断" });
+        });
+        expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+        await user.click(screen.getByTitle("收起详情"));
+        expect(screen.getByTitle("执行")).toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: "拒绝执行" }));
+        expect(invoke).toHaveBeenCalledWith("reject_mcp_tool_call", { callId: 56 });
+        expect(invoke).not.toHaveBeenCalledWith("execute_mcp_tool_call", expect.anything());
+        expect(screen.queryByRole("button", { name: "拒绝执行" })).not.toBeInTheDocument();
+    });
+
+    it("should preserve a live decision when the earlier history request returns no review", async () => {
+        let resolveHistory!: (value: null) => void;
+        mockInvokeHandler("get_tool_review", () => new Promise((resolve) => { resolveHistory = resolve; }));
+        render(<McpToolCall callId={57} conversationId={8} status="pending" />);
+        await flushEffects();
+        await act(async () => {
+            noteToolReview(57, { phase: "done", callId: 57, verdict: "error", reason: "模型返回无效 JSON" });
+            resolveHistory(null);
+        });
+        await userEvent.setup().click(screen.getByTitle("展开详情"));
+        expect(screen.getByText(/模型返回无效 JSON/)).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    });
+
+    it("should allow rejection when a pending manual call has no review record", async () => {
+        mockInvokeHandler("get_tool_review", () => null);
+        render(<McpToolCall callId={58} conversationId={8} status="pending" />);
+        expect(screen.getByRole("button", { name: "拒绝执行" })).toBeInTheDocument();
+        await userEvent.setup().click(screen.getByTitle("展开详情"));
+        expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
     });
 });

@@ -1,4 +1,5 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 export type ToolReviewView =
     | { phase: "reviewing"; callId: number }
@@ -48,6 +49,23 @@ function getSnapshot() {
 
 export function useToolReview(callId?: number | null): ToolReviewView | null {
     const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+    useEffect(() => {
+        if (!callId || reviews.has(callId)) return;
+        let cancelled = false;
+        invoke<{ verdict?: string; reason?: string } | null>("get_tool_review", { callId })
+            .then((loaded) => {
+                // A live event is newer than this historical read, even if it is still reviewing.
+                if (cancelled || reviews.has(callId) || !loaded?.verdict) return;
+                noteToolReview(callId, {
+                    phase: "done",
+                    callId,
+                    verdict: loaded.verdict,
+                    reason: loaded.reason?.trim() || "",
+                });
+            })
+            .catch(() => undefined);
+        return () => { cancelled = true; };
+    }, [callId]);
     if (!callId) {
         return null;
     }

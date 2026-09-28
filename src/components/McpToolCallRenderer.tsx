@@ -1,6 +1,7 @@
 import React from "react";
 import McpToolCall from "@/components/McpToolCall";
 import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
+import { useToolReview } from "@/hooks/toolReviewStore";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { ensureBuiltinMcpToolComponentsRegistered } from "@/services/builtinMcpToolComponents";
 import {
@@ -99,10 +100,15 @@ const McpToolCallRenderer: React.FC<McpToolComponentProps> = (props) => {
         ...props,
         currentToolCall: resolveCurrentToolCall(props),
     };
+    const effectiveCallId = enhancedProps.currentToolCall?.call_id
+        ?? enhancedProps.currentToolCall?.id ?? enhancedProps.callId;
+    const review = useToolReview(effectiveCallId);
+    const currentStatus = enhancedProps.currentToolCall?.status ?? props.status;
     const resolvedComponent = mcpToolComponentRegistry.resolve(enhancedProps, selectedComponentId);
     const fallback = renderDefaultMcpToolCall(enhancedProps);
 
-    if (!resolvedComponent) {
+    // Specialized cards do not implement the review confirmation controls.
+    if (!resolvedComponent || (currentStatus === "pending" && review)) {
         return fallback;
     }
 
