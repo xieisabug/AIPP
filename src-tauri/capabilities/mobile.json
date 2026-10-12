@@ -7,11 +7,7 @@
         "iOS"
     ],
     "windows": [
-        "chat_ui",
-        "config",
-        "butler_experiment",
-        "schedule",
-        "sidebar"
+        "chat_ui"
     ],
     "permissions": [
         "core:default",
