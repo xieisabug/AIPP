@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.config import Settings, get_settings
 from app.db import configure_database, init_db
-from app.routes import admin, pull, push, status
+from app.routes import admin, notify, pull, push, status
+from app.services.notify import NotifyHub
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -14,8 +18,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_database(settings)
     init_db(settings)
 
-    app = FastAPI(title="AIPP Sync Server", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.notify_hub.bind_loop(asyncio.get_running_loop())
+        yield
+
+    app = FastAPI(title="AIPP Sync Server", version="0.1.0", lifespan=lifespan)
     app.dependency_overrides[get_settings] = lambda: settings
+    app.state.notify_hub = NotifyHub()
 
     max_body = settings.max_request_body_bytes
 
@@ -36,5 +46,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(status.router)
     app.include_router(push.router)
     app.include_router(pull.router)
+    app.include_router(notify.router)
     app.include_router(admin.router)
     return app

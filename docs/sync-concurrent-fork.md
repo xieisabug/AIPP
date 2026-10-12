@@ -8,4 +8,4 @@ When a remote `conversation.message` **insert** would land in conversation C und
 
 See also: [AIPP-mobile-sync-hostbridge-设计方案.md](./AIPP-mobile-sync-hostbridge-设计方案.md) §4.3.
 
-Deferred: execution lease, SSE notify, full Host Bridge WS/relay/E2EE.
+Deferred: execution lease, full Host Bridge WS/relay/E2EE. (SSE notify: shipped as GET /v1/sync/notify)

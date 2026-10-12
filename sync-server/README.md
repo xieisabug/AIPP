@@ -79,6 +79,25 @@ GET  /v1/admin/devices                     list devices
 POST /v1/admin/devices/{id}/revoke         revoke device
 ```
 
+### Realtime Notify (SSE)
+
+Clients can subscribe to change notifications instead of waiting for the ~45s poll:
+
+```http
+GET /v1/sync/notify?cursor=<last_pulled_cursor>
+Authorization: Bearer <token>
+X-AIPP-Device-ID: <device_id>
+```
+
+Response is `text/event-stream`. When the account cursor advances (after another device's successful push, or when the subscriber is already behind), the server sends:
+
+```text
+event: sync
+data: {"cursor":12,"device_id":"device-a"}
+```
+
+The subscriber should pull immediately, then reconnect with the new cursor. Keepalive comments are sent about every 20s; connections recycle after ~5 minutes. Events from the same `X-AIPP-Device-ID` are skipped so a device is not woken by its own push.
+
 ### Input Validation & Limits
 
 - ID fields (`event_id`, `object_type`, `object_id`, `device_id`) accept `[A-Za-z0-9._:+/=-]`, 1-128 chars. The set includes `+/=` because natural object ids embed standard base64 (`natural:<base64>`).

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -34,6 +35,8 @@ const CLIENT_SCHEMA_VERSION: i64 = 2;
 const SYNC_INTERVAL_SECS: u64 = 45;
 const DEBOUNCE_MS: u64 = 1200;
 const HTTP_TIMEOUT_SECS: u64 = 30;
+const NOTIFY_CONNECT_TIMEOUT_SECS: u64 = 10;
+const NOTIFY_RECONNECT_SECS: u64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -94,12 +97,27 @@ pub struct SaveSyncSettingsRequest {
     token: Option<String>,
 }
 
-#[derive(Default)]
 pub struct SyncState {
     worker_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    notify_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     debounce_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     sync_lock: Mutex<()>,
+    /// Wakes the poll loop early when SSE reports a remote cursor advance.
+    wake: Arc<tokio::sync::Notify>,
     status: Mutex<SyncRuntimeStatus>,
+}
+
+impl Default for SyncState {
+    fn default() -> Self {
+        Self {
+            worker_task: Mutex::new(None),
+            notify_task: Mutex::new(None),
+            debounce_task: Mutex::new(None),
+            sync_lock: Mutex::new(()),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            status: Mutex::new(SyncRuntimeStatus::default()),
+        }
+    }
 }
 
 impl SyncState {
@@ -676,15 +694,33 @@ async fn start_worker(app_handle: AppHandle) {
     }
 
     let app = app_handle.clone();
+    let wake = state.wake.clone();
     *task = Some(tauri::async_runtime::spawn(async move {
         loop {
             if !matches!(load_settings(&app).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
                 break;
             }
             run_sync_once(&app).await;
-            tokio::time::sleep(Duration::from_secs(SYNC_INTERVAL_SECS)).await;
+            // Wait for either the poll interval or an SSE wake (remote push).
+            tokio::select! {
+                _ = wake.notified() => {
+                    debug!("Sync worker woken by notify channel");
+                }
+                _ = tokio::time::sleep(Duration::from_secs(SYNC_INTERVAL_SECS)) => {}
+            }
         }
     }));
+    drop(task);
+
+    {
+        let mut notify_task = state.notify_task.lock().await;
+        if notify_task.is_none() {
+            let notify_app = app_handle.clone();
+            *notify_task = Some(tauri::async_runtime::spawn(async move {
+                run_notify_listener(notify_app).await;
+            }));
+        }
+    }
 
     let mut runtime = state.status.lock().await;
     runtime.running = true;
@@ -695,6 +731,9 @@ async fn start_worker(app_handle: AppHandle) {
 async fn stop_worker(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<SyncState>() {
         if let Some(task) = state.worker_task.lock().await.take() {
+            task.abort();
+        }
+        if let Some(task) = state.notify_task.lock().await.take() {
             task.abort();
         }
         if let Some(task) = state.debounce_task.lock().await.take() {
@@ -1075,6 +1114,110 @@ fn sync_http_client() -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())
+}
+
+fn sync_notify_http_client() -> Result<reqwest::Client, String> {
+    // SSE streams outlive the normal request timeout; only bound connect.
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(NOTIFY_CONNECT_TIMEOUT_SECS))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Subscribe to `GET /v1/sync/notify` and wake the poll worker when the account cursor advances.
+async fn run_notify_listener(app_handle: AppHandle) {
+    loop {
+        if !matches!(load_settings(&app_handle).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
+            break;
+        }
+        match listen_notify_once(&app_handle).await {
+            Ok(()) => {
+                debug!("Sync notify stream ended; reconnecting");
+            }
+            Err(err) => {
+                debug!(error = %err, "Sync notify listener error; will retry");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(NOTIFY_RECONNECT_SECS)).await;
+    }
+}
+
+async fn listen_notify_once(app_handle: &AppHandle) -> Result<(), String> {
+    let settings = load_settings(app_handle)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return Ok(());
+    }
+    let token = settings
+        .token
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "missing sync token".to_string())?;
+    let device_id = {
+        let conn = open_sync_db(app_handle)?;
+        ensure_device_id(&conn)?
+    };
+    let cursor = get_cursor(app_handle).unwrap_or(0);
+    let url = format!(
+        "{}/v1/sync/notify?cursor={}",
+        settings.server_url.trim_end_matches('/'),
+        cursor
+    );
+    let response = sync_notify_http_client()?
+        .get(url)
+        .bearer_auth(token)
+        .header("X-AIPP-Device-ID", &device_id)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| format!("notify connect failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("notify HTTP {}", response.status()));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("notify read failed: {e}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buffer.find("
+
+") {
+            let raw = buffer[..idx].to_string();
+            buffer = buffer[idx + 2..].to_string();
+            if let Some(cursor_hint) = parse_sse_sync_cursor(&raw) {
+                debug!(cursor = cursor_hint, "Sync notify received remote cursor");
+                if let Some(state) = app_handle.try_state::<SyncState>() {
+                    state.wake.notify_one();
+                }
+                // Server recycles after one actionable event; reconnect with fresh cursor.
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_sse_sync_cursor(block: &str) -> Option<i64> {
+    let mut event_name: Option<&str> = None;
+    let mut data_line: Option<&str> = None;
+    for line in block.lines() {
+        if line.starts_with(':') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_name = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_line = Some(rest.trim());
+        }
+    }
+    if event_name != Some("sync") {
+        return None;
+    }
+    let data = data_line?;
+    let value: JsonValue = serde_json::from_str(data).ok()?;
+    value.get("cursor")?.as_i64()
 }
 
 fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
@@ -3004,6 +3147,14 @@ mod tests {
         assert_eq!(SyncMode::from_config("self_hosted"), SyncMode::SelfHosted);
         assert_eq!(SyncMode::from_config("self-hosted"), SyncMode::SelfHosted);
         assert_eq!(SyncMode::from_config(""), SyncMode::Local);
+    }
+
+    #[test]
+    fn parse_sse_sync_cursor_reads_sync_events() {
+        let block = "event: sync\ndata: {\"cursor\":42,\"device_id\":\"d1\"}\n";
+        assert_eq!(parse_sse_sync_cursor(block), Some(42));
+        assert_eq!(parse_sse_sync_cursor(": keepalive\n"), None);
+        assert_eq!(parse_sse_sync_cursor("event: ping\ndata: {\"cursor\":1}\n"), None);
     }
 
     #[test]

@@ -594,3 +594,65 @@ def test_admin_revoke_device_blocks_push(tmp_path) -> None:
     body["events"] = [sample_event("event-2", "conv-2")]
     response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
     assert response.status_code == 403
+
+
+def test_notify_catchup_when_cursor_behind(tmp_path) -> None:
+    client = make_client(tmp_path)
+    push_body = {"device_id": "device-a", "events": [sample_event("event-1", "conv-1")]}
+    assert client.post("/v1/sync/push", headers=auth_headers(), json=push_body).status_code == 200
+
+    with client.stream(
+        "GET",
+        "/v1/sync/notify?cursor=0",
+        headers=auth_headers(device_id="device-b"),
+    ) as response:
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+        body = "".join(response.iter_text())
+
+    assert "event: sync" in body
+    assert '"cursor":1' in body
+
+
+def test_notify_hub_publish_delivers_to_subscriber(tmp_path) -> None:
+    """In-process hub delivers cursor advances to waiters (push → SSE path)."""
+    import asyncio
+
+    from app.services.notify import NotifyHub
+
+    async def exercise() -> None:
+        hub = NotifyHub()
+        hub.bind_loop(asyncio.get_running_loop())
+        queue = await hub.subscribe("acct-a")
+        await hub.publish("acct-a", cursor=7, device_id="device-a")
+        payload = await asyncio.wait_for(queue.get(), timeout=1)
+        assert payload.cursor == 7
+        assert payload.device_id == "device-a"
+        await hub.unsubscribe("acct-a", queue)
+
+    asyncio.run(exercise())
+
+
+def test_push_publishes_notify_for_accepted_events(tmp_path, monkeypatch) -> None:
+    """Successful push fans out to NotifyHub so SSE subscribers can wake."""
+    from app.services.notify import NotifyHub
+
+    calls: list[tuple[str, int, str | None]] = []
+
+    def fake_publish(self, account_id: str, cursor: int, device_id: str | None = None) -> None:
+        calls.append((account_id, cursor, device_id))
+
+    monkeypatch.setattr(NotifyHub, "publish_threadsafe", fake_publish)
+    client = make_client(tmp_path)
+    body = {"device_id": "device-a", "events": [sample_event("event-1", "conv-1")]}
+    response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
+    assert response.status_code == 200
+    assert response.json()["accepted"]
+    assert calls == [("acct-a", 1, "device-a")]
+
+
+
+def test_notify_requires_auth_and_device(tmp_path) -> None:
+    client = make_client(tmp_path)
+    assert client.get("/v1/sync/notify").status_code == 401
+    assert client.get("/v1/sync/notify", headers=auth_headers()).status_code == 400
