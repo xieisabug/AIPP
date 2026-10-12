@@ -7,6 +7,7 @@ mod db;
 mod errors;
 mod external_channels;
 mod feishu;
+mod host_bridge;
 mod mcp;
 mod plugin;
 mod scheduler;

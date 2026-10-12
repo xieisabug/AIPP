@@ -2,6 +2,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import "./App.css";
 import { Toaster } from "./components/ui/sonner.tsx";
+import { usePlatform } from "./hooks/use-platform";
 
 // 按需加载各个窗口，避免一次性打包全部页面导致移动端首屏加载过慢
 const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType<any> }>> = {
@@ -15,10 +16,12 @@ const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType
     artifact_collections: () => import("./windows/ArtifactCollectionsWindow"),
     artifact: () => import("./windows/ArtifactWindow"),
     sidebar: () => import("./windows/SidebarWindow"),
+    mobile_shell: () => import("./windows/MobileShell"),
 };
 
 function App() {
     const [winLabel, setWinLabel] = useState<string>("chat_ui");
+    const platform = usePlatform();
 
     useEffect(() => {
         try {
@@ -43,10 +46,20 @@ function App() {
         };
     }, []);
 
+    // Mobile: host full-client shell (bottom tabs) instead of bare chat_ui.
+    // Desktop behavior unchanged — still renders the native window label.
+    const effectiveLabel = useMemo(() => {
+        // Wait until platform is known; then mobile always uses MobileShell.
+        if (platform === "android" || platform === "ios") {
+            return "mobile_shell";
+        }
+        return winLabel;
+    }, [platform, winLabel]);
+
     const WindowComponent = useMemo(() => {
-        const loader = windowLoaders[winLabel];
+        const loader = windowLoaders[effectiveLabel];
         return loader ? lazy(loader) : null;
-    }, [winLabel]);
+    }, [effectiveLabel]);
 
     const LoadingScreen = () => (
         <div
@@ -79,7 +92,7 @@ function App() {
 
     return (
         <>
-            <Suspense fallback={<LoadingScreen />}>{WindowComponent ? <WindowComponent /> : <div>未知窗口类型: {winLabel}</div>}</Suspense>
+            <Suspense fallback={<LoadingScreen />}>{WindowComponent ? <WindowComponent /> : <div>未知窗口类型: {effectiveLabel}</div>}</Suspense>
             <Toaster richColors />
         </>
     );
