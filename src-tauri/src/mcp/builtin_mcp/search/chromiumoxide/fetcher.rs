@@ -3,6 +3,7 @@ use super::super::engine_manager::SearchEngine;
 use super::super::engines::base::SearchEngineBase;
 use super::super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
 use super::browser_pool::BrowserPool;
+use super::launch_browser_recovering_stale_locks;
 use chromiumoxide_cdp::cdp::browser_protocol::{emulation, network, page as cdp_page};
 use futures::StreamExt;
 use serde::Serialize;
@@ -897,21 +898,31 @@ impl ContentFetcher {
             "Launching Chromiumoxide for fetch"
         );
 
-        let config =
-            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
-
-        let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}): {}",
-                    browser_path.display(),
-                    browser_path_exists,
-                    self.config.headless,
-                    user_data_dir.display(),
-                    e
-                )
-            })?;
+        let headless = self.config.headless;
+        let (browser, mut handler) = launch_browser_recovering_stale_locks(
+            &user_data_dir,
+            "fetch_chromiumoxide",
+            || {
+                let config = builder.clone().build();
+                let browser_path = browser_path.clone();
+                let user_data_dir = user_data_dir.clone();
+                async move {
+                    let config =
+                        config.map_err(|e| format!("Failed to build browser config: {}", e))?;
+                    chromiumoxide::browser::Browser::launch(config).await.map_err(|e| {
+                        format!(
+                            "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}): {}",
+                            browser_path.display(),
+                            browser_path_exists,
+                            headless,
+                            user_data_dir.display(),
+                            e
+                        )
+                    })
+                }
+            },
+        )
+        .await?;
 
         // 启动事件处理器
         tokio::spawn(async move {
@@ -1956,12 +1967,18 @@ impl ContentFetcher {
             }
         }
 
-        let config =
-            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
-
-        let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
-            .await
-            .map_err(|e| format!("Failed to launch browser: {}", e))?;
+        let (browser, mut handler) =
+            launch_browser_recovering_stale_locks(&user_data_dir, "search_chromiumoxide", || {
+                let config = builder.clone().build();
+                async move {
+                    let config =
+                        config.map_err(|e| format!("Failed to build browser config: {}", e))?;
+                    chromiumoxide::browser::Browser::launch(config)
+                        .await
+                        .map_err(|e| format!("Failed to launch browser: {}", e))
+                }
+            })
+            .await?;
 
         // 启动事件处理器
         tokio::spawn(async move {
@@ -2190,12 +2207,18 @@ impl ContentFetcher {
             }
         }
 
-        let config =
-            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
-
-        let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
-            .await
-            .map_err(|e| format!("Failed to launch browser: {}", e))?;
+        let (browser, mut handler) =
+            launch_browser_recovering_stale_locks(&user_data_dir, "kagi_session_search", || {
+                let config = builder.clone().build();
+                async move {
+                    let config =
+                        config.map_err(|e| format!("Failed to build browser config: {}", e))?;
+                    chromiumoxide::browser::Browser::launch(config)
+                        .await
+                        .map_err(|e| format!("Failed to launch browser: {}", e))
+                }
+            })
+            .await?;
 
         // 启动事件处理器
         tokio::spawn(async move {

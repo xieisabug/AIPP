@@ -30,6 +30,7 @@ dependencies = [
  "htmd",
  "image",
  "keyring",
+ "libc",
  "macos-accessibility-client",
  "mime_guess",
  "mockito",

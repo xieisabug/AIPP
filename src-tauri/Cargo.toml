@@ -85,6 +85,9 @@ agent-client-protocol = { version = "2.0.0", features = ["unstable_end_turn_toke
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-accessibility-client = "0.0.1"
 
+[target.'cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))'.dependencies]
+libc = "0.2"
+
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-global-shortcut =  { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
 tauri-plugin-autostart = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }
