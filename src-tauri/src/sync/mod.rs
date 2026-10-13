@@ -1450,6 +1450,8 @@ fn read_local_snapshots(
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut snapshots = Vec::new();
     let mut present_ids = HashSet::new();
+    // 跨库外键（如 message.llm_model_id → llm.model）在本表扫描内缓存连接
+    let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
 
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let mut fields = Map::new();
@@ -1484,11 +1486,19 @@ fn read_local_snapshots(
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
         present_ids.insert(object_id.clone());
 
-        let Some(refs) = build_fk_refs(spec, &raw_values, |object_type, value| {
-            find_object_id(sync_conn, object_type, value)
+        let Some(refs) = build_fk_refs(spec, &raw_values, &mut fields, |object_type, value| {
+            if let Some(sync_id) = find_object_id(sync_conn, object_type, value)? {
+                return Ok(FkLookup::Resolved(sync_id));
+            }
+            // 未入 map：区分「依赖行还在，只是本轮未映射」与「悬空外键」
+            if dependency_row_exists(app_handle, object_type, value, &mut dep_conns)? {
+                Ok(FkLookup::Pending)
+            } else {
+                Ok(FkLookup::Dangling)
+            }
         })?
         else {
-            // 外键引用尚未建立映射（依赖对象未同步）：本轮跳过该行，
+            // 外键指向的依赖行存在但尚未建立映射：本轮跳过该行，
             // 绝不把本地 rowid 作为外键值推送出去。下轮扫描会自然重试。
             debug!(
                 object_type = %spec.object_type,
@@ -1512,28 +1522,76 @@ fn read_local_snapshots(
     Ok((snapshots, present_ids))
 }
 
+/// 外键本地解析结果：区分「已映射 / 依赖未入 map / 悬空」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FkLookup {
+    /// sync_object_map 中已有同步 object_id
+    Resolved(String),
+    /// 依赖行本地存在，但尚未进入 sync_object_map —— 本轮跳过，下轮重试
+    Pending,
+    /// 依赖行本地不存在（悬空外键）—— 按 NULL 处理，避免永久卡住
+    Dangling,
+}
+
 /// 构建一行的外键引用表。
 ///
-/// 返回 `Ok(Some(refs))` 表示所有非空外键都已解析为同步 object_id；
-/// 返回 `Ok(None)` 表示存在无法解析的外键（依赖对象尚未同步），
-/// 调用方必须跳过该行，避免把本地 rowid 作为外键值泄露到 payload 中。
+/// 返回 `Ok(Some(refs))` 表示可推送：已解析的外键写入 refs；悬空外键从
+/// `fields` 置为 NULL 且不进入 refs。
+/// 返回 `Ok(None)` 表示存在「行在但尚未映射」的依赖，调用方必须跳过该行，
+/// 避免把本地 rowid 作为外键值泄露到 payload 中。
 fn build_fk_refs(
     spec: &SyncTableSpec,
     raw_values: &HashMap<String, JsonValue>,
-    mut resolve: impl FnMut(&str, i64) -> Result<Option<String>, String>,
+    fields: &mut Map<String, JsonValue>,
+    mut resolve: impl FnMut(&str, i64) -> Result<FkLookup, String>,
 ) -> Result<Option<Map<String, JsonValue>>, String> {
     let mut refs = Map::new();
     for fk in spec.foreign_keys {
         if let Some(value) = raw_values.get(fk.column).and_then(JsonValue::as_i64) {
             match resolve(fk.object_type, value)? {
-                Some(ref_id) => {
+                FkLookup::Resolved(ref_id) => {
                     refs.insert(fk.column.to_string(), JsonValue::String(ref_id));
                 }
-                None => return Ok(None),
+                FkLookup::Pending => return Ok(None),
+                FkLookup::Dangling => {
+                    // 悬空外键：当作 NULL 推送，不永久卡住同步
+                    fields.insert(fk.column.to_string(), JsonValue::Null);
+                    debug!(
+                        object_type = %spec.object_type,
+                        column = fk.column,
+                        local_fk = value,
+                        target = fk.object_type,
+                        "Omitting dangling foreign key from sync snapshot"
+                    );
+                }
             }
         }
     }
     Ok(Some(refs))
+}
+
+/// 检查外键指向的依赖行是否在本地业务库中真实存在。
+///
+/// 按目标 `db_name` 缓存只读连接；不复用正在扫描的 `conn`，避免与行游标争用借用。
+fn dependency_row_exists(
+    app_handle: &AppHandle,
+    object_type: &str,
+    local_id: i64,
+    dep_conns: &mut HashMap<&'static str, Connection>,
+) -> Result<bool, String> {
+    let Some(dep_spec) = specs().into_iter().find(|s| s.object_type == object_type) else {
+        // 未知 object_type：无法核实行是否存在，按悬空处理以免永久卡住
+        return Ok(false);
+    };
+    if !dep_conns.contains_key(dep_spec.db_name) {
+        let path = get_db_path(app_handle, dep_spec.db_name)?;
+        let conn = open_data_db(&path)?;
+        dep_conns.insert(dep_spec.db_name, conn);
+    }
+    let dep_conn = dep_conns
+        .get(dep_spec.db_name)
+        .expect("dep conn just inserted");
+    row_exists_by_id(dep_conn, &dep_spec, local_id)
 }
 
 /// 用 refs 中的同步 object_id 外键引用覆盖 fields 里的值。
@@ -3643,12 +3701,30 @@ mod tests {
             db_name: "conversation.db",
             table: "message",
             object_type: "conversation.message",
-            columns: &["id", "conversation_id", "parent_id", "content"],
+            columns: &["id", "conversation_id", "parent_id", "content", "llm_model_id"],
             natural_key_columns: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
                 ForeignKeySpec { column: "parent_id", object_type: "conversation.message" },
+                ForeignKeySpec { column: "llm_model_id", object_type: "llm.model" },
+            ],
+            where_clause: None,
+            order_by: "id",
+        }
+    }
+
+    fn assistant_model_spec() -> SyncTableSpec {
+        SyncTableSpec {
+            db_name: "assistant.db",
+            table: "assistant_model",
+            object_type: "assistant.model",
+            columns: &["id", "assistant_id", "provider_id", "model_code", "alias"],
+            natural_key_columns: &[],
+            official_column: None,
+            foreign_keys: &[
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
+                ForeignKeySpec { column: "provider_id", object_type: "llm.provider" },
             ],
             where_clause: None,
             order_by: "id",
@@ -3665,8 +3741,9 @@ mod tests {
             ("parent_id".to_string(), json!(7)),
             ("content".to_string(), json!("hi")),
         ]);
-        let refs = build_fk_refs(&spec, &raw_values, |object_type, value| {
-            Ok(Some(format!("{object_type}-{value}")))
+        let mut fields = Map::new();
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
         })
         .unwrap()
         .expect("all foreign keys resolvable");
@@ -3674,7 +3751,7 @@ mod tests {
         assert_eq!(refs.get("parent_id").unwrap(), &json!("conversation.message-7"));
     }
 
-    /// 任一外键无法解析时返回 None（调用方跳过该行），不产出裸 rowid
+    /// 依赖行存在但尚未映射时返回 None（调用方跳过该行），不产出裸 rowid
     #[test]
     fn fk_refs_return_none_when_dependency_unresolved() {
         let spec = message_spec();
@@ -3683,11 +3760,12 @@ mod tests {
             ("conversation_id".to_string(), json!(3)),
             ("parent_id".to_string(), json!(7)),
         ]);
-        let result = build_fk_refs(&spec, &raw_values, |object_type, _| {
+        let mut fields = Map::new();
+        let result = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, _| {
             if object_type == "conversation.message" {
-                Ok(None)
+                Ok(FkLookup::Pending)
             } else {
-                Ok(Some(format!("{object_type}-x")))
+                Ok(FkLookup::Resolved(format!("{object_type}-x")))
             }
         })
         .unwrap();
@@ -3703,12 +3781,99 @@ mod tests {
             ("conversation_id".to_string(), json!(3)),
             ("parent_id".to_string(), JsonValue::Null),
         ]);
-        let refs = build_fk_refs(&spec, &raw_values, |object_type, value| {
-            Ok(Some(format!("{object_type}-{value}")))
+        let mut fields = Map::new();
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
         })
         .unwrap()
         .expect("null foreign key needs no ref");
         assert!(!refs.contains_key("parent_id"));
+    }
+
+    /// 悬空 llm_model_id：依赖行不存在时按 NULL 处理，仍可产出快照（不永久卡住）
+    #[test]
+    fn fk_refs_dangling_llm_model_id_nulls_field_and_pushes() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(1)),
+            ("conversation_id".to_string(), json!(10)),
+            ("parent_id".to_string(), JsonValue::Null),
+            ("llm_model_id".to_string(), json!(1)),
+            ("content".to_string(), json!("hello")),
+        ]);
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(1)),
+            ("content".to_string(), json!("hello")),
+        ]);
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            match object_type {
+                "conversation" => Ok(FkLookup::Resolved(format!("conv-{value}"))),
+                "llm.model" => Ok(FkLookup::Dangling),
+                other => panic!("unexpected fk target {other}"),
+            }
+        })
+        .unwrap()
+        .expect("dangling llm_model_id must not block snapshot");
+        assert_eq!(refs.get("conversation_id").unwrap(), &json!("conv-10"));
+        assert!(!refs.contains_key("llm_model_id"));
+        assert_eq!(fields.get("llm_model_id").unwrap(), &JsonValue::Null);
+    }
+
+    /// 悬空 provider_id=0：assistant.model 快照不被挡住
+    #[test]
+    fn fk_refs_dangling_provider_id_does_not_block_assistant_model() {
+        let spec = assistant_model_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(1)),
+            ("assistant_id".to_string(), json!(1)),
+            ("provider_id".to_string(), json!(0)),
+            ("model_code".to_string(), json!("")),
+        ]);
+        let mut fields = Map::from_iter([
+            ("assistant_id".to_string(), json!(1)),
+            ("provider_id".to_string(), json!(0)),
+            ("model_code".to_string(), json!("")),
+        ]);
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            match object_type {
+                "assistant" => Ok(FkLookup::Resolved(format!("asst-{value}"))),
+                "llm.provider" => Ok(FkLookup::Dangling),
+                other => panic!("unexpected fk target {other}"),
+            }
+        })
+        .unwrap()
+        .expect("dangling provider_id must not block assistant.model");
+        assert_eq!(refs.get("assistant_id").unwrap(), &json!("asst-1"));
+        assert!(!refs.contains_key("provider_id"));
+        assert_eq!(fields.get("provider_id").unwrap(), &JsonValue::Null);
+    }
+
+    /// 真实「未映射但行存在」的依赖仍跳过（与悬空外键区分）
+    #[test]
+    fn fk_refs_pending_existing_dependency_still_skips() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(2)),
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(5)),
+        ]);
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(5)),
+        ]);
+        let result = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            match object_type {
+                "conversation" => Ok(FkLookup::Resolved(format!("conv-{value}"))),
+                // llm.model id=5 本地存在但尚未写入 sync_object_map
+                "llm.model" => Ok(FkLookup::Pending),
+                other => panic!("unexpected fk target {other}"),
+            }
+        })
+        .unwrap();
+        assert!(result.is_none(), "existing-but-unmapped dependency must still skip");
+        // fields 未被清空（跳过时不应改写为 NULL）
+        assert_eq!(fields.get("llm_model_id").unwrap(), &json!(5));
     }
 
     /// 接收端：refs 完整时外键被改写为本机 local_id
