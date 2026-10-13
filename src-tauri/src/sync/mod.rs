@@ -3311,40 +3311,46 @@ fn save_sync_token(app_handle: &AppHandle, token: &str) -> Result<(), String> {
 }
 
 fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> {
-    // 优先使用 OS keychain（Windows 凭据管理器 / macOS Keychain / Linux Secret Service）。
-    // keychain 不可用（如无 Secret Service 的 headless Linux）时退回文件存储，
-    // 避免整个同步功能在这些平台上不可用。
+    // 与 feishu/config.rs 对齐：优先使用本地文件 master key，保证 Linux（无 Secret
+    // Service / mock keyring）上 encrypt/decrypt 使用同一把持久化密钥。
+    // OS keychain 仅在能真正 round-trip 持久化时使用。
+    if let Some(key) = read_master_key_from_file(app_handle)? {
+        return Ok(key);
+    }
+
     match keyring::Entry::new(KEYRING_SERVICE, KEYRING_MASTER_KEY_USER) {
         Ok(entry) => match entry.get_password() {
-            Ok(encoded) => {
-                let bytes = BASE64
-                    .decode(encoded)
-                    .map_err(|e| format!("OS keychain 中的同步主密钥解码失败: {e}"))?;
-                return bytes
-                    .try_into()
-                    .map_err(|_| "OS keychain 中的同步主密钥长度非法".to_string());
-            }
-            Err(keyring::Error::NoEntry) => {
-                // 旧版本文件存储迁移：读出文件 key → 写入 keychain → 删除文件
-                let path = master_key_file_path(app_handle)?;
-                if path.exists() {
-                    let bytes = std::fs::read(&path).map_err(|e| {
-                        format!("Failed to read secure master key `{}`: {}", path.display(), e)
-                    })?;
-                    let key: [u8; 32] = bytes
-                        .try_into()
-                        .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()))?;
-                    entry
-                        .set_password(&BASE64.encode(key))
-                        .map_err(|e| format!("迁移同步主密钥到 OS keychain 失败: {e}"))?;
-                    let _ = std::fs::remove_file(&path);
+            Ok(encoded) => match decode_master_key_b64(&encoded) {
+                Ok(key) => {
+                    // 可选迁移：把已有 keychain key 落到文件，后续走稳定的 file-first 路径。
+                    if let Err(err) = write_master_key_to_file(app_handle, &key) {
+                        warn!(error = %err, "Failed to mirror OS keychain master key to local file");
+                    }
                     return Ok(key);
                 }
+                Err(err) => {
+                    warn!(error = %err, "OS keychain master key invalid, falling back to file");
+                }
+            },
+            Err(keyring::Error::NoEntry) => {
                 let key: [u8; 32] = rand::random();
-                entry
-                    .set_password(&BASE64.encode(key))
-                    .map_err(|e| format!("写入同步主密钥到 OS keychain 失败: {e}"))?;
-                return Ok(key);
+                match try_persist_master_key_in_keyring(&entry, &key) {
+                    Ok(()) => {
+                        if let Err(err) = write_master_key_to_file(app_handle, &key) {
+                            warn!(
+                                error = %err,
+                                "Keychain persist ok but failed to mirror master key to local file"
+                            );
+                        }
+                        return Ok(key);
+                    }
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            "OS keychain did not persist master key (mock/no backend); using file fallback"
+                        );
+                    }
+                }
             }
             Err(err) => {
                 warn!(error = %err, "OS keychain unavailable, falling back to file-based master key");
@@ -3357,25 +3363,59 @@ fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> 
     get_or_create_master_key_from_file(app_handle)
 }
 
-/// 文件存储的 master key（旧版本格式；仅作为 keychain 不可用时的回退）。
+/// 写入 keychain 后立即 get+decode+compare；mock/无后端 keyring 的 set 看似成功但不持久化，
+/// 必须在此时失败并让调用方退回文件，否则下次 NoEntry 会生成新 key 导致 aead 解密失败。
+fn try_persist_master_key_in_keyring(
+    entry: &keyring::Entry,
+    key: &[u8; 32],
+) -> Result<(), String> {
+    persist_master_key_with_roundtrip_verify(
+        |encoded| {
+            entry
+                .set_password(encoded)
+                .map_err(|e| format!("写入同步主密钥到 OS keychain 失败: {e}"))
+        },
+        || {
+            entry
+                .get_password()
+                .map_err(|e| format!("OS keychain round-trip get 失败: {e}"))
+        },
+        key,
+    )
+}
+
+/// 可单测的 round-trip 校验：set 后立刻 get，解码并与刚生成的 key 比较。
+fn persist_master_key_with_roundtrip_verify(
+    set_password: impl FnOnce(&str) -> Result<(), String>,
+    get_password: impl FnOnce() -> Result<String, String>,
+    key: &[u8; 32],
+) -> Result<(), String> {
+    let encoded = BASE64.encode(key);
+    set_password(&encoded)?;
+    let stored = get_password()?;
+    let stored_key = decode_master_key_b64(&stored)?;
+    if &stored_key != key {
+        return Err("OS keychain round-trip master key mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn decode_master_key_b64(encoded: &str) -> Result<[u8; 32], String> {
+    let bytes = BASE64
+        .decode(encoded.trim())
+        .map_err(|e| format!("同步主密钥解码失败: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| "同步主密钥长度非法".to_string())
+}
+
+/// 文件存储的 master key（稳定回退；与 feishu 的 local-secrets 策略一致）。
 fn get_or_create_master_key_from_file(app_handle: &AppHandle) -> Result<[u8; 32], String> {
-    let path = master_key_file_path(app_handle)?;
-    if path.exists() {
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("Failed to read secure master key `{}`: {}", path.display(), e))?;
-        return bytes
-            .try_into()
-            .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()));
+    if let Some(key) = read_master_key_from_file(app_handle)? {
+        return Ok(key);
     }
     let key: [u8; 32] = rand::random();
-    std::fs::write(&path, key)
-        .map_err(|e| format!("Failed to write secure master key `{}`: {}", path.display(), e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
+    write_master_key_to_file(app_handle, &key)?;
     Ok(key)
 }
 
@@ -3384,6 +3424,57 @@ fn master_key_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let secret_dir = app_dir.join("local-secrets");
     std::fs::create_dir_all(&secret_dir).map_err(|e| e.to_string())?;
     Ok(secret_dir.join(SECURE_MASTER_KEY_FILE))
+}
+
+fn read_master_key_from_file(app_handle: &AppHandle) -> Result<Option<[u8; 32]>, String> {
+    let path = master_key_file_path(app_handle)?;
+    read_master_key_at_path(&path)
+}
+
+fn write_master_key_to_file(app_handle: &AppHandle, key: &[u8; 32]) -> Result<(), String> {
+    let path = master_key_file_path(app_handle)?;
+    write_master_key_at_path(&path, key)
+}
+
+fn read_master_key_at_path(path: &std::path::Path) -> Result<Option<[u8; 32]>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read secure master key `{}`: {}", path.display(), e))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()))?;
+    Ok(Some(key))
+}
+
+fn write_master_key_at_path(path: &std::path::Path, key: &[u8; 32]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, key)
+        .map_err(|e| format!("Failed to write secure master key `{}`: {}", path.display(), e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            format!(
+                "Failed to set secure permissions on master key `{}`: {}",
+                path.display(),
+                e
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn get_or_create_master_key_at_path(path: &std::path::Path) -> Result<[u8; 32], String> {
+    if let Some(key) = read_master_key_at_path(path)? {
+        return Ok(key);
+    }
+    let key: [u8; 32] = rand::random();
+    write_master_key_at_path(path, &key)?;
+    Ok(key)
 }
 
 fn encrypt_secret_with_key(key_bytes: &[u8; 32], plaintext: &str) -> Result<(String, String), String> {
@@ -3443,6 +3534,84 @@ mod tests {
         let (ciphertext, nonce) = encrypt_secret_with_key(&key, "dev-token").unwrap();
         assert_ne!(ciphertext, "dev-token");
         assert_eq!(decrypt_secret_with_key(&key, &ciphertext, &nonce).unwrap(), "dev-token");
+    }
+
+    /// mock keyring：set_password 看似成功，但随后 get 仍 NoEntry（不持久化）。
+    #[test]
+    fn keyring_roundtrip_verify_fails_when_store_does_not_persist() {
+        let key: [u8; 32] = [9; 32];
+        let err = persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()),
+            || Err("NoEntry".to_string()),
+            &key,
+        )
+        .expect_err("non-persisting keyring must fail round-trip verify");
+        assert!(err.contains("round-trip") || err.contains("NoEntry"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn keyring_roundtrip_verify_fails_on_key_mismatch() {
+        let key: [u8; 32] = [3; 32];
+        let other = BASE64.encode([4u8; 32]);
+        let err = persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()),
+            move || Ok(other),
+            &key,
+        )
+        .expect_err("mismatched key must fail verify");
+        assert!(err.contains("mismatch"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn keyring_roundtrip_verify_ok_when_get_returns_same_key() {
+        let key: [u8; 32] = [5; 32];
+        let encoded = BASE64.encode(key);
+        persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()),
+            move || Ok(encoded),
+            &key,
+        )
+        .expect("persisting keyring should pass round-trip verify");
+    }
+
+    /// 模拟「keyring 不持久化 → 退回文件」后，同一文件 key 可稳定 encrypt/decrypt。
+    #[test]
+    fn file_fallback_after_failed_keyring_persist_keeps_encrypt_decrypt_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SECURE_MASTER_KEY_FILE);
+        let key: [u8; 32] = [11; 32];
+
+        let verify_err = persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()), // mock set "succeeds"
+            || Err("NoEntry".to_string()), // mock get fails → not persisted
+            &key,
+        )
+        .expect_err("fake keyring must not look persisted");
+        assert!(!verify_err.is_empty());
+
+        // 失败后走文件路径（与 get_or_create_master_key 的 fallthrough 一致）
+        write_master_key_at_path(&path, &key).unwrap();
+        let loaded = get_or_create_master_key_at_path(&path).unwrap();
+        assert_eq!(loaded, key);
+        let again = get_or_create_master_key_at_path(&path).unwrap();
+        assert_eq!(again, key, "file master key must be stable across calls");
+
+        let (ciphertext, nonce) = encrypt_secret_with_key(&loaded, "sync-token").unwrap();
+        assert_eq!(
+            decrypt_secret_with_key(&again, &ciphertext, &nonce).unwrap(),
+            "sync-token"
+        );
+    }
+
+    #[test]
+    fn file_master_key_create_then_reload_roundtrips_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SECURE_MASTER_KEY_FILE);
+        let key1 = get_or_create_master_key_at_path(&path).unwrap();
+        let key2 = get_or_create_master_key_at_path(&path).unwrap();
+        assert_eq!(key1, key2);
+        let (ciphertext, nonce) = encrypt_secret_with_key(&key1, "hello").unwrap();
+        assert_eq!(decrypt_secret_with_key(&key2, &ciphertext, &nonce).unwrap(), "hello");
     }
 
     #[test]
