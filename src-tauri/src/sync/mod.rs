@@ -1711,6 +1711,14 @@ fn field_as_i64(fields: &Map<String, JsonValue>, key: &str) -> Option<i64> {
     })
 }
 
+fn field_as_string(fields: &Map<String, JsonValue>, key: &str) -> Option<String> {
+    fields.get(key).and_then(|value| match value {
+        JsonValue::String(s) if !s.is_empty() => Some(s.clone()),
+        JsonValue::Null => None,
+        _ => None,
+    })
+}
+
 fn message_sibling_exists(
     conn: &Connection,
     conversation_id: i64,
@@ -1736,20 +1744,112 @@ fn message_sibling_exists(
     Ok(count > 0)
 }
 
-fn conversation_has_any_messages(
+fn generation_group_exists(
+    conn: &Connection,
+    conversation_id: i64,
+    generation_group_id: &str,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let count: i64 = if let Some(exclude_id) = exclude_message_id {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1 AND generation_group_id = ?2 AND id != ?3",
+            params![conversation_id, generation_group_id, exclude_id],
+            |row| row.get(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1 AND generation_group_id = ?2",
+            params![conversation_id, generation_group_id],
+            |row| row.get(0),
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(count > 0)
+}
+
+/// Local has another generation_group that shares `parent_group_id` but is not
+/// `exclude_generation_group_id` (sibling version / concurrent regenerate).
+fn local_sibling_under_parent_group(
+    conn: &Connection,
+    conversation_id: i64,
+    parent_group_id: &str,
+    exclude_generation_group_id: Option<&str>,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1
+               AND parent_group_id = ?2
+               AND (?3 IS NULL OR generation_group_id IS NULL OR generation_group_id != ?3)
+               AND (?4 IS NULL OR id != ?4)",
+            params![
+                conversation_id,
+                parent_group_id,
+                exclude_generation_group_id,
+                exclude_message_id,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(count > 0)
+}
+
+/// Latest finalized tip generation_group_id (prefer response/assistant with finish_time,
+/// else any message with a generation_group_id), newest id wins.
+fn local_tip_generation_group_id(
+    conn: &Connection,
+    conversation_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<Option<String>, String> {
+    let sql = if exclude_message_id.is_some() {
+        "SELECT generation_group_id FROM message
+         WHERE conversation_id = ?1
+           AND generation_group_id IS NOT NULL
+           AND id != ?2
+           AND (message_type NOT IN ('response', 'assistant') OR finish_time IS NOT NULL)
+         ORDER BY id DESC LIMIT 1"
+    } else {
+        "SELECT generation_group_id FROM message
+         WHERE conversation_id = ?1
+           AND generation_group_id IS NOT NULL
+           AND (message_type NOT IN ('response', 'assistant') OR finish_time IS NOT NULL)
+         ORDER BY id DESC LIMIT 1"
+    };
+    if let Some(exclude_id) = exclude_message_id {
+        conn.query_row(sql, params![conversation_id, exclude_id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())
+    } else {
+        conn.query_row(sql, params![conversation_id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn conversation_has_unfinished_response(
     conn: &Connection,
     conversation_id: i64,
     exclude_message_id: Option<i64>,
 ) -> Result<bool, String> {
     let count: i64 = if let Some(exclude_id) = exclude_message_id {
         conn.query_row(
-            "SELECT COUNT(1) FROM message WHERE conversation_id = ?1 AND id != ?2",
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1
+               AND message_type IN ('response', 'assistant')
+               AND finish_time IS NULL
+               AND id != ?2",
             params![conversation_id, exclude_id],
             |row| row.get(0),
         )
     } else {
         conn.query_row(
-            "SELECT COUNT(1) FROM message WHERE conversation_id = ?1",
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1
+               AND message_type IN ('response', 'assistant')
+               AND finish_time IS NULL",
             params![conversation_id],
             |row| row.get(0),
         )
@@ -1758,14 +1858,207 @@ fn conversation_has_any_messages(
     Ok(count > 0)
 }
 
-fn latest_message_id(conn: &Connection, conversation_id: i64) -> Result<Option<i64>, String> {
+/// True when conversation C has at least one mapped message whose sync_id is not
+/// yet in sync_shadow (local continue not confirmed by server).
+fn local_has_unconfirmed_tip(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    conversation_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let mut stmt = data_conn
+        .prepare(
+            "SELECT id FROM message WHERE conversation_id = ?1 ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map(params![conversation_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    for id in ids {
+        if exclude_message_id == Some(id) {
+            continue;
+        }
+        let sync_id: Option<String> = sync_conn
+            .query_row(
+                "SELECT sync_id FROM sync_object_map
+                 WHERE object_type = 'conversation.message' AND local_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(sync_id) = sync_id else {
+            // Mapped on scan; unmapped local rows are still a local tip.
+            return Ok(true);
+        };
+        let shadowed: bool = sync_conn
+            .query_row(
+                "SELECT 1 FROM sync_shadow
+                 WHERE object_type = 'conversation.message' AND object_id = ?1
+                   AND deleted_at IS NULL",
+                params![sync_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        if !shadowed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Last message id that is confirmed in sync_shadow — the common-history tip.
+/// Used as fork_at so C' copies shared history only, not the local divergent tip.
+fn common_history_tip_message_id(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    conversation_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<Option<i64>, String> {
+    let mut stmt = data_conn
+        .prepare(
+            "SELECT id FROM message WHERE conversation_id = ?1 ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map(params![conversation_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut last_common = None;
+    for id in ids {
+        if exclude_message_id == Some(id) {
+            continue;
+        }
+        let sync_id: Option<String> = sync_conn
+            .query_row(
+                "SELECT sync_id FROM sync_object_map
+                 WHERE object_type = 'conversation.message' AND local_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(sync_id) = sync_id else {
+            break;
+        };
+        let shadowed: bool = sync_conn
+            .query_row(
+                "SELECT 1 FROM sync_shadow
+                 WHERE object_type = 'conversation.message' AND object_id = ?1
+                   AND deleted_at IS NULL",
+                params![sync_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        if shadowed {
+            last_common = Some(id);
+        } else {
+            break;
+        }
+    }
+    Ok(last_common)
+}
+
+fn last_message_id_in_generation_group(
+    conn: &Connection,
+    conversation_id: i64,
+    generation_group_id: &str,
+) -> Result<Option<i64>, String> {
     conn.query_row(
-        "SELECT id FROM message WHERE conversation_id = ?1 ORDER BY id DESC LIMIT 1",
-        params![conversation_id],
+        "SELECT id FROM message
+         WHERE conversation_id = ?1 AND generation_group_id = ?2
+         ORDER BY id DESC LIMIT 1",
+        params![conversation_id, generation_group_id],
         |row| row.get(0),
     )
     .optional()
     .map_err(|e| e.to_string())
+}
+
+fn gather_divergence_input(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    field_values: &Map<String, JsonValue>,
+    exclude_message_id: Option<i64>,
+    is_new_insert: bool,
+) -> Result<divergence::DivergenceInput, String> {
+    let conversation_id = field_as_i64(field_values, "conversation_id")
+        .ok_or_else(|| "conversation.message missing conversation_id".to_string())?;
+    let remote_parent_id = field_as_i64(field_values, "parent_id");
+    let remote_generation_group_id = field_as_string(field_values, "generation_group_id");
+    let remote_parent_group_id = field_as_string(field_values, "parent_group_id");
+
+    let sibling_exists_under_parent_id = match remote_parent_id {
+        Some(p) => message_sibling_exists(data_conn, conversation_id, p, exclude_message_id)?,
+        None => false,
+    };
+    let remote_generation_group_already_local = match remote_generation_group_id.as_deref() {
+        Some(g) => generation_group_exists(data_conn, conversation_id, g, exclude_message_id)?,
+        None => false,
+    };
+    let local_has_sibling_under_parent_group = match remote_parent_group_id.as_deref() {
+        Some(pg) => local_sibling_under_parent_group(
+            data_conn,
+            conversation_id,
+            pg,
+            remote_generation_group_id.as_deref(),
+            exclude_message_id,
+        )?,
+        None => false,
+    };
+    let tip_group =
+        local_tip_generation_group_id(data_conn, conversation_id, exclude_message_id)?;
+    let runtime_running =
+        conversation_has_unfinished_response(data_conn, conversation_id, exclude_message_id)?;
+    let unconfirmed_tip =
+        local_has_unconfirmed_tip(data_conn, sync_conn, conversation_id, exclude_message_id)?;
+
+    Ok(divergence::DivergenceInput {
+        is_new_insert,
+        remote_parent_id,
+        remote_generation_group_id,
+        remote_parent_group_id,
+        sibling_exists_under_parent_id,
+        local_has_sibling_under_parent_group,
+        remote_generation_group_already_local,
+        local_tip_generation_group_id: tip_group,
+        local_runtime_running: runtime_running,
+        local_has_unconfirmed_tip: unconfirmed_tip,
+    })
+}
+
+fn resolve_sync_fork_point(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    conversation_id: i64,
+    remote_parent_id: Option<i64>,
+    remote_parent_group_id: Option<&str>,
+    exclude_message_id: Option<i64>,
+) -> Result<Option<i64>, String> {
+    if let Some(p) = remote_parent_id {
+        return Ok(Some(p));
+    }
+    if let Some(pg) = remote_parent_group_id {
+        if let Some(id) = last_message_id_in_generation_group(data_conn, conversation_id, pg)? {
+            return Ok(Some(id));
+        }
+    }
+    let common = common_history_tip_message_id(
+        data_conn,
+        sync_conn,
+        conversation_id,
+        exclude_message_id,
+    )?;
+    Ok(divergence::resolve_fork_at_message_id(None, common))
 }
 
 /// If inserting this remote message into C would diverge, fork C → C' and remap
@@ -1778,27 +2071,19 @@ fn maybe_fork_before_message_insert(
 ) -> Result<(), String> {
     let conversation_id = field_as_i64(field_values, "conversation_id")
         .ok_or_else(|| "conversation.message insert missing conversation_id".to_string())?;
-    let parent_id = field_as_i64(field_values, "parent_id");
-
-    let sibling_exists = match parent_id {
-        Some(p) => message_sibling_exists(data_conn, conversation_id, p, None)?,
-        None => false,
-    };
-    let has_messages = conversation_has_any_messages(data_conn, conversation_id, None)?;
-
-    if !divergence::detect_concurrent_message_divergence(
-        true,
-        parent_id,
-        sibling_exists,
-        has_messages,
-    ) {
+    let input = gather_divergence_input(data_conn, sync_conn, field_values, None, true)?;
+    if !divergence::detect_concurrent_message_divergence(&input) {
         return Ok(());
     }
 
-    let fork_point = match parent_id {
-        Some(p) => Some(p),
-        None => latest_message_id(data_conn, conversation_id)?,
-    };
+    let fork_point = resolve_sync_fork_point(
+        data_conn,
+        sync_conn,
+        conversation_id,
+        input.remote_parent_id,
+        input.remote_parent_group_id.as_deref(),
+        None,
+    )?;
 
     let forked_id = crate::api::conversation_api::fork_conversation_internal(
         app_handle,
@@ -1818,14 +2103,16 @@ fn maybe_fork_before_message_insert(
     debug!(
         original_conversation_id = conversation_id,
         forked_conversation_id = forked_id,
-        parent_id = ?parent_id,
+        fork_point = ?fork_point,
+        remote_parent_id = ?input.remote_parent_id,
+        remote_parent_group_id = ?input.remote_parent_group_id,
         "Sync concurrent divergence: forked conversation for remote message insert"
     );
     Ok(())
 }
 
-/// Conflict path: when remote-wins would overwrite a local tip that already has a
-/// sibling under the same parent, keep local tip and land the server payload on a fork.
+/// Conflict path: when remote-wins would overwrite a local tip that already diverged,
+/// keep local tip and land the server payload on a fork (same §4.3 detection).
 fn try_fork_message_conflict_instead_of_overwrite(
     app_handle: &AppHandle,
     sync_conn: &Connection,
@@ -1860,30 +2147,22 @@ fn try_fork_message_conflict_instead_of_overwrite(
         Some(id) => id,
         None => return Ok(false),
     };
-    let parent_id = field_as_i64(&field_values, "parent_id");
 
-    let sibling_exists = match parent_id {
-        Some(p) => message_sibling_exists(&data_conn, conversation_id, p, local_id)?,
-        None => false,
-    };
-    let has_messages = conversation_has_any_messages(&data_conn, conversation_id, local_id)?;
-
-    // Treat as "would diverge against local tip" when siblings exist (or root into non-empty).
-    // For conflict we always have a map hit (update path), so pass is_new_insert=true only to
-    // reuse the sibling/root heuristic against *other* local messages.
-    if !divergence::detect_concurrent_message_divergence(
-        true,
-        parent_id,
-        sibling_exists,
-        has_messages,
-    ) {
+    // Conflict is an update of an existing sync_id, but we evaluate divergence against
+    // *other* local messages / tip state (exclude the mapped local row).
+    let input = gather_divergence_input(&data_conn, sync_conn, &field_values, local_id, true)?;
+    if !divergence::detect_concurrent_message_divergence(&input) {
         return Ok(false);
     }
 
-    let fork_point = match parent_id {
-        Some(p) => Some(p),
-        None => latest_message_id(&data_conn, conversation_id)?,
-    };
+    let fork_point = resolve_sync_fork_point(
+        &data_conn,
+        sync_conn,
+        conversation_id,
+        input.remote_parent_id,
+        input.remote_parent_group_id.as_deref(),
+        local_id,
+    )?;
 
     let forked_id = crate::api::conversation_api::fork_conversation_internal(
         app_handle,
@@ -1929,6 +2208,7 @@ fn try_fork_message_conflict_instead_of_overwrite(
     debug!(
         original_conversation_id = conversation_id,
         forked_conversation_id = forked_id,
+        fork_point = ?fork_point,
         "Sync message conflict: kept local tip, applied server payload into fork"
     );
     Ok(true)
@@ -3666,43 +3946,211 @@ mod tests {
         }
     }
 
-    #[test]
-    fn concurrent_divergence_sibling_under_same_parent() {
-        assert!(divergence::detect_concurrent_message_divergence(
-            true,
-            Some(42),
-            true,
-            false
-        ));
+    fn message_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                message_type TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                parent_id INTEGER,
+                finish_time TEXT,
+                generation_group_id TEXT,
+                parent_group_id TEXT
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_msg(
+        conn: &Connection,
+        conversation_id: i64,
+        message_type: &str,
+        generation_group_id: Option<&str>,
+        parent_group_id: Option<&str>,
+        parent_id: Option<i64>,
+        finish_time: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO message
+             (conversation_id, message_type, content, parent_id, finish_time, generation_group_id, parent_group_id)
+             VALUES (?1, ?2, 'x', ?3, ?4, ?5, ?6)",
+            params![
+                conversation_id,
+                message_type,
+                parent_id,
+                finish_time,
+                generation_group_id,
+                parent_group_id,
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
     }
 
     #[test]
-    fn concurrent_divergence_no_sibling_is_false() {
-        assert!(!divergence::detect_concurrent_message_divergence(
-            true,
-            Some(42),
-            false,
-            true
-        ));
+    fn concurrent_divergence_regression_nonempty_parent_id_none_no_fork() {
+        // Guarantee: non-empty conversation + parent_id None normal insert must NOT fork
+        // when there is no unconfirmed local tip / runtime / parent_group sibling.
+        let input = divergence::DivergenceInput {
+            is_new_insert: true,
+            ..divergence::DivergenceInput::default()
+        };
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
     }
 
     #[test]
-    fn concurrent_divergence_update_path_not_applicable() {
-        assert!(!divergence::detect_concurrent_message_divergence(
-            false,
-            Some(42),
-            true,
-            true
-        ));
+    fn concurrent_divergence_legacy_parent_id_sibling() {
+        let mut input = divergence::DivergenceInput {
+            is_new_insert: true,
+            remote_parent_id: Some(42),
+            sibling_exists_under_parent_id: true,
+            ..divergence::DivergenceInput::default()
+        };
+        assert!(divergence::detect_concurrent_message_divergence(&input));
+        input.sibling_exists_under_parent_id = false;
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
     }
 
     #[test]
-    fn concurrent_divergence_root_into_nonempty() {
-        assert!(divergence::detect_concurrent_message_divergence(
-            true, None, false, true
-        ));
-        assert!(!divergence::detect_concurrent_message_divergence(
-            true, None, false, false
-        ));
+    fn concurrent_divergence_parent_group_sibling_and_conflict_path_inputs() {
+        let mut input = divergence::DivergenceInput {
+            is_new_insert: true,
+            remote_parent_group_id: Some("pg".into()),
+            remote_generation_group_id: Some("g-remote".into()),
+            local_has_sibling_under_parent_group: true,
+            ..divergence::DivergenceInput::default()
+        };
+        assert!(divergence::detect_concurrent_message_divergence(&input));
+        // Conflict path reuses the same detector.
+        input.local_has_sibling_under_parent_group = false;
+        input.local_tip_generation_group_id = Some("pg".into());
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
+    }
+
+    #[test]
+    fn common_history_fork_point_excludes_unconfirmed_local_tip() {
+        let data = message_test_db();
+        let sync = test_sync_conn();
+        let common = insert_msg(&data, 1, "user", Some("g0"), None, None, Some("t0"));
+        let common_resp = insert_msg(&data, 1, "response", Some("g0"), None, None, Some("t1"));
+        let local_tip = insert_msg(&data, 1, "user", Some("g-local"), None, None, Some("t2"));
+
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES
+             ('conversation.message', 'message', ?1, 'sync-common-u', 'now'),
+             ('conversation.message', 'message', ?2, 'sync-common-r', 'now'),
+             ('conversation.message', 'message', ?3, 'sync-local-tip', 'now')",
+            params![common, common_resp, local_tip],
+        )
+        .unwrap();
+        for sid in ["sync-common-u", "sync-common-r"] {
+            sync.execute(
+                "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+                 VALUES ('conversation.message', ?1, 1, 'h', NULL, 'now')",
+                params![sid],
+            )
+            .unwrap();
+        }
+
+        assert!(local_has_unconfirmed_tip(&data, &sync, 1, None).unwrap());
+        let fork_at = common_history_tip_message_id(&data, &sync, 1, None).unwrap();
+        assert_eq!(fork_at, Some(common_resp));
+        // parent_id None → copy common history only, not local tip
+        assert_eq!(
+            resolve_sync_fork_point(&data, &sync, 1, None, None, None).unwrap(),
+            Some(common_resp)
+        );
+        assert_ne!(fork_at, Some(local_tip));
+    }
+
+    #[test]
+    fn gather_divergence_normal_insert_into_synced_nonempty_does_not_fork() {
+        let data = message_test_db();
+        let sync = test_sync_conn();
+        let m1 = insert_msg(&data, 5, "user", Some("g0"), None, None, Some("t0"));
+        let m2 = insert_msg(&data, 5, "response", Some("g0"), None, None, Some("t1"));
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES
+             ('conversation.message', 'message', ?1, 's1', 'now'),
+             ('conversation.message', 'message', ?2, 's2', 'now')",
+            params![m1, m2],
+        )
+        .unwrap();
+        for sid in ["s1", "s2"] {
+            sync.execute(
+                "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+                 VALUES ('conversation.message', ?1, 1, 'h', NULL, 'now')",
+                params![sid],
+            )
+            .unwrap();
+        }
+
+        let fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(5)),
+            ("parent_id".to_string(), JsonValue::Null),
+            ("generation_group_id".to_string(), json!("g-remote")),
+            ("parent_group_id".to_string(), JsonValue::Null),
+        ]);
+        let input = gather_divergence_input(&data, &sync, &fields, None, true).unwrap();
+        assert!(!input.local_has_unconfirmed_tip);
+        assert!(!input.local_runtime_running);
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
+    }
+
+    #[test]
+    fn gather_divergence_unconfirmed_local_tip_forks_and_schedules_common_history() {
+        let data = message_test_db();
+        let sync = test_sync_conn();
+        let common = insert_msg(&data, 9, "response", Some("g0"), None, None, Some("t0"));
+        let _local = insert_msg(&data, 9, "user", Some("g-local"), None, None, Some("t1"));
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES ('conversation.message', 'message', ?1, 's-common', 'now')",
+            params![common],
+        )
+        .unwrap();
+        sync.execute(
+            "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+             VALUES ('conversation.message', 's-common', 1, 'h', NULL, 'now')",
+            [],
+        )
+        .unwrap();
+
+        let fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(9)),
+            ("parent_id".to_string(), JsonValue::Null),
+            ("content".to_string(), json!("remote")),
+        ]);
+        let input = gather_divergence_input(&data, &sync, &fields, None, true).unwrap();
+        assert!(input.local_has_unconfirmed_tip);
+        assert!(divergence::detect_concurrent_message_divergence(&input));
+        let fork_at = resolve_sync_fork_point(&data, &sync, 9, None, None, None).unwrap();
+        assert_eq!(fork_at, Some(common));
+    }
+
+    #[test]
+    fn after_fork_ensure_object_id_maps_forked_conversation_for_upload() {
+        // Sync-map scheduling contract used by maybe_fork / conflict path:
+        // forked conversation must get a sync_id so scan uploads C'.
+        let sync = test_sync_conn();
+        let forked_local_id = 77_i64;
+        let sync_id = ensure_object_id(&sync, "conversation", "conversation", forked_local_id).unwrap();
+        let mapped: i64 = sync
+            .query_row(
+                "SELECT local_id FROM sync_object_map
+                 WHERE object_type = 'conversation' AND sync_id = ?1",
+                params![sync_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mapped, forked_local_id);
+        // Second call is stable (upload scheduling idempotent).
+        let again = ensure_object_id(&sync, "conversation", "conversation", forked_local_id).unwrap();
+        assert_eq!(sync_id, again);
     }
 }

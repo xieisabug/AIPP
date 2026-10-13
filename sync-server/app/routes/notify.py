@@ -39,14 +39,15 @@ async def notify_stream(
     hub: NotifyHub = Depends(get_notify_hub),
 ) -> StreamingResponse:
     ensure_device(db, auth, device_id)
-    # Snapshot current server cursor before opening the queue so we do not miss
-    # a concurrent push between this read and subscribe.
-    server_cursor = latest_cursor(db, auth.account_id)
     db.commit()
 
     async def event_gen() -> AsyncIterator[str]:
+        # Subscribe first, then (re)read cursor so a push that lands between
+        # subscribe and the read is visible either via the queue or catch-up.
         queue = await hub.subscribe(auth.account_id)
         try:
+            server_cursor = latest_cursor(db, auth.account_id)
+            db.commit()
             # Catch-up: if the client is behind, nudge immediately then end
             # so the client pulls and reconnects with an updated cursor.
             if server_cursor > cursor:
