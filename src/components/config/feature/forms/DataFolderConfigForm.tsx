@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 
@@ -204,6 +205,73 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
     }, [status]);
 
+    const renderSyncStatusRow = useCallback(() => {
+        const items = [
+            { label: "连接状态", value: statusText },
+            { label: "上次同步时间", value: status?.last_sync_at || "尚未同步" },
+            { label: "最近错误", value: status?.last_error || "无" },
+        ];
+        return (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                {items.map((item) => (
+                    <div key={item.label} className="min-w-0 space-y-2">
+                        <div className="font-semibold text-sm text-foreground">{item.label}</div>
+                        <div className="text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap">
+                            {item.value}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        );
+    }, [status?.last_error, status?.last_sync_at, statusText]);
+
+    const renderSyncActionButtons = useCallback(() => {
+        return (
+            <div className="flex flex-wrap items-center gap-2">
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="hover:bg-muted hover:border-border"
+                    disabled={mode !== "self_hosted" || syncing || saving}
+                    onClick={handleSyncNow}
+                >
+                    {syncing ? "同步中..." : "立即同步"}
+                </Button>
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="hover:bg-muted hover:border-border"
+                    disabled={mode !== "self_hosted" || retryingFailed || saving || (status?.failed_outbox_count ?? 0) === 0}
+                    onClick={handleRetryFailed}
+                >
+                    {retryingFailed ? "重试中..." : "重试失败"}
+                </Button>
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="hover:bg-muted hover:border-border"
+                    disabled={
+                        mode !== "self_hosted" || retryingDeadLetters || saving || (status?.dead_letter_count ?? 0) === 0
+                    }
+                    onClick={handleRetryDeadLetters}
+                >
+                    {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
+                </Button>
+            </div>
+        );
+    }, [
+        handleRetryDeadLetters,
+        handleRetryFailed,
+        handleSyncNow,
+        mode,
+        retryingDeadLetters,
+        retryingFailed,
+        saving,
+        status?.dead_letter_count,
+        status?.failed_outbox_count,
+        syncing,
+    ]);
+
     const dataFolderConfig = [
         {
             key: "openDataFolder",
@@ -263,58 +331,19 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             },
         },
         {
-            key: "status",
+            key: "syncStatusRow",
             config: {
-                type: "static" as const,
-                label: "连接状态",
-                value: statusText,
+                type: "custom" as const,
+                label: "",
+                customRender: renderSyncStatusRow,
             },
         },
         {
-            key: "lastSyncAt",
+            key: "syncActions",
             config: {
-                type: "static" as const,
-                label: "上次同步时间",
-                value: status?.last_sync_at || "尚未同步",
-            },
-        },
-        {
-            key: "lastError",
-            config: {
-                type: "static" as const,
-                label: "最近错误",
-                value: status?.last_error || "无",
-            },
-        },
-        {
-            key: "syncNow",
-            config: {
-                type: "button" as const,
-                label: "手动同步",
-                value: syncing ? "同步中..." : "立即同步",
-                disabled: mode !== "self_hosted" || syncing || saving,
-                onClick: handleSyncNow,
-            },
-        },
-        {
-            key: "retryFailed",
-            config: {
-                type: "button" as const,
-                label: "失败重试",
-                value: retryingFailed ? "重试中..." : "重试失败",
-                disabled: mode !== "self_hosted" || retryingFailed || saving || (status?.failed_outbox_count ?? 0) === 0,
-                onClick: handleRetryFailed,
-            },
-        },
-        {
-            key: "retryDeadLetters",
-            config: {
-                type: "button" as const,
-                label: "无法应用的变更",
-                value: retryingDeadLetters ? "重试中..." : "重试无法应用的变更",
-                disabled:
-                    mode !== "self_hosted" || retryingDeadLetters || saving || (status?.dead_letter_count ?? 0) === 0,
-                onClick: handleRetryDeadLetters,
+                type: "custom" as const,
+                label: "同步操作",
+                customRender: renderSyncActionButtons,
             },
         },
         {
