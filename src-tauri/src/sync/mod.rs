@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -21,6 +22,8 @@ use uuid::Uuid;
 use crate::db::get_db_path;
 use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 
+mod divergence;
+
 const FEATURE_CODE: &str = "data_sync";
 const TOKEN_SCOPE: &str = "data_sync";
 const TOKEN_KEY: &str = "token";
@@ -32,6 +35,8 @@ const CLIENT_SCHEMA_VERSION: i64 = 2;
 const SYNC_INTERVAL_SECS: u64 = 45;
 const DEBOUNCE_MS: u64 = 1200;
 const HTTP_TIMEOUT_SECS: u64 = 30;
+const NOTIFY_CONNECT_TIMEOUT_SECS: u64 = 10;
+const NOTIFY_RECONNECT_SECS: u64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -92,12 +97,27 @@ pub struct SaveSyncSettingsRequest {
     token: Option<String>,
 }
 
-#[derive(Default)]
 pub struct SyncState {
     worker_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    notify_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     debounce_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     sync_lock: Mutex<()>,
+    /// Wakes the poll loop early when SSE reports a remote cursor advance.
+    wake: Arc<tokio::sync::Notify>,
     status: Mutex<SyncRuntimeStatus>,
+}
+
+impl Default for SyncState {
+    fn default() -> Self {
+        Self {
+            worker_task: Mutex::new(None),
+            notify_task: Mutex::new(None),
+            debounce_task: Mutex::new(None),
+            sync_lock: Mutex::new(()),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            status: Mutex::new(SyncRuntimeStatus::default()),
+        }
+    }
 }
 
 impl SyncState {
@@ -120,6 +140,11 @@ struct SyncTableSpec {
     object_type: &'static str,
     columns: &'static [&'static str],
     natural_key_columns: &'static [&'static str],
+    /// DB UNIQUE（或种子软身份）列。apply 时按这些列 find-or-update，
+    /// 并将 sync_object_map 重映射为远端 sync_id（远端获胜），避免 UNIQUE 死信。
+    unique_key_columns: &'static [&'static str],
+    /// 无 flag 列的固定种子 local id（如 assistant id=1），使用 official:{type}:{id}。
+    seed_official_ids: &'static [i64],
     /// 官方/内置种子行的标记列（如 is_official / is_builtin）。
     /// 值为真时该行使用确定性 object_id（official:{type}:{local_id}），多端收敛不重复。
     official_column: Option<&'static str>,
@@ -246,6 +271,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.provider",
             columns: &["id", "name", "api_type", "description", "is_official", "is_enabled"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: Some("is_official"),
             foreign_keys: &[],
             where_clause: None,
@@ -257,6 +284,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.provider_config",
             columns: &["id", "name", "llm_provider_id", "value", "append_location", "is_addition"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
             // 白名单：只同步已知不含密钥的配置名。env 类配置（acp_env_vars / acp_env_* 等）
@@ -270,6 +299,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.model",
             columns: &["id", "name", "llm_provider_id", "code", "description", "vision_support", "audio_support", "video_support"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
             where_clause: None,
@@ -281,6 +312,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.model_request_mode_preference",
             columns: &["id", "llm_provider_id", "model_code", "request_mode", "created_time", "updated_time"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
             where_clause: None,
@@ -292,6 +325,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant",
             columns: &["id", "name", "description", "assistant_type", "is_addition", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[1],
             official_column: None,
             foreign_keys: &[],
             where_clause: None,
@@ -303,6 +338,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.prompt",
             columns: &["id", "assistant_id", "prompt", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant" }],
             where_clause: None,
@@ -314,6 +351,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.model",
             columns: &["id", "assistant_id", "provider_id", "model_code", "alias"],
             natural_key_columns: &[],
+            unique_key_columns: &["assistant_id", "provider_id", "model_code"],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
@@ -328,6 +367,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.model_config",
             columns: &["id", "assistant_id", "assistant_model_id", "name", "value", "value_type"],
             natural_key_columns: &[],
+            unique_key_columns: &["assistant_id", "name"],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
@@ -342,6 +383,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server",
             columns: &["id", "name", "description", "transport_type", "url", "timeout", "is_long_running", "is_enabled", "is_builtin", "is_deletable", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: Some("is_builtin"),
             foreign_keys: &[],
             where_clause: None,
@@ -353,6 +396,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server_tool",
             columns: &["id", "server_id", "tool_name", "tool_description", "is_enabled", "is_auto_run", "parameters", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &["server_id", "tool_name"],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
             where_clause: None,
@@ -364,6 +409,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server_resource",
             columns: &["id", "server_id", "resource_uri", "resource_name", "resource_type", "resource_description", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &["server_id", "resource_uri"],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
             where_clause: None,
@@ -375,6 +422,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server_prompt",
             columns: &["id", "server_id", "prompt_name", "prompt_description", "is_enabled", "arguments", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &["server_id", "prompt_name"],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
             where_clause: None,
@@ -386,6 +435,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.mcp_config",
             columns: &["id", "assistant_id", "mcp_server_id", "is_enabled", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &["assistant_id", "mcp_server_id"],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
@@ -400,6 +451,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "assistant.mcp_tool_config",
             columns: &["id", "assistant_id", "mcp_tool_id", "is_enabled", "is_auto_run", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &["assistant_id", "mcp_tool_id"],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
@@ -414,6 +467,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation",
             columns: &["id", "name", "assistant_id", "created_time", "updated_time", "conversation_kind", "parent_butler_conversation_id", "source_task_title", "is_hidden_from_normal_chat_list", "channel_source", "butler_task_status", "butler_task_summary", "butler_task_finalized_at"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
@@ -428,6 +483,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.message",
             columns: &["id", "conversation_id", "message_type", "content", "llm_model_id", "created_time", "token_count", "input_token_count", "output_token_count", "parent_id", "start_time", "finish_time", "llm_model_name", "generation_group_id", "parent_group_id", "tool_calls_json", "metadata_json", "first_token_time", "ttft_ms"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
@@ -443,6 +500,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.message_attachment",
             columns: &["id", "message_id", "attachment_type", "attachment_url", "attachment_hash", "attachment_content", "use_vector", "token_count"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "message_id", object_type: "conversation.message" }],
             where_clause: None,
@@ -454,6 +513,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.summary",
             columns: &["id", "conversation_id", "summary", "user_intent", "key_outcomes", "created_time"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation" }],
             where_clause: None,
@@ -465,6 +526,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "conversation.todo",
             columns: &["id", "conversation_id", "content", "status", "active_form", "sort_order", "created_time", "updated_time"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation" }],
             where_clause: None,
@@ -476,6 +539,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "system.feature_config",
             columns: &["id", "feature_code", "key", "value", "data_type", "description"],
             natural_key_columns: &["feature_code", "key"],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[],
             where_clause: Some("feature_code != 'data_sync'"),
@@ -487,6 +552,8 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "artifacts.collection",
             columns: &["id", "name", "icon", "description", "artifact_type", "code", "tags", "created_time", "last_used_time", "use_count", "db_id", "assistant_id"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant" }],
             where_clause: None,
@@ -674,15 +741,33 @@ async fn start_worker(app_handle: AppHandle) {
     }
 
     let app = app_handle.clone();
+    let wake = state.wake.clone();
     *task = Some(tauri::async_runtime::spawn(async move {
         loop {
             if !matches!(load_settings(&app).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
                 break;
             }
             run_sync_once(&app).await;
-            tokio::time::sleep(Duration::from_secs(SYNC_INTERVAL_SECS)).await;
+            // Wait for either the poll interval or an SSE wake (remote push).
+            tokio::select! {
+                _ = wake.notified() => {
+                    debug!("Sync worker woken by notify channel");
+                }
+                _ = tokio::time::sleep(Duration::from_secs(SYNC_INTERVAL_SECS)) => {}
+            }
         }
     }));
+    drop(task);
+
+    {
+        let mut notify_task = state.notify_task.lock().await;
+        if notify_task.is_none() {
+            let notify_app = app_handle.clone();
+            *notify_task = Some(tauri::async_runtime::spawn(async move {
+                run_notify_listener(notify_app).await;
+            }));
+        }
+    }
 
     let mut runtime = state.status.lock().await;
     runtime.running = true;
@@ -693,6 +778,9 @@ async fn start_worker(app_handle: AppHandle) {
 async fn stop_worker(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<SyncState>() {
         if let Some(task) = state.worker_task.lock().await.take() {
+            task.abort();
+        }
+        if let Some(task) = state.notify_task.lock().await.take() {
             task.abort();
         }
         if let Some(task) = state.debounce_task.lock().await.take() {
@@ -1075,6 +1163,110 @@ fn sync_http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+fn sync_notify_http_client() -> Result<reqwest::Client, String> {
+    // SSE streams outlive the normal request timeout; only bound connect.
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(NOTIFY_CONNECT_TIMEOUT_SECS))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Subscribe to `GET /v1/sync/notify` and wake the poll worker when the account cursor advances.
+async fn run_notify_listener(app_handle: AppHandle) {
+    loop {
+        if !matches!(load_settings(&app_handle).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
+            break;
+        }
+        match listen_notify_once(&app_handle).await {
+            Ok(()) => {
+                debug!("Sync notify stream ended; reconnecting");
+            }
+            Err(err) => {
+                debug!(error = %err, "Sync notify listener error; will retry");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(NOTIFY_RECONNECT_SECS)).await;
+    }
+}
+
+async fn listen_notify_once(app_handle: &AppHandle) -> Result<(), String> {
+    let settings = load_settings(app_handle)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return Ok(());
+    }
+    let token = settings
+        .token
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "missing sync token".to_string())?;
+    let device_id = {
+        let conn = open_sync_db(app_handle)?;
+        ensure_device_id(&conn)?
+    };
+    let cursor = get_cursor(app_handle).unwrap_or(0);
+    let url = format!(
+        "{}/v1/sync/notify?cursor={}",
+        settings.server_url.trim_end_matches('/'),
+        cursor
+    );
+    let response = sync_notify_http_client()?
+        .get(url)
+        .bearer_auth(token)
+        .header("X-AIPP-Device-ID", &device_id)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .map_err(|e| format!("notify connect failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("notify HTTP {}", response.status()));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("notify read failed: {e}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buffer.find("
+
+") {
+            let raw = buffer[..idx].to_string();
+            buffer = buffer[idx + 2..].to_string();
+            if let Some(cursor_hint) = parse_sse_sync_cursor(&raw) {
+                debug!(cursor = cursor_hint, "Sync notify received remote cursor");
+                if let Some(state) = app_handle.try_state::<SyncState>() {
+                    state.wake.notify_one();
+                }
+                // Server recycles after one actionable event; reconnect with fresh cursor.
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_sse_sync_cursor(block: &str) -> Option<i64> {
+    let mut event_name: Option<&str> = None;
+    let mut data_line: Option<&str> = None;
+    for line in block.lines() {
+        if line.starts_with(':') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_name = Some(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_line = Some(rest.trim());
+        }
+    }
+    if event_name != Some("sync") {
+        return None;
+    }
+    let data = data_line?;
+    let value: JsonValue = serde_json::from_str(data).ok()?;
+    value.get("cursor")?.as_i64()
+}
+
 fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
     ensure_sync_db(app_handle)?;
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
@@ -1305,6 +1497,8 @@ fn read_local_snapshots(
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut snapshots = Vec::new();
     let mut present_ids = HashSet::new();
+    // 跨库外键（如 message.llm_model_id → llm.model）在本表扫描内缓存连接
+    let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
 
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let mut fields = Map::new();
@@ -1322,16 +1516,23 @@ fn read_local_snapshots(
         }
 
         let local_id = local_id.ok_or_else(|| format!("{} row missing id", spec.table))?;
-        let is_official_row = spec
-            .official_column
-            .and_then(|column| raw_values.get(column))
-            .and_then(JsonValue::as_i64)
-            .is_some_and(|value| value != 0);
+        let is_official_row = spec.seed_official_ids.contains(&local_id)
+            || spec
+                .official_column
+                .and_then(|column| raw_values.get(column))
+                .and_then(JsonValue::as_i64)
+                .is_some_and(|value| value != 0);
         let object_id = if !spec.natural_key_columns.is_empty() {
             natural_object_id(spec, &raw_values)?
         } else if is_official_row {
             // 官方/内置种子行：确定性 object_id，各设备对同一内置行生成相同标识
             upsert_official_object_map(sync_conn, spec.object_type, spec.table, local_id)?
+        } else if let Some(child_id) =
+            try_deterministic_child_object_id(sync_conn, spec, &raw_values)?
+        {
+            // 内置父行下的子配置（tool/resource/prompt/model…）：确定性 id，避免多端各推 UUID
+            remap_sync_object_map(sync_conn, spec.object_type, spec.table, local_id, &child_id)?;
+            child_id
         } else {
             ensure_object_id(sync_conn, spec.object_type, spec.table, local_id)?
         };
@@ -1339,11 +1540,19 @@ fn read_local_snapshots(
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
         present_ids.insert(object_id.clone());
 
-        let Some(refs) = build_fk_refs(spec, &raw_values, |object_type, value| {
-            find_object_id(sync_conn, object_type, value)
+        let Some(refs) = build_fk_refs(spec, &raw_values, &mut fields, |object_type, value| {
+            if let Some(sync_id) = find_object_id(sync_conn, object_type, value)? {
+                return Ok(FkLookup::Resolved(sync_id));
+            }
+            // 未入 map：区分「依赖行还在，只是本轮未映射」与「悬空外键」
+            if dependency_row_exists(app_handle, object_type, value, &mut dep_conns)? {
+                Ok(FkLookup::Pending)
+            } else {
+                Ok(FkLookup::Dangling)
+            }
         })?
         else {
-            // 外键引用尚未建立映射（依赖对象未同步）：本轮跳过该行，
+            // 外键指向的依赖行存在但尚未建立映射：本轮跳过该行，
             // 绝不把本地 rowid 作为外键值推送出去。下轮扫描会自然重试。
             debug!(
                 object_type = %spec.object_type,
@@ -1367,28 +1576,85 @@ fn read_local_snapshots(
     Ok((snapshots, present_ids))
 }
 
+/// 外键本地解析结果：区分「已映射 / 依赖未入 map / 悬空」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FkLookup {
+    /// sync_object_map 中已有同步 object_id
+    Resolved(String),
+    /// 依赖行本地存在，但尚未进入 sync_object_map —— 本轮跳过，下轮重试
+    Pending,
+    /// 依赖行本地不存在（悬空外键）—— 按 NULL 处理，避免永久卡住
+    Dangling,
+}
+
 /// 构建一行的外键引用表。
 ///
-/// 返回 `Ok(Some(refs))` 表示所有非空外键都已解析为同步 object_id；
-/// 返回 `Ok(None)` 表示存在无法解析的外键（依赖对象尚未同步），
-/// 调用方必须跳过该行，避免把本地 rowid 作为外键值泄露到 payload 中。
+/// 返回 `Ok(Some(refs))` 表示可推送：已解析的外键写入 refs；悬空外键从
+/// `fields` 置为 NULL 且不进入 refs。
+/// 返回 `Ok(None)` 表示存在「行在但尚未映射」的依赖，调用方必须跳过该行，
+/// 避免把本地 rowid 作为外键值泄露到 payload 中。
 fn build_fk_refs(
     spec: &SyncTableSpec,
     raw_values: &HashMap<String, JsonValue>,
-    mut resolve: impl FnMut(&str, i64) -> Result<Option<String>, String>,
+    fields: &mut Map<String, JsonValue>,
+    mut resolve: impl FnMut(&str, i64) -> Result<FkLookup, String>,
 ) -> Result<Option<Map<String, JsonValue>>, String> {
     let mut refs = Map::new();
     for fk in spec.foreign_keys {
         if let Some(value) = raw_values.get(fk.column).and_then(JsonValue::as_i64) {
+            // provider_id=0 是「未选 provider」哨兵，不是真实 llm.provider 行；保留 0，不进 refs。
+            if is_provider_id_unset_sentinel(fk, value) {
+                fields.insert(fk.column.to_string(), JsonValue::Number(0.into()));
+                continue;
+            }
             match resolve(fk.object_type, value)? {
-                Some(ref_id) => {
+                FkLookup::Resolved(ref_id) => {
                     refs.insert(fk.column.to_string(), JsonValue::String(ref_id));
                 }
-                None => return Ok(None),
+                FkLookup::Pending => return Ok(None),
+                FkLookup::Dangling => {
+                    // 悬空外键：当作 NULL 推送，不永久卡住同步
+                    fields.insert(fk.column.to_string(), JsonValue::Null);
+                    debug!(
+                        object_type = %spec.object_type,
+                        column = fk.column,
+                        local_fk = value,
+                        target = fk.object_type,
+                        "Omitting dangling foreign key from sync snapshot"
+                    );
+                }
             }
         }
     }
     Ok(Some(refs))
+}
+
+fn is_provider_id_unset_sentinel(fk: &ForeignKeySpec, value: i64) -> bool {
+    value == 0 && fk.column == "provider_id" && fk.object_type == "llm.provider"
+}
+
+/// 检查外键指向的依赖行是否在本地业务库中真实存在。
+///
+/// 按目标 `db_name` 缓存只读连接；不复用正在扫描的 `conn`，避免与行游标争用借用。
+fn dependency_row_exists(
+    app_handle: &AppHandle,
+    object_type: &str,
+    local_id: i64,
+    dep_conns: &mut HashMap<&'static str, Connection>,
+) -> Result<bool, String> {
+    let Some(dep_spec) = specs().into_iter().find(|s| s.object_type == object_type) else {
+        // 未知 object_type：无法核实行是否存在，按悬空处理以免永久卡住
+        return Ok(false);
+    };
+    if !dep_conns.contains_key(dep_spec.db_name) {
+        let path = get_db_path(app_handle, dep_spec.db_name)?;
+        let conn = open_data_db(&path)?;
+        dep_conns.insert(dep_spec.db_name, conn);
+    }
+    let dep_conn = dep_conns
+        .get(dep_spec.db_name)
+        .expect("dep conn just inserted");
+    row_exists_by_id(dep_conn, &dep_spec, local_id)
 }
 
 /// 用 refs 中的同步 object_id 外键引用覆盖 fields 里的值。
@@ -1410,6 +1676,20 @@ fn resolve_remote_foreign_keys(
                 )
             })?;
             field_values.insert(fk.column.to_string(), JsonValue::Number(local_id.into()));
+        } else if is_provider_id_unset_sentinel(fk, 0) {
+            // 哨兵列：refs 缺失时保留 0；旧客户端推上来的 NULL 也回落为 0（NOT NULL 列）
+            let keep_zero = field_values
+                .get(fk.column)
+                .map(|v| v.is_null() || v.as_i64() == Some(0))
+                .unwrap_or(true);
+            if keep_zero {
+                field_values.insert(fk.column.to_string(), JsonValue::Number(0.into()));
+            } else if field_values.get(fk.column).and_then(JsonValue::as_i64).is_some() {
+                return Err(format!(
+                    "远端变更缺少外键引用: {}.{}（refs 缺失，拒绝写入原始本地 id）",
+                    spec.object_type, fk.column
+                ));
+            }
         } else if field_values
             .get(fk.column)
             .and_then(JsonValue::as_i64)
@@ -1542,16 +1822,541 @@ fn apply_change(
         } else {
             insert_row_with_id(&conn, &spec, official_id, &field_values)?;
         }
-        save_object_map(sync_conn, &change.object_type, spec.table, official_id, &change.object_id)?;
+        remap_sync_object_map(sync_conn, &change.object_type, spec.table, official_id, &change.object_id)?;
     } else if !spec.natural_key_columns.is_empty() {
         upsert_natural_row(&conn, &spec, &field_values)?;
+    } else if !spec.unique_key_columns.is_empty() {
+        // UNIQUE / 种子软身份：合并到已有行，远端 sync_id 获胜，避免 UNIQUE 死信
+        upsert_by_unique_key(sync_conn, &conn, &spec, &change.object_id, &field_values)?;
     } else {
-        let new_id = insert_row(&conn, &spec, &field_values)?;
-        save_object_map(sync_conn, &change.object_type, spec.table, new_id, &change.object_id)?;
+        // New insert: conversation.message may need concurrent-continue auto-fork.
+        if change.object_type == "conversation.message" {
+            maybe_fork_before_message_insert(app_handle, sync_conn, &conn, &mut field_values)?;
+        }
+        match insert_row(&conn, &spec, &field_values) {
+            Ok(new_id) => {
+                remap_sync_object_map(sync_conn, &change.object_type, spec.table, new_id, &change.object_id)?;
+            }
+            Err(err) if is_unique_constraint_error(&err) && !spec.unique_key_columns.is_empty() => {
+                upsert_by_unique_key(sync_conn, &conn, &spec, &change.object_id, &field_values)?;
+            }
+            Err(err) => return Err(err),
+        }
     }
 
     upsert_shadow_from_remote(sync_conn, change)?;
     Ok(())
+}
+
+fn field_as_i64(fields: &Map<String, JsonValue>, key: &str) -> Option<i64> {
+    fields.get(key).and_then(|value| match value {
+        JsonValue::Number(n) => n.as_i64(),
+        JsonValue::Null => None,
+        _ => None,
+    })
+}
+
+fn field_as_string(fields: &Map<String, JsonValue>, key: &str) -> Option<String> {
+    fields.get(key).and_then(|value| match value {
+        JsonValue::String(s) if !s.is_empty() => Some(s.clone()),
+        JsonValue::Null => None,
+        _ => None,
+    })
+}
+
+fn message_sibling_exists(
+    conn: &Connection,
+    conversation_id: i64,
+    parent_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let count: i64 = if let Some(exclude_id) = exclude_message_id {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1 AND parent_id = ?2 AND id != ?3",
+            params![conversation_id, parent_id, exclude_id],
+            |row| row.get(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1 AND parent_id = ?2",
+            params![conversation_id, parent_id],
+            |row| row.get(0),
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(count > 0)
+}
+
+fn generation_group_exists(
+    conn: &Connection,
+    conversation_id: i64,
+    generation_group_id: &str,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let count: i64 = if let Some(exclude_id) = exclude_message_id {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1 AND generation_group_id = ?2 AND id != ?3",
+            params![conversation_id, generation_group_id, exclude_id],
+            |row| row.get(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1 AND generation_group_id = ?2",
+            params![conversation_id, generation_group_id],
+            |row| row.get(0),
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(count > 0)
+}
+
+/// Local has another generation_group that shares `parent_group_id` but is not
+/// `exclude_generation_group_id` (sibling version / concurrent regenerate).
+fn local_sibling_under_parent_group(
+    conn: &Connection,
+    conversation_id: i64,
+    parent_group_id: &str,
+    exclude_generation_group_id: Option<&str>,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1
+               AND parent_group_id = ?2
+               AND (?3 IS NULL OR generation_group_id IS NULL OR generation_group_id != ?3)
+               AND (?4 IS NULL OR id != ?4)",
+            params![
+                conversation_id,
+                parent_group_id,
+                exclude_generation_group_id,
+                exclude_message_id,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(count > 0)
+}
+
+/// Latest finalized tip generation_group_id (prefer response/assistant with finish_time,
+/// else any message with a generation_group_id), newest id wins.
+fn local_tip_generation_group_id(
+    conn: &Connection,
+    conversation_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<Option<String>, String> {
+    let sql = if exclude_message_id.is_some() {
+        "SELECT generation_group_id FROM message
+         WHERE conversation_id = ?1
+           AND generation_group_id IS NOT NULL
+           AND id != ?2
+           AND (message_type NOT IN ('response', 'assistant') OR finish_time IS NOT NULL)
+         ORDER BY id DESC LIMIT 1"
+    } else {
+        "SELECT generation_group_id FROM message
+         WHERE conversation_id = ?1
+           AND generation_group_id IS NOT NULL
+           AND (message_type NOT IN ('response', 'assistant') OR finish_time IS NOT NULL)
+         ORDER BY id DESC LIMIT 1"
+    };
+    if let Some(exclude_id) = exclude_message_id {
+        conn.query_row(sql, params![conversation_id, exclude_id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())
+    } else {
+        conn.query_row(sql, params![conversation_id], |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn conversation_has_unfinished_response(
+    conn: &Connection,
+    conversation_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let count: i64 = if let Some(exclude_id) = exclude_message_id {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1
+               AND message_type IN ('response', 'assistant')
+               AND finish_time IS NULL
+               AND id != ?2",
+            params![conversation_id, exclude_id],
+            |row| row.get(0),
+        )
+    } else {
+        conn.query_row(
+            "SELECT COUNT(1) FROM message
+             WHERE conversation_id = ?1
+               AND message_type IN ('response', 'assistant')
+               AND finish_time IS NULL",
+            params![conversation_id],
+            |row| row.get(0),
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(count > 0)
+}
+
+/// True when conversation C has at least one mapped message whose sync_id is not
+/// yet in sync_shadow (local continue not confirmed by server).
+fn local_has_unconfirmed_tip(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    conversation_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<bool, String> {
+    let mut stmt = data_conn
+        .prepare(
+            "SELECT id FROM message WHERE conversation_id = ?1 ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map(params![conversation_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    for id in ids {
+        if exclude_message_id == Some(id) {
+            continue;
+        }
+        let sync_id: Option<String> = sync_conn
+            .query_row(
+                "SELECT sync_id FROM sync_object_map
+                 WHERE object_type = 'conversation.message' AND local_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(sync_id) = sync_id else {
+            // Mapped on scan; unmapped local rows are still a local tip.
+            return Ok(true);
+        };
+        let shadowed: bool = sync_conn
+            .query_row(
+                "SELECT 1 FROM sync_shadow
+                 WHERE object_type = 'conversation.message' AND object_id = ?1
+                   AND deleted_at IS NULL",
+                params![sync_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        if !shadowed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Last message id that is confirmed in sync_shadow — the common-history tip.
+/// Used as fork_at so C' copies shared history only, not the local divergent tip.
+fn common_history_tip_message_id(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    conversation_id: i64,
+    exclude_message_id: Option<i64>,
+) -> Result<Option<i64>, String> {
+    let mut stmt = data_conn
+        .prepare(
+            "SELECT id FROM message WHERE conversation_id = ?1 ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map(params![conversation_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut last_common = None;
+    for id in ids {
+        if exclude_message_id == Some(id) {
+            continue;
+        }
+        let sync_id: Option<String> = sync_conn
+            .query_row(
+                "SELECT sync_id FROM sync_object_map
+                 WHERE object_type = 'conversation.message' AND local_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(sync_id) = sync_id else {
+            break;
+        };
+        let shadowed: bool = sync_conn
+            .query_row(
+                "SELECT 1 FROM sync_shadow
+                 WHERE object_type = 'conversation.message' AND object_id = ?1
+                   AND deleted_at IS NULL",
+                params![sync_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        if shadowed {
+            last_common = Some(id);
+        } else {
+            break;
+        }
+    }
+    Ok(last_common)
+}
+
+fn last_message_id_in_generation_group(
+    conn: &Connection,
+    conversation_id: i64,
+    generation_group_id: &str,
+) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT id FROM message
+         WHERE conversation_id = ?1 AND generation_group_id = ?2
+         ORDER BY id DESC LIMIT 1",
+        params![conversation_id, generation_group_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn gather_divergence_input(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    field_values: &Map<String, JsonValue>,
+    exclude_message_id: Option<i64>,
+    is_new_insert: bool,
+) -> Result<divergence::DivergenceInput, String> {
+    let conversation_id = field_as_i64(field_values, "conversation_id")
+        .ok_or_else(|| "conversation.message missing conversation_id".to_string())?;
+    let remote_parent_id = field_as_i64(field_values, "parent_id");
+    let remote_generation_group_id = field_as_string(field_values, "generation_group_id");
+    let remote_parent_group_id = field_as_string(field_values, "parent_group_id");
+
+    let sibling_exists_under_parent_id = match remote_parent_id {
+        Some(p) => message_sibling_exists(data_conn, conversation_id, p, exclude_message_id)?,
+        None => false,
+    };
+    let remote_generation_group_already_local = match remote_generation_group_id.as_deref() {
+        Some(g) => generation_group_exists(data_conn, conversation_id, g, exclude_message_id)?,
+        None => false,
+    };
+    let local_has_sibling_under_parent_group = match remote_parent_group_id.as_deref() {
+        Some(pg) => local_sibling_under_parent_group(
+            data_conn,
+            conversation_id,
+            pg,
+            remote_generation_group_id.as_deref(),
+            exclude_message_id,
+        )?,
+        None => false,
+    };
+    let tip_group =
+        local_tip_generation_group_id(data_conn, conversation_id, exclude_message_id)?;
+    let runtime_running =
+        conversation_has_unfinished_response(data_conn, conversation_id, exclude_message_id)?;
+    let unconfirmed_tip =
+        local_has_unconfirmed_tip(data_conn, sync_conn, conversation_id, exclude_message_id)?;
+
+    Ok(divergence::DivergenceInput {
+        is_new_insert,
+        remote_parent_id,
+        remote_generation_group_id,
+        remote_parent_group_id,
+        sibling_exists_under_parent_id,
+        local_has_sibling_under_parent_group,
+        remote_generation_group_already_local,
+        local_tip_generation_group_id: tip_group,
+        local_runtime_running: runtime_running,
+        local_has_unconfirmed_tip: unconfirmed_tip,
+    })
+}
+
+fn resolve_sync_fork_point(
+    data_conn: &Connection,
+    sync_conn: &Connection,
+    conversation_id: i64,
+    remote_parent_id: Option<i64>,
+    remote_parent_group_id: Option<&str>,
+    exclude_message_id: Option<i64>,
+) -> Result<Option<i64>, String> {
+    if let Some(p) = remote_parent_id {
+        return Ok(Some(p));
+    }
+    if let Some(pg) = remote_parent_group_id {
+        if let Some(id) = last_message_id_in_generation_group(data_conn, conversation_id, pg)? {
+            return Ok(Some(id));
+        }
+    }
+    let common = common_history_tip_message_id(
+        data_conn,
+        sync_conn,
+        conversation_id,
+        exclude_message_id,
+    )?;
+    Ok(divergence::resolve_fork_at_message_id(None, common))
+}
+
+/// If inserting this remote message into C would diverge, fork C → C' and remap
+/// `conversation_id` in `field_values` to C' so the insert lands on the fork.
+fn maybe_fork_before_message_insert(
+    app_handle: &AppHandle,
+    sync_conn: &Connection,
+    data_conn: &Connection,
+    field_values: &mut Map<String, JsonValue>,
+) -> Result<(), String> {
+    let conversation_id = field_as_i64(field_values, "conversation_id")
+        .ok_or_else(|| "conversation.message insert missing conversation_id".to_string())?;
+    let input = gather_divergence_input(data_conn, sync_conn, field_values, None, true)?;
+    if !divergence::detect_concurrent_message_divergence(&input) {
+        return Ok(());
+    }
+
+    let fork_point = resolve_sync_fork_point(
+        data_conn,
+        sync_conn,
+        conversation_id,
+        input.remote_parent_id,
+        input.remote_parent_group_id.as_deref(),
+        None,
+    )?;
+
+    let forked_id = crate::api::conversation_api::fork_conversation_internal(
+        app_handle,
+        conversation_id,
+        fork_point,
+        crate::api::conversation_api::ForkNameStyle::SyncDivergence,
+        false,
+    )?;
+
+    // Ensure the forked conversation has a sync_id so subsequent local scan uploads C'.
+    let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
+    field_values.insert(
+        "conversation_id".to_string(),
+        JsonValue::Number(forked_id.into()),
+    );
+    schedule_sync_after_local_change(app_handle);
+    debug!(
+        original_conversation_id = conversation_id,
+        forked_conversation_id = forked_id,
+        fork_point = ?fork_point,
+        remote_parent_id = ?input.remote_parent_id,
+        remote_parent_group_id = ?input.remote_parent_group_id,
+        "Sync concurrent divergence: forked conversation for remote message insert"
+    );
+    Ok(())
+}
+
+/// Conflict path: when remote-wins would overwrite a local tip that already diverged,
+/// keep local tip and land the server payload on a fork (same §4.3 detection).
+fn try_fork_message_conflict_instead_of_overwrite(
+    app_handle: &AppHandle,
+    sync_conn: &Connection,
+    change: &PullChange,
+) -> Result<bool, String> {
+    if change.object_type != "conversation.message" || change.operation == "delete" {
+        return Ok(false);
+    }
+
+    let Some(spec) = specs().into_iter().find(|s| s.object_type == change.object_type) else {
+        return Ok(false);
+    };
+    let db_path = get_db_path(app_handle, spec.db_name)?;
+    let data_conn = open_data_db(&db_path)?;
+
+    let payload = match change.payload.as_ref() {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    let fields = match payload.get("fields").and_then(JsonValue::as_object) {
+        Some(f) => f,
+        None => return Ok(false),
+    };
+    let refs = payload.get("refs").and_then(JsonValue::as_object).cloned().unwrap_or_default();
+    let mut field_values = fields.clone();
+    resolve_remote_foreign_keys(&spec, &mut field_values, &refs, |object_type, ref_object_id| {
+        find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
+    })?;
+
+    let local_id = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?;
+    let conversation_id = match field_as_i64(&field_values, "conversation_id") {
+        Some(id) => id,
+        None => return Ok(false),
+    };
+
+    // Conflict is an update of an existing sync_id, but we evaluate divergence against
+    // *other* local messages / tip state (exclude the mapped local row).
+    let input = gather_divergence_input(&data_conn, sync_conn, &field_values, local_id, true)?;
+    if !divergence::detect_concurrent_message_divergence(&input) {
+        return Ok(false);
+    }
+
+    let fork_point = resolve_sync_fork_point(
+        &data_conn,
+        sync_conn,
+        conversation_id,
+        input.remote_parent_id,
+        input.remote_parent_group_id.as_deref(),
+        local_id,
+    )?;
+
+    let forked_id = crate::api::conversation_api::fork_conversation_internal(
+        app_handle,
+        conversation_id,
+        fork_point,
+        crate::api::conversation_api::ForkNameStyle::SyncDivergence,
+        false,
+    )?;
+    let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
+
+    // Keep local tip: detach this sync_id from the local row so scan will re-id it,
+    // then insert the server payload into the forked conversation under the server sync_id.
+    if let Some(existing_local_id) = local_id {
+        sync_conn
+            .execute(
+                "DELETE FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
+                params![change.object_type, change.object_id],
+            )
+            .map_err(|e| e.to_string())?;
+        // Ensure orphaned local tip gets a fresh sync identity on next scan.
+        let _ = ensure_object_id(
+            sync_conn,
+            "conversation.message",
+            "message",
+            existing_local_id,
+        )?;
+    }
+
+    field_values.insert(
+        "conversation_id".to_string(),
+        JsonValue::Number(forked_id.into()),
+    );
+    let new_id = insert_row(&data_conn, &spec, &field_values)?;
+    save_object_map(
+        sync_conn,
+        &change.object_type,
+        spec.table,
+        new_id,
+        &change.object_id,
+    )?;
+    upsert_shadow_from_remote(sync_conn, change)?;
+    schedule_sync_after_local_change(app_handle);
+    debug!(
+        original_conversation_id = conversation_id,
+        forked_conversation_id = forked_id,
+        fork_point = ?fork_point,
+        "Sync message conflict: kept local tip, applied server payload into fork"
+    );
+    Ok(true)
 }
 
 fn apply_delete(
@@ -1672,6 +2477,175 @@ fn row_exists_by_id(conn: &Connection, spec: &SyncTableSpec, id: i64) -> Result<
         .optional()
         .map_err(|e| e.to_string())?;
     Ok(found.is_some())
+}
+
+
+/// 内置父行下的子对象确定性 id：`official:{type}:{parent_sync_id}:{key…}`。
+/// 仅当 unique_key 中的父 FK 已映射且为 official:* 时生成，使 A/B 对同一 builtin tool 推同一 object_id。
+fn try_deterministic_child_object_id(
+    sync_conn: &Connection,
+    spec: &SyncTableSpec,
+    raw_values: &HashMap<String, JsonValue>,
+) -> Result<Option<String>, String> {
+    if spec.unique_key_columns.is_empty() {
+        return Ok(None);
+    }
+    let mut parent_sync_id: Option<String> = None;
+    let mut name_parts: Vec<String> = Vec::new();
+    for column in spec.unique_key_columns {
+        if let Some(fk) = spec.foreign_keys.iter().find(|fk| fk.column == *column) {
+            let Some(local_fk) = raw_values.get(*column).and_then(JsonValue::as_i64) else {
+                return Ok(None);
+            };
+            if is_provider_id_unset_sentinel(fk, local_fk) {
+                name_parts.push("0".to_string());
+                continue;
+            }
+            let Some(sync_id) = find_object_id(sync_conn, fk.object_type, local_fk)? else {
+                return Ok(None);
+            };
+            if !sync_id.starts_with("official:") {
+                return Ok(None);
+            }
+            if parent_sync_id.is_none() {
+                parent_sync_id = Some(sync_id);
+            } else {
+                name_parts.push(sync_id);
+            }
+        } else {
+            let value = raw_values
+                .get(*column)
+                .ok_or_else(|| format!("unique key column {column} missing"))?;
+            name_parts.push(
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+            );
+        }
+    }
+    let Some(parent) = parent_sync_id else {
+        return Ok(None);
+    };
+    if name_parts.is_empty() {
+        Ok(Some(format!("official:{}:{}", spec.object_type, parent)))
+    } else {
+        Ok(Some(format!(
+            "official:{}:{}:{}",
+            spec.object_type,
+            parent,
+            name_parts.join(":")
+        )))
+    }
+}
+
+/// 远端 sync_id 获胜：清掉占用该 sync_id 的旧映射，再按 local_id upsert。
+fn remap_sync_object_map(
+    conn: &Connection,
+    object_type: &str,
+    local_table: &str,
+    local_id: i64,
+    sync_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM sync_object_map WHERE sync_id = ?1",
+        params![sync_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(object_type, local_id) DO UPDATE SET sync_id = excluded.sync_id",
+        params![object_type, local_table, local_id, sync_id, now_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn is_unique_constraint_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("unique constraint failed") || lower.contains("constraint failed")
+}
+
+fn find_row_by_unique_key(
+    conn: &Connection,
+    spec: &SyncTableSpec,
+    fields: &Map<String, JsonValue>,
+) -> Result<Option<i64>, String> {
+    if spec.unique_key_columns.is_empty() {
+        return Ok(None);
+    }
+    let where_clause = spec
+        .unique_key_columns
+        .iter()
+        .map(|column| format!("{column} = ?"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let mut where_values = Vec::new();
+    for column in spec.unique_key_columns {
+        let value = fields
+            .get(*column)
+            .ok_or_else(|| format!("unique key column {column} missing"))?;
+        where_values.push(sql_value_from_json(value));
+    }
+    conn.query_row(
+        &format!("SELECT id FROM {} WHERE {}", spec.table, where_clause),
+        params_from_iter(where_values.iter()),
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+/// 按 unique_key_columns find-or-insert，并把 sync_object_map 重映射为远端 sync_id。
+fn upsert_by_unique_key(
+    sync_conn: &Connection,
+    data_conn: &Connection,
+    spec: &SyncTableSpec,
+    remote_sync_id: &str,
+    fields: &Map<String, JsonValue>,
+) -> Result<(), String> {
+    if let Some(existing_id) = find_row_by_unique_key(data_conn, spec, fields)? {
+        update_row(data_conn, spec, existing_id, fields)?;
+        remap_sync_object_map(
+            sync_conn,
+            spec.object_type,
+            spec.table,
+            existing_id,
+            remote_sync_id,
+        )?;
+        return Ok(());
+    }
+    match insert_row(data_conn, spec, fields) {
+        Ok(new_id) => {
+            remap_sync_object_map(
+                sync_conn,
+                spec.object_type,
+                spec.table,
+                new_id,
+                remote_sync_id,
+            )?;
+            Ok(())
+        }
+        Err(err) if is_unique_constraint_error(&err) => {
+            let existing_id = find_row_by_unique_key(data_conn, spec, fields)?.ok_or_else(|| {
+                format!(
+                    "UNIQUE conflict on {} but row not found by unique key",
+                    spec.table
+                )
+            })?;
+            update_row(data_conn, spec, existing_id, fields)?;
+            remap_sync_object_map(
+                sync_conn,
+                spec.object_type,
+                spec.table,
+                existing_id,
+                remote_sync_id,
+            )?;
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn upsert_natural_row(
@@ -1974,7 +2948,16 @@ fn handle_push_response(
                 },
                 created_at: now_string(),
             };
-            match apply_change(app_handle, &conn, &pseudo_change, "") {
+            let apply_result = match try_fork_message_conflict_instead_of_overwrite(
+                app_handle,
+                &conn,
+                &pseudo_change,
+            ) {
+                Ok(true) => Ok(()),
+                Ok(false) => apply_change(app_handle, &conn, &pseudo_change, ""),
+                Err(err) => Err(err),
+            };
+            match apply_result {
                 Ok(()) => {
                     conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
                         .map_err(|e| e.to_string())?;
@@ -2425,6 +3408,15 @@ fn is_local_sync_scope_empty(app_handle: &AppHandle) -> Result<bool, String> {
         if let Some(column) = spec.official_column {
             conditions.push(format!("COALESCE({column}, 0) = 0"));
         }
+        if !spec.seed_official_ids.is_empty() {
+            let ids = spec
+                .seed_official_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            conditions.push(format!("id NOT IN ({ids})"));
+        }
         let where_sql =
             if conditions.is_empty() { String::new() } else { format!(" WHERE {}", conditions.join(" AND ")) };
         let count: i64 = conn
@@ -2642,40 +3634,46 @@ fn save_sync_token(app_handle: &AppHandle, token: &str) -> Result<(), String> {
 }
 
 fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> {
-    // 优先使用 OS keychain（Windows 凭据管理器 / macOS Keychain / Linux Secret Service）。
-    // keychain 不可用（如无 Secret Service 的 headless Linux）时退回文件存储，
-    // 避免整个同步功能在这些平台上不可用。
+    // 与 feishu/config.rs 对齐：优先使用本地文件 master key，保证 Linux（无 Secret
+    // Service / mock keyring）上 encrypt/decrypt 使用同一把持久化密钥。
+    // OS keychain 仅在能真正 round-trip 持久化时使用。
+    if let Some(key) = read_master_key_from_file(app_handle)? {
+        return Ok(key);
+    }
+
     match keyring::Entry::new(KEYRING_SERVICE, KEYRING_MASTER_KEY_USER) {
         Ok(entry) => match entry.get_password() {
-            Ok(encoded) => {
-                let bytes = BASE64
-                    .decode(encoded)
-                    .map_err(|e| format!("OS keychain 中的同步主密钥解码失败: {e}"))?;
-                return bytes
-                    .try_into()
-                    .map_err(|_| "OS keychain 中的同步主密钥长度非法".to_string());
-            }
-            Err(keyring::Error::NoEntry) => {
-                // 旧版本文件存储迁移：读出文件 key → 写入 keychain → 删除文件
-                let path = master_key_file_path(app_handle)?;
-                if path.exists() {
-                    let bytes = std::fs::read(&path).map_err(|e| {
-                        format!("Failed to read secure master key `{}`: {}", path.display(), e)
-                    })?;
-                    let key: [u8; 32] = bytes
-                        .try_into()
-                        .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()))?;
-                    entry
-                        .set_password(&BASE64.encode(key))
-                        .map_err(|e| format!("迁移同步主密钥到 OS keychain 失败: {e}"))?;
-                    let _ = std::fs::remove_file(&path);
+            Ok(encoded) => match decode_master_key_b64(&encoded) {
+                Ok(key) => {
+                    // 可选迁移：把已有 keychain key 落到文件，后续走稳定的 file-first 路径。
+                    if let Err(err) = write_master_key_to_file(app_handle, &key) {
+                        warn!(error = %err, "Failed to mirror OS keychain master key to local file");
+                    }
                     return Ok(key);
                 }
+                Err(err) => {
+                    warn!(error = %err, "OS keychain master key invalid, falling back to file");
+                }
+            },
+            Err(keyring::Error::NoEntry) => {
                 let key: [u8; 32] = rand::random();
-                entry
-                    .set_password(&BASE64.encode(key))
-                    .map_err(|e| format!("写入同步主密钥到 OS keychain 失败: {e}"))?;
-                return Ok(key);
+                match try_persist_master_key_in_keyring(&entry, &key) {
+                    Ok(()) => {
+                        if let Err(err) = write_master_key_to_file(app_handle, &key) {
+                            warn!(
+                                error = %err,
+                                "Keychain persist ok but failed to mirror master key to local file"
+                            );
+                        }
+                        return Ok(key);
+                    }
+                    Err(err) => {
+                        warn!(
+                            error = %err,
+                            "OS keychain did not persist master key (mock/no backend); using file fallback"
+                        );
+                    }
+                }
             }
             Err(err) => {
                 warn!(error = %err, "OS keychain unavailable, falling back to file-based master key");
@@ -2688,25 +3686,59 @@ fn get_or_create_master_key(app_handle: &AppHandle) -> Result<[u8; 32], String> 
     get_or_create_master_key_from_file(app_handle)
 }
 
-/// 文件存储的 master key（旧版本格式；仅作为 keychain 不可用时的回退）。
+/// 写入 keychain 后立即 get+decode+compare；mock/无后端 keyring 的 set 看似成功但不持久化，
+/// 必须在此时失败并让调用方退回文件，否则下次 NoEntry 会生成新 key 导致 aead 解密失败。
+fn try_persist_master_key_in_keyring(
+    entry: &keyring::Entry,
+    key: &[u8; 32],
+) -> Result<(), String> {
+    persist_master_key_with_roundtrip_verify(
+        |encoded| {
+            entry
+                .set_password(encoded)
+                .map_err(|e| format!("写入同步主密钥到 OS keychain 失败: {e}"))
+        },
+        || {
+            entry
+                .get_password()
+                .map_err(|e| format!("OS keychain round-trip get 失败: {e}"))
+        },
+        key,
+    )
+}
+
+/// 可单测的 round-trip 校验：set 后立刻 get，解码并与刚生成的 key 比较。
+fn persist_master_key_with_roundtrip_verify(
+    set_password: impl FnOnce(&str) -> Result<(), String>,
+    get_password: impl FnOnce() -> Result<String, String>,
+    key: &[u8; 32],
+) -> Result<(), String> {
+    let encoded = BASE64.encode(key);
+    set_password(&encoded)?;
+    let stored = get_password()?;
+    let stored_key = decode_master_key_b64(&stored)?;
+    if &stored_key != key {
+        return Err("OS keychain round-trip master key mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn decode_master_key_b64(encoded: &str) -> Result<[u8; 32], String> {
+    let bytes = BASE64
+        .decode(encoded.trim())
+        .map_err(|e| format!("同步主密钥解码失败: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| "同步主密钥长度非法".to_string())
+}
+
+/// 文件存储的 master key（稳定回退；与 feishu 的 local-secrets 策略一致）。
 fn get_or_create_master_key_from_file(app_handle: &AppHandle) -> Result<[u8; 32], String> {
-    let path = master_key_file_path(app_handle)?;
-    if path.exists() {
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("Failed to read secure master key `{}`: {}", path.display(), e))?;
-        return bytes
-            .try_into()
-            .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()));
+    if let Some(key) = read_master_key_from_file(app_handle)? {
+        return Ok(key);
     }
     let key: [u8; 32] = rand::random();
-    std::fs::write(&path, key)
-        .map_err(|e| format!("Failed to write secure master key `{}`: {}", path.display(), e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-    }
+    write_master_key_to_file(app_handle, &key)?;
     Ok(key)
 }
 
@@ -2715,6 +3747,57 @@ fn master_key_file_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let secret_dir = app_dir.join("local-secrets");
     std::fs::create_dir_all(&secret_dir).map_err(|e| e.to_string())?;
     Ok(secret_dir.join(SECURE_MASTER_KEY_FILE))
+}
+
+fn read_master_key_from_file(app_handle: &AppHandle) -> Result<Option<[u8; 32]>, String> {
+    let path = master_key_file_path(app_handle)?;
+    read_master_key_at_path(&path)
+}
+
+fn write_master_key_to_file(app_handle: &AppHandle, key: &[u8; 32]) -> Result<(), String> {
+    let path = master_key_file_path(app_handle)?;
+    write_master_key_at_path(&path, key)
+}
+
+fn read_master_key_at_path(path: &std::path::Path) -> Result<Option<[u8; 32]>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read secure master key `{}`: {}", path.display(), e))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("Invalid secure master key length in `{}`", path.display()))?;
+    Ok(Some(key))
+}
+
+fn write_master_key_at_path(path: &std::path::Path, key: &[u8; 32]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, key)
+        .map_err(|e| format!("Failed to write secure master key `{}`: {}", path.display(), e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            format!(
+                "Failed to set secure permissions on master key `{}`: {}",
+                path.display(),
+                e
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn get_or_create_master_key_at_path(path: &std::path::Path) -> Result<[u8; 32], String> {
+    if let Some(key) = read_master_key_at_path(path)? {
+        return Ok(key);
+    }
+    let key: [u8; 32] = rand::random();
+    write_master_key_at_path(path, &key)?;
+    Ok(key)
 }
 
 fn encrypt_secret_with_key(key_bytes: &[u8; 32], plaintext: &str) -> Result<(String, String), String> {
@@ -2761,11 +3844,97 @@ mod tests {
     }
 
     #[test]
+    fn parse_sse_sync_cursor_reads_sync_events() {
+        let block = "event: sync\ndata: {\"cursor\":42,\"device_id\":\"d1\"}\n";
+        assert_eq!(parse_sse_sync_cursor(block), Some(42));
+        assert_eq!(parse_sse_sync_cursor(": keepalive\n"), None);
+        assert_eq!(parse_sse_sync_cursor("event: ping\ndata: {\"cursor\":1}\n"), None);
+    }
+
+    #[test]
     fn secret_roundtrip_uses_aes_gcm_payload() {
         let key: [u8; 32] = [7; 32];
         let (ciphertext, nonce) = encrypt_secret_with_key(&key, "dev-token").unwrap();
         assert_ne!(ciphertext, "dev-token");
         assert_eq!(decrypt_secret_with_key(&key, &ciphertext, &nonce).unwrap(), "dev-token");
+    }
+
+    /// mock keyring：set_password 看似成功，但随后 get 仍 NoEntry（不持久化）。
+    #[test]
+    fn keyring_roundtrip_verify_fails_when_store_does_not_persist() {
+        let key: [u8; 32] = [9; 32];
+        let err = persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()),
+            || Err("NoEntry".to_string()),
+            &key,
+        )
+        .expect_err("non-persisting keyring must fail round-trip verify");
+        assert!(err.contains("round-trip") || err.contains("NoEntry"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn keyring_roundtrip_verify_fails_on_key_mismatch() {
+        let key: [u8; 32] = [3; 32];
+        let other = BASE64.encode([4u8; 32]);
+        let err = persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()),
+            move || Ok(other),
+            &key,
+        )
+        .expect_err("mismatched key must fail verify");
+        assert!(err.contains("mismatch"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn keyring_roundtrip_verify_ok_when_get_returns_same_key() {
+        let key: [u8; 32] = [5; 32];
+        let encoded = BASE64.encode(key);
+        persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()),
+            move || Ok(encoded),
+            &key,
+        )
+        .expect("persisting keyring should pass round-trip verify");
+    }
+
+    /// 模拟「keyring 不持久化 → 退回文件」后，同一文件 key 可稳定 encrypt/decrypt。
+    #[test]
+    fn file_fallback_after_failed_keyring_persist_keeps_encrypt_decrypt_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SECURE_MASTER_KEY_FILE);
+        let key: [u8; 32] = [11; 32];
+
+        let verify_err = persist_master_key_with_roundtrip_verify(
+            |_encoded| Ok(()), // mock set "succeeds"
+            || Err("NoEntry".to_string()), // mock get fails → not persisted
+            &key,
+        )
+        .expect_err("fake keyring must not look persisted");
+        assert!(!verify_err.is_empty());
+
+        // 失败后走文件路径（与 get_or_create_master_key 的 fallthrough 一致）
+        write_master_key_at_path(&path, &key).unwrap();
+        let loaded = get_or_create_master_key_at_path(&path).unwrap();
+        assert_eq!(loaded, key);
+        let again = get_or_create_master_key_at_path(&path).unwrap();
+        assert_eq!(again, key, "file master key must be stable across calls");
+
+        let (ciphertext, nonce) = encrypt_secret_with_key(&loaded, "sync-token").unwrap();
+        assert_eq!(
+            decrypt_secret_with_key(&again, &ciphertext, &nonce).unwrap(),
+            "sync-token"
+        );
+    }
+
+    #[test]
+    fn file_master_key_create_then_reload_roundtrips_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SECURE_MASTER_KEY_FILE);
+        let key1 = get_or_create_master_key_at_path(&path).unwrap();
+        let key2 = get_or_create_master_key_at_path(&path).unwrap();
+        assert_eq!(key1, key2);
+        let (ciphertext, nonce) = encrypt_secret_with_key(&key1, "hello").unwrap();
+        assert_eq!(decrypt_secret_with_key(&key2, &ciphertext, &nonce).unwrap(), "hello");
     }
 
     #[test]
@@ -2776,6 +3945,8 @@ mod tests {
             object_type: "system.feature_config",
             columns: &["id", "feature_code", "key"],
             natural_key_columns: &["feature_code", "key"],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[],
             where_clause: None,
@@ -2797,12 +3968,34 @@ mod tests {
             db_name: "conversation.db",
             table: "message",
             object_type: "conversation.message",
-            columns: &["id", "conversation_id", "parent_id", "content"],
+            columns: &["id", "conversation_id", "parent_id", "content", "llm_model_id"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
                 ForeignKeySpec { column: "parent_id", object_type: "conversation.message" },
+                ForeignKeySpec { column: "llm_model_id", object_type: "llm.model" },
+            ],
+            where_clause: None,
+            order_by: "id",
+        }
+    }
+
+    fn assistant_model_spec() -> SyncTableSpec {
+        SyncTableSpec {
+            db_name: "assistant.db",
+            table: "assistant_model",
+            object_type: "assistant.model",
+            columns: &["id", "assistant_id", "provider_id", "model_code", "alias"],
+            natural_key_columns: &[],
+            unique_key_columns: &["assistant_id", "provider_id", "model_code"],
+            seed_official_ids: &[],
+            official_column: None,
+            foreign_keys: &[
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
+                ForeignKeySpec { column: "provider_id", object_type: "llm.provider" },
             ],
             where_clause: None,
             order_by: "id",
@@ -2819,8 +4012,9 @@ mod tests {
             ("parent_id".to_string(), json!(7)),
             ("content".to_string(), json!("hi")),
         ]);
-        let refs = build_fk_refs(&spec, &raw_values, |object_type, value| {
-            Ok(Some(format!("{object_type}-{value}")))
+        let mut fields = Map::new();
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
         })
         .unwrap()
         .expect("all foreign keys resolvable");
@@ -2828,7 +4022,7 @@ mod tests {
         assert_eq!(refs.get("parent_id").unwrap(), &json!("conversation.message-7"));
     }
 
-    /// 任一外键无法解析时返回 None（调用方跳过该行），不产出裸 rowid
+    /// 依赖行存在但尚未映射时返回 None（调用方跳过该行），不产出裸 rowid
     #[test]
     fn fk_refs_return_none_when_dependency_unresolved() {
         let spec = message_spec();
@@ -2837,11 +4031,12 @@ mod tests {
             ("conversation_id".to_string(), json!(3)),
             ("parent_id".to_string(), json!(7)),
         ]);
-        let result = build_fk_refs(&spec, &raw_values, |object_type, _| {
+        let mut fields = Map::new();
+        let result = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, _| {
             if object_type == "conversation.message" {
-                Ok(None)
+                Ok(FkLookup::Pending)
             } else {
-                Ok(Some(format!("{object_type}-x")))
+                Ok(FkLookup::Resolved(format!("{object_type}-x")))
             }
         })
         .unwrap();
@@ -2857,12 +4052,122 @@ mod tests {
             ("conversation_id".to_string(), json!(3)),
             ("parent_id".to_string(), JsonValue::Null),
         ]);
-        let refs = build_fk_refs(&spec, &raw_values, |object_type, value| {
-            Ok(Some(format!("{object_type}-{value}")))
+        let mut fields = Map::new();
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
         })
         .unwrap()
         .expect("null foreign key needs no ref");
         assert!(!refs.contains_key("parent_id"));
+    }
+
+    /// 悬空 llm_model_id：依赖行不存在时按 NULL 处理，仍可产出快照（不永久卡住）
+    #[test]
+    fn fk_refs_dangling_llm_model_id_nulls_field_and_pushes() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(1)),
+            ("conversation_id".to_string(), json!(10)),
+            ("parent_id".to_string(), JsonValue::Null),
+            ("llm_model_id".to_string(), json!(1)),
+            ("content".to_string(), json!("hello")),
+        ]);
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(1)),
+            ("content".to_string(), json!("hello")),
+        ]);
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            match object_type {
+                "conversation" => Ok(FkLookup::Resolved(format!("conv-{value}"))),
+                "llm.model" => Ok(FkLookup::Dangling),
+                other => panic!("unexpected fk target {other}"),
+            }
+        })
+        .unwrap()
+        .expect("dangling llm_model_id must not block snapshot");
+        assert_eq!(refs.get("conversation_id").unwrap(), &json!("conv-10"));
+        assert!(!refs.contains_key("llm_model_id"));
+        assert_eq!(fields.get("llm_model_id").unwrap(), &JsonValue::Null);
+    }
+
+    /// provider_id=0 是未选 provider 哨兵：保留 0、不进 refs、不挡快照
+    #[test]
+    fn fk_refs_provider_id_zero_kept_as_sentinel() {
+        let spec = assistant_model_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(1)),
+            ("assistant_id".to_string(), json!(1)),
+            ("provider_id".to_string(), json!(0)),
+            ("model_code".to_string(), json!("")),
+        ]);
+        let mut fields = Map::from_iter([
+            ("assistant_id".to_string(), json!(1)),
+            ("provider_id".to_string(), json!(0)),
+            ("model_code".to_string(), json!("")),
+        ]);
+        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            match object_type {
+                "assistant" => Ok(FkLookup::Resolved(format!("asst-{value}"))),
+                "llm.provider" => panic!("provider_id=0 must not call resolve"),
+                other => panic!("unexpected fk target {other}"),
+            }
+        })
+        .unwrap()
+        .expect("provider_id=0 must not block assistant.model");
+        assert_eq!(refs.get("assistant_id").unwrap(), &json!("asst-1"));
+        assert!(!refs.contains_key("provider_id"));
+        assert_eq!(fields.get("provider_id").unwrap(), &json!(0));
+    }
+
+    /// provider_id=0 round-trip：push 侧保留 0；apply 侧 refs 缺失/NULL → 写回 0
+    #[test]
+    fn provider_id_zero_round_trip_on_resolve_remote() {
+        let spec = assistant_model_spec();
+        let mut fields = Map::from_iter([
+            ("assistant_id".to_string(), json!(1)),
+            ("provider_id".to_string(), JsonValue::Null),
+            ("model_code".to_string(), json!("")),
+        ]);
+        let refs = Map::from_iter([("assistant_id".to_string(), json!("asst-1"))]);
+        resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(Some(10))).unwrap();
+        assert_eq!(fields.get("assistant_id").unwrap(), &json!(10));
+        assert_eq!(fields.get("provider_id").unwrap(), &json!(0));
+
+        let mut fields_keep = Map::from_iter([
+            ("assistant_id".to_string(), json!(1)),
+            ("provider_id".to_string(), json!(0)),
+            ("model_code".to_string(), json!("")),
+        ]);
+        resolve_remote_foreign_keys(&spec, &mut fields_keep, &refs, |_, _| Ok(Some(10))).unwrap();
+        assert_eq!(fields_keep.get("provider_id").unwrap(), &json!(0));
+    }
+
+    /// 真实「未映射但行存在」的依赖仍跳过（与悬空外键区分）
+    #[test]
+    fn fk_refs_pending_existing_dependency_still_skips() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(2)),
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(5)),
+        ]);
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(5)),
+        ]);
+        let result = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
+            match object_type {
+                "conversation" => Ok(FkLookup::Resolved(format!("conv-{value}"))),
+                // llm.model id=5 本地存在但尚未写入 sync_object_map
+                "llm.model" => Ok(FkLookup::Pending),
+                other => panic!("unexpected fk target {other}"),
+            }
+        })
+        .unwrap();
+        assert!(result.is_none(), "existing-but-unmapped dependency must still skip");
+        // fields 未被清空（跳过时不应改写为 NULL）
+        assert_eq!(fields.get("llm_model_id").unwrap(), &json!(5));
     }
 
     /// 接收端：refs 完整时外键被改写为本机 local_id
@@ -3127,6 +4432,8 @@ mod tests {
             object_type: "llm.provider",
             columns: &["id", "name", "api_type", "description", "is_official", "is_enabled"],
             natural_key_columns: &[],
+            unique_key_columns: &[],
+            seed_official_ids: &[],
             official_column: Some("is_official"),
             foreign_keys: &[],
             where_clause: None,
@@ -3267,5 +4574,442 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "{table} should be empty");
         }
+    }
+
+    fn message_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                message_type TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                parent_id INTEGER,
+                finish_time TEXT,
+                generation_group_id TEXT,
+                parent_group_id TEXT
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_msg(
+        conn: &Connection,
+        conversation_id: i64,
+        message_type: &str,
+        generation_group_id: Option<&str>,
+        parent_group_id: Option<&str>,
+        parent_id: Option<i64>,
+        finish_time: Option<&str>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO message
+             (conversation_id, message_type, content, parent_id, finish_time, generation_group_id, parent_group_id)
+             VALUES (?1, ?2, 'x', ?3, ?4, ?5, ?6)",
+            params![
+                conversation_id,
+                message_type,
+                parent_id,
+                finish_time,
+                generation_group_id,
+                parent_group_id,
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn concurrent_divergence_regression_nonempty_parent_id_none_no_fork() {
+        // Guarantee: non-empty conversation + parent_id None normal insert must NOT fork
+        // when there is no unconfirmed local tip / runtime / parent_group sibling.
+        let input = divergence::DivergenceInput {
+            is_new_insert: true,
+            ..divergence::DivergenceInput::default()
+        };
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
+    }
+
+    #[test]
+    fn concurrent_divergence_legacy_parent_id_sibling() {
+        let mut input = divergence::DivergenceInput {
+            is_new_insert: true,
+            remote_parent_id: Some(42),
+            sibling_exists_under_parent_id: true,
+            ..divergence::DivergenceInput::default()
+        };
+        assert!(divergence::detect_concurrent_message_divergence(&input));
+        input.sibling_exists_under_parent_id = false;
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
+    }
+
+    #[test]
+    fn concurrent_divergence_parent_group_sibling_and_conflict_path_inputs() {
+        let mut input = divergence::DivergenceInput {
+            is_new_insert: true,
+            remote_parent_group_id: Some("pg".into()),
+            remote_generation_group_id: Some("g-remote".into()),
+            local_has_sibling_under_parent_group: true,
+            ..divergence::DivergenceInput::default()
+        };
+        assert!(divergence::detect_concurrent_message_divergence(&input));
+        // Conflict path reuses the same detector.
+        input.local_has_sibling_under_parent_group = false;
+        input.local_tip_generation_group_id = Some("pg".into());
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
+    }
+
+    #[test]
+    fn common_history_fork_point_excludes_unconfirmed_local_tip() {
+        let data = message_test_db();
+        let sync = test_sync_conn();
+        let common = insert_msg(&data, 1, "user", Some("g0"), None, None, Some("t0"));
+        let common_resp = insert_msg(&data, 1, "response", Some("g0"), None, None, Some("t1"));
+        let local_tip = insert_msg(&data, 1, "user", Some("g-local"), None, None, Some("t2"));
+
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES
+             ('conversation.message', 'message', ?1, 'sync-common-u', 'now'),
+             ('conversation.message', 'message', ?2, 'sync-common-r', 'now'),
+             ('conversation.message', 'message', ?3, 'sync-local-tip', 'now')",
+            params![common, common_resp, local_tip],
+        )
+        .unwrap();
+        for sid in ["sync-common-u", "sync-common-r"] {
+            sync.execute(
+                "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+                 VALUES ('conversation.message', ?1, 1, 'h', NULL, 'now')",
+                params![sid],
+            )
+            .unwrap();
+        }
+
+        assert!(local_has_unconfirmed_tip(&data, &sync, 1, None).unwrap());
+        let fork_at = common_history_tip_message_id(&data, &sync, 1, None).unwrap();
+        assert_eq!(fork_at, Some(common_resp));
+        // parent_id None → copy common history only, not local tip
+        assert_eq!(
+            resolve_sync_fork_point(&data, &sync, 1, None, None, None).unwrap(),
+            Some(common_resp)
+        );
+        assert_ne!(fork_at, Some(local_tip));
+    }
+
+    #[test]
+    fn gather_divergence_normal_insert_into_synced_nonempty_does_not_fork() {
+        let data = message_test_db();
+        let sync = test_sync_conn();
+        let m1 = insert_msg(&data, 5, "user", Some("g0"), None, None, Some("t0"));
+        let m2 = insert_msg(&data, 5, "response", Some("g0"), None, None, Some("t1"));
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES
+             ('conversation.message', 'message', ?1, 's1', 'now'),
+             ('conversation.message', 'message', ?2, 's2', 'now')",
+            params![m1, m2],
+        )
+        .unwrap();
+        for sid in ["s1", "s2"] {
+            sync.execute(
+                "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+                 VALUES ('conversation.message', ?1, 1, 'h', NULL, 'now')",
+                params![sid],
+            )
+            .unwrap();
+        }
+
+        let fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(5)),
+            ("parent_id".to_string(), JsonValue::Null),
+            ("generation_group_id".to_string(), json!("g-remote")),
+            ("parent_group_id".to_string(), JsonValue::Null),
+        ]);
+        let input = gather_divergence_input(&data, &sync, &fields, None, true).unwrap();
+        assert!(!input.local_has_unconfirmed_tip);
+        assert!(!input.local_runtime_running);
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
+    }
+
+    #[test]
+    fn gather_divergence_unconfirmed_local_tip_forks_and_schedules_common_history() {
+        let data = message_test_db();
+        let sync = test_sync_conn();
+        let common = insert_msg(&data, 9, "response", Some("g0"), None, None, Some("t0"));
+        let _local = insert_msg(&data, 9, "user", Some("g-local"), None, None, Some("t1"));
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES ('conversation.message', 'message', ?1, 's-common', 'now')",
+            params![common],
+        )
+        .unwrap();
+        sync.execute(
+            "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
+             VALUES ('conversation.message', 's-common', 1, 'h', NULL, 'now')",
+            [],
+        )
+        .unwrap();
+
+        let fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(9)),
+            ("parent_id".to_string(), JsonValue::Null),
+            ("content".to_string(), json!("remote")),
+        ]);
+        let input = gather_divergence_input(&data, &sync, &fields, None, true).unwrap();
+        assert!(input.local_has_unconfirmed_tip);
+        assert!(divergence::detect_concurrent_message_divergence(&input));
+        let fork_at = resolve_sync_fork_point(&data, &sync, 9, None, None, None).unwrap();
+        assert_eq!(fork_at, Some(common));
+    }
+
+    fn mcp_server_tool_spec() -> SyncTableSpec {
+        SyncTableSpec {
+            db_name: "mcp.db",
+            table: "mcp_server_tool",
+            object_type: "mcp.server_tool",
+            columns: &[
+                "id",
+                "server_id",
+                "tool_name",
+                "tool_description",
+                "is_enabled",
+                "is_auto_run",
+                "parameters",
+                "created_time",
+            ],
+            natural_key_columns: &[],
+            unique_key_columns: &["server_id", "tool_name"],
+            seed_official_ids: &[],
+            official_column: None,
+            foreign_keys: &[ForeignKeySpec {
+                column: "server_id",
+                object_type: "mcp.server",
+            }],
+            where_clause: None,
+            order_by: "id",
+        }
+    }
+
+    fn assistant_model_config_spec() -> SyncTableSpec {
+        SyncTableSpec {
+            db_name: "assistant.db",
+            table: "assistant_model_config",
+            object_type: "assistant.model_config",
+            columns: &["id", "assistant_id", "assistant_model_id", "name", "value", "value_type"],
+            natural_key_columns: &[],
+            unique_key_columns: &["assistant_id", "name"],
+            seed_official_ids: &[],
+            official_column: None,
+            foreign_keys: &[
+                ForeignKeySpec {
+                    column: "assistant_id",
+                    object_type: "assistant",
+                },
+                ForeignKeySpec {
+                    column: "assistant_model_id",
+                    object_type: "assistant.model",
+                },
+            ],
+            where_clause: None,
+            order_by: "id",
+        }
+    }
+
+    /// 把远端 builtin tool 应用到已有种子行：UNIQUE 合并 + sync_id 重映射为远端
+    #[test]
+    fn apply_builtin_tool_onto_existing_seed_merges_unique_and_remaps() {
+        let sync = test_sync_conn();
+        let data = Connection::open_in_memory().unwrap();
+        data.execute_batch(
+            "CREATE TABLE mcp_server_tool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id INTEGER NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_description TEXT,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                is_auto_run INTEGER NOT NULL DEFAULT 0,
+                parameters TEXT,
+                created_time TEXT,
+                UNIQUE(server_id, tool_name)
+            );",
+        )
+        .unwrap();
+        data.execute(
+            "INSERT INTO mcp_server_tool (id, server_id, tool_name, tool_description, is_enabled, is_auto_run)
+             VALUES (1, 1, 'read_file', 'local seed', 1, 0)",
+            [],
+        )
+        .unwrap();
+        // 本地种子曾用随机 UUID 映射
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES ('mcp.server_tool', 'mcp_server_tool', 1, 'local-random-uuid', 'now')",
+            [],
+        )
+        .unwrap();
+
+        let spec = mcp_server_tool_spec();
+        let remote_id = "official:mcp.server_tool:official:mcp.server:1:read_file";
+        let fields = Map::from_iter([
+            ("server_id".to_string(), json!(1)),
+            ("tool_name".to_string(), json!("read_file")),
+            ("tool_description".to_string(), json!("from remote")),
+            ("is_enabled".to_string(), json!(1)),
+            ("is_auto_run".to_string(), json!(0)),
+        ]);
+        upsert_by_unique_key(&sync, &data, &spec, remote_id, &fields).unwrap();
+
+        let count: i64 = data
+            .query_row("SELECT COUNT(*) FROM mcp_server_tool", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "must not insert a second tool row");
+        let desc: String = data
+            .query_row(
+                "SELECT tool_description FROM mcp_server_tool WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(desc, "from remote");
+        let mapped: String = sync
+            .query_row(
+                "SELECT sync_id FROM sync_object_map WHERE object_type = 'mcp.server_tool' AND local_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mapped, remote_id);
+        let row_count: i64 = sync
+            .query_row("SELECT COUNT(*) FROM sync_object_map WHERE object_type = 'mcp.server_tool'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1, "must not leave two sync ids for one row");
+    }
+
+    /// 父 model 合并成功后，model_config 依赖可解析并按 (assistant_id, name) upsert
+    #[test]
+    fn model_config_applies_after_parent_model_unique_merge() {
+        let sync = test_sync_conn();
+        let data = Connection::open_in_memory().unwrap();
+        data.execute_batch(
+            "CREATE TABLE assistant_model (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assistant_id INTEGER NOT NULL,
+                provider_id INTEGER NOT NULL,
+                model_code TEXT NOT NULL,
+                alias TEXT
+            );
+            CREATE TABLE assistant_model_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assistant_id INTEGER,
+                assistant_model_id INTEGER,
+                name TEXT NOT NULL,
+                value TEXT,
+                value_type TEXT NOT NULL DEFAULT 'float',
+                UNIQUE(assistant_id, name)
+            );",
+        )
+        .unwrap();
+        data.execute(
+            "INSERT INTO assistant_model (id, assistant_id, provider_id, model_code, alias)
+             VALUES (1, 1, 0, '', '')",
+            [],
+        )
+        .unwrap();
+        data.execute(
+            "INSERT INTO assistant_model_config (id, assistant_id, assistant_model_id, name, value, value_type)
+             VALUES (1, 1, 1, 'temperature', '0.75', 'float')",
+            [],
+        )
+        .unwrap();
+
+        let model_spec = assistant_model_spec();
+        let remote_model = "official:assistant.model:official:assistant:1:0:";
+        let model_fields = Map::from_iter([
+            ("assistant_id".to_string(), json!(1)),
+            ("provider_id".to_string(), json!(0)),
+            ("model_code".to_string(), json!("")),
+            ("alias".to_string(), json!("")),
+        ]);
+        upsert_by_unique_key(&sync, &data, &model_spec, remote_model, &model_fields).unwrap();
+        let model_local = find_local_id_by_object_id(&sync, "assistant.model", remote_model)
+            .unwrap()
+            .expect("model map after merge");
+        assert_eq!(model_local, 1);
+
+        // 模拟 resolve_remote_foreign_keys 后的 fields
+        let config_spec = assistant_model_config_spec();
+        let remote_config = "official:assistant.model_config:official:assistant:1:temperature";
+        let config_fields = Map::from_iter([
+            ("assistant_id".to_string(), json!(1)),
+            ("assistant_model_id".to_string(), json!(model_local)),
+            ("name".to_string(), json!("temperature")),
+            ("value".to_string(), json!("0.9")),
+            ("value_type".to_string(), json!("float")),
+        ]);
+        upsert_by_unique_key(&sync, &data, &config_spec, remote_config, &config_fields).unwrap();
+
+        let count: i64 = data
+            .query_row("SELECT COUNT(*) FROM assistant_model_config", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let value: String = data
+            .query_row(
+                "SELECT value FROM assistant_model_config WHERE assistant_id = 1 AND name = 'temperature'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "0.9");
+        let mapped = find_local_id_by_object_id(&sync, "assistant.model_config", remote_config)
+            .unwrap()
+            .expect("config mapped");
+        assert_eq!(mapped, 1);
+    }
+
+    /// 内置父 server 下的 tool 生成确定性 child object_id
+    #[test]
+    fn deterministic_child_object_id_for_builtin_server_tool() {
+        let sync = test_sync_conn();
+        sync.execute(
+            "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
+             VALUES ('mcp.server', 'mcp_server', 1, 'official:mcp.server:1', 'now')",
+            [],
+        )
+        .unwrap();
+        let spec = mcp_server_tool_spec();
+        let raw = HashMap::from([
+            ("id".to_string(), json!(7)),
+            ("server_id".to_string(), json!(1)),
+            ("tool_name".to_string(), json!("read_file")),
+        ]);
+        let id = try_deterministic_child_object_id(&sync, &spec, &raw)
+            .unwrap()
+            .expect("builtin parent should yield deterministic id");
+        assert_eq!(
+            id,
+            "official:mcp.server_tool:official:mcp.server:1:read_file"
+        );
+    }
+
+    #[test]
+    fn after_fork_ensure_object_id_maps_forked_conversation_for_upload() {
+        // Sync-map scheduling contract used by maybe_fork / conflict path:
+        // forked conversation must get a sync_id so scan uploads C'.
+        let sync = test_sync_conn();
+        let forked_local_id = 77_i64;
+        let sync_id = ensure_object_id(&sync, "conversation", "conversation", forked_local_id).unwrap();
+        let mapped: i64 = sync
+            .query_row(
+                "SELECT local_id FROM sync_object_map
+                 WHERE object_type = 'conversation' AND sync_id = ?1",
+                params![sync_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mapped, forked_local_id);
+        // Second call is stable (upload scheduling idempotent).
+        let again = ensure_object_id(&sync, "conversation", "conversation", forked_local_id).unwrap();
+        assert_eq!(sync_id, again);
     }
 }

@@ -606,27 +606,39 @@ pub fn update_message_content(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn fork_conversation(
-    app_handle: tauri::AppHandle,
-    conversation_id: i64,
-    message_id: i64,
-) -> Result<i64, String> {
-    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+/// Name strategy when forking a conversation.
+#[derive(Debug, Clone, Copy)]
+pub enum ForkNameStyle {
+    /// `{base} 版本{N}` — user-facing manual fork.
+    Version,
+    /// `{base} 同步分叉` — sync concurrent-continue auto-fork.
+    SyncDivergence,
+}
 
-    // 获取原对话信息
+/// Internal fork used by the Tauri command and by sync auto-fork.
+///
+/// `fork_at_message_id`:
+/// - `Some(id)` — copy messages up to and including that id (must exist).
+/// - `None` — create an empty fork (no messages copied).
+pub fn fork_conversation_internal(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    fork_at_message_id: Option<i64>,
+    name_style: ForkNameStyle,
+    schedule_sync: bool,
+) -> Result<i64, String> {
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+
     let conversation_repo = db.conversation_repo().unwrap();
     let original_conversation = conversation_repo
         .read(conversation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Conversation not found".to_string())?;
 
-    // 获取原对话的所有消息（包含附件）
     let message_repo = db.message_repo().unwrap();
     let all_messages_with_attachments =
         message_repo.list_by_conversation_id(conversation_id).map_err(|e| e.to_string())?;
 
-    // 构建消息ID到附件列表的映射
     let mut attachment_map: HashMap<i64, Vec<MessageAttachment>> = HashMap::new();
     for (message, attachment) in &all_messages_with_attachments {
         if let Some(att) = attachment {
@@ -634,43 +646,55 @@ pub async fn fork_conversation(
         }
     }
 
-    // 提取消息部分（去重，因为一条消息可能有多个附件导致多行）
     let mut seen_ids = std::collections::HashSet::new();
     let all_messages: Vec<Message> = all_messages_with_attachments
         .iter()
-        .filter_map(
-            |(message, _)| {
-                if seen_ids.insert(message.id) {
-                    Some(message.clone())
-                } else {
-                    None
-                }
-            },
-        )
+        .filter_map(|(message, _)| {
+            if seen_ids.insert(message.id) {
+                Some(message.clone())
+            } else {
+                None
+            }
+        })
         .collect();
 
-    // 找到目标消息的位置
-    let target_message_index = all_messages
-        .iter()
-        .position(|m| m.id == message_id)
-        .ok_or_else(|| "Message not found".to_string())?;
-
-    // 只复制到目标消息为止的消息
-    let messages_to_copy = &all_messages[..=target_message_index];
-
-    // 生成新对话标题（添加版本号）
-    let version_pattern = regex::Regex::new(r"版本(\d+)$").unwrap();
-    let mut version = 1;
-    let base_name = if let Some(captures) = version_pattern.captures(&original_conversation.name) {
-        version = captures.get(1).unwrap().as_str().parse::<i32>().unwrap_or(1) + 1;
-        version_pattern.replace(&original_conversation.name, "").trim().to_string()
-    } else {
-        original_conversation.name.clone()
+    let messages_to_copy: &[Message] = match fork_at_message_id {
+        Some(message_id) => {
+            let target_message_index = all_messages
+                .iter()
+                .position(|m| m.id == message_id)
+                .ok_or_else(|| "Message not found".to_string())?;
+            &all_messages[..=target_message_index]
+        }
+        None => &[],
     };
 
-    let new_conversation_name = format!("{} 版本{}", base_name, version);
+    let new_conversation_name = match name_style {
+        ForkNameStyle::Version => {
+            let version_pattern = regex::Regex::new(r"版本(\d+)$").unwrap();
+            let mut version = 1;
+            let base_name = if let Some(captures) = version_pattern.captures(&original_conversation.name)
+            {
+                version = captures.get(1).unwrap().as_str().parse::<i32>().unwrap_or(1) + 1;
+                version_pattern
+                    .replace(&original_conversation.name, "")
+                    .trim()
+                    .to_string()
+            } else {
+                original_conversation.name.clone()
+            };
+            format!("{} 版本{}", base_name, version)
+        }
+        ForkNameStyle::SyncDivergence => {
+            let base = original_conversation
+                .name
+                .trim_end_matches(" 同步分叉")
+                .trim()
+                .to_string();
+            format!("{} 同步分叉", base)
+        }
+    };
 
-    // 创建新对话
     let new_conversation = crate::db::conversation_db::Conversation {
         id: 0,
         name: new_conversation_name,
@@ -679,7 +703,10 @@ pub async fn fork_conversation(
         updated_time: chrono::Utc::now(),
         conversation_kind: "normal".to_string(),
         parent_butler_conversation_id: None,
-        source_task_title: None,
+        source_task_title: match name_style {
+            ForkNameStyle::SyncDivergence => Some("sync_fork:concurrent_continue".to_string()),
+            ForkNameStyle::Version => None,
+        },
         is_hidden_from_normal_chat_list: false,
         channel_source: original_conversation.channel_source.clone(),
         butler_task_status: None,
@@ -690,10 +717,8 @@ pub async fn fork_conversation(
     let created_conversation =
         conversation_repo.create(&new_conversation).map_err(|e| e.to_string())?;
 
-    // 获取附件仓库
     let attachment_repo = db.attachment_repo().map_err(|e| e.to_string())?;
 
-    // 复制消息到新对话，并复制对应的附件
     for message in messages_to_copy {
         let old_message_id = message.id;
 
@@ -704,7 +729,6 @@ pub async fn fork_conversation(
 
         let created_message = message_repo.create(&new_message).map_err(|e| e.to_string())?;
 
-        // 复制该消息的所有附件
         if let Some(attachments) = attachment_map.get(&old_message_id) {
             for attachment in attachments {
                 let mut new_attachment = attachment.clone();
@@ -715,8 +739,25 @@ pub async fn fork_conversation(
         }
     }
 
-    crate::sync::schedule_sync_after_local_change(&app_handle);
+    if schedule_sync {
+        crate::sync::schedule_sync_after_local_change(app_handle);
+    }
     Ok(created_conversation.id)
+}
+
+#[tauri::command]
+pub async fn fork_conversation(
+    app_handle: tauri::AppHandle,
+    conversation_id: i64,
+    message_id: i64,
+) -> Result<i64, String> {
+    fork_conversation_internal(
+        &app_handle,
+        conversation_id,
+        Some(message_id),
+        ForkNameStyle::Version,
+        true,
+    )
 }
 
 #[tauri::command]

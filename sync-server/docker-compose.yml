@@ -1,0 +1,16 @@
+services:
+  sync:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - aipp-sync-data:/app/data
+    environment:
+      AIPP_SYNC_BASE_URL: http://127.0.0.1:8080
+      AIPP_SYNC_BOOTSTRAP_TOKEN: dev-token
+      # 生产环境请换成私有 token，且把 BASE_URL 改成非 localhost 的公网/域名地址
+      # （非 localhost 时拒绝空 token 与公开的 dev-token）
+    restart: unless-stopped
+
+volumes:
+  aipp-sync-data:

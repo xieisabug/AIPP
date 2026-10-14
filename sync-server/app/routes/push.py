@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -13,6 +13,7 @@ from app.db import get_db
 from app.models import SyncChange, SyncObject
 from app.schemas import AcceptedEvent, ConflictEvent, PushRequest, PushResponse, RejectedEvent
 from app.services.merge import process_push_event
+from app.services.notify import NotifyHub
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ def recover_from_integrity_error(
 @router.post("/push", response_model=PushResponse)
 def push_events(
     request: PushRequest,
+    http_request: Request,
     auth: AuthContext = Depends(require_auth),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -90,5 +92,13 @@ def push_events(
             rejected.append(result)
 
     db.commit()
+    if accepted:
+        # Notify other devices subscribed via SSE so they pull without waiting for poll.
+        hub: NotifyHub = http_request.app.state.notify_hub
+        hub.publish_threadsafe(
+            auth.account_id,
+            max(item.server_seq for item in accepted),
+            request.device_id,
+        )
     return PushResponse(accepted=accepted, conflicts=conflicts, rejected=rejected)
 
