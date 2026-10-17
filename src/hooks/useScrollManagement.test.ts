@@ -230,4 +230,167 @@ describe("useScrollManagement", () => {
 
         expect(container.scrollTo).not.toHaveBeenCalled();
     });
+
+    it("keeps following stream growth after mid-auto-scroll syncScrollState", () => {
+        let scrollHeight = 1000;
+        const container = {
+            scrollTop: 600,
+            get scrollHeight() {
+                return scrollHeight;
+            },
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+        });
+
+        act(() => {
+            // 距离 > 120 → smooth，进入 auto-scroll 锁
+            result.current.smartScroll();
+        });
+
+        expect(container.scrollTo).toHaveBeenCalled();
+
+        act(() => {
+            // 模拟 smooth 中途：尚未贴底时 Virtuoso onScrollStateChange 回调
+            container.scrollTop = 650;
+            scrollHeight = 1400;
+            result.current.syncScrollState(container as HTMLDivElement);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(400);
+            // 流式继续增高，再次 smartScroll（与 ConversationUI 流式 auto 路径一致）
+            scrollHeight = 1800;
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenLastCalledWith({
+            top: 1800,
+            behavior: "auto",
+        });
+    });
+    it("resumes smartScroll after user scrolls back to bottom", () => {
+        const container = {
+            scrollTop: 600,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.handleUserScrollIntent({
+                deltaY: -80,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll(false, "auto");
+        });
+        expect(container.scrollTo).not.toHaveBeenCalled();
+
+        // 用户滚回底部：syncScrollState 清除 isUserScrolledUp
+        act(() => {
+            container.scrollTop = 600; // 1000-400
+            result.current.syncScrollState(container);
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledWith({
+            top: 1000,
+            behavior: "auto",
+        });
+    });
+
+    it("marks scrolled-up on touch intent when away from bottom", () => {
+        const container = {
+            scrollTop: 100,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            // TouchEvent-like：无 deltaY，靠 distanceToBottom >= 10
+            result.current.handleUserScrollIntent({} as any);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll();
+        });
+
+        expect(container.scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("keeps following under fast burst smartScroll auto updates", () => {
+        let scrollHeight = 1000;
+        const container = {
+            scrollTop: 600,
+            get scrollHeight() {
+                return scrollHeight;
+            },
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+        });
+
+        for (const height of [1200, 1500, 2000, 2800, 3600]) {
+            act(() => {
+                // 释放上一轮 auto 锁
+                vi.advanceTimersByTime(120);
+                scrollHeight = height;
+                result.current.smartScroll(false, "auto");
+            });
+            expect(container.scrollTo).toHaveBeenLastCalledWith({
+                top: height,
+                behavior: "auto",
+            });
+        }
+    });
+
 });
