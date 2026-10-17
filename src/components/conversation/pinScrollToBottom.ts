@@ -243,6 +243,7 @@ export function followScrollContainerBottom({
 }: FollowScrollToBottomOptions): () => void {
     let stopped = false;
     let frameRef: number | null = null;
+    let lastScrollHeight = container.scrollHeight;
 
     const getDistanceToBottom = () =>
         container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -290,14 +291,50 @@ export function followScrollContainerBottom({
     });
 
     const observed = new Set<Element>();
-    [container, ...Array.from(container.children), ...contentElements].forEach(
-        (element) => {
-            if (element && !observed.has(element)) {
-                observed.add(element);
-                resizeObserver.observe(element);
-            }
-        },
-    );
+    const observeElement = (element: Element | null | undefined) => {
+        if (!element || observed.has(element)) {
+            return;
+        }
+        observed.add(element);
+        resizeObserver.observe(element);
+    };
+
+    const observeKnownElements = () => {
+        observeElement(container);
+        Array.from(container.children).forEach(observeElement);
+        contentElements.forEach(observeElement);
+    };
+
+    observeKnownElements();
+
+    // Virtuoso / 异步内容插入新节点时，仅观察首批 children 会漏掉后续增高
+    const mutationObserver = new MutationObserver(() => {
+        if (stopped || !shouldContinue()) {
+            return;
+        }
+        observeKnownElements();
+        schedulePin();
+    });
+    mutationObserver.observe(container, {
+        childList: true,
+        subtree: true,
+    });
+
+    // scrollHeight 变化不一定触发 ResizeObserver（虚拟列表 spacer / 估高校正）；轮询兜底
+    const heightPollId = window.setInterval(() => {
+        if (stopped) {
+            return;
+        }
+        if (!shouldContinue()) {
+            stop();
+            return;
+        }
+        const nextHeight = container.scrollHeight;
+        if (nextHeight !== lastScrollHeight) {
+            lastScrollHeight = nextHeight;
+            schedulePin();
+        }
+    }, 100);
 
     const timeoutId = window.setTimeout(() => stop(), maxDurationMs);
 
@@ -307,6 +344,7 @@ export function followScrollContainerBottom({
         }
         stopped = true;
         resizeObserver.disconnect();
+        mutationObserver.disconnect();
         container.removeEventListener("scroll", handleScroll);
         USER_INTENT_EVENTS.forEach((eventName) => {
             container.removeEventListener(eventName, stop);
@@ -315,6 +353,7 @@ export function followScrollContainerBottom({
             cancelAnimationFrame(frameRef);
             frameRef = null;
         }
+        window.clearInterval(heightPollId);
         window.clearTimeout(timeoutId);
     }
 

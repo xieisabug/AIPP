@@ -138,4 +138,23 @@ describe("followScrollContainerBottom", () => {
 
         expect(container.scrollTop).toBe(600);
     });
+
+    it("should re-pin when scrollHeight grows without ResizeObserver", () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(1000);
+
+        const stop = followScrollContainerBottom({
+            container,
+            onScrollStateChange: vi.fn(),
+            shouldContinue: () => true,
+        });
+
+        setScrollHeight(1800);
+        // 不触发 ResizeObserver，仅靠 height poll；rAF 仍走 stub 同步执行
+        vi.advanceTimersByTime(100);
+
+        expect(container.scrollTop).toBe(1400);
+        stop();
+        vi.useRealTimers();
+    });
 });
