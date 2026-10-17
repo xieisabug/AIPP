@@ -45,10 +45,12 @@ interface VirtuosoMessageListContext {
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 180;
 const DEFAULT_ITEM_HEIGHT = 160;
 const INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT = 10;
-const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 30;
+const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 90;
 const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
-/** 硬超时：pin 被打断时也不能永久 visibility:hidden */
-const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 500;
+/** 硬超时：pin 被打断时也不能永久 visibility:hidden；长对话布局常超过 500ms */
+const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 2500;
+/** 打开后继续跟随晚到布局（代码高亮 / 图片 / Virtuoso 估高校正） */
+const INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS = 15_000;
 
 function itemMatchesMessageId(
     item: RenderableConversationItem,
@@ -321,6 +323,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
     useLayoutEffect(() => {
         lastPinnedUserMessageIdRef.current = null;
+        initialBottomConversationRef.current = null;
+        initialBottomPinConversationRef.current = null;
+        setInitialBottomVisibleConversationId(null);
     }, [conversationId]);
 
     const effectiveScrollParent = scrollParent ?? scrollContainerRef.current;
@@ -370,32 +375,60 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return;
         }
 
-        // live-only 无 Virtuoso 贴底闪动：不 pin、不 hide，仅做一次滚动贴底
-        // 同时标记 visible，避免之后长出 history 时因 ref 已写入却未 unhide 而永久隐藏
+        const startFollow = (target: HTMLDivElement) =>
+            followScrollContainerBottom({
+                container: target,
+                contentElements: [listWrapperRef.current],
+                onScrollStateChange,
+                shouldContinue: () =>
+                    initialBottomConversationRef.current === conversationId,
+                maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
+            });
+
+        // live-only 无 Virtuoso 贴底闪动：不 pin、不 hide，一次滚动贴底后继续跟随晚到增高。
+        // 不写入 initialBottomConversationRef：若随后长出 history，仍走完整 pin 路径。
         if (historyItems.length === 0) {
             if (
-                container
-                && hasCurrentConversationMessages
-                && initialBottomConversationRef.current !== conversationId
+                !container
+                || !hasCurrentConversationMessages
             ) {
-                initialBottomConversationRef.current = conversationId;
-                setInitialBottomVisibleConversationId(conversationId);
-                container.scrollTop = Math.max(
-                    0,
-                    container.scrollHeight - container.clientHeight,
-                );
-                onScrollStateChange?.(container);
+                return;
             }
-            return;
+
+            setInitialBottomVisibleConversationId(conversationId);
+            container.scrollTop = Math.max(
+                0,
+                container.scrollHeight - container.clientHeight,
+            );
+            onScrollStateChange?.(container);
+            // live-only follow：cleanup 时 stop；shouldContinue 不依赖 pin-done ref
+            const stopFollow = followScrollContainerBottom({
+                container,
+                contentElements: [listWrapperRef.current],
+                onScrollStateChange,
+                shouldContinue: () => true,
+                maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
+            });
+            return () => {
+                stopFollow();
+            };
         }
 
         if (
             !container
             || !hasCurrentConversationMessages
-            || initialBottomConversationRef.current === conversationId
             || initialBottomPinConversationRef.current === conversationId
         ) {
             return;
+        }
+
+        // 初始 pin 已完成：effect 因依赖变化 cleanup 后必须重新挂上 follow，
+        // 否则晚到的布局增高会把视口留在半截（长对话打开常见）。
+        if (initialBottomConversationRef.current === conversationId) {
+            const stopFollow = startFollow(container);
+            return () => {
+                stopFollow();
+            };
         }
 
         initialBottomPinConversationRef.current = conversationId;
@@ -413,13 +446,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                     lastPinnedUserMessageIdRef.current = tailUserMessageIdRef.current;
                 }
                 setInitialBottomVisibleConversationId(conversationId);
-                stopFollow = followScrollContainerBottom({
-                    container,
-                    contentElements: [listWrapperRef.current],
-                    onScrollStateChange,
-                    shouldContinue: () =>
-                        initialBottomConversationRef.current === conversationId,
-                });
+                stopFollow = startFollow(container);
             },
             minFrameCount: INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT,
             stableFrameCount: INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT,

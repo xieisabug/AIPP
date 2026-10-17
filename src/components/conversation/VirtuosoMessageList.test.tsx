@@ -515,4 +515,69 @@ describe("VirtuosoMessageList row height reservation", () => {
         );
         expect(screen.getByTestId("virtuoso")).toBeVisible();
     });
+    it("keeps sticking to bottom after pin effect restarts and content grows late", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const messages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "user-2",
+            }),
+        ];
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 模拟父组件重渲染导致 onScrollStateChange identity 变化 → effect cleanup 停掉 follow
+        rerender(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        // 晚到的布局增高（代码高亮 / 图片 / Virtuoso 估高校正）
+        scrollHeight = 2000;
+        scrollContainer.scrollTop = 600;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(1600);
+        });
+    });
+
 });
