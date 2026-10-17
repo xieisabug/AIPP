@@ -230,4 +230,55 @@ describe("useScrollManagement", () => {
 
         expect(container.scrollTo).not.toHaveBeenCalled();
     });
+
+    it("keeps following stream growth after mid-auto-scroll syncScrollState", () => {
+        let scrollHeight = 1000;
+        const container = {
+            scrollTop: 600,
+            get scrollHeight() {
+                return scrollHeight;
+            },
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+        });
+
+        act(() => {
+            // 距离 > 120 → smooth，进入 auto-scroll 锁
+            result.current.smartScroll();
+        });
+
+        expect(container.scrollTo).toHaveBeenCalled();
+
+        act(() => {
+            // 模拟 smooth 中途：尚未贴底时 Virtuoso onScrollStateChange 回调
+            container.scrollTop = 650;
+            scrollHeight = 1400;
+            result.current.syncScrollState(container as HTMLDivElement);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(400);
+            // 流式继续增高，再次 smartScroll（与 ConversationUI 流式 auto 路径一致）
+            scrollHeight = 1800;
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenLastCalledWith({
+            top: 1800,
+            behavior: "auto",
+        });
+    });
 });

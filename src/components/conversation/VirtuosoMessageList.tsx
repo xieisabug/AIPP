@@ -51,6 +51,8 @@ const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
 const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 2500;
 /** 打开后继续跟随晚到布局（代码高亮 / 图片 / Virtuoso 估高校正） */
 const INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS = 15_000;
+/** 流式输出期间持续贴底；实际结束由 streamingMessages 清空时的 effect cleanup 负责 */
+const STREAM_FOLLOW_MAX_DURATION_MS = 10 * 60_000;
 
 function itemMatchesMessageId(
     item: RenderableConversationItem,
@@ -219,6 +221,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const initialBottomPinConversationRef = useRef<string | null>(null);
     const lastPinnedUserMessageIdRef = useRef<number | null>(null);
     const tailUserMessageIdRef = useRef<number | null>(null);
+    const streamingActiveRef = useRef(false);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
     const [viewportHeight, setViewportHeight] = useState(0);
     const [
@@ -281,6 +284,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         () => liveItems.map((item) => item.key).join("|"),
         [liveItems],
     );
+    const streamingMessageCount = messageListProps.streamingMessages.size;
+    streamingActiveRef.current = streamingMessageCount > 0;
     const hasCurrentConversationMessages = useMemo(() => {
         if (!conversationId || messageListProps.allDisplayMessages.length === 0) {
             return false;
@@ -511,6 +516,39 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         pendingScrollMessageId,
         effectiveScrollParent,
         tailUserMessageId,
+    ]);
+
+    // 流式回复持续长高：在用户未主动上滑前一直贴底，避免 smartScroll 锁/假阳性上滑后停在半截。
+    useLayoutEffect(() => {
+        const container = effectiveScrollParent;
+        if (
+            !container
+            || streamingMessageCount === 0
+            || !hasCurrentConversationMessages
+            || pendingScrollMessageId !== null
+        ) {
+            return;
+        }
+
+        // 打开会话的初始 pin 进行中时不要抢 follow；pin onComplete 会接上打开 follow
+        if (initialBottomPinConversationRef.current === conversationId) {
+            return;
+        }
+
+        return followScrollContainerBottom({
+            container,
+            contentElements: [listWrapperRef.current],
+            onScrollStateChange,
+            shouldContinue: () => streamingActiveRef.current,
+            maxDurationMs: STREAM_FOLLOW_MAX_DURATION_MS,
+        });
+    }, [
+        conversationId,
+        hasCurrentConversationMessages,
+        onScrollStateChange,
+        pendingScrollMessageId,
+        effectiveScrollParent,
+        streamingMessageCount,
     ]);
 
     const overscanPx = useMemo(

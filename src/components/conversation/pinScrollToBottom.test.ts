@@ -157,4 +157,51 @@ describe("followScrollContainerBottom", () => {
         stop();
         vi.useRealTimers();
     });
+
+    it("should keep following across many stream-like height growths", () => {
+        // 用异步 rAF，避免同步 stub 在 cb 把 frameRef 置空后又被赋回 id 导致后续 schedulePin 早退
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+            void id;
+            rafQueue.length = 0;
+        });
+        const flushRaf = () => {
+            const queued = rafQueue.splice(0);
+            queued.forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(1000);
+        let streaming = true;
+
+        const stop = followScrollContainerBottom({
+            container,
+            shouldContinue: () => streaming,
+            maxDurationMs: 60_000,
+        });
+
+        for (const height of [1200, 1600, 2200, 3000, 4000]) {
+            setScrollHeight(height);
+            // 高度 poll（虚拟列表 spacer 不一定触发 ResizeObserver）
+            vi.advanceTimersByTime(100);
+            flushRaf();
+            expect(container.scrollTop).toBe(height - 400);
+        }
+
+        streaming = false;
+        setScrollHeight(4500);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        // shouldContinue false → stop，不再贴底
+        expect(container.scrollTop).toBe(3600);
+        stop();
+        vi.useRealTimers();
+    });
+
 });
