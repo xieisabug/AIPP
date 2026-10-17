@@ -230,8 +230,8 @@ const USER_INTENT_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as 
 /**
  * 初始贴底结束后，虚拟列表实测高度与估算不一致会持续收缩/增长，
  * 异步内容（代码高亮、图片、富文本预览）也可能继续长高。
- * 用户未主动交互前，内容尺寸变化或程序触发的滚动离开底部都会重新贴底；
- * 用户一旦滚轮/触摸/点击/按键，立即让位。
+ * 用户未主动上滑前，内容尺寸变化或程序触发的滚动离开底部都会重新贴底；
+ * 用户滚轮向上 / 触摸离底后暂停跟滚，滚回底部后自动恢复（流式场景需要）。
  */
 export function followScrollContainerBottom({
     container,
@@ -242,15 +242,19 @@ export function followScrollContainerBottom({
     bottomThresholdPx = DEFAULT_FOLLOW_BOTTOM_THRESHOLD_PX,
 }: FollowScrollToBottomOptions): () => void {
     let stopped = false;
+    /** 用户上滑后暂停跟滚；贴底后自动恢复（与 useScrollManagement.isUserScrolledUp 对齐） */
+    let pausedByUser = false;
     let frameRef: number | null = null;
     let lastScrollHeight = container.scrollHeight;
 
     const getDistanceToBottom = () =>
         container.scrollHeight - container.scrollTop - container.clientHeight;
 
+    const isAtBottom = () => getDistanceToBottom() <= bottomThresholdPx;
+
     const pinToBottom = () => {
         frameRef = null;
-        if (stopped || !shouldContinue()) {
+        if (stopped || pausedByUser || !shouldContinue()) {
             return;
         }
 
@@ -267,19 +271,63 @@ export function followScrollContainerBottom({
     };
 
     const schedulePin = () => {
-        if (stopped || frameRef !== null) {
+        if (stopped || pausedByUser || frameRef !== null) {
             return;
         }
         frameRef = requestAnimationFrame(pinToBottom);
     };
 
     // 高度收缩时 Virtuoso / 浏览器滚动锚定会补偿 scrollTop，且可能过量补偿到远离底部；
-    // 真正的用户滚动都会先经过 USER_INTENT_EVENTS 而停止跟随，这里的滚动都视为程序触发
+    // 用户主动上滑会 pausedByUser，其余偏离底部的滚动视为程序触发并重新贴底。
+    // 用户滚回底部时清除 pause，流式期间恢复跟滚。
     const handleScroll = () => {
-        if (stopped || getDistanceToBottom() <= bottomThresholdPx) {
+        if (stopped) {
+            return;
+        }
+        if (pausedByUser) {
+            if (isAtBottom()) {
+                pausedByUser = false;
+                // 暂停期间 height poll 可能已推进 lastScrollHeight；回底后立刻补一次贴底，
+                // 否则要等下一次增高才恢复跟滚。
+                schedulePin();
+            }
+            return;
+        }
+        if (isAtBottom()) {
             return;
         }
         schedulePin();
+    };
+
+    const handleUserIntent = (event: Event) => {
+        if (stopped) {
+            return;
+        }
+        // End / PageDown / ArrowDown：用户意图是回底或下翻，不暂停（否则会卡住跟滚）
+        if (event.type === "keydown") {
+            const key = (event as KeyboardEvent).key;
+            if (
+                key === "End"
+                || key === "PageDown"
+                || key === "ArrowDown"
+                || key === " "
+            ) {
+                return;
+            }
+        }
+        const isWheelUp =
+            event.type === "wheel"
+            && "deltaY" in event
+            && typeof (event as WheelEvent).deltaY === "number"
+            && (event as WheelEvent).deltaY < 0;
+        // 滚轮向上，或当前已离底（触摸/指针拖动上滑）：暂停跟滚
+        if (isWheelUp || !isAtBottom()) {
+            pausedByUser = true;
+            if (frameRef !== null) {
+                cancelAnimationFrame(frameRef);
+                frameRef = null;
+            }
+        }
     };
 
     const resizeObserver = new ResizeObserver(() => {
@@ -329,11 +377,23 @@ export function followScrollContainerBottom({
             stop();
             return;
         }
-        const nextHeight = container.scrollHeight;
-        if (nextHeight !== lastScrollHeight) {
-            lastScrollHeight = nextHeight;
+        // End 键等到底时偶发不触发 scroll；暂停中若已贴底则在此恢复
+        if (pausedByUser && isAtBottom()) {
+            pausedByUser = false;
+            lastScrollHeight = container.scrollHeight;
             schedulePin();
+            return;
         }
+        const nextHeight = container.scrollHeight;
+        if (nextHeight === lastScrollHeight) {
+            return;
+        }
+        if (pausedByUser) {
+            // 保留 delta：恢复跟滚后下一轮 poll / schedulePin 仍能看到增高
+            return;
+        }
+        lastScrollHeight = nextHeight;
+        schedulePin();
     }, 100);
 
     const timeoutId = window.setTimeout(() => stop(), maxDurationMs);
@@ -347,7 +407,7 @@ export function followScrollContainerBottom({
         mutationObserver.disconnect();
         container.removeEventListener("scroll", handleScroll);
         USER_INTENT_EVENTS.forEach((eventName) => {
-            container.removeEventListener(eventName, stop);
+            container.removeEventListener(eventName, handleUserIntent);
         });
         if (frameRef !== null) {
             cancelAnimationFrame(frameRef);
@@ -359,7 +419,7 @@ export function followScrollContainerBottom({
 
     container.addEventListener("scroll", handleScroll, { passive: true });
     USER_INTENT_EVENTS.forEach((eventName) => {
-        container.addEventListener(eventName, stop, { passive: true });
+        container.addEventListener(eventName, handleUserIntent, { passive: true });
     });
 
     return stop;

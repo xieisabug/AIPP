@@ -75,7 +75,7 @@ describe("followScrollContainerBottom", () => {
         stop();
     });
 
-    it("should stop following when user shows scroll intent", () => {
+    it("should pause following when user wheels upward", () => {
         const { container, setScrollHeight } = makeContainer(1000);
 
         followScrollContainerBottom({
@@ -83,10 +83,13 @@ describe("followScrollContainerBottom", () => {
             shouldContinue: () => true,
         });
 
-        container.dispatchEvent(new Event("wheel"));
+        container.dispatchEvent(
+            new WheelEvent("wheel", { deltaY: -80 }),
+        );
         setScrollHeight(1500);
         triggerResize();
 
+        // paused：增高不再抢滚
         expect(container.scrollTop).toBe(600);
     });
 
@@ -106,7 +109,7 @@ describe("followScrollContainerBottom", () => {
         stop();
     });
 
-    it("should not pull back after user scrolls away", () => {
+    it("should not pull back after user scrolls away via pointer", () => {
         const { container, setScrollHeight } = makeContainer(1000);
 
         followScrollContainerBottom({
@@ -114,8 +117,9 @@ describe("followScrollContainerBottom", () => {
             shouldContinue: () => true,
         });
 
-        container.dispatchEvent(new Event("pointerdown"));
+        // 先离底再 pointerdown：模拟拖动滚动条/触摸上滑后的意图
         container.scrollTop = 200;
+        container.dispatchEvent(new Event("pointerdown"));
         container.dispatchEvent(new Event("scroll"));
         setScrollHeight(1500);
         triggerResize();
@@ -202,6 +206,193 @@ describe("followScrollContainerBottom", () => {
         expect(container.scrollTop).toBe(3600);
         stop();
         vi.useRealTimers();
+    });
+
+    it("should resume following after user scrolls back to bottom mid-stream", () => {
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            const queued = rafQueue.splice(0);
+            queued.forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(1000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        // 上滑暂停
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -120 }));
+        container.scrollTop = 200;
+        container.dispatchEvent(new Event("scroll"));
+
+        // 暂停期间内容持续增高（poll 不得吃掉 delta）
+        setScrollHeight(1800);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(200);
+
+        // 用户滚回底部 → 清除 pause 并立刻补贴底
+        container.scrollTop = 1800 - 400;
+        container.dispatchEvent(new Event("scroll"));
+        flushRaf();
+        expect(container.scrollTop).toBe(1400);
+
+        // 流式继续增高 → 继续贴底
+        setScrollHeight(2400);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(2000);
+        vi.useRealTimers();
+    });
+
+    it("should pause on touchstart when already away from bottom", () => {
+        const { container, setScrollHeight } = makeContainer(1000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.scrollTop = 150;
+        container.dispatchEvent(new Event("touchstart"));
+        setScrollHeight(1600);
+        triggerResize();
+
+        expect(container.scrollTop).toBe(150);
+    });
+
+    it("should not pause on wheel-down while still at bottom", () => {
+        const { container, setScrollHeight } = makeContainer(1000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        // 在底部向下滚（已到底）不应暂停
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
+        setScrollHeight(1500);
+        triggerResize();
+
+        expect(container.scrollTop).toBe(1100);
+    });
+
+    it("should keep following under fast burst height growth", () => {
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            const queued = rafQueue.splice(0);
+            queued.forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(800);
+
+        const stop = followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+            maxDurationMs: 60_000,
+        });
+
+        // 模拟低延迟突发 token：短间隔多次跳高（靠 height poll，16ms 帧内也可能叠多跳）
+        let height = 800;
+        for (let i = 0; i < 20; i += 1) {
+            height += 50 + (i % 3) * 30;
+            setScrollHeight(height);
+            vi.advanceTimersByTime(100); // height poll 周期
+            flushRaf();
+            expect(container.scrollTop).toBe(height - 400);
+        }
+
+        stop();
+        vi.useRealTimers();
+    });
+
+    it("should resume via height poll when user is at bottom without a scroll event", () => {
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            const queued = rafQueue.splice(0);
+            queued.forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(1000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -80 }));
+        container.scrollTop = 100;
+        setScrollHeight(1600);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        // 仍暂停
+        expect(container.scrollTop).toBe(100);
+
+        // End 键贴底但不派发 scroll
+        container.scrollTop = 1600 - 400;
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        // poll 发现已贴底 → 恢复；高度未变则保持贴底
+        expect(container.scrollTop).toBe(1200);
+
+        setScrollHeight(2200);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(1800);
+        vi.useRealTimers();
+    });
+
+    it("should not pause on End key so jump-to-bottom can keep following", () => {
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+
+        const { container, setScrollHeight } = makeContainer(1000);
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.scrollTop = 200;
+        container.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
+        // 模拟 End 贴底
+        container.scrollTop = 600;
+        container.dispatchEvent(new Event("scroll"));
+
+        setScrollHeight(1500);
+        triggerResize();
+        flushRaf();
+        expect(container.scrollTop).toBe(1100);
     });
 
 });

@@ -518,7 +518,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         tailUserMessageId,
     ]);
 
-    // 流式回复持续长高：在用户未主动上滑前一直贴底，避免 smartScroll 锁/假阳性上滑后停在半截。
+    // 流式回复持续长高：follow 贴底；用户上滑暂停、滚回底部恢复（见 followScrollContainerBottom）。
     useLayoutEffect(() => {
         const container = effectiveScrollParent;
         if (

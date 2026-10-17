@@ -655,4 +655,89 @@ describe("VirtuosoMessageList row height reservation", () => {
         );
     });
 
+    it("pauses stream follow when user wheels up, resumes after return to bottom", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const streamEvent = {
+            message_id: 99,
+            conversation_id: 1,
+            content: "stream-start",
+            is_done: false,
+            reasoning_content: null,
+        } as any;
+
+        const baseMessages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "ask-long",
+            }),
+        ];
+
+        const props = makeProps(baseMessages, true);
+        props.streamingMessages = new Map([[99, streamEvent]]);
+
+        render(
+            <VirtuosoMessageList
+                {...props}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 等初始 pin 结束，避免 pin 的 scroll 监听把用户上滑抢回底部
+        await waitFor(
+            () => {
+                expect(
+                    document.querySelector(
+                        "[data-aipp-initial-bottom-positioning='true']",
+                    ),
+                ).toBeNull();
+            },
+            { timeout: 2000 },
+        );
+
+        // 用户上滑：follow 应暂停
+        scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+        scrollContainer.scrollTop = 200;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        scrollHeight = 2200;
+        // 触发 height poll / 程序 scroll 路径
+        await new Promise((r) => setTimeout(r, 150));
+        expect(scrollContainer.scrollTop).toBe(200);
+
+        // 滚回底部 → 恢复 follow
+        scrollContainer.scrollTop = 2200 - 400;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        scrollHeight = 3000;
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(2600);
+        }, { timeout: 2000 });
+    });
+
 });
