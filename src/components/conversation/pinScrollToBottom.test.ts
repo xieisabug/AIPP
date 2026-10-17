@@ -51,6 +51,7 @@ describe("followScrollContainerBottom", () => {
             return 1;
         });
         vi.stubGlobal("cancelAnimationFrame", vi.fn());
+        vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response())));
     });
 
     afterEach(() => {
@@ -240,17 +241,106 @@ describe("followScrollContainerBottom", () => {
         flushRaf();
         expect(container.scrollTop).toBe(200);
 
-        // 用户滚回底部 → 清除 pause 并立刻补贴底
+        // 用户向下滚回底部（wheel-down force resume，越过上滑锁）
         container.scrollTop = 1800 - 400;
-        container.dispatchEvent(new Event("scroll"));
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: 120 }));
         flushRaf();
         expect(container.scrollTop).toBe(1400);
 
-        // 流式继续增高 → 继续贴底
-        setScrollHeight(2400);
+        // 流式继续增高 → 必须持续贴底（case 3：resume 后 viewport 跟着 MARK 走）
+        for (const height of [2200, 2800, 3600, 4500]) {
+            setScrollHeight(height);
+            vi.advanceTimersByTime(100);
+            flushRaf();
+            expect(container.scrollTop).toBe(height - 400);
+        }
+        vi.useRealTimers();
+    });
+
+    it("should resume on wheel-down near bottom then keep following growth", () => {
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(2000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+        container.scrollTop = 300;
+        setScrollHeight(3000);
         vi.advanceTimersByTime(100);
         flushRaf();
-        expect(container.scrollTop).toBe(2000);
+        expect(container.scrollTop).toBe(300);
+
+        // 向下滚到距底 50px（宽松 resume 阈值内）
+        container.scrollTop = 3000 - 400 - 50;
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
+        flushRaf(); // wheel-down rAF resume
+
+        setScrollHeight(4000);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(3600);
+
+        setScrollHeight(5000);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(4600);
+        vi.useRealTimers();
+    });
+
+    it("should ignore scroll-near-bottom resume briefly after wheel-up, but honor wheel-down", () => {
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({
+            toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "performance"],
+        });
+        const { container, setScrollHeight } = makeContainer(2000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+        container.scrollTop = 300;
+        // 立刻滚到近底：锁定期内不得 resume
+        container.scrollTop = 2000 - 400 - 20;
+        container.dispatchEvent(new Event("scroll"));
+        flushRaf();
+        setScrollHeight(3000);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(1580); // 仍暂停在近底位置，未贴 2600
+
+        // 向下滚强制恢复
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
+        flushRaf();
+        setScrollHeight(4000);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(3600);
         vi.useRealTimers();
     });
 
@@ -335,7 +425,9 @@ describe("followScrollContainerBottom", () => {
             queued.forEach((cb) => cb(performance.now()));
         };
 
-        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        vi.useFakeTimers({
+            toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "performance"],
+        });
         const { container, setScrollHeight } = makeContainer(1000);
 
         followScrollContainerBottom({
@@ -351,11 +443,10 @@ describe("followScrollContainerBottom", () => {
         // 仍暂停
         expect(container.scrollTop).toBe(100);
 
-        // End 键贴底但不派发 scroll
+        // End 键贴底但不派发 scroll；越过上滑锁后 poll 恢复
         container.scrollTop = 1600 - 400;
-        vi.advanceTimersByTime(100);
+        vi.advanceTimersByTime(500);
         flushRaf();
-        // poll 发现已贴底 → 恢复；高度未变则保持贴底
         expect(container.scrollTop).toBe(1200);
 
         setScrollHeight(2200);

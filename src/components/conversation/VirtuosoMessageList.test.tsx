@@ -730,9 +730,9 @@ describe("VirtuosoMessageList row height reservation", () => {
         await new Promise((r) => setTimeout(r, 150));
         expect(scrollContainer.scrollTop).toBe(200);
 
-        // 滚回底部 → 恢复 follow
+        // 滚回底部（wheel-down force resume）→ 恢复 follow
         scrollContainer.scrollTop = 2200 - 400;
-        scrollContainer.dispatchEvent(new Event("scroll"));
+        scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: 120 }));
 
         scrollHeight = 3000;
         await waitFor(() => {
