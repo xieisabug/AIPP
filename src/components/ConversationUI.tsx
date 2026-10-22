@@ -572,8 +572,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     handleMessageCompletion(streamEvent);
                 }
 
-                // 每次消息更新时手动触发滚动
-                setTimeout(() => smartScrollRef.current?.(), 0);
+                // 每次消息更新时手动触发滚动；流式用 auto，避免 smooth 锁期内假阳性上滑后停在半截
+                setTimeout(() => smartScrollRef.current?.(false, "auto"), 0);
             };
 
             return {

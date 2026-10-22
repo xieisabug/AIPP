@@ -85,7 +85,7 @@ function makeProps(messages: Message[], forceVirtualized = false) {
         allDisplayMessages: forceVirtualized
             ? [...Array.from({ length: 81 }, (_, i) => makeMessage({ id: 10000 + i, message_type: "user" })), ...messages]
             : messages,
-        streamingMessages: new Map<number, never>(),
+        streamingMessages: new Map<number, any>(),
         shiningMessageIds: new Set<number>(),
         shiningMcpCallId: null,
         reasoningExpandStates: new Map<number, boolean>(),
@@ -542,4 +542,229 @@ describe("VirtuosoMessageList row height reservation", () => {
         );
         expect(screen.getByTestId("virtuoso")).toBeVisible();
     });
+    it("keeps sticking to bottom after pin effect restarts and content grows late", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const messages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "user-2",
+            }),
+        ];
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 模拟父组件重渲染导致 onScrollStateChange identity 变化 → effect cleanup 停掉 follow
+        rerender(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        // 晚到的布局增高（代码高亮 / 图片 / Virtuoso 估高校正）
+        scrollHeight = 2000;
+        scrollContainer.scrollTop = 600;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(1600);
+        });
+    });
+
+
+    it("keeps sticking to bottom while streaming content grows", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const streamEvent = {
+            message_id: 99,
+            conversation_id: 1,
+            content: "stream-start",
+            is_done: false,
+            reasoning_content: null,
+        } as any;
+
+        const baseMessages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "ask-long",
+            }),
+        ];
+
+        const props = makeProps(baseMessages, true);
+        props.streamingMessages = new Map([[99, streamEvent]]);
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...props}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 流式 token 导致内容持续增高（无用户上滑）
+        scrollHeight = 2500;
+        scrollContainer.scrollTop = 600;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(2100);
+        });
+
+        // 流式结束后不再强制跟（清理 follow）；这里只验证流式期间贴底
+        const doneProps = makeProps(baseMessages, true);
+        doneProps.streamingMessages = new Map();
+        rerender(
+            <VirtuosoMessageList
+                {...doneProps}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+    });
+
+    it("pauses stream follow when user wheels up, resumes after return to bottom", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const streamEvent = {
+            message_id: 99,
+            conversation_id: 1,
+            content: "stream-start",
+            is_done: false,
+            reasoning_content: null,
+        } as any;
+
+        const baseMessages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "ask-long",
+            }),
+        ];
+
+        const props = makeProps(baseMessages, true);
+        props.streamingMessages = new Map([[99, streamEvent]]);
+
+        render(
+            <VirtuosoMessageList
+                {...props}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 等初始 pin 结束，避免 pin 的 scroll 监听把用户上滑抢回底部
+        await waitFor(
+            () => {
+                expect(
+                    document.querySelector(
+                        "[data-aipp-initial-bottom-positioning='true']",
+                    ),
+                ).toBeNull();
+            },
+            { timeout: 2000 },
+        );
+
+        // 用户上滑：follow 应暂停
+        scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+        scrollContainer.scrollTop = 200;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        scrollHeight = 2200;
+        // 触发 height poll / 程序 scroll 路径
+        await new Promise((r) => setTimeout(r, 150));
+        expect(scrollContainer.scrollTop).toBe(200);
+
+        // 滚回底部（wheel-down force resume）→ 恢复 follow
+        scrollContainer.scrollTop = 2200 - 400;
+        scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: 120 }));
+
+        scrollHeight = 3000;
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(2600);
+        }, { timeout: 2000 });
+    });
+
 });

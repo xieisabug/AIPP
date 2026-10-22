@@ -309,8 +309,9 @@ fn test_resolve_auto_execute_keeps_legacy_when_review_disabled() {
     assert!(!resolve_auto_execute("off", "write_file", false, Some(true)));
     assert!(!resolve_auto_execute("", "bash", false, Some(true)));
     assert!(resolve_auto_execute("auto_model", "preview_code", true, Some(false)));
-    assert!(!resolve_auto_execute("auto_model", "preview_file", false, Some(true)));
-    assert!(resolve_auto_execute("auto_model", "ask_user_question", true, None));
+    assert!(resolve_auto_execute("auto_model", "preview_file", false, Some(true)));
+    assert!(resolve_auto_execute("auto_model", "ask_user_question", false, None));
+    assert!(resolve_auto_execute("off", "ask_user_question", false, None));
 }
 
 #[test]
