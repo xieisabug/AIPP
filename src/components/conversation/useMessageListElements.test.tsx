@@ -2,6 +2,7 @@ import { render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     findFirstLiveSuffixIndex,
+    readMcpCallRefs,
     useMessageListElements,
     type UseMessageListElementsProps,
 } from "./useMessageListElements";
@@ -279,5 +280,37 @@ describe("findFirstLiveSuffixIndex", () => {
                 { virtualizationMode: "virtualized" },
             ]),
         ).toBe(-1);
+    });
+});
+
+describe("readMcpCallRefs", () => {
+    it("collects numeric call ids from finished tool call comments", () => {
+        const refs = readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL:{"call_id":12,"tool_name":"x"} --> b <!-- MCP_TOOL_CALL:34 -->',
+        }));
+        expect(refs).toEqual({ ids: [12, 34], needsFullMap: false });
+    });
+
+    it("needs the full state map when a streaming comment only carries llm_call_id", () => {
+        const refs = readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL_STREAMING:{"llm_call_id":"call_abc","tool_name":"x"} -->',
+        }));
+        expect(refs.needsFullMap).toBe(true);
+    });
+
+    it("needs the full state map for a comment without any call id or an unterminated comment", () => {
+        expect(readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL:{"server_name":"s","tool_name":"t"} -->',
+        })).needsFullMap).toBe(true);
+        expect(readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"t","param',
+        })).needsFullMap).toBe(true);
+    });
+
+    it("returns no refs for plain messages", () => {
+        expect(readMcpCallRefs(makeMessage({ content: "plain" }))).toEqual({
+            ids: [],
+            needsFullMap: false,
+        });
     });
 });

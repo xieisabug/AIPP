@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversation";
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
-import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
+import { MarkdownStreamingContext, useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
 import type { InlineInteractionItem } from "./ConversationUI";
 
@@ -57,7 +57,7 @@ const ReasoningMessage = React.memo(
         );
 
         // Markdown 配置与 MCP 处理（保持与普通消息一致的处理方式）
-        const markdownConfig = useMarkdownConfig({ isStreaming: isThinking });
+        const markdownConfig = useMarkdownConfig();
         const { processContent } = useMcpToolCallProcessor(markdownConfig, {
             conversationId,
             messageId: message.id,
@@ -266,18 +266,20 @@ const ReasoningMessage = React.memo(
                     </span>
                 </div>
                 <div className="text-sm text-gray-600 whitespace-pre-wrap break-words font-mono overflow-hidden">
-                    {isThinking &&
-                        contentLines.hasMoreThanThreeLines &&
-                        !isReasoningExpanded ? (
-                        <>
-                            <div className="text-gray-400 text-xs mb-1">
-                                ...
-                            </div>
-                            {renderedPreviewContent}
-                        </>
-                    ) : (
-                        renderedContent
-                    )}
+                    <MarkdownStreamingContext.Provider value={isThinking}>
+                        {isThinking &&
+                            contentLines.hasMoreThanThreeLines &&
+                            !isReasoningExpanded ? (
+                            <>
+                                <div className="text-gray-400 text-xs mb-1">
+                                    ...
+                                </div>
+                                {renderedPreviewContent}
+                            </>
+                        ) : (
+                            renderedContent
+                        )}
+                    </MarkdownStreamingContext.Provider>
                 </div>
                 {/* 思考中时的展开按钮 */}
                 {isThinking &&

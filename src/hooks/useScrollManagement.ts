@@ -48,6 +48,11 @@ export function useScrollManagement(
     const isUserScrolledUpRef = useRef(false); // 使用 Ref 来跟踪滚动状态，避免闭包问题
     const isAutoScrolling = useRef(false);
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
+    const observedTailElementRef = useRef<Element | null>(null);
+    const smartScrollOptionsRef = useRef<{
+        forceScroll: boolean;
+        behaviorOverride?: ScrollBehavior;
+    }>({ forceScroll: false });
     const autoScrollTimeoutRef = useRef<number | null>(null);
     const pendingSmartScrollRef = useRef<{
         forceScroll: boolean;
@@ -179,6 +184,7 @@ export function useScrollManagement(
         if (resizeObserverRef.current) {
             resizeObserverRef.current.disconnect();
             resizeObserverRef.current = null;
+            observedTailElementRef.current = null;
         }
     }, [clearAutoScrollTimeout]);
 
@@ -191,6 +197,13 @@ export function useScrollManagement(
         const { scrollTop, scrollHeight, clientHeight } = target;
         const atBottom = scrollHeight - scrollTop - clientHeight < 10;
         isUserScrolledUpRef.current = !atBottom;
+        // 滚动条拖动不会走 wheel。离开底部后立刻拆掉贴底观察器，
+        // 避免尾部稍后变高时沿用上一次 forceScroll 把视口拽回去。
+        if (!atBottom && !isAutoScrolling.current && resizeObserverRef.current) {
+            resizeObserverRef.current.disconnect();
+            resizeObserverRef.current = null;
+            observedTailElementRef.current = null;
+        }
     }, []);
 
     // 处理用户滚动事件
@@ -226,33 +239,38 @@ export function useScrollManagement(
         const container = scrollContainerRef.current;
         if (!container) return;
 
-        // 清理之前的观察器
-        if (resizeObserverRef.current) {
-            resizeObserverRef.current.disconnect();
-        }
+        smartScrollOptionsRef.current = { forceScroll, behaviorOverride };
 
         const scrollToBottom = () => {
-            // 再次从 Ref 检查，确保万无一失
-            if (isAutoScrolling.current || (!forceScroll && isUserScrolledUpRef.current) || !scrollContainerRef.current) {
-                if (isAutoScrolling.current) {
-                    queuePendingSmartScroll(forceScroll, behaviorOverride);
+            const options = smartScrollOptionsRef.current;
+            // 用户已经开始滚（滚轮或滚动条）时，排队中的强制滚动也不能再抢到底部。
+            if (
+                hasRecentUserScrollIntent()
+                || isAutoScrolling.current
+                || (!options.forceScroll && isUserScrolledUpRef.current)
+                || !scrollContainerRef.current
+            ) {
+                if (isAutoScrolling.current && !hasRecentUserScrollIntent()) {
+                    queuePendingSmartScroll(options.forceScroll, options.behaviorOverride);
                 }
-                if (resizeObserverRef.current) {
+                if (
+                    (hasRecentUserScrollIntent() || isUserScrolledUpRef.current)
+                    && resizeObserverRef.current
+                ) {
                     resizeObserverRef.current.disconnect();
+                    resizeObserverRef.current = null;
+                    observedTailElementRef.current = null;
                 }
                 return;
             }
             const c = scrollContainerRef.current!;
             const distanceToBottom = c.scrollHeight - c.scrollTop - c.clientHeight;
             // 优先使用外部传入的行为；否则距离较大时使用平滑滚动，小距离使用 auto
-            const behavior: ScrollBehavior = behaviorOverride ?? (distanceToBottom > 120 ? 'smooth' : 'auto');
+            const behavior: ScrollBehavior = options.behaviorOverride ?? (distanceToBottom > 120 ? 'smooth' : 'auto');
 
             lastUserScrollIntentAtRef.current = null;
             isAutoScrolling.current = true;
             c.scrollTo({ top: c.scrollHeight, behavior });
-            if (resizeObserverRef.current) {
-                resizeObserverRef.current.disconnect();
-            }
             scheduleAutoScrollRelease(
                 behavior === "smooth"
                     ? SMOOTH_SCROLL_LOCK_MS
@@ -270,11 +288,25 @@ export function useScrollManagement(
             : null);
         const observed: Element | null = lastReplyContainer || lastMessageItem || (disableTailObservation ? null : container.lastElementChild);
 
-        if (observed) {
+        if (observed && observedTailElementRef.current !== observed) {
+            resizeObserverRef.current?.disconnect();
             resizeObserverRef.current = new ResizeObserver(() => {
+                if (hasRecentUserScrollIntent() || isUserScrolledUpRef.current) {
+                    resizeObserverRef.current?.disconnect();
+                    resizeObserverRef.current = null;
+                    observedTailElementRef.current = null;
+                    return;
+                }
+                // 只在仍然贴底时跟随变高。不能复用上一次 smartScroll(true)，
+                // 否则用户离开底部后，尾部任意一次尺寸变化都会跳回底部。
+                smartScrollOptionsRef.current = {
+                    forceScroll: false,
+                    behaviorOverride: "auto",
+                };
                 scrollToBottom();
             });
             resizeObserverRef.current.observe(observed);
+            observedTailElementRef.current = observed;
         }
 
         // 回退：若 ResizeObserver 未触发，下一帧也滚动一次

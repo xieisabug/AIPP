@@ -77,9 +77,13 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 说明：
 
 - `AIPP_CHAT_SCROLL_PERF_INDEX` 从 `0` 开始，且是**当前 ChatUI 会话列表顺序**里的下标；先从结果 JSON 的 `conversationName` 确认目标会话，不要凭序号想当然
+- 也可以用 `AIPP_CHAT_SCROLL_PERF_CONVERSATION_ID=<会话 id>` 直接按 id 选会话（需在最近 100 个会话内），优先于下标
+- `AIPP_CHAT_SCROLL_PERF_DIRECTION=up` 模拟"打开后从底部拖滚动条到顶部"：不先回顶，每帧按 `滑块比例 × 当前 maxScrollTop` 写 `scrollTop`。重点看 `maxObservedMaxScrollTop` 与 `finalMaxScrollTop` 的差（总高收缩 = 估高偏大 = 滑块跳动）、`externalScrollAdjustCount/maxExternalScrollAdjustPx`（Virtuoso 在两帧之间修正了 scrollTop）、`thumbReverseJumpCount`（滑块逆向跳）
+- 结果里的 `rowEstimateSummary` 列出已测量行的估高与实测高（含行内每条消息 `parts`），`viewportWidth` 是滚动容器宽度；估高逻辑在 `src/components/conversation/messageHeightEstimate.ts`，会按合并气泡、"显示思考过程"开关和列表宽度估算
 - 结果会写到 `tmp/*.json`
 - `messagesRenderedMs` 表示 harness 启动到出现消息 DOM 的耗时（不是完整可交互耗时）；`initialSettleMs` 是随后 72 帧采样所用时间。滚动探针会先发出 wheel 事件解除初始贴底跟随，避免程序滚动被跟随逻辑拉回。
-- `VirtuosoMessageList` 当前在展示消息不超过80条且正文总量不超过500,000字符时保留节点；超过任一阈值时使用虚拟列表。回归时应覆盖两条路径，并分别记录冷打开、Loading关闭和真实滚轮往返。只看预热后的程序滚动帧率，不能证明首次滚动不跳动；流式新增消息跨阈值也应单独验证。
+- `VirtuosoMessageList` 当前在展示消息不超过80条且正文总量不超过500,000字符时保留节点。屏外行不能用 `content-visibility: auto`：估高小于真实高度时，滚出视口的行会被压扁，`scrollTop` 会被夹到最底部。超过任一阈值时使用虚拟列表，上下 overscan 约 1.5 倍视口，两侧最少各 4 条。贴底 ResizeObserver 只在用户仍在底部时跟随尾部变高，不能沿用上一次 `forceScroll`。回归时应覆盖两条路径，并分别记录冷打开、Loading关闭和真实滚轮往返。只看预热后的程序滚动帧率，不能证明首次滚动不跳动；流式新增消息跨阈值也应单独验证。用户上滑或拖滚动条时，视口不得被拉回底部。
+- 流式更新期间，`window.__AIPP_CHAT_PERF_CAPTURE__.getMessageItemRenderCounts()` 应只让尾部消息的渲染次数增加。历史消息持续增加，说明 memo 又被新的 props 引用击穿。
 - **不要并行跑多个 harness**：它们会竞争 Cargo 默认构建/输出锁，必须串行执行、等上一个结束再跑下一个
 - 如果以后排查别的 UI 问题，没有现成入口，就按同样模式补一个：
   - 前端暴露测试 API

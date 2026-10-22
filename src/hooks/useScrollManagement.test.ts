@@ -9,12 +9,20 @@ import {
 } from "@/components/conversation/layoutConstants";
 
 class ResizeObserverMock {
+    static instances: ResizeObserverMock[] = [];
+    callback: ResizeObserverCallback;
     observe = vi.fn();
     disconnect = vi.fn();
+
+    constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        ResizeObserverMock.instances.push(this);
+    }
 }
 
 describe("useScrollManagement", () => {
     beforeEach(() => {
+        ResizeObserverMock.instances = [];
         vi.useFakeTimers();
         vi.stubGlobal(
             "requestAnimationFrame",
@@ -229,5 +237,82 @@ describe("useScrollManagement", () => {
         });
 
         expect(container.scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("does not jump back to the bottom when the tail resizes after the user leaves", () => {
+        const tail = document.createElement("div");
+        const container = {
+            scrollTop: 600,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: tail,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.smartScroll(true, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledTimes(1);
+
+        act(() => {
+            vi.advanceTimersByTime(100);
+        });
+
+        act(() => {
+            container.scrollTop = 80;
+            result.current.syncScrollState(container);
+        });
+
+        act(() => {
+            ResizeObserverMock.instances.at(-1)?.callback([], ResizeObserverMock.instances.at(-1) as unknown as ResizeObserver);
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledTimes(1);
+        expect(container.scrollTop).toBe(80);
+    });
+
+    it("follows tail growth while the user remains at the bottom", () => {
+        const tail = document.createElement("div");
+        const container = {
+            scrollTop: 600,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: tail,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.smartScroll();
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(100);
+        });
+
+        act(() => {
+            ResizeObserverMock.instances.at(-1)?.callback([], ResizeObserverMock.instances.at(-1) as unknown as ResizeObserver);
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledTimes(2);
+        expect(container.scrollTop).toBe(1000);
     });
 });

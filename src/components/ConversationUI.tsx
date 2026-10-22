@@ -58,11 +58,8 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
-import ConversationContent, {
-    type VirtualizedListEngine,
-} from "./conversation/ConversationContent";
+import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail from "./conversation/ConversationTurnRail";
-import { applyScrollHighlight } from "./conversation/scrollHighlight";
 import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
 import { Badge } from "@/components/ui/badge";
@@ -231,8 +228,6 @@ interface ConversationUIProps {
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
-    virtualizeMessages?: boolean;
-    virtualizedListEngine?: VirtualizedListEngine;
     windowLabel?: string;
     busySendBehavior?: "queue" | "interrupt";
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
@@ -246,6 +241,40 @@ function makeTurnPreview(content: string): string {
         return collapsed;
     }
     return collapsed.slice(0, TURN_PREVIEW_MAX) + "…";
+}
+
+const EMPTY_GENERATION_GROUPS = new Map<string, any>();
+const EMPTY_GROUP_ROOT_MESSAGE_IDS = new Map<string, number>();
+const showAllMessageVersions = () => ({ shouldShow: true });
+const persistedAgentActivitiesCache = new WeakMap<Message, AgentActivityEvent[]>();
+const MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES = 500;
+
+interface PluginMessageActionCacheEntry {
+    messageType: string;
+    content: string;
+    rendered: React.ReactNode;
+}
+
+function readPersistedAgentActivities(message: Message): AgentActivityEvent[] {
+    const cached = persistedAgentActivitiesCache.get(message);
+    if (cached) {
+        return cached;
+    }
+    let activities: AgentActivityEvent[] = [];
+    if (message.metadata_json) {
+        try {
+            const metadata = JSON.parse(message.metadata_json) as {
+                agent_activities?: AgentActivityEvent[];
+            };
+            activities = (metadata.agent_activities ?? []).filter(
+                (activity) => activity?.item_id && activity.agent_kind,
+            );
+        } catch {
+            activities = [];
+        }
+    }
+    persistedAgentActivitiesCache.set(message, activities);
+    return activities;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -264,8 +293,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowDelete = true,
             headerExtraActions,
             allowFeishuDebugResend = false,
-            virtualizeMessages = false,
-            virtualizedListEngine = "legacy",
             windowLabel = "chat_ui",
             busySendBehavior = "queue",
             onPreviewFileContextClick,
@@ -819,9 +846,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             messages: messagesWithQueued,
             streamingMessages,
             conversation,
-            generationGroups: new Map(), // 第一步只需要合并消息用于分组
-            groupRootMessageIds: new Map(),
-            getMessageVersionInfo: () => ({ shouldShow: true }),
+            generationGroups: EMPTY_GENERATION_GROUPS,
+            groupRootMessageIds: EMPTY_GROUP_ROOT_MESSAGE_IDS,
+            getMessageVersionInfo: showAllMessageVersions,
         });
 
         // 第二步：使用合并后的消息进行分组计算
@@ -842,21 +869,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const displayAgentActivities = useMemo(() => {
             const combined = new Map<string, AgentActivityEvent>();
             for (const message of allDisplayMessages) {
-                if (!message.metadata_json) continue;
-                try {
-                    const metadata = JSON.parse(message.metadata_json) as {
-                        agent_activities?: AgentActivityEvent[];
-                    };
-                    for (const activity of metadata.agent_activities ?? []) {
-                        if (!activity?.item_id || !activity.agent_kind) continue;
-                        const key = `${activity.agent_kind}:${activity.session_id ?? ""}:${activity.item_id}`;
-                        const existing = combined.get(key);
-                        if (!existing || existing.sequence < activity.sequence) {
-                            combined.set(key, activity);
-                        }
+                for (const activity of readPersistedAgentActivities(message)) {
+                    const key = `${activity.agent_kind}:${activity.session_id ?? ""}:${activity.item_id}`;
+                    const existing = combined.get(key);
+                    if (!existing || existing.sequence < activity.sequence) {
+                        combined.set(key, activity);
                     }
-                } catch {
-                    // Other message metadata is allowed to be non-Agent JSON.
                 }
             }
             for (const [key, activity] of agentActivities) {
@@ -871,14 +889,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const {
             messagesEndRef,
             scrollContainerRef,
-            handleScroll,
             handleUserScrollIntent,
             syncScrollState,
             smartScroll,
-            scrollToUserMessage,
-            scrollToBottomStable,
         } = useScrollManagement({
-            disableTailObservation: virtualizeMessages,
+            disableTailObservation: true,
         });
         smartScrollRef.current = smartScroll;
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
@@ -886,8 +901,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= Chat Sidebar 数据提取 =============
 
         // Artifacts from messages (code blocks)
+        const activeStreamingMessageIds = useMemo(() => {
+            const ids = new Set<number>();
+            streamingMessages.forEach((event, id) => {
+                if (!event.is_done) {
+                    ids.add(id);
+                }
+            });
+            return ids;
+        }, [streamingMessages]);
         const { artifacts: inferredArtifacts } = useArtifactExtractor({
             messages: allDisplayMessages,
+            activeStreamingMessageIds,
         });
         const { artifacts: explicitArtifacts } = useExplicitArtifacts({
             conversationId,
@@ -1388,6 +1413,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 setInputText(planExecutionPrompt);
             }
         }, [isPlanMode, setAgentPlanMode, setInputText]);
+        const handleContinueAgentPlan = useCallback(() => {
+            void handleContinuePlanning();
+        }, [handleContinuePlanning]);
+        const handleApproveAgentPlan = useCallback(() => {
+            void handleStartPlanExecution();
+        }, [handleStartPlanExecution]);
 
         const actionableAgentPlanMessageId = useMemo(() => {
             if (!isPlanMode) return null;
@@ -1399,35 +1430,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     && Boolean(message.content.trim())
                 )?.id ?? null;
         }, [allDisplayMessages, isPlanMode]);
-
-        useEffect(() => {
-            const planMessages = allDisplayMessages
-                .filter((message) => message.message_type === "agent_plan")
-                .map((message) => ({
-                    id: message.id,
-                    parentId: message.parent_id,
-                    contentLength: message.content.length,
-                    hasContent: Boolean(message.content.trim()),
-                    finishTime: message.finish_time,
-                }));
-            console.info("[AIPP Plan] action state", {
-                conversationId,
-                isAcpAssistant,
-                isPlanMode,
-                planModeSwitching,
-                hasActivePrompt: acpSessionState?.has_active_prompt ?? null,
-                actionableAgentPlanMessageId,
-                planMessages,
-            });
-        }, [
-            acpSessionState?.has_active_prompt,
-            actionableAgentPlanMessageId,
-            allDisplayMessages,
-            conversationId,
-            isAcpAssistant,
-            isPlanMode,
-            planModeSwitching,
-        ]);
 
         useEffect(() => {
             if (!pendingPlanExecutionRef.current || inputText !== planExecutionPrompt) return;
@@ -1504,7 +1506,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [headerExtraActions, pluginHeaderActions]);
 
+        const pluginMessageActionCacheRef = useRef<{
+            pluginList: any[];
+            entries: Map<number, PluginMessageActionCacheEntry>;
+        }>({ pluginList, entries: new Map() });
         const renderPluginMessageActions = useCallback((message: Message) => {
+            const cache = pluginMessageActionCacheRef.current;
+            if (cache.pluginList !== pluginList) {
+                cache.pluginList = pluginList;
+                cache.entries.clear();
+            }
             const actionEntries = pluginList
                 .flatMap((plugin) =>
                     (plugin.contributions?.actions ?? []).map((action: {
@@ -1520,6 +1531,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 return null;
             }
 
+            // 缓存渲染结果，让历史消息的 messageActions 引用保持稳定，MessageItem 的 memo 才不会被击穿。
+            const cached = cache.entries.get(message.id);
+            if (
+                cached
+                && cached.messageType === message.message_type
+                && cached.content === message.content
+            ) {
+                return cached.rendered;
+            }
+
             const actionContext = {
                 conversationId: message.conversation_id,
                 messageId: message.id,
@@ -1527,7 +1548,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 messageContent: message.content,
             };
 
-            return actionEntries.map(({ plugin, action }) => {
+            const rendered = actionEntries.map(({ plugin, action }) => {
                 const instance = plugin.instance as
                     | { renderAction?: (actionId: string, context?: Record<string, unknown>) => React.ReactNode }
                     | null;
@@ -1535,9 +1556,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     return null;
                 }
                 try {
-                    const rendered = instance.renderAction(action.id, actionContext);
-                    return rendered ? (
-                        <Fragment key={`${plugin.code}:${action.id}:${message.id}`}>{rendered}</Fragment>
+                    const node = instance.renderAction(action.id, actionContext);
+                    return node ? (
+                        <Fragment key={`${plugin.code}:${action.id}:${message.id}`}>{node}</Fragment>
                     ) : null;
                 } catch (error) {
                     console.error(
@@ -1547,6 +1568,19 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     return null;
                 }
             });
+            cache.entries.delete(message.id);
+            cache.entries.set(message.id, {
+                messageType: message.message_type,
+                content: message.content,
+                rendered,
+            });
+            if (cache.entries.size > MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES) {
+                const oldest = cache.entries.keys().next().value;
+                if (oldest !== undefined) {
+                    cache.entries.delete(oldest);
+                }
+            }
+            return rendered;
         }, [pluginList]);
 
         const sendButtonSlotContext = useMemo(
@@ -1845,92 +1879,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             };
         }, [updateShiningMessages]);
 
-        // 在切换对话后，加载完成并渲染出消息后，强制滚动到底部
-        useEffect(() => {
-            if (virtualizeMessages) return;
-            // 必须有对话且不在加载中，且有可显示的消息时才执行
-            if (!conversationId) return;
-            if (isLoadingShow) return;
-            if (allDisplayMessages.length === 0) return;
-            // 用户正在通过角标/搜索定位到某条消息时，不要抢回底部
-            if (pendingScrollMessageId !== null) return;
-
-            const renderStartTime = performance.now();
-            console.log(`[PERF-FRONTEND] 开始渲染 ${allDisplayMessages.length} 条消息`);
-
-            // 等待渲染与布局稳定后再滚动（双 rAF）
-            requestAnimationFrame(() =>
-                requestAnimationFrame(() => {
-                    const renderDuration = performance.now() - renderStartTime;
-                    console.log(`[PERF-FRONTEND] 消息渲染完成耗时: ${renderDuration.toFixed(2)}ms`);
-                    // 忽略"用户上滑"状态，切换话题后总是瞬时滚动到底部（无平滑动画）
-                    smartScroll(true, 'auto');
-                })
-            );
-        }, [conversationId, isLoadingShow, allDisplayMessages.length, pendingScrollMessageId, smartScroll, virtualizeMessages]);
-
-        // 按消息 ID 定位滚动（用于搜索结果）
-        useEffect(() => {
-            if (virtualizeMessages) {
-                return;
-            }
-            if (pendingScrollMessageId === null) {
-                return;
-            }
-            const container = scrollContainerRef.current;
-            if (!container) {
-                return;
-            }
-            const target = container.querySelector(
-                `[data-message-id='${pendingScrollMessageId}']`
-            ) as HTMLElement | null;
-            if (!target) {
-                return;
-            }
-            applyScrollHighlight({
-                target,
-                messageId: pendingScrollMessageId,
-                setShiningMessageIds,
-                clearPendingScrollMessageId: setPendingScrollMessageId,
-            });
-        }, [
-            pendingScrollMessageId,
-            allDisplayMessages.length,
-            scrollContainerRef,
-            setShiningMessageIds,
-            virtualizeMessages,
-        ]);
-
-        useEffect(() => {
-            // 用户正在定位到某条消息时，不要抢回底部
-            if (pendingScrollMessageId !== null) return;
-            const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
-            if (!lastMessage || lastMessage.message_type !== "user") {
-                return;
-            }
-            // Virtuoso 列表在 VirtuosoMessageList 内用 useLayoutEffect + ResizeObserver 钉底
-            if (virtualizeMessages && virtualizedListEngine === "virtuoso") {
-                return;
-            }
-            // 在渲染和布局之后执行，避免时间竞态
-            requestAnimationFrame(() =>
-                requestAnimationFrame(() => {
-                    if (virtualizeMessages) {
-                        scrollToBottomStable();
-                        return;
-                    }
-                    scrollToUserMessage();
-                }),
-            );
-        }, [
-            allDisplayMessages.length,
-            pendingScrollMessageId,
-            scrollToBottomStable,
-            scrollToUserMessage,
-            virtualizeMessages,
-            virtualizedListEngine,
-        ]);
-
         useEffect(() => {
             if (!inlineInteractionVisible) {
                 return;
@@ -1959,6 +1907,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             return () => viewport.removeEventListener("resize", onResize);
         }, [isMobile, smartScroll]);
 
+        const handleSelectTurn = useCallback((messageId: number) => {
+            // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
+            handleUserScrollIntent();
+            setPendingScrollMessageId(messageId);
+        }, [handleUserScrollIntent]);
+
         // ============= 组件渲染 =============
 
         return (
@@ -1972,11 +1926,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         <ConversationTurnRail
                             turns={userTurns}
                             scrollContainerRef={scrollContainerRef}
-                            onSelect={(messageId) => {
-                                // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
-                                handleUserScrollIntent();
-                                setPendingScrollMessageId(messageId);
-                            }}
+                            onSelect={handleSelectTurn}
                         />
                     )}
                     {/* Main content area：min-h-0 防止嵌套 flex（如总管家）把滚动区撑破导致占位过高 */}
@@ -2002,10 +1952,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             ref={scrollContainerRef}
                             onWheelCapture={handleUserScrollIntent}
                             onTouchMoveCapture={handleUserScrollIntent}
-                            onScroll={virtualizeMessages ? undefined : handleScroll}
                             className={`conversation-scroll-transparent-track min-h-0 h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                             data-aipp-slot="chat-conversation-scroll"
-                            style={virtualizeMessages ? { overflowAnchor: "none" } : undefined}
+                            style={{ overflowAnchor: "none" }}
                         >
                             <ConversationContent
                                 conversationId={conversationId}
@@ -2032,10 +1981,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 renderMessageActions={renderPluginMessageActions}
                                 actionableAgentPlanMessageId={actionableAgentPlanMessageId}
                                 agentPlanModeSwitching={planModeSwitching}
-                                onContinueAgentPlan={() => void handleContinuePlanning()}
-                                onApproveAgentPlan={() => void handleStartPlanExecution()}
-                                virtualizeMessages={virtualizeMessages}
-                                virtualizedListEngine={virtualizedListEngine}
+                                onContinueAgentPlan={handleContinueAgentPlan}
+                                onApproveAgentPlan={handleApproveAgentPlan}
                                 scrollContainerRef={scrollContainerRef}
                                 pendingScrollMessageId={pendingScrollMessageId}
                                 clearPendingScrollMessageId={setPendingScrollMessageId}

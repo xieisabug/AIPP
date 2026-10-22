@@ -90,7 +90,7 @@ export function AgentActivityShell({
     executionState === "executing" || executionState === "pending";
 
   return (
-    <MotionToolCard>
+    <MotionToolCard animateEntrance={isRunning}>
       {isRunning && (
         <ShineBorder
           shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}

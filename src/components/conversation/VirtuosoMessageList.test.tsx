@@ -134,6 +134,7 @@ describe("VirtuosoMessageList row height reservation", () => {
         ])} />);
         expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
         for (const id of [1, 2, 3, 4]) expect(screen.getByTestId(`message-${id}`)).toBeInTheDocument();
+        expect(document.querySelector("[style*='content-visibility']")).toBeNull();
     });
 
     it("should keep virtualization when a few messages exceed the text budget", () => {

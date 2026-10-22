@@ -7,13 +7,34 @@ const MAX_HIGHLIGHT_CACHE_ENTRIES = 200;
 const highlightResultCache = new Map<string, string>();
 const inFlightHighlightRequests = new Map<string, Promise<string>>();
 
-function buildHighlightCacheKey(
+// 两个独立的 32 位哈希拼成 64 位，碰撞会直接显示成别的代码，单个 32 位不够稳。
+function hashHighlightCode(code: string): string {
+    let fnv = 2166136261;
+    let djb = 5381;
+    for (let index = 0; index < code.length; index += 1) {
+        const charCode = code.charCodeAt(index);
+        fnv ^= charCode;
+        fnv = Math.imul(fnv, 16777619);
+        djb = (Math.imul(djb, 33) + charCode) | 0;
+    }
+    return `${(fnv >>> 0).toString(36)}.${(djb >>> 0).toString(36)}`;
+}
+
+export function buildHighlightCacheKey(
     lang: string,
     code: string,
     isDark: boolean,
     themeHint?: string,
 ): string {
-    return JSON.stringify([lang, code, isDark, themeHint ?? null]);
+    return [
+        lang,
+        isDark ? "1" : "0",
+        themeHint ?? "",
+        String(code.length),
+        hashHighlightCode(code),
+        code.slice(0, 24),
+        code.slice(-24),
+    ].join("\u0000");
 }
 
 function storeHighlightResult(key: string, html: string) {

@@ -1,5 +1,6 @@
 import {
     useCallback,
+    useEffect,
     useMemo,
     useState,
     useLayoutEffect,
@@ -26,6 +27,8 @@ const GAP_MAX = 10;
 const GAP_MIN = 2;
 const HEIGHT_RATIO = 0.7;
 const ACTIVE_LINE_OFFSET_PX = 56;
+const NODE_REFRESH_INTERVAL_MS = 200;
+const CONTENT_RESIZE_SYNC_DELAY_MS = 150;
 
 export function findActiveTurnId(
     turns: Pick<TurnRailItem, "id">[],
@@ -82,40 +85,55 @@ export default function ConversationTurnRail({
         return () => observer.disconnect();
     }, [scrollContainerRef]);
 
-    useLayoutEffect(() => {
+    const turnsRef = useRef(turns);
+    turnsRef.current = turns;
+    const turnsKey = useMemo(() => turns.map((turn) => turn.id).join(","), [turns]);
+
+    useEffect(() => {
         const container = scrollContainerRef.current;
-        if (!container || turns.length === 0) {
+        if (!container || turnsRef.current.length === 0) {
             setActiveTurnId(null);
             return;
         }
 
-        const getTurnPositions = () => {
-            const containerRect = container.getBoundingClientRect();
-            const positions = new Map<number, number>();
+        // 虚拟列表会卸载屏外行，已卸载轮次沿用最后一次测得的位置。
+        const positions = new Map<number, number>();
+        let turnNodes: HTMLElement[] = [];
+        let nodesCollectedAt = -Infinity;
+        let nodesDirty = true;
 
-            turns.forEach((turn) => {
-                const target = container.querySelector(
-                    `[data-message-id='${turn.id}']`,
-                ) as HTMLElement | null;
-                if (!target) {
-                    return;
-                }
-
-                const targetRect = target.getBoundingClientRect();
-                positions.set(
-                    turn.id,
-                    targetRect.top - containerRect.top + container.scrollTop,
-                );
-            });
-
-            return positions;
+        const collectTurnNodes = () => {
+            const turnIds = new Set(turnsRef.current.map((turn) => String(turn.id)));
+            turnNodes = Array.from(
+                container.querySelectorAll<HTMLElement>("[data-message-id]"),
+            ).filter((node) => turnIds.has(node.dataset.messageId ?? ""));
+            nodesCollectedAt = performance.now();
+            nodesDirty = false;
         };
 
-        const syncActiveTurn = () => {
+        const measureTurnPositions = () => {
+            if (
+                nodesDirty
+                || performance.now() - nodesCollectedAt > NODE_REFRESH_INTERVAL_MS
+                || turnNodes.some((node) => !node.isConnected)
+            ) {
+                collectTurnNodes();
+            }
+            const containerTop = container.getBoundingClientRect().top;
+            const scrollTop = container.scrollTop;
+            for (const node of turnNodes) {
+                const id = Number(node.dataset.messageId);
+                if (Number.isFinite(id)) {
+                    positions.set(id, node.getBoundingClientRect().top - containerTop + scrollTop);
+                }
+            }
+        };
+
+        const publishActiveTurn = () => {
             syncFrameRef.current = null;
-            const positions = getTurnPositions();
+            measureTurnPositions();
             const nextActiveTurnId = findActiveTurnId(
-                turns,
+                turnsRef.current,
                 positions,
                 container.scrollTop,
             );
@@ -129,12 +147,12 @@ export default function ConversationTurnRail({
                     return nextActiveTurnId;
                 }
                 if (distanceToBottom <= 4) {
-                    return turns[turns.length - 1]?.id ?? null;
+                    return turnsRef.current[turnsRef.current.length - 1]?.id ?? null;
                 }
                 if (container.scrollTop <= 4) {
-                    return turns[0]?.id ?? null;
+                    return turnsRef.current[0]?.id ?? null;
                 }
-                if (current !== null && turns.some((turn) => turn.id === current)) {
+                if (current !== null && turnsRef.current.some((turn) => turn.id === current)) {
                     return current;
                 }
                 return current;
@@ -145,31 +163,44 @@ export default function ConversationTurnRail({
             if (syncFrameRef.current !== null) {
                 return;
             }
-            syncFrameRef.current = requestAnimationFrame(syncActiveTurn);
+            syncFrameRef.current = requestAnimationFrame(publishActiveTurn);
         };
 
-        syncActiveTurn();
+        // 内容高度变化（图片加载、展开推理、流式增长）会移动后续轮次，节流后重新测量。
+        let contentResizeTimer: number | null = null;
+        const handleContentResize = () => {
+            nodesDirty = true;
+            if (contentResizeTimer !== null) {
+                return;
+            }
+            contentResizeTimer = window.setTimeout(() => {
+                contentResizeTimer = null;
+                scheduleSyncActiveTurn();
+            }, CONTENT_RESIZE_SYNC_DELAY_MS);
+        };
+
         container.addEventListener("scroll", scheduleSyncActiveTurn, {
             passive: true,
         });
         const resizeObserver = new ResizeObserver(scheduleSyncActiveTurn);
         resizeObserver.observe(container);
-        const mutationObserver = new MutationObserver(scheduleSyncActiveTurn);
-        mutationObserver.observe(container, {
-            childList: true,
-            subtree: true,
-        });
+        const contentResizeObserver = new ResizeObserver(handleContentResize);
+        Array.from(container.children).forEach((child) => contentResizeObserver.observe(child));
+        scheduleSyncActiveTurn();
 
         return () => {
             if (syncFrameRef.current !== null) {
                 cancelAnimationFrame(syncFrameRef.current);
                 syncFrameRef.current = null;
             }
+            if (contentResizeTimer !== null) {
+                window.clearTimeout(contentResizeTimer);
+            }
             container.removeEventListener("scroll", scheduleSyncActiveTurn);
             resizeObserver.disconnect();
-            mutationObserver.disconnect();
+            contentResizeObserver.disconnect();
         };
-    }, [scrollContainerRef, turns]);
+    }, [scrollContainerRef, turnsKey]);
 
     const gap = useMemo(() => {
         const count = turns.length;

@@ -259,7 +259,7 @@ const LoadMcpCatalogToolCall: React.FC<LoadMcpCatalogToolCallProps> = (props) =>
     }, [effectiveCallId]);
 
     return (
-        <MotionToolCard>
+        <MotionToolCard animateEntrance={isRunning}>
             {shouldShine && (
                 <ShineBorder
                     shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}

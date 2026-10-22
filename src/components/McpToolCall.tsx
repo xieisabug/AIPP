@@ -6,6 +6,7 @@ import { ShineBorder } from "@/components/magicui/shine-border";
 import { MotionMetaRow, MotionStatusSlot, MotionToolCard } from "@/components/mcp-tool-components/McpToolMotion";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { invoke } from "@tauri-apps/api/core";
+import { loadMcpToolCall } from "@/services/conversationResourceCache";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
@@ -273,9 +274,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         if (effectiveCallId && executionState === "idle") {
             const fetchExistingResult = async () => {
                 try {
-                    const result = await invoke<MCPToolCall>("get_mcp_tool_call", {
-                        callId: effectiveCallId,
-                    });
+                    const result = await loadMcpToolCall(effectiveCallId);
 
                     if (result.status === "success") {
                         setExecutionResult((prev) => result.result ?? prev ?? null);
@@ -525,7 +524,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     };
 
     return (
-        <MotionToolCard>
+        <MotionToolCard animateEntrance={isRunning || isStreaming}>
             {(isRunning || isStreaming) && (
                 <ShineBorder
                     shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}

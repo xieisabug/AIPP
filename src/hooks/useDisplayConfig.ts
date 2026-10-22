@@ -131,28 +131,30 @@ const subscribe = (listener: () => void) => {
 
 const getSnapshot = () => store.state;
 
+let displayConfigEventsBound = false;
+
+function ensureDisplayConfigSubscriptions() {
+    if (!store.state.config && !store.state.isLoading && !store.loadPromise) {
+        void loadConfig();
+    }
+    if (displayConfigEventsBound || typeof window === 'undefined') {
+        return;
+    }
+    displayConfigEventsBound = true;
+    void listen('display-config-changed', () => {
+        void loadConfig();
+    });
+    void listen('theme-changed', () => {
+        void loadConfig();
+    });
+}
+
 export const useDisplayConfig = () => {
     const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
-    // 初次挂载时触发一次加载（仅一次请求，多组件共享）
+    // loadConfig 会同步通知订阅者，不能在渲染阶段调用
     useEffect(() => {
-        if (!state.config && !state.isLoading) {
-            loadConfig();
-        }
-    }, [state.config, state.isLoading]);
-
-    // 监听配置变化事件，实时刷新
-    useEffect(() => {
-        const unsubscribe = listen('display-config-changed', () => {
-            loadConfig();
-        });
-        const unsubscribeTheme = listen('theme-changed', () => {
-            loadConfig();
-        });
-        return () => {
-            unsubscribe.then((fn) => fn());
-            unsubscribeTheme.then((fn) => fn());
-        };
+        ensureDisplayConfigSubscriptions();
     }, []);
 
     const refreshConfig = useCallback(() => loadConfig(), []);

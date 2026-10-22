@@ -306,6 +306,8 @@ struct Config {
 #[derive(Debug, Clone)]
 struct ChatScrollPerfAutorunConfig {
     conversation_index: usize,
+    conversation_id: Option<i64>,
+    direction: String,
     scroll_duration_ms: u64,
     include_return_trip: bool,
     settle_frame_count: u32,
@@ -335,6 +337,14 @@ fn read_chat_scroll_perf_autorun_config() -> Option<ChatScrollPerfAutorunConfig>
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
+    let conversation_id = std::env::var("AIPP_CHAT_SCROLL_PERF_CONVERSATION_ID")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok());
+    let direction = std::env::var("AIPP_CHAT_SCROLL_PERF_DIRECTION")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| value == "up" || value == "down")
+        .unwrap_or_else(|| "down".to_string());
     let scroll_duration_ms = std::env::var("AIPP_CHAT_SCROLL_PERF_DURATION_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -353,6 +363,8 @@ fn read_chat_scroll_perf_autorun_config() -> Option<ChatScrollPerfAutorunConfig>
 
     Some(ChatScrollPerfAutorunConfig {
         conversation_index,
+        conversation_id,
+        direction,
         scroll_duration_ms,
         include_return_trip: parse_bool_env("AIPP_CHAT_SCROLL_PERF_INCLUDE_RETURN_TRIP", true),
         settle_frame_count,
@@ -436,6 +448,8 @@ async fn run_chat_scroll_perf_autorun(
 
     let options_json = serde_json::json!({
         "conversationIndex": config.conversation_index,
+        "conversationId": config.conversation_id,
+        "direction": config.direction,
         "scrollDurationMs": config.scroll_duration_ms,
         "includeReturnTrip": config.include_return_trip,
         "settleFrameCount": config.settle_frame_count,

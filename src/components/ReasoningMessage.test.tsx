@@ -16,13 +16,17 @@ vi.mock("../hooks/useCustomTagParser", () => ({
     useCustomTagParser: () => ({ parseCustomTags }),
 }));
 
-vi.mock("../hooks/useMarkdownConfig", () => ({
-    useMarkdownConfig: () => ({
-        remarkPlugins: [],
-        rehypePlugins: [],
-        markdownComponents: {},
-    }),
-}));
+vi.mock("../hooks/useMarkdownConfig", async () => {
+    const { createContext } = await import("react");
+    return {
+        MarkdownStreamingContext: createContext(false),
+        useMarkdownConfig: () => ({
+            remarkPlugins: [],
+            rehypePlugins: [],
+            markdownComponents: {},
+        }),
+    };
+});
 
 vi.mock("../hooks/useMcpToolCallProcessor", () => ({
     useMcpToolCallProcessor: () => ({

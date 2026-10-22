@@ -50,6 +50,16 @@ const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
 /** 硬超时：pin 被打断时也不能永久 visibility:hidden */
 const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 500;
 
+function readContentWidth(element: HTMLElement): number {
+    const style = getComputedStyle(element);
+    return Math.max(
+        0,
+        element.clientWidth
+            - (parseFloat(style.paddingLeft) || 0)
+            - (parseFloat(style.paddingRight) || 0),
+    );
+}
+
 function itemMatchesMessageId(
     item: RenderableConversationItem,
     messageId: number,
@@ -64,7 +74,10 @@ function itemMatchesMessageId(
 function useRecordedHeight(
     key: string,
     elementRef: React.RefObject<HTMLDivElement | null>,
+    estimatedHeight?: number,
 ) {
+    const estimatedHeightRef = useRef(estimatedHeight);
+    estimatedHeightRef.current = estimatedHeight;
     useEffect(() => {
         const element = elementRef.current;
         const recordHeight = window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight;
@@ -76,7 +89,16 @@ function useRecordedHeight(
             const entry = entries[0];
             if (!entry) return;
             const height = entry.borderBoxSize[0]?.blockSize ?? entry.contentRect.height;
-            if (height > 0) recordHeight(key, height);
+            if (height <= 0) return;
+            const parts = Array.from(
+                element.querySelectorAll<HTMLElement>("[data-message-id][data-message-type]"),
+                (part) => ({
+                    id: part.dataset.messageId ?? "",
+                    type: part.dataset.messageType ?? "",
+                    height: Math.round(part.getBoundingClientRect().height),
+                }),
+            );
+            recordHeight(key, height, estimatedHeightRef.current, parts);
         });
         observer.observe(element, { box: "border-box" });
 
@@ -102,7 +124,11 @@ export function getVirtuosoRowMinHeight(
 const MeasuredVirtuosoItem = React.memo(
     ({ item, hasGapAfter, minHeight }: MeasuredVirtuosoItemProps) => {
         const rowRef = useRef<HTMLDivElement | null>(null);
-        useRecordedHeight(item.key, rowRef);
+        useRecordedHeight(
+            item.key,
+            rowRef,
+            item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0),
+        );
 
         return (
             <div
@@ -203,7 +229,11 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     onScrollStateChange,
     ...messageListProps
 }) => {
-    const { renderItems } = useMessageListElements(messageListProps);
+    const [listWidth, setListWidth] = useState(0);
+    const { renderItems } = useMessageListElements({
+        ...messageListProps,
+        listWidthPx: listWidth || undefined,
+    });
     // Keep bounded rich transcripts mounted: viewport crossings must not
     // repeatedly recreate code blocks and change the reader's scroll anchor.
     const retainHistory = messageListProps.allDisplayMessages.length <= 80
@@ -299,6 +329,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 setViewportHeight((prev) =>
                     prev === el.clientHeight ? prev : el.clientHeight,
                 );
+                const width = readContentWidth(el);
+                setListWidth((prev) => (prev === width ? prev : width));
             }
             return el;
         };
@@ -345,7 +377,11 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
         syncScrollState();
         container.addEventListener("scroll", syncScrollState, { passive: true });
-        const resizeObserver = new ResizeObserver(syncScrollState);
+        const resizeObserver = new ResizeObserver(() => {
+            const width = readContentWidth(container);
+            setListWidth((prev) => (prev === width ? prev : width));
+            syncScrollState();
+        });
         resizeObserver.observe(container);
 
         return () => {
@@ -487,7 +523,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     ]);
 
     const overscanPx = useMemo(
-        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 3),
+        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 1.5),
         [viewportHeight],
     );
     const initialBottomOffsetPx = useMemo(() => {
@@ -645,7 +681,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                     top: overscanPx,
                     bottom: overscanPx,
                 }}
-                minOverscanItemCount={{ top: 8, bottom: 8 }}
+                minOverscanItemCount={{ top: 4, bottom: 4 }}
                 alignToBottom
                 style={{ width: "100%" }}
             />

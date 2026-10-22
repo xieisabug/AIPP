@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { useTheme } from "@/hooks/useTheme";
 import IconButton from "./IconButton";
 import { Copy, Check, SquareTerminal } from "lucide-react";
-import { getCachedRustHighlight, useRustHighlight } from "@/hooks/highlight/useRustHighlight";
+import { buildHighlightCacheKey, getCachedRustHighlight, useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
 import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
@@ -66,7 +65,6 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     disableCollapse = false,
 }) => {
     const code = useMemo(() => (typeof children === "string" ? children : String(children)), [children]);
-    const { resolvedTheme } = useTheme();
     // 脚本执行依赖 shell 环境，移动端不支持，隐藏"运行"按钮
     const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
     const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null);
@@ -77,7 +75,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const containerRef = useRef<HTMLDivElement | null>(null);
     const codeRef = useRef<HTMLDivElement | null>(null);
     const rafRef = useRef<number | null>(null);
-    const { currentTheme } = useCodeTheme();
+    const { currentTheme, resolvedTheme } = useCodeTheme();
     const rustHighlight = useRustHighlight();
     const shouldUsePlainText = isPlainTextLanguage(language);
 
@@ -93,7 +91,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const collapsedPreview = useMemo(() => getCollapsedPreviewCode(code), [code]);
     const renderCode = !disableCollapse && isCollapsed ? collapsedPreview.code : code;
     const highlightKey = useMemo(
-        () => JSON.stringify([language, renderCode, resolvedTheme, currentTheme]),
+        () => buildHighlightCacheKey(language, renderCode, resolvedTheme === "dark", currentTheme),
         [language, renderCode, resolvedTheme, currentTheme],
     );
     const cachedHtml = useMemo(
@@ -122,19 +120,32 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
         if (cachedHtml !== undefined) return;
 
         let cancelled = false;
-        (async () => {
-            try {
-                const result = await rustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme);
-                if (!cancelled) setHighlighted({ key: highlightKey, html: result });
-            } catch (e) {
-                console.warn("[RustCodeBlock] highlight failed, fallback to plain text", e);
-                if (!cancelled) setHighlighted(null);
-            }
-        })();
+        const runHighlight = () => {
+            void (async () => {
+                try {
+                    const result = await rustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme);
+                    if (!cancelled) setHighlighted({ key: highlightKey, html: result });
+                } catch (e) {
+                    console.warn("[RustCodeBlock] highlight failed, fallback to plain text", e);
+                    if (!cancelled) setHighlighted(null);
+                }
+            })();
+        };
+
+        if (!isStreaming) {
+            runHighlight();
+            return () => {
+                cancelled = true;
+            };
+        }
+
+        // 结果只在 key 完全一致时展示，流式中途的高亮会被下一个 token 作废，所以等输出停顿再高亮。
+        const timer = window.setTimeout(runHighlight, 150);
         return () => {
             cancelled = true;
+            window.clearTimeout(timer);
         };
-    }, [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText, rustHighlight, cachedHtml, highlightKey]);
+    }, [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText, rustHighlight, cachedHtml, highlightKey, isStreaming]);
 
     // 计算是否超出折叠阈值，并在需要时进行自动折叠
     useEffect(() => {

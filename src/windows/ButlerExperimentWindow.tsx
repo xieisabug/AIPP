@@ -1530,8 +1530,6 @@ function ButlerExperimentWindow() {
                                     allowFeishuDebugResend={
                                         showFeishuStatus && isMainConversationFeishuBound
                                     }
-                                    virtualizeMessages
-                                    virtualizedListEngine="virtuoso"
                                     windowLabel="butler_experiment"
                                     busySendBehavior="interrupt"
                                     onPreviewFileContextClick={handlePreviewFileContextSelection}

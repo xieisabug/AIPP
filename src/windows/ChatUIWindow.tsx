@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
@@ -38,8 +38,13 @@ import {
     runScrollPerformanceProbe,
     waitForAnimationFrames,
     waitForCondition,
+    type ChatScrollProbeDirection,
     type ChatScrollProbeResult,
 } from "../utils/chatScrollPerf";
+import type {
+    VirtualRowEstimateSummary,
+    VirtualRowMessagePart,
+} from "../utils/messageItemRenderStats";
 import { getErrorMessage } from "../utils/error";
 
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -47,6 +52,8 @@ import { pluginRuntime } from "../services/PluginRuntime";
 
 interface ChatScrollPerfTestOptions {
     conversationIndex?: number;
+    conversationId?: number | null;
+    direction?: ChatScrollProbeDirection;
     scrollDurationMs?: number;
     includeReturnTrip?: boolean;
     settleFrameCount?: number;
@@ -84,6 +91,8 @@ interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
         delta: number;
         lastHeight: number;
     }>;
+    rowEstimateSummary: VirtualRowEstimateSummary | null;
+    viewportWidth: number;
 }
 
 interface ChatScrollPerfTestErrorResult {
@@ -108,7 +117,12 @@ declare global {
             getLastResult: () => ChatScrollPerfTestOutcome | null;
         };
         __AIPP_CHAT_PERF_CAPTURE__?: {
-            recordVirtualRowHeight?: (key: string, height: number) => void;
+            recordVirtualRowHeight?: (
+                key: string,
+                height: number,
+                estimatedHeight?: number,
+                parts?: VirtualRowMessagePart[],
+            ) => void;
             resetVirtualRowHeightDrift?: () => void;
             getVirtualRowHeightDrift?: () => Array<{
                 key: string;
@@ -118,6 +132,10 @@ declare global {
                 delta: number;
                 lastHeight: number;
             }>;
+            recordMessageItemRender?: (messageId: number) => void;
+            resetMessageItemRenderCounts?: () => void;
+            getMessageItemRenderCounts?: () => Record<string, number>;
+            getVirtualRowEstimateSummary?: () => VirtualRowEstimateSummary;
         };
         __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean;
     }
@@ -160,6 +178,8 @@ async function sampleInitialScrollSettle(
     return samples;
 }
 
+const EMPTY_INLINE_INTERACTION_ITEMS: InlineInteractionItem[] = [];
+
 function ChatUIWindow() {
     // 集成主题系统
     useTheme("chat_ui");
@@ -190,6 +210,8 @@ function ChatUIWindow() {
             minHeight: number;
             maxHeight: number;
             lastHeight: number;
+            estimatedHeight?: number;
+            parts?: VirtualRowMessagePart[];
         }>(),
     );
     const { listConversations } = useConversationManager();
@@ -244,56 +266,78 @@ function ChatUIWindow() {
     } = usePreviewFile({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
-    const inlineInteractionItems: InlineInteractionItem[] = [];
-    if (isAskUserDialogOpen && pendingAskUserRequest) {
-        inlineInteractionItems.push({
-            key: `ask-user-question-${pendingAskUserRequest.request_id}`,
-            callId: askUserCallId,
-            messageId: askUserMessageId,
-            content: (
-                <AskUserQuestionCard
-                    request={pendingAskUserRequest}
-                    isOpen={isAskUserDialogOpen}
-                    viewMode={askUserViewMode}
-                    completedAnswers={askUserCompletedAnswers}
-                    readOnly={isAskUserReadOnly}
-                    onSubmit={handleAskUserSubmit}
-                    onCancel={handleAskUserCancel}
-                />
-            ),
-        });
-    }
-    if (elicitationQuestionRequest) {
-        inlineInteractionItems.push({
-            key: `acp-elicitation-${elicitationQuestionRequest.request_id}`,
-            callId: null,
-            messageId: null,
-            content: (
-                <AskUserQuestionCard
-                    request={elicitationQuestionRequest}
-                    isOpen
-                    viewMode="questionnaire"
-                    errorMessage={elicitationDecisionError}
-                    onSubmit={handleElicitationSubmit}
-                    onCancel={handleElicitationCancel}
-                />
-            ),
-        });
-    }
-    if (isPreviewFileDialogOpen && pendingPreviewFileRequest) {
-        inlineInteractionItems.push({
-            key: `preview-file-${pendingPreviewFileRequest.request_id}`,
-            callId: previewFileCallId,
-            messageId: previewFileMessageId,
-            content: (
-                <PreviewFileCard
-                    request={pendingPreviewFileRequest}
-                    isOpen={isPreviewFileDialogOpen}
-                    onOpenChange={handlePreviewFileOpenChange}
-                />
-            ),
-        });
-    }
+    const inlineInteractionItems = useMemo(() => {
+        const items: InlineInteractionItem[] = [];
+        if (isAskUserDialogOpen && pendingAskUserRequest) {
+            items.push({
+                key: `ask-user-question-${pendingAskUserRequest.request_id}`,
+                callId: askUserCallId,
+                messageId: askUserMessageId,
+                content: (
+                    <AskUserQuestionCard
+                        request={pendingAskUserRequest}
+                        isOpen={isAskUserDialogOpen}
+                        viewMode={askUserViewMode}
+                        completedAnswers={askUserCompletedAnswers}
+                        readOnly={isAskUserReadOnly}
+                        onSubmit={handleAskUserSubmit}
+                        onCancel={handleAskUserCancel}
+                    />
+                ),
+            });
+        }
+        if (elicitationQuestionRequest) {
+            items.push({
+                key: `acp-elicitation-${elicitationQuestionRequest.request_id}`,
+                callId: null,
+                messageId: null,
+                content: (
+                    <AskUserQuestionCard
+                        request={elicitationQuestionRequest}
+                        isOpen
+                        viewMode="questionnaire"
+                        errorMessage={elicitationDecisionError}
+                        onSubmit={handleElicitationSubmit}
+                        onCancel={handleElicitationCancel}
+                    />
+                ),
+            });
+        }
+        if (isPreviewFileDialogOpen && pendingPreviewFileRequest) {
+            items.push({
+                key: `preview-file-${pendingPreviewFileRequest.request_id}`,
+                callId: previewFileCallId,
+                messageId: previewFileMessageId,
+                content: (
+                    <PreviewFileCard
+                        request={pendingPreviewFileRequest}
+                        isOpen={isPreviewFileDialogOpen}
+                        onOpenChange={handlePreviewFileOpenChange}
+                    />
+                ),
+            });
+        }
+        return items.length === 0 ? EMPTY_INLINE_INTERACTION_ITEMS : items;
+    }, [
+        askUserCallId,
+        askUserCompletedAnswers,
+        askUserMessageId,
+        askUserViewMode,
+        elicitationDecisionError,
+        elicitationQuestionRequest,
+        handleAskUserCancel,
+        handleAskUserSubmit,
+        handleElicitationCancel,
+        handleElicitationSubmit,
+        handlePreviewFileOpenChange,
+        isAskUserDialogOpen,
+        isAskUserReadOnly,
+        isPreviewFileDialogOpen,
+        pendingAskUserRequest,
+        pendingPreviewFileRequest,
+        previewFileCallId,
+        previewFileMessageId,
+    ]);
     const hasInlineInteraction = inlineInteractionItems.length > 0;
 
     // 移动端选择对话后自动关闭侧边栏
@@ -354,10 +398,14 @@ function ChatUIWindow() {
                 emitProgress("conversations-loaded", {
                     conversationCount: conversations.length,
                 });
-                const targetConversation = conversations[conversationIndex];
+                const targetConversation = options.conversationId != null
+                    ? conversations.find((item) => item.id === options.conversationId)
+                    : conversations[conversationIndex];
                 if (!targetConversation) {
                     throw new Error(
-                        `Conversation index ${conversationIndex} is unavailable; only ${conversations.length} conversation(s) were loaded.`,
+                        options.conversationId != null
+                            ? `Conversation id ${options.conversationId} is not among the ${conversations.length} most recent conversation(s).`
+                            : `Conversation index ${conversationIndex} is unavailable; only ${conversations.length} conversation(s) were loaded.`,
                     );
                 }
 
@@ -452,7 +500,9 @@ function ChatUIWindow() {
                 // Match real user scrolling: cancel initial bottom-follow before
                 // programmatically driving the probe, otherwise it fights the test.
                 scrollContainer.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
-                scrollContainer.scrollTop = 0;
+                if (options.direction !== "up") {
+                    scrollContainer.scrollTop = 0;
+                }
                 await waitForAnimationFrames(2);
                 window.__AIPP_CHAT_PERF_CAPTURE__?.resetVirtualRowHeightDrift?.();
 
@@ -463,6 +513,7 @@ function ChatUIWindow() {
                     messageItemCount,
                 });
                 const probeResult = await runScrollPerformanceProbe(scrollContainer, {
+                    direction: options.direction,
                     durationMs: options.scrollDurationMs,
                     includeReturnTrip: options.includeReturnTrip,
                     settleFrameCount: options.settleFrameCount,
@@ -492,6 +543,10 @@ function ChatUIWindow() {
                     rowHeightDrift:
                         window.__AIPP_CHAT_PERF_CAPTURE__?.getVirtualRowHeightDrift?.()
                         ?? [],
+                    rowEstimateSummary:
+                        window.__AIPP_CHAT_PERF_CAPTURE__?.getVirtualRowEstimateSummary?.()
+                        ?? null,
+                    viewportWidth: scrollContainer.clientWidth,
                 };
 
                 lastChatPerfResultRef.current = result;
@@ -702,8 +757,24 @@ function ChatUIWindow() {
     }, [runConversationScrollPerfTest]);
 
     useEffect(() => {
+        const messageRenderCounts = new Map<number, number>();
         const capture = {
-            recordVirtualRowHeight: (key: string, height: number) => {
+            recordMessageItemRender: (messageId: number) => {
+                messageRenderCounts.set(
+                    messageId,
+                    (messageRenderCounts.get(messageId) ?? 0) + 1,
+                );
+            },
+            resetMessageItemRenderCounts: () => {
+                messageRenderCounts.clear();
+            },
+            getMessageItemRenderCounts: () => Object.fromEntries(messageRenderCounts),
+            recordVirtualRowHeight: (
+                key: string,
+                height: number,
+                estimatedHeight?: number,
+                parts?: VirtualRowMessagePart[],
+            ) => {
                 const map = virtualRowHeightDriftRef.current;
                 const existing = map.get(key);
                 if (!existing) {
@@ -712,10 +783,18 @@ function ChatUIWindow() {
                         minHeight: height,
                         maxHeight: height,
                         lastHeight: height,
+                        estimatedHeight,
+                        parts,
                     });
                     return;
                 }
 
+                if (estimatedHeight !== undefined) {
+                    existing.estimatedHeight = estimatedHeight;
+                }
+                if (parts) {
+                    existing.parts = parts;
+                }
                 if (existing.lastHeight === height) {
                     return;
                 }
@@ -741,6 +820,26 @@ function ChatUIWindow() {
             )
                 .sort((a, b) => b.delta - a.delta || b.changeCount - a.changeCount)
                 .slice(0, 12),
+            getVirtualRowEstimateSummary: () => {
+                const rows = Array.from(virtualRowHeightDriftRef.current)
+                    .filter(([, value]) => value.estimatedHeight !== undefined)
+                    .map(([key, value]) => ({
+                        key,
+                        estimatedHeight: Math.round(value.estimatedHeight ?? 0),
+                        measuredHeight: Math.round(value.lastHeight),
+                        parts: value.parts,
+                    }));
+                return {
+                    measuredRowCount: rows.length,
+                    totalEstimatedHeight: rows.reduce((sum, row) => sum + row.estimatedHeight, 0),
+                    totalMeasuredHeight: rows.reduce((sum, row) => sum + row.measuredHeight, 0),
+                    rows: rows
+                        .sort((a, b) =>
+                            Math.abs(b.estimatedHeight - b.measuredHeight)
+                            - Math.abs(a.estimatedHeight - a.measuredHeight))
+                        .slice(0, 40),
+                };
+            },
         };
 
         window.__AIPP_CHAT_PERF_CAPTURE__ = capture;
@@ -809,8 +908,6 @@ function ChatUIWindow() {
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
                             onPreviewFileContextClick={handlePreviewFileContextSelection}
-                            virtualizeMessages
-                            virtualizedListEngine="virtuoso"
                         />
                     </div>
 
@@ -864,8 +961,6 @@ function ChatUIWindow() {
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
                         onPreviewFileContextClick={handlePreviewFileContextSelection}
-                        virtualizeMessages
-                        virtualizedListEngine="virtuoso"
                     />
                 </div>
 

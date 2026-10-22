@@ -888,6 +888,79 @@ describe("useConversationEvents MCP completion reconciliation", () => {
     });
 });
 
+describe("useConversationEvents streaming frame batching", () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+        clearAllMockHandlers();
+        vi.clearAllMocks();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+    });
+
+    it("should not let a queued older frame overwrite an immediate flush when both target one message", async () => {
+        const conversationId = 61;
+        const messageId = 6101;
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, { target_type: "none" }));
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "idle"));
+
+        const { result } = renderHook(() => useConversationEvents({ conversationId }));
+        await flushEffects();
+
+        const previewContent =
+            'older text\n<!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"preview_code"} -->';
+
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_update",
+                data: { message_id: messageId, message_type: "response", content: "older text", is_done: false },
+            });
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_update",
+                data: { message_id: messageId, message_type: "response", content: previewContent, is_done: false },
+            });
+        });
+
+        await advanceAndFlush(200);
+
+        expect(result.current.streamingMessages.get(messageId)?.content).toBe(previewContent);
+    });
+
+    it("should flush batched frames by timer when animation frames are paused", async () => {
+        const conversationId = 62;
+        const messageId = 6201;
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, { target_type: "none" }));
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "idle"));
+        vi.stubGlobal("requestAnimationFrame", () => 1);
+        vi.stubGlobal("cancelAnimationFrame", () => undefined);
+
+        try {
+            const { result } = renderHook(() => useConversationEvents({ conversationId }));
+            await flushEffects();
+
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "message_update",
+                    data: { message_id: messageId, message_type: "response", content: "hidden window token", is_done: false },
+                });
+            });
+            await advanceAndFlush(150);
+
+            expect(result.current.streamingMessages.get(messageId)?.content).toBe("hidden window token");
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+});
+
 describe("useConversationEvents preview_code flush policy", () => {
     it("flushes preview_code streaming markers immediately", () => {
         expect(

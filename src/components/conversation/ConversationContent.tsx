@@ -1,13 +1,9 @@
 import React, { memo } from "react";
-import MessageList from "./MessageList";
-import VirtualizedMessageList from "./VirtualizedMessageList";
 import VirtuosoMessageList from "./VirtuosoMessageList";
 import NewChatComponent from "../NewChatComponent";
 import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
 import type { InlineInteractionItem } from "../ConversationUI";
-
-export type VirtualizedListEngine = "legacy" | "virtuoso";
 
 export interface ConversationContentProps {
     conversationId: string;
@@ -36,8 +32,6 @@ export interface ConversationContentProps {
     agentPlanModeSwitching?: boolean;
     onContinueAgentPlan?: () => void;
     onApproveAgentPlan?: () => void;
-    virtualizeMessages?: boolean;
-    virtualizedListEngine?: VirtualizedListEngine;
     scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId?: number | null;
     clearPendingScrollMessageId?: (messageId: number | null) => void;
@@ -83,8 +77,6 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     agentPlanModeSwitching = false,
     onContinueAgentPlan,
     onApproveAgentPlan,
-    virtualizeMessages = false,
-    virtualizedListEngine = "legacy",
     scrollContainerRef,
     pendingScrollMessageId = null,
     clearPendingScrollMessageId,
@@ -132,42 +124,23 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     if (conversationId) {
         return (
             <>
-                <>
-                    {virtualizeMessages
-                        && scrollContainerRef
-                        && clearPendingScrollMessageId
-                        && setShiningMessageIds
-                        && smartScroll ? (
-                        virtualizedListEngine === "virtuoso" ? (
-                            <VirtuosoMessageList
-                                {...sharedMessageListProps}
-                                conversationId={conversationId}
-                                scrollContainerRef={scrollContainerRef}
-                                pendingScrollMessageId={pendingScrollMessageId}
-                                clearPendingScrollMessageId={
-                                    clearPendingScrollMessageId
-                                }
-                                setShiningMessageIds={setShiningMessageIds}
-                                onScrollStateChange={onScrollStateChange}
-                                smartScroll={smartScroll}
-                            />
-                        ) : (
-                            <VirtualizedMessageList
-                                {...sharedMessageListProps}
-                                scrollContainerRef={scrollContainerRef}
-                                pendingScrollMessageId={pendingScrollMessageId}
-                                clearPendingScrollMessageId={
-                                    clearPendingScrollMessageId
-                                }
-                                setShiningMessageIds={setShiningMessageIds}
-                                onScrollStateChange={onScrollStateChange}
-                                smartScroll={smartScroll}
-                            />
-                        )
-                    ) : (
-                        <MessageList {...sharedMessageListProps} />
-                    )}
-                </>
+                {scrollContainerRef
+                    && clearPendingScrollMessageId
+                    && setShiningMessageIds
+                    && smartScroll ? (
+                    <VirtuosoMessageList
+                        {...sharedMessageListProps}
+                        conversationId={conversationId}
+                        scrollContainerRef={scrollContainerRef}
+                        pendingScrollMessageId={pendingScrollMessageId}
+                        clearPendingScrollMessageId={
+                            clearPendingScrollMessageId
+                        }
+                        setShiningMessageIds={setShiningMessageIds}
+                        onScrollStateChange={onScrollStateChange}
+                        smartScroll={smartScroll}
+                    />
+                ) : null}
             </>
         );
     }

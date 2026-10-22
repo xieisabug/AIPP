@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, memo } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import McpToolCallRenderer from '@/components/McpToolCallRenderer';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
@@ -468,6 +468,28 @@ function getMcpToolCallKey(
     return `mcp-slot-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
 }
 
+const MemoMarkdownSegment = memo(function MemoMarkdownSegment({
+    content,
+    remarkPlugins,
+    rehypePlugins,
+    markdownComponents,
+}: {
+    content: string;
+    remarkPlugins: readonly any[];
+    rehypePlugins: readonly any[];
+    markdownComponents: Components;
+}) {
+    return (
+        <ReactMarkdown
+            children={content}
+            remarkPlugins={remarkPlugins as any}
+            rehypePlugins={rehypePlugins as any}
+            components={markdownComponents}
+            urlTransform={customUrlTransform}
+        />
+    );
+});
+
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
     const { remarkPlugins, rehypePlugins, markdownComponents } = options;
     const {
@@ -522,13 +544,12 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加注释前的内容
             if (beforeComment.trim()) {
                 parts.push(
-                    <ReactMarkdown
+                    <MemoMarkdownSegment
                         key={`before-${index}`}
-                        children={beforeComment}
-                        remarkPlugins={[...remarkPlugins]}
-                        rehypePlugins={[...rehypePlugins]}
-                        components={markdownComponents}
-                        urlTransform={customUrlTransform}
+                        content={beforeComment}
+                        remarkPlugins={remarkPlugins}
+                        rehypePlugins={rehypePlugins}
+                        markdownComponents={markdownComponents}
                     />
                 );
             }
@@ -580,13 +601,12 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         const remainingContent = markdownContent.slice(lastIndex);
         if (remainingContent.trim()) {
             parts.push(
-                <ReactMarkdown
+                <MemoMarkdownSegment
                     key="remaining"
-                    children={remainingContent}
-                    remarkPlugins={[...remarkPlugins]}
-                    rehypePlugins={[...rehypePlugins]}
-                    components={markdownComponents}
-                    urlTransform={customUrlTransform}
+                    content={remainingContent}
+                    remarkPlugins={remarkPlugins}
+                    rehypePlugins={rehypePlugins}
+                    markdownComponents={markdownComponents}
                 />
             );
         }

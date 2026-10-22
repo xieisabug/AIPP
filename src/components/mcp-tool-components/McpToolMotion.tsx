@@ -35,10 +35,11 @@ const getMotionBlur = (shouldReduceMotion: boolean | null) => (
 
 interface MotionToolCardProps extends DivProps {
     interactive?: boolean;
+    animateEntrance?: boolean;
 }
 
 export const MotionToolCard = React.forwardRef<HTMLDivElement, MotionToolCardProps>(
-    ({ className, interactive = false, children, ...props }, ref) => {
+    ({ className, interactive = false, animateEntrance = true, children, ...props }, ref) => {
         const shouldReduceMotion = useReducedMotion();
         const baseClassName = cn(
             "w-full max-w-[600px] my-1 p-2 border border-border rounded-md bg-card overflow-hidden relative transition-colors",
@@ -50,7 +51,7 @@ export const MotionToolCard = React.forwardRef<HTMLDivElement, MotionToolCardPro
             <motion.div
                 ref={ref}
                 className={baseClassName}
-                initial={{ opacity: 0, y: shouldReduceMotion ? 1 : 4 }}
+                initial={animateEntrance ? { opacity: 0, y: shouldReduceMotion ? 1 : 4 } : false}
                 animate={{ opacity: 1, y: 0 }}
                 transition={cardTransition}
                 data-mcp-motion="card"

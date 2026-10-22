@@ -466,6 +466,7 @@ const SearchWebToolCall: React.FC<McpToolComponentProps> = (props) => {
 
     return (
         <MotionToolCard
+            animateEntrance={isRunning}
             interactive={canFocusInSidebar}
             onClick={handleCardClick}
             onKeyDown={handleCardKeyDown}

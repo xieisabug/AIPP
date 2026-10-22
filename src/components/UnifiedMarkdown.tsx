@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
+import { MarkdownStreamingContext, useMarkdownConfig } from '../hooks/useMarkdownConfig';
 import { customUrlTransform } from '@/constants/markdown';
 import { transformInlineImages, releaseInlineImages } from '@/lib/inlineImageStore';
 
@@ -31,7 +31,6 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     const markdownConfig = useMarkdownConfig({
         onCodeRun,
         disableMarkdownSyntax,
-        isStreaming,
     });
 
     const { content: optimizedContent, inlineImageIds } = useMemo(() => transformInlineImages(children), [children]);
@@ -45,14 +44,16 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     }, [inlineImageIds]);
 
     const markdownNode = (
-        <ReactMarkdown
-            children={optimizedContent}
-            // 交由 useMarkdownConfig 统一管理插件，避免重复添加
-            remarkPlugins={[...markdownConfig.remarkPlugins] as any}
-            rehypePlugins={[...markdownConfig.rehypePlugins] as any}
-            components={markdownConfig.markdownComponents}
-            urlTransform={customUrlTransform}
-        />
+        <MarkdownStreamingContext.Provider value={isStreaming}>
+            <ReactMarkdown
+                children={optimizedContent}
+                // 交由 useMarkdownConfig 统一管理插件，避免重复添加
+                remarkPlugins={[...markdownConfig.remarkPlugins] as any}
+                rehypePlugins={[...markdownConfig.rehypePlugins] as any}
+                components={markdownConfig.markdownComponents}
+                urlTransform={customUrlTransform}
+            />
+        </MarkdownStreamingContext.Provider>
     );
 
     if (noProseWrapper) {

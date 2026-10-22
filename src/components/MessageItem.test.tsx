@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import MessageItem from './MessageItem';
 import type { Message } from '@/data/Conversation';
+import {
+    getMessageItemRenderCount,
+    resetMessageItemRenderCounts,
+} from '@/utils/messageItemRenderStats';
 
 const messageActionButtonCalls = vi.hoisted(() => [] as Array<{ messageContent?: string }>);
 const antiLeakageState = vi.hoisted(() => ({
@@ -11,9 +15,20 @@ const antiLeakageState = vi.hoisted(() => ({
     isRevealed: true,
 }));
 
-vi.mock('./UnifiedMarkdown', () => ({
-    default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-}));
+const markdownMountCounts = vi.hoisted(() => new Map<string, number>());
+
+vi.mock('./UnifiedMarkdown', async () => {
+    const { useEffect } = await import('react');
+    return {
+        default: ({ children }: { children: React.ReactNode }) => {
+            useEffect(() => {
+                const key = String(children);
+                markdownMountCounts.set(key, (markdownMountCounts.get(key) ?? 0) + 1);
+            }, []);
+            return <div>{children}</div>;
+        },
+    };
+});
 
 vi.mock('./ReasoningMessage', () => ({
     default: () => <div>reasoning</div>,
@@ -59,9 +74,13 @@ vi.mock('@/hooks/useCustomTagParser', () => ({
     }),
 }));
 
-vi.mock('@/hooks/useMarkdownConfig', () => ({
-    useMarkdownConfig: () => ({}),
-}));
+vi.mock('@/hooks/useMarkdownConfig', async () => {
+    const { createContext } = await import('react');
+    return {
+        MarkdownStreamingContext: createContext(false),
+        useMarkdownConfig: () => ({}),
+    };
+});
 
 vi.mock('@/hooks/useMcpToolCallProcessor', () => ({
     useMcpToolCallProcessor: () => ({
@@ -265,5 +284,96 @@ describe('MessageItem user message folding', () => {
         await user.click(screen.getByRole('button', { name: '收起' }));
 
         expect(screen.getByText(`${visibleContent}…`)).toBeInTheDocument();
+    });
+});
+
+describe('MessageItem streaming markdown blocks', () => {
+    it('should keep closed blocks mounted when the stream finishes', () => {
+        markdownMountCounts.clear();
+        const content = 'first block\n\nsecond block';
+        const message = createMessage({ id: 31, content: '' });
+        const { rerender } = render(
+            <MessageItem
+                message={message}
+                streamEvent={{ message_id: 31, message_type: 'response', content, is_done: false }}
+            />,
+        );
+
+        expect(screen.getByText('first block')).toBeInTheDocument();
+        expect(screen.getByText('second block')).toBeInTheDocument();
+
+        rerender(
+            <MessageItem
+                message={{ ...message, content }}
+                streamEvent={{ message_id: 31, message_type: 'response', content, is_done: true }}
+            />,
+        );
+
+        expect(markdownMountCounts.get('first block')).toBe(1);
+        expect(markdownMountCounts.get('second block')).toBe(1);
+    });
+
+    it('should render historical messages as a single markdown document', () => {
+        markdownMountCounts.clear();
+        render(<MessageItem message={createMessage({ id: 32, content: 'one\n\ntwo' })} />);
+
+        expect(markdownMountCounts.get('one\n\ntwo')).toBe(1);
+    });
+});
+
+const stablePlanAction = () => undefined;
+
+describe('MessageItem render stability', () => {
+    it('does not render a historical message again when only the tail content changes', () => {
+        resetMessageItemRenderCounts();
+        const history = createMessage({ id: 11, content: 'earlier answer' });
+        const { rerender } = render(
+            <>
+                <MessageItem
+                    message={history}
+                    onContinueAgentPlan={stablePlanAction}
+                    onApproveAgentPlan={stablePlanAction}
+                />
+                <MessageItem
+                    message={createMessage({ id: 12, content: 'partial' })}
+                    onContinueAgentPlan={stablePlanAction}
+                    onApproveAgentPlan={stablePlanAction}
+                />
+            </>,
+        );
+        const historyRenders = getMessageItemRenderCount(11);
+
+        rerender(
+            <>
+                <MessageItem
+                    message={history}
+                    onContinueAgentPlan={stablePlanAction}
+                    onApproveAgentPlan={stablePlanAction}
+                />
+                <MessageItem
+                    message={createMessage({ id: 12, content: 'partial plus a token' })}
+                    onContinueAgentPlan={stablePlanAction}
+                    onApproveAgentPlan={stablePlanAction}
+                />
+            </>,
+        );
+
+        expect(getMessageItemRenderCount(11)).toBe(historyRenders);
+        expect(getMessageItemRenderCount(12)).toBeGreaterThan(historyRenders);
+    });
+
+    it('renders again when the plan callback identity changes', () => {
+        resetMessageItemRenderCounts();
+        const history = createMessage({ id: 21, content: 'earlier answer' });
+        const { rerender } = render(
+            <MessageItem message={history} onContinueAgentPlan={stablePlanAction} />,
+        );
+        const renders = getMessageItemRenderCount(21);
+
+        rerender(
+            <MessageItem message={history} onContinueAgentPlan={() => undefined} />,
+        );
+
+        expect(getMessageItemRenderCount(21)).toBeGreaterThan(renders);
     });
 });

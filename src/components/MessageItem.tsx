@@ -13,12 +13,14 @@ import { AgentPlanCard } from "./conversation/AgentPlanCard";
 import { buildActivitySegments } from "./conversation/agent-activity/activitySegments";
 import { useCopyHandler } from "../hooks/useCopyHandler";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
-import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
+import { MarkdownStreamingContext, useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useDisplayConfig } from "../hooks/useDisplayConfig";
 import { useFeishuDebugResend } from "../hooks/useFeishuDebugResend";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent } from "../utils/antiLeakage";
+import { recordMessageItemRender } from "../utils/messageItemRenderStats";
+import { splitClosedMarkdownBlocks } from "../utils/streamingMarkdownBlocks";
 import type { InlineInteractionItem } from "./ConversationUI";
 import { ChevronDown, ChevronUp, ListEnd, Loader2, Zap } from "lucide-react";
 import {
@@ -76,8 +78,30 @@ interface RichMessageContentProps {
     inlineInteractionItems?: InlineInteractionItem[];
 }
 
-const RichMessageContent = React.memo(function RichMessageContent({
-    displayContent,
+interface StableMarkdownChunkProps extends Omit<RichMessageContentProps, "displayContent"> {
+    chunk: string;
+}
+
+function stableMarkdownChunkPropsEqual(
+    prev: StableMarkdownChunkProps,
+    next: StableMarkdownChunkProps,
+): boolean {
+    return prev.chunk === next.chunk
+        && prev.isStreaming === next.isStreaming
+        && prev.isUserMessage === next.isUserMessage
+        && prev.isUserMessageMarkdownEnabled === next.isUserMessageMarkdownEnabled
+        && prev.isLastMessage === next.isLastMessage
+        && prev.useRawTextRenderer === next.useRawTextRenderer
+        && prev.conversationId === next.conversationId
+        && prev.messageId === next.messageId
+        && prev.mcpToolCallStates === next.mcpToolCallStates
+        && prev.shiningMcpCallId === next.shiningMcpCallId
+        && prev.inlineInteractionItems === next.inlineInteractionItems
+        && prev.onCodeRun === next.onCodeRun;
+}
+
+const StableMarkdownChunk = React.memo(function StableMarkdownChunk({
+    chunk: displayContent,
     onCodeRun,
     isUserMessage,
     isUserMessageMarkdownEnabled,
@@ -89,7 +113,7 @@ const RichMessageContent = React.memo(function RichMessageContent({
     mcpToolCallStates,
     shiningMcpCallId,
     inlineInteractionItems,
-}: RichMessageContentProps) {
+}: StableMarkdownChunkProps) {
     const { parseCustomTags } = useCustomTagParser();
     const markdownContent = useMemo(
         () => useRawTextRenderer ? displayContent : parseCustomTags(displayContent),
@@ -98,7 +122,6 @@ const RichMessageContent = React.memo(function RichMessageContent({
     const markdownConfig = useMarkdownConfig({
         onCodeRun,
         disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
-        isStreaming,
     });
     const { processContent } = useMcpToolCallProcessor(markdownConfig, {
         conversationId,
@@ -129,7 +152,11 @@ const RichMessageContent = React.memo(function RichMessageContent({
                 </UnifiedMarkdown>
             );
 
-            return processContent(markdownContent, element);
+            return (
+                <MarkdownStreamingContext.Provider value={isStreaming}>
+                    {processContent(markdownContent, element)}
+                </MarkdownStreamingContext.Provider>
+            );
         },
         [
             isUserMessage,
@@ -141,6 +168,54 @@ const RichMessageContent = React.memo(function RichMessageContent({
             processContent,
             isStreaming,
         ],
+    );
+}, stableMarkdownChunkPropsEqual);
+
+const RichMessageContent = React.memo(function RichMessageContent(props: RichMessageContentProps) {
+    // 在本次挂载期间流式输出过的消息，结束后保持同一套切块结构，
+    // 否则流结束时整条消息会从切块切回整体渲染，所有块重新挂载。
+    const [streamedWhileMounted, setStreamedWhileMounted] = useState(props.isStreaming);
+    if (props.isStreaming && !streamedWhileMounted) {
+        setStreamedWhileMounted(true);
+    }
+
+    const blocks = useMemo(() => {
+        if (!streamedWhileMounted || props.useRawTextRenderer || props.isUserMessage) {
+            return null;
+        }
+        if (
+            props.displayContent.includes("MCP_TOOL_CALL")
+            || props.displayContent.includes("<mcp_tool_call")
+        ) {
+            return null;
+        }
+        return splitClosedMarkdownBlocks(props.displayContent);
+    }, [
+        props.displayContent,
+        props.isUserMessage,
+        props.useRawTextRenderer,
+        streamedWhileMounted,
+    ]);
+
+    // 两条路径都以 key="tail" 结尾，切换时尾块不会被重新挂载。
+    return (
+        <>
+            {blocks?.closed.map((chunk, index) => (
+                <StableMarkdownChunk
+                    key={`closed-${index}`}
+                    {...props}
+                    chunk={chunk}
+                    isStreaming={false}
+                />
+            ))}
+            {!blocks || blocks.open ? (
+                <StableMarkdownChunk
+                    key="tail"
+                    {...props}
+                    chunk={blocks ? blocks.open : props.displayContent}
+                />
+            ) : null}
+        </>
     );
 });
 
@@ -236,6 +311,7 @@ const MessageItem = React.memo<MessageItemProps>(
         onContinueAgentPlan,
         onApproveAgentPlan,
     }) => {
+        recordMessageItemRender(message.id);
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
@@ -421,17 +497,6 @@ const MessageItem = React.memo<MessageItemProps>(
         }
 
         if (message.message_type === "agent_plan") {
-            console.info("[AIPP Plan] card render", {
-                conversationId: message.conversation_id,
-                messageId: message.id,
-                contentLength: displayContent.length,
-                messageFinishTime: message.finish_time,
-                streamIsDone: streamEvent?.is_done ?? null,
-                isStreaming,
-                canActOnAgentPlan,
-                effectiveCanAct: canActOnAgentPlan && !isStreaming,
-                agentPlanModeSwitching,
-            });
             return (
                 <div
                     className="flex justify-start"

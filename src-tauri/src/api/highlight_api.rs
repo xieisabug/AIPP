@@ -322,74 +322,44 @@ pub fn highlight_code_for_export(
     highlighted_html_for_string(code, ss, syntax, theme).map_err(|e| e.to_string())
 }
 
+fn theme_hint_resolves(hint: &str, is_dark: bool) -> bool {
+    pick_theme_by_name(hint).is_some()
+        || map_ui_theme_to_syntect(hint, is_dark)
+            .and_then(pick_theme_by_name)
+            .is_some()
+}
+
 #[tauri::command]
-pub fn highlight_code(
+pub async fn highlight_code(
     lang: String,
     code: String,
     is_dark: bool,
     theme_hint: Option<String>,
     feature_config_state: tauri::State<'_, FeatureConfigState>,
 ) -> Result<String, String> {
-    let ss = syntax_set();
-    // Determine theme in priority:
-    // 1) Explicit theme_hint that directly matches syntect theme name
-    // 2) Map theme_hint UI id -> syntect theme
-    // 3) Read display.code_theme_{light,dark} from feature config and map -> syntect theme
-    // 4) Fallback candidates by dark/light
-
-    // Try theme_hint
-    let mut theme_ref: Option<&'static syntect::highlighting::Theme> = None;
-    if let Some(ref hint) = theme_hint {
-        if let Some(t) = pick_theme_by_name(hint) {
-            theme_ref = Some(t);
-        } else if let Some(mapped_name) = map_ui_theme_to_syntect(hint, is_dark) {
-            theme_ref = pick_theme_by_name(mapped_name);
-        }
-    }
-    // Try feature config
-    if theme_ref.is_none() {
-        let config_map_guard = feature_config_state.config_feature_map.blocking_lock();
+    let mut resolved_hint = theme_hint;
+    let hint_is_usable = resolved_hint
+        .as_deref()
+        .is_some_and(|hint| theme_hint_resolves(hint, is_dark));
+    if !hint_is_usable {
+        let config_map_guard = feature_config_state.config_feature_map.lock().await;
         if let Some(display_map) = config_map_guard.get("display") {
-            let key = if is_dark { "code_theme_dark" } else { "code_theme_light" };
+            let key = if is_dark {
+                "code_theme_dark"
+            } else {
+                "code_theme_light"
+            };
             if let Some(fc) = display_map.get(key) {
-                let ui_id = fc.value.as_str();
-                if let Some(mapped_name) = map_ui_theme_to_syntect(ui_id, is_dark) {
-                    theme_ref = pick_theme_by_name(mapped_name);
-                }
+                resolved_hint = Some(fc.value.clone());
             }
         }
-        drop(config_map_guard);
     }
-    let theme = theme_ref.unwrap_or_else(|| pick_theme(is_dark));
 
-    // Figure out theme name for logging
-    let _ts = theme_set();
-
-    // Try by token, then by extension, else plain text
-    let raw_token = normalize_lang_token(&lang);
-    let mapped = map_lang_alias(raw_token);
-    let token_lower = mapped.to_lowercase();
-    let scope_match = Scope::new(&mapped).ok().and_then(|scope| ss.find_syntax_by_scope(scope));
-    let syntax = scope_match
-        .or_else(|| ss.find_syntax_by_token(&mapped))
-        .or_else(|| ss.find_syntax_by_token(&token_lower))
-        .or_else(|| ss.find_syntax_by_extension(&mapped))
-        .or_else(|| ss.find_syntax_by_extension(&token_lower))
-        .or_else(|| ss.find_syntax_by_name(&mapped))
-        .or_else(|| ss.find_syntax_by_name(&token_lower))
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
-    debug!(
-        raw_lang = %lang,
-        mapped_lang = %mapped,
-        syntax_name = %syntax.name,
-        syntax_scope = %syntax.scope,
-        "Highlight syntax resolved"
-    );
-
-    // Use helper to generate inline-styled HTML within <pre><code> ... </code></pre>
-    let html = highlighted_html_for_string(&code, ss, syntax, theme).map_err(|e| e.to_string())?;
-
-    Ok(html)
+    tokio::task::spawn_blocking(move || {
+        highlight_code_for_export(&lang, &code, is_dark, resolved_hint.as_deref())
+    })
+    .await
+    .map_err(|err| format!("highlight task failed: {err}"))?
 }
 
 #[tauri::command]

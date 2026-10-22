@@ -5,22 +5,18 @@ import VersionPagination from "../VersionPagination";
 import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
 import { isHiddenAgentActivity } from "./AgentActivityList";
 import type { InlineInteractionItem } from "../ConversationUI";
-import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
-import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useFeishuDebugResend } from "@/hooks/useFeishuDebugResend";
-import {
-    LARGE_MESSAGE_PREVIEW_HEIGHT_ESTIMATE,
-    shouldUseLargeMessagePreview,
-} from "@/utils/largeMessagePreview";
-import { ShineBorder } from "../magicui/shine-border";
-import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
-import MessageActionButtons from "../message-item/MessageActionButtons";
+import MergedAssistantGroup from "./MergedAssistantGroup";
 import {
     LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
     LAST_REPLY_CONTAINER_MIN_HEIGHT,
 } from "./layoutConstants";
 import { findLastReplyStartIndex } from "./lastReplyLayout";
+import {
+    estimateMergedGroupHeight,
+    estimateMessageHeight,
+} from "./messageHeightEstimate";
 
 export interface UseMessageListElementsProps {
     allDisplayMessages: Message[];
@@ -47,6 +43,8 @@ export interface UseMessageListElementsProps {
     agentPlanModeSwitching?: boolean;
     onContinueAgentPlan?: () => void;
     onApproveAgentPlan?: () => void;
+    /** Width of the message list, used to estimate text wrapping. */
+    listWidthPx?: number;
 }
 
 export interface MessageElementEntry {
@@ -77,20 +75,6 @@ export function findFirstLiveSuffixIndex(
     return index < items.length ? index : -1;
 }
 
-function stripMcpToolCallMarkup(content: string): string {
-    return content
-        .replace(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g, "")
-        .replace(/<mcp_tool_call[\s\S]*?<\/mcp_tool_call>/gi, "")
-        .trim();
-}
-
-function countMcpToolCalls(content: string): number {
-    return (
-        (content.match(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g) ?? []).length
-        + (content.match(/<mcp_tool_call[\s\S]*?<\/mcp_tool_call>/gi) ?? []).length
-    );
-}
-
 function countPreviewCodeToolCalls(content: string): number {
     return (
         (content.match(/"tool_name"\s*:\s*"preview_code"/g) ?? []).length
@@ -98,167 +82,103 @@ function countPreviewCodeToolCalls(content: string): number {
     );
 }
 
-const CODE_BLOCK_HEIGHT_ESTIMATE_WRAP_CHARS = 96;
-const CODE_BLOCK_COLLAPSED_VISIBLE_LINE_COUNT = 16;
-const CODE_BLOCK_AUTO_COLLAPSE_LINE_THRESHOLD = 18;
+interface McpCallRefs {
+    ids: number[];
+    /** 存在没有数字 call_id 的工具调用，卡片要靠 llm_call_id 或自建的 call 查状态。 */
+    needsFullMap: boolean;
+}
 
-function estimateWrappedCodeLineCount(code: string): number {
-    return Math.max(
-        1,
-        code.split(/\r?\n/).reduce((total, line) => {
-            return total + Math.max(
-                1,
-                Math.ceil(line.length / CODE_BLOCK_HEIGHT_ESTIMATE_WRAP_CHARS),
+const EMPTY_MCP_CALL_REFS: McpCallRefs = { ids: [], needsFullMap: false };
+const mcpCallRefsCache = new WeakMap<Message, McpCallRefs>();
+const previewCodeCountCache = new WeakMap<Message, number>();
+
+export function readMcpCallRefs(message: Message): McpCallRefs {
+    const cached = mcpCallRefsCache.get(message);
+    if (cached) {
+        return cached;
+    }
+    const content = message.content ?? "";
+    let refs = EMPTY_MCP_CALL_REFS;
+    if (content.includes("MCP_TOOL_CALL") || /<mcp_tool_call/i.test(content)) {
+        const ids: number[] = [];
+        let needsFullMap = /<mcp_tool_call/i.test(content);
+        const markerPattern = /<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:?/g;
+        let marker: RegExpExecArray | null;
+        while ((marker = markerPattern.exec(content)) !== null) {
+            const payloadStart = marker.index + marker[0].length;
+            const payloadEnd = content.indexOf("-->", payloadStart);
+            const payload = content.slice(
+                payloadStart,
+                payloadEnd === -1 ? content.length : payloadEnd,
             );
-        }, 0),
-    );
-}
-
-function normalizeCollapsedCodeBlocksForHeightEstimate(content: string): string {
-    return content.replace(
-        /(^|\n)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)(?:\n\2(?=\n|$)|$)/g,
-        (match, leading: string, fence: string, meta: string, code: string) => {
-            const visualLineCount = estimateWrappedCodeLineCount(code);
-            if (visualLineCount <= CODE_BLOCK_AUTO_COLLAPSE_LINE_THRESHOLD) {
-                return match;
+            const idMatch = /^\s*(\d+)\s*$/.exec(payload)
+                ?? /"call_id"\s*:\s*"?(\d+)/.exec(payload);
+            const id = idMatch ? Number(idMatch[1]) : Number.NaN;
+            if (Number.isFinite(id)) {
+                ids.push(id);
+            } else {
+                needsFullMap = true;
             }
-
-            const visiblePlaceholder = Array.from(
-                { length: CODE_BLOCK_COLLAPSED_VISIBLE_LINE_COUNT },
-                () => "code",
-            ).join("\n");
-
-            return `${leading}${fence}${meta}\n${visiblePlaceholder}\n${fence}`;
-        },
-    );
+        }
+        refs = { ids, needsFullMap };
+    }
+    mcpCallRefsCache.set(message, refs);
+    return refs;
 }
 
-function collectPreviewCodePayloadLengths(content: string): number[] {
-    const segments = [
-        ...(content.match(/<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->/g) ?? []),
-        ...(content.match(/<mcp_tool_call[\s\S]*?<\/mcp_tool_call>/gi) ?? []),
-    ];
-
-    return segments
-        .filter((segment) => messageContainsPreviewCode(segment))
-        .map((segment) => segment.length);
+function cachedPreviewCodeCount(message: Message | undefined): number {
+    if (!message) {
+        return 0;
+    }
+    const cached = previewCodeCountCache.get(message);
+    if (cached !== undefined) {
+        return cached;
+    }
+    const count = countPreviewCodeToolCalls(message.content ?? "");
+    previewCodeCountCache.set(message, count);
+    return count;
 }
 
-function estimateMessageHeight(
-    message: Message,
-    options: { isLastMessage?: boolean; isReasoningExpanded?: boolean; agentActivityCount?: number } = {},
-): number {
-    const { isLastMessage = false, isReasoningExpanded = false, agentActivityCount = 0 } = options;
-    const rawContent = message.content ?? "";
+function mcpEventUnchanged(previous: any, next: any): boolean {
+    if (previous === next) {
+        return true;
+    }
+    if (!previous || !next) {
+        return false;
+    }
+    return previous.status === next.status
+        && previous.error === next.error
+        && previous.result === next.result
+        && previous.parameters === next.parameters
+        && previous.tool_name === next.tool_name;
+}
 
-    // Completed collapsed reasoning is represented by a compact status row. Do
-    // not scan its full transcript just to estimate a height; long reasoning
-    // transcripts are common and are not rendered until the user expands them.
+function reuseMcpSlice(
+    previous: Map<number, any> | undefined,
+    ids: number[],
+    source: Map<number, any>,
+): Map<number, any> | undefined {
+    const presentIds = ids.filter((id) => source.has(id));
+    if (presentIds.length === 0) {
+        return undefined;
+    }
     if (
-        message.message_type === "reasoning"
-        && !isReasoningExpanded
-        && message.finish_time !== null
-        && !rawContent.includes("MCP_TOOL_CALL")
-        && !rawContent.includes("<mcp_tool_call")
+        previous
+        && previous.size === presentIds.length
+        && presentIds.every((id) => mcpEventUnchanged(previous.get(id), source.get(id)))
     ) {
-        return 72;
+        return previous;
     }
-
-    const content = normalizeCollapsedCodeBlocksForHeightEstimate(
-        stripMcpToolCallMarkup(rawContent),
-    );
-    const mcpToolCallCount = countMcpToolCalls(rawContent);
-    const previewCodePayloadLengths = rawContent.includes("MCP_TOOL_CALL_STREAMING")
-        ? []
-        : collectPreviewCodePayloadLengths(rawContent);
-    const previewCodeToolCallCount = rawContent.includes("MCP_TOOL_CALL_STREAMING")
-        ? 0
-        : previewCodePayloadLengths.length || countPreviewCodeToolCalls(rawContent);
-    const genericToolCallCount = Math.max(
-        0,
-        mcpToolCallCount - previewCodeToolCallCount,
-    );
-    const contentLength = content.length;
-    const lineCount = content.length > 0
-        ? content.split(/\r?\n/).length
-        : 1;
-    const wrappedLineCount = content.split(/\r?\n/).reduce(
-        (total, line) => total + Math.max(0, Math.ceil(line.length / 96) - 1),
-        0,
-    );
-    const codeBlockCount = Math.floor((content.match(/```/g) ?? []).length / 2);
-    const listItemCount = (content.match(/^\s*(?:[-*+]|\d+\.)\s+/gm) ?? []).length;
-    const tableRowCount = (content.match(/^\|.*\|$/gm) ?? []).length;
-    const hasToolCall = mcpToolCallCount > 0;
-
-    if (
-        shouldUseLargeMessagePreview({
-            content: rawContent,
-            isLastMessage,
-            isStreaming: false,
-            messageType: message.message_type,
-            previewMetadata: message.large_message_preview,
-        })
-    ) {
-        return LARGE_MESSAGE_PREVIEW_HEIGHT_ESTIMATE;
+    const next = new Map<number, any>();
+    for (const id of presentIds) {
+        const incoming = source.get(id);
+        const previousValue = previous?.get(id);
+        next.set(
+            id,
+            previousValue && mcpEventUnchanged(previousValue, incoming) ? previousValue : incoming,
+        );
     }
-
-    const structureContributionCap =
-        lineCount > 240 || contentLength > 6000 ? 12000 : 5200;
-    const structureContribution = Math.min(
-        structureContributionCap,
-        Math.max(0, lineCount - 1) * 22
-        + wrappedLineCount * 18
-        + codeBlockCount * 240
-        + listItemCount * 10
-        + tableRowCount * 18,
-    );
-    const lengthContribution = Math.min(1600, Math.ceil(contentLength / 240) * 12);
-    const previewCodeBaseHeight = isLastMessage
-        ? PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 144
-        : PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + 120;
-    const previewCodeContribution = previewCodeToolCallCount > 0
-        ? previewCodePayloadLengths.length > 0
-            ? previewCodePayloadLengths.reduce((sum, payloadLength) => {
-                const payloadOverhead = isLastMessage
-                    ? Math.min(40, Math.ceil(payloadLength / 6000) * 20)
-                    : Math.min(24, Math.ceil(payloadLength / 6000) * 12);
-                return sum + previewCodeBaseHeight + payloadOverhead;
-            }, 0)
-            : previewCodeToolCallCount * previewCodeBaseHeight
-        : 0;
-    const toolCallContribution = mcpToolCallCount > 0
-        ? previewCodeContribution + genericToolCallCount * 88
-        : 0;
-    // Agent 活动卡片收进气泡内，按每张卡片 88px 估算（与通用工具卡片一致）
-    const agentActivityContribution = agentActivityCount * 88;
-
-    switch (message.message_type) {
-        case "response":
-            if (hasToolCall) {
-                return 112 + structureContribution + lengthContribution + toolCallContribution + agentActivityContribution;
-            }
-            return 180 + structureContribution + lengthContribution + toolCallContribution + agentActivityContribution;
-        case "agent_plan":
-            return 180 + structureContribution + lengthContribution;
-        case "tool_result":
-            return 160 + structureContribution + lengthContribution + toolCallContribution;
-        case "reasoning":
-            if (!isReasoningExpanded) {
-                return hasToolCall ? 140 : 72;
-            }
-            return 132 + structureContribution + lengthContribution + toolCallContribution;
-        case "user":
-            return 100
-                + Math.min(1800, Math.max(0, lineCount - 1) * 14 + wrappedLineCount * 10)
-                + Math.min(320, Math.ceil(contentLength / 320) * 14);
-        case "system":
-            return 96
-                + Math.min(960, Math.max(0, lineCount - 1) * 12 + wrappedLineCount * 8)
-                + Math.min(240, Math.ceil(contentLength / 480) * 12);
-        default:
-            return 120 + structureContribution + lengthContribution + toolCallContribution;
-    }
+    return next;
 }
 
 export function useMessageListElements({
@@ -286,8 +206,9 @@ export function useMessageListElements({
     agentPlanModeSwitching = false,
     onContinueAgentPlan,
     onApproveAgentPlan,
+    listWidthPx,
 }: UseMessageListElementsProps) {
-    const { isMergeAssistantMessages } = useDisplayConfig();
+    const { isMergeAssistantMessages, isShowThinking } = useDisplayConfig();
     const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
 
     const messageInlineInteractionMap = useMemo(() => {
@@ -304,15 +225,60 @@ export function useMessageListElements({
 
     // Agent 活动按所属响应消息分组，收进对应消息气泡内展示；
     // userMessage/agentMessage 这类已在正文体现的 kind 直接过滤掉（含历史数据）
+    const previousActivitiesRef = useRef<Map<number, AgentActivityEvent[]>>(new Map());
     const activitiesByMessageId = useMemo(() => {
-        const map = new Map<number, AgentActivityEvent[]>();
+        const grouped = new Map<number, AgentActivityEvent[]>();
         agentActivities.forEach((activity) => {
             if (isHiddenAgentActivity(activity)) return;
-            const existing = map.get(activity.response_message_id) ?? [];
-            map.set(activity.response_message_id, [...existing, activity]);
+            const existing = grouped.get(activity.response_message_id);
+            if (existing) {
+                existing.push(activity);
+            } else {
+                grouped.set(activity.response_message_id, [activity]);
+            }
         });
-        return map;
+
+        const previous = previousActivitiesRef.current;
+        let unchanged = grouped.size === previous.size;
+        grouped.forEach((list, messageId) => {
+            const previousList = previous.get(messageId);
+            if (
+                previousList
+                && previousList.length === list.length
+                && previousList.every((activity, index) => activity === list[index])
+            ) {
+                grouped.set(messageId, previousList);
+            } else {
+                unchanged = false;
+            }
+        });
+        if (unchanged) {
+            return previous;
+        }
+        previousActivitiesRef.current = grouped;
+        return grouped;
     }, [agentActivities]);
+    const previousMcpSlicesRef = useRef<Map<number, Map<number, any> | undefined>>(new Map());
+    const mcpSliceByMessageId = useMemo(() => {
+        const previous = previousMcpSlicesRef.current;
+        const next = new Map<number, Map<number, any> | undefined>();
+        let unchanged = previous.size === allDisplayMessages.length;
+        for (const message of allDisplayMessages) {
+            const refs = readMcpCallRefs(message);
+            const slice = refs.needsFullMap
+                ? mcpToolCallStates
+                : reuseMcpSlice(previous.get(message.id), refs.ids, mcpToolCallStates);
+            next.set(message.id, slice);
+            if (!previous.has(message.id) || previous.get(message.id) !== slice) {
+                unchanged = false;
+            }
+        }
+        if (unchanged) {
+            return previous;
+        }
+        previousMcpSlicesRef.current = next;
+        return next;
+    }, [allDisplayMessages, mcpToolCallStates]);
 
     const displayedMessageIdSet = useMemo(
         () => new Set(allDisplayMessages.map((message) => message.id)),
@@ -340,36 +306,30 @@ export function useMessageListElements({
                 : null,
         [allDisplayMessages],
     );
+    // Bucketed so window resizes do not re-estimate every message per pixel.
+    const estimateListWidthPx = listWidthPx && listWidthPx > 0
+        ? Math.round(listWidthPx / 40) * 40
+        : undefined;
     // 高度估算按消息缓存：流式输出时只有尾部消息内容在变，历史消息命中缓存，
     // 避免每个 token 都对全部消息重跑重量级正则计算。
-    const estimatedHeightCacheRef = useRef<
-        Map<
-            number,
-            {
-                content: string;
-                messageType: string;
-                largePreview: Message["large_message_preview"];
-                isLast: boolean;
-                expanded: boolean;
-                activityCount: number;
-                height: number;
-            }
-        >
-    >(new Map());
+    const estimatedHeightCacheRef = useRef<{
+        layoutKey: string;
+        entries: Map<number, {
+            content: string;
+            messageType: string;
+            finishTime: Message["finish_time"];
+            isLast: boolean;
+            expanded: boolean;
+            activityCount: number;
+            height: number;
+        }>;
+    }>({ layoutKey: "", entries: new Map() });
     const estimatedHeightByMessageId = useMemo(() => {
-        const previousCache = estimatedHeightCacheRef.current;
-        const nextCache = new Map<
-            number,
-            {
-                content: string;
-                messageType: string;
-                largePreview: Message["large_message_preview"];
-                isLast: boolean;
-                expanded: boolean;
-                activityCount: number;
-                height: number;
-            }
-        >();
+        const layoutKey = `${isMergeAssistantMessages}:${isShowThinking}:${estimateListWidthPx ?? ""}`;
+        const previousCache = estimatedHeightCacheRef.current.layoutKey === layoutKey
+            ? estimatedHeightCacheRef.current.entries
+            : new Map();
+        const nextCache: typeof estimatedHeightCacheRef.current.entries = new Map();
         const result = new Map<number, number>();
 
         for (const message of allDisplayMessages) {
@@ -384,7 +344,7 @@ export function useMessageListElements({
                 cached
                 && cached.content === content
                 && cached.messageType === message.message_type
-                && cached.largePreview === message.large_message_preview
+                && cached.finishTime === message.finish_time
                 && cached.isLast === isLast
                 && cached.expanded === expanded
                 && cached.activityCount === activityCount
@@ -395,6 +355,11 @@ export function useMessageListElements({
                     isLastMessage: isLast,
                     isReasoningExpanded: expanded,
                     agentActivityCount: activityCount,
+                    mergedMode: isMergeAssistantMessages
+                        && message.message_type !== "user"
+                        && message.message_type !== "agent_plan",
+                    isShowThinking,
+                    listWidthPx: estimateListWidthPx,
                 });
             }
 
@@ -402,7 +367,7 @@ export function useMessageListElements({
             nextCache.set(message.id, {
                 content,
                 messageType: message.message_type,
-                largePreview: message.large_message_preview,
+                finishTime: message.finish_time,
                 isLast,
                 expanded,
                 activityCount,
@@ -410,9 +375,17 @@ export function useMessageListElements({
             });
         }
 
-        estimatedHeightCacheRef.current = nextCache;
+        estimatedHeightCacheRef.current = { layoutKey, entries: nextCache };
         return result;
-    }, [allDisplayMessages, lastMessageId, reasoningExpandStates, activitiesByMessageId]);
+    }, [
+        allDisplayMessages,
+        lastMessageId,
+        reasoningExpandStates,
+        activitiesByMessageId,
+        isMergeAssistantMessages,
+        isShowThinking,
+        estimateListWidthPx,
+    ]);
 
     const messageElements = useMemo(() => {
         if (!isMergeAssistantMessages) {
@@ -426,15 +399,7 @@ export function useMessageListElements({
                 return {
                     messageId: message.id,
                     messageIds: [message.id],
-                    estimatedHeight:
-                        estimatedHeightByMessageId.get(message.id)
-                        ?? estimateMessageHeight(message, {
-                            isLastMessage: message.id === lastMessageId,
-                            isReasoningExpanded:
-                                reasoningExpandStates.get(message.id) || false,
-                            agentActivityCount:
-                                activitiesByMessageId.get(message.id)?.length ?? 0,
-                        }),
+                    estimatedHeight: estimatedHeightByMessageId.get(message.id) ?? 0,
                     messageElement: (
                         <MessageItem
                             key={`message-${message.id}`}
@@ -453,7 +418,7 @@ export function useMessageListElements({
                             }
                             shouldShowShineBorder={shouldShowShineBorder}
                             conversationId={message.conversation_id}
-                            mcpToolCallStates={mcpToolCallStates}
+                            mcpToolCallStates={mcpSliceByMessageId.get(message.id)}
                             shiningMcpCallId={shiningMcpCallId}
                             isLastMessage={isLastMessage}
                             inlineInteractionItems={messageInlineInteractionMap.get(
@@ -492,118 +457,41 @@ export function useMessageListElements({
             const anyShining = groupMessages.some((m) => shiningMessageIds.has(m.id));
 
             const mergedElement = (
-                <div
-                    key={`merged-${groupMessages.map((m) => m.id).join("-")}`}
-                    className="flex flex-col"
-                    data-message-item
-                    data-message-id={lastMsg.id}
-                    data-message-type="merged"
-                >
-                    <div className="group relative py-4 px-5 rounded-2xl inline-block max-w-[65%] transition-all duration-200 bg-background text-foreground border border-border self-start">
-                        {anyShining && (
-                            <ShineBorder
-                                shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
-                                borderWidth={DEFAULT_SHINE_BORDER_CONFIG.borderWidth}
-                                duration={DEFAULT_SHINE_BORDER_CONFIG.duration}
-                            />
-                        )}
-                        <div className="flex flex-col gap-2">
-                            {groupMessages.map((message) => {
-                                const streamEvent = streamingMessages.get(message.id);
-                                const isLast = keepExpanded || message.id === lastMessageId;
-
-                                return (
-                                    <MessageItem
-                                        key={`message-${message.id}`}
-                                        message={message}
-                                        streamEvent={streamEvent}
-                                        onCodeRun={onCodeRun}
-                                        onMessageRegenerate={() => onMessageRegenerate(message.id)}
-                                        onMessageEdit={() => onMessageEdit(message)}
-                                        onMessageFork={() => onMessageFork(message.id)}
-                                        onQueuedMessagePromote={onQueuedMessagePromote}
-                                        isReasoningExpanded={
-                                            reasoningExpandStates.get(message.id) || false
-                                        }
-                                        onToggleReasoningExpand={() =>
-                                            onToggleReasoningExpand(message.id)
-                                        }
-                                        shouldShowShineBorder={false}
-                                        conversationId={message.conversation_id}
-                                        mcpToolCallStates={mcpToolCallStates}
-                                        shiningMcpCallId={shiningMcpCallId}
-                                        isLastMessage={isLast}
-                                        inlineInteractionItems={messageInlineInteractionMap.get(
-                                            message.id,
-                                        )}
-                                        allowFeishuDebugResend={allowFeishuDebugResend}
-                                        messageActions={renderMessageActions?.(message)}
-                                        agentActivities={activitiesByMessageId.get(message.id)}
-                                        canActOnAgentPlan={message.id === actionableAgentPlanMessageId}
-                                        agentPlanModeSwitching={agentPlanModeSwitching}
-                                        onContinueAgentPlan={onContinueAgentPlan}
-                                        onApproveAgentPlan={onApproveAgentPlan}
-                                        mergedMode
-                                    />
-                                );
-                            })}
-                        </div>
-                        {(() => {
-                            const lastResponse = [...groupMessages].reverse().find((m) => m.message_type === "response");
-                            const resendTargetMessage = [...groupMessages]
-                                .reverse()
-                                .find((m) => m.message_type === "response" || m.message_type === "tool_result");
-                            const toolbarMessage = lastResponse ?? resendTargetMessage;
-
-                            if (!toolbarMessage) return null;
-
-                            return (
-                                <MessageActionButtons
-                                    messageId={toolbarMessage.id}
-                                    messageType={lastResponse ? "response" : toolbarMessage.message_type}
-                                    isUserMessage={false}
-                                    copyIconState="copy"
-                                    onCopy={() => {
-                                        const responseContent = groupMessages
-                                            .filter((m) => m.message_type === "response")
-                                            .map((m) => m.content);
-                                        const content = responseContent.length > 0
-                                            ? responseContent.join("\n")
-                                            : toolbarMessage.content;
-                                        navigator.clipboard.writeText(content);
-                                    }}
-                                    onRegenerate={lastResponse ? () => onMessageRegenerate(lastResponse.id) : undefined}
-                                    onFork={lastResponse ? () => onMessageFork(lastResponse.id) : undefined}
-                                    onResendToFeishuDebug={
-                                        allowFeishuDebugResend && resendTargetMessage
-                                            ? () => void resendMessageToFeishuDebug(resendTargetMessage.id)
-                                            : undefined
-                                    }
-                                    isResendToFeishuDebugPending={pendingMessageId === resendTargetMessage?.id}
-                                    messageContent={toolbarMessage.content}
-                                    pluginActions={renderMessageActions?.(toolbarMessage)}
-                                />
-                            );
-                        })()}
-                    </div>
-                </div>
+                <MergedAssistantGroup
+                    key={`merged-${groupMessages.map((message) => message.id).join("-")}`}
+                    groupMessages={groupMessages}
+                    anyShining={anyShining}
+                    keepExpanded={keepExpanded}
+                    lastMessageId={lastMessageId}
+                    streamingMessages={streamingMessages}
+                    reasoningExpandStates={reasoningExpandStates}
+                    activitiesByMessageId={activitiesByMessageId}
+                    mcpSliceByMessageId={mcpSliceByMessageId}
+                    messageInlineInteractionMap={messageInlineInteractionMap}
+                    shiningMcpCallId={shiningMcpCallId}
+                    allowFeishuDebugResend={allowFeishuDebugResend}
+                    pendingMessageId={pendingMessageId}
+                    actionableAgentPlanMessageId={actionableAgentPlanMessageId}
+                    agentPlanModeSwitching={agentPlanModeSwitching}
+                    onCodeRun={onCodeRun}
+                    onMessageRegenerate={onMessageRegenerate}
+                    onMessageEdit={onMessageEdit}
+                    onMessageFork={onMessageFork}
+                    onQueuedMessagePromote={onQueuedMessagePromote}
+                    onToggleReasoningExpand={onToggleReasoningExpand}
+                    renderMessageActions={renderMessageActions}
+                    resendMessageToFeishuDebug={resendMessageToFeishuDebug}
+                    onContinueAgentPlan={onContinueAgentPlan}
+                    onApproveAgentPlan={onApproveAgentPlan}
+                />
             );
 
             result.push({
                 messageId: lastMsg.id,
                 messageIds: groupMessages.map((message) => message.id),
-                estimatedHeight: groupMessages.reduce((sum, message) => {
-                    return sum + (
-                        estimatedHeightByMessageId.get(message.id)
-                        ?? estimateMessageHeight(message, {
-                            isLastMessage: message.id === lastMessageId,
-                            isReasoningExpanded:
-                                reasoningExpandStates.get(message.id) || false,
-                            agentActivityCount:
-                                activitiesByMessageId.get(message.id)?.length ?? 0,
-                        })
-                    );
-                }, 0),
+                estimatedHeight: estimateMergedGroupHeight(
+                    groupMessages.map((message) => estimatedHeightByMessageId.get(message.id) ?? 0),
+                ),
                 messageElement: mergedElement,
                 groupControl,
             });
@@ -639,7 +527,7 @@ export function useMessageListElements({
                             }
                             shouldShowShineBorder={shouldShowShineBorder}
                             conversationId={message.conversation_id}
-                            mcpToolCallStates={mcpToolCallStates}
+                            mcpToolCallStates={mcpSliceByMessageId.get(message.id)}
                             shiningMcpCallId={shiningMcpCallId}
                             isLastMessage={isLastMessage}
                             inlineInteractionItems={messageInlineInteractionMap.get(
@@ -673,7 +561,7 @@ export function useMessageListElements({
         onQueuedMessagePromote,
         reasoningExpandStates,
         onToggleReasoningExpand,
-        mcpToolCallStates,
+        mcpSliceByMessageId,
         activitiesByMessageId,
         shiningMcpCallId,
         messageInlineInteractionMap,
@@ -773,21 +661,15 @@ export function useMessageListElements({
             const sourceMessage = messageById.get(entry.messageId) ?? allDisplayMessages[0];
             const shouldKeepLive =
                 sourceMessage?.message_type === "reasoning"
-                || countPreviewCodeToolCalls(sourceMessage?.content ?? "") > 0;
+                || cachedPreviewCodeCount(sourceMessage) > 0;
             items.push({
                 key: `message-${entry.messageId}`,
                 messageId: entry.messageId,
                 messageIds: entry.messageIds ?? [entry.messageId],
                 estimatedHeight:
-                entry.estimatedHeight
-                    ?? estimateMessageHeight(
-                        messageById.get(entry.messageId) ?? allDisplayMessages[0],
-                        {
-                            isLastMessage: entry.messageId === lastMessageId,
-                            isReasoningExpanded:
-                                reasoningExpandStates.get(entry.messageId) || false,
-                        },
-                    ),
+                    entry.estimatedHeight
+                    ?? estimatedHeightByMessageId.get(entry.messageId)
+                    ?? 0,
                 element: entry.messageElement,
                 virtualizationMode: shouldKeepLive ? "live" : "virtualized",
             });
@@ -817,15 +699,9 @@ export function useMessageListElements({
                 0,
                 lastGroup.reduce((sum, entry) => {
                     let next = sum + (
-                        estimatedHeightByMessageId.get(entry.messageId)
-                        ?? estimateMessageHeight(
-                            messageById.get(entry.messageId) ?? allDisplayMessages[0],
-                            {
-                                isLastMessage: entry.messageId === lastMessageId,
-                                isReasoningExpanded:
-                                    reasoningExpandStates.get(entry.messageId) || false,
-                            },
-                        )
+                        entry.estimatedHeight
+                        ?? estimatedHeightByMessageId.get(entry.messageId)
+                        ?? 0
                     );
                     if (versionMap.has(`version-${entry.messageId}`)) {
                         next += 48;

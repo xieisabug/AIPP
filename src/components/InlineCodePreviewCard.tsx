@@ -19,6 +19,7 @@ import {
 import { createPreviewCodeRuntime } from "@/utils/previewCodeRuntime";
 import { CheckCircle, Loader2, Sparkles, XCircle } from "lucide-react";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
+import { loadMcpToolCall, loadPreviewCodeRequests } from "@/services/conversationResourceCache";
 import PreviewExternalResourcesDialog from "@/components/PreviewExternalResourcesDialog";
 import {
     hasActionablePreviewResources,
@@ -719,7 +720,7 @@ export default function InlineCodePreviewCard({
             return;
         }
         let active = true;
-        invoke<MCPToolCall>("get_mcp_tool_call", { callId: effectiveCallId })
+        loadMcpToolCall(effectiveCallId)
             .then((toolCall) => {
                 if (active) {
                     setPersistedToolCall(toolCall);
@@ -740,10 +741,7 @@ export default function InlineCodePreviewCard({
             return;
         }
         let active = true;
-        invoke<PreviewCodeRequestEvent[]>("list_preview_code_requests_for_conversation", {
-            conversationId,
-            conversation_id: conversationId,
-        })
+        loadPreviewCodeRequests(conversationId)
             .then((events) => {
                 if (!active) {
                     return;
