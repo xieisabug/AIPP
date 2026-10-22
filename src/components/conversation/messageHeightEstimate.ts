@@ -239,6 +239,24 @@ export function estimateMessageHeight(
     return STANDALONE_BUBBLE_CHROME_PX + Math.max(TEXT_LINE_HEIGHT_PX, body);
 }
 
+/**
+ * Height of one virtual row of a merged bubble that was split across rows.
+ * The first segment carries the top chrome, the last the bottom chrome, and
+ * every other segment ends with the inter-part gap, so the segments of a group
+ * add up to {@link estimateMergedGroupHeight}.
+ */
+export function estimateMergedSegmentHeight(
+    partHeights: readonly number[],
+    { isFirst, isLast }: { isFirst: boolean; isLast: boolean },
+): number {
+    const visible = partHeights.filter((height) => height > 0);
+    const halfChrome = BUBBLE_CHROME_PX / 2;
+    return (isFirst ? halfChrome : 0)
+        + (isLast ? halfChrome : MERGED_PART_GAP_PX)
+        + visible.reduce((sum, height) => sum + height, 0)
+        + Math.max(0, visible.length - 1) * MERGED_PART_GAP_PX;
+}
+
 /** Height of a merged assistant bubble containing the given part heights. */
 export function estimateMergedGroupHeight(partHeights: readonly number[]): number {
     const visible = partHeights.filter((height) => height > 0);

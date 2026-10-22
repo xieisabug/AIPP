@@ -82,6 +82,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 - `AIPP_CHAT_SCROLL_PERF_KEEP_OPEN=1`：结果写出后不退出应用，便于继续手动观察或接调试工具
 - 估高相关红线：`VirtuosoMessageList` 不能传 `defaultItemHeight`（它会先填充 sizeTree，Virtuoso 随后会丢弃逐行 `heightEstimates`，所有未测行都按同一个平均值计算）；Virtuoso 按数据所属会话 `key` 重建，并在读到列表宽度后才挂载，保证第一份 `heightEstimates` 就是按真实宽度估的
 - 结果里的 `rowEstimateSummary` 列出已测量行的估高与实测高（含行内每条消息 `parts`），`viewportWidth` 是滚动容器宽度；估高逻辑在 `src/components/conversation/messageHeightEstimate.ts`，会按合并气泡、"显示思考过程"开关和列表宽度估算
+- 高合并气泡拆行：历史中估高 ≥720px 的合并组按约 360px 拆成多个虚拟行（`mergedGroupSegments.ts`，行 key 形如 `merged-<ids>:segment-<首条id>`，`joinsNext` 的行之间不加行间距），由 `MergedAssistantGroupSegment` 分段画边框；同组各段通过 `mergedGroupWidthStore.ts` 共享已测到的最大自然宽度，内容层 `w-fit` 不随组宽重排。尾部 last-reply 组不拆
 - 结果会写到 `tmp/*.json`
 - `messagesRenderedMs` 表示 harness 启动到出现消息 DOM 的耗时（不是完整可交互耗时）；`initialSettleMs` 是随后 72 帧采样所用时间。滚动探针会先发出 wheel 事件解除初始贴底跟随，避免程序滚动被跟随逻辑拉回。
 - `VirtuosoMessageList` 当前在展示消息不超过80条且正文总量不超过500,000字符时保留节点。屏外行不能用 `content-visibility: auto`：估高小于真实高度时，滚出视口的行会被压扁，`scrollTop` 会被夹到最底部。超过任一阈值时使用虚拟列表，上下 overscan 约 1.5 倍视口，两侧最少各 4 条。贴底 ResizeObserver 只在用户仍在底部时跟随尾部变高，不能沿用上一次 `forceScroll`。回归时应覆盖两条路径，并分别记录冷打开、Loading关闭和真实滚轮往返。只看预热后的程序滚动帧率，不能证明首次滚动不跳动；流式新增消息跨阈值也应单独验证。用户上滑或拖滚动条时，视口不得被拉回底部。

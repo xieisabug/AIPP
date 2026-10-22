@@ -7,7 +7,11 @@ import { isHiddenAgentActivity } from "./AgentActivityList";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useFeishuDebugResend } from "@/hooks/useFeishuDebugResend";
-import MergedAssistantGroup from "./MergedAssistantGroup";
+import MergedAssistantGroup, {
+    MergedAssistantGroupSegment,
+    type MergedAssistantGroupProps,
+} from "./MergedAssistantGroup";
+import { splitMergedGroupMessages } from "./mergedGroupSegments";
 import {
     LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
     LAST_REPLY_CONTAINER_MIN_HEIGHT,
@@ -15,6 +19,7 @@ import {
 import { findLastReplyStartIndex } from "./lastReplyLayout";
 import {
     estimateMergedGroupHeight,
+    estimateMergedSegmentHeight,
     estimateMessageHeight,
 } from "./messageHeightEstimate";
 
@@ -47,11 +52,20 @@ export interface UseMessageListElementsProps {
     listWidthPx?: number;
 }
 
+export interface MessageElementSegment {
+    key: string;
+    messageIds: number[];
+    estimatedHeight: number;
+    element: React.ReactElement;
+}
+
 export interface MessageElementEntry {
     messageId: number;
     messageIds?: number[];
     estimatedHeight?: number;
     messageElement: React.ReactElement;
+    /** Row-sized pieces of a tall merged bubble, used when it is virtualized as history. */
+    segments?: MessageElementSegment[];
     groupControl: any;
 }
 
@@ -62,6 +76,8 @@ export interface RenderableConversationItem {
     estimatedHeight: number;
     element: React.ReactElement;
     virtualizationMode?: "virtualized" | "live";
+    /** The next item continues the same bubble, so no row gap goes between them. */
+    joinsNext?: boolean;
 }
 
 export function findFirstLiveSuffixIndex(
@@ -454,45 +470,76 @@ export function useMessageListElements({
             const keepExpanded = options?.keepExpanded ?? false;
             // 合并组使用最后一条消息的 groupControl
             const groupControl = getGenerationGroupControl(lastMsg);
-            const anyShining = groupMessages.some((m) => shiningMessageIds.has(m.id));
-
-            const mergedElement = (
-                <MergedAssistantGroup
-                    key={`merged-${groupMessages.map((message) => message.id).join("-")}`}
-                    groupMessages={groupMessages}
-                    anyShining={anyShining}
-                    keepExpanded={keepExpanded}
-                    lastMessageId={lastMessageId}
-                    streamingMessages={streamingMessages}
-                    reasoningExpandStates={reasoningExpandStates}
-                    activitiesByMessageId={activitiesByMessageId}
-                    mcpSliceByMessageId={mcpSliceByMessageId}
-                    messageInlineInteractionMap={messageInlineInteractionMap}
-                    shiningMcpCallId={shiningMcpCallId}
-                    allowFeishuDebugResend={allowFeishuDebugResend}
-                    pendingMessageId={pendingMessageId}
-                    actionableAgentPlanMessageId={actionableAgentPlanMessageId}
-                    agentPlanModeSwitching={agentPlanModeSwitching}
-                    onCodeRun={onCodeRun}
-                    onMessageRegenerate={onMessageRegenerate}
-                    onMessageEdit={onMessageEdit}
-                    onMessageFork={onMessageFork}
-                    onQueuedMessagePromote={onQueuedMessagePromote}
-                    onToggleReasoningExpand={onToggleReasoningExpand}
-                    renderMessageActions={renderMessageActions}
-                    resendMessageToFeishuDebug={resendMessageToFeishuDebug}
-                    onContinueAgentPlan={onContinueAgentPlan}
-                    onApproveAgentPlan={onApproveAgentPlan}
-                />
+            const groupKey = `merged-${groupMessages.map((message) => message.id).join("-")}`;
+            const groupProps: MergedAssistantGroupProps = {
+                groupMessages,
+                anyShining: groupMessages.some((m) => shiningMessageIds.has(m.id)),
+                keepExpanded,
+                lastMessageId,
+                streamingMessages,
+                reasoningExpandStates,
+                activitiesByMessageId,
+                mcpSliceByMessageId,
+                messageInlineInteractionMap,
+                shiningMcpCallId,
+                allowFeishuDebugResend,
+                pendingMessageId,
+                actionableAgentPlanMessageId,
+                agentPlanModeSwitching,
+                onCodeRun,
+                onMessageRegenerate,
+                onMessageEdit,
+                onMessageFork,
+                onQueuedMessagePromote,
+                onToggleReasoningExpand,
+                renderMessageActions,
+                resendMessageToFeishuDebug,
+                onContinueAgentPlan,
+                onApproveAgentPlan,
+            };
+            const groupEstimatedHeight = estimateMergedGroupHeight(
+                groupMessages.map((message) => estimatedHeightByMessageId.get(message.id) ?? 0),
             );
+
+            // 只有历史组会被虚拟化；尾部组留在 last-reply 容器里整体渲染。
+            const segmentMessageRuns = keepExpanded
+                ? null
+                : splitMergedGroupMessages(
+                    groupMessages,
+                    estimatedHeightByMessageId,
+                    groupEstimatedHeight,
+                );
+            const segments = segmentMessageRuns?.map((segmentMessages, index, runs) => {
+                const isFirstSegment = index === 0;
+                const isLastSegment = index === runs.length - 1;
+                const key = `${groupKey}:segment-${segmentMessages[0].id}`;
+                return {
+                    key,
+                    messageIds: segmentMessages.map((message) => message.id),
+                    estimatedHeight: estimateMergedSegmentHeight(
+                        segmentMessages.map((message) => estimatedHeightByMessageId.get(message.id) ?? 0),
+                        { isFirst: isFirstSegment, isLast: isLastSegment },
+                    ),
+                    element: (
+                        <MergedAssistantGroupSegment
+                            key={key}
+                            {...groupProps}
+                            groupKey={groupKey}
+                            anyShining={segmentMessages.some((m) => shiningMessageIds.has(m.id))}
+                            segmentMessages={segmentMessages}
+                            isFirstSegment={isFirstSegment}
+                            isLastSegment={isLastSegment}
+                        />
+                    ),
+                } satisfies MessageElementSegment;
+            });
 
             result.push({
                 messageId: lastMsg.id,
                 messageIds: groupMessages.map((message) => message.id),
-                estimatedHeight: estimateMergedGroupHeight(
-                    groupMessages.map((message) => estimatedHeightByMessageId.get(message.id) ?? 0),
-                ),
-                messageElement: mergedElement,
+                estimatedHeight: groupEstimatedHeight,
+                messageElement: <MergedAssistantGroup key={groupKey} {...groupProps} />,
+                segments,
                 groupControl,
             });
 
@@ -662,17 +709,32 @@ export function useMessageListElements({
             const shouldKeepLive =
                 sourceMessage?.message_type === "reasoning"
                 || cachedPreviewCodeCount(sourceMessage) > 0;
-            items.push({
-                key: `message-${entry.messageId}`,
-                messageId: entry.messageId,
-                messageIds: entry.messageIds ?? [entry.messageId],
-                estimatedHeight:
-                    entry.estimatedHeight
-                    ?? estimatedHeightByMessageId.get(entry.messageId)
-                    ?? 0,
-                element: entry.messageElement,
-                virtualizationMode: shouldKeepLive ? "live" : "virtualized",
-            });
+            const virtualizationMode = shouldKeepLive ? "live" : "virtualized";
+            if (entry.segments) {
+                entry.segments.forEach((segment, index, segments) => {
+                    items.push({
+                        key: segment.key,
+                        messageId: segment.messageIds[segment.messageIds.length - 1],
+                        messageIds: segment.messageIds,
+                        estimatedHeight: segment.estimatedHeight,
+                        element: segment.element,
+                        virtualizationMode,
+                        joinsNext: index < segments.length - 1,
+                    });
+                });
+            } else {
+                items.push({
+                    key: `message-${entry.messageId}`,
+                    messageId: entry.messageId,
+                    messageIds: entry.messageIds ?? [entry.messageId],
+                    estimatedHeight:
+                        entry.estimatedHeight
+                        ?? estimatedHeightByMessageId.get(entry.messageId)
+                        ?? 0,
+                    element: entry.messageElement,
+                    virtualizationMode,
+                });
+            }
 
             const versionElement = versionMap.get(`version-${entry.messageId}`);
             if (versionElement) {
@@ -681,7 +743,7 @@ export function useMessageListElements({
                     messageId: null,
                     estimatedHeight: 48,
                     element: versionElement,
-                    virtualizationMode: shouldKeepLive ? "live" : "virtualized",
+                    virtualizationMode,
                 });
             }
         };

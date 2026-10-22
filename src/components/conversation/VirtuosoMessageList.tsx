@@ -113,6 +113,15 @@ interface MeasuredVirtuosoItemProps {
     minHeight?: number;
 }
 
+function historyRowHasGapAfter(
+    item: Pick<RenderableConversationItem, "joinsNext">,
+    index: number,
+    historyCount: number,
+    liveCount: number,
+): boolean {
+    return !item.joinsNext && (index < historyCount - 1 || liveCount > 0);
+}
+
 export function getVirtuosoRowMinHeight(
     index: number,
     item: Pick<RenderableConversationItem, "estimatedHeight">,
@@ -163,9 +172,14 @@ const VirtuosoLiveFooter = React.memo(
 
         // last-reply 的 min-height 直接读 live-only CSS 变量，无需再在 footer 上覆盖
         return (
-            <div ref={footerRef} className="flex flex-col gap-4">
-                {liveItems.map((item) => (
-                    <React.Fragment key={item.key}>{item.element}</React.Fragment>
+            <div ref={footerRef} className="flex flex-col">
+                {liveItems.map((item, index) => (
+                    <React.Fragment key={item.key}>
+                        {item.element}
+                        {index < liveItems.length - 1 && !item.joinsNext && (
+                            <div aria-hidden className="flex-none" style={{ height: VIRTUAL_ROW_GAP_PX }} />
+                        )}
+                    </React.Fragment>
                 ))}
             </div>
         );
@@ -271,11 +285,12 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     );
     const heightEstimates = useMemo(
         () =>
-            historyItems.map((item, index) => {
-                const hasGapAfter =
-                    index < historyItems.length - 1 || liveItems.length > 0;
-                return item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0);
-            }),
+            historyItems.map((item, index) =>
+                item.estimatedHeight
+                + (historyRowHasGapAfter(item, index, historyItems.length, liveItems.length)
+                    ? VIRTUAL_ROW_GAP_PX
+                    : 0),
+            ),
         [historyItems, liveItems.length],
     );
     const context = useMemo<VirtuosoMessageListContext>(
@@ -522,7 +537,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         }
 
         return -liveItems.reduce((sum, item, index) => {
-            const hasGapAfter = index < liveItems.length - 1;
+            const hasGapAfter = index < liveItems.length - 1 && !item.joinsNext;
             return sum + item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0);
         }, 0);
     }, [liveItems]);
@@ -544,7 +559,12 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         (index: number, item: RenderableConversationItem) => (
             <MeasuredVirtuosoItem
                 item={item}
-                hasGapAfter={index < historyItems.length - 1 || liveItems.length > 0}
+                hasGapAfter={historyRowHasGapAfter(
+                    item,
+                    index,
+                    historyItems.length,
+                    liveItems.length,
+                )}
                 minHeight={getVirtuosoRowMinHeight(index, item)}
             />
         ),

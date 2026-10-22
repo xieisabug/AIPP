@@ -184,7 +184,7 @@ describe("useMessageListElements merged assistant preview state", () => {
             makeMessage({
                 id: 2,
                 message_type: "response",
-                content: Array.from({ length: 240 }, () => "a very long assistant response line").join("\n"),
+                content: Array.from({ length: 12 }, () => "a very long assistant response line").join("\n"),
             }),
             makeMessage({ id: 3, message_type: "tool_result", content: "ok" }),
             makeMessage({ id: 4, message_type: "user", content: "user-2" }),
@@ -213,6 +213,33 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(mergedGroupItem?.estimatedHeight ?? 0).toBeGreaterThan(
             singleItem?.estimatedHeight ?? 0,
         );
+    });
+
+    it("should split tall historical merged groups into joined segment rows", () => {
+        const longResponse = Array.from({ length: 40 }, () => "a very long assistant response line").join("\n\n");
+        const messages = [
+            makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+            makeMessage({ id: 2, message_type: "response", content: longResponse }),
+            makeMessage({ id: 3, message_type: "response", content: longResponse }),
+            makeMessage({ id: 4, message_type: "response", content: "done" }),
+            makeMessage({ id: 5, message_type: "user", content: "user-2" }),
+            makeMessage({ id: 6, message_type: "response", content: longResponse }),
+            makeMessage({ id: 7, message_type: "response", content: longResponse }),
+        ];
+
+        const { result } = renderHook(() => useMessageListElements(makeHookProps(messages)));
+        const items = result.current.renderItems;
+        const segmentItems = items.filter((item) => item.key.includes(":segment-"));
+
+        expect(segmentItems.length).toBeGreaterThan(1);
+        expect(segmentItems.flatMap((item) => item.messageIds)).toEqual([2, 3, 4]);
+        expect(segmentItems.map((item) => item.joinsNext ?? false)).toEqual([
+            ...segmentItems.slice(0, -1).map(() => true),
+            false,
+        ]);
+        // 尾部组仍整体留在 last-reply 容器中
+        const lastReply = items.find((item) => item.key === "last-reply-container");
+        expect(lastReply?.messageIds).toEqual([5, 7]);
     });
 
     it("caps historical row height estimates for auto-collapsed code blocks", () => {
