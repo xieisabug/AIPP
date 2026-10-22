@@ -22,8 +22,10 @@ pub(crate) fn should_auto_run_tool(
     default_auto_run: bool,
     server_command: Option<&str>,
 ) -> bool {
+    // ask_user_question / preview_* are themselves the user-facing interaction.
+    // They must never sit in pending waiting for a separate "run" permission click.
     if server_command == Some("aipp:ui_interaction")
-        && matches!(tool_name, "preview_code" | "preview_file")
+        && matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file")
     {
         return true;
     }
@@ -52,7 +54,7 @@ mod auto_run_tests {
     use super::*;
 
     #[test]
-    fn test_builtin_preview_tools_auto_run_even_when_disabled_by_config() {
+    fn test_builtin_ui_interaction_tools_auto_run_even_when_disabled_by_config() {
         let override_config = McpOverrideConfig {
             all_tool_auto_run: Some(false),
             tool_auto_run: None,
@@ -73,11 +75,11 @@ mod auto_run_tests {
             false,
             Some("aipp:ui_interaction"),
         ));
-        assert!(!should_auto_run_tool(
+        assert!(should_auto_run_tool(
             Some(&override_config),
             "UI交互工具",
             "ask_user_question",
-            true,
+            false,
             Some("aipp:ui_interaction"),
         ));
         assert!(!should_auto_run_tool(

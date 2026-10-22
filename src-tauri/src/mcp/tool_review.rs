@@ -89,7 +89,7 @@ pub fn is_review_exempt_tool(tool_name: &str) -> bool {
     matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file")
 }
 
-/// 已开启自动运行、未启用模型审核，或工具本身就是用户交互时，沿用原来的 auto-run 结果。
+/// 已开启自动运行则直接执行；用户交互类工具（提问/预览）始终放行，不依赖 run 开关。
 /// 只有未开启自动运行且启用模型审核时，才看审核结论；失败时 `review_safe` 为 None，保持不执行。
 pub fn resolve_auto_execute(
     mode: &str,
@@ -97,7 +97,10 @@ pub fn resolve_auto_execute(
     legacy_auto_run: bool,
     review_safe: Option<bool>,
 ) -> bool {
-    if legacy_auto_run || mode != "auto_model" || is_review_exempt_tool(tool_name) {
+    if is_review_exempt_tool(tool_name) {
+        return true;
+    }
+    if legacy_auto_run || mode != "auto_model" {
         return legacy_auto_run;
     }
     review_safe.unwrap_or(false)
