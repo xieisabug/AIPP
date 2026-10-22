@@ -415,6 +415,32 @@ describe("VirtuosoMessageList row height reservation", () => {
         expect(virtuosoMockState.lastProps.initialTopMostItemIndex.offset).toBeLessThan(0);
     });
 
+    it("should pass per-row heightEstimates without defaultItemHeight when history is virtualized", () => {
+        const scrollContainer = document.createElement("div");
+
+        render(
+            <VirtuosoMessageList
+                {...makeProps([
+                    makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+                    makeMessage({
+                        id: 2,
+                        message_type: "response",
+                        content: "response line\n\n".repeat(30),
+                    }),
+                    makeMessage({ id: 3, message_type: "user", content: "user-2" }),
+                    makeMessage({ id: 4, message_type: "response", content: "response-2" }),
+                ], true)}
+                scrollContainerRef={{ current: scrollContainer }}
+            />,
+        );
+
+        const props = virtuosoMockState.lastProps;
+        // defaultItemHeight 会先填充 sizeTree，导致 Virtuoso 丢弃逐行 heightEstimates。
+        expect(props.defaultItemHeight).toBeUndefined();
+        expect(props.heightEstimates).toHaveLength(props.data.length);
+        expect(new Set(props.heightEstimates).size).toBeGreaterThan(1);
+    });
+
     it("renders the latest Butler user message and error without hiding the live footer", () => {
         const { unmount } = render(
             <VirtuosoMessageList

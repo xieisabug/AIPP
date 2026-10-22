@@ -79,7 +79,7 @@ export const MotionStatusSlot: React.FC<MotionStatusSlotProps> = ({ stateKey, pr
     }
 
     return (
-        <AnimatePresence mode="popLayout">
+        <AnimatePresence mode="popLayout" initial={false}>
             <motion.div
                 key={stateKey}
                 className="flex items-center"
@@ -110,7 +110,7 @@ export const MotionDetails: React.FC<MotionPresenceProps> = ({ show, children, c
     const shouldReduceMotion = useReducedMotion();
 
     return (
-        <AnimatePresence>
+        <AnimatePresence initial={false}>
             {show && (
                 <motion.div
                     className={className}
@@ -137,7 +137,7 @@ export const MotionMetaRow: React.FC<MotionPresenceProps> = ({ show, children, c
     const shouldReduceMotion = useReducedMotion();
 
     return (
-        <AnimatePresence>
+        <AnimatePresence initial={false}>
             {show && (
                 <motion.div
                     className={className}
@@ -167,7 +167,7 @@ export const MotionMetricItem: React.FC<MotionMetricItemProps> = ({ metricKey, c
     const shouldReduceMotion = useReducedMotion();
 
     return (
-        <AnimatePresence mode="popLayout">
+        <AnimatePresence mode="popLayout" initial={false}>
             <motion.span
                 key={metricKey}
                 className="inline-flex"

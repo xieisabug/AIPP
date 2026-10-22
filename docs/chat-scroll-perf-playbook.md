@@ -79,6 +79,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 - `AIPP_CHAT_SCROLL_PERF_INDEX` 从 `0` 开始，且是**当前 ChatUI 会话列表顺序**里的下标；先从结果 JSON 的 `conversationName` 确认目标会话，不要凭序号想当然
 - 也可以用 `AIPP_CHAT_SCROLL_PERF_CONVERSATION_ID=<会话 id>` 直接按 id 选会话（需在最近 100 个会话内），优先于下标
 - `AIPP_CHAT_SCROLL_PERF_DIRECTION=up` 模拟"打开后从底部拖滚动条到顶部"：不先回顶，每帧按 `滑块比例 × 当前 maxScrollTop` 写 `scrollTop`。重点看 `maxObservedMaxScrollTop` 与 `finalMaxScrollTop` 的差（总高收缩 = 估高偏大 = 滑块跳动）、`externalScrollAdjustCount/maxExternalScrollAdjustPx`（Virtuoso 在两帧之间修正了 scrollTop）、`thumbReverseJumpCount`（滑块逆向跳）
+- `AIPP_CHAT_SCROLL_PERF_KEEP_OPEN=1`：结果写出后不退出应用，便于继续手动观察或接调试工具
+- 估高相关红线：`VirtuosoMessageList` 不能传 `defaultItemHeight`（它会先填充 sizeTree，Virtuoso 随后会丢弃逐行 `heightEstimates`，所有未测行都按同一个平均值计算）；Virtuoso 按数据所属会话 `key` 重建，并在读到列表宽度后才挂载，保证第一份 `heightEstimates` 就是按真实宽度估的
 - 结果里的 `rowEstimateSummary` 列出已测量行的估高与实测高（含行内每条消息 `parts`），`viewportWidth` 是滚动容器宽度；估高逻辑在 `src/components/conversation/messageHeightEstimate.ts`，会按合并气泡、"显示思考过程"开关和列表宽度估算
 - 结果会写到 `tmp/*.json`
 - `messagesRenderedMs` 表示 harness 启动到出现消息 DOM 的耗时（不是完整可交互耗时）；`initialSettleMs` 是随后 72 帧采样所用时间。滚动探针会先发出 wheel 事件解除初始贴底跟随，避免程序滚动被跟随逻辑拉回。

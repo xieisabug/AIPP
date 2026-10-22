@@ -534,7 +534,9 @@ fn spawn_chat_scroll_perf_autorun_if_requested(app_handle: &AppHandle) {
         };
 
         write_chat_scroll_perf_output(&config.result_path, &output);
-        request_app_exit(&app_handle);
+        if !parse_bool_env("AIPP_CHAT_SCROLL_PERF_KEEP_OPEN", false) {
+            request_app_exit(&app_handle);
+        }
     });
 }
 

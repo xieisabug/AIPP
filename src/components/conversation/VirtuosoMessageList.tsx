@@ -43,7 +43,6 @@ interface VirtuosoMessageListContext {
 }
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 180;
-const DEFAULT_ITEM_HEIGHT = 160;
 const INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT = 10;
 const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 30;
 const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
@@ -229,7 +228,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     onScrollStateChange,
     ...messageListProps
 }) => {
-    const [listWidth, setListWidth] = useState(0);
+    const [listWidth, setListWidth] = useState<number | null>(null);
     const { renderItems } = useMessageListElements({
         ...messageListProps,
         listWidthPx: listWidth || undefined,
@@ -279,19 +278,6 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             }),
         [historyItems, liveItems.length],
     );
-    const defaultItemHeight = useMemo(() => {
-        if (heightEstimates.length === 0) {
-            return DEFAULT_ITEM_HEIGHT;
-        }
-
-        const sample = heightEstimates.slice(0, 12);
-        return Math.max(
-            1,
-            Math.round(
-                sample.reduce((sum, height) => sum + height, 0) / sample.length,
-            ),
-        );
-    }, [heightEstimates]);
     const context = useMemo<VirtuosoMessageListContext>(
         () => ({ liveItems }),
         [liveItems],
@@ -318,6 +304,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             (message) => String(message.conversation_id) === conversationId,
         );
     }, [conversationId, messageListProps.allDisplayMessages]);
+    // 按数据实际所属会话重建 Virtuoso，保证新会话从空 sizeTree 开始并采纳本会话的 heightEstimates。
+    const dataConversationKey = String(
+        messageListProps.allDisplayMessages[0]?.conversation_id ?? conversationId,
+    );
 
     // scrollParent 解析不能只依赖 ref 对象 identity：Butler 等场景下首帧
     // ref.current 偶发仍为 null，若不再重试会永久停在 minHeight:1 占位，气泡全无。
@@ -654,6 +644,12 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         return <VirtuosoLiveFooter context={{ liveItems: fallbackItems }} />;
     }
 
+    // Virtuoso 只在 sizeTree 为空时采纳第一份非空 heightEstimates，之后的更新全部忽略；
+    // 必须等拿到真实列表宽度再挂载，否则按默认宽度估算的高度会被永久固化。
+    if (listWidth === null) {
+        return <div ref={listWrapperRef} style={initialBottomPositioningStyle} />;
+    }
+
     return (
         <div
             ref={listWrapperRef}
@@ -663,6 +659,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             style={initialBottomPositioningStyle}
         >
             <Virtuoso
+                key={dataConversationKey}
                 ref={virtuosoRef}
                 customScrollParent={effectiveScrollParent}
                 data={historyItems}
@@ -670,7 +667,6 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 itemContent={itemContent}
                 components={virtuosoComponents}
                 context={context}
-                defaultItemHeight={defaultItemHeight}
                 heightEstimates={heightEstimates}
                 initialTopMostItemIndex={{
                     index: "LAST",
