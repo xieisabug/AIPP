@@ -310,6 +310,34 @@ function buildPreviewFileSignature(request: PreviewFileRequest | null): string |
     });
 }
 
+function toAskUserPersistedState(
+    call: MCPToolCall,
+    conversationId: number | undefined
+): AskUserQuestionPersistedState | null {
+    if (!["pending", "executing", "success", "failed"].includes(call.status)) {
+        return null;
+    }
+    const request = parseAskUserQuestionRequest(
+        call.parameters,
+        conversationId,
+        `persisted-ask-${call.id}`
+    );
+    if (!request) return null;
+    const normalizedStatus: "pending" | "executing" | "success" | "failed" =
+        call.status === "unknown" ? "failed" : (call.status as AskUserQuestionPersistedState["status"]);
+    return {
+        callId: call.id,
+        messageId: call.message_id ?? null,
+        request,
+        status: normalizedStatus,
+        answers: normalizedStatus === "success" ? parseAskUserQuestionAnswers(call.result) : null,
+    };
+}
+
+/**
+ * Prefer an in-flight ask_user_question (pending/executing) over a completed one.
+ * Otherwise the UI keeps showing the previous answer while a newer call is waiting.
+ */
 function getLatestAskUserQuestionState(
     calls: MCPToolCall[],
     conversationId: number | undefined
@@ -318,29 +346,35 @@ function getLatestAskUserQuestionState(
         .filter((call) => call.tool_name === ASK_USER_QUESTION_TOOL_NAME)
         .sort((a, b) => b.id - a.id);
 
+    // Prefer executing over pending: when one turn creates multiple asks, the
+    // later call may already be "pending" while the earlier one is still
+    // "executing" and waiting for answers. Showing the pending one first would
+    // hide the live questionnaire.
     for (const call of candidates) {
-        if (!["pending", "executing", "success", "failed"].includes(call.status)) {
-            continue;
-        }
-        const request = parseAskUserQuestionRequest(
-            call.parameters,
-            conversationId,
-            `persisted-ask-${call.id}`
-        );
-        if (!request) continue;
-        const normalizedStatus: "pending" | "executing" | "success" | "failed" =
-            call.status === "unknown" ? "failed" : call.status;
-        return {
-            callId: call.id,
-            messageId: call.message_id ?? null,
-            request,
-            status: normalizedStatus,
-            answers: normalizedStatus === "success" ? parseAskUserQuestionAnswers(call.result) : null,
-        };
+        if (call.status !== "executing") continue;
+        const state = toAskUserPersistedState(call, conversationId);
+        if (state) return state;
+    }
+    for (const call of candidates) {
+        if (call.status !== "pending") continue;
+        const state = toAskUserPersistedState(call, conversationId);
+        if (state) return state;
+    }
+
+    for (const call of candidates) {
+        const state = toAskUserPersistedState(call, conversationId);
+        if (state) return state;
     }
 
     return null;
 }
+
+/** Exported for unit tests. */
+export const askUserQuestionStateForTest = {
+    getLatestAskUserQuestionState,
+    buildAskUserQuestionSignature,
+    parseAskUserQuestionAnswers,
+};
 
 function getLatestPreviewFileState(
     calls: MCPToolCall[],
@@ -428,6 +462,30 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
         void refreshPersistedState();
     }, [refreshPersistedState]);
 
+    // Drop a stale local summary once a newer in-flight ask exists in persistence.
+    useEffect(() => {
+        if (!submittedSummary || !persistedState) return;
+        if (persistedState.status !== "pending" && persistedState.status !== "executing") {
+            return;
+        }
+        const summarySig = buildAskUserQuestionSignature(submittedSummary.request);
+        const activeSig = buildAskUserQuestionSignature(persistedState.request);
+        if (
+            summarySig
+            && activeSig
+            && summarySig !== activeSig
+        ) {
+            setSubmittedSummary(null);
+        } else if (
+            submittedSummary.request.request_id
+            && persistedState.request.request_id
+            && submittedSummary.request.request_id !== persistedState.request.request_id
+            && !submittedSummary.request.request_id.startsWith("persisted-ask-")
+        ) {
+            setSubmittedSummary(null);
+        }
+    }, [persistedState, submittedSummary]);
+
     useEffect(() => {
         const unsubscribe = listen<AskUserQuestionRequest>("ask-user-question-request", (event) => {
             const request = event.payload;
@@ -498,7 +556,6 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             if (!currentPending || currentPending.request_id !== requestId) {
                 return;
             }
-            setSubmittedSummary({ request: currentPending, answers });
             try {
                 await invoke("submit_ask_user_question_response", {
                     requestId,
@@ -508,11 +565,26 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             } catch (error) {
                 console.error("Failed to submit AskUserQuestion response:", getErrorMessage(error));
             } finally {
-                shiftNextRequest();
+                // Only keep the local summary when this was the last queued request.
+                // If another ask is already waiting, showing the previous answers would
+                // mask the next questionnaire (bug: 2nd call shows 1st answers).
+                setRequestQueue((prev) => {
+                    const [, ...rest] = prev;
+                    if (rest.length > 0) {
+                        setSubmittedSummary(null);
+                        setPendingRequest(rest[0] ?? null);
+                        setIsDialogOpen(true);
+                    } else {
+                        setSubmittedSummary({ request: currentPending, answers });
+                        setPendingRequest(null);
+                        setIsDialogOpen(false);
+                    }
+                    return rest;
+                });
                 schedulePersistedRefresh();
             }
         },
-        [pendingRequest, schedulePersistedRefresh, shiftNextRequest]
+        [pendingRequest, schedulePersistedRefresh]
     );
 
     const handleCancel = useCallback(
@@ -546,10 +618,12 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             } catch (error) {
                 console.error("Failed to cancel AskUserQuestion response:", getErrorMessage(error));
             } finally {
+                setSubmittedSummary(null);
                 if (isRealtimePendingMatch) {
                     shiftNextRequest();
                 } else {
                     setPendingRequest(null);
+                    setRequestQueue([]);
                     setIsDialogOpen(false);
                 }
                 schedulePersistedRefresh();
@@ -565,6 +639,15 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             if (!request || !persistedState) {
                 return null;
             }
+            // Prefer call-id / request-id match over question-text signature so two
+            // different asks in one turn never share the wrong answers card.
+            if (
+                request.request_id
+                && persistedState.request.request_id
+                && request.request_id === persistedState.request.request_id
+            ) {
+                return persistedState;
+            }
             const requestSignature = buildAskUserQuestionSignature(request);
             const persistedSignature = buildAskUserQuestionSignature(persistedState.request);
             if (!requestSignature || !persistedSignature) {
@@ -573,6 +656,17 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             return requestSignature === persistedSignature ? persistedState : null;
         };
 
+        const closed = {
+            request: null as AskUserQuestionRequest | null,
+            isOpen: false,
+            mode: "questionnaire" as AskUserQuestionViewMode,
+            completedAnswers: null as Record<string, string> | null,
+            readOnly: false,
+            callId: null as number | null,
+            messageId: null as number | null,
+        };
+
+        // 1) Live queued request always wins — show that call's own prompt.
         if (pendingRequest && isDialogOpen) {
             const persistedAnchor = resolvePersistedAnchor(pendingRequest);
             return {
@@ -586,8 +680,47 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             };
         }
 
+        const summaryMatchesPersisted = (() => {
+            if (!submittedSummary || !persistedState) return false;
+            if (
+                submittedSummary.request.request_id
+                && persistedState.request.request_id
+                && submittedSummary.request.request_id === persistedState.request.request_id
+            ) {
+                return true;
+            }
+            const summarySig = buildAskUserQuestionSignature(submittedSummary.request);
+            const persistedSig = buildAskUserQuestionSignature(persistedState.request);
+            return Boolean(summarySig && persistedSig && summarySig === persistedSig);
+        })();
+
+        // 2) In-flight persisted call (pending/executing) beats a *stale* local summary
+        //    for a *different* ask. Same-call executing after submit should keep the summary
+        //    so we do not flash the questionnaire again while status catches up.
+        if (
+            persistedState
+            && persistedState.status === "executing"
+            && !summaryMatchesPersisted
+        ) {
+            return {
+                request: persistedState.request,
+                isOpen: true,
+                mode: "questionnaire" as AskUserQuestionViewMode,
+                completedAnswers: null as Record<string, string> | null,
+                readOnly: false,
+                callId: persistedState.callId,
+                messageId: persistedState.messageId,
+            };
+        }
+
+        // 3) Ephemeral post-submit summary for the call just answered.
+        //    Do NOT resurrect completed asks from DB — that is what left the first
+        //    answer stuck when the next turn/run was never started.
         if (submittedSummary) {
             const persistedAnchor = resolvePersistedAnchor(submittedSummary.request);
+            if (persistedAnchor && persistedAnchor.status === "failed") {
+                return closed;
+            }
             return {
                 request: submittedSummary.request,
                 isOpen: true,
@@ -599,40 +732,7 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
             };
         }
 
-        if (persistedState) {
-            if (persistedState.status === "success") {
-                return {
-                    request: persistedState.request,
-                    isOpen: true,
-                    mode: "summary" as AskUserQuestionViewMode,
-                    completedAnswers: persistedState.answers ?? {},
-                    readOnly: true,
-                    callId: persistedState.callId,
-                    messageId: persistedState.messageId,
-                };
-            }
-            if (persistedState.status === "pending" || persistedState.status === "executing") {
-                return {
-                    request: persistedState.request,
-                    isOpen: true,
-                    mode: "questionnaire" as AskUserQuestionViewMode,
-                    completedAnswers: null as Record<string, string> | null,
-                    readOnly: false,
-                    callId: persistedState.callId,
-                    messageId: persistedState.messageId,
-                };
-            }
-        }
-
-        return {
-            request: null as AskUserQuestionRequest | null,
-            isOpen: false,
-            mode: "questionnaire" as AskUserQuestionViewMode,
-            completedAnswers: null as Record<string, string> | null,
-            readOnly: false,
-            callId: null as number | null,
-            messageId: null as number | null,
-        };
+        return closed;
     }, [pendingRequest, isDialogOpen, persistedState, submittedSummary]);
 
     return {
