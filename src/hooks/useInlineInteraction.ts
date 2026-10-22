@@ -369,11 +369,144 @@ function getLatestAskUserQuestionState(
     return null;
 }
 
+type AskUserQuestionViewState = {
+    request: AskUserQuestionRequest | null;
+    isOpen: boolean;
+    mode: AskUserQuestionViewMode;
+    completedAnswers: Record<string, string> | null;
+    readOnly: boolean;
+    callId: number | null;
+    messageId: number | null;
+};
+
+/**
+ * Pure view resolver — kept separate so unit tests can cover the clarified bug:
+ * Q1 submitted (local summary) + Q2 still pending (not Run yet) must NOT keep
+ * showing the centered Q1 answer summary.
+ */
+function resolveAskUserQuestionView(args: {
+    pendingRequest: AskUserQuestionRequest | null;
+    isDialogOpen: boolean;
+    persistedState: AskUserQuestionPersistedState | null;
+    submittedSummary: {
+        request: AskUserQuestionRequest;
+        answers: Record<string, string>;
+    } | null;
+}): AskUserQuestionViewState {
+    const { pendingRequest, isDialogOpen, persistedState, submittedSummary } = args;
+
+    const resolvePersistedAnchor = (
+        request: AskUserQuestionRequest | null
+    ): AskUserQuestionPersistedState | null => {
+        if (!request || !persistedState) {
+            return null;
+        }
+        // Prefer call-id / request-id match over question-text signature so two
+        // different asks in one turn never share the wrong answers card.
+        if (
+            request.request_id
+            && persistedState.request.request_id
+            && request.request_id === persistedState.request.request_id
+        ) {
+            return persistedState;
+        }
+        const requestSignature = buildAskUserQuestionSignature(request);
+        const persistedSignature = buildAskUserQuestionSignature(persistedState.request);
+        if (!requestSignature || !persistedSignature) {
+            return null;
+        }
+        return requestSignature === persistedSignature ? persistedState : null;
+    };
+
+    const closed: AskUserQuestionViewState = {
+        request: null,
+        isOpen: false,
+        mode: "questionnaire",
+        completedAnswers: null,
+        readOnly: false,
+        callId: null,
+        messageId: null,
+    };
+
+    // 1) Live queued request always wins — show that call's own prompt.
+    if (pendingRequest && isDialogOpen) {
+        const persistedAnchor = resolvePersistedAnchor(pendingRequest);
+        return {
+            request: pendingRequest,
+            isOpen: true,
+            mode: "questionnaire",
+            completedAnswers: null,
+            readOnly: false,
+            callId: persistedAnchor?.callId ?? null,
+            messageId: persistedAnchor?.messageId ?? null,
+        };
+    }
+
+    const summaryMatchesPersisted = (() => {
+        if (!submittedSummary || !persistedState) return false;
+        if (
+            submittedSummary.request.request_id
+            && persistedState.request.request_id
+            && submittedSummary.request.request_id === persistedState.request.request_id
+        ) {
+            return true;
+        }
+        const summarySig = buildAskUserQuestionSignature(submittedSummary.request);
+        const persistedSig = buildAskUserQuestionSignature(persistedState.request);
+        return Boolean(summarySig && persistedSig && summarySig === persistedSig);
+    })();
+
+    // 2) In-flight persisted call for a *different* ask beats a stale local summary.
+    //    - executing → show that call's questionnaire
+    //    - pending (proposed, waiting for Run) → keep UI clean; do NOT keep Q1
+    //      answers centered (clarified sticky-summary bug)
+    //    Same-call executing after submit should keep the summary so we do not
+    //    flash the questionnaire again while status catches up.
+    if (persistedState && !summaryMatchesPersisted) {
+        if (persistedState.status === "executing") {
+            return {
+                request: persistedState.request,
+                isOpen: true,
+                mode: "questionnaire",
+                completedAnswers: null,
+                readOnly: false,
+                callId: persistedState.callId,
+                messageId: persistedState.messageId,
+            };
+        }
+        if (persistedState.status === "pending") {
+            return closed;
+        }
+    }
+
+    // 3) Ephemeral post-submit summary for the call just answered.
+    //    Do NOT resurrect completed asks from DB — that is what left the first
+    //    answer stuck when the next turn/run was never started.
+    if (submittedSummary) {
+        const persistedAnchor = resolvePersistedAnchor(submittedSummary.request);
+        if (persistedAnchor && persistedAnchor.status === "failed") {
+            return closed;
+        }
+        return {
+            request: submittedSummary.request,
+            isOpen: true,
+            mode: "summary",
+            completedAnswers: submittedSummary.answers,
+            readOnly: true,
+            callId: persistedAnchor?.callId ?? null,
+            messageId: persistedAnchor?.messageId ?? null,
+        };
+    }
+
+    return closed;
+}
+
 /** Exported for unit tests. */
 export const askUserQuestionStateForTest = {
     getLatestAskUserQuestionState,
     buildAskUserQuestionSignature,
     parseAskUserQuestionAnswers,
+    resolveAskUserQuestionView,
 };
 
 function getLatestPreviewFileState(
@@ -632,108 +765,16 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
         [pendingRequest, persistedState?.callId, schedulePersistedRefresh, shiftNextRequest]
     );
 
-    const askUserQuestionView = useMemo(() => {
-        const resolvePersistedAnchor = (
-            request: AskUserQuestionRequest | null
-        ): AskUserQuestionPersistedState | null => {
-            if (!request || !persistedState) {
-                return null;
-            }
-            // Prefer call-id / request-id match over question-text signature so two
-            // different asks in one turn never share the wrong answers card.
-            if (
-                request.request_id
-                && persistedState.request.request_id
-                && request.request_id === persistedState.request.request_id
-            ) {
-                return persistedState;
-            }
-            const requestSignature = buildAskUserQuestionSignature(request);
-            const persistedSignature = buildAskUserQuestionSignature(persistedState.request);
-            if (!requestSignature || !persistedSignature) {
-                return null;
-            }
-            return requestSignature === persistedSignature ? persistedState : null;
-        };
-
-        const closed = {
-            request: null as AskUserQuestionRequest | null,
-            isOpen: false,
-            mode: "questionnaire" as AskUserQuestionViewMode,
-            completedAnswers: null as Record<string, string> | null,
-            readOnly: false,
-            callId: null as number | null,
-            messageId: null as number | null,
-        };
-
-        // 1) Live queued request always wins — show that call's own prompt.
-        if (pendingRequest && isDialogOpen) {
-            const persistedAnchor = resolvePersistedAnchor(pendingRequest);
-            return {
-                request: pendingRequest,
-                isOpen: true,
-                mode: "questionnaire" as AskUserQuestionViewMode,
-                completedAnswers: null as Record<string, string> | null,
-                readOnly: false,
-                callId: persistedAnchor?.callId ?? (null as number | null),
-                messageId: persistedAnchor?.messageId ?? (null as number | null),
-            };
-        }
-
-        const summaryMatchesPersisted = (() => {
-            if (!submittedSummary || !persistedState) return false;
-            if (
-                submittedSummary.request.request_id
-                && persistedState.request.request_id
-                && submittedSummary.request.request_id === persistedState.request.request_id
-            ) {
-                return true;
-            }
-            const summarySig = buildAskUserQuestionSignature(submittedSummary.request);
-            const persistedSig = buildAskUserQuestionSignature(persistedState.request);
-            return Boolean(summarySig && persistedSig && summarySig === persistedSig);
-        })();
-
-        // 2) In-flight persisted call (pending/executing) beats a *stale* local summary
-        //    for a *different* ask. Same-call executing after submit should keep the summary
-        //    so we do not flash the questionnaire again while status catches up.
-        if (
-            persistedState
-            && persistedState.status === "executing"
-            && !summaryMatchesPersisted
-        ) {
-            return {
-                request: persistedState.request,
-                isOpen: true,
-                mode: "questionnaire" as AskUserQuestionViewMode,
-                completedAnswers: null as Record<string, string> | null,
-                readOnly: false,
-                callId: persistedState.callId,
-                messageId: persistedState.messageId,
-            };
-        }
-
-        // 3) Ephemeral post-submit summary for the call just answered.
-        //    Do NOT resurrect completed asks from DB — that is what left the first
-        //    answer stuck when the next turn/run was never started.
-        if (submittedSummary) {
-            const persistedAnchor = resolvePersistedAnchor(submittedSummary.request);
-            if (persistedAnchor && persistedAnchor.status === "failed") {
-                return closed;
-            }
-            return {
-                request: submittedSummary.request,
-                isOpen: true,
-                mode: "summary" as AskUserQuestionViewMode,
-                completedAnswers: submittedSummary.answers,
-                readOnly: true,
-                callId: persistedAnchor?.callId ?? (null as number | null),
-                messageId: persistedAnchor?.messageId ?? (null as number | null),
-            };
-        }
-
-        return closed;
-    }, [pendingRequest, isDialogOpen, persistedState, submittedSummary]);
+    const askUserQuestionView = useMemo(
+        () =>
+            resolveAskUserQuestionView({
+                pendingRequest,
+                isDialogOpen,
+                persistedState,
+                submittedSummary,
+            }),
+        [pendingRequest, isDialogOpen, persistedState, submittedSummary]
+    );
 
     return {
         pendingRequest: askUserQuestionView.request,
