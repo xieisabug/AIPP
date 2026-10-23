@@ -80,6 +80,7 @@ export interface ContextItem {
         | 'skill'
         | 'read_file'
         | 'preview_file'
+        | 'preview_code'
         | 'search'
         | 'list_directory'
         | 'loaded_mcp_tool'
@@ -125,6 +126,7 @@ export interface ContextItem {
 export const CONTEXT_TOOL_NAMES = [
     'read_file',
     'preview_file',
+    'preview_code',
     'get_file_contents',
     'list_directory',
     'list_allowed_directories',
@@ -137,8 +139,27 @@ export const CONTEXT_TOOL_NAMES = [
     'view',
 ];
 
+/** Exact-match-only names (substring match would false-positive, e.g. preview_code contains "view"). */
+const CONTEXT_TOOL_EXACT_NAMES = new Set(['view']);
+
+export function isContextToolName(toolName: string): boolean {
+    const normalizedName = toolName.toLowerCase();
+    if (CONTEXT_TOOL_EXACT_NAMES.has(normalizedName)) {
+        return true;
+    }
+    return CONTEXT_TOOL_NAMES.some((name) => {
+        if (CONTEXT_TOOL_EXACT_NAMES.has(name)) {
+            return false;
+        }
+        return normalizedName.includes(name.toLowerCase());
+    });
+}
+
 export function getContextTypeFromToolName(toolName: string): ContextItem['type'] {
     const normalizedName = toolName.toLowerCase();
+    if (normalizedName.includes('preview_code')) {
+        return 'preview_code';
+    }
     if (normalizedName.includes('preview_file')) {
         return 'preview_file';
     }
