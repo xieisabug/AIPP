@@ -262,6 +262,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     const scrollSyncFrameRef = useRef<number | null>(null);
     const initialBottomConversationRef = useRef<string | null>(null);
     const initialBottomPinConversationRef = useRef<string | null>(null);
+    /** 打开后用户已用滚轮或滚动条上翻；效果重跑时不再钉底或跟滚。 */
+    const userReleasedInitialScrollRef = useRef<string | null>(null);
     const lastPinnedUserMessageIdRef = useRef<number | null>(null);
     const tailUserMessageIdRef = useRef<number | null>(null);
     const streamingActiveRef = useRef(false);
@@ -367,6 +369,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         lastPinnedUserMessageIdRef.current = null;
         initialBottomConversationRef.current = null;
         initialBottomPinConversationRef.current = null;
+        userReleasedInitialScrollRef.current = null;
         setInitialBottomVisibleConversationId(null);
     }, [conversationId]);
 
@@ -411,6 +414,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
     useLayoutEffect(() => {
         const container = effectiveScrollParent;
+        if (userReleasedInitialScrollRef.current === conversationId) {
+            return;
+        }
         if (pendingScrollMessageId !== null && hasCurrentConversationMessages) {
             initialBottomConversationRef.current = conversationId;
             setInitialBottomVisibleConversationId((currentConversationId) =>
@@ -421,6 +427,14 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return;
         }
 
+        const markInitialScrollReleased = () => {
+            userReleasedInitialScrollRef.current = conversationId;
+        };
+        const markInitialScrollResumed = () => {
+            if (userReleasedInitialScrollRef.current === conversationId) {
+                userReleasedInitialScrollRef.current = null;
+            }
+        };
         const startFollow = (target: HTMLDivElement) =>
             followScrollContainerBottom({
                 container: target,
@@ -429,6 +443,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 shouldContinue: () =>
                     initialBottomConversationRef.current === conversationId,
                 maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
+                onUserPause: markInitialScrollReleased,
+                onUserResume: markInitialScrollResumed,
             });
 
         // live-only 无 Virtuoso 贴底闪动：不 pin、不 hide，一次滚动贴底后继续跟随晚到增高。
@@ -454,6 +470,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 onScrollStateChange,
                 shouldContinue: () => true,
                 maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
+                onUserPause: markInitialScrollReleased,
+                onUserResume: markInitialScrollResumed,
             });
             return () => {
                 stopFollow();
@@ -493,6 +511,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 }
                 setInitialBottomVisibleConversationId(conversationId);
                 stopFollow = startFollow(container);
+            },
+            onUserRelease: () => {
+                userReleasedInitialScrollRef.current = conversationId;
+                initialBottomConversationRef.current = conversationId;
+                initialBottomPinConversationRef.current = null;
+                if (tailUserMessageIdRef.current !== null) {
+                    lastPinnedUserMessageIdRef.current = tailUserMessageIdRef.current;
+                }
+                setInitialBottomVisibleConversationId(conversationId);
             },
             minFrameCount: INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT,
             stableFrameCount: INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT,
@@ -545,6 +572,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             onScrollStateChange,
             shouldContinue: () => true,
             onComplete: () => {
+                lastPinnedUserMessageIdRef.current = pinningMessageId;
+            },
+            onUserRelease: () => {
                 lastPinnedUserMessageIdRef.current = pinningMessageId;
             },
             observeMode: "tail",

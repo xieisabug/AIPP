@@ -767,4 +767,71 @@ describe("VirtuosoMessageList row height reservation", () => {
         }, { timeout: 2000 });
     });
 
+    it("does not pull the scrollbar back to the bottom after the conversation opens", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const messages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "user-2",
+            }),
+        ];
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(
+                document.querySelector("[data-aipp-initial-bottom-positioning='true']"),
+            ).toBeNull();
+        }, { timeout: 2000 });
+
+        // 高度没变，从底部向上拖一段，仍落在宽松恢复阈值内
+        scrollContainer.scrollTop = 480;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+        scrollContainer.scrollTop = 220;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(scrollContainer.scrollTop).toBe(220);
+
+        rerender(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        scrollHeight = 1800;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(scrollContainer.scrollTop).toBe(220);
+    });
+
 });

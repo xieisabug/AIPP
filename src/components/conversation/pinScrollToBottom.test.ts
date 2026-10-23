@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { followScrollContainerBottom } from "./pinScrollToBottom";
+import {
+    followScrollContainerBottom,
+    pinScrollContainerToBottom,
+} from "./pinScrollToBottom";
 
 let resizeCallbacks: Array<() => void> = [];
 
@@ -20,6 +23,35 @@ class ResizeObserverMock {
 
 function triggerResize() {
     resizeCallbacks.forEach((callback) => callback());
+}
+
+function placeContainer(
+    container: HTMLDivElement,
+    width: number,
+    height: number,
+    scrollbar = 0,
+) {
+    Object.defineProperty(container, "offsetWidth", {
+        configurable: true,
+        value: width,
+    });
+    Object.defineProperty(container, "clientWidth", {
+        configurable: true,
+        value: width - scrollbar,
+    });
+    container.getBoundingClientRect = () => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+        width,
+        height,
+        toJSON() {
+            return {};
+        },
+    }) as DOMRect;
 }
 
 function makeContainer(initialScrollHeight: number, clientHeight = 400) {
@@ -492,7 +524,6 @@ describe("followScrollContainerBottom", () => {
         expect(container.scrollTop).toBe(1100);
     });
 
-
     it("should not jump to bottom on post-send up-then-tiny-down within one viewport", () => {
         // 复现：发消息贴底跟滚 → 上滑一段（仍在一屏内）→ 轻微下滚 → 旧 oneScreen 逻辑会误贴底
         let rafId = 0;
@@ -571,4 +602,134 @@ describe("followScrollContainerBottom", () => {
         vi.useRealTimers();
     });
 
+    it("should pause when the scrollbar moves up from the bottom without a height change", () => {
+        const { container, setScrollHeight } = makeContainer(1000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        // 仍在 240px 恢复阈值内，但高度没变，是滚动条在往上拖
+        container.scrollTop = 480;
+        container.dispatchEvent(new Event("scroll"));
+        container.scrollTop = 300;
+        container.dispatchEvent(new Event("scroll"));
+        setScrollHeight(1500);
+        triggerResize();
+
+        expect(container.scrollTop).toBe(300);
+    });
+
+    it("should pause on a scrollbar pointerdown while still at the bottom", () => {
+        const { container, setScrollHeight } = makeContainer(1000);
+        placeContainer(container, 800, 400, 16);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.dispatchEvent(new PointerEvent("pointerdown", {
+            clientX: 796,
+            clientY: 120,
+            bubbles: true,
+        }));
+        setScrollHeight(1500);
+        triggerResize();
+
+        expect(container.scrollTop).toBe(600);
+    });
+
+    it("should keep following when a content pointerdown happens at the bottom", () => {
+        const { container, setScrollHeight } = makeContainer(1000);
+        placeContainer(container, 800, 400, 16);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.dispatchEvent(new PointerEvent("pointerdown", {
+            clientX: 40,
+            clientY: 20,
+            bubbles: true,
+        }));
+        setScrollHeight(1500);
+        triggerResize();
+
+        expect(container.scrollTop).toBe(1100);
+    });
+});
+
+describe("pinScrollContainerToBottom", () => {
+    beforeEach(() => {
+        resizeCallbacks = [];
+        vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+        vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response())));
+    });
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    function queueAnimationFrames() {
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            return rafQueue.length;
+        });
+        vi.stubGlobal("cancelAnimationFrame", vi.fn());
+        return () => {
+            const queued = rafQueue.splice(0);
+            queued.forEach((cb) => cb(performance.now()));
+        };
+    }
+
+    it("should release the pin when the user scrolls up without a height change", () => {
+        const flushRaf = queueAnimationFrames();
+        const { container } = makeContainer(1000);
+        const onComplete = vi.fn();
+        const onUserRelease = vi.fn();
+
+        pinScrollContainerToBottom({
+            container,
+            shouldContinue: () => true,
+            onComplete,
+            onUserRelease,
+            minFrameCount: 10,
+            stableFrameCount: 4,
+            maxFrameCount: 30,
+        });
+
+        container.scrollTop = 120;
+        container.dispatchEvent(new Event("scroll"));
+        flushRaf();
+
+        expect(onUserRelease).toHaveBeenCalledTimes(1);
+        expect(onComplete).not.toHaveBeenCalled();
+        expect(container.scrollTop).toBe(120);
+    });
+
+    it("should release the pin when the user wheels upward", () => {
+        const flushRaf = queueAnimationFrames();
+        const { container } = makeContainer(1000);
+        const onComplete = vi.fn();
+        const onUserRelease = vi.fn();
+
+        pinScrollContainerToBottom({
+            container,
+            shouldContinue: () => true,
+            onComplete,
+            onUserRelease,
+        });
+
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -40 }));
+        container.scrollTop = 80;
+        flushRaf();
+
+        expect(onUserRelease).toHaveBeenCalledTimes(1);
+        expect(onComplete).not.toHaveBeenCalled();
+        expect(container.scrollTop).toBe(80);
+    });
 });

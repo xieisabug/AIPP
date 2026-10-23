@@ -9,6 +9,11 @@ export interface PinScrollToBottomOptions {
     observeMode?: "full" | "tail";
     /** 硬超时：pin 被打断时也不能永久卡在未完成状态（如 visibility:hidden） */
     failsafeTimeoutMs?: number;
+    /**
+     * 用户滚轮上滑或拖动滚动条时结束钉底。
+     * 调用方应记下「用户已接手」，避免效果重跑后又把视口钉回底部。
+     */
+    onUserRelease?: () => void;
 }
 
 const DEFAULT_MIN_FRAME_COUNT = 10;
@@ -59,6 +64,29 @@ function observeAllContentElements(
     });
 }
 
+const SCROLLBAR_GUTTER_MIN_PX = 16;
+
+/** 指针落在容器右缘滚动条上。内容区点击的坐标在这个窄条之外。 */
+export function isScrollbarPointerEvent(
+    container: HTMLElement,
+    event: Event,
+): boolean {
+    if (event.type !== "pointerdown" && event.type !== "mousedown") {
+        return false;
+    }
+    if (!("clientX" in event) || typeof (event as MouseEvent).clientX !== "number") {
+        return false;
+    }
+    const clientX = (event as MouseEvent).clientX;
+    if (!Number.isFinite(clientX)) {
+        return false;
+    }
+    const rect = container.getBoundingClientRect();
+    const measuredGutter = container.offsetWidth - container.clientWidth;
+    const gutter = Math.max(measuredGutter, SCROLLBAR_GUTTER_MIN_PX);
+    return clientX >= rect.right - gutter && clientX <= rect.right + 1;
+}
+
 export function pinScrollContainerToBottom({
     container,
     onScrollStateChange,
@@ -69,6 +97,7 @@ export function pinScrollContainerToBottom({
     maxFrameCount = DEFAULT_MAX_FRAME_COUNT,
     observeMode = "full",
     failsafeTimeoutMs,
+    onUserRelease,
 }: PinScrollToBottomOptions): () => void {
     let elapsedFrames = 0;
     let stableFrames = 0;
@@ -77,9 +106,11 @@ export function pinScrollContainerToBottom({
     let frameRef: number | null = null;
     let failsafeTimerId: number | null = null;
     let completed = false;
+    let lastScrollTop = container.scrollTop;
+    let lastScrollHeight = container.scrollHeight;
 
     const pinToBottom = () => {
-        if (!shouldContinue()) {
+        if (completed || !shouldContinue()) {
             return;
         }
 
@@ -89,15 +120,52 @@ export function pinScrollContainerToBottom({
             container.scrollHeight - container.clientHeight,
         );
         isPinningScroll = false;
+        lastScrollTop = container.scrollTop;
+        lastScrollHeight = container.scrollHeight;
         onScrollStateChange?.(container);
     };
 
+    const releaseToUser = () => {
+        if (completed) {
+            return;
+        }
+        completed = true;
+        cleanup();
+        onUserRelease?.();
+    };
+
     const handlePinnedScroll = () => {
-        if (isPinningScroll || !shouldContinue()) {
+        if (completed || isPinningScroll || !shouldContinue()) {
             return;
         }
 
+        const movedUp = container.scrollTop < lastScrollTop - 1;
+        const heightUnchanged = Math.abs(container.scrollHeight - lastScrollHeight) <= 1;
+        // 滚动条拖动通常只产生 scroll、没有指针坐标。高度没变却往上走，就是用户在翻。
+        if (movedUp && heightUnchanged) {
+            releaseToUser();
+            return;
+        }
+
+        lastScrollTop = container.scrollTop;
+        lastScrollHeight = container.scrollHeight;
         pinToBottom();
+    };
+
+    const handleUserIntent = (event: Event) => {
+        if (completed || isPinningScroll) {
+            return;
+        }
+        if (event.type === "wheel" && "deltaY" in event && (event as WheelEvent).deltaY < 0) {
+            releaseToUser();
+            return;
+        }
+        if (
+            (event.type === "pointerdown" || event.type === "mousedown")
+            && isScrollbarPointerEvent(container, event)
+        ) {
+            releaseToUser();
+        }
     };
 
     const observedElements = new Set<Element>();
@@ -129,6 +197,9 @@ export function pinScrollContainerToBottom({
 
     const cleanup = () => {
         container.removeEventListener("scroll", handlePinnedScroll);
+        container.removeEventListener("wheel", handleUserIntent);
+        container.removeEventListener("pointerdown", handleUserIntent);
+        container.removeEventListener("mousedown", handleUserIntent);
         contentResizeObserver.disconnect();
         mutationObserver.disconnect();
         if (frameRef !== null) {
@@ -152,7 +223,7 @@ export function pinScrollContainerToBottom({
 
     const scrollToBottom = () => {
         frameRef = null;
-        if (!shouldContinue()) {
+        if (completed || !shouldContinue()) {
             return;
         }
 
@@ -187,6 +258,9 @@ export function pinScrollContainerToBottom({
     };
 
     container.addEventListener("scroll", handlePinnedScroll, { passive: true });
+    container.addEventListener("wheel", handleUserIntent, { passive: true });
+    container.addEventListener("pointerdown", handleUserIntent, { passive: true });
+    container.addEventListener("mousedown", handleUserIntent, { passive: true });
     observeContentElements();
     mutationObserver.observe(container, {
         childList: true,
@@ -223,18 +297,22 @@ export interface FollowScrollToBottomOptions {
     bottomThresholdPx?: number;
     /** 回底恢复跟滚的宽松阈值（Virtuoso 估高校正常留下数十 px 离底） */
     resumeBottomThresholdPx?: number;
+    /** 用户上滑或拖动滚动条后暂停。调用方可据此避免效果重跑时重新跟滚。 */
+    onUserPause?: () => void;
+    onUserResume?: () => void;
 }
 
 const DEFAULT_FOLLOW_MAX_DURATION_MS = 10_000;
 const DEFAULT_FOLLOW_BOTTOM_THRESHOLD_PX = 10;
 /** 恢复跟滚用更宽阈值：贴底后 Virtuoso spacer/footer 常让 distance 卡在 10~60px */
 const DEFAULT_RESUME_BOTTOM_THRESHOLD_PX = 240;
-const USER_INTENT_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
+const USER_INTENT_EVENTS = ["wheel", "touchstart", "pointerdown", "mousedown", "keydown"] as const;
 
 /**
  * 初始贴底结束后，虚拟列表实测高度与估算不一致会持续收缩/增长，
  * 异步内容（代码高亮、图片、富文本预览）也可能继续长高。
- * 用户滚轮向上 / 触摸离底后暂停跟滚；滚回底部（含宽松阈值）后自动恢复。
+ * 用户滚轮向上、拖动滚动条或触摸离底后暂停跟滚。
+ * 恢复只发生在滚轮向下、End 一类回底键，或视口确实回到底部。
  */
 export function followScrollContainerBottom({
     container,
@@ -244,15 +322,20 @@ export function followScrollContainerBottom({
     maxDurationMs = DEFAULT_FOLLOW_MAX_DURATION_MS,
     bottomThresholdPx = DEFAULT_FOLLOW_BOTTOM_THRESHOLD_PX,
     resumeBottomThresholdPx = DEFAULT_RESUME_BOTTOM_THRESHOLD_PX,
+    onUserPause,
+    onUserResume,
 }: FollowScrollToBottomOptions): () => void {
     let stopped = false;
     /** 用户上滑后暂停跟滚；贴底后自动恢复（与 useScrollManagement.isUserScrolledUp 对齐） */
     let pausedByUser = false;
+    let scrollbarDragging = false;
     let isPinningScroll = false;
     /** rAF id；用 pinScheduled 判断是否已排队，避免同步 rAF stub 把 id 赋回后永久卡住 */
     let frameRef: number | null = null;
     let pinScheduled = false;
     let lastScrollHeight = container.scrollHeight;
+    let lastScrollTop = container.scrollTop;
+    let scrollTopAtPause = container.scrollTop;
     /** wheel-up 后短暂禁止 scroll/poll 自动 resume，避免 Virtuoso 尚未离底时立刻解暂停 */
     let resumeLockedUntil = 0;
 
@@ -273,12 +356,16 @@ export function followScrollContainerBottom({
             container.scrollHeight - container.clientHeight,
         );
         if (Math.abs(container.scrollTop - maxScrollTop) <= 1) {
+            lastScrollTop = container.scrollTop;
+            lastScrollHeight = container.scrollHeight;
             return;
         }
 
         isPinningScroll = true;
         container.scrollTop = maxScrollTop;
         isPinningScroll = false;
+        lastScrollTop = container.scrollTop;
+        lastScrollHeight = container.scrollHeight;
         onScrollStateChange?.(container);
     };
 
@@ -308,6 +395,7 @@ export function followScrollContainerBottom({
             lastScrollHeight,
             container.scrollHeight - 1,
         );
+        onUserResume?.();
         schedulePin();
     };
 
@@ -316,7 +404,15 @@ export function followScrollContainerBottom({
             return;
         }
         pausedByUser = true;
-        if (reason.startsWith("wheel") || reason.startsWith("keydown:ArrowUp") || reason.startsWith("keydown:PageUp") || reason.startsWith("keydown:Home")) {
+        scrollTopAtPause = container.scrollTop;
+        if (
+            reason.startsWith("wheel")
+            || reason.startsWith("keydown:ArrowUp")
+            || reason.startsWith("keydown:PageUp")
+            || reason.startsWith("keydown:Home")
+            || reason === "user-scroll"
+            || reason === "scrollbar"
+        ) {
             resumeLockedUntil = performance.now() + 450;
         }
         if (frameRef !== null) {
@@ -324,15 +420,31 @@ export function followScrollContainerBottom({
             frameRef = null;
         }
         pinScheduled = false;
+        onUserPause?.();
     };
 
-    // 高度收缩时 Virtuoso / 浏览器滚动锚定会补偿 scrollTop，且可能过量补偿到远离底部；
-    // 用户主动上滑会 pausedByUser，其余偏离底部的滚动视为程序触发并重新贴底。
+    // 高度收缩时 Virtuoso / 浏览器滚动锚定会补偿 scrollTop，且可能过量补偿到远离底部。
+    // 高度没变却往上走是滚动条或键盘翻页，必须暂停；其余偏离视为程序触发并重新贴底。
     const handleScroll = () => {
         if (stopped || isPinningScroll) {
             return;
         }
+
+        const movedUp = container.scrollTop < lastScrollTop - 1;
+        const heightUnchanged = Math.abs(container.scrollHeight - lastScrollHeight) <= 1;
+        lastScrollTop = container.scrollTop;
+
+        if (!pausedByUser && heightUnchanged && movedUp) {
+            pauseFollow("user-scroll");
+            return;
+        }
+
         if (pausedByUser) {
+            // 拖动滚动条期间，或这次滚动仍在继续上移：即使还在宽松阈值内也不恢复。
+            if (scrollbarDragging || container.scrollTop < scrollTopAtPause - 1) {
+                scrollTopAtPause = container.scrollTop;
+                return;
+            }
             // 仅真正接近底部时恢复跟滚。
             // 旧逻辑「下滚且距底 ≤ 一屏」在发消息后上滑再轻微下滚时会误贴底拽走。
             if (isNearBottomForResume()) {
@@ -409,9 +521,29 @@ export function followScrollContainerBottom({
             return;
         }
 
-        // touchstart / pointerdown：仅在已离底时暂停（避免误触）
+        // 滚动条按下：即使人还在底部也暂停。内容区点击不在这条窄边上。
+        if (
+            (event.type === "pointerdown" || event.type === "mousedown")
+            && isScrollbarPointerEvent(container, event)
+        ) {
+            scrollbarDragging = true;
+            pauseFollow("scrollbar");
+            return;
+        }
+
+        // touchstart / 内容区 pointerdown：仅在已离底时暂停（避免误触）
         if (!isNearBottomForResume()) {
             pauseFollow(event.type);
+        }
+    };
+
+    const handleScrollbarRelease = () => {
+        if (!scrollbarDragging) {
+            return;
+        }
+        scrollbarDragging = false;
+        if (pausedByUser && isAtBottom()) {
+            resumeFollow("scrollbar-release", { force: true });
         }
     };
 
@@ -462,9 +594,10 @@ export function followScrollContainerBottom({
             stop();
             return;
         }
-        // 暂停中若已近底（End 键等可能不触发 scroll）→ 恢复
-        if (pausedByUser && isNearBottomForResume()) {
-            resumeFollow("poll-near-bottom");
+        // 暂停中若确实贴底（End 键等可能不触发 scroll）→ 恢复。
+        // 拖动滚动条时人还在往上走，不能因为离底不到宽松阈值就恢复。
+        if (pausedByUser && !scrollbarDragging && isAtBottom()) {
+            resumeFollow("poll-at-bottom");
             return;
         }
         const nextHeight = container.scrollHeight;
@@ -492,6 +625,9 @@ export function followScrollContainerBottom({
         USER_INTENT_EVENTS.forEach((eventName) => {
             container.removeEventListener(eventName, handleUserIntent);
         });
+        window.removeEventListener("pointerup", handleScrollbarRelease);
+        window.removeEventListener("pointercancel", handleScrollbarRelease);
+        window.removeEventListener("mouseup", handleScrollbarRelease);
         if (frameRef !== null) {
             cancelAnimationFrame(frameRef);
             frameRef = null;
@@ -505,6 +641,9 @@ export function followScrollContainerBottom({
     USER_INTENT_EVENTS.forEach((eventName) => {
         container.addEventListener(eventName, handleUserIntent, { passive: true });
     });
+    window.addEventListener("pointerup", handleScrollbarRelease);
+    window.addEventListener("pointercancel", handleScrollbarRelease);
+    window.addEventListener("mouseup", handleScrollbarRelease);
     // 启动时先贴一次底；用户随后上滑仍会 pause（case 2）
     schedulePin();
     return stop;
