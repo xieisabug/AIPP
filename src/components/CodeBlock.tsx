@@ -90,7 +90,13 @@ const CodeBlock = React.memo(
         // 使用 react-syntax-highlighter 进行客户端高亮渲染
 
         const ButtonGroup = () => (
-            <div className="flex items-center gap-1 bg-background/90 dark:bg-muted/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm">
+            <div
+                className="flex items-center gap-1 bg-background/90 dark:bg-muted/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm"
+                onMouseDown={(event) => {
+                    // 点击复制时保留代码选区
+                    event.preventDefault();
+                }}
+            >
                 <IconButton
                     icon={copyIconState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}

@@ -69,12 +69,11 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
     const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null);
     const [copyState, setCopyState] = useState<"copy" | "ok">("copy");
-    const [isHovered, setIsHovered] = useState(false);
     const [isSticky, setIsSticky] = useState(false);
     const [toolbarRight, setToolbarRight] = useState<number>(8);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const codeRef = useRef<HTMLDivElement | null>(null);
-    const rafRef = useRef<number | null>(null);
+    const headerSentinelRef = useRef<HTMLDivElement | null>(null);
     const { currentTheme, resolvedTheme } = useCodeTheme();
     const rustHighlight = useRustHighlight();
     const shouldUsePlainText = isPlainTextLanguage(language);
@@ -202,54 +201,38 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
         // 依赖 html 与 code，在代码或高亮结果变化时重新测量
     }, [html, code, renderCode, isStreaming, disableCollapse, shouldCollapseInitially]);
 
-    // 监听滚动判断是否需要 sticky - 使用 RAF 节流
+    // 用 IntersectionObserver 判断是否需要 sticky 工具栏，避免 mouseenter/leave 改 state 触发重渲染清掉选区
     useEffect(() => {
-        if (!isHovered) {
-            setIsSticky(false);
-            return;
-        }
+        const sentinel = headerSentinelRef.current;
+        const container = containerRef.current;
+        if (!sentinel || !container) return;
 
-        const handleScroll = () => {
-            // 取消之前的 RAF
-            if (rafRef.current) {
-                cancelAnimationFrame(rafRef.current);
-            }
-
-            // 使用 RAF 节流，确保在下一帧才更新
-            rafRef.current = requestAnimationFrame(() => {
-                if (!containerRef.current) return;
-
-                const rect = containerRef.current.getBoundingClientRect();
-                const shouldStick = rect.top < 8 && rect.bottom > 60;
-                
-                // 只在状态真正变化时才更新
-                setIsSticky(prev => {
-                    if (prev !== shouldStick) {
-                        // 同时更新 right 位置，避免额外渲染
-                        if (shouldStick) {
-                            setToolbarRight(window.innerWidth - rect.right + 8);
-                        }
-                        return shouldStick;
-                    }
+        const updateStickyGeometry = (shouldStick: boolean) => {
+            setIsSticky((prev) => {
+                if (prev === shouldStick) {
                     return prev;
-                });
+                }
+                if (shouldStick) {
+                    const rect = container.getBoundingClientRect();
+                    setToolbarRight(window.innerWidth - rect.right + 8);
+                }
+                return shouldStick;
             });
         };
 
-        window.addEventListener("scroll", handleScroll, { passive: true });
-        const scrollParent = containerRef.current?.closest('.overflow-auto, .overflow-y-auto');
-        scrollParent?.addEventListener("scroll", handleScroll, { passive: true } as any);
-        
-        handleScroll(); // 初始检查
-
-        return () => {
-            if (rafRef.current) {
-                cancelAnimationFrame(rafRef.current);
-            }
-            window.removeEventListener("scroll", handleScroll);
-            scrollParent?.removeEventListener("scroll", handleScroll as any);
-        };
-    }, [isHovered]);
+        const observer = new IntersectionObserver(
+            (entries) => {
+                const entry = entries[0];
+                // 顶部 sentinel 滚出视口且代码块仍可见时，固定工具栏
+                const rect = container.getBoundingClientRect();
+                const stillVisible = rect.bottom > 60;
+                updateStickyGeometry(!entry.isIntersecting && stillVisible);
+            },
+            { root: null, rootMargin: "0px", threshold: [0, 1] },
+        );
+        observer.observe(sentinel);
+        return () => observer.disconnect();
+    }, []);
 
     const handleCopy = useCallback(() => {
         writeText(code);
@@ -266,16 +249,17 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     return (
         <div 
             ref={containerRef}
-            className={`relative overflow-hidden bg-transparent ${className}`}
+            className={`group/codeblock relative overflow-hidden bg-transparent ${className}`}
             data-meta={meta?.meta}
             data-title={meta?.title}
             data-filename={meta?.filename}
             data-line={meta?.line}
             data-highlight={meta?.highlight}
-            onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
         >
-            {/* Toolbar - 根据 isSticky 切换定位方式 */}
+            {/* 顶部 sentinel：滚出视口后启用 sticky 工具栏；不参与布局 */}
+            <div ref={headerSentinelRef} className="h-0 w-full" aria-hidden />
+            {/* Toolbar：CSS :hover 显隐，避免 mouseleave setState 重渲染清掉代码选区。
+                mousedown preventDefault 避免点复制时抢走选区。 */}
             <div 
                 className={`
                     z-10
@@ -283,10 +267,12 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     bg-white/85 dark:bg-neutral-800/75 rounded-md p-1 backdrop-blur-sm shadow-sm
                     transition-opacity duration-150 ease-out
                     will-change-opacity
-                    ${isSticky ? 'fixed top-20 shadow-lg' : 'absolute right-2 top-2'}
-                    ${isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}
+                    ${isSticky ? 'fixed top-20 shadow-lg opacity-100' : 'absolute right-2 top-2 opacity-0 group-hover/codeblock:opacity-100'}
                 `}
                 style={isSticky ? { right: `${toolbarRight}px` } : undefined}
+                onMouseDown={(event) => {
+                    event.preventDefault();
+                }}
             >
                 <IconButton
                     icon={copyState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}

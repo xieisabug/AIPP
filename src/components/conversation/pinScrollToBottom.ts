@@ -253,7 +253,6 @@ export function followScrollContainerBottom({
     let frameRef: number | null = null;
     let pinScheduled = false;
     let lastScrollHeight = container.scrollHeight;
-    let scrollTopAtPause = container.scrollTop;
     /** wheel-up 后短暂禁止 scroll/poll 自动 resume，避免 Virtuoso 尚未离底时立刻解暂停 */
     let resumeLockedUntil = 0;
 
@@ -317,7 +316,6 @@ export function followScrollContainerBottom({
             return;
         }
         pausedByUser = true;
-        scrollTopAtPause = container.scrollTop;
         if (reason.startsWith("wheel") || reason.startsWith("keydown:ArrowUp") || reason.startsWith("keydown:PageUp") || reason.startsWith("keydown:Home")) {
             resumeLockedUntil = performance.now() + 450;
         }
@@ -335,15 +333,10 @@ export function followScrollContainerBottom({
             return;
         }
         if (pausedByUser) {
-            // 已近底，或用户明显下滚并进入「一屏内」→ 恢复跟滚
-            const movedDown = container.scrollTop > scrollTopAtPause + 8;
-            const oneScreen = Math.max(resumeBottomThresholdPx, container.clientHeight);
+            // 仅真正接近底部时恢复跟滚。
+            // 旧逻辑「下滚且距底 ≤ 一屏」在发消息后上滑再轻微下滚时会误贴底拽走。
             if (isNearBottomForResume()) {
                 resumeFollow("scroll-near-bottom");
-                return;
-            }
-            if (movedDown && getDistanceToBottom() <= oneScreen) {
-                resumeFollow("scroll-toward-bottom");
             }
             return;
         }
@@ -357,18 +350,27 @@ export function followScrollContainerBottom({
         if (stopped || isPinningScroll) {
             return;
         }
-        // End / PageDown / ArrowDown / Space：回底/下翻意图 → 立刻恢复跟滚并贴底
-        // （不要求已近底：WebView 里 End 常落在输入框，或 Virtuoso 残留距离 > 阈值）
+        // End：明确回底。PageDown / ArrowDown / Space：仅在已接近底部时恢复跟滚，
+        // 避免中段下翻被当成贴底意图拽走（与 wheel-down 对齐）。
         if (event.type === "keydown") {
             const key = (event as KeyboardEvent).key;
+            if (key === "End") {
+                if (pausedByUser) {
+                    resumeFollow(`keydown:${key}`, { force: true });
+                } else {
+                    schedulePin();
+                }
+                return;
+            }
             if (
-                key === "End"
-                || key === "PageDown"
+                key === "PageDown"
                 || key === "ArrowDown"
                 || key === " "
             ) {
                 if (pausedByUser) {
-                    resumeFollow(`keydown:${key}`, { force: true });
+                    if (isNearBottomForResume()) {
+                        resumeFollow(`keydown:${key}`, { force: true });
+                    }
                 } else {
                     schedulePin();
                 }
@@ -388,10 +390,13 @@ export function followScrollContainerBottom({
         const isWheel = event.type === "wheel" && "deltaY" in event;
         const deltaY = isWheel ? (event as WheelEvent).deltaY : 0;
 
-        // 滚轮向下：回底意图 → 立刻恢复并贴底（case 3 关键路径）
+        // 滚轮向下：仅在接近底部时恢复跟滚；中段下滚保持暂停，
+        // 等 scroll 把视口带进 resume 阈值后再恢复（发消息后上滑再轻下滚不得贴底）。
         if (isWheel && deltaY > 0) {
             if (pausedByUser) {
-                resumeFollow("wheel-down", { force: true });
+                if (isNearBottomForResume()) {
+                    resumeFollow("wheel-down", { force: true });
+                }
             } else {
                 schedulePin();
             }

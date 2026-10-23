@@ -179,18 +179,28 @@ export function useScrollManagement(
                 !!event && "deltaY" in event && typeof event.deltaY === "number";
             const isWheelUp = isWheel && event.deltaY < 0;
             const isWheelDown = isWheel && event.deltaY > 0;
-            // 滚轮向下是回底意图：立刻清上滑标记，让 smartScroll / follow 恢复
-            if (isWheelDown) {
+            // 与 syncScrollState 贴底阈值对齐：只有已经接近底部时，下滚才恢复跟滚。
+            // 中段阅读时下滚绝不能清掉上滑标记，否则 ResizeObserver/smartScroll 会立刻拽到底。
+            const nearBottomForResume = distanceToBottom < 96;
+            if (isWheelDown && nearBottomForResume) {
                 isUserScrolledUpRef.current = false;
             } else if (isWheelUp || distanceToBottom >= 10) {
                 isUserScrolledUpRef.current = true;
             }
         }
-        // 仅上滑时拆掉 smartScroll 的 ResizeObserver；下滚保留，便于恢复跟滚。
-        // 拆掉时清掉已观察节点，否则同一尾部无法再次挂上观察器。
+        // 上滑、或中段下滚（仍视为离开底部）时拆掉贴底观察器。
+        // 接近底部的下滚保留观察器，便于恢复跟滚。
         const isWheelUpEvent =
             !!event && "deltaY" in event && event.deltaY < 0;
-        if (isWheelUpEvent || !event) {
+        const isWheelDownAwayFromBottom =
+            !!event
+            && "deltaY" in event
+            && event.deltaY > 0
+            && scrollContainerRef.current !== null
+            && (scrollContainerRef.current.scrollHeight
+                - scrollContainerRef.current.scrollTop
+                - scrollContainerRef.current.clientHeight) >= 96;
+        if (isWheelUpEvent || isWheelDownAwayFromBottom || !event) {
             if (resizeObserverRef.current) {
                 resizeObserverRef.current.disconnect();
                 resizeObserverRef.current = null;

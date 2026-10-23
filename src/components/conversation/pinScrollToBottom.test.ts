@@ -301,7 +301,7 @@ describe("followScrollContainerBottom", () => {
         vi.useRealTimers();
     });
 
-    it("should ignore scroll-near-bottom resume briefly after wheel-up, but honor wheel-down", () => {
+    it("should ignore scroll-near-bottom resume briefly after wheel-up, but honor near-bottom wheel-down", () => {
         let rafId = 0;
         const rafQueue: FrameRequestCallback[] = [];
         vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
@@ -334,7 +334,13 @@ describe("followScrollContainerBottom", () => {
         flushRaf();
         expect(container.scrollTop).toBe(1580); // 仍暂停在近底位置，未贴 2600
 
-        // 向下滚强制恢复
+        // 内容已长高，当前位置已不在近底：中段下滚不得拽到底
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
+        flushRaf();
+        expect(container.scrollTop).toBe(1580);
+
+        // 真正滚到新底部附近后再下滚 → 恢复跟滚（force 越过上滑锁）
+        container.scrollTop = 3000 - 400 - 20;
         container.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
         flushRaf();
         setScrollHeight(4000);
@@ -484,6 +490,85 @@ describe("followScrollContainerBottom", () => {
         triggerResize();
         flushRaf();
         expect(container.scrollTop).toBe(1100);
+    });
+
+
+    it("should not jump to bottom on post-send up-then-tiny-down within one viewport", () => {
+        // 复现：发消息贴底跟滚 → 上滑一段（仍在一屏内）→ 轻微下滚 → 旧 oneScreen 逻辑会误贴底
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(3000, 800);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        // 上滑约 500px：距底仍 < clientHeight，旧逻辑会把后续任何下滚当成 resume
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -120 }));
+        container.scrollTop = 3000 - 800 - 500;
+        container.dispatchEvent(new Event("scroll"));
+        expect(container.scrollTop).toBe(1700);
+
+        // 轻微下滚 40px，距底仍约 460（> resume 240）
+        container.scrollTop = 1740;
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: 40 }));
+        container.dispatchEvent(new Event("scroll"));
+        flushRaf();
+        expect(container.scrollTop).toBe(1740);
+
+        setScrollHeight(3600);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(1740);
+        vi.useRealTimers();
+    });
+
+    it("should not jump to bottom on mid-history wheel-down", () => {
+        let rafId = 0;
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            rafId += 1;
+            return rafId;
+        });
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(performance.now()));
+        };
+
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        const { container, setScrollHeight } = makeContainer(3000);
+
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+        });
+
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -120 }));
+        container.scrollTop = 200;
+        container.dispatchEvent(new Event("scroll"));
+
+        // 中段下滚：不得贴底
+        container.scrollTop = 280;
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: 80 }));
+        flushRaf();
+        expect(container.scrollTop).toBe(280);
+
+        setScrollHeight(4000);
+        vi.advanceTimersByTime(100);
+        flushRaf();
+        expect(container.scrollTop).toBe(280);
+        vi.useRealTimers();
     });
 
 });
