@@ -501,4 +501,60 @@ describe('useContextList', () => {
             );
         });
     });
+
+    it('builds preview_code context item with title and renderer details', async () => {
+        const mcpToolCallStates = new Map<number, MCPToolCallUpdateEvent>([
+            [42, {
+                call_id: 42,
+                conversation_id: 1,
+                message_id: 7,
+                status: 'success',
+                tool_name: 'preview_code',
+                parameters: JSON.stringify({
+                    title: 'compound_interest',
+                    renderer: 'html',
+                    code: '<div>Loading</div>',
+                    loading_messages: ['正在生成交互面板'],
+                    interaction_mode: 'none',
+                }),
+                result: JSON.stringify({
+                    content: [{ type: 'text', text: 'preview shown' }],
+                }),
+                finished_time: '2026-06-12T00:00:00.000Z',
+            }],
+        ]);
+
+        const { result } = renderHook(() =>
+            useContextList({
+                conversationId: 1,
+                userFiles: null,
+                mcpToolCallStates,
+                messages: [],
+                acpWorkingDirectory: null,
+            }),
+        );
+
+        await waitFor(() => {
+            expect(
+                result.current.contextItems.find((item) => item.type === 'preview_code'),
+            ).toEqual(
+                expect.objectContaining({
+                    type: 'preview_code',
+                    name: 'compound_interest',
+                    details: 'preview_code · html',
+                    previewData: expect.objectContaining({
+                        contentType: 'code',
+                        content: '<div>Loading</div>',
+                        language: 'html',
+                        metadata: expect.objectContaining({
+                            来源: 'PreviewCode',
+                            渲染器: 'html',
+                            标题: 'compound_interest',
+                        }),
+                    }),
+                }),
+            );
+        });
+    });
+
 });

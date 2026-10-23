@@ -7,7 +7,7 @@ import { useTheme } from "../hooks/useTheme";
 import { ChatSidebarContent } from "../components/chat-sidebar";
 import { TodoItem, CodeArtifact, ContextItem } from "../components/chat-sidebar/types";
 import { Button } from "../components/ui/button";
-import { X, FileText, Globe, Image, ExternalLink, FolderOpen, Search, Sparkles, LoaderCircle, AlertCircle } from "lucide-react";
+import { X, FileText, Globe, Image, ExternalLink, FolderOpen, Search, Sparkles, LoaderCircle, AlertCircle, Code2, Wrench } from "lucide-react";
 import EmbeddedArtifactPreview from "../components/EmbeddedArtifactPreview";
 import RawTextRenderer from "../components/RawTextRenderer";
 import UnifiedMarkdown from "../components/UnifiedMarkdown";
@@ -402,21 +402,27 @@ function SidebarWindow() {
 
     const renderContextIcon = useCallback((context: ContextItem) => {
         if (context.type === 'search') {
-            return <Search className="h-4 w-4" />;
+            return <Search className="h-4 w-4 text-muted-foreground" />;
         }
         if (context.type === 'list_directory') {
-            return <FolderOpen className="h-4 w-4" />;
+            return <FolderOpen className="h-4 w-4 text-muted-foreground" />;
         }
         if (context.type === 'skill') {
-            return <Sparkles className="h-4 w-4" />;
+            return <Sparkles className="h-4 w-4 text-muted-foreground" />;
+        }
+        if (context.type === 'preview_code') {
+            return <Code2 className="h-4 w-4 text-muted-foreground" />;
         }
         if (context.attachmentData?.type === 'Image' || context.previewData?.contentType === 'image') {
-            return <Image className="h-4 w-4" />;
+            return <Image className="h-4 w-4 text-muted-foreground" />;
         }
         if (context.type === 'loaded_mcp_tool') {
-            return <Globe className="h-4 w-4" />;
+            return <Globe className="h-4 w-4 text-muted-foreground" />;
         }
-        return <FileText className="h-4 w-4" />;
+        if (context.type === 'other') {
+            return <Wrench className="h-4 w-4 text-muted-foreground" />;
+        }
+        return <FileText className="h-4 w-4 text-muted-foreground" />;
     }, []);
 
     const renderPreviewItems = useCallback((context: ContextItem) => {

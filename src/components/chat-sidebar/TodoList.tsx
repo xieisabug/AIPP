@@ -11,9 +11,9 @@ interface TodoListProps {
 const TodoStatusIcon: React.FC<{ status: TodoItem['status'] }> = ({ status }) => {
     switch (status) {
         case 'completed':
-            return <CheckCircle2 className="h-4 w-4 text-green-500 flex-shrink-0" />;
+            return <CheckCircle2 className="h-4 w-4 text-primary flex-shrink-0" />;
         case 'in_progress':
-            return <Loader2 className="h-4 w-4 text-blue-500 animate-spin flex-shrink-0" />;
+            return <Loader2 className="h-4 w-4 text-primary animate-spin flex-shrink-0" />;
         case 'pending':
         default:
             return <Circle className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
@@ -40,7 +40,7 @@ const TodoList: React.FC<TodoListProps> = ({ todos, className }) => {
             <div className="flex items-center gap-2 px-3 pt-2">
                 <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
                     <div 
-                        className="h-full bg-green-500 transition-all duration-300"
+                        className="h-full bg-primary transition-all duration-300"
                         style={{ width: `${progressPercent}%` }}
                     />
                 </div>
@@ -57,7 +57,7 @@ const TodoList: React.FC<TodoListProps> = ({ todos, className }) => {
                         className={cn(
                             "flex items-start gap-2 p-2 rounded-md transition-colors",
                             "hover:bg-muted/50",
-                            todo.status === 'in_progress' && "bg-blue-50 dark:bg-blue-950/30"
+                            todo.status === 'in_progress' && "bg-primary/5 dark:bg-primary/10"
                         )}
                     >
                         <TodoStatusIcon status={todo.status} />
@@ -69,7 +69,7 @@ const TodoList: React.FC<TodoListProps> = ({ todos, className }) => {
                                 {todo.content}
                             </p>
                             {todo.status === 'in_progress' && todo.activeForm && (
-                                <p className="text-xs text-blue-600 dark:text-blue-400 mt-0.5">
+                                <p className="text-xs text-primary mt-0.5">
                                     {todo.activeForm}
                                 </p>
                             )}

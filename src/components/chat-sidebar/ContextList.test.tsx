@@ -216,8 +216,74 @@ describe('ContextList skills', () => {
             },
         ];
 
-        render(<ContextList items={items} selectedItemId="search-selected" />);
+        render(<ContextList items={items} selectedItemId="search-selected" onItemClick={() => undefined} />);
 
         expect(screen.getByText('selected query').closest('.cursor-pointer')).toHaveClass('bg-muted/50');
+    });
+
+    it('renders preview_code under 代码预览 without the unknown-file fallback', () => {
+        const items: ContextItem[] = [
+            {
+                id: 'preview-code-1',
+                type: 'preview_code',
+                name: 'compound_interest',
+                details: 'preview_code · html',
+                source: 'mcp',
+                previewData: {
+                    title: 'compound_interest',
+                    subtitle: 'preview_code · html',
+                    contentType: 'code',
+                    content: '<div>hi</div>',
+                    language: 'html',
+                },
+            },
+        ];
+
+        const { container } = render(<ContextList items={items} onItemClick={() => undefined} />);
+
+        expect(screen.getByText('代码预览')).toBeInTheDocument();
+        expect(screen.getByText('compound_interest')).toBeInTheDocument();
+        expect(screen.getByText('preview_code · html')).toBeInTheDocument();
+        expect(container.querySelector('.lucide-file-question')).toBeNull();
+        expect(container.querySelector('.lucide-code-2, .lucide-code-xml, svg.lucide-code-2')).toBeTruthy();
+    });
+
+    it('uses neutral image icons instead of colored ones', () => {
+        const items: ContextItem[] = [
+            {
+                id: 'generated-image-neutral',
+                type: 'generated_image',
+                name: '图片 1',
+                source: 'assistant',
+                attachmentData: {
+                    type: 'Image',
+                    content: 'data:image/png;base64,Zm9v',
+                },
+            },
+        ];
+
+        const { container } = render(<ContextList items={items} onItemClick={() => undefined} />);
+        const icon = container.querySelector('svg.lucide-image');
+        expect(icon).toBeTruthy();
+        expect(icon?.className.baseVal || icon?.getAttribute('class') || '').toContain('text-muted-foreground');
+        expect(icon?.className.baseVal || icon?.getAttribute('class') || '').not.toContain('text-blue-500');
+    });
+
+    it('renders unknown/other tools with a clean wrench icon instead of a dead question-mark file', () => {
+        const items: ContextItem[] = [
+            {
+                id: 'other-1',
+                type: 'other',
+                name: 'custom_tool',
+                details: 'mcp::custom_tool',
+                source: 'mcp',
+            },
+        ];
+
+        const { container } = render(<ContextList items={items} />);
+        expect(screen.getByText('其他工具')).toBeInTheDocument();
+        expect(container.querySelector('.lucide-file-question')).toBeNull();
+        expect(screen.getByText('custom_tool').closest('.cursor-pointer')).toBeNull();
+        expect(screen.getByText('custom_tool').closest('.cursor-default')).toBeTruthy();
     });
 });
