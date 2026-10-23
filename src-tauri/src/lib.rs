@@ -214,7 +214,7 @@ use crate::window::{
     close_sidebar_window, create_ask_window, create_ask_window_hidden,
     create_butler_experiment_window, create_butler_experiment_window_hidden,
     create_chat_ui_window_hidden, create_config_window_hidden, create_schedule_window_hidden,
-    ensure_hidden_search_window, handle_open_ask_window, is_butler_experiment_enabled,
+    handle_open_ask_window, is_butler_experiment_enabled,
     open_artifact_collections_window, open_artifact_preview_window, open_butler_experiment_window,
     open_butler_experiment_window_inner, open_chat_ui_window, open_chat_ui_window_inner,
     open_config_window, open_config_window_inner, open_default_home_window, open_plugin_window,
@@ -1202,7 +1202,6 @@ pub fn run() {
             confirm_acp_elicitation,
             confirm_codex_permission,
             highlight_code,
-            ensure_hidden_search_window,
             list_syntect_themes,
             // Skill commands
             scan_skills,

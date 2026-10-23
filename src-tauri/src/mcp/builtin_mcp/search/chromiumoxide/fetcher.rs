@@ -717,19 +717,6 @@ impl ContentFetcher {
         })
     }
 
-    /// WebView兜底导航（不提取内容）
-    async fn fallback_webview_navigation(&self, url: &str) -> Result<String, String> {
-        if let Err(e) = crate::window::ensure_hidden_search_window(self.app_handle.clone()).await {
-            warn!(error = %e, "Failed to create hidden search window");
-        } else if let Some(window) = self.app_handle.get_webview_window("hidden_search") {
-            let _ = window.navigate(url.parse().map_err(|e| format!("Invalid URL: {}", e))?);
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-
-        Err("All fetch strategies failed; WebView navigation attempted but no content extracted"
-            .to_string())
-    }
-
     pub async fn fetch_content_http_first(
         &mut self,
         url: &str,
@@ -738,7 +725,7 @@ impl ContentFetcher {
     ) -> Result<String, String> {
         info!(%url, "Starting content fetch with HTTP-first strategy");
 
-        match self.fetch_with_http(url).await {
+        let http_failure = match self.fetch_with_http(url).await {
             Ok(http_result) => {
                 let assessment = Self::assess_http_content(&http_result.body);
                 if !assessment.should_fallback_to_browser {
@@ -777,6 +764,7 @@ impl ContentFetcher {
                         ("visible_text.txt", SearchEngineBase::visible_text(&http_result.body)),
                     ]),
                 );
+                format!("incomplete content ({})", assessment.reasons.join("; "))
             }
             Err(e) => {
                 warn!(
@@ -785,8 +773,9 @@ impl ContentFetcher {
                     strategy = "http",
                     "HTTP-first fetch failed, falling back to browser"
                 );
+                e
             }
-        }
+        };
 
         match self.fetch_with_chromiumoxide(url, browser_manager, browser_pool).await {
             Ok(html) => {
@@ -797,10 +786,10 @@ impl ContentFetcher {
                 );
                 Ok(html)
             }
-            Err(e) => {
+            Err(chromium_error) => {
                 warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
+                    error = %chromium_error,
+                    timeout_like = Self::is_timeout_like(&chromium_error),
                     strategy = "chromiumoxide",
                     "Browser fallback failed"
                 );
@@ -820,7 +809,9 @@ impl ContentFetcher {
                             strategy = "headless",
                             "Headless fallback failed"
                         );
-                        self.fallback_webview_navigation(url).await
+                        Err(format!(
+                            "http: {http_failure}; chromiumoxide: {chromium_error}; headless: {headless_error}"
+                        ))
                     }
                 }
             }
