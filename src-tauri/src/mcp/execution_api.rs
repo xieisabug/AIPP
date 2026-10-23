@@ -2016,6 +2016,8 @@ pub async fn execute_mcp_tool_call(
             .get_mcp_tool_call(call_id)
             .map_err(|e| format!("获取当前工具调用状态失败: {}", e));
     }
+    // 用户手动确认执行时，停止进行中的自动审核请求。
+    let _ = crate::mcp::tool_review::cancel_tool_review(call_id).await;
     crate::mcp::tool_review::record_user_allow_if_review_held(&app_handle, call_id);
     tool_call = db
         .get_mcp_tool_call(call_id)
@@ -2402,6 +2404,9 @@ pub async fn reject_mcp_tool_call(
     if tool_call.status != "pending" {
         return Err(format!("工具调用状态为 {} 时不能拒绝", tool_call.status));
     }
+
+    // 用户手动拒绝时，停止进行中的自动审核请求。
+    let _ = crate::mcp::tool_review::cancel_tool_review(call_id).await;
 
     let review_reason = db
         .get_tool_review_by_call_id(call_id)
