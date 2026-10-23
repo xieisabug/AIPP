@@ -405,3 +405,13 @@ async fn test_register_review_cancel_token_replaces_previous() {
     assert!(cancel_tool_review(call_id).await);
     assert!(second.is_cancelled());
 }
+
+
+#[test]
+fn test_normalize_review_mode_uses_assistant_choice_only() {
+    assert_eq!(normalize_review_mode(Some("auto_model")), "auto_model");
+    assert_eq!(normalize_review_mode(Some("off")), "off");
+    assert_eq!(normalize_review_mode(Some("")), "off");
+    assert_eq!(normalize_review_mode(None), "off");
+    assert_eq!(normalize_review_mode(Some("unexpected")), "off");
+}

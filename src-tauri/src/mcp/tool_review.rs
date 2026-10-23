@@ -1,7 +1,8 @@
 //! 工具调用自动审核。
 //!
 //! 已开启自动运行的工具直接执行，不调用审核模型。
-//! 未开启自动运行且「设置 → 辅助AI」中已配置自动审核模型时，用该模型判断安全性（无需助手表单再选审核方式）。
+//! 未开启自动运行且助手 `tool_review_mode=auto_model` 时，用「设置 → 辅助AI」里配置的审核模型判断安全性。
+//! 助手选人工审核（`off`）时即使已配置审核模型也不会自动审核。
 //! 审核进行中用户可手动确认/拒绝；手动介入会取消进行中的自动审核请求。
 //! 审核模型会把该工具的描述和字段说明写成普通文本放进 prompt（schema 会展开成字段列表，不走 tools API）；
 //! 只用来理解字段含义，不负责判断工具是否存在，也不执行或回答这次调用。
@@ -10,6 +11,7 @@
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::conversation::{build_chat_request_from_messages, ToolCallStrategy};
 use crate::api::ai_api::sanitize_tool_name;
+use crate::api::assistant_api::get_assistant_field_value;
 use crate::api::genai_client;
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::{MCPDatabase, MCPServerTool, NewToolReviewLog, ToolReviewLog};
@@ -479,13 +481,18 @@ fn build_review_user_prompt(
     prompt
 }
 
-/// 审核方式由辅助 AI 是否配置了自动审核模型决定，助手表单不再单独暴露该字段。
-async fn resolve_review_mode(app_handle: &tauri::AppHandle) -> String {
-    let config_feature_map = load_feature_config_map(app_handle).await;
-    if configured_review_model(&config_feature_map).is_ok() {
-        "auto_model".to_string()
-    } else {
-        "off".to_string()
+/// 审核方式只看助手配置的 `tool_review_mode`；辅助 AI 模型仅在 auto_model 时作为审核模型来源。
+fn normalize_review_mode(raw: Option<&str>) -> String {
+    match raw {
+        Some("auto_model") => "auto_model".to_string(),
+        _ => "off".to_string(),
+    }
+}
+
+fn read_review_mode(app_handle: &tauri::AppHandle, assistant_id: i64) -> String {
+    match get_assistant_field_value(app_handle.clone(), assistant_id, "tool_review_mode") {
+        Ok(value) => normalize_review_mode(Some(value.as_str())),
+        Err(_) => normalize_review_mode(None),
     }
 }
 
@@ -691,7 +698,7 @@ fn existing_safe_pending(db: &MCPDatabase, call_id: i64) -> Option<bool> {
 /// 用户手动确认/拒绝时会 `cancel_tool_review`，本函数随之返回 false 且不再自动执行。
 pub async fn should_auto_execute_after_review(
     app_handle: &tauri::AppHandle,
-    _assistant_id: i64,
+    assistant_id: i64,
     conversation_id: i64,
     call_id: i64,
     server_name: &str,
@@ -699,7 +706,7 @@ pub async fn should_auto_execute_after_review(
     parameters: &str,
     legacy_auto_run: bool,
 ) -> bool {
-    let mode = resolve_review_mode(app_handle).await;
+    let mode = read_review_mode(app_handle, assistant_id);
     if legacy_auto_run || mode != "auto_model" || is_review_exempt_tool(tool_name) {
         return resolve_auto_execute(&mode, tool_name, legacy_auto_run, None);
     }
