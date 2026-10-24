@@ -189,7 +189,7 @@ window.HelloAssistantPlugin = HelloAssistantPlugin;
 
 - `runAssistantText` / `runModelText` 走无会话持久化路径，默认不会写入对话列表；
 - 对话标题栏可通过 `contributions.actions` + `renderAction()` 注入小型操作按钮，例如手动触发优化流程；消息悬浮工具栏使用 `location: "conversation.message-actions"`，上下文包含 `conversationId`、`messageId`、`messageType` 和 `messageContent`；
-- ComfyUI 调用走 Rust `reqwest` 桥接，不依赖 WebView `fetch`。插件必须声明 `network.comfyui`；附加图片还需声明 `conversation.write`。地址仅允许无凭据的 `http/https` URL，生成结果会作为图片附件绑定到目标 assistant 消息并触发会话刷新。`promptNodeId` 和 `promptInputName` 用于指定 workflow 中写入提示词的节点和字符串参数，默认分别为 `57:27` 与 `text`；其它默认 workflow 节点和参数保持不变；
+- ComfyUI 调用走 Rust `reqwest` 桥接，不依赖 WebView `fetch`。插件必须声明 `network.comfyui`；附加图片还需声明 `conversation.write`。地址仅允许无凭据的 `http/https` URL，生成结果会作为图片附件绑定到目标 assistant 消息并触发会话刷新。`promptNodeId` 和 `promptInputName` 用于指定 workflow 中写入提示词的节点和字符串参数。插件配置页在 ComfyUI 地址下上传 Export (API) JSON 后，从其中的字符串输入选择这两个值；未上传时使用内置工作流，默认分别为 `57:27` 与 `text`。除被选中的提示词参数外，工作流里的其它节点和参数保持不变；
 - `chat.afterResponseCompleted` 事件上下文包含 `assistantMessageId`，普通 Chat 与 ACP 都会提供该字段，插件应使用它精确定位完成的 assistant 消息；
 - 读取会话详情与助手详情、更新助手 prompt，优先使用 `systemApi.conversations` / `systemApi.assistants` 的受限 API，而不是直接 `invoke(...)`；
 - `systemApi.ui` 让插件可复用宿主 shadcn 风格组件，避免“原生 UI 风格割裂”。

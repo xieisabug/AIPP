@@ -45,6 +45,21 @@ const customWorkflow = context.comfyUiBuildWorkflow("custom prompt", "9", "filen
 assert.equal(customWorkflow["9"].inputs.filename_prefix, "custom prompt");
 assert.throws(() => context.comfyUiBuildWorkflow("custom prompt", "57:27", "missing"));
 
+const uploaded = context.comfyUiParseWorkflow(JSON.stringify({
+  "3": { inputs: { text: "old", clip: ["1", 0] }, class_type: "CLIPTextEncode", _meta: { title: "正向" } },
+  "9": { inputs: { images: ["8", 0] }, class_type: "SaveImage" },
+}));
+assert.equal(uploaded.nodes.length, 1);
+assert.equal(uploaded.nodes[0].id, "3");
+assert.equal(uploaded.nodes[0].title, "正向");
+assert.equal(uploaded.nodes[0].inputs.length, 1);
+assert.equal(uploaded.nodes[0].inputs[0], "text");
+const uploadedWorkflow = context.comfyUiBuildWorkflow("hello", "3", "text", uploaded.workflow);
+assert.equal(uploadedWorkflow["3"].inputs.text, "hello");
+assert.equal(context.comfyUiBuildWorkflow("new prompt")["57:27"].inputs.text, "new prompt", "uploaded workflow must not replace the built-in graph");
+assert.throws(() => context.comfyUiParseWorkflow(JSON.stringify({ nodes: [], links: [] })), /Export \(API\)/);
+assert.throws(() => context.comfyUiParseWorkflow("{"));
+
 (async () => {
   const Plugin = context.window.ComfyUiImagePlugin;
   const plugin = new Plugin();
