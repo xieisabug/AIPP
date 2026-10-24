@@ -387,16 +387,21 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             switch (state.primary_target.target_type) {
                 case "message":
                     cancelIdleTransientReset();
+                    // Backend activity took over — drop optimistic regenerate / scroll manual shine.
+                    setManualShiningMessageIds(new Set());
                     setActivityShiningMessageIds(new Set([state.primary_target.message_id]));
                     setShiningMcpCallId(null);
                     break;
                 case "mcp_call":
                     cancelIdleTransientReset();
+                    setManualShiningMessageIds(new Set());
                     setActivityShiningMessageIds(new Set());
                     setShiningMcpCallId(state.primary_target.call_id);
                     break;
                 case "none":
                 default:
+                    // Generation stopped: never leave optimistic manual shine behind.
+                    setManualShiningMessageIds(new Set());
                     setActivityShiningMessageIds(new Set());
                     setShiningMcpCallId(null);
                     resetIdleTransientState("shine state is none", {
@@ -408,9 +413,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         },
         [deriveActivityFocusFromShine, resetIdleTransientState, cancelIdleTransientReset]
     );
-
-    // 兼容保留：边框由 shine_state_snapshot 驱动，此方法保持为无副作用接口
-    const updateShiningMessages = useCallback(() => { }, []);
 
     const setShiningMessageIds = useCallback<Dispatch<SetStateAction<Set<number>>>>(
         (nextState) => {
@@ -1249,6 +1251,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setShineState(null);
         shineVersionRef.current = { epoch: -1, revision: -1 };
     }, [cancelIdleTransientReset, invalidateMcpCompensationPolling]);
+
+    // Legacy alias used by regenerate / send / error-notification catch paths.
+    // After shine v2 these must clear local shine; a no-op left borders stuck forever.
+    const updateShiningMessages = clearShiningMessages;
 
     const setPendingUserMessage = useCallback((messageId: number | null) => {
         setPendingUserMessageId(messageId);
