@@ -886,6 +886,135 @@ describe("useConversationEvents MCP completion reconciliation", () => {
         expect(result.current.runtimeState?.phase).toBe("idle");
         expect(result.current.runtimeState?.is_running).toBe(false);
     });
+
+    it("clears optimistic regenerate manual shine when backend goes idle", async () => {
+        const conversationId = 21;
+        const regenerateMessageId = 910;
+
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, { target_type: "none" }, 1),
+        );
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "idle", 1),
+        );
+
+        const { result } = renderHook(() =>
+            useConversationEvents({
+                conversationId,
+            }),
+        );
+
+        await flushEffects();
+
+        await act(async () => {
+            result.current.setManualShineMessage(regenerateMessageId);
+        });
+        expect(result.current.shiningMessageIds.has(regenerateMessageId)).toBe(true);
+
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "shine_state_snapshot",
+                data: {
+                    conversation_id: conversationId,
+                    state: createShineState(conversationId, 2, { target_type: "none" }, 1),
+                },
+            });
+        });
+
+        await flushEffects();
+
+        expect(result.current.shiningMessageIds.size).toBe(0);
+        expect(result.current.shiningMcpCallId).toBeNull();
+    });
+
+    it("hands regenerate manual shine off to backend activity shine", async () => {
+        const conversationId = 22;
+        const regenerateMessageId = 911;
+        const assistantMessageId = 912;
+
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, { target_type: "none" }, 2),
+        );
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "idle", 2),
+        );
+
+        const { result } = renderHook(() =>
+            useConversationEvents({
+                conversationId,
+            }),
+        );
+
+        await flushEffects();
+
+        await act(async () => {
+            result.current.setManualShineMessage(regenerateMessageId);
+        });
+        expect(result.current.shiningMessageIds.has(regenerateMessageId)).toBe(true);
+
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "shine_state_snapshot",
+                data: {
+                    conversation_id: conversationId,
+                    state: createShineState(
+                        conversationId,
+                        2,
+                        {
+                            target_type: "message",
+                            message_id: assistantMessageId,
+                            reason: "assistant_streaming",
+                        },
+                        2,
+                    ),
+                },
+            });
+        });
+
+        await flushEffects();
+
+        expect(result.current.shiningMessageIds.has(regenerateMessageId)).toBe(false);
+        expect(result.current.shiningMessageIds.has(assistantMessageId)).toBe(true);
+        expect(result.current.shiningMessageIds.size).toBe(1);
+    });
+
+    it("updateShiningMessages clears stuck local shine on error settle", async () => {
+        const conversationId = 23;
+        const regenerateMessageId = 913;
+
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, {
+                target_type: "message",
+                message_id: regenerateMessageId,
+                reason: "user_pending",
+            }, 3),
+        );
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "user_pending", 3),
+        );
+
+        const { result } = renderHook(() =>
+            useConversationEvents({
+                conversationId,
+            }),
+        );
+
+        await flushEffects();
+        await flushEffects();
+
+        expect(result.current.shiningMessageIds.has(regenerateMessageId)).toBe(true);
+
+        await act(async () => {
+            result.current.updateShiningMessages();
+        });
+
+        expect(result.current.shiningMessageIds.size).toBe(0);
+        expect(result.current.shiningMcpCallId).toBeNull();
+        expect(result.current.activityFocus).toEqual({ focus_type: "none" });
+    });
 });
 
 describe("useConversationEvents streaming frame batching", () => {

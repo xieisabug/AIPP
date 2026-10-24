@@ -1026,6 +1026,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onChangeConversationId,
             smartScroll,
             updateShiningMessages,
+            clearShiningMessages,
             setAiIsResponsing,
         });
 
@@ -1868,8 +1869,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 // 重置AI响应状态
                 setAiIsResponsing(false);
 
-                // 使用智能边框控制，而不是直接清空
-                updateShiningMessages();
+                // Error notification means the run stopped — drop any stuck shine border.
+                clearShiningMessages();
             });
 
             return () => {
@@ -1877,7 +1878,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     unsubscribe.then((f) => f());
                 }
             };
-        }, [updateShiningMessages]);
+        }, [clearShiningMessages]);
 
         useEffect(() => {
             if (!inlineInteractionVisible) {

@@ -122,12 +122,11 @@ export function useConversationOperations({
                 .catch((error) => {
                     console.error("Regenerate error:", error);
                     setAiIsResponsing(false);
-                    // 使用智能边框控制，而不是直接清空
-                    updateShiningMessages();
-                    // 错误信息将在对话框中显示
+                    // Regenerate sets optimistic manual shine first; must clear on invoke failure.
+                    clearShiningMessages();
                 });
         },
-        [setAiIsResponsing, updateShiningMessages],
+        [setAiIsResponsing, setManualShineMessage, clearShiningMessages],
     );
 
     // 消息分支处理函数
@@ -450,7 +449,7 @@ export function useConversationOperations({
                     .catch((error) => {
                         console.error("Send message error:", error);
                         setAiIsResponsing(false);
-                        updateShiningMessages();
+                        clearShiningMessages();
                         const assistantName = assistantData?.name ?? "Agent";
                         toast.error(`${assistantName} 运行失败`, {
                             description: error instanceof Error ? error.message : String(error),

@@ -12,6 +12,7 @@ export interface UseAssistantRuntimeProps {
     onChangeConversationId: (conversationId: string) => void;
     smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     updateShiningMessages: () => void;
+    clearShiningMessages: () => void;
     setAiIsResponsing: (isResponsing: boolean) => void;
 }
 
@@ -27,7 +28,8 @@ export function useAssistantRuntime({
     setMessages,
     onChangeConversationId,
     smartScroll,
-    updateShiningMessages,
+    updateShiningMessages: _updateShiningMessages,
+    clearShiningMessages,
     setAiIsResponsing,
 }: UseAssistantRuntimeProps): UseAssistantRuntimeReturn {
     // Cache for the current assistant's model ID
@@ -146,9 +148,7 @@ export function useAssistantRuntime({
                 .catch((e) => {
                     console.error("ask assistant error", e);
                     setAiIsResponsing(false);
-                    // 使用智能边框控制，而不是直接清空
-                    updateShiningMessages();
-                    // 错误信息将在对话框中显示
+                    clearShiningMessages();
                     throw e;
                 });
         },
