@@ -329,6 +329,8 @@ describe("useAssistantFormConfig tool review mode", () => {
             { value: "auto_model", label: "模型自动审核" },
         ]);
         expect(result.current.formConfig.some((item) => item.key === "tool_review_model_hint")).toBe(false);
+        // 过滤 raw model_configs，只保留意图明确的 select，不重复渲染
+        expect(result.current.formConfig.filter((item) => item.key === "tool_review_mode")).toHaveLength(1);
 
         reviewField?.config.onChange?.("auto_model");
         expect(onConfigChange).toHaveBeenCalledWith("tool_review_mode", "auto_model", "string");
@@ -373,6 +375,7 @@ describe("useAssistantFormConfig tool review mode", () => {
         await waitFor(() => {
             expect(result.current.formConfig.some((item) => item.key === "tool_review_model_hint")).toBe(true);
         });
+        expect(result.current.formConfig.filter((item) => item.key === "tool_review_mode")).toHaveLength(1);
 
         const hint = result.current.formConfig.find((item) => item.key === "tool_review_model_hint");
         render(React.createElement(React.Fragment, null, hint?.config.customRender?.()));

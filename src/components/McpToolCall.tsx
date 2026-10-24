@@ -13,7 +13,7 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import { maskToolCall } from "@/utils/antiLeakage";
 import { getErrorMessage } from "@/utils/error";
 import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
-import { useToolReview } from "@/hooks/toolReviewStore";
+import { noteToolReview, useToolReview } from "@/hooks/toolReviewStore";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -265,8 +265,8 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const canExecute = executionState === "idle" || executionState === "pending" || executionState === "failed"; // idle/pending/failed 状态都可以执行
     const isProtocolFailureWithoutCall = !effectiveCallId && isFailed && (status === "failed" || Boolean(error));
     const shouldHideFailedActions = isFailed && continueOnToolErrorEnabled;
-    const canShowExecutionActions = canExecute && !shouldHideFailedActions && !isProtocolFailureWithoutCall && !isReviewing;
-    const canReject = executionState === "pending" && Boolean(effectiveCallId) && !isReviewing;
+    const canShowExecutionActions = canExecute && !shouldHideFailedActions && !isProtocolFailureWithoutCall;
+    const canReject = executionState === "pending" && Boolean(effectiveCallId);
     const isRunning = effectiveCallId !== null && shiningMcpCallId === effectiveCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
@@ -391,6 +391,14 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         if (!canReject || !effectiveCallId || isRejecting) return;
         setIsRejecting(true);
         try {
+            if (isReviewing) {
+                noteToolReview(effectiveCallId, {
+                    phase: "done",
+                    callId: effectiveCallId,
+                    verdict: "cancelled",
+                    reason: "用户已手动介入，已停止自动审核",
+                });
+            }
             await invoke("reject_mcp_tool_call", { callId: effectiveCallId });
             const reason = reviewReason || "用户拒绝执行";
             setExecutionState("failed");
@@ -400,7 +408,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         } finally {
             setIsRejecting(false);
         }
-    }, [canReject, effectiveCallId, isRejecting, reviewReason]);
+    }, [canReject, effectiveCallId, isRejecting, isReviewing, reviewReason]);
 
     const handleExecute = useCallback(async () => {
         if (!conversationId) {
@@ -417,6 +425,14 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionError(null);
 
             let currentCallId = effectiveCallId;
+            if (isReviewing && currentCallId) {
+                noteToolReview(currentCallId, {
+                    phase: "done",
+                    callId: currentCallId,
+                    verdict: "cancelled",
+                    reason: "用户已手动介入，已停止自动审核",
+                });
+            }
 
             // Create tool call if it doesn't exist
             if (!currentCallId) {
@@ -462,7 +478,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionState("failed");
             setAutoExpanded(!continueOnToolErrorEnabled);
         }
-    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, continueOnToolErrorEnabled, setAutoExpanded]);
+    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isReviewing, continueOnToolErrorEnabled, setAutoExpanded]);
 
     const handleStop = useCallback(async () => {
         if (!effectiveCallId) {

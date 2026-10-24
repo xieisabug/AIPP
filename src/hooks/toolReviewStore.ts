@@ -19,6 +19,10 @@ export function noteToolReview(callId: number, next: ToolReviewView) {
     if (current?.phase === "done" && next.phase === "reviewing") {
         return;
     }
+    // Manual intervene already cancelled auto-review; ignore late model verdicts.
+    if (current?.phase === "done" && current.verdict === "cancelled" && next.phase === "done") {
+        return;
+    }
     if (
         current?.phase === "done"
         && next.phase === "done"

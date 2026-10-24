@@ -478,4 +478,89 @@ describe("useScrollManagement", () => {
             });
         }
     });
+
+    it("does not resume follow on mid-history wheel-down after scrolling up", () => {
+        const container = {
+            scrollTop: 80,
+            scrollHeight: 2000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.handleUserScrollIntent({
+                deltaY: -80,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        // 中段继续下滚一点：不得清掉上滑标记
+        act(() => {
+            container.scrollTop = 160;
+            result.current.handleUserScrollIntent({
+                deltaY: 40,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("resumes follow when wheel-down happens near the bottom", () => {
+        const container = {
+            scrollTop: 550,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            // 先上滑离开底部
+            result.current.handleUserScrollIntent({
+                deltaY: -40,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            // 距底 50px：下滚应恢复跟滚
+            container.scrollTop = 550;
+            result.current.handleUserScrollIntent({
+                deltaY: 30,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledWith({
+            top: 1000,
+            behavior: "auto",
+        });
+    });
+
 });

@@ -396,7 +396,9 @@ export const useAssistantFormConfig = ({
                         !assistantTypeHideField.includes(config.name) &&
                         !assistantTypeCustomField.find((field) => field.key === config.name) &&
                         config.name !== "reasoning_effort" &&
-                        config.name !== "dynamic_mcp_loading_enabled"
+                        config.name !== "dynamic_mcp_loading_enabled" &&
+                        config.name !== "use_native_toolcall" &&
+                        config.name !== "tool_review_mode"
                 )
                 .map((config) => ({
                     key: config.name,
@@ -519,7 +521,7 @@ export const useAssistantFormConfig = ({
                         { value: "auto_model", label: "模型自动审核" },
                     ],
                     tooltip:
-                        "已开启自动运行的工具直接执行，不经过审核。未开启自动运行时，人工审核等待确认；模型自动审核由「设置 → 辅助AI」中的自动审核模型判断能否直接执行。",
+                        "已开启自动运行的工具直接执行，不经过审核。未开启自动运行时，人工审核等待确认；模型自动审核由「设置 → 辅助AI」中的自动审核模型判断能否直接执行。审核进行中仍可手动确认或拒绝。",
                     onChange: (value: string | boolean) =>
                         handleConfigChange("tool_review_mode", value, "string"),
                 },

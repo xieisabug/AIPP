@@ -32,6 +32,11 @@ describe("RustCodeBlock", () => {
             observe() {}
             disconnect() {}
         });
+        vi.stubGlobal("IntersectionObserver", class {
+            observe() {}
+            disconnect() {}
+            unobserve() {}
+        });
     });
     afterEach(() => {
         vi.unstubAllGlobals();
@@ -105,4 +110,26 @@ describe("RustCodeBlock", () => {
         render(<RustCodeBlock language="ts">cached remount</RustCodeBlock>);
         expect(screen.getByTestId("cached-highlight")).toBeInTheDocument();
     });
+
+    it("keeps text selection after pointer leaves the code block", () => {
+        render(
+            <RustCodeBlock language="text">
+                {"alpha beta gamma"}
+            </RustCodeBlock>
+        );
+
+        const codeNode = screen.getByText(/alpha beta gamma/);
+        const range = document.createRange();
+        range.selectNodeContents(codeNode);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        expect(selection?.toString()).toContain("beta");
+
+        const root = codeNode.closest(".group\\/codeblock");
+        expect(root).not.toBeNull();
+        root!.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+        expect(window.getSelection()?.toString()).toContain("beta");
+    });
+
 });

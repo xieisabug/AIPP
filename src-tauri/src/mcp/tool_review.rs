@@ -1,7 +1,9 @@
 //! 工具调用自动审核。
 //!
 //! 已开启自动运行的工具直接执行，不调用审核模型。
-//! 未开启自动运行且助手 `tool_review_mode=auto_model` 时，用辅助 AI 里配置的审核模型判断安全性。
+//! 未开启自动运行且助手 `tool_review_mode=auto_model` 时，用「设置 → 辅助AI」里配置的审核模型判断安全性。
+//! 助手选人工审核（`off`）时即使已配置审核模型也不会自动审核。
+//! 审核进行中用户可手动确认/拒绝；手动介入会取消进行中的自动审核请求。
 //! 审核模型会把该工具的描述和字段说明写成普通文本放进 prompt（schema 会展开成字段列表，不走 tools API）；
 //! 只用来理解字段含义，不负责判断工具是否存在，也不执行或回答这次调用。
 //! 安全则直接执行；有风险、超时、模型缺失或返回无法解析时保持 pending，由用户确认。
@@ -18,9 +20,42 @@ use genai::adapter::AdapterKind;
 use genai::chat::{ChatOptions, ChatResponse, JsonSpec, StopReason};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::Manager;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+type ReviewCancelRegistry = Arc<Mutex<HashMap<i64, CancellationToken>>>;
+static REVIEW_CANCEL_REGISTRY: OnceLock<ReviewCancelRegistry> = OnceLock::new();
+
+fn review_cancel_registry() -> &'static ReviewCancelRegistry {
+    REVIEW_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+async fn register_review_cancel_token(call_id: i64) -> CancellationToken {
+    let token = CancellationToken::new();
+    let mut registry = review_cancel_registry().lock().await;
+    if let Some(previous) = registry.insert(call_id, token.clone()) {
+        previous.cancel();
+    }
+    token
+}
+
+async fn take_review_cancel_token(call_id: i64) -> Option<CancellationToken> {
+    review_cancel_registry().lock().await.remove(&call_id)
+}
+
+/// 取消进行中的自动审核（用户手动确认/拒绝时调用）。返回是否找到并取消了令牌。
+pub async fn cancel_tool_review(call_id: i64) -> bool {
+    if let Some(token) = take_review_cancel_token(call_id).await {
+        token.cancel();
+        true
+    } else {
+        false
+    }
+}
 
 pub const REVIEW_TIMEOUT_SECS: u64 = 20;
 const PROMPT_PARAM_LIMIT: usize = 8000;
@@ -446,10 +481,25 @@ fn build_review_user_prompt(
     prompt
 }
 
+/// 审核方式只看助手配置的 `tool_review_mode`；辅助 AI 模型仅在 auto_model 时作为审核模型来源。
+fn normalize_review_mode(raw: Option<&str>) -> String {
+    match raw {
+        Some("auto_model") => "auto_model".to_string(),
+        _ => "off".to_string(),
+    }
+}
+
 fn read_review_mode(app_handle: &tauri::AppHandle, assistant_id: i64) -> String {
     match get_assistant_field_value(app_handle.clone(), assistant_id, "tool_review_mode") {
-        Ok(value) if value == "auto_model" => "auto_model".to_string(),
-        _ => "off".to_string(),
+        Ok(value) => normalize_review_mode(Some(value.as_str())),
+        Err(_) => normalize_review_mode(None),
+    }
+}
+
+fn call_still_pending(app_handle: &tauri::AppHandle, call_id: i64) -> bool {
+    match MCPDatabase::new(app_handle).and_then(|db| db.get_mcp_tool_call(call_id)) {
+        Ok(call) => call.status == "pending",
+        Err(_) => false,
     }
 }
 
@@ -645,6 +695,7 @@ fn existing_safe_pending(db: &MCPDatabase, call_id: i64) -> Option<bool> {
 }
 
 /// 返回是否应立即执行。未开启自动运行且启用审核时会写入 `tool_review_log`。
+/// 用户手动确认/拒绝时会 `cancel_tool_review`，本函数随之返回 false 且不再自动执行。
 pub async fn should_auto_execute_after_review(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
@@ -666,9 +717,33 @@ pub async fn should_auto_execute_after_review(
         }
     }
 
+    let cancel_token = register_review_cancel_token(call_id).await;
     emit_tool_review_status(app_handle, conversation_id, call_id, "reviewing", None, "");
-    let mut draft =
-        review_with_configured_model(app_handle, call_id, server_name, tool_name, parameters).await;
+    let review_result = tokio::select! {
+        _ = cancel_token.cancelled() => None,
+        draft = review_with_configured_model(app_handle, call_id, server_name, tool_name, parameters) => {
+            let _ = take_review_cancel_token(call_id).await;
+            Some(draft)
+        }
+    };
+
+    let Some(mut draft) = review_result else {
+        emit_tool_review_status(
+            app_handle,
+            conversation_id,
+            call_id,
+            "done",
+            Some("cancelled"),
+            "用户已手动介入，已停止自动审核",
+        );
+        return false;
+    };
+
+    // 审核结束时若用户已手动执行/拒绝，不再自动跑、也不再覆盖 UI 状态。
+    if !call_still_pending(app_handle, call_id) {
+        return false;
+    }
+
     if let Some(detail) = draft.error_detail.as_ref() {
         let detail = format!("{detail} (conversation_id={conversation_id}, call_id={call_id}, model={}, provider_id={:?})", draft.model_code, draft.provider_id);
         draft.reason = detail.clone();
@@ -715,6 +790,9 @@ pub async fn should_auto_execute_after_review(
                 &format!("打开审核数据库失败 (conversation_id={conversation_id}, call_id={call_id}): {error}"));
             return false;
         }
+    }
+    if !call_still_pending(app_handle, call_id) {
+        return false;
     }
     // Publish completion after persistence, so confirmation can immediately record a decision.
     emit_tool_review_status(app_handle, conversation_id, call_id, "done",

@@ -10,6 +10,8 @@ const verdictLabel = (verdict: string): string => {
             return "审核认为有风险";
         case "error":
             return "自动审核失败";
+        case "cancelled":
+            return "已停止自动审核";
         default:
             return "自动审核";
     }
@@ -19,6 +21,11 @@ export const ToolReviewNotice: React.FC<{ callId?: number | null }> = ({ callId 
     const review = useToolReview(callId);
 
     if (!review) {
+        return null;
+    }
+
+    // Manual intervene cancels auto-review; hide the transient cancelled state.
+    if (review.phase === "done" && review.verdict === "cancelled") {
         return null;
     }
 

@@ -384,3 +384,34 @@ fn test_tool_review_log_roundtrip_and_user_deny() {
     assert_eq!(denied.user_decision.as_deref(), Some("deny"));
     assert!(db.list_tool_reviews_by_conversation(99).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_cancel_tool_review_stops_in_flight_token() {
+    let call_id = 9_901i64;
+    let token = register_review_cancel_token(call_id).await;
+    assert!(!token.is_cancelled());
+    assert!(cancel_tool_review(call_id).await);
+    assert!(token.is_cancelled());
+    assert!(!cancel_tool_review(call_id).await);
+}
+
+#[tokio::test]
+async fn test_register_review_cancel_token_replaces_previous() {
+    let call_id = 9_902i64;
+    let first = register_review_cancel_token(call_id).await;
+    let second = register_review_cancel_token(call_id).await;
+    assert!(first.is_cancelled());
+    assert!(!second.is_cancelled());
+    assert!(cancel_tool_review(call_id).await);
+    assert!(second.is_cancelled());
+}
+
+
+#[test]
+fn test_normalize_review_mode_uses_assistant_choice_only() {
+    assert_eq!(normalize_review_mode(Some("auto_model")), "auto_model");
+    assert_eq!(normalize_review_mode(Some("off")), "off");
+    assert_eq!(normalize_review_mode(Some("")), "off");
+    assert_eq!(normalize_review_mode(None), "off");
+    assert_eq!(normalize_review_mode(Some("unexpected")), "off");
+}

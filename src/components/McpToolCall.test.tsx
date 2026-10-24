@@ -652,7 +652,7 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.getByText(/只读查询/)).toBeInTheDocument();
     });
 
-    it("should show that automatic review is in progress", async () => {
+    it("should show that automatic review is in progress while still allowing manual confirm or reject", async () => {
         noteToolReview(55, { phase: "reviewing", callId: 55 });
 
         render(
@@ -678,8 +678,41 @@ describe("McpToolCall call_id binding", () => {
         );
 
         expect(await screen.findByText("自动审核中")).toBeInTheDocument();
-        expect(screen.queryByRole("button", { name: "执行" })).not.toBeInTheDocument();
-        expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "执行" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    });
+
+    it("should cancel the in-flight auto-review notice when the user manually executes", async () => {
+        mockInvokeHandler("execute_mcp_tool_call", () => ({ id: 55, status: "success", result: "ok" }));
+        noteToolReview(55, { phase: "reviewing", callId: 55 });
+        render(
+            <McpToolCall
+                conversationId={8}
+                messageId={12}
+                callId={55}
+                serverName="demo-server"
+                toolName="bash"
+                parameters="{}"
+                status="pending"
+                mcpToolCallStates={new Map([
+                    [55, {
+                        call_id: 55,
+                        conversation_id: 8,
+                        status: "pending",
+                        server_name: "demo-server",
+                        tool_name: "bash",
+                        parameters: "{}",
+                    }],
+                ])}
+            />
+        );
+        expect(await screen.findByText("自动审核中")).toBeInTheDocument();
+        await userEvent.setup().click(screen.getByRole("button", { name: "执行" }));
+        expect(invoke).toHaveBeenCalledWith("execute_mcp_tool_call", {
+            callId: 55,
+            triggerContinuation: true,
+        });
+        expect(screen.queryByText("自动审核中")).not.toBeInTheDocument();
     });
 
     it.each(["risky", "error"])("should update both actions when a live %s review finishes while the call stays pending", async (verdict) => {
