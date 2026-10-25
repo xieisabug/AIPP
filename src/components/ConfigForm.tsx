@@ -466,7 +466,9 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                                 className="text-muted-foreground hover:text-foreground transition-colors"
                                             />
                                         </TooltipTrigger>
-                                        <TooltipContent>{field.tooltip}</TooltipContent>
+                                        <TooltipContent className="max-w-sm text-left leading-relaxed">
+                                            {field.tooltip}
+                                        </TooltipContent>
                                     </Tooltip>
                                 </TooltipProvider>
                             )}

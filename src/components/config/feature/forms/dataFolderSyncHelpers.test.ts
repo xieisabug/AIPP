@@ -8,8 +8,10 @@ import {
     canStopSync,
     decideSyncNowAction,
     formatDanglingFkStatusText,
+    formatLastSyncAt,
     formatRecentSyncError,
-    formatSyncStatusText,
+    formatSyncConnectionState,
+    formatSyncStatusMetrics,
     friendlySyncError,
     isAutoSyncEnabled,
     normalizeSyncServerUrl,
@@ -81,35 +83,36 @@ describe("dataFolderSyncHelpers", () => {
         ).toContain("HTTP 413");
     });
 
-    it("formatSyncStatusText is compact connection + counters (no dangling / auto copy)", () => {
+    it("formats connection state separately from queue metrics", () => {
+        const connected = {
+            mode: "self_hosted" as const,
+            syncing: false,
+            connected: true,
+            running: true,
+            paused: false,
+            pending_outbox_count: 2,
+            pushing_outbox_count: 1,
+            failed_outbox_count: 3,
+            dead_letter_count: 4,
+            server_cursor: 9,
+        };
+        expect(formatSyncConnectionState(connected)).toBe("已连接");
+        expect(formatSyncStatusMetrics(connected)).toEqual([
+            { label: "待推送", value: 2 },
+            { label: "推送中", value: 1 },
+            { label: "失败", value: 3 },
+            { label: "无法应用", value: 4 },
+            { label: "游标", value: 9 },
+        ]);
         expect(
-            formatSyncStatusText({
-                mode: "self_hosted",
-                syncing: false,
-                connected: true,
-                running: true,
-                paused: false,
-                pending_outbox_count: 0,
-                failed_outbox_count: 0,
-                server_cursor: 3,
-            }),
-        ).toMatch(/^已连接；待推送/);
-        expect(
-            formatSyncStatusText({
-                mode: "self_hosted",
-                syncing: false,
-                connected: false,
-                running: false,
-                paused: true,
-                pending_outbox_count: 1,
-                failed_outbox_count: 0,
-                server_cursor: 3,
+            formatSyncStatusMetrics({
+                ...connected,
                 dangling_fk_count: 5,
                 dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步",
-            }),
+            }).map((metric) => metric.label),
         ).not.toContain("引用已失效");
         expect(
-            formatSyncStatusText({
+            formatSyncConnectionState({
                 mode: "self_hosted",
                 syncing: false,
                 connected: false,
@@ -119,7 +122,42 @@ describe("dataFolderSyncHelpers", () => {
                 failed_outbox_count: 0,
                 server_cursor: 3,
             }),
-        ).toContain("已连接");
+        ).toBe("已连接");
+        expect(
+            formatSyncConnectionState({
+                mode: "local",
+                syncing: false,
+                connected: false,
+                running: false,
+                pending_outbox_count: 1,
+                failed_outbox_count: 0,
+                server_cursor: 3,
+            }),
+        ).toBe("本地模式");
+        expect(
+            formatSyncStatusMetrics({
+                mode: "local",
+                syncing: false,
+                connected: false,
+                running: false,
+                pending_outbox_count: 1,
+                failed_outbox_count: 0,
+                server_cursor: 3,
+            }),
+        ).toEqual([]);
+        expect(formatSyncConnectionState(null)).toBe("读取中");
+    });
+
+    it("formatLastSyncAt renders local time and falls back when empty or invalid", () => {
+        expect(formatLastSyncAt(null)).toBe("尚未同步");
+        expect(formatLastSyncAt("  ")).toBe("尚未同步");
+        expect(formatLastSyncAt("not-a-date")).toBe("not-a-date");
+        const iso = "2026-10-14T09:00:00+08:00";
+        const date = new Date(iso);
+        const pad = (n: number) => String(n).padStart(2, "0");
+        expect(formatLastSyncAt(iso)).toBe(
+            `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+        );
     });
 
     it("canStopSync when self_hosted and syncing (manual or auto)", () => {
@@ -204,20 +242,20 @@ describe("dataFolderSyncHelpers", () => {
         expect(formatDanglingFkStatusText({ dangling_fk_count: 0 })).toBeNull();
     });
 
-    it("formatSyncStatusText does not append dangling FK notice", () => {
-        expect(
-            formatSyncStatusText({
-                mode: "self_hosted",
-                syncing: false,
-                connected: true,
-                running: true,
-                pending_outbox_count: 0,
-                failed_outbox_count: 0,
-                server_cursor: 1,
-                dangling_fk_count: 5,
-                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message_attachment.message_id×5）",
-            }),
-        ).not.toContain("引用已失效");
+    it("formatSyncStatusMetrics does not include dangling FK notice", () => {
+        const metrics = formatSyncStatusMetrics({
+            mode: "self_hosted",
+            syncing: false,
+            connected: true,
+            running: true,
+            pending_outbox_count: 0,
+            failed_outbox_count: 0,
+            server_cursor: 1,
+            dangling_fk_count: 5,
+            dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message_attachment.message_id×5）",
+        });
+        expect(metrics.map((metric) => metric.label).join(" ")).not.toContain("引用已失效");
+        expect(metrics.find((metric) => metric.label === "游标")?.value).toBe(1);
     });
 
     it("formatRecentSyncError softens stale outbox HTTP errors", () => {

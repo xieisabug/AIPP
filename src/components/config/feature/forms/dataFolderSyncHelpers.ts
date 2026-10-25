@@ -114,24 +114,56 @@ export function formatDanglingFkStatusText(
     return null;
 }
 
-/** Human-readable sync status line for the connection-status row (no dangling notice). */
-export function formatSyncStatusText(status: SyncStatusSummaryInput | null | undefined): string {
+export type SyncStatusMetricLabel = "待推送" | "推送中" | "失败" | "无法应用" | "游标";
+
+export interface SyncStatusMetric {
+    label: SyncStatusMetricLabel;
+    value: number;
+}
+
+/** Connection-state label only. Queue counters are separate metrics, not a sentence. */
+export function formatSyncConnectionState(status: SyncStatusSummaryInput | null | undefined): string {
     if (!status) {
         return "读取中";
     }
     if (status.mode === "local") {
-        return "本地模式：仅使用本机 SQLite，后台同步已停止。";
+        return "本地模式";
     }
-    // Connection row: compact state + queue counters only (dangling lives in its own row).
-    let state: string;
     if (status.syncing) {
-        state = "同步中";
-    } else if (status.connected || status.running || status.paused) {
-        state = "已连接";
-    } else {
-        state = "未连接";
+        return "同步中";
     }
-    return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
+    if (status.connected || status.running || status.paused) {
+        return "已连接";
+    }
+    return "未连接";
+}
+
+/** Queue counters for the connection-status row. Empty in local mode (no dangling notice). */
+export function formatSyncStatusMetrics(status: SyncStatusSummaryInput | null | undefined): SyncStatusMetric[] {
+    if (!status || status.mode === "local") {
+        return [];
+    }
+    return [
+        { label: "待推送", value: status.pending_outbox_count },
+        { label: "推送中", value: status.pushing_outbox_count ?? 0 },
+        { label: "失败", value: status.failed_outbox_count },
+        { label: "无法应用", value: status.dead_letter_count ?? 0 },
+        { label: "游标", value: status.server_cursor },
+    ];
+}
+
+/** Local display for `last_sync_at` (RFC3339). Empty → 尚未同步; unparseable → raw text. */
+export function formatLastSyncAt(value: string | null | undefined): string {
+    const raw = (value || "").trim();
+    if (!raw) {
+        return "尚未同步";
+    }
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) {
+        return raw;
+    }
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 export type SyncPrimaryControlInput = {
