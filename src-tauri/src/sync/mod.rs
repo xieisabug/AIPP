@@ -852,11 +852,12 @@ pub async fn cleanup_dangling_foreign_keys(app_handle: AppHandle) -> Result<Sync
     let report = null_out_dangling_local_fks(&app_handle)?;
     if let Some(state) = app_handle.try_state::<SyncState>() {
         let mut runtime = state.status.lock().await;
-        if report.nulled_count > 0 {
+        let cleaned = report.cleaned_count();
+        if cleaned > 0 {
             runtime.dangling_fk_count = 0;
             runtime.dangling_fk_summary = Some(format!(
                 "已清理 {} 条失效本地引用{}",
-                report.nulled_count,
+                cleaned,
                 format_dangling_kinds_suffix(&report.by_kind)
             ));
         } else {
@@ -865,7 +866,7 @@ pub async fn cleanup_dangling_foreign_keys(app_handle: AppHandle) -> Result<Sync
         }
     }
     emit_status_changed(&app_handle).await;
-    if report.nulled_count > 0 {
+    if report.cleaned_count() > 0 {
         schedule_sync_after_local_change(&app_handle);
     }
     sync_status(&app_handle).await
@@ -2075,11 +2076,38 @@ impl DanglingFkScanReport {
     }
 }
 
-/// 清理结果（用户确认后的本地 NULL 操作）。
+/// 清理结果（用户确认后的本地 NULL / 孤儿行删除）。
 #[derive(Debug, Default, Clone)]
 struct DanglingFkCleanupReport {
+    /// 置空外键列的次数
     nulled_count: i64,
+    /// 删除的孤儿子行数（owned-by-parent 结构外键）
+    deleted_count: i64,
     by_kind: HashMap<(String, String), usize>,
+}
+
+impl DanglingFkCleanupReport {
+    fn cleaned_count(&self) -> i64 {
+        self.nulled_count + self.deleted_count
+    }
+}
+
+/// Owned child rows whose parent is gone should be deleted, not NULLed
+/// (parent id columns are often NOT NULL).
+fn orphan_cleanup_deletes_row(object_type: &str, column: &str) -> bool {
+    matches!(
+        (object_type, column),
+        ("conversation.message", "conversation_id")
+            | ("conversation.message_attachment", "message_id")
+            | ("conversation.summary", "conversation_id")
+            | ("conversation.todo", "conversation_id")
+            | ("assistant.model", "assistant_id")
+            | ("assistant.model_config", "assistant_id")
+            | ("assistant.model_config", "assistant_model_id")
+            | ("assistant.prompt", "assistant_id")
+            | ("assistant.mcp_config", "assistant_id")
+            | ("assistant.mcp_tool_config", "assistant_id")
+    )
 }
 
 fn format_dangling_kinds_suffix(by_kind: &HashMap<(String, String), usize>) -> String {
@@ -2152,6 +2180,9 @@ fn scan_or_null_dangling_local_fks(
     // 按 db_name 缓存连接，避免重复打开
     let mut data_conns: HashMap<&'static str, Connection> = HashMap::new();
     let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
+    // Rows already scheduled for DELETE in this pass (avoid double-count when
+    // multiple structural FKs on the same owned row are dangling).
+    let mut delete_ids: HashMap<&'static str, std::collections::HashSet<i64>> = HashMap::new();
 
     for spec in specs() {
         if spec.foreign_keys.is_empty() {
@@ -2192,13 +2223,16 @@ fn scan_or_null_dangling_local_fks(
                 .unwrap_or_default(),
         );
         // 先读出待清理列表，结束对 data_conns 的不可变借用后再写
-        let to_null: Vec<(i64, &'static str)> = {
+        let mut to_null: Vec<(i64, &'static str)> = Vec::new();
+        let mut to_delete: Vec<i64> = Vec::new();
+        {
             let conn = data_conns.get(spec.db_name).expect("data conn inserted");
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
             let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-            let mut pending = Vec::new();
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
                 let local_id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                let mut should_delete = false;
+                let mut null_cols: Vec<&'static str> = Vec::new();
                 for (idx, fk) in fk_cols.iter().enumerate() {
                     let value: Option<i64> = row.get(idx + 1).map_err(|e| e.to_string())?;
                     let Some(value) = value else { continue };
@@ -2212,20 +2246,61 @@ fn scan_or_null_dangling_local_fks(
                     if dependency_row_exists(app_handle, fk.object_type, value, &mut dep_conns)? {
                         continue;
                     }
-                    pending.push((local_id, fk.column));
                     *report
                         .by_kind
                         .entry((spec.object_type.to_string(), fk.column.to_string()))
                         .or_default() += 1;
-                    report.nulled_count += 1;
+                    if orphan_cleanup_deletes_row(spec.object_type, fk.column) {
+                        should_delete = true;
+                    } else {
+                        null_cols.push(fk.column);
+                    }
+                }
+                if should_delete {
+                    let seen = delete_ids.entry(spec.object_type).or_default();
+                    if seen.insert(local_id) {
+                        to_delete.push(local_id);
+                        report.deleted_count += 1;
+                    }
+                } else {
+                    for column in null_cols {
+                        to_null.push((local_id, column));
+                        report.nulled_count += 1;
+                    }
                 }
             }
-            pending
-        };
-        if mutate && !to_null.is_empty() {
+        }
+        if mutate && (!to_null.is_empty() || !to_delete.is_empty()) {
             let conn = data_conns.get_mut(spec.db_name).expect("data conn");
             let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            // Delete owned orphans first; when deleting messages also clear
+            // their attachments so we do not leave a new dangling wave.
+            for local_id in &to_delete {
+                if spec.object_type == "conversation.message" {
+                    tx.execute(
+                        "DELETE FROM message_attachment WHERE message_id = ?1",
+                        params![local_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                if spec.object_type == "assistant.model" {
+                    tx.execute(
+                        "DELETE FROM assistant_model_config WHERE assistant_model_id = ?1",
+                        params![local_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                tx.execute(
+                    &format!("DELETE FROM {} WHERE id = ?1", spec.table),
+                    params![local_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
             for (local_id, column) in to_null {
+                // Skip NULL if this row was deleted as an orphan.
+                if to_delete.contains(&local_id) {
+                    continue;
+                }
                 tx.execute(
                     &format!("UPDATE {} SET {} = NULL WHERE id = ?1", spec.table, column),
                     params![local_id],
@@ -5105,6 +5180,16 @@ mod tests {
             .collect();
         assert_eq!(soft_cols, vec!["llm_model_id"]);
         assert_eq!(structural_cols, vec!["conversation_id", "parent_id"]);
+    }
+
+    #[test]
+    fn orphan_cleanup_deletes_owned_child_rows_not_optional_parent_id() {
+        assert!(orphan_cleanup_deletes_row("conversation.message", "conversation_id"));
+        assert!(orphan_cleanup_deletes_row("conversation.message_attachment", "message_id"));
+        assert!(orphan_cleanup_deletes_row("conversation.summary", "conversation_id"));
+        assert!(orphan_cleanup_deletes_row("assistant.model", "assistant_id"));
+        assert!(!orphan_cleanup_deletes_row("conversation.message", "parent_id"));
+        assert!(!orphan_cleanup_deletes_row("conversation", "assistant_id"));
     }
 
     /// 同一 (object_type, column, local_fk) 多次命中只聚合计数，摘要只出一条

@@ -488,3 +488,16 @@ fn test_assistant_delete_nonexistent_relations() {
     let result = db.delete_assistant_model_config_by_assistant_id(999);
     assert!(result.is_ok());
 }
+
+/// delete_assistant_model_by_assistant_id 清掉助手模型绑定（delete_assistant API 应对齐）
+#[test]
+fn test_delete_assistant_model_by_assistant_id() {
+    let db = create_assistant_db();
+    let assistant_id = db.add_assistant("Model Owner", "Desc", None, false).unwrap();
+    db.add_assistant_model(assistant_id, 1, "gpt-4", "GPT-4").unwrap();
+    db.add_assistant_model(assistant_id, 2, "claude", "Claude").unwrap();
+    assert_eq!(db.get_assistant_model(assistant_id).unwrap().len(), 2);
+
+    db.delete_assistant_model_by_assistant_id(assistant_id).unwrap();
+    assert!(db.get_assistant_model(assistant_id).unwrap().is_empty());
+}

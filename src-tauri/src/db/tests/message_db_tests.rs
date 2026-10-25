@@ -498,3 +498,68 @@ fn test_message_update_content_nonexistent() {
     let result = msg_repo.update_content(99999, "New content");
     assert!(result.is_ok());
 }
+
+/// 删除消息时同步清理 message_attachment
+#[test]
+fn test_message_delete_clears_attachments() {
+    let conn = create_test_db();
+    conn.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, datetime('now'))",
+        ("Msg Cascade", Some(1i64)),
+    )
+    .unwrap();
+    let conversation_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO message (conversation_id, message_type, content, created_time) VALUES (?, ?, ?, datetime('now'))",
+        (conversation_id, "user", "with attachment"),
+    )
+    .unwrap();
+    let message_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO message_attachment (message_id, attachment_type, attachment_url) VALUES (?, ?, ?)",
+        (message_id, 1i64, "file:///b.png"),
+    )
+    .unwrap();
+    // Sibling attachment on another message must survive.
+    conn.execute(
+        "INSERT INTO message (conversation_id, message_type, content, created_time) VALUES (?, ?, ?, datetime('now'))",
+        (conversation_id, "user", "other"),
+    )
+    .unwrap();
+    let other_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO message_attachment (message_id, attachment_type, attachment_url) VALUES (?, ?, ?)",
+        (other_id, 1i64, "file:///c.png"),
+    )
+    .unwrap();
+
+    delete_attachments_for_message(&conn, message_id).unwrap();
+    conn.execute("DELETE FROM message WHERE id = ?", [message_id]).unwrap();
+
+    let gone: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM message_attachment WHERE message_id = ?",
+            [message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let kept: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM message_attachment WHERE message_id = ?",
+            [other_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(gone, 0);
+    assert_eq!(kept, 1);
+
+    // Also cover MessageRepository::delete path via free helper already used above;
+    // repository wraps the same SQL under write lock.
+    let (msg_repo, cid) = create_message_test_db();
+    let message = create_test_message(cid, "user", "to delete", None, Some(new_group_id()));
+    let created = msg_repo.create(&message).unwrap();
+    // Attachment insert through separate repo is awkward (separate memory DB);
+    // repository delete of a message with no attachments must still succeed.
+    msg_repo.delete(created.id).unwrap();
+    assert!(msg_repo.read(created.id).unwrap().is_none());
+}
