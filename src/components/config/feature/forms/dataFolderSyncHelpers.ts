@@ -92,7 +92,27 @@ export type SyncStatusSummaryInput = {
     failed_outbox_count: number;
     dead_letter_count?: number;
     server_cursor: number;
+    dangling_fk_count?: number;
+    dangling_fk_summary?: string | null;
 };
+
+/** Friendly dangling-FK notice for status text / detail row. */
+export function formatDanglingFkStatusText(
+    status: Pick<SyncStatusSummaryInput, "dangling_fk_count" | "dangling_fk_summary"> | null | undefined,
+): string | null {
+    if (!status) {
+        return null;
+    }
+    const summary = (status.dangling_fk_summary || "").trim();
+    if (summary) {
+        return summary;
+    }
+    const count = status.dangling_fk_count ?? 0;
+    if (count > 0) {
+        return `有 ${count} 条历史引用已失效，已按空值同步`;
+    }
+    return null;
+}
 
 /** Human-readable sync status line for the settings row. */
 export function formatSyncStatusText(status: SyncStatusSummaryInput | null | undefined): string {
@@ -114,7 +134,12 @@ export function formatSyncStatusText(status: SyncStatusSummaryInput | null | und
     } else {
         state = "未运行";
     }
-    return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
+    let text = `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
+    const dangling = formatDanglingFkStatusText(status);
+    if (dangling) {
+        text = `${text}。${dangling}`;
+    }
+    return text;
 }
 
 /** Whether「停止同步」should be enabled. */

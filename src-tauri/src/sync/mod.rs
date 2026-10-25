@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::db::get_db_path;
@@ -85,6 +85,10 @@ struct SyncRuntimeStatus {
     last_error: Option<String>,
     /// 本轮进程内累计的"远端赢"冲突解决数，前端据此提示用户本地修改被覆盖
     conflict_resolved_count: i64,
+    /// 最近一轮本地扫描中按空值处理的悬空外键次数（字段级）
+    dangling_fk_count: i64,
+    /// 友好中文摘要，如「有 N 条历史引用已失效，已按空值同步…」
+    dangling_fk_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +109,10 @@ pub struct SyncStatusDto {
     needs_reset: bool,
     conflict_resolved_count: i64,
     server_cursor: i64,
+    /// 最近一轮扫描中悬空外键按空值同步的次数
+    dangling_fk_count: i64,
+    /// 友好中文摘要（无悬空时为 null）
+    dangling_fk_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -817,6 +825,32 @@ pub async fn reset_sync_state(app_handle: AppHandle) -> Result<SyncStatusDto, St
     sync_status(&app_handle).await
 }
 
+/// 用户确认后：把本地悬空外键列置为 NULL（不自动改库）。
+/// 返回更新后的同步状态；成功后会调度一次后台同步。
+#[tauri::command]
+pub async fn cleanup_dangling_foreign_keys(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    let report = null_out_dangling_local_fks(&app_handle)?;
+    if let Some(state) = app_handle.try_state::<SyncState>() {
+        let mut runtime = state.status.lock().await;
+        if report.nulled_count > 0 {
+            runtime.dangling_fk_count = 0;
+            runtime.dangling_fk_summary = Some(format!(
+                "已清理 {} 条失效本地引用{}",
+                report.nulled_count,
+                format_dangling_kinds_suffix(&report.by_kind)
+            ));
+        } else {
+            runtime.dangling_fk_count = 0;
+            runtime.dangling_fk_summary = Some("未发现需要清理的失效引用".to_string());
+        }
+    }
+    emit_status_changed(&app_handle).await;
+    if report.nulled_count > 0 {
+        schedule_sync_after_local_change(&app_handle);
+    }
+    sync_status(&app_handle).await
+}
+
 async fn start_worker(app_handle: AppHandle) {
     let state = app_handle.state::<SyncState>();
     if state.status.lock().await.paused {
@@ -1058,8 +1092,9 @@ async fn run_sync_once_inner(
 
     let local_empty = is_local_sync_scope_empty(app_handle)?;
     if remote_status.remote_empty && !local_empty {
-        let queued = scan_local_changes(app_handle)?;
-        if queued > 0 {
+        let (queued, dangling) = scan_local_changes(app_handle)?;
+        store_dangling_fk_report(app_handle, &dangling).await;
+        if queued > 0 || dangling.total_hits > 0 {
             emit_status_changed(app_handle).await;
         }
         ensure_not_cancelled(cancel)?;
@@ -1072,8 +1107,9 @@ async fn run_sync_once_inner(
         return Ok(());
     }
 
-    let queued = scan_local_changes(app_handle)?;
-    if queued > 0 {
+    let (queued, dangling) = scan_local_changes(app_handle)?;
+    store_dangling_fk_report(app_handle, &dangling).await;
+    if queued > 0 || dangling.total_hits > 0 {
         emit_status_changed(app_handle).await;
     }
     ensure_not_cancelled(cancel)?;
@@ -1553,7 +1589,9 @@ fn update_dead_letter_failure(conn: &Connection, id: i64, error: &str) -> Result
 }
 
 fn sync_http_client() -> Result<reqwest::Client, String> {
+    // Force direct connect: LAN sync-server must not go through Clash/system HTTP_PROXY.
     reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())
@@ -1561,7 +1599,9 @@ fn sync_http_client() -> Result<reqwest::Client, String> {
 
 fn sync_notify_http_client() -> Result<reqwest::Client, String> {
     // SSE streams outlive the normal request timeout; only bound connect.
+    // Same no_proxy policy as sync_http_client — notify must reach LAN host directly.
     reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(NOTIFY_CONNECT_TIMEOUT_SECS))
         .pool_idle_timeout(Duration::from_secs(90))
         .build()
@@ -1668,14 +1708,16 @@ fn parse_sse_sync_cursor(block: &str) -> Option<i64> {
     value.get("cursor")?.as_i64()
 }
 
-fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
+fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanReport), String> {
     ensure_sync_db(app_handle)?;
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
     let sync_conn = open_sync_db(app_handle)?;
     let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
+    let mut dangling = DanglingFkScanReport::default();
     for spec in specs() {
-        let (snapshots, present_ids) = read_local_snapshots(app_handle, &spec, &sync_conn)?;
+        let (snapshots, present_ids) =
+            read_local_snapshots(app_handle, &spec, &sync_conn, &mut dangling)?;
         for snapshot in snapshots {
             if enqueue_snapshot_if_changed(&sync_conn, &snapshot, &device_id)? {
                 enqueued += 1;
@@ -1683,7 +1725,8 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
         }
         enqueued += scan_local_deletes(app_handle, &sync_conn, &spec, &present_ids)?;
     }
-    Ok(enqueued)
+    log_dangling_fk_summary(&dangling);
+    Ok((enqueued, dangling))
 }
 
 /// 删除检测：shadow 中已同步（非墓碑）但本轮快照里不存在的对象，
@@ -1880,6 +1923,7 @@ fn read_local_snapshots(
     app_handle: &AppHandle,
     spec: &SyncTableSpec,
     sync_conn: &Connection,
+    dangling: &mut DanglingFkScanReport,
 ) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
     let path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&path)?;
@@ -1941,17 +1985,23 @@ fn read_local_snapshots(
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
         present_ids.insert(object_id.clone());
 
-        let Some(refs) = build_fk_refs(spec, &raw_values, &mut fields, |object_type, value| {
-            if let Some(sync_id) = find_object_id(sync_conn, object_type, value)? {
-                return Ok(FkLookup::Resolved(sync_id));
-            }
-            // 未入 map：区分「依赖行还在，只是本轮未映射」与「悬空外键」
-            if dependency_row_exists(app_handle, object_type, value, &mut dep_conns)? {
-                Ok(FkLookup::Pending)
-            } else {
-                Ok(FkLookup::Dangling)
-            }
-        })?
+        let Some(refs) = build_fk_refs(
+            spec,
+            &raw_values,
+            &mut fields,
+            |object_type, value| {
+                if let Some(sync_id) = find_object_id(sync_conn, object_type, value)? {
+                    return Ok(FkLookup::Resolved(sync_id));
+                }
+                // 未入 map：区分「依赖行还在，只是本轮未映射」与「悬空外键」
+                if dependency_row_exists(app_handle, object_type, value, &mut dep_conns)? {
+                    Ok(FkLookup::Pending)
+                } else {
+                    Ok(FkLookup::Dangling)
+                }
+            },
+            Some(dangling),
+        )?
         else {
             // 外键指向的依赖行存在但尚未建立映射：本轮跳过该行，
             // 绝不把本地 rowid 作为外键值推送出去。下轮扫描会自然重试。
@@ -1977,6 +2027,194 @@ fn read_local_snapshots(
     Ok((snapshots, present_ids))
 }
 
+/// 一轮本地扫描内悬空外键的聚合报告。
+///
+/// 键为 (object_type, column, local_fk)；值为命中行数。整轮结束后打摘要日志，
+/// 并把友好中文摘要写入 SyncRuntimeStatus 供 UI 展示。
+#[derive(Debug, Default, Clone)]
+struct DanglingFkScanReport {
+    /// 字段级命中总数（一行多列悬空会计多次）
+    total_hits: i64,
+    /// (object_type, column, local_fk) → 行数
+    by_key: HashMap<(String, String, i64), usize>,
+    /// (object_type, column) → 行数，用于 UI top kinds
+    by_kind: HashMap<(String, String), usize>,
+}
+
+impl DanglingFkScanReport {
+    fn record(&mut self, object_type: &str, column: &str, local_fk: i64) {
+        self.total_hits += 1;
+        *self
+            .by_key
+            .entry((object_type.to_string(), column.to_string(), local_fk))
+            .or_default() += 1;
+        *self
+            .by_kind
+            .entry((object_type.to_string(), column.to_string()))
+            .or_default() += 1;
+    }
+}
+
+/// 清理结果（用户确认后的本地 NULL 操作）。
+#[derive(Debug, Default, Clone)]
+struct DanglingFkCleanupReport {
+    nulled_count: i64,
+    by_kind: HashMap<(String, String), usize>,
+}
+
+fn format_dangling_kinds_suffix(by_kind: &HashMap<(String, String), usize>) -> String {
+    if by_kind.is_empty() {
+        return String::new();
+    }
+    let mut kinds: Vec<_> = by_kind.iter().collect();
+    kinds.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let top: Vec<String> = kinds
+        .iter()
+        .take(3)
+        .map(|((obj, col), n)| format!("{obj}.{col}×{n}"))
+        .collect();
+    format!("（{}）", top.join("、"))
+}
+
+fn format_dangling_fk_summary(report: &DanglingFkScanReport) -> Option<String> {
+    if report.total_hits <= 0 {
+        return None;
+    }
+    Some(format!(
+        "有 {} 条历史引用已失效，已按空值同步{}",
+        report.total_hits,
+        format_dangling_kinds_suffix(&report.by_kind)
+    ))
+}
+
+fn log_dangling_fk_summary(report: &DanglingFkScanReport) {
+    if report.total_hits <= 0 {
+        return;
+    }
+    let mut keys: Vec<_> = report.by_key.iter().collect();
+    keys.sort_by(|a, b| a.0.cmp(b.0));
+    for ((object_type, column, local_fk), rows) in keys {
+        info!(
+            object_type = %object_type,
+            column = %column,
+            local_fk = %local_fk,
+            rows = %rows,
+            "Dangling foreign key omitted from sync snapshot (aggregated)"
+        );
+    }
+    info!(
+        total = report.total_hits,
+        kinds = report.by_kind.len(),
+        "Dangling foreign key scan summary"
+    );
+}
+
+async fn store_dangling_fk_report(app_handle: &AppHandle, report: &DanglingFkScanReport) {
+    let Some(state) = app_handle.try_state::<SyncState>() else {
+        return;
+    };
+    let mut runtime = state.status.lock().await;
+    runtime.dangling_fk_count = report.total_hits;
+    runtime.dangling_fk_summary = format_dangling_fk_summary(report);
+}
+
+/// 扫描并可选地把本地悬空外键列置为 NULL。
+///
+/// `mutate=false` 仅统计；`mutate=true` 写库。provider_id=0 哨兵不处理。
+fn scan_or_null_dangling_local_fks(
+    app_handle: &AppHandle,
+    mutate: bool,
+) -> Result<DanglingFkCleanupReport, String> {
+    let mut report = DanglingFkCleanupReport::default();
+    // 按 db_name 缓存连接，避免重复打开
+    let mut data_conns: HashMap<&'static str, Connection> = HashMap::new();
+    let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
+
+    for spec in specs() {
+        if spec.foreign_keys.is_empty() {
+            continue;
+        }
+        if !data_conns.contains_key(spec.db_name) {
+            let path = get_db_path(app_handle, spec.db_name)?;
+            data_conns.insert(spec.db_name, open_data_db(&path)?);
+        }
+        let columns = {
+            let conn = data_conns.get(spec.db_name).expect("data conn inserted");
+            existing_columns(conn, spec.table, spec.columns)?
+        };
+        if !columns.iter().any(|c| c == "id") {
+            continue;
+        }
+        let fk_cols: Vec<&ForeignKeySpec> = spec
+            .foreign_keys
+            .iter()
+            .filter(|fk| columns.iter().any(|c| c == fk.column))
+            .collect();
+        if fk_cols.is_empty() {
+            continue;
+        }
+        let select_cols = {
+            let mut cols = vec!["id".to_string()];
+            for fk in &fk_cols {
+                cols.push(fk.column.to_string());
+            }
+            cols
+        };
+        let sql = format!(
+            "SELECT {} FROM {} {}",
+            select_cols.join(", "),
+            spec.table,
+            spec.where_clause
+                .map(|w| format!("WHERE {w}"))
+                .unwrap_or_default(),
+        );
+        // 先读出待清理列表，结束对 data_conns 的不可变借用后再写
+        let to_null: Vec<(i64, &'static str)> = {
+            let conn = data_conns.get(spec.db_name).expect("data conn inserted");
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            let mut pending = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let local_id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                for (idx, fk) in fk_cols.iter().enumerate() {
+                    let value: Option<i64> = row.get(idx + 1).map_err(|e| e.to_string())?;
+                    let Some(value) = value else { continue };
+                    if is_provider_id_unset_sentinel(fk, value) {
+                        continue;
+                    }
+                    if dependency_row_exists(app_handle, fk.object_type, value, &mut dep_conns)? {
+                        continue;
+                    }
+                    pending.push((local_id, fk.column));
+                    *report
+                        .by_kind
+                        .entry((spec.object_type.to_string(), fk.column.to_string()))
+                        .or_default() += 1;
+                    report.nulled_count += 1;
+                }
+            }
+            pending
+        };
+        if mutate && !to_null.is_empty() {
+            let conn = data_conns.get_mut(spec.db_name).expect("data conn");
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            for (local_id, column) in to_null {
+                tx.execute(
+                    &format!("UPDATE {} SET {} = NULL WHERE id = ?1", spec.table, column),
+                    params![local_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(report)
+}
+
+fn null_out_dangling_local_fks(app_handle: &AppHandle) -> Result<DanglingFkCleanupReport, String> {
+    scan_or_null_dangling_local_fks(app_handle, true)
+}
+
 /// 外键本地解析结果：区分「已映射 / 依赖未入 map / 悬空」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FkLookup {
@@ -1994,11 +2232,15 @@ enum FkLookup {
 /// `fields` 置为 NULL 且不进入 refs。
 /// 返回 `Ok(None)` 表示存在「行在但尚未映射」的依赖，调用方必须跳过该行，
 /// 避免把本地 rowid 作为外键值泄露到 payload 中。
+///
+/// `dangling` 若提供，则按 (object_type, column, local_fk) 聚合计数，供整轮扫描后
+/// 打一条摘要日志，避免 per-row DEBUG 刷屏。
 fn build_fk_refs(
     spec: &SyncTableSpec,
     raw_values: &HashMap<String, JsonValue>,
     fields: &mut Map<String, JsonValue>,
     mut resolve: impl FnMut(&str, i64) -> Result<FkLookup, String>,
+    mut dangling: Option<&mut DanglingFkScanReport>,
 ) -> Result<Option<Map<String, JsonValue>>, String> {
     let mut refs = Map::new();
     for fk in spec.foreign_keys {
@@ -2016,13 +2258,9 @@ fn build_fk_refs(
                 FkLookup::Dangling => {
                     // 悬空外键：当作 NULL 推送，不永久卡住同步
                     fields.insert(fk.column.to_string(), JsonValue::Null);
-                    debug!(
-                        object_type = %spec.object_type,
-                        column = fk.column,
-                        local_fk = value,
-                        target = fk.object_type,
-                        "Omitting dangling foreign key from sync snapshot"
-                    );
+                    if let Some(report) = dangling.as_mut() {
+                        report.record(spec.object_type, fk.column, value);
+                    }
                 }
             }
         }
@@ -3948,6 +4186,8 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         needs_reset,
         conflict_resolved_count: runtime.conflict_resolved_count,
         server_cursor: get_cursor(app_handle).unwrap_or(0),
+        dangling_fk_count: runtime.dangling_fk_count,
+        dangling_fk_summary: runtime.dangling_fk_summary.clone(),
     })
 }
 
@@ -4626,7 +4866,7 @@ mod tests {
         let mut fields = Map::new();
         let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
             Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
-        })
+        }, None)
         .unwrap()
         .expect("all foreign keys resolvable");
         assert_eq!(refs.get("conversation_id").unwrap(), &json!("conversation-3"));
@@ -4649,7 +4889,7 @@ mod tests {
             } else {
                 Ok(FkLookup::Resolved(format!("{object_type}-x")))
             }
-        })
+        }, None)
         .unwrap();
         assert!(result.is_none());
     }
@@ -4666,7 +4906,7 @@ mod tests {
         let mut fields = Map::new();
         let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
             Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
-        })
+        }, None)
         .unwrap()
         .expect("null foreign key needs no ref");
         assert!(!refs.contains_key("parent_id"));
@@ -4688,18 +4928,64 @@ mod tests {
             ("llm_model_id".to_string(), json!(1)),
             ("content".to_string(), json!("hello")),
         ]);
-        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
-            match object_type {
+        let mut dangling = DanglingFkScanReport::default();
+        let refs = build_fk_refs(
+            &spec,
+            &raw_values,
+            &mut fields,
+            |object_type, value| match object_type {
                 "conversation" => Ok(FkLookup::Resolved(format!("conv-{value}"))),
                 "llm.model" => Ok(FkLookup::Dangling),
                 other => panic!("unexpected fk target {other}"),
-            }
-        })
+            },
+            Some(&mut dangling),
+        )
         .unwrap()
         .expect("dangling llm_model_id must not block snapshot");
         assert_eq!(refs.get("conversation_id").unwrap(), &json!("conv-10"));
         assert!(!refs.contains_key("llm_model_id"));
         assert_eq!(fields.get("llm_model_id").unwrap(), &JsonValue::Null);
+        assert_eq!(dangling.total_hits, 1);
+        assert_eq!(
+            dangling.by_key.get(&("conversation.message".into(), "llm_model_id".into(), 1)),
+            Some(&1)
+        );
+        let summary = format_dangling_fk_summary(&dangling).expect("summary");
+        assert!(summary.contains("有 1 条历史引用已失效"));
+        assert!(summary.contains("llm_model_id"));
+    }
+
+    /// 同一 (object_type, column, local_fk) 多次命中只聚合计数，摘要只出一条
+    #[test]
+    fn dangling_fk_report_aggregates_same_key() {
+        let mut report = DanglingFkScanReport::default();
+        report.record("conversation.message", "llm_model_id", 1);
+        report.record("conversation.message", "llm_model_id", 1);
+        report.record("conversation.message", "llm_model_id", 2);
+        report.record("conversation.message_attachment", "message_id", 99);
+        assert_eq!(report.total_hits, 4);
+        assert_eq!(
+            report
+                .by_key
+                .get(&("conversation.message".into(), "llm_model_id".into(), 1)),
+            Some(&2)
+        );
+        assert_eq!(
+            report
+                .by_kind
+                .get(&("conversation.message".into(), "llm_model_id".into())),
+            Some(&3)
+        );
+        let summary = format_dangling_fk_summary(&report).unwrap();
+        assert!(summary.starts_with("有 4 条历史引用已失效，已按空值同步"));
+        assert!(summary.contains("llm_model_id"));
+    }
+
+    /// sync HTTP client builders must disable system proxy (Clash LAN bypass)
+    #[test]
+    fn sync_http_clients_build_with_no_proxy() {
+        assert!(sync_http_client().is_ok());
+        assert!(sync_notify_http_client().is_ok());
     }
 
     /// provider_id=0 是未选 provider 哨兵：保留 0、不进 refs、不挡快照
@@ -4723,7 +5009,7 @@ mod tests {
                 "llm.provider" => panic!("provider_id=0 must not call resolve"),
                 other => panic!("unexpected fk target {other}"),
             }
-        })
+        }, None)
         .unwrap()
         .expect("provider_id=0 must not block assistant.model");
         assert_eq!(refs.get("assistant_id").unwrap(), &json!("asst-1"));
@@ -4774,7 +5060,7 @@ mod tests {
                 "llm.model" => Ok(FkLookup::Pending),
                 other => panic!("unexpected fk target {other}"),
             }
-        })
+        }, None)
         .unwrap();
         assert!(result.is_none(), "existing-but-unmapped dependency must still skip");
         // fields 未被清空（跳过时不应改写为 NULL）

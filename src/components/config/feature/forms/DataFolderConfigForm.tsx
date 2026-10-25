@@ -10,6 +10,7 @@ import { getErrorMessage } from "@/utils/error";
 import {
     canStopSync,
     decideSyncNowAction,
+    formatDanglingFkStatusText,
     formatSyncStatusText,
     friendlySyncError,
     saveThenSyncSuccessMessage,
@@ -37,6 +38,8 @@ interface SyncStatus {
     needs_reset: boolean;
     conflict_resolved_count: number;
     server_cursor: number;
+    dangling_fk_count?: number;
+    dangling_fk_summary?: string | null;
 }
 
 const STATUS_FALLBACK_POLL_MS = 30_000;
@@ -50,6 +53,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [retryingDeadLetters, setRetryingDeadLetters] = useState(false);
     const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
     const [resetting, setResetting] = useState(false);
+    const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+    const [cleaningDangling, setCleaningDangling] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
     const watchedServerUrl = useWatch({ control: form.control, name: "server_url" }) || "";
@@ -269,7 +274,24 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
+    const handleCleanupDanglingFks = useCallback(async () => {
+        setCleanupConfirmOpen(false);
+        setCleaningDangling(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("cleanup_dangling_foreign_keys");
+            setStatus(nextStatus);
+            const notice = formatDanglingFkStatusText(nextStatus);
+            toast.success(notice || "已清理失效的本地引用");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "清理失效引用失败"));
+        } finally {
+            setCleaningDangling(false);
+        }
+    }, []);
+
     const statusText = useMemo(() => formatSyncStatusText(status), [status]);
+    const danglingText = useMemo(() => formatDanglingFkStatusText(status), [status]);
+    const danglingCount = status?.dangling_fk_count ?? 0;
     const stopEnabled = canStopSync({
         mode,
         syncing: Boolean(status?.syncing) || syncing,
@@ -284,18 +306,28 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             { label: "最近错误", value: status?.last_error || "无" },
         ];
         return (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                {items.map((item) => (
-                    <div key={item.label} className="min-w-0 space-y-2">
-                        <div className="font-semibold text-sm text-foreground">{item.label}</div>
-                        <div className="text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap">
-                            {item.value}
+            <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    {items.map((item) => (
+                        <div key={item.label} className="min-w-0 space-y-2">
+                            <div className="font-semibold text-sm text-foreground">{item.label}</div>
+                            <div className="text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap">
+                                {item.value}
+                            </div>
                         </div>
+                    ))}
+                </div>
+                {danglingText ? (
+                    <div className="text-sm text-amber-700 dark:text-amber-300 px-3 py-2 bg-amber-50 dark:bg-amber-950/40 rounded-md break-words">
+                        {danglingText}
+                        {danglingCount > 0
+                            ? " 如需把本机对应字段也清空，可点下方「清理失效引用」。"
+                            : ""}
                     </div>
-                ))}
+                ) : null}
             </div>
         );
-    }, [status?.last_error, status?.last_sync_at, statusText]);
+    }, [danglingCount, danglingText, status?.last_error, status?.last_sync_at, statusText]);
 
     const renderSyncActionButtons = useCallback(() => {
         return (
@@ -342,9 +374,25 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 >
                     {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
                 </Button>
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="hover:bg-muted hover:border-border"
+                    disabled={
+                        mode !== "self_hosted"
+                        || cleaningDangling
+                        || saving
+                        || danglingCount === 0
+                    }
+                    onClick={() => setCleanupConfirmOpen(true)}
+                >
+                    {cleaningDangling ? "清理中..." : "清理失效引用"}
+                </Button>
             </div>
         );
     }, [
+        cleaningDangling,
+        danglingCount,
         handleRetryDeadLetters,
         handleRetryFailed,
         handleStopSync,
@@ -483,6 +531,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 confirmText="将清空本机的同步游标、对象映射与待推送队列，然后与新服务器重新全量同步。本机数据本身不会被删除，但未推送的本地修改会以全量方式重新上传。确认继续？"
                 onConfirm={handleResetSyncState}
                 onCancel={() => setResetConfirmOpen(false)}
+            />
+            <ConfirmDialog
+                isOpen={cleanupConfirmOpen}
+                title="清理失效引用"
+                confirmText={`将把本机约 ${danglingCount} 处悬空外键（如 llm_model_id、message_id 等指向已不存在行的字段）置为空值。同步推送时本就会按空值处理；此操作会改写本地数据库，请确认后继续。`}
+                onConfirm={handleCleanupDanglingFks}
+                onCancel={() => setCleanupConfirmOpen(false)}
             />
         </>
     );

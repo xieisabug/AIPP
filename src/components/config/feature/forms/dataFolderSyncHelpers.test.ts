@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
     canStopSync,
     decideSyncNowAction,
+    formatDanglingFkStatusText,
     formatSyncStatusText,
     friendlySyncError,
     normalizeSyncServerUrl,
@@ -125,5 +126,34 @@ describe("dataFolderSyncHelpers", () => {
     it("saveThenSyncSuccessMessage merges to one toast", () => {
         expect(saveThenSyncSuccessMessage(false)).toContain("已开始同步");
         expect(saveThenSyncSuccessMessage(true)).toContain("开始同步");
+    });
+
+    it("formatDanglingFkStatusText prefers backend summary", () => {
+        expect(
+            formatDanglingFkStatusText({
+                dangling_fk_count: 3,
+                dangling_fk_summary: "有 3 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×3）",
+            }),
+        ).toContain("有 3 条历史引用已失效");
+        expect(formatDanglingFkStatusText({ dangling_fk_count: 2 })).toBe(
+            "有 2 条历史引用已失效，已按空值同步",
+        );
+        expect(formatDanglingFkStatusText({ dangling_fk_count: 0 })).toBeNull();
+    });
+
+    it("formatSyncStatusText appends dangling FK notice", () => {
+        expect(
+            formatSyncStatusText({
+                mode: "self_hosted",
+                syncing: false,
+                connected: true,
+                running: true,
+                pending_outbox_count: 0,
+                failed_outbox_count: 0,
+                server_cursor: 1,
+                dangling_fk_count: 5,
+                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×5）",
+            }),
+        ).toContain("有 5 条历史引用已失效");
     });
 });
