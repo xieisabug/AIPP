@@ -637,7 +637,7 @@ pub async fn save_sync_settings(
             let token = token.unwrap_or_default().trim().to_string();
             let existing = previous.token.clone();
             if token.is_empty() && existing.is_none() {
-                return Err("自建同步模式需要填写访问 token".to_string());
+                return Err("自建同步模式需要填写访问 token（填写后点保存，或点「立即同步」会自动保存）".to_string());
             }
             // 服务器地址或账号 token 变更：若本地已有同步状态（cursor/shadow/map），
             // 不能静默沿用——置 needs_reset，等用户确认后重新全量同步。
@@ -676,7 +676,7 @@ pub async fn trigger_sync_now(app_handle: AppHandle) -> Result<SyncStatusDto, St
         return Err("当前是本地模式，未启用自建同步".to_string());
     }
     if settings.token.as_deref().unwrap_or_default().trim().is_empty() {
-        return Err("缺少同步 token，请先保存自建同步配置".to_string());
+        return Err("缺少同步 token：请填写访问 token 后点「立即同步」（会自动保存），或先保存配置再同步".to_string());
     }
     run_sync_once(&app_handle).await;
     sync_status(&app_handle).await
@@ -689,7 +689,7 @@ pub async fn retry_failed_sync_outbox(app_handle: AppHandle) -> Result<SyncStatu
         return Err("当前是本地模式，未启用自建同步".to_string());
     }
     if settings.token.as_deref().unwrap_or_default().trim().is_empty() {
-        return Err("缺少同步 token，请先保存自建同步配置".to_string());
+        return Err("缺少同步 token：请填写访问 token 并保存后再重试失败项".to_string());
     }
 
     let retried = reset_failed_events(&app_handle)?;
@@ -3616,7 +3616,40 @@ fn load_sync_token(app_handle: &AppHandle) -> Result<Option<String>, String> {
         return Ok(None);
     };
     let key = get_or_create_master_key(app_handle)?;
-    decrypt_secret_with_key(&key, &entry.ciphertext, &entry.nonce).map(Some)
+    // 主密钥轮换/文件重建后，旧 ciphertext 会 decrypt 失败；若把 Err 冒泡，
+    // save_sync_settings / get_sync_status / trigger_sync_now 都会被砖死，无法写入新 token。
+    decrypt_stored_sync_token(&key, &entry.ciphertext, &entry.nonce, || {
+        db.delete_secure_config(TOKEN_SCOPE, TOKEN_KEY)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// 解密已持久化的 sync token。成功返回 `Some`；AEAD/密钥不匹配/损坏时记 warn，
+/// 可选清理坏行后返回 `None`（视为未配置），避免设置/同步 API 被砖死。
+fn decrypt_stored_sync_token(
+    key: &[u8; 32],
+    ciphertext: &str,
+    nonce: &str,
+    clear_bad_row: impl FnOnce() -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    match decrypt_secret_with_key(key, ciphertext, nonce) {
+        Ok(token) => Ok(Some(token)),
+        Err(err) => {
+            warn!(
+                error = %err,
+                scope = TOKEN_SCOPE,
+                key = TOKEN_KEY,
+                "Stored sync token decrypt failed (master key mismatch or corrupt); treating as unset"
+            );
+            if let Err(delete_err) = clear_bad_row() {
+                warn!(
+                    error = %delete_err,
+                    "Failed to delete undecryptable sync token secure_config row"
+                );
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn save_sync_token(app_handle: &AppHandle, token: &str) -> Result<(), String> {
@@ -3857,6 +3890,47 @@ mod tests {
         let (ciphertext, nonce) = encrypt_secret_with_key(&key, "dev-token").unwrap();
         assert_ne!(ciphertext, "dev-token");
         assert_eq!(decrypt_secret_with_key(&key, &ciphertext, &nonce).unwrap(), "dev-token");
+    }
+
+    #[test]
+    fn decrypt_stored_sync_token_wrong_key_returns_none_and_clears_row() {
+        let old_key: [u8; 32] = [1; 32];
+        let new_key: [u8; 32] = [2; 32];
+        let (ciphertext, nonce) = encrypt_secret_with_key(&old_key, "stale-token").unwrap();
+        let mut cleared = false;
+        let result = decrypt_stored_sync_token(&new_key, &ciphertext, &nonce, || {
+            cleared = true;
+            Ok(())
+        })
+        .expect("decrypt mismatch must not brick load path");
+        assert_eq!(result, None);
+        assert!(cleared, "undecryptable row should be cleared for a clean re-save");
+    }
+
+    #[test]
+    fn decrypt_stored_sync_token_wrong_key_still_none_when_clear_fails() {
+        let old_key: [u8; 32] = [3; 32];
+        let new_key: [u8; 32] = [4; 32];
+        let (ciphertext, nonce) = encrypt_secret_with_key(&old_key, "stale-token").unwrap();
+        let result = decrypt_stored_sync_token(&new_key, &ciphertext, &nonce, || {
+            Err("delete failed".to_string())
+        })
+        .expect("clear failure must still return Ok(None)");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn decrypt_stored_sync_token_success_keeps_token_and_skips_clear() {
+        let key: [u8; 32] = [8; 32];
+        let (ciphertext, nonce) = encrypt_secret_with_key(&key, "good-token").unwrap();
+        let mut cleared = false;
+        let result = decrypt_stored_sync_token(&key, &ciphertext, &nonce, || {
+            cleared = true;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(result.as_deref(), Some("good-token"));
+        assert!(!cleared, "successful decrypt must not delete the row");
     }
 
     /// mock keyring：set_password 看似成功，但随后 get 仍 NoEntry（不持久化）。
