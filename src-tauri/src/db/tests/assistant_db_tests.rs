@@ -12,6 +12,17 @@
 use crate::db::assistant_db::*;
 use rusqlite::Connection;
 
+#[test]
+fn test_model_configs_legacy_null_binding_uses_unbound_sentinel() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE assistant_model_config(id INTEGER PRIMARY KEY, assistant_id INTEGER, assistant_model_id INTEGER, name TEXT, value TEXT, value_type TEXT);
+        INSERT INTO assistant_model_config VALUES (1, 1, NULL, 'temperature', '0.7', 'number');").unwrap();
+    let db = AssistantDatabase { conn, mcp_conn: Connection::open_in_memory().unwrap() };
+    assert_eq!(db.get_assistant_model_configs(1).unwrap()[0].assistant_model_id, -1);
+    assert_eq!(db.get_assistant_model_configs_with_model_id(1, -1).unwrap().len(), 1);
+    assert!(db.get_assistant_model_configs_with_model_id(1, 99).unwrap().is_empty());
+}
+
 // ============================================================================
 // 测试辅助函数
 // ============================================================================

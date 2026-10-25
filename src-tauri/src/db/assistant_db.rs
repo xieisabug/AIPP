@@ -527,7 +527,7 @@ impl AssistantDatabase {
             Ok(AssistantModelConfig {
                 id: row.get(0)?,
                 assistant_id: row.get(1)?,
-                assistant_model_id: row.get(2)?,
+                assistant_model_id: row.get::<_, Option<i64>>(2)?.unwrap_or(-1),
                 name: row.get(3)?,
                 value: row.get(4)?,
                 value_type: row.get(5)?,
@@ -547,13 +547,13 @@ impl AssistantDatabase {
         assistant_id: i64,
         assistant_model_id: i64,
     ) -> Result<Vec<AssistantModelConfig>> {
-        let mut stmt = self.conn.prepare("SELECT id, assistant_id, assistant_model_id, name, value, value_type FROM assistant_model_config WHERE assistant_id = ? AND assistant_model_id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT id, assistant_id, assistant_model_id, name, value, value_type FROM assistant_model_config WHERE assistant_id = ? AND COALESCE(assistant_model_id, -1) = ?")?;
         let assistant_model_config_iter =
             stmt.query_map(params![assistant_id, assistant_model_id], |row| {
                 Ok(AssistantModelConfig {
                     id: row.get(0)?,
                     assistant_id: row.get(1)?,
-                    assistant_model_id: row.get(2)?,
+                    assistant_model_id: row.get::<_, Option<i64>>(2)?.unwrap_or(-1),
                     name: row.get(3)?,
                     value: row.get(4)?,
                     value_type: row.get(5)?,

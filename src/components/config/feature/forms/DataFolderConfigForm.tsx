@@ -25,6 +25,7 @@ import {
     isAutoSyncEnabled,
     saveThenSyncSuccessMessage,
     shouldTriggerSyncAfterSave,
+    syncConflictNotice,
 } from "./dataFolderSyncHelpers";
 
 interface DataFolderConfigFormProps {
@@ -45,6 +46,7 @@ interface SyncStatus {
     pushing_outbox_count: number;
     failed_outbox_count: number;
     dead_letter_count: number;
+    dead_letter_summary?: string | null;
     needs_reset: boolean;
     conflict_resolved_count: number;
     server_cursor: number;
@@ -53,6 +55,8 @@ interface SyncStatus {
 }
 
 const STATUS_FALLBACK_POLL_MS = 30_000;
+// Survives settings panel remounts; lifetime counters are never fresh conflicts.
+const conflictNotices = new Map<string, { count: number; pending: number }>();
 
 const SYNC_ACTIONS_HINT =
     "开启自动同步后，本地变更会防抖推送并定期/经服务器通知拉取。关闭后后台 worker 持久暂停；仍可用「立即同步一次」手动跑一轮。无论自动开或关，同步进行中都可「停止同步」取消本轮（不会关自动同步）。「立即同步一次」也会重试失败项。";
@@ -79,6 +83,7 @@ function metricValueClass(metric: SyncStatusMetric): string {
 
 export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form }) => {
     const [status, setStatus] = useState<SyncStatus | null>(null);
+    const [statusReadError, setStatusReadError] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [stopping, setStopping] = useState(false);
@@ -94,10 +99,20 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const watchedServerUrl = useWatch({ control: form.control, name: "server_url" }) || "";
     const isPlaintextUrl = watchedServerUrl.trim().toLowerCase().startsWith("http://");
 
+    const acceptStatus = useCallback((next: SyncStatus) => {
+        const notice = syncConflictNotice(conflictNotices.get(next.server_url), next.conflict_resolved_count, next.syncing);
+        conflictNotices.set(next.server_url, notice.state);
+        setStatus(next);
+        setStatusReadError(null);
+        if (notice.delta > 0) {
+            toast.warning(`有 ${notice.delta} 处修改与服务器冲突，已采用服务器版本`, { id: "sync-conflicts" });
+        }
+    }, []);
+
     const loadStatus = useCallback(async (syncFormValues = false) => {
         try {
             const nextStatus = await invoke<SyncStatus>("get_sync_status");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             if (syncFormValues) {
                 form.reset({
                     mode: nextStatus.mode || "local",
@@ -106,26 +121,19 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 });
             }
         } catch (error) {
-            toast.error(friendlySyncError(getErrorMessage(error), "读取同步状态失败"));
+            setStatusReadError(friendlySyncError(getErrorMessage(error), "读取同步状态失败"));
         }
-    }, [form]);
+    }, [form, acceptStatus]);
 
     useEffect(() => {
         void loadStatus(true);
         const unlistenPromise = listen<SyncStatus>("sync_status_changed", (event) => {
-            setStatus((prev) => {
-                const next = event.payload;
-                const resolvedDelta = (next.conflict_resolved_count ?? 0) - (prev?.conflict_resolved_count ?? 0);
-                if (resolvedDelta > 0) {
-                    toast.warning(`有 ${resolvedDelta} 处修改与服务器冲突，已采用服务器版本`);
-                }
-                return next;
-            });
+            acceptStatus(event.payload);
         });
         return () => {
             void unlistenPromise.then((unlisten) => unlisten());
         };
-    }, [loadStatus]);
+    }, [loadStatus, acceptStatus]);
 
     useEffect(() => {
         if (mode !== "self_hosted") {
@@ -305,7 +313,11 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         try {
             const nextStatus = await invoke<SyncStatus>("retry_sync_dead_letters");
             setStatus(nextStatus);
-            toast.success("已重试无法应用的变更");
+            if (nextStatus.dead_letter_count > 0) {
+                toast.warning(`重试后仍有 ${nextStatus.dead_letter_count} 条无法应用，请查看具体原因`, { id: "sync-dead-letters" });
+            } else {
+                toast.success("无法应用的变更已全部处理");
+            }
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "重试无法应用的变更失败"));
         } finally {
@@ -414,6 +426,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                         </div>
                     ))}
                 </div>
+                {statusReadError ? <p className="text-sm text-destructive break-words">{statusReadError}</p> : null}
+                {status?.dead_letter_summary ? (
+                    <details className="text-sm text-destructive break-words">
+                        <summary className="cursor-pointer">无法应用的原因（{status.dead_letter_count} 条）</summary>
+                        <p className="mt-2 whitespace-pre-wrap">{status.dead_letter_summary}</p>
+                    </details>
+                ) : null}
                 {danglingText ? (
                     <div className="text-sm text-amber-700 dark:text-amber-300 px-3 py-2 bg-amber-50 dark:bg-amber-950/40 rounded-md break-words">
                         {danglingText}
@@ -424,7 +443,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 ) : null}
             </div>
         );
-    }, [connectionState, danglingCount, danglingText, status?.failed_outbox_count, status?.last_error, status?.last_sync_at, status?.syncing, statusMetrics, syncing]);
+    }, [connectionState, danglingCount, danglingText, statusReadError, status?.dead_letter_count, status?.dead_letter_summary, status?.failed_outbox_count, status?.last_error, status?.last_sync_at, status?.syncing, statusMetrics, syncing]);
 
     const renderSyncActionButtons = useCallback(() => {
         // Auto-sync toggle is the persistent on/off. Stop shows while any round is syncing.

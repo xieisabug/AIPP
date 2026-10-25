@@ -13,11 +13,13 @@ written by conversation APIs).
 Fork when (new insert only):
 
 - legacy `parent_id` sibling exists, or
-- sibling `generation_group` under the same `parent_group_id`, or
-- local tip is still unconfirmed (`sync_shadow` miss) / local response unfinished,
-  and the remote root insert is a different tip
+- sibling `generation_group` under the same `parent_group_id`
 
 **Guarantee:** non-empty conversation + `parent_id` None normal insert → **no fork**.
+Unconfirmed local rows, delayed acknowledgements and unfinished historical responses
+are not proof of divergent ancestry. Root inserts without ancestry do not fork.
+Responses in an already routed remote generation group and its descendants reuse
+that fork; subsequent streaming updates stay with the mapped message's conversation.
 
 ## Fork point
 
@@ -33,5 +35,23 @@ the entire local tip, into C'. Remote message lands on C'.
 See also: [AIPP-mobile-sync-hostbridge-设计方案.md](./AIPP-mobile-sync-hostbridge-设计方案.md) §4.3.
 
 Deferred: execution lease, full Host Bridge WS/relay/E2EE; stamping `parent_group_id`
-on every normal `ask_ai` continue (both-sides-already-pushed concurrent tips without
-unconfirmed/local-running signals). SSE notify: shipped as `GET /v1/sync/notify`.
+on every normal `ask_ai` continue. Without ancestry, concurrent root turns cannot
+be reliably distinguished from a normal delayed pull. SSE notify: shipped as
+`GET /v1/sync/notify`.
+
+## Identity and replay
+
+Payload comparisons use sync references rather than device-local FK numbers.
+Natural/unique-key merges preserve previous identities as reference aliases. Old
+remote versions and delayed acknowledgements cannot roll back an applied version.
+Across merged aliases, server sequence orders changes because each UUID has its own
+independent version counter. Known provider IDs embedded in model-selection settings
+also carry sync references; legacy values without identity are rejected explicitly.
+Only unsent pending snapshots are coalesced; attempted events retain their event ID,
+base version and payload for idempotent retries. One object has at most one outstanding event in
+a push window; accepted predecessors rebase unsent successors.
+
+Required ownership references (for example message → conversation) must not be
+uploaded as NULL. Invalid historical changes remain in dead letters with their
+object ID and failure reason; no conversation is invented to hide missing data.
+Existing fork conversations are not automatically deleted or merged.

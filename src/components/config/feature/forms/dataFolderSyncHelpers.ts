@@ -3,6 +3,14 @@ export function normalizeSyncServerUrl(url: string | null | undefined): string {
     return (url || "").trim().replace(/\/+$/, "");
 }
 
+/** Accumulate new conflicts and notify once when the round ends. */
+export function syncConflictNotice(previous: { count: number; pending: number } | undefined, count: number, syncing: boolean) {
+    // A polling response can arrive after a newer event. Do not lower its baseline.
+    if (previous && count < previous.count) return { state: previous, delta: 0 };
+    const pending = previous && count >= previous.count ? previous.pending + count - previous.count : 0;
+    return { state: { count, pending: syncing ? pending : 0 }, delta: syncing ? 0 : pending };
+}
+
 export type SyncAutoSaveDecision =
     | { action: "sync_only" }
     | { action: "save_then_sync" }
@@ -109,7 +117,7 @@ export function formatDanglingFkStatusText(
     }
     const count = status.dangling_fk_count ?? 0;
     if (count > 0) {
-        return `有 ${count} 条历史引用已失效，已按空值同步`;
+        return `有 ${count} 条历史引用已失效，缺少必需归属的记录已暂停上传`;
     }
     return null;
 }

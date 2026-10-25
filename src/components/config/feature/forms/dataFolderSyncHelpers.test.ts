@@ -17,9 +17,18 @@ import {
     normalizeSyncServerUrl,
     saveThenSyncSuccessMessage,
     shouldTriggerSyncAfterSave,
+    syncConflictNotice,
 } from "./dataFolderSyncHelpers";
 
 describe("dataFolderSyncHelpers", () => {
+    it("should ignore older polling counters when a newer conflict status was received", () => {
+        const first = syncConflictNotice(undefined, 10, false);
+        const next = syncConflictNotice(first.state, 12, false);
+        expect(next.delta).toBe(2);
+        const delayed = syncConflictNotice(next.state, 10, false);
+        expect(delayed.delta).toBe(0);
+        expect(syncConflictNotice(delayed.state, 12, false).delta).toBe(0);
+    });
     it("normalizeSyncServerUrl strips trailing slashes", () => {
         expect(normalizeSyncServerUrl(" https://sync.example.com/ ")).toBe(
             "https://sync.example.com",
@@ -237,7 +246,7 @@ describe("dataFolderSyncHelpers", () => {
             }),
         ).toContain("有 3 条历史引用已失效");
         expect(formatDanglingFkStatusText({ dangling_fk_count: 2 })).toBe(
-            "有 2 条历史引用已失效，已按空值同步",
+            "有 2 条历史引用已失效，缺少必需归属的记录已暂停上传",
         );
         expect(formatDanglingFkStatusText({ dangling_fk_count: 0 })).toBeNull();
     });
@@ -294,5 +303,25 @@ describe("dataFolderSyncHelpers", () => {
                 syncing: false,
             }),
         ).toBe("无");
+    });
+});
+
+
+describe("syncConflictNotice", () => {
+    it("should ignore historical conflicts when settings first opens", () => {
+        expect(syncConflictNotice(undefined, 100, false).delta).toBe(0);
+    });
+    it("should notify once when a round with several batches completes", () => {
+        const baseline = syncConflictNotice(undefined, 100, false);
+        const first = syncConflictNotice(baseline.state, 103, true);
+        const second = syncConflictNotice(first.state, 108, true);
+        expect(first.delta).toBe(0);
+        expect(second.delta).toBe(0);
+        const done = syncConflictNotice(second.state, 108, false);
+        expect(done.delta).toBe(8);
+        expect(syncConflictNotice(done.state, 108, false).delta).toBe(0);
+    });
+    it("should avoid a notice when an older counter arrives", () => {
+        expect(syncConflictNotice({ count: 100, pending: 5 }, 0, false).delta).toBe(0);
     });
 });

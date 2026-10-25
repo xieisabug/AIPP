@@ -66,13 +66,9 @@ pub fn detect_concurrent_message_divergence(input: &DivergenceInput) -> bool {
         return false;
     }
 
-    // parent_id and parent_group_id both None (normal ask_ai writers).
-    // Only fork when local already has a concurrent tip or is mid-turn —
-    // never merely because the conversation already has messages.
-    if input.local_runtime_running || input.local_has_unconfirmed_tip {
-        return true;
-    }
-
+    // Missing ancestry is not evidence of concurrent continuation. In particular,
+    // bootstrap, delayed acknowledgements and historical unfinished responses all
+    // produce unconfirmed/running tips during an otherwise linear pull.
     false
 }
 
@@ -163,17 +159,17 @@ mod tests {
     }
 
     #[test]
-    fn unconfirmed_local_tip_with_root_insert_is_divergence() {
+    fn test_unconfirmed_local_tip_without_ancestry_does_not_fork() {
         let mut input = base_insert();
         input.local_has_unconfirmed_tip = true;
-        assert!(detect_concurrent_message_divergence(&input));
+        assert!(!detect_concurrent_message_divergence(&input));
     }
 
     #[test]
-    fn runtime_running_with_root_insert_is_divergence() {
+    fn test_unfinished_response_without_ancestry_does_not_fork() {
         let mut input = base_insert();
         input.local_runtime_running = true;
-        assert!(detect_concurrent_message_divergence(&input));
+        assert!(!detect_concurrent_message_divergence(&input));
     }
 
     #[test]

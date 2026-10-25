@@ -39,7 +39,7 @@ const SYNC_INTERVAL_SECS: u64 = 45;
 const DEBOUNCE_MS: u64 = 1200;
 const HTTP_TIMEOUT_SECS: u64 = 30;
 /// Soft per-request event cap (server allows up to 500 by default).
-const PUSH_BATCH_MAX_EVENTS: usize = 25;
+const PUSH_BATCH_MAX_EVENTS: usize = 100;
 /// Soft serialized-body budget so normal batches stay under typical proxy/server limits.
 const PUSH_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 const OVERSIZED_PUSH_REASON: &str =
@@ -109,6 +109,7 @@ pub struct SyncStatusDto {
     pushing_outbox_count: i64,
     failed_outbox_count: i64,
     dead_letter_count: i64,
+    dead_letter_summary: Option<String>,
     needs_reset: bool,
     conflict_resolved_count: i64,
     server_cursor: i64,
@@ -346,7 +347,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.model",
             columns: &["id", "name", "llm_provider_id", "code", "description", "vision_support", "audio_support", "video_support"],
             natural_key_columns: &[],
-            unique_key_columns: &[],
+            unique_key_columns: &["llm_provider_id", "code"],
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
@@ -359,7 +360,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.model_request_mode_preference",
             columns: &["id", "llm_provider_id", "model_code", "request_mode", "created_time", "updated_time"],
             natural_key_columns: &[],
-            unique_key_columns: &[],
+            unique_key_columns: &["llm_provider_id", "model_code"],
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
@@ -430,7 +431,7 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "mcp.server",
             columns: &["id", "name", "description", "transport_type", "url", "timeout", "is_long_running", "is_enabled", "is_builtin", "is_deletable", "created_time"],
             natural_key_columns: &[],
-            unique_key_columns: &[],
+            unique_key_columns: &["name"],
             seed_official_ids: &[],
             official_column: Some("is_builtin"),
             foreign_keys: &[],
@@ -1079,6 +1080,7 @@ where
     E: std::fmt::Display,
 {
     tokio::select! {
+        biased;
         _ = cancel.cancelled() => Err(SYNC_STOPPED_MSG.to_string()),
         result = fut => result.map_err(|e| e.to_string()),
     }
@@ -1623,6 +1625,10 @@ fn record_dead_letter(conn: &Connection, change: &PullChange, error: &str) {
 fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize, usize), String> {
     ensure_sync_db(app_handle)?;
     let conn = open_sync_db(app_handle)?;
+    replay_dead_letter_rows(&conn, |change| apply_change(app_handle, &conn, change, device_id))
+}
+
+fn replay_dead_letter_rows(conn: &Connection, mut apply: impl FnMut(&PullChange) -> Result<(), String>) -> Result<(usize, usize), String> {
     let pending: Vec<(i64, String)> = {
         let mut stmt = conn
             .prepare("SELECT id, change_json FROM sync_dead_letter ORDER BY id")
@@ -1635,27 +1641,38 @@ fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize
     if pending.is_empty() {
         return Ok((0, 0));
     }
+    let total = pending.len();
     let mut resolved = 0usize;
-    for (id, change_json) in &pending {
-        let change: PullChange = match serde_json::from_str(change_json) {
+    let mut retry = pending;
+    loop {
+      let before = resolved;
+      let mut deferred = Vec::new();
+      for (id, change_json) in retry {
+        let change: PullChange = match serde_json::from_str(&change_json) {
             Ok(change) => change,
             Err(err) => {
-                update_dead_letter_failure(&conn, *id, &format!("死信反序列化失败: {err}"))?;
+                update_dead_letter_failure(conn, id, &format!("死信反序列化失败: {err}"))?;
                 continue;
             }
         };
-        match apply_change(app_handle, &conn, &change, device_id) {
+        match apply(&change) {
             Ok(()) => {
                 conn.execute("DELETE FROM sync_dead_letter WHERE id = ?1", params![id])
                     .map_err(|e| e.to_string())?;
                 resolved += 1;
             }
             Err(err) => {
-                update_dead_letter_failure(&conn, *id, &err)?;
+                update_dead_letter_failure(conn, id, &err)?;
+                if is_dependency_pending_error(&err) {
+                    deferred.push((id, change_json));
+                }
             }
         }
+      }
+      if deferred.is_empty() || resolved == before { break; }
+      retry = deferred;
     }
-    let remaining = pending.len() - resolved;
+    let remaining = total - resolved;
     if resolved > 0 {
         debug!(resolved, remaining, "Replayed sync dead letters");
     }
@@ -1674,12 +1691,14 @@ fn update_dead_letter_failure(conn: &Connection, id: i64, error: &str) -> Result
 }
 
 fn sync_http_client() -> Result<reqwest::Client, String> {
-    // Force direct connect: LAN sync-server must not go through Clash/system HTTP_PROXY.
-    reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| e.to_string())
+    }).clone()
 }
 
 fn sync_notify_http_client() -> Result<reqwest::Client, String> {
@@ -1796,7 +1815,8 @@ fn parse_sse_sync_cursor(block: &str) -> Option<i64> {
 fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanReport), String> {
     ensure_sync_db(app_handle)?;
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
-    let sync_conn = open_sync_db(app_handle)?;
+    let mut sync_conn = open_sync_db(app_handle)?;
+    let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
     let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
     let mut dangling = DanglingFkScanReport::default();
@@ -1810,6 +1830,7 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
         }
         enqueued += scan_local_deletes(app_handle, &sync_conn, &spec, &present_ids)?;
     }
+    sync_conn.commit().map_err(|e| e.to_string())?;
     log_dangling_fk_summary(&dangling);
     Ok((enqueued, dangling))
 }
@@ -1988,8 +2009,8 @@ fn enqueue_delete_event(
     .map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO sync_outbox
-         (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
-         VALUES (?1, ?2, ?3, 'delete', NULL, ?4, ?5, ?6, ?7, 'pending')",
+         (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status, sent_once)
+         VALUES (?1, ?2, ?3, 'delete', NULL, ?4, ?5, ?6, ?7, 'pending', 0)",
         params![
             Uuid::new_v4().to_string(),
             spec.object_type,
@@ -2070,7 +2091,7 @@ fn read_local_snapshots(
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
         present_ids.insert(object_id.clone());
 
-        let Some(refs) = build_fk_refs(
+        let Some(mut refs) = build_fk_refs(
             spec,
             &raw_values,
             &mut fields,
@@ -2098,10 +2119,18 @@ fn read_local_snapshots(
             continue;
         };
 
+        if let Some((_, provider_id)) = embedded_provider_value(spec.object_type, &fields) {
+            let Some(provider_sync_id) = find_object_id(sync_conn, "llm.provider", provider_id)? else {
+                // Never transport a device-local provider ID without its sync identity.
+                continue;
+            };
+            refs.insert("value_provider_id".into(), json!(provider_sync_id));
+        }
+
         let payload = json!({ "fields": fields, "refs": refs });
         let payload_json =
             serde_json::to_string(&payload).map_err(|e| format!("serialize payload: {e}"))?;
-        let payload_hash = hash_text(&payload_json);
+        let payload_hash = sync_payload_hash(sync_conn, Some(&payload))?;
         snapshots.push(LocalObjectSnapshot {
             object_type: spec.object_type.to_string(),
             object_id,
@@ -2193,7 +2222,7 @@ fn format_dangling_fk_summary(report: &DanglingFkScanReport) -> Option<String> {
         return None;
     }
     Some(format!(
-        "有 {} 条历史引用已失效，已按空值同步{}",
+        "有 {} 条历史引用已失效，缺少必需归属的记录已暂停上传{}",
         report.total_hits,
         format_dangling_kinds_suffix(&report.by_kind)
     ))
@@ -2304,6 +2333,9 @@ fn scan_or_null_dangling_local_fks(
                     if fk.is_soft() {
                         continue;
                     }
+                    if spec.object_type == "assistant.model_config" && fk.column == "assistant_model_id" && value <= 0 {
+                        continue;
+                    }
                     if is_provider_id_unset_sentinel(fk, value) {
                         continue;
                     }
@@ -2409,7 +2441,22 @@ fn build_fk_refs(
     mut dangling: Option<&mut DanglingFkScanReport>,
 ) -> Result<Option<Map<String, JsonValue>>, String> {
     let mut refs = Map::new();
+    let mut blocked = false;
     for fk in spec.foreign_keys {
+        if spec.object_type == "assistant.model_config" && fk.column == "assistant_model_id"
+            && raw_values.get(fk.column).and_then(JsonValue::as_i64).unwrap_or(-1) <= 0
+        {
+            fields.insert(fk.column.to_string(), json!(-1));
+            continue;
+        }
+        if required_sync_owner(spec.object_type, fk.column)
+            && raw_values.get(fk.column).and_then(JsonValue::as_i64).is_none()
+        {
+            if let Some(report) = dangling.as_mut() {
+                report.record(spec.object_type, fk.column, 0);
+            }
+            blocked = true;
+        }
         if let Some(value) = raw_values.get(fk.column).and_then(JsonValue::as_i64) {
             // provider_id=0 是「未选 provider」哨兵，不是真实 llm.provider 行；保留 0，不进 refs。
             if is_provider_id_unset_sentinel(fk, value) {
@@ -2432,18 +2479,35 @@ fn build_fk_refs(
                             local_fk = %value,
                             "Soft dangling foreign key omitted from sync snapshot"
                         );
-                    } else if let Some(report) = dangling.as_mut() {
-                        report.record(spec.object_type, fk.column, value);
+                    } else {
+                        if let Some(report) = dangling.as_mut() {
+                            report.record(spec.object_type, fk.column, value);
+                        }
+                        if required_sync_owner(spec.object_type, fk.column)
+                            || (spec.object_type == "assistant.model_config" && fk.column == "assistant_model_id") {
+                            blocked = true;
+                        }
                     }
                 }
             }
         }
     }
-    Ok(Some(refs))
+    if blocked { Ok(None) } else { Ok(Some(refs)) }
 }
 
 fn is_provider_id_unset_sentinel(fk: &ForeignKeySpec, value: i64) -> bool {
     value == 0 && fk.column == "provider_id" && fk.object_type == "llm.provider"
+}
+
+fn required_sync_owner(object_type: &str, column: &str) -> bool {
+    (orphan_cleanup_deletes_row(object_type, column)
+        && !(object_type == "assistant.model_config" && column == "assistant_model_id"))
+        || matches!((object_type, column),
+            ("mcp.server_tool", "server_id")
+            | ("mcp.server_resource", "server_id")
+            | ("mcp.server_prompt", "server_id")
+            | ("assistant.mcp_config", "mcp_server_id")
+            | ("assistant.mcp_tool_config", "mcp_tool_id"))
 }
 
 /// 检查外键指向的依赖行是否在本地业务库中真实存在。
@@ -2481,6 +2545,13 @@ fn resolve_remote_foreign_keys(
     mut resolve_local_id: impl FnMut(&str, &str) -> Result<Option<i64>, String>,
 ) -> Result<(), String> {
     for fk in spec.foreign_keys {
+        if spec.object_type == "assistant.model_config" && fk.column == "assistant_model_id"
+            && !refs.contains_key(fk.column)
+            && field_values.get(fk.column).and_then(JsonValue::as_i64).unwrap_or(-1) <= 0
+        {
+            field_values.insert(fk.column.to_string(), json!(-1));
+            continue;
+        }
         if let Some(JsonValue::String(ref_object_id)) = refs.get(fk.column) {
             let local_id = resolve_local_id(fk.object_type, ref_object_id)?.ok_or_else(|| {
                 format!(
@@ -2489,6 +2560,10 @@ fn resolve_remote_foreign_keys(
                 )
             })?;
             field_values.insert(fk.column.to_string(), JsonValue::Number(local_id.into()));
+        } else if required_sync_owner(spec.object_type, fk.column)
+            && field_values.get(fk.column).is_none_or(JsonValue::is_null)
+        {
+            return Err(format!("无法应用 {}: 必需归属 {} 为空且缺少 refs；来源变更未提供可恢复的同步身份", spec.object_type, fk.column));
         } else if is_provider_id_unset_sentinel(fk, 0) {
             // 哨兵列：refs 缺失时保留 0；旧客户端推上来的 NULL 也回落为 0（NOT NULL 列）
             let keep_zero = field_values
@@ -2514,6 +2589,54 @@ fn resolve_remote_foreign_keys(
             ));
         }
     }
+    resolve_embedded_provider_value(spec.object_type, field_values, refs, resolve_local_id)?;
+    Ok(())
+}
+
+/// Known settings that embed a provider row ID in a string rather than a SQL FK.
+fn embedded_provider_value(object_type: &str, fields: &Map<String, JsonValue>) -> Option<(String, i64)> {
+    let value = fields.get("value")?.as_str()?.trim();
+    let combined = match object_type {
+        "assistant.model_config" if fields.get("name")?.as_str()? == "acp_provider" => false,
+        "system.feature_config" => {
+            let feature = fields.get("feature_code")?.as_str()?;
+            let key = fields.get("key")?.as_str()?;
+            match (feature, key) {
+                ("conversation_summary", "provider_id" | "title_provider_id" | "form_autofill_provider_id"
+                    | "memory_summary_provider_id" | "auto_review_provider_id" | "conversation_summary_provider_id")
+                | ("experimental", "conversation_summary_provider_id") => false,
+                ("conversation_summary", "title_model" | "form_autofill_model" | "memory_summary_model"
+                    | "auto_review_model" | "conversation_summary_model")
+                | ("experimental", "butler_model_id" | "mcp_summarizer_model_id"
+                    | "assistant_summarizer_model_id" | "conversation_summary_model") => true,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let (prefix, id) = if combined {
+        let (model, id) = value.rsplit_once("%%")?;
+        (format!("{model}%%"), id)
+    } else {
+        (String::new(), value)
+    };
+    let id = id.parse::<i64>().ok().filter(|id| *id > 0)?;
+    Some((prefix, id))
+}
+
+fn resolve_embedded_provider_value(
+    object_type: &str,
+    fields: &mut Map<String, JsonValue>,
+    refs: &Map<String, JsonValue>,
+    mut resolve: impl FnMut(&str, &str) -> Result<Option<i64>, String>,
+) -> Result<(), String> {
+    if let Some((prefix, _)) = embedded_provider_value(object_type, fields) {
+        let remote_id = refs.get("value_provider_id").and_then(JsonValue::as_str)
+            .ok_or_else(|| format!("远端变更缺少外键引用: {object_type}.value_provider_id（配置包含来源设备的本地供应商 id，需来源设备升级后重新同步）"))?;
+        let local_id = resolve("llm.provider", remote_id)?
+            .ok_or_else(|| format!("缺少同步依赖: {object_type}.value_provider_id -> {remote_id}"))?;
+        fields.insert("value".into(), json!(format!("{prefix}{local_id}")));
+    }
     Ok(())
 }
 
@@ -2530,7 +2653,19 @@ fn enqueue_snapshot_if_changed(
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    if shadow.as_ref().is_some_and(|(_, hash)| hash == &snapshot.payload_hash) {
+    // Only coalesce events that have never been sent. Retried event identities
+    // and payloads must remain immutable for server-side idempotency.
+    conn.execute(
+        "DELETE FROM sync_outbox WHERE object_type = ?1 AND object_id = ?2
+         AND operation = 'upsert' AND status = 'pending' AND sent_once = 0
+         AND payload_json != ?3",
+        params![snapshot.object_type, snapshot.object_id, snapshot.payload_json],
+    ).map_err(|e| e.to_string())?;
+    let outstanding: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type = ?1 AND object_id = ?2 AND status IN ('pending', 'pushing', 'failed'))",
+        params![snapshot.object_type, snapshot.object_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !outstanding && shadow.as_ref().is_some_and(|(_, hash)| hash == &snapshot.payload_hash) {
         return Ok(false);
     }
 
@@ -2556,8 +2691,8 @@ fn enqueue_snapshot_if_changed(
     let now = now_string();
     conn.execute(
         "INSERT INTO sync_outbox
-         (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status)
-         VALUES (?1, ?2, ?3, 'upsert', ?4, ?5, ?6, ?7, ?8, 'pending')",
+         (event_id, object_type, object_id, operation, payload_json, base_version, local_version, device_id, created_at, status, sent_once)
+         VALUES (?1, ?2, ?3, 'upsert', ?4, ?5, ?6, ?7, ?8, 'pending', 0)",
         params![
             Uuid::new_v4().to_string(),
             snapshot.object_type,
@@ -2593,6 +2728,10 @@ fn apply_change(
     change: &PullChange,
     local_device_id: &str,
 ) -> Result<(), String> {
+    if remote_change_already_applied(sync_conn, change)? {
+        upsert_shadow_from_remote(sync_conn, change)?;
+        return Ok(());
+    }
     if change.device_id == local_device_id {
         upsert_shadow_from_remote(sync_conn, change)?;
         return Ok(());
@@ -2625,7 +2764,29 @@ fn apply_change(
         find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
     })?;
 
+    let merge_target = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?
+        .or(find_row_by_unique_key(&conn, &spec, &field_values)?);
+    if let Some(local_id) = merge_target {
+        if remote_row_change_is_stale(sync_conn, change, local_id)? {
+            if find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?.is_none() {
+                sync_conn.execute(
+                    "INSERT OR REPLACE INTO sync_object_alias (object_type, sync_id, local_id) VALUES (?1, ?2, ?3)",
+                    params![change.object_type, change.object_id, local_id],
+                ).map_err(|e| e.to_string())?;
+            }
+            upsert_shadow_from_remote(sync_conn, change)?;
+            return Ok(());
+        }
+    }
+
     if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
+        if change.object_type == "conversation.message" {
+            // Streaming updates must stay with the message already placed in a fork.
+            let conversation_id: i64 = conn.query_row(
+                "SELECT conversation_id FROM message WHERE id = ?1", params![local_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            field_values.insert("conversation_id".into(), json!(conversation_id));
+        }
         update_row(&conn, &spec, local_id, &field_values)?;
     } else if let Some(official_id) = parse_official_object_id(&change.object_id, &change.object_type) {
         // 官方/内置种子行按确定性 id 对齐：本机已有同 id 行则更新，
@@ -3029,6 +3190,12 @@ fn maybe_fork_before_message_insert(
 ) -> Result<(), String> {
     let conversation_id = field_as_i64(field_values, "conversation_id")
         .ok_or_else(|| "conversation.message insert missing conversation_id".to_string())?;
+    if route_sync_branch(sync_conn, data_conn, field_values)? {
+        return Ok(());
+    }
+    if field_as_i64(field_values, "parent_id").is_none() && field_as_string(field_values, "parent_group_id").is_none() {
+        return Ok(());
+    }
     let input = gather_divergence_input(data_conn, sync_conn, field_values, None, true)?;
     if !divergence::detect_concurrent_message_divergence(&input) {
         return Ok(());
@@ -3053,6 +3220,7 @@ fn maybe_fork_before_message_insert(
 
     // Ensure the forked conversation has a sync_id so subsequent local scan uploads C'.
     let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
+    remember_sync_branch(sync_conn, conversation_id, field_values, forked_id)?;
     field_values.insert(
         "conversation_id".to_string(),
         JsonValue::Number(forked_id.into()),
@@ -3069,6 +3237,38 @@ fn maybe_fork_before_message_insert(
     Ok(())
 }
 
+/// A response and later descendants of one remote turn belong to the same fork.
+fn route_sync_branch(sync: &Connection, data: &Connection, fields: &mut Map<String, JsonValue>) -> Result<bool, String> {
+    let Some(source) = field_as_i64(fields, "conversation_id") else { return Ok(false) };
+    for key in ["generation_group_id", "parent_group_id"] {
+        let Some(group) = field_as_string(fields, key) else { continue };
+        let target: Option<i64> = sync.query_row(
+            "SELECT fork_conversation_id FROM sync_branch_route WHERE source_conversation_id = ?1 AND generation_group_id = ?2",
+            params![source, group], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        if let Some(target) = target {
+            let exists: bool = data.query_row("SELECT EXISTS(SELECT 1 FROM conversation WHERE id = ?1)", params![target], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            if exists {
+                remember_sync_branch(sync, source, fields, target)?;
+                fields.insert("conversation_id".into(), json!(target));
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn remember_sync_branch(sync: &Connection, source: i64, fields: &Map<String, JsonValue>, target: i64) -> Result<(), String> {
+    if let Some(group) = field_as_string(fields, "generation_group_id") {
+        sync.execute(
+            "INSERT OR REPLACE INTO sync_branch_route (source_conversation_id, generation_group_id, fork_conversation_id) VALUES (?1, ?2, ?3)",
+            params![source, group, target],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Conflict path: when remote-wins would overwrite a local tip that already diverged,
 /// keep local tip and land the server payload on a fork (same §4.3 detection).
 fn try_fork_message_conflict_instead_of_overwrite(
@@ -3077,6 +3277,9 @@ fn try_fork_message_conflict_instead_of_overwrite(
     change: &PullChange,
 ) -> Result<bool, String> {
     if change.object_type != "conversation.message" || change.operation == "delete" {
+        return Ok(false);
+    }
+    if remote_change_already_applied(sync_conn, change)? {
         return Ok(false);
     }
 
@@ -3106,10 +3309,25 @@ fn try_fork_message_conflict_instead_of_overwrite(
         None => return Ok(false),
     };
 
+    if let Some(local_id) = local_id {
+        let current_conversation: Option<i64> = data_conn.query_row(
+            "SELECT conversation_id FROM message WHERE id = ?1", params![local_id], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        if current_conversation.is_some_and(|current| current != conversation_id) {
+            // This identity already lives on a fork. Normal apply preserves that placement.
+            return Ok(false);
+        }
+    }
+
+    let routed = route_sync_branch(sync_conn, &data_conn, &mut field_values)?;
+    if !routed && field_as_i64(&field_values, "parent_id").is_none() && field_as_string(&field_values, "parent_group_id").is_none() {
+        return Ok(false);
+    }
+
     // Conflict is an update of an existing sync_id, but we evaluate divergence against
     // *other* local messages / tip state (exclude the mapped local row).
     let input = gather_divergence_input(&data_conn, sync_conn, &field_values, local_id, true)?;
-    if !divergence::detect_concurrent_message_divergence(&input) {
+    if !routed && !divergence::detect_concurrent_message_divergence(&input) {
         return Ok(false);
     }
 
@@ -3122,14 +3340,17 @@ fn try_fork_message_conflict_instead_of_overwrite(
         local_id,
     )?;
 
-    let forked_id = crate::api::conversation_api::fork_conversation_internal(
+    let forked_id = if routed {
+        field_as_i64(&field_values, "conversation_id").expect("routed conversation")
+    } else { crate::api::conversation_api::fork_conversation_internal(
         app_handle,
         conversation_id,
         fork_point,
         crate::api::conversation_api::ForkNameStyle::SyncDivergence,
         false,
-    )?;
+    )? };
     let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
+    remember_sync_branch(sync_conn, conversation_id, &field_values, forked_id)?;
 
     // Keep local tip: detach this sync_id from the local row so scan will re-id it,
     // then insert the server payload into the forked conversation under the server sync_id.
@@ -3178,6 +3399,14 @@ fn apply_delete(
     spec: &SyncTableSpec,
     change: &PullChange,
 ) -> Result<(), String> {
+    // An obsolete merged identity can be tombstoned without deleting the row
+    // still owned by its canonical identity.
+    if sync_conn.execute(
+        "DELETE FROM sync_object_alias WHERE object_type = ?1 AND sync_id = ?2",
+        params![change.object_type, change.object_id],
+    ).map_err(|e| e.to_string())? > 0 {
+        return Ok(());
+    }
     if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
         conn.execute(&format!("DELETE FROM {} WHERE id = ?1", spec.table), params![local_id])
             .map_err(|e| e.to_string())?;
@@ -3189,6 +3418,10 @@ fn apply_delete(
                 params![change.object_type, change.object_id],
             )
             .map_err(|e| e.to_string())?;
+        sync_conn.execute(
+            "DELETE FROM sync_object_alias WHERE object_type = ?1 AND local_id = ?2",
+            params![change.object_type, local_id],
+        ).map_err(|e| e.to_string())?;
         return Ok(());
     }
     if !spec.natural_key_columns.is_empty() {
@@ -3361,6 +3594,19 @@ fn remap_sync_object_map(
     sync_id: &str,
 ) -> Result<(), String> {
     conn.execute(
+        "INSERT OR REPLACE INTO sync_object_alias (object_type, sync_id, local_id)
+         SELECT object_type, sync_id, local_id FROM sync_object_map
+         WHERE object_type = ?1 AND local_id = ?2 AND sync_id != ?3",
+        params![object_type, local_id, sync_id],
+    ).map_err(|e| e.to_string())?;
+    if find_object_id(conn, object_type, local_id)?.as_deref() == Some(sync_id) {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM sync_object_alias WHERE object_type = ?1 AND sync_id = ?2",
+        params![object_type, sync_id],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
         "DELETE FROM sync_object_map WHERE sync_id = ?1",
         params![sync_id],
     )
@@ -3376,8 +3622,7 @@ fn remap_sync_object_map(
 }
 
 fn is_unique_constraint_error(err: &str) -> bool {
-    let lower = err.to_ascii_lowercase();
-    lower.contains("unique constraint failed") || lower.contains("constraint failed")
+    err.to_ascii_lowercase().contains("unique constraint failed")
 }
 
 fn find_row_by_unique_key(
@@ -3502,6 +3747,10 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
             "SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
              WHERE status = 'pending'
+               AND NOT EXISTS (SELECT 1 FROM sync_outbox earlier
+                   WHERE earlier.object_type = sync_outbox.object_type
+                     AND earlier.object_id = sync_outbox.object_id
+                     AND earlier.id < sync_outbox.id AND earlier.status IN ('pending', 'pushing'))
                AND (next_retry_at IS NULL OR next_retry_at <= ?2)
              ORDER BY id
              LIMIT ?1",
@@ -3564,7 +3813,7 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
 fn mark_events_pushing(app_handle: &AppHandle, events: &[(i64, PushEvent)]) -> Result<(), String> {
     let conn = open_sync_db(app_handle)?;
     for (id, _) in events {
-        conn.execute("UPDATE sync_outbox SET status = 'pushing' WHERE id = ?1", params![id])
+        conn.execute("UPDATE sync_outbox SET status = 'pushing', sent_once = 1 WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -3644,16 +3893,16 @@ fn reset_failed_events(app_handle: &AppHandle) -> Result<usize, String> {
     reset_failed_events_inner(&conn)
 }
 
-/// 重试 failed 事件前，用 shadow 中当前的 server_version 刷新 base_version，
-/// 消除"base_version 冻结 → 永远 conflict"的重试死循环。
+/// 仅未发送事件可以刷新基线；已尝试事件必须保留原始内容和基线，
+/// 否则重试可能把旧内容当成基于最新版本的编辑覆盖到服务器。
 fn reset_failed_events_inner(conn: &Connection) -> Result<usize, String> {
     conn.execute(
         "UPDATE sync_outbox
-         SET base_version = COALESCE((
+         SET base_version = CASE WHEN sent_once = 0 THEN COALESCE((
                  SELECT s.server_version FROM sync_shadow s
                  WHERE s.object_type = sync_outbox.object_type
                    AND s.object_id = sync_outbox.object_id
-             ), base_version),
+             ), base_version) ELSE base_version END,
              status = 'pending',
              last_error = NULL,
              next_retry_at = NULL
@@ -3673,6 +3922,11 @@ fn apply_ack_to_shadow(
     operation: &str,
     payload_hash: &str,
 ) -> Result<(), String> {
+    let newer: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_shadow WHERE object_type = ?1 AND object_id = ?2 AND server_version > ?3)",
+        params![object_type, object_id, server_version], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if newer { return Ok(()); }
     if operation == "delete" {
         let now = now_string();
         conn.execute(
@@ -3685,6 +3939,15 @@ fn apply_ack_to_shadow(
             params![object_type, object_id, server_version, payload_hash, now],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM sync_object_alias WHERE object_type = ?1 AND local_id IN
+             (SELECT local_id FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2)",
+            params![object_type, object_id],
+        ).map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM sync_object_alias WHERE object_type = ?1 AND sync_id = ?2",
+            params![object_type, object_id],
+        ).map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
             params![object_type, object_id],
@@ -3722,8 +3985,9 @@ fn handle_push_response(
             let payload_hash = event
                 .payload
                 .as_ref()
-                .map(|payload| hash_text(&serde_json::to_string(payload).unwrap_or_default()))
-                .unwrap_or_else(|| hash_text(""));
+                .map(|payload| sync_payload_hash(&conn, Some(payload)))
+                .transpose()?
+                .unwrap_or_else(|| hash_text("null"));
             apply_ack_to_shadow(
                 &conn,
                 &accepted.object_type,
@@ -3732,6 +3996,11 @@ fn handle_push_response(
                 &event.operation,
                 &payload_hash,
             )?;
+            conn.execute(
+                "UPDATE sync_outbox SET base_version = ?3 WHERE object_type = ?1 AND object_id = ?2
+                 AND status = 'pending' AND sent_once = 0",
+                params![accepted.object_type, accepted.object_id, accepted.server_version],
+            ).map_err(|e| e.to_string())?;
         }
     }
 
@@ -3755,7 +4024,13 @@ fn handle_push_response(
     let mut conflict_resolved = 0usize;
     let mut resolved_object_types: Vec<String> = Vec::new();
     for conflict in response.conflicts {
-        if let Some((id, _)) = by_event_id.get(conflict.event_id.as_str()) {
+        if let Some((id, event)) = by_event_id.get(conflict.event_id.as_str()) {
+            let equivalent = event.operation == conflict.server_operation
+                && sync_payload_hash(&conn, event.payload.as_ref())? == sync_payload_hash(&conn, conflict.server_payload.as_ref())?;
+            let already_applied: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_shadow WHERE object_type = ?1 AND object_id = ?2 AND server_version >= ?3)",
+                params![conflict.object_type, conflict.object_id, conflict.server_version], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
             // 远端赢：把服务端版本按 pull 语义落地到本地，然后删除该 outbox 事件
             // （冲突已解决，无需重试；本地未推送修改被服务端版本覆盖）。
             let pseudo_change = PullChange {
@@ -3788,13 +4063,12 @@ fn handle_push_response(
                 Ok(()) => {
                     conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
                         .map_err(|e| e.to_string())?;
-                    conflict_resolved += 1;
+                    if !equivalent && !already_applied { conflict_resolved += 1; }
                     resolved_object_types.push(conflict.object_type.clone());
                 }
                 Err(err) => {
-                    // 落地失败（如依赖未就绪）：标 failed 等待重试，重试前
-                    // base_version 会被刷新（见 reset_failed_events）；
-                    // 该变更后续也会经 pull 正常下发，不会丢。
+                    // 落地失败（如依赖未就绪）：标 failed 等待重试，保留已发送事件的基线。
+                    // 服务器变更后续也会经 pull 正常下发。
                     let message = format!("冲突落地失败: {err}");
                     latest_failure = Some(message.clone());
                     conn.execute(
@@ -3821,16 +4095,76 @@ fn handle_push_response(
     Ok(conflict_resolved)
 }
 
+/// Device-local FK numbers are transport hints only. refs carry identity.
+fn sync_payload_hash(conn: &Connection, payload: Option<&JsonValue>) -> Result<String, String> {
+    let mut payload = payload.cloned().unwrap_or(JsonValue::Null);
+    if let Some(refs) = payload.get("refs").and_then(JsonValue::as_object).cloned() {
+        for (column, reference) in refs {
+            if let Some(fields) = payload.get_mut("fields").and_then(JsonValue::as_object_mut) {
+                if column == "value_provider_id" {
+                    // Retain the model code: only the provider suffix is device-local.
+                    let value = fields.get("value").and_then(JsonValue::as_str).unwrap_or("");
+                    let normalized = value.rsplit_once("%%").map(|(model, _)| format!("{model}%%@ref"))
+                        .unwrap_or_else(|| "@ref".into());
+                    fields.insert("value".into(), json!(normalized));
+                } else {
+                    fields.insert(column.clone(), JsonValue::Null);
+                }
+            }
+            // Resolve known aliases to the local canonical identity for comparisons.
+            if let Some(remote_id) = reference.as_str() {
+                let canonical: Option<String> = conn.query_row(
+                    "SELECT m.sync_id FROM sync_object_alias a JOIN sync_object_map m
+                     ON m.object_type = a.object_type AND m.local_id = a.local_id
+                     WHERE a.sync_id = ?1 LIMIT 1",
+                    params![remote_id], |row| row.get(0),
+                ).optional().map_err(|e| e.to_string())?;
+                if let Some(canonical) = canonical {
+                    if let Some(refs) = payload.get_mut("refs").and_then(JsonValue::as_object_mut) {
+                        refs.insert(column, json!(canonical));
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_string(&payload).map(|text| hash_text(&text)).map_err(|e| e.to_string())
+}
+
+fn remote_change_already_applied(conn: &Connection, change: &PullChange) -> Result<bool, String> {
+    let version: Option<i64> = conn.query_row(
+        "SELECT server_version FROM sync_shadow WHERE object_type = ?1 AND object_id = ?2",
+        params![change.object_type, change.object_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if version.is_some_and(|version| version >= change.version) { return Ok(true); }
+    if let Some(local_id) = find_local_id_by_object_id(conn, &change.object_type, &change.object_id)? {
+        return remote_row_change_is_stale(conn, change, local_id);
+    }
+    Ok(false)
+}
+
+/// Versions belong to individual UUIDs. Merged UUIDs can only be ordered by server sequence.
+fn remote_row_change_is_stale(conn: &Connection, change: &PullChange, local_id: i64) -> Result<bool, String> {
+    if change.seq <= 0 { return Ok(false); }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_shadow s WHERE s.object_type = ?1 AND s.server_seq >= ?3
+         AND s.object_id IN (SELECT sync_id FROM sync_object_map WHERE object_type = ?1 AND local_id = ?2
+             UNION SELECT sync_id FROM sync_object_alias WHERE object_type = ?1 AND local_id = ?2))",
+        params![change.object_type, local_id, change.seq], |row| row.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 fn upsert_shadow_from_remote(conn: &Connection, change: &PullChange) -> Result<(), String> {
-    let payload_hash = hash_text(&serde_json::to_string(&change.payload).unwrap_or_default());
+    let payload_hash = sync_payload_hash(conn, change.payload.as_ref())?;
     conn.execute(
-        "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at, server_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(object_type, object_id)
          DO UPDATE SET server_version = excluded.server_version,
                        payload_hash = excluded.payload_hash,
                        deleted_at = excluded.deleted_at,
-                       updated_at = excluded.updated_at",
+                       updated_at = excluded.updated_at,
+                       server_seq = MAX(sync_shadow.server_seq, excluded.server_seq)
+         WHERE excluded.server_version >= sync_shadow.server_version",
         params![
             change.object_type,
             change.object_id,
@@ -3838,6 +4172,7 @@ fn upsert_shadow_from_remote(conn: &Connection, change: &PullChange) -> Result<(
             payload_hash,
             change.deleted_at,
             now_string(),
+            change.seq,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -3853,6 +4188,19 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             created_at TEXT NOT NULL,
             PRIMARY KEY (object_type, local_id),
             UNIQUE (sync_id)
+        );
+        CREATE TABLE IF NOT EXISTS sync_object_alias (
+            object_type TEXT NOT NULL,
+            sync_id TEXT NOT NULL,
+            local_id INTEGER NOT NULL,
+            PRIMARY KEY (object_type, sync_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_object_alias_local ON sync_object_alias(object_type, local_id);
+        CREATE TABLE IF NOT EXISTS sync_branch_route (
+            source_conversation_id INTEGER NOT NULL,
+            generation_group_id TEXT NOT NULL,
+            fork_conversation_id INTEGER NOT NULL,
+            PRIMARY KEY (source_conversation_id, generation_group_id)
         );
         CREATE TABLE IF NOT EXISTS sync_device (
             device_id TEXT PRIMARY KEY,
@@ -3879,15 +4227,19 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             status TEXT NOT NULL DEFAULT 'pending'
                 CHECK(status IN ('pending', 'pushing', 'acked', 'failed')),
             retry_count INTEGER NOT NULL DEFAULT 0,
+            sent_once INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
             next_retry_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_sync_outbox_status_id
             ON sync_outbox(status, id);
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_object_status
+            ON sync_outbox(object_type, object_id, status);
         CREATE TABLE IF NOT EXISTS sync_shadow (
             object_type TEXT NOT NULL,
             object_id TEXT NOT NULL,
             server_version INTEGER NOT NULL,
+            server_seq INTEGER NOT NULL DEFAULT 0,
             payload_hash TEXT NOT NULL,
             deleted_at TEXT,
             updated_at TEXT NOT NULL,
@@ -3919,7 +4271,10 @@ fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
 
 /// CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，这里做幂等的列迁移。
 fn ensure_sync_db_columns(conn: &Connection) -> Result<(), String> {
-    ensure_column(conn, "sync_outbox", "next_retry_at", "ALTER TABLE sync_outbox ADD COLUMN next_retry_at INTEGER")
+    ensure_column(conn, "sync_shadow", "server_seq", "ALTER TABLE sync_shadow ADD COLUMN server_seq INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "sync_outbox", "next_retry_at", "ALTER TABLE sync_outbox ADD COLUMN next_retry_at INTEGER")?;
+    // Existing events may already have reached the server before an interrupted push.
+    ensure_column(conn, "sync_outbox", "sent_once", "ALTER TABLE sync_outbox ADD COLUMN sent_once INTEGER NOT NULL DEFAULT 1")
 }
 
 fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<(), String> {
@@ -3979,8 +4334,10 @@ fn clear_sync_state(conn: &Connection) -> Result<(), String> {
         "DELETE FROM sync_cursor;
          DELETE FROM sync_shadow;
          DELETE FROM sync_object_map;
+         DELETE FROM sync_object_alias;
          DELETE FROM sync_outbox;
          DELETE FROM sync_dead_letter;
+         DELETE FROM sync_branch_route;
          DELETE FROM sync_meta WHERE key = 'needs_reset';",
     )
     .map_err(|e| e.to_string())?;
@@ -4177,7 +4534,8 @@ fn find_local_id_by_object_id(
     object_id: &str,
 ) -> Result<Option<i64>, String> {
     conn.query_row(
-        "SELECT local_id FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
+        "SELECT local_id FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2
+         UNION ALL SELECT local_id FROM sync_object_alias WHERE object_type = ?1 AND sync_id = ?2 LIMIT 1",
         params![object_type, object_id],
         |row| row.get::<_, i64>(0),
     )
@@ -4344,6 +4702,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
     let dead_letter_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |row| row.get(0))
         .unwrap_or(0);
+    let dead_letter_summary = summarize_dead_letters(&conn)?;
     let needs_reset = needs_reset(&conn).unwrap_or(false);
     // Keep runtime.paused aligned with persisted auto_sync for status reads.
     apply_persisted_auto_sync_to_runtime(app_handle).await;
@@ -4377,12 +4736,25 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         pushing_outbox_count,
         failed_outbox_count,
         dead_letter_count,
+        dead_letter_summary,
         needs_reset,
         conflict_resolved_count: runtime.conflict_resolved_count,
         server_cursor: get_cursor(app_handle).unwrap_or(0),
         dangling_fk_count: runtime.dangling_fk_count,
         dangling_fk_summary: runtime.dangling_fk_summary.clone(),
     })
+}
+
+fn summarize_dead_letters(conn: &Connection) -> Result<Option<String>, String> {
+    let mut stmt = conn.prepare(
+        "SELECT object_type, error, COUNT(*), MIN(object_id) FROM sync_dead_letter
+         GROUP BY object_type, error ORDER BY COUNT(*) DESC, object_type, error LIMIT 5",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| Ok(format!("{} ×{}：{}（对象 {}）",
+        row.get::<_, String>(0)?, row.get::<_, i64>(2)?, row.get::<_, String>(1)?, row.get::<_, String>(3)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    Ok(if rows.is_empty() { None } else { Some(rows.join("\n")) })
 }
 
 async fn emit_status_changed(app_handle: &AppHandle) {
@@ -5204,9 +5576,8 @@ mod tests {
             },
             Some(&mut dangling),
         )
-        .unwrap()
-        .expect("dangling conversation_id must not block snapshot");
-        assert!(!refs.contains_key("conversation_id"));
+        .unwrap();
+        assert!(refs.is_none(), "orphan message must not be uploaded");
         assert_eq!(fields.get("conversation_id").unwrap(), &JsonValue::Null);
         assert_eq!(dangling.total_hits, 1);
         assert_eq!(
@@ -5245,8 +5616,8 @@ mod tests {
             },
             Some(&mut dangling),
         )
-        .unwrap()
-        .expect("must still push");
+        .unwrap();
+        assert!(_refs.is_none(), "orphan message must not be uploaded");
         assert_eq!(fields.get("conversation_id").unwrap(), &JsonValue::Null);
         assert_eq!(fields.get("llm_model_id").unwrap(), &JsonValue::Null);
         assert_eq!(dangling.total_hits, 1);
@@ -5315,7 +5686,7 @@ mod tests {
             Some(&3)
         );
         let summary = format_dangling_fk_summary(&report).unwrap();
-        assert!(summary.starts_with("有 4 条历史引用已失效，已按空值同步"));
+        assert!(summary.starts_with("有 4 条历史引用已失效，缺少必需归属的记录已暂停上传"));
         assert!(summary.contains("conversation_id"));
     }
 
@@ -5465,17 +5836,19 @@ mod tests {
         assert!(result.unwrap_err().contains("缺少外键引用"));
     }
 
-    /// 接收端：外键为 null 且 refs 缺失时允许（无需解析）
+    /// 接收端：可选外键为 null 且 refs 缺失时允许，必需归属仍须解析
     #[test]
     fn remote_fk_null_without_ref_is_allowed() {
         let spec = message_spec();
         let mut fields = Map::from_iter([
-            ("conversation_id".to_string(), JsonValue::Null),
+            ("conversation_id".to_string(), json!(3)),
+            ("parent_id".to_string(), JsonValue::Null),
             ("content".to_string(), json!("hi")),
         ]);
-        let refs = Map::new();
-        resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(None)).unwrap();
-        assert_eq!(fields.get("conversation_id").unwrap(), &JsonValue::Null);
+        let refs = Map::from_iter([("conversation_id".to_string(), json!("conv-uuid"))]);
+        resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(Some(100))).unwrap();
+        assert_eq!(fields.get("conversation_id").unwrap(), &json!(100));
+        assert_eq!(fields.get("parent_id").unwrap(), &JsonValue::Null);
     }
 
     fn test_sync_conn() -> Connection {
@@ -5993,7 +6366,7 @@ mod tests {
     }
 
     #[test]
-    fn gather_divergence_unconfirmed_local_tip_forks_and_schedules_common_history() {
+    fn test_gather_divergence_unconfirmed_tip_without_ancestry_does_not_fork() {
         let data = message_test_db();
         let sync = test_sync_conn();
         let common = insert_msg(&data, 9, "response", Some("g0"), None, None, Some("t0"));
@@ -6018,7 +6391,7 @@ mod tests {
         ]);
         let input = gather_divergence_input(&data, &sync, &fields, None, true).unwrap();
         assert!(input.local_has_unconfirmed_tip);
-        assert!(divergence::detect_concurrent_message_divergence(&input));
+        assert!(!divergence::detect_concurrent_message_divergence(&input));
         let fork_at = resolve_sync_fork_point(&data, &sync, 9, None, None, None).unwrap();
         assert_eq!(fork_at, Some(common));
     }
@@ -6264,3 +6637,7 @@ mod tests {
         assert_eq!(sync_id, again);
     }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod regression_tests;
