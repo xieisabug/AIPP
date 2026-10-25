@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    canShowCleanupDangling,
+    canShowRetryDeadLetters,
+    canShowRetryFailed,
+    canShowSyncNow,
     canStopSync,
     decideSyncNowAction,
     formatDanglingFkStatusText,
+    formatRecentSyncError,
     formatSyncStatusText,
     friendlySyncError,
     normalizeSyncServerUrl,
@@ -113,6 +118,38 @@ describe("dataFolderSyncHelpers", () => {
         expect(canStopSync({ mode: "local", syncing: true, running: true })).toBe(false);
     });
 
+    it("canShowSyncNow is mutually exclusive with canStopSync", () => {
+        // Busy: background auto-sync running → Stop only (user complaint: both shown while 后台自动同步中)
+        const autoSyncing = { mode: "self_hosted", syncing: false, running: true, paused: false };
+        expect(canStopSync(autoSyncing)).toBe(true);
+        expect(canShowSyncNow(autoSyncing)).toBe(false);
+
+        // Sync round in flight → Stop only
+        const syncing = { mode: "self_hosted", syncing: true, running: true, paused: false };
+        expect(canStopSync(syncing)).toBe(true);
+        expect(canShowSyncNow(syncing)).toBe(false);
+
+        // Paused / idle → Sync Now only (resumes when paused)
+        const paused = { mode: "self_hosted", syncing: false, running: false, paused: true };
+        expect(canStopSync(paused)).toBe(false);
+        expect(canShowSyncNow(paused)).toBe(true);
+
+        const idle = { mode: "self_hosted", syncing: false, running: false, paused: false };
+        expect(canStopSync(idle)).toBe(false);
+        expect(canShowSyncNow(idle)).toBe(true);
+
+        expect(canShowSyncNow({ mode: "local", syncing: false, running: false })).toBe(false);
+    });
+
+    it("secondary retry/cleanup actions hide when counts are zero", () => {
+        expect(canShowRetryFailed(0)).toBe(false);
+        expect(canShowRetryFailed(2)).toBe(true);
+        expect(canShowRetryDeadLetters(0)).toBe(false);
+        expect(canShowRetryDeadLetters(1)).toBe(true);
+        expect(canShowCleanupDangling(0)).toBe(false);
+        expect(canShowCleanupDangling(3)).toBe(true);
+    });
+
     it("shouldTriggerSyncAfterSave only when save skipped sync (needs_reset)", () => {
         expect(
             shouldTriggerSyncAfterSave({ mode: "self_hosted", needs_reset: false }),
@@ -132,7 +169,7 @@ describe("dataFolderSyncHelpers", () => {
         expect(
             formatDanglingFkStatusText({
                 dangling_fk_count: 3,
-                dangling_fk_summary: "有 3 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×3）",
+                dangling_fk_summary: "有 3 条历史引用已失效，已按空值同步（conversation.message.conversation_id×3）",
             }),
         ).toContain("有 3 条历史引用已失效");
         expect(formatDanglingFkStatusText({ dangling_fk_count: 2 })).toBe(
@@ -152,8 +189,46 @@ describe("dataFolderSyncHelpers", () => {
                 failed_outbox_count: 0,
                 server_cursor: 1,
                 dangling_fk_count: 5,
-                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×5）",
+                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message_attachment.message_id×5）",
             }),
         ).toContain("有 5 条历史引用已失效");
+    });
+
+    it("formatRecentSyncError softens stale outbox HTTP errors", () => {
+        expect(
+            formatRecentSyncError({
+                last_error: "有 100 条待重试",
+                failed_outbox_count: 100,
+                syncing: false,
+            }),
+        ).toBe("有 100 条待重试");
+        expect(
+            formatRecentSyncError({
+                last_error: "变更过大被服务器拒绝（HTTP 413），已跳过并记入失败项",
+                failed_outbox_count: 100,
+                syncing: false,
+            }),
+        ).toBe("有 100 条待重试");
+        expect(
+            formatRecentSyncError({
+                last_error: null,
+                failed_outbox_count: 5,
+                syncing: false,
+            }),
+        ).toBe("有 5 条待重试");
+        expect(
+            formatRecentSyncError({
+                last_error: "网络不可达",
+                failed_outbox_count: 5,
+                syncing: false,
+            }),
+        ).toBe("网络不可达");
+        expect(
+            formatRecentSyncError({
+                last_error: null,
+                failed_outbox_count: 0,
+                syncing: false,
+            }),
+        ).toBe("无");
     });
 });

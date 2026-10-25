@@ -142,13 +142,19 @@ export function formatSyncStatusText(status: SyncStatusSummaryInput | null | und
     return text;
 }
 
-/** Whether「停止同步」should be enabled. */
-export function canStopSync(input: {
+export type SyncPrimaryControlInput = {
     mode: string;
     syncing: boolean;
     running: boolean;
     paused?: boolean;
-}): boolean {
+};
+
+/**
+ * Whether the busy primary control「停止同步」applies.
+ * True while a sync round is in flight, or the background worker is running and not paused
+ * (status may say「后台自动同步中」even when syncing=false).
+ */
+export function canStopSync(input: SyncPrimaryControlInput): boolean {
     if (input.mode !== "self_hosted") {
         return false;
     }
@@ -159,6 +165,33 @@ export function canStopSync(input: {
         return true;
     }
     return false;
+}
+
+/**
+ * Whether the idle primary control「立即同步一次」should show.
+ * Mutually exclusive with Stop: if canStopSync → hide Sync Now; else show Sync Now (and hide Stop).
+ * When paused, Sync Now resumes background sync and runs a round.
+ */
+export function canShowSyncNow(input: SyncPrimaryControlInput): boolean {
+    if (input.mode !== "self_hosted") {
+        return false;
+    }
+    return !canStopSync(input);
+}
+
+/** Secondary:「重试失败」— only when failed outbox items exist (not a third sync mode). */
+export function canShowRetryFailed(failedOutboxCount: number): boolean {
+    return (failedOutboxCount ?? 0) > 0;
+}
+
+/** Secondary:「重试无法应用的变更」— only when dead-letter count > 0. */
+export function canShowRetryDeadLetters(deadLetterCount: number): boolean {
+    return (deadLetterCount ?? 0) > 0;
+}
+
+/** Secondary:「清理失效引用」— only when dangling FK count > 0. */
+export function canShowCleanupDangling(danglingFkCount: number): boolean {
+    return (danglingFkCount ?? 0) > 0;
 }
 
 /** Map backend sync errors to friendlier Chinese copy when possible. */
@@ -189,4 +222,35 @@ export function friendlySyncError(raw: string, fallbackPrefix: string): string {
         return "当前是本地模式，请先切换到「自建同步」并保存后再同步";
     }
     return `${fallbackPrefix}: ${text}`;
+}
+
+/**
+ * 「最近错误」display: prefer a live runtime error; when idle with failed outbox
+ * items only, show soft「有 N 条待重试」instead of raw stale HTTP 413 text.
+ */
+export function formatRecentSyncError(input: {
+    last_error?: string | null;
+    failed_outbox_count?: number;
+    syncing?: boolean;
+} | null | undefined): string {
+    if (!input) {
+        return "无";
+    }
+    const failed = input.failed_outbox_count ?? 0;
+    const raw = (input.last_error || "").trim();
+    if (!raw) {
+        return !input.syncing && failed > 0 ? `有 ${failed} 条待重试` : "无";
+    }
+    if (/^有 \d+ 条待重试$/.test(raw)) {
+        return raw;
+    }
+    // Defense: backend used to OR in ancient outbox last_error after a clean sync.
+    if (
+        !input.syncing &&
+        failed > 0 &&
+        (raw.includes("413") || raw.includes("变更过大") || /HTTP\s*\d+/i.test(raw))
+    ) {
+        return `有 ${failed} 条待重试`;
+    }
+    return raw;
 }
