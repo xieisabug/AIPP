@@ -7,6 +7,10 @@ import ConfirmDialog from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
+import {
+    decideSyncNowAction,
+    friendlySyncError,
+} from "./dataFolderSyncHelpers";
 
 interface DataFolderConfigFormProps {
     form: UseFormReturn<any>;
@@ -57,7 +61,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 });
             }
         } catch (error) {
-            toast.error("读取同步状态失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "读取同步状态失败"));
         }
     }, [form]);
 
@@ -113,46 +117,81 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
-    const handleSave = useCallback(async () => {
+    const persistSyncSettings = useCallback(async (opts?: { quietSuccess?: boolean }) => {
         const values = form.getValues();
+        const nextStatus = await invoke<SyncStatus>("save_sync_settings", {
+            request: {
+                mode: values.mode || "local",
+                server_url: values.server_url || "",
+                token: values.token || "",
+            },
+        });
+        setStatus(nextStatus);
+        form.reset({
+            mode: nextStatus.mode || "local",
+            server_url: nextStatus.server_url || "",
+            token: "",
+        });
+        if (!opts?.quietSuccess) {
+            toast.success(nextStatus.mode === "self_hosted" ? "自建同步配置已保存" : "已切换为本地模式");
+        }
+        if (nextStatus.mode === "self_hosted") {
+            void loadStatus(false);
+        }
+        return nextStatus;
+    }, [form, loadStatus]);
+
+    const handleSave = useCallback(async () => {
         setSaving(true);
         try {
-            const nextStatus = await invoke<SyncStatus>("save_sync_settings", {
-                request: {
-                    mode: values.mode || "local",
-                    server_url: values.server_url || "",
-                    token: values.token || "",
-                },
-            });
-            setStatus(nextStatus);
-            form.reset({
-                mode: nextStatus.mode || "local",
-                server_url: nextStatus.server_url || "",
-                token: "",
-            });
-            toast.success(nextStatus.mode === "self_hosted" ? "自建同步配置已保存" : "已切换为本地模式");
-            if (nextStatus.mode === "self_hosted") {
-                void loadStatus(false);
-            }
+            await persistSyncSettings();
         } catch (error) {
-            toast.error("保存同步配置失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "保存同步配置失败"));
         } finally {
             setSaving(false);
         }
-    }, [form]);
+    }, [persistSyncSettings]);
 
     const handleSyncNow = useCallback(async () => {
+        const values = form.getValues();
+        const decision = decideSyncNowAction({
+            formMode: values.mode || "local",
+            formServerUrl: values.server_url || "",
+            formToken: values.token || "",
+            tokenConfigured: Boolean(status?.token_configured),
+            savedServerUrl: status?.server_url || "",
+        });
+
+        if (decision.action === "wrong_mode" || decision.action === "need_token" || decision.action === "need_server_url") {
+            toast.error(decision.message);
+            return;
+        }
+
         setSyncing(true);
         try {
+            if (decision.action === "save_then_sync") {
+                setSaving(true);
+                try {
+                    const saved = await persistSyncSettings({ quietSuccess: true });
+                    if (saved.mode === "self_hosted" && !saved.token_configured) {
+                        toast.error("访问 token 未能保存成功，请检查后重试");
+                        return;
+                    }
+                    toast.success("配置已自动保存，开始同步…");
+                } finally {
+                    setSaving(false);
+                }
+            }
+
             const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
             setStatus(nextStatus);
             toast.success("同步已触发");
         } catch (error) {
-            toast.error("触发同步失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "触发同步失败"));
         } finally {
             setSyncing(false);
         }
-    }, []);
+    }, [form, persistSyncSettings, status?.server_url, status?.token_configured]);
 
     const handleRetryFailed = useCallback(async () => {
         setRetryingFailed(true);
@@ -161,7 +200,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             setStatus(nextStatus);
             toast.success("已重新触发失败项");
         } catch (error) {
-            toast.error("重试失败项失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "重试失败项失败"));
         } finally {
             setRetryingFailed(false);
         }
@@ -174,7 +213,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             setStatus(nextStatus);
             toast.success("已重试无法应用的变更");
         } catch (error) {
-            toast.error("重试无法应用的变更失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "重试无法应用的变更失败"));
         } finally {
             setRetryingDeadLetters(false);
         }
@@ -188,7 +227,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             setStatus(nextStatus);
             toast.success("同步状态已重置，正在重新全量同步");
         } catch (error) {
-            toast.error("重置同步状态失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "重置同步状态失败"));
         } finally {
             setResetting(false);
         }
@@ -235,7 +274,11 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                     disabled={mode !== "self_hosted" || syncing || saving}
                     onClick={handleSyncNow}
                 >
-                    {syncing ? "同步中..." : "立即同步"}
+                    {syncing
+                        ? "同步中..."
+                        : status?.token_configured
+                          ? "立即同步"
+                          : "保存并同步"}
                 </Button>
                 <Button
                     type="button"
@@ -269,6 +312,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         saving,
         status?.dead_letter_count,
         status?.failed_outbox_count,
+        status?.token_configured,
         syncing,
     ]);
 
