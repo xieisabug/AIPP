@@ -122,15 +122,15 @@ describe("dataFolderSyncHelpers", () => {
         ).toContain("已连接");
     });
 
-    it("canStopSync only for manual sync while auto-sync is off", () => {
-        // Auto on + background/idle → no Stop
+    it("canStopSync when self_hosted and syncing (manual or auto)", () => {
+        // Idle → no Stop
         expect(
             canStopSync({ mode: "self_hosted", syncing: false, running: true, paused: false }),
         ).toBe(false);
-        // Auto on + syncing → still no Stop
+        // Auto on + syncing → Stop (cancel current round only)
         expect(
             canStopSync({ mode: "self_hosted", syncing: true, running: true, paused: false }),
-        ).toBe(false);
+        ).toBe(true);
         // Auto off + idle → no Stop
         expect(
             canStopSync({ mode: "self_hosted", syncing: false, running: false, paused: true }),
@@ -144,13 +144,13 @@ describe("dataFolderSyncHelpers", () => {
         );
     });
 
-    it("canShowSyncNow always in self_hosted; Stop is independent", () => {
-        const autoSyncing = { mode: "self_hosted", syncing: false, running: true, paused: false };
-        expect(canStopSync(autoSyncing)).toBe(false);
-        expect(canShowSyncNow(autoSyncing)).toBe(true);
+    it("canShowSyncNow always in self_hosted; Stop when syncing", () => {
+        const autoIdle = { mode: "self_hosted", syncing: false, running: true, paused: false };
+        expect(canStopSync(autoIdle)).toBe(false);
+        expect(canShowSyncNow(autoIdle)).toBe(true);
 
         const autoSyncRound = { mode: "self_hosted", syncing: true, running: true, paused: false };
-        expect(canStopSync(autoSyncRound)).toBe(false);
+        expect(canStopSync(autoSyncRound)).toBe(true);
         expect(canShowSyncNow(autoSyncRound)).toBe(true);
 
         const manualSyncing = { mode: "self_hosted", syncing: true, running: false, paused: true };

@@ -143,14 +143,14 @@ export type SyncPrimaryControlInput = {
 
 /**
  * Whether「停止同步」should show.
- * Only while a manual Sync Now round is in flight with auto-sync OFF (`paused`).
- * Auto-sync ON never shows Stop (turn auto off via the toggle instead).
+ * Any in-flight sync round in self_hosted (manual Sync Now or auto background).
+ * Stop only cancels the current round; it does not turn off auto-sync.
  */
 export function canStopSync(input: SyncPrimaryControlInput): boolean {
     if (input.mode !== "self_hosted") {
         return false;
     }
-    return Boolean(input.syncing) && Boolean(input.paused);
+    return Boolean(input.syncing);
 }
 
 /**

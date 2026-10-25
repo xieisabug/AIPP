@@ -322,8 +322,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const autoSyncOn = isAutoSyncEnabled({ mode, paused: status?.paused });
     const primaryControlInput = {
         mode,
-        // Stop: backend syncing, or local Sync Now click while auto is already off.
-        syncing: Boolean(status?.syncing) || (syncing && Boolean(status?.paused)),
+        // Stop whenever a round is in flight (backend syncing or local Sync Now click).
+        syncing: Boolean(status?.syncing) || syncing,
         running: Boolean(status?.running),
         paused: status?.paused,
     };
@@ -373,7 +373,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     }, [danglingCount, danglingText, status?.failed_outbox_count, status?.last_error, status?.last_sync_at, status?.syncing, statusText, syncing]);
 
     const renderSyncActionButtons = useCallback(() => {
-        // Auto-sync toggle is the persistent on/off. Stop only for manual round while auto off.
+        // Auto-sync toggle is the persistent on/off. Stop shows while any round is syncing.
+        // 「同步中」lives only in the connection status row, not as a button label.
         return (
             <div className="space-y-3">
                 <div className="flex flex-wrap items-center gap-3">
@@ -399,11 +400,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                             disabled={syncing || saving || stopping || togglingAutoSync || Boolean(status?.syncing)}
                             onClick={handleSyncNow}
                         >
-                            {syncing || status?.syncing
-                                ? "同步中..."
-                                : status?.token_configured
-                                  ? "立即同步一次"
-                                  : "保存并同步"}
+                            {status?.token_configured ? "立即同步一次" : "保存并同步"}
                         </Button>
                     ) : null}
                     {stopEnabled ? (
@@ -540,7 +537,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             config: {
                 type: "static" as const,
                 label: "说明",
-                value: "开启自动同步后，本地变更会防抖推送并定期/经服务器通知拉取。关闭后后台 worker 持久暂停；仍可用「立即同步一次」手动跑一轮，同步中可「停止同步」。「立即同步一次」也会重试失败项。",
+                value: "开启自动同步后，本地变更会防抖推送并定期/经服务器通知拉取。关闭后后台 worker 持久暂停；仍可用「立即同步一次」手动跑一轮。无论自动开或关，同步进行中都可「停止同步」取消本轮（不会关自动同步）。「立即同步一次」也会重试失败项。",
                 hidden: mode !== "self_hosted",
             },
         },
