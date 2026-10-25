@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    canShowCleanupDangling,
+    canShowRetryDeadLetters,
+    canShowRetryFailed,
+    canShowSyncNow,
     canStopSync,
     decideSyncNowAction,
     formatDanglingFkStatusText,
@@ -111,6 +115,38 @@ describe("dataFolderSyncHelpers", () => {
             false,
         );
         expect(canStopSync({ mode: "local", syncing: true, running: true })).toBe(false);
+    });
+
+    it("canShowSyncNow is mutually exclusive with canStopSync", () => {
+        // Busy: background auto-sync running → Stop only (user complaint: both shown while 后台自动同步中)
+        const autoSyncing = { mode: "self_hosted", syncing: false, running: true, paused: false };
+        expect(canStopSync(autoSyncing)).toBe(true);
+        expect(canShowSyncNow(autoSyncing)).toBe(false);
+
+        // Sync round in flight → Stop only
+        const syncing = { mode: "self_hosted", syncing: true, running: true, paused: false };
+        expect(canStopSync(syncing)).toBe(true);
+        expect(canShowSyncNow(syncing)).toBe(false);
+
+        // Paused / idle → Sync Now only (resumes when paused)
+        const paused = { mode: "self_hosted", syncing: false, running: false, paused: true };
+        expect(canStopSync(paused)).toBe(false);
+        expect(canShowSyncNow(paused)).toBe(true);
+
+        const idle = { mode: "self_hosted", syncing: false, running: false, paused: false };
+        expect(canStopSync(idle)).toBe(false);
+        expect(canShowSyncNow(idle)).toBe(true);
+
+        expect(canShowSyncNow({ mode: "local", syncing: false, running: false })).toBe(false);
+    });
+
+    it("secondary retry/cleanup actions hide when counts are zero", () => {
+        expect(canShowRetryFailed(0)).toBe(false);
+        expect(canShowRetryFailed(2)).toBe(true);
+        expect(canShowRetryDeadLetters(0)).toBe(false);
+        expect(canShowRetryDeadLetters(1)).toBe(true);
+        expect(canShowCleanupDangling(0)).toBe(false);
+        expect(canShowCleanupDangling(3)).toBe(true);
     });
 
     it("shouldTriggerSyncAfterSave only when save skipped sync (needs_reset)", () => {

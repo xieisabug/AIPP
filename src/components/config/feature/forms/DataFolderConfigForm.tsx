@@ -8,6 +8,10 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import {
+    canShowCleanupDangling,
+    canShowRetryDeadLetters,
+    canShowRetryFailed,
+    canShowSyncNow,
     canStopSync,
     decideSyncNowAction,
     formatDanglingFkStatusText,
@@ -292,12 +296,19 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const statusText = useMemo(() => formatSyncStatusText(status), [status]);
     const danglingText = useMemo(() => formatDanglingFkStatusText(status), [status]);
     const danglingCount = status?.dangling_fk_count ?? 0;
-    const stopEnabled = canStopSync({
+    const primaryControlInput = {
         mode,
         syncing: Boolean(status?.syncing) || syncing,
         running: Boolean(status?.running),
         paused: status?.paused,
-    });
+    };
+    const stopEnabled = canStopSync(primaryControlInput);
+    const showSyncNow = canShowSyncNow(primaryControlInput);
+    const failedOutboxCount = status?.failed_outbox_count ?? 0;
+    const deadLetterCount = status?.dead_letter_count ?? 0;
+    const showRetryFailed = canShowRetryFailed(failedOutboxCount);
+    const showRetryDeadLetters = canShowRetryDeadLetters(deadLetterCount);
+    const showCleanupDangling = canShowCleanupDangling(danglingCount);
 
     const renderSyncStatusRow = useCallback(() => {
         const items = [
@@ -330,79 +341,83 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     }, [danglingCount, danglingText, status?.last_error, status?.last_sync_at, statusText]);
 
     const renderSyncActionButtons = useCallback(() => {
+        // Primary: Sync Now | Stop are mutually exclusive. Secondary retries only when counts > 0.
         return (
             <div className="flex flex-wrap items-center gap-2">
-                <Button
-                    type="button"
-                    variant="outline"
-                    className="hover:bg-muted hover:border-border"
-                    disabled={mode !== "self_hosted" || syncing || saving || stopping}
-                    onClick={handleSyncNow}
-                >
-                    {syncing
-                        ? "同步中..."
-                        : status?.token_configured
-                          ? "立即同步一次"
-                          : "保存并同步"}
-                </Button>
-                <Button
-                    type="button"
-                    variant="outline"
-                    className="hover:bg-muted hover:border-border"
-                    disabled={!stopEnabled || stopping || saving}
-                    onClick={handleStopSync}
-                >
-                    {stopping ? "停止中..." : "停止同步"}
-                </Button>
-                <Button
-                    type="button"
-                    variant="outline"
-                    className="hover:bg-muted hover:border-border"
-                    disabled={mode !== "self_hosted" || retryingFailed || saving || (status?.failed_outbox_count ?? 0) === 0}
-                    onClick={handleRetryFailed}
-                >
-                    {retryingFailed ? "重试中..." : "重试失败"}
-                </Button>
-                <Button
-                    type="button"
-                    variant="outline"
-                    className="hover:bg-muted hover:border-border"
-                    disabled={
-                        mode !== "self_hosted" || retryingDeadLetters || saving || (status?.dead_letter_count ?? 0) === 0
-                    }
-                    onClick={handleRetryDeadLetters}
-                >
-                    {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
-                </Button>
-                <Button
-                    type="button"
-                    variant="outline"
-                    className="hover:bg-muted hover:border-border"
-                    disabled={
-                        mode !== "self_hosted"
-                        || cleaningDangling
-                        || saving
-                        || danglingCount === 0
-                    }
-                    onClick={() => setCleanupConfirmOpen(true)}
-                >
-                    {cleaningDangling ? "清理中..." : "清理失效引用"}
-                </Button>
+                {showSyncNow ? (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={syncing || saving || stopping}
+                        onClick={handleSyncNow}
+                    >
+                        {syncing
+                            ? "同步中..."
+                            : status?.token_configured
+                              ? "立即同步一次"
+                              : "保存并同步"}
+                    </Button>
+                ) : null}
+                {stopEnabled ? (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={stopping || saving}
+                        onClick={handleStopSync}
+                    >
+                        {stopping ? "停止中..." : "停止同步"}
+                    </Button>
+                ) : null}
+                {showRetryFailed ? (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={retryingFailed || saving}
+                        onClick={handleRetryFailed}
+                    >
+                        {retryingFailed ? "重试中..." : "重试失败"}
+                    </Button>
+                ) : null}
+                {showRetryDeadLetters ? (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={retryingDeadLetters || saving}
+                        onClick={handleRetryDeadLetters}
+                    >
+                        {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
+                    </Button>
+                ) : null}
+                {showCleanupDangling ? (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={cleaningDangling || saving}
+                        onClick={() => setCleanupConfirmOpen(true)}
+                    >
+                        {cleaningDangling ? "清理中..." : "清理失效引用"}
+                    </Button>
+                ) : null}
             </div>
         );
     }, [
         cleaningDangling,
-        danglingCount,
         handleRetryDeadLetters,
         handleRetryFailed,
         handleStopSync,
         handleSyncNow,
-        mode,
         retryingDeadLetters,
         retryingFailed,
         saving,
-        status?.dead_letter_count,
-        status?.failed_outbox_count,
+        showCleanupDangling,
+        showRetryDeadLetters,
+        showRetryFailed,
+        showSyncNow,
         status?.token_configured,
         stopEnabled,
         stopping,
@@ -472,7 +487,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             config: {
                 type: "static" as const,
                 label: "自动同步",
-                value: "已配置自建同步后，本地数据变更会在短暂防抖后自动推送，并定期/经服务器通知拉取远端变更。「立即同步一次」仅在需要马上跑一轮时使用；同步进行中可点「停止同步」暂停后台。",
+                value: "已配置自建同步后，本地数据变更会在短暂防抖后自动推送，并定期/经服务器通知拉取远端变更。主操作互斥：后台自动同步中或本轮同步中只显示「停止同步」；已暂停或空闲时只显示「立即同步一次」（暂停时点它会恢复后台并跑一轮）。「重试失败」仅在有失败队列项时出现，用于重试失败的推送项，不是第三种同步模式。",
                 hidden: mode !== "self_hosted",
             },
         },

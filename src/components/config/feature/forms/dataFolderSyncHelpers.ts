@@ -142,13 +142,19 @@ export function formatSyncStatusText(status: SyncStatusSummaryInput | null | und
     return text;
 }
 
-/** Whether「停止同步」should be enabled. */
-export function canStopSync(input: {
+export type SyncPrimaryControlInput = {
     mode: string;
     syncing: boolean;
     running: boolean;
     paused?: boolean;
-}): boolean {
+};
+
+/**
+ * Whether the busy primary control「停止同步」applies.
+ * True while a sync round is in flight, or the background worker is running and not paused
+ * (status may say「后台自动同步中」even when syncing=false).
+ */
+export function canStopSync(input: SyncPrimaryControlInput): boolean {
     if (input.mode !== "self_hosted") {
         return false;
     }
@@ -159,6 +165,33 @@ export function canStopSync(input: {
         return true;
     }
     return false;
+}
+
+/**
+ * Whether the idle primary control「立即同步一次」should show.
+ * Mutually exclusive with Stop: if canStopSync → hide Sync Now; else show Sync Now (and hide Stop).
+ * When paused, Sync Now resumes background sync and runs a round.
+ */
+export function canShowSyncNow(input: SyncPrimaryControlInput): boolean {
+    if (input.mode !== "self_hosted") {
+        return false;
+    }
+    return !canStopSync(input);
+}
+
+/** Secondary:「重试失败」— only when failed outbox items exist (not a third sync mode). */
+export function canShowRetryFailed(failedOutboxCount: number): boolean {
+    return (failedOutboxCount ?? 0) > 0;
+}
+
+/** Secondary:「重试无法应用的变更」— only when dead-letter count > 0. */
+export function canShowRetryDeadLetters(deadLetterCount: number): boolean {
+    return (deadLetterCount ?? 0) > 0;
+}
+
+/** Secondary:「清理失效引用」— only when dangling FK count > 0. */
+export function canShowCleanupDangling(danglingFkCount: number): boolean {
+    return (danglingFkCount ?? 0) > 0;
 }
 
 /** Map backend sync errors to friendlier Chinese copy when possible. */
