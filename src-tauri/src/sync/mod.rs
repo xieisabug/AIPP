@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
@@ -16,7 +17,7 @@ use serde_json::{json, Map, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::db::get_db_path;
@@ -35,8 +36,21 @@ const CLIENT_SCHEMA_VERSION: i64 = 2;
 const SYNC_INTERVAL_SECS: u64 = 45;
 const DEBOUNCE_MS: u64 = 1200;
 const HTTP_TIMEOUT_SECS: u64 = 30;
+/// Soft per-request event cap (server allows up to 500 by default).
+const PUSH_BATCH_MAX_EVENTS: usize = 25;
+/// Soft serialized-body budget so normal batches stay under typical proxy/server limits.
+const PUSH_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+const OVERSIZED_PUSH_REASON: &str =
+    "变更过大被服务器拒绝（HTTP 413），已跳过并记入失败项；请缩小该对象后重试";
 const NOTIFY_CONNECT_TIMEOUT_SECS: u64 = 10;
 const NOTIFY_RECONNECT_SECS: u64 = 3;
+/// Cooperative cancel / user stop — not a hard sync failure.
+const SYNC_STOPPED_MSG: &str = "同步已停止";
+/// Hard abort after cooperative cancel timed out; next run self-heals.
+const SYNC_FORCED_STOP_MSG: &str =
+    "同步已强制停止（协作取消超时）；下次同步会自动恢复";
+/// How long stop_sync waits for in-flight run_sync_once to exit cooperatively.
+const STOP_COOPERATIVE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -65,10 +79,16 @@ struct SyncRuntimeStatus {
     connected: bool,
     running: bool,
     syncing: bool,
+    /// User paused background sync (「停止同步」). Cleared by resume paths.
+    paused: bool,
     last_sync_at: Option<String>,
     last_error: Option<String>,
     /// 本轮进程内累计的"远端赢"冲突解决数，前端据此提示用户本地修改被覆盖
     conflict_resolved_count: i64,
+    /// 最近一轮本地扫描中按空值处理的悬空外键次数（字段级）
+    dangling_fk_count: i64,
+    /// 友好中文摘要，如「有 N 条历史引用已失效，已按空值同步…」
+    dangling_fk_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +99,7 @@ pub struct SyncStatusDto {
     connected: bool,
     running: bool,
     syncing: bool,
+    paused: bool,
     last_sync_at: Option<String>,
     last_error: Option<String>,
     pending_outbox_count: i64,
@@ -88,6 +109,10 @@ pub struct SyncStatusDto {
     needs_reset: bool,
     conflict_resolved_count: i64,
     server_cursor: i64,
+    /// 最近一轮扫描中悬空外键按空值同步的次数
+    dangling_fk_count: i64,
+    /// 友好中文摘要（无悬空时为 null）
+    dangling_fk_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,6 +127,8 @@ pub struct SyncState {
     notify_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     debounce_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     sync_lock: Mutex<()>,
+    /// Cooperative cancel for the in-flight `run_sync_once` (HTTP + between units).
+    cancel: Mutex<CancellationToken>,
     /// Wakes the poll loop early when SSE reports a remote cursor advance.
     wake: Arc<tokio::sync::Notify>,
     status: Mutex<SyncRuntimeStatus>,
@@ -114,6 +141,7 @@ impl Default for SyncState {
             notify_task: Mutex::new(None),
             debounce_task: Mutex::new(None),
             sync_lock: Mutex::new(()),
+            cancel: Mutex::new(CancellationToken::new()),
             wake: Arc::new(tokio::sync::Notify::new()),
             status: Mutex::new(SyncRuntimeStatus::default()),
         }
@@ -583,6 +611,9 @@ pub fn schedule_sync_after_local_change(app_handle: &AppHandle) {
         let Some(state) = app.try_state::<SyncState>() else {
             return;
         };
+        if state.status.lock().await.paused {
+            return;
+        }
         let mut task = state.debounce_task.lock().await;
         if let Some(existing) = task.take() {
             existing.abort();
@@ -598,6 +629,12 @@ pub fn schedule_sync_after_local_change(app_handle: &AppHandle) {
 pub fn flush_before_exit(app_handle: &AppHandle) -> tauri::async_runtime::JoinHandle<()> {
     let app = app_handle.clone();
     tauri::async_runtime::spawn(async move {
+        // Respect user pause: do not flush on exit when sync was stopped.
+        if let Some(state) = app.try_state::<SyncState>() {
+            if state.status.lock().await.paused {
+                return;
+            }
+        }
         if matches!(load_settings(&app).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
             run_sync_once(&app).await;
         }
@@ -622,6 +659,7 @@ pub async fn save_sync_settings(
         SyncMode::Local => {
             save_feature_config_value(&app_handle, &feature_state, "mode", "local").await?;
             save_feature_config_value(&app_handle, &feature_state, "server_url", &server_url).await?;
+            clear_paused(&app_handle).await;
             stop_worker(&app_handle).await;
         }
         SyncMode::SelfHosted => {
@@ -658,6 +696,7 @@ pub async fn save_sync_settings(
                 set_sync_meta(&conn, META_NEEDS_RESET, "1")?;
                 warn!("Sync server/account changed with existing local state; waiting for reset confirmation");
             }
+            clear_paused(&app_handle).await;
             start_worker(app_handle.clone()).await;
             if !reset_required {
                 run_sync_once(&app_handle).await;
@@ -678,7 +717,56 @@ pub async fn trigger_sync_now(app_handle: AppHandle) -> Result<SyncStatusDto, St
     if settings.token.as_deref().unwrap_or_default().trim().is_empty() {
         return Err("缺少同步 token：请填写访问 token 后点「立即同步」（会自动保存），或先保存配置再同步".to_string());
     }
+    clear_paused(&app_handle).await;
+    start_worker(app_handle.clone()).await;
     run_sync_once(&app_handle).await;
+    sync_status(&app_handle).await
+}
+
+/// Stop in-flight sync and pause the background worker until the user resumes
+/// (「立即同步一次」/ save self_hosted / app restart).
+#[tauri::command]
+pub async fn stop_sync(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    let settings = load_settings(&app_handle)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return Err("当前是本地模式，没有可停止的同步".to_string());
+    }
+    let Some(state) = app_handle.try_state::<SyncState>() else {
+        return sync_status(&app_handle).await;
+    };
+    let was_busy = {
+        let runtime = state.status.lock().await;
+        runtime.syncing || runtime.running
+    };
+    // Mark paused first so debounce/worker won't immediately requeue.
+    {
+        let mut runtime = state.status.lock().await;
+        runtime.paused = true;
+    }
+    request_cancel(&app_handle).await;
+    // Give in-flight run_sync_once a short window to exit cooperatively
+    // (HTTP select! + between-stage checks) before aborting idle waiters.
+    let cleared = wait_until_not_syncing(&app_handle, STOP_COOPERATIVE_TIMEOUT).await;
+    // Abort idle waiters (worker poll / SSE / debounce). If syncing is still
+    // stuck after the timeout, this is the same hard-abort path as before,
+    // plus an honest last_error noting forced stop / self-heal on next run.
+    abort_background_tasks(&app_handle).await;
+    {
+        let mut runtime = state.status.lock().await;
+        runtime.running = false;
+        runtime.connected = false;
+        runtime.syncing = false;
+        runtime.last_error = if !cleared {
+            Some(SYNC_FORCED_STOP_MSG.to_string())
+        } else if was_busy {
+            Some(SYNC_STOPPED_MSG.to_string())
+        } else {
+            runtime.last_error.clone()
+        };
+    }
+    // Fresh token so the next resume isn't instantly cancelled.
+    replace_cancel_token(&app_handle).await;
+    emit_status_changed(&app_handle).await;
     sync_status(&app_handle).await
 }
 
@@ -694,7 +782,9 @@ pub async fn retry_failed_sync_outbox(app_handle: AppHandle) -> Result<SyncStatu
 
     let retried = reset_failed_events(&app_handle)?;
     if retried > 0 {
+        clear_paused(&app_handle).await;
         emit_status_changed(&app_handle).await;
+        start_worker(app_handle.clone()).await;
         run_sync_once(&app_handle).await;
     }
     sync_status(&app_handle).await
@@ -727,14 +817,45 @@ pub async fn reset_sync_state(app_handle: AppHandle) -> Result<SyncStatusDto, St
         let conn = open_sync_db(&app_handle)?;
         clear_sync_state(&conn)?;
     }
+    clear_paused(&app_handle).await;
     emit_status_changed(&app_handle).await;
     // 重置完成后立即重新全量同步（bootstrap）
+    start_worker(app_handle.clone()).await;
     run_sync_once(&app_handle).await;
+    sync_status(&app_handle).await
+}
+
+/// 用户确认后：把本地悬空外键列置为 NULL（不自动改库）。
+/// 返回更新后的同步状态；成功后会调度一次后台同步。
+#[tauri::command]
+pub async fn cleanup_dangling_foreign_keys(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    let report = null_out_dangling_local_fks(&app_handle)?;
+    if let Some(state) = app_handle.try_state::<SyncState>() {
+        let mut runtime = state.status.lock().await;
+        if report.nulled_count > 0 {
+            runtime.dangling_fk_count = 0;
+            runtime.dangling_fk_summary = Some(format!(
+                "已清理 {} 条失效本地引用{}",
+                report.nulled_count,
+                format_dangling_kinds_suffix(&report.by_kind)
+            ));
+        } else {
+            runtime.dangling_fk_count = 0;
+            runtime.dangling_fk_summary = Some("未发现需要清理的失效引用".to_string());
+        }
+    }
+    emit_status_changed(&app_handle).await;
+    if report.nulled_count > 0 {
+        schedule_sync_after_local_change(&app_handle);
+    }
     sync_status(&app_handle).await
 }
 
 async fn start_worker(app_handle: AppHandle) {
     let state = app_handle.state::<SyncState>();
+    if state.status.lock().await.paused {
+        return;
+    }
     let mut task = state.worker_task.lock().await;
     if task.is_some() {
         return;
@@ -747,7 +868,17 @@ async fn start_worker(app_handle: AppHandle) {
             if !matches!(load_settings(&app).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
                 break;
             }
+            if let Some(state) = app.try_state::<SyncState>() {
+                if state.status.lock().await.paused {
+                    break;
+                }
+            }
             run_sync_once(&app).await;
+            if let Some(state) = app.try_state::<SyncState>() {
+                if state.status.lock().await.paused {
+                    break;
+                }
+            }
             // Wait for either the poll interval or an SSE wake (remote push).
             tokio::select! {
                 _ = wake.notified() => {
@@ -775,7 +906,7 @@ async fn start_worker(app_handle: AppHandle) {
     emit_status_changed(&app_handle).await;
 }
 
-async fn stop_worker(app_handle: &AppHandle) {
+async fn abort_background_tasks(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<SyncState>() {
         if let Some(task) = state.worker_task.lock().await.take() {
             task.abort();
@@ -786,19 +917,109 @@ async fn stop_worker(app_handle: &AppHandle) {
         if let Some(task) = state.debounce_task.lock().await.take() {
             task.abort();
         }
+    }
+}
+
+/// Poll until `syncing` clears or `timeout` elapses. Returns true if cleared.
+async fn wait_until_not_syncing(app_handle: &AppHandle, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let syncing = match app_handle.try_state::<SyncState>() {
+            Some(state) => state.status.lock().await.syncing,
+            None => false,
+        };
+        if !syncing {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn stop_worker(app_handle: &AppHandle) {
+    request_cancel(app_handle).await;
+    abort_background_tasks(app_handle).await;
+    if let Some(state) = app_handle.try_state::<SyncState>() {
         let mut runtime = state.status.lock().await;
         runtime.running = false;
         runtime.connected = false;
+        runtime.syncing = false;
         runtime.last_error = None;
     }
+    replace_cancel_token(app_handle).await;
     emit_status_changed(app_handle).await;
+}
+
+async fn clear_paused(app_handle: &AppHandle) {
+    if let Some(state) = app_handle.try_state::<SyncState>() {
+        let mut runtime = state.status.lock().await;
+        runtime.paused = false;
+        if matches!(
+            runtime.last_error.as_deref(),
+            Some(SYNC_STOPPED_MSG) | Some(SYNC_FORCED_STOP_MSG)
+        ) {
+            runtime.last_error = None;
+        }
+    }
+}
+
+async fn current_cancel_token(app_handle: &AppHandle) -> CancellationToken {
+    if let Some(state) = app_handle.try_state::<SyncState>() {
+        state.cancel.lock().await.clone()
+    } else {
+        CancellationToken::new()
+    }
+}
+
+async fn request_cancel(app_handle: &AppHandle) {
+    if let Some(state) = app_handle.try_state::<SyncState>() {
+        state.cancel.lock().await.cancel();
+    }
+}
+
+async fn replace_cancel_token(app_handle: &AppHandle) {
+    if let Some(state) = app_handle.try_state::<SyncState>() {
+        *state.cancel.lock().await = CancellationToken::new();
+    }
+}
+
+fn ensure_not_cancelled(cancel: &CancellationToken) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        Err(SYNC_STOPPED_MSG.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn is_sync_stopped_error(err: &str) -> bool {
+    err == SYNC_STOPPED_MSG
+}
+
+async fn await_or_cancel<T, E, F>(cancel: &CancellationToken, fut: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    tokio::select! {
+        _ = cancel.cancelled() => Err(SYNC_STOPPED_MSG.to_string()),
+        result = fut => result.map_err(|e| e.to_string()),
+    }
 }
 
 async fn run_sync_once(app_handle: &AppHandle) {
     let Some(state) = app_handle.try_state::<SyncState>() else {
         return;
     };
+    if state.status.lock().await.paused {
+        return;
+    }
     let _guard = state.sync_lock.lock().await;
+    // Re-check after acquiring the lock: stop may have happened while waiting.
+    if state.status.lock().await.paused {
+        return;
+    }
     {
         let mut runtime = state.status.lock().await;
         runtime.running = matches!(load_settings(app_handle).map(|s| s.mode), Ok(SyncMode::SelfHosted));
@@ -807,7 +1028,8 @@ async fn run_sync_once(app_handle: &AppHandle) {
     }
     emit_status_changed(app_handle).await;
 
-    let result = run_sync_once_inner(app_handle).await;
+    let cancel = current_cancel_token(app_handle).await;
+    let result = run_sync_once_inner(app_handle, &cancel).await;
     let mut runtime = state.status.lock().await;
     match result {
         Ok(()) => {
@@ -817,19 +1039,30 @@ async fn run_sync_once(app_handle: &AppHandle) {
             runtime.last_sync_at = Some(synced_at.clone());
             let _ = set_device_last_sync_at(app_handle, &synced_at);
         }
+        Err(err) if is_sync_stopped_error(&err) => {
+            // Cooperative stop: honest status, not a hard failure toast-worthy error.
+            runtime.connected = false;
+            runtime.last_error = Some(SYNC_STOPPED_MSG.to_string());
+            debug!("AIPP self-hosted sync stopped by user");
+        }
         Err(err) => {
             runtime.connected = false;
             runtime.last_error = Some(err.clone());
             warn!(error = %err, "AIPP self-hosted sync failed");
         }
     }
-    runtime.running = matches!(load_settings(app_handle).map(|s| s.mode), Ok(SyncMode::SelfHosted));
+    runtime.running = matches!(load_settings(app_handle).map(|s| s.mode), Ok(SyncMode::SelfHosted))
+        && !runtime.paused;
     runtime.syncing = false;
     drop(runtime);
     emit_status_changed(app_handle).await;
 }
 
-async fn run_sync_once_inner(app_handle: &AppHandle) -> Result<(), String> {
+async fn run_sync_once_inner(
+    app_handle: &AppHandle,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    ensure_not_cancelled(cancel)?;
     ensure_sync_db(app_handle)?;
     let settings = load_settings(app_handle)?;
     if settings.mode != SyncMode::SelfHosted {
@@ -851,30 +1084,38 @@ async fn run_sync_once_inner(app_handle: &AppHandle) -> Result<(), String> {
         device_id
     };
     let device_name = device_name();
+    ensure_not_cancelled(cancel)?;
     reset_pushing_events(app_handle)?;
-    let remote_status = fetch_remote_status(&settings.server_url, token, &device_id).await?;
+    let remote_status =
+        fetch_remote_status(&settings.server_url, token, &device_id, cancel).await?;
+    ensure_not_cancelled(cancel)?;
 
     let local_empty = is_local_sync_scope_empty(app_handle)?;
     if remote_status.remote_empty && !local_empty {
-        let queued = scan_local_changes(app_handle)?;
-        if queued > 0 {
+        let (queued, dangling) = scan_local_changes(app_handle)?;
+        store_dangling_fk_report(app_handle, &dangling).await;
+        if queued > 0 || dangling.total_hits > 0 {
             emit_status_changed(app_handle).await;
         }
-        push_pending(app_handle, &settings, token, &device_id, &device_name).await?;
+        ensure_not_cancelled(cancel)?;
+        push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await?;
         return Ok(());
     }
 
     if !remote_status.remote_empty && local_empty {
-        pull_remote(app_handle, &settings, token, &device_id).await?;
+        pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
         return Ok(());
     }
 
-    let queued = scan_local_changes(app_handle)?;
-    if queued > 0 {
+    let (queued, dangling) = scan_local_changes(app_handle)?;
+    store_dangling_fk_report(app_handle, &dangling).await;
+    if queued > 0 || dangling.total_hits > 0 {
         emit_status_changed(app_handle).await;
     }
-    push_pending(app_handle, &settings, token, &device_id, &device_name).await?;
-    pull_remote(app_handle, &settings, token, &device_id).await?;
+    ensure_not_cancelled(cancel)?;
+    push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await?;
+    ensure_not_cancelled(cancel)?;
+    pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
     Ok(())
 }
 
@@ -882,19 +1123,30 @@ async fn fetch_remote_status(
     server_url: &str,
     token: &str,
     device_id: &str,
+    cancel: &CancellationToken,
 ) -> Result<RemoteStatus, String> {
+    ensure_not_cancelled(cancel)?;
     let url = format!("{server_url}/v1/sync/status");
-    let response = sync_http_client()?
-        .get(url)
-        .bearer_auth(token)
-        .header("X-AIPP-Device-ID", device_id)
-        .send()
-        .await
-        .map_err(|e| format!("连接同步服务器失败: {e}"))?;
+    let response = await_or_cancel(
+        cancel,
+        sync_http_client()?
+            .get(url)
+            .bearer_auth(token)
+            .header("X-AIPP-Device-ID", device_id)
+            .send(),
+    )
+    .await
+    .map_err(|e| {
+        if is_sync_stopped_error(&e) {
+            e
+        } else {
+            format!("连接同步服务器失败: {e}")
+        }
+    })?;
     if !response.status().is_success() {
         return Err(format!("同步服务器 status 返回 {}", response.status()));
     }
-    response.json::<RemoteStatus>().await.map_err(|e| e.to_string())
+    await_or_cancel(cancel, response.json::<RemoteStatus>()).await
 }
 
 async fn push_pending(
@@ -903,10 +1155,19 @@ async fn push_pending(
     token: &str,
     device_id: &str,
     device_name: &str,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let mut total_conflict_resolved = 0usize;
-    let result =
-        push_pending_loop(app_handle, settings, token, device_id, device_name, &mut total_conflict_resolved).await;
+    let result = push_pending_loop(
+        app_handle,
+        settings,
+        token,
+        device_id,
+        device_name,
+        &mut total_conflict_resolved,
+        cancel,
+    )
+    .await;
     if total_conflict_resolved > 0 {
         if let Some(state) = app_handle.try_state::<SyncState>() {
             let mut runtime = state.status.lock().await;
@@ -925,47 +1186,207 @@ async fn push_pending_loop(
     device_id: &str,
     device_name: &str,
     total_conflict_resolved: &mut usize,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     loop {
-        let events = load_pending_outbox(app_handle, 100)?;
+        ensure_not_cancelled(cancel)?;
+        // Load a generous window; we slice into size-aware sub-batches below.
+        let events = load_pending_outbox(app_handle, (PUSH_BATCH_MAX_EVENTS * 4) as i64)?;
         if events.is_empty() {
             return Ok(());
         }
-        mark_events_pushing(app_handle, &events)?;
-        let request = PushRequest {
-            device_id: device_id.to_string(),
-            device_name: device_name.to_string(),
-            events: events.iter().map(|(_, event)| event.clone()).collect(),
-        };
-        let url = format!("{}/v1/sync/push", settings.server_url);
-        emit_status_changed(app_handle).await;
-        let response = match sync_http_client()?
+        // FIFO work queue so earlier outbox ids stay ahead of later ones
+        // (including after 413 splits). Iterative — no recursive async futures.
+        let mut queue = build_push_batch_queue(&events, PUSH_BATCH_MAX_EVENTS, PUSH_BATCH_MAX_BYTES);
+        while let Some(batch) = queue.pop_front() {
+            ensure_not_cancelled(cancel)?;
+            match push_event_batch_once(
+                app_handle,
+                settings,
+                token,
+                device_id,
+                device_name,
+                &batch,
+                cancel,
+            )
+            .await?
+            {
+                PushBatchOutcome::Done { conflicts } => {
+                    *total_conflict_resolved += conflicts;
+                }
+                PushBatchOutcome::Split => {
+                    // Bisect oversized multi-event batch; keep ascending-id order
+                    // by pushing second half then first half to the front.
+                    warn!(
+                        batch_len = batch.len(),
+                        "Push batch rejected with HTTP 413; splitting and retrying"
+                    );
+                    requeue_split_batch_front(&mut queue, batch);
+                }
+                PushBatchOutcome::SkippedOversized => {
+                    // Single event permanently failed; continue with remaining work.
+                }
+            }
+        }
+    }
+}
+
+/// Slice pending events into size-aware batches in id-ascending order (FIFO).
+fn build_push_batch_queue(
+    events: &[(i64, PushEvent)],
+    max_events: usize,
+    max_bytes: usize,
+) -> VecDeque<Vec<(i64, PushEvent)>> {
+    let mut queue: VecDeque<Vec<(i64, PushEvent)>> = VecDeque::new();
+    let mut offset = 0usize;
+    while offset < events.len() {
+        let remaining = &events[offset..];
+        let take = select_push_batch_len(remaining, max_events, max_bytes);
+        queue.push_back(remaining[..take].to_vec());
+        offset += take;
+    }
+    queue
+}
+
+/// After a 413 Split, put first half before second half at the front of the queue.
+fn requeue_split_batch_front(
+    queue: &mut VecDeque<Vec<(i64, PushEvent)>>,
+    batch: Vec<(i64, PushEvent)>,
+) {
+    let mid = batch.len() / 2;
+    let second = batch[mid..].to_vec();
+    let first = batch[..mid].to_vec();
+    // push_front second then first → pop_front yields first, then second.
+    queue.push_front(second);
+    queue.push_front(first);
+}
+
+enum PushBatchOutcome {
+    Done { conflicts: usize },
+    /// Multi-event batch hit 413 — caller should bisect and retry.
+    Split,
+    /// Single event was too large; already marked failed permanently.
+    SkippedOversized,
+}
+
+/// Push one concrete batch. Does not recurse — 413 split is handled by the caller queue.
+#[allow(clippy::too_many_arguments)]
+async fn push_event_batch_once(
+    app_handle: &AppHandle,
+    settings: &SyncSettings,
+    token: &str,
+    device_id: &str,
+    device_name: &str,
+    events: &[(i64, PushEvent)],
+    cancel: &CancellationToken,
+) -> Result<PushBatchOutcome, String> {
+    if events.is_empty() {
+        return Ok(PushBatchOutcome::Done { conflicts: 0 });
+    }
+    ensure_not_cancelled(cancel)?;
+    mark_events_pushing(app_handle, events)?;
+    let request = PushRequest {
+        device_id: device_id.to_string(),
+        device_name: device_name.to_string(),
+        events: events.iter().map(|(_, event)| event.clone()).collect(),
+    };
+    let url = format!("{}/v1/sync/push", settings.server_url);
+    emit_status_changed(app_handle).await;
+    let response = match await_or_cancel(
+        cancel,
+        sync_http_client()?
             .post(url)
             .bearer_auth(token)
             .json(&request)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                mark_events_failed(app_handle, &events, &err.to_string())?;
-                return Err(format!("推送同步变更失败: {err}"));
-            }
-        };
-        if !response.status().is_success() {
-            mark_events_failed(app_handle, &events, &format!("HTTP {}", response.status()))?;
-            return Err(format!("同步服务器 push 返回 {}", response.status()));
+            .send(),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(err) if is_sync_stopped_error(&err) => return Err(err),
+        Err(err) => {
+            mark_events_failed(app_handle, events, &err)?;
+            return Err(format!("推送同步变更失败: {err}"));
         }
-        let body = match response.json::<PushResponse>().await {
-            Ok(body) => body,
-            Err(err) => {
-                mark_events_failed(app_handle, &events, &err.to_string())?;
-                return Err(err.to_string());
-            }
-        };
-        *total_conflict_resolved += handle_push_response(app_handle, &events, body)?;
+    };
+    let status = response.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        if events.len() > 1 {
+            return Ok(PushBatchOutcome::Split);
+        }
+        let (id, event) = &events[0];
+        let reason = format!(
+            "{OVERSIZED_PUSH_REASON}（{}/{}）",
+            event.object_type, event.object_id
+        );
+        warn!(
+            event_id = %event.event_id,
+            object_type = %event.object_type,
+            object_id = %event.object_id,
+            "Skipping oversized outbox event after HTTP 413"
+        );
+        mark_event_failed_permanent(app_handle, *id, &reason)?;
         emit_status_changed(app_handle).await;
+        return Ok(PushBatchOutcome::SkippedOversized);
     }
+    if !status.is_success() {
+        mark_events_failed(app_handle, events, &format!("HTTP {status}"))?;
+        return Err(format!("同步服务器 push 返回 {status}"));
+    }
+    let body = match await_or_cancel(cancel, response.json::<PushResponse>()).await {
+        Ok(body) => body,
+        Err(err) if is_sync_stopped_error(&err) => return Err(err),
+        Err(err) => {
+            mark_events_failed(app_handle, events, &err)?;
+            return Err(err);
+        }
+    };
+    let conflicts = handle_push_response(app_handle, events, body)?;
+    emit_status_changed(app_handle).await;
+    Ok(PushBatchOutcome::Done { conflicts })
+}
+
+fn estimate_push_event_bytes(event: &PushEvent) -> usize {
+    let payload_len = event
+        .payload
+        .as_ref()
+        .and_then(|payload| serde_json::to_vec(payload).ok())
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    // event_id / type / id / operation / versions + JSON framing overhead
+    payload_len
+        .saturating_add(event.event_id.len())
+        .saturating_add(event.object_type.len())
+        .saturating_add(event.object_id.len())
+        .saturating_add(event.operation.len())
+        .saturating_add(192)
+}
+
+/// How many leading events fit under both the count and soft byte budgets.
+fn select_push_batch_len(
+    events: &[(i64, PushEvent)],
+    max_events: usize,
+    max_bytes: usize,
+) -> usize {
+    if events.is_empty() {
+        return 0;
+    }
+    let mut total = 256usize; // PushRequest envelope overhead
+    let mut count = 0usize;
+    for (_, event) in events.iter().take(max_events) {
+        let next = estimate_push_event_bytes(event);
+        if count > 0 && total.saturating_add(next) > max_bytes {
+            break;
+        }
+        total = total.saturating_add(next);
+        count += 1;
+        // Always include at least one event even if it alone exceeds the soft budget;
+        // a single oversized item is handled via 413 skip-and-continue.
+        if count == 1 && next > max_bytes {
+            break;
+        }
+    }
+    count.max(1).min(events.len())
 }
 
 async fn pull_remote(
@@ -973,24 +1394,35 @@ async fn pull_remote(
     settings: &SyncSettings,
     token: &str,
     device_id: &str,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     loop {
+        ensure_not_cancelled(cancel)?;
         let cursor = get_cursor(app_handle)?;
         let url = format!("{}/v1/sync/pull?cursor={cursor}&limit=500", settings.server_url);
-        let response = sync_http_client()?
-            .get(url)
-            .bearer_auth(token)
-            .header("X-AIPP-Device-ID", device_id)
-            .send()
-            .await
-            .map_err(|e| format!("拉取同步变更失败: {e}"))?;
+        let response = await_or_cancel(
+            cancel,
+            sync_http_client()?
+                .get(url)
+                .bearer_auth(token)
+                .header("X-AIPP-Device-ID", device_id)
+                .send(),
+        )
+        .await
+        .map_err(|e| {
+            if is_sync_stopped_error(&e) {
+                e
+            } else {
+                format!("拉取同步变更失败: {e}")
+            }
+        })?;
         if response.status() == StatusCode::NO_CONTENT {
             return Ok(());
         }
         if !response.status().is_success() {
             return Err(format!("同步服务器 pull 返回 {}", response.status()));
         }
-        let body = response.json::<PullResponse>().await.map_err(|e| e.to_string())?;
+        let body = await_or_cancel(cancel, response.json::<PullResponse>()).await?;
         // 每页复用同一个 sync.db 连接应用所有变更
         let sync_conn = open_sync_db(app_handle)?;
         let mut deferred: Vec<&PullChange> = Vec::new();
@@ -1157,7 +1589,9 @@ fn update_dead_letter_failure(conn: &Connection, id: i64, error: &str) -> Result
 }
 
 fn sync_http_client() -> Result<reqwest::Client, String> {
+    // Force direct connect: LAN sync-server must not go through Clash/system HTTP_PROXY.
     reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())
@@ -1165,7 +1599,9 @@ fn sync_http_client() -> Result<reqwest::Client, String> {
 
 fn sync_notify_http_client() -> Result<reqwest::Client, String> {
     // SSE streams outlive the normal request timeout; only bound connect.
+    // Same no_proxy policy as sync_http_client — notify must reach LAN host directly.
     reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(NOTIFY_CONNECT_TIMEOUT_SECS))
         .pool_idle_timeout(Duration::from_secs(90))
         .build()
@@ -1177,6 +1613,11 @@ async fn run_notify_listener(app_handle: AppHandle) {
     loop {
         if !matches!(load_settings(&app_handle).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
             break;
+        }
+        if let Some(state) = app_handle.try_state::<SyncState>() {
+            if state.status.lock().await.paused {
+                break;
+            }
         }
         match listen_notify_once(&app_handle).await {
             Ok(()) => {
@@ -1267,14 +1708,16 @@ fn parse_sse_sync_cursor(block: &str) -> Option<i64> {
     value.get("cursor")?.as_i64()
 }
 
-fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
+fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanReport), String> {
     ensure_sync_db(app_handle)?;
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
     let sync_conn = open_sync_db(app_handle)?;
     let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
+    let mut dangling = DanglingFkScanReport::default();
     for spec in specs() {
-        let (snapshots, present_ids) = read_local_snapshots(app_handle, &spec, &sync_conn)?;
+        let (snapshots, present_ids) =
+            read_local_snapshots(app_handle, &spec, &sync_conn, &mut dangling)?;
         for snapshot in snapshots {
             if enqueue_snapshot_if_changed(&sync_conn, &snapshot, &device_id)? {
                 enqueued += 1;
@@ -1282,7 +1725,8 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<usize, String> {
         }
         enqueued += scan_local_deletes(app_handle, &sync_conn, &spec, &present_ids)?;
     }
-    Ok(enqueued)
+    log_dangling_fk_summary(&dangling);
+    Ok((enqueued, dangling))
 }
 
 /// 删除检测：shadow 中已同步（非墓碑）但本轮快照里不存在的对象，
@@ -1479,6 +1923,7 @@ fn read_local_snapshots(
     app_handle: &AppHandle,
     spec: &SyncTableSpec,
     sync_conn: &Connection,
+    dangling: &mut DanglingFkScanReport,
 ) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
     let path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&path)?;
@@ -1540,17 +1985,23 @@ fn read_local_snapshots(
         // 否则删除检测会把"暂时跳过"误判成"已删除"。
         present_ids.insert(object_id.clone());
 
-        let Some(refs) = build_fk_refs(spec, &raw_values, &mut fields, |object_type, value| {
-            if let Some(sync_id) = find_object_id(sync_conn, object_type, value)? {
-                return Ok(FkLookup::Resolved(sync_id));
-            }
-            // 未入 map：区分「依赖行还在，只是本轮未映射」与「悬空外键」
-            if dependency_row_exists(app_handle, object_type, value, &mut dep_conns)? {
-                Ok(FkLookup::Pending)
-            } else {
-                Ok(FkLookup::Dangling)
-            }
-        })?
+        let Some(refs) = build_fk_refs(
+            spec,
+            &raw_values,
+            &mut fields,
+            |object_type, value| {
+                if let Some(sync_id) = find_object_id(sync_conn, object_type, value)? {
+                    return Ok(FkLookup::Resolved(sync_id));
+                }
+                // 未入 map：区分「依赖行还在，只是本轮未映射」与「悬空外键」
+                if dependency_row_exists(app_handle, object_type, value, &mut dep_conns)? {
+                    Ok(FkLookup::Pending)
+                } else {
+                    Ok(FkLookup::Dangling)
+                }
+            },
+            Some(dangling),
+        )?
         else {
             // 外键指向的依赖行存在但尚未建立映射：本轮跳过该行，
             // 绝不把本地 rowid 作为外键值推送出去。下轮扫描会自然重试。
@@ -1576,6 +2027,194 @@ fn read_local_snapshots(
     Ok((snapshots, present_ids))
 }
 
+/// 一轮本地扫描内悬空外键的聚合报告。
+///
+/// 键为 (object_type, column, local_fk)；值为命中行数。整轮结束后打摘要日志，
+/// 并把友好中文摘要写入 SyncRuntimeStatus 供 UI 展示。
+#[derive(Debug, Default, Clone)]
+struct DanglingFkScanReport {
+    /// 字段级命中总数（一行多列悬空会计多次）
+    total_hits: i64,
+    /// (object_type, column, local_fk) → 行数
+    by_key: HashMap<(String, String, i64), usize>,
+    /// (object_type, column) → 行数，用于 UI top kinds
+    by_kind: HashMap<(String, String), usize>,
+}
+
+impl DanglingFkScanReport {
+    fn record(&mut self, object_type: &str, column: &str, local_fk: i64) {
+        self.total_hits += 1;
+        *self
+            .by_key
+            .entry((object_type.to_string(), column.to_string(), local_fk))
+            .or_default() += 1;
+        *self
+            .by_kind
+            .entry((object_type.to_string(), column.to_string()))
+            .or_default() += 1;
+    }
+}
+
+/// 清理结果（用户确认后的本地 NULL 操作）。
+#[derive(Debug, Default, Clone)]
+struct DanglingFkCleanupReport {
+    nulled_count: i64,
+    by_kind: HashMap<(String, String), usize>,
+}
+
+fn format_dangling_kinds_suffix(by_kind: &HashMap<(String, String), usize>) -> String {
+    if by_kind.is_empty() {
+        return String::new();
+    }
+    let mut kinds: Vec<_> = by_kind.iter().collect();
+    kinds.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let top: Vec<String> = kinds
+        .iter()
+        .take(3)
+        .map(|((obj, col), n)| format!("{obj}.{col}×{n}"))
+        .collect();
+    format!("（{}）", top.join("、"))
+}
+
+fn format_dangling_fk_summary(report: &DanglingFkScanReport) -> Option<String> {
+    if report.total_hits <= 0 {
+        return None;
+    }
+    Some(format!(
+        "有 {} 条历史引用已失效，已按空值同步{}",
+        report.total_hits,
+        format_dangling_kinds_suffix(&report.by_kind)
+    ))
+}
+
+fn log_dangling_fk_summary(report: &DanglingFkScanReport) {
+    if report.total_hits <= 0 {
+        return;
+    }
+    let mut keys: Vec<_> = report.by_key.iter().collect();
+    keys.sort_by(|a, b| a.0.cmp(b.0));
+    for ((object_type, column, local_fk), rows) in keys {
+        info!(
+            object_type = %object_type,
+            column = %column,
+            local_fk = %local_fk,
+            rows = %rows,
+            "Dangling foreign key omitted from sync snapshot (aggregated)"
+        );
+    }
+    info!(
+        total = report.total_hits,
+        kinds = report.by_kind.len(),
+        "Dangling foreign key scan summary"
+    );
+}
+
+async fn store_dangling_fk_report(app_handle: &AppHandle, report: &DanglingFkScanReport) {
+    let Some(state) = app_handle.try_state::<SyncState>() else {
+        return;
+    };
+    let mut runtime = state.status.lock().await;
+    runtime.dangling_fk_count = report.total_hits;
+    runtime.dangling_fk_summary = format_dangling_fk_summary(report);
+}
+
+/// 扫描并可选地把本地悬空外键列置为 NULL。
+///
+/// `mutate=false` 仅统计；`mutate=true` 写库。provider_id=0 哨兵不处理。
+fn scan_or_null_dangling_local_fks(
+    app_handle: &AppHandle,
+    mutate: bool,
+) -> Result<DanglingFkCleanupReport, String> {
+    let mut report = DanglingFkCleanupReport::default();
+    // 按 db_name 缓存连接，避免重复打开
+    let mut data_conns: HashMap<&'static str, Connection> = HashMap::new();
+    let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
+
+    for spec in specs() {
+        if spec.foreign_keys.is_empty() {
+            continue;
+        }
+        if !data_conns.contains_key(spec.db_name) {
+            let path = get_db_path(app_handle, spec.db_name)?;
+            data_conns.insert(spec.db_name, open_data_db(&path)?);
+        }
+        let columns = {
+            let conn = data_conns.get(spec.db_name).expect("data conn inserted");
+            existing_columns(conn, spec.table, spec.columns)?
+        };
+        if !columns.iter().any(|c| c == "id") {
+            continue;
+        }
+        let fk_cols: Vec<&ForeignKeySpec> = spec
+            .foreign_keys
+            .iter()
+            .filter(|fk| columns.iter().any(|c| c == fk.column))
+            .collect();
+        if fk_cols.is_empty() {
+            continue;
+        }
+        let select_cols = {
+            let mut cols = vec!["id".to_string()];
+            for fk in &fk_cols {
+                cols.push(fk.column.to_string());
+            }
+            cols
+        };
+        let sql = format!(
+            "SELECT {} FROM {} {}",
+            select_cols.join(", "),
+            spec.table,
+            spec.where_clause
+                .map(|w| format!("WHERE {w}"))
+                .unwrap_or_default(),
+        );
+        // 先读出待清理列表，结束对 data_conns 的不可变借用后再写
+        let to_null: Vec<(i64, &'static str)> = {
+            let conn = data_conns.get(spec.db_name).expect("data conn inserted");
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            let mut pending = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let local_id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                for (idx, fk) in fk_cols.iter().enumerate() {
+                    let value: Option<i64> = row.get(idx + 1).map_err(|e| e.to_string())?;
+                    let Some(value) = value else { continue };
+                    if is_provider_id_unset_sentinel(fk, value) {
+                        continue;
+                    }
+                    if dependency_row_exists(app_handle, fk.object_type, value, &mut dep_conns)? {
+                        continue;
+                    }
+                    pending.push((local_id, fk.column));
+                    *report
+                        .by_kind
+                        .entry((spec.object_type.to_string(), fk.column.to_string()))
+                        .or_default() += 1;
+                    report.nulled_count += 1;
+                }
+            }
+            pending
+        };
+        if mutate && !to_null.is_empty() {
+            let conn = data_conns.get_mut(spec.db_name).expect("data conn");
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            for (local_id, column) in to_null {
+                tx.execute(
+                    &format!("UPDATE {} SET {} = NULL WHERE id = ?1", spec.table, column),
+                    params![local_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(report)
+}
+
+fn null_out_dangling_local_fks(app_handle: &AppHandle) -> Result<DanglingFkCleanupReport, String> {
+    scan_or_null_dangling_local_fks(app_handle, true)
+}
+
 /// 外键本地解析结果：区分「已映射 / 依赖未入 map / 悬空」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FkLookup {
@@ -1593,11 +2232,15 @@ enum FkLookup {
 /// `fields` 置为 NULL 且不进入 refs。
 /// 返回 `Ok(None)` 表示存在「行在但尚未映射」的依赖，调用方必须跳过该行，
 /// 避免把本地 rowid 作为外键值泄露到 payload 中。
+///
+/// `dangling` 若提供，则按 (object_type, column, local_fk) 聚合计数，供整轮扫描后
+/// 打一条摘要日志，避免 per-row DEBUG 刷屏。
 fn build_fk_refs(
     spec: &SyncTableSpec,
     raw_values: &HashMap<String, JsonValue>,
     fields: &mut Map<String, JsonValue>,
     mut resolve: impl FnMut(&str, i64) -> Result<FkLookup, String>,
+    mut dangling: Option<&mut DanglingFkScanReport>,
 ) -> Result<Option<Map<String, JsonValue>>, String> {
     let mut refs = Map::new();
     for fk in spec.foreign_keys {
@@ -1615,13 +2258,9 @@ fn build_fk_refs(
                 FkLookup::Dangling => {
                     // 悬空外键：当作 NULL 推送，不永久卡住同步
                     fields.insert(fk.column.to_string(), JsonValue::Null);
-                    debug!(
-                        object_type = %spec.object_type,
-                        column = fk.column,
-                        local_fk = value,
-                        target = fk.object_type,
-                        "Omitting dangling foreign key from sync snapshot"
-                    );
+                    if let Some(report) = dangling.as_mut() {
+                        report.record(spec.object_type, fk.column, value);
+                    }
                 }
             }
         }
@@ -2800,6 +3439,20 @@ fn mark_events_failed(
     Ok(())
 }
 
+/// Mark one outbox row failed immediately (no backoff retry) — used for inherent
+/// oversized payloads that will keep hitting 413.
+fn mark_event_failed_permanent(app_handle: &AppHandle, id: i64, error: &str) -> Result<(), String> {
+    let conn = open_sync_db(app_handle)?;
+    conn.execute(
+        "UPDATE sync_outbox
+         SET status = 'failed', retry_count = retry_count + 1, last_error = ?2, next_retry_at = NULL
+         WHERE id = ?1",
+        params![id, error],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn reset_pushing_events(app_handle: &AppHandle) -> Result<(), String> {
     let conn = open_sync_db(app_handle)?;
     conn.execute(
@@ -3523,6 +4176,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         connected: runtime.connected,
         running: runtime.running,
         syncing: runtime.syncing,
+        paused: runtime.paused,
         last_sync_at: runtime.last_sync_at.or(persisted_last_sync_at),
         last_error,
         pending_outbox_count,
@@ -3532,6 +4186,8 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         needs_reset,
         conflict_resolved_count: runtime.conflict_resolved_count,
         server_cursor: get_cursor(app_handle).unwrap_or(0),
+        dangling_fk_count: runtime.dangling_fk_count,
+        dangling_fk_summary: runtime.dangling_fk_summary.clone(),
     })
 }
 
@@ -3862,6 +4518,127 @@ mod tests {
     use std::iter::FromIterator;
 
     #[test]
+    fn select_push_batch_len_respects_byte_budget_but_keeps_single_oversized() {
+        let small = PushEvent {
+            event_id: "e1".into(),
+            object_type: "message".into(),
+            object_id: "m1".into(),
+            operation: "upsert".into(),
+            base_version: None,
+            local_version: 1,
+            payload: Some(serde_json::json!({"fields": {"text": "hi"}, "refs": {}})),
+            created_at: "now".into(),
+            client_schema_version: CLIENT_SCHEMA_VERSION,
+            object_schema_version: 1,
+        };
+        let huge_payload = "x".repeat(5000);
+        let huge = PushEvent {
+            event_id: "e2".into(),
+            object_type: "message".into(),
+            object_id: "m2".into(),
+            operation: "upsert".into(),
+            base_version: None,
+            local_version: 1,
+            payload: Some(serde_json::json!({"fields": {"blob": huge_payload}, "refs": {}})),
+            created_at: "now".into(),
+            client_schema_version: CLIENT_SCHEMA_VERSION,
+            object_schema_version: 1,
+        };
+        let events = vec![(1, small.clone()), (2, small.clone()), (3, huge.clone())];
+        // Tiny budget: first small fits alone; second would exceed → take 1
+        assert_eq!(select_push_batch_len(&events, 25, 400), 1);
+        // Single oversized still returns 1 so 413 handler can skip it
+        let only_huge = vec![(3, huge)];
+        assert_eq!(select_push_batch_len(&only_huge, 25, 100), 1);
+        // Generous budget takes multiple
+        assert!(select_push_batch_len(&events[..2], 25, 10_000) >= 2);
+    }
+
+    fn tiny_push_event(id: &str) -> PushEvent {
+        PushEvent {
+            event_id: id.into(),
+            object_type: "message".into(),
+            object_id: id.into(),
+            operation: "upsert".into(),
+            base_version: None,
+            local_version: 1,
+            payload: Some(serde_json::json!({"fields": {"text": id}, "refs": {}})),
+            created_at: "now".into(),
+            client_schema_version: CLIENT_SCHEMA_VERSION,
+            object_schema_version: 1,
+        }
+    }
+
+    /// Multi-batch selection + FIFO queue keeps outbox ids ascending when drained.
+    #[test]
+    fn push_batch_queue_fifo_keeps_ascending_outbox_ids() {
+        // Force one-event batches via tiny byte budget so we get multiple queue entries.
+        let events: Vec<(i64, PushEvent)> = (1..=5)
+            .map(|id| (id, tiny_push_event(&format!("e{id}"))))
+            .collect();
+        let mut queue = build_push_batch_queue(&events, 25, 400);
+        assert!(queue.len() >= 3, "expected multiple batches, got {}", queue.len());
+        let mut drained_ids = Vec::new();
+        while let Some(batch) = queue.pop_front() {
+            for (id, _) in batch {
+                drained_ids.push(id);
+            }
+        }
+        assert_eq!(drained_ids, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// 413 Split requeue puts the first half before the second half (still FIFO).
+    #[test]
+    fn push_batch_split_requeue_keeps_first_half_before_second() {
+        let batch: Vec<(i64, PushEvent)> = (10..=13)
+            .map(|id| (id, tiny_push_event(&format!("e{id}"))))
+            .collect();
+        let mut queue: VecDeque<Vec<(i64, PushEvent)>> = VecDeque::new();
+        // Existing later work should stay behind the split halves.
+        queue.push_back(vec![(99, tiny_push_event("later"))]);
+        requeue_split_batch_front(&mut queue, batch);
+        let first = queue.pop_front().expect("first half");
+        let second = queue.pop_front().expect("second half");
+        let later = queue.pop_front().expect("later work");
+        assert_eq!(
+            first.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            second.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![12, 13]
+        );
+        assert_eq!(later[0].0, 99);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn ensure_not_cancelled_errors_only_after_cancel() {
+        let token = CancellationToken::new();
+        assert!(ensure_not_cancelled(&token).is_ok());
+        token.cancel();
+        let err = ensure_not_cancelled(&token).unwrap_err();
+        assert_eq!(err, SYNC_STOPPED_MSG);
+        assert!(is_sync_stopped_error(&err));
+        assert!(!is_sync_stopped_error("连接同步服务器失败"));
+    }
+
+    #[tokio::test]
+    async fn await_or_cancel_returns_stopped_when_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let result: Result<i32, String> = await_or_cancel(&token, async { Ok::<i32, String>(1) }).await;
+        assert_eq!(result.unwrap_err(), SYNC_STOPPED_MSG);
+    }
+
+    #[tokio::test]
+    async fn await_or_cancel_passes_through_success() {
+        let token = CancellationToken::new();
+        let result = await_or_cancel(&token, async { Ok::<i32, String>(7) }).await;
+        assert_eq!(result.unwrap(), 7);
+    }
+
+    #[test]
     fn dependency_pending_error_matches_only_dependency_prefixes() {
         assert!(is_dependency_pending_error("缺少同步依赖: message.conversation_id -> abc"));
         assert!(is_dependency_pending_error("远端变更缺少外键引用: message.conversation_id（refs 缺失，拒绝写入原始本地 id）"));
@@ -4089,7 +4866,7 @@ mod tests {
         let mut fields = Map::new();
         let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
             Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
-        })
+        }, None)
         .unwrap()
         .expect("all foreign keys resolvable");
         assert_eq!(refs.get("conversation_id").unwrap(), &json!("conversation-3"));
@@ -4112,7 +4889,7 @@ mod tests {
             } else {
                 Ok(FkLookup::Resolved(format!("{object_type}-x")))
             }
-        })
+        }, None)
         .unwrap();
         assert!(result.is_none());
     }
@@ -4129,7 +4906,7 @@ mod tests {
         let mut fields = Map::new();
         let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
             Ok(FkLookup::Resolved(format!("{object_type}-{value}")))
-        })
+        }, None)
         .unwrap()
         .expect("null foreign key needs no ref");
         assert!(!refs.contains_key("parent_id"));
@@ -4151,18 +4928,64 @@ mod tests {
             ("llm_model_id".to_string(), json!(1)),
             ("content".to_string(), json!("hello")),
         ]);
-        let refs = build_fk_refs(&spec, &raw_values, &mut fields, |object_type, value| {
-            match object_type {
+        let mut dangling = DanglingFkScanReport::default();
+        let refs = build_fk_refs(
+            &spec,
+            &raw_values,
+            &mut fields,
+            |object_type, value| match object_type {
                 "conversation" => Ok(FkLookup::Resolved(format!("conv-{value}"))),
                 "llm.model" => Ok(FkLookup::Dangling),
                 other => panic!("unexpected fk target {other}"),
-            }
-        })
+            },
+            Some(&mut dangling),
+        )
         .unwrap()
         .expect("dangling llm_model_id must not block snapshot");
         assert_eq!(refs.get("conversation_id").unwrap(), &json!("conv-10"));
         assert!(!refs.contains_key("llm_model_id"));
         assert_eq!(fields.get("llm_model_id").unwrap(), &JsonValue::Null);
+        assert_eq!(dangling.total_hits, 1);
+        assert_eq!(
+            dangling.by_key.get(&("conversation.message".into(), "llm_model_id".into(), 1)),
+            Some(&1)
+        );
+        let summary = format_dangling_fk_summary(&dangling).expect("summary");
+        assert!(summary.contains("有 1 条历史引用已失效"));
+        assert!(summary.contains("llm_model_id"));
+    }
+
+    /// 同一 (object_type, column, local_fk) 多次命中只聚合计数，摘要只出一条
+    #[test]
+    fn dangling_fk_report_aggregates_same_key() {
+        let mut report = DanglingFkScanReport::default();
+        report.record("conversation.message", "llm_model_id", 1);
+        report.record("conversation.message", "llm_model_id", 1);
+        report.record("conversation.message", "llm_model_id", 2);
+        report.record("conversation.message_attachment", "message_id", 99);
+        assert_eq!(report.total_hits, 4);
+        assert_eq!(
+            report
+                .by_key
+                .get(&("conversation.message".into(), "llm_model_id".into(), 1)),
+            Some(&2)
+        );
+        assert_eq!(
+            report
+                .by_kind
+                .get(&("conversation.message".into(), "llm_model_id".into())),
+            Some(&3)
+        );
+        let summary = format_dangling_fk_summary(&report).unwrap();
+        assert!(summary.starts_with("有 4 条历史引用已失效，已按空值同步"));
+        assert!(summary.contains("llm_model_id"));
+    }
+
+    /// sync HTTP client builders must disable system proxy (Clash LAN bypass)
+    #[test]
+    fn sync_http_clients_build_with_no_proxy() {
+        assert!(sync_http_client().is_ok());
+        assert!(sync_notify_http_client().is_ok());
     }
 
     /// provider_id=0 是未选 provider 哨兵：保留 0、不进 refs、不挡快照
@@ -4186,7 +5009,7 @@ mod tests {
                 "llm.provider" => panic!("provider_id=0 must not call resolve"),
                 other => panic!("unexpected fk target {other}"),
             }
-        })
+        }, None)
         .unwrap()
         .expect("provider_id=0 must not block assistant.model");
         assert_eq!(refs.get("assistant_id").unwrap(), &json!("asst-1"));
@@ -4237,7 +5060,7 @@ mod tests {
                 "llm.model" => Ok(FkLookup::Pending),
                 other => panic!("unexpected fk target {other}"),
             }
-        })
+        }, None)
         .unwrap();
         assert!(result.is_none(), "existing-but-unmapped dependency must still skip");
         // fields 未被清空（跳过时不应改写为 NULL）

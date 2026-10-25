@@ -8,8 +8,13 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import {
+    canStopSync,
     decideSyncNowAction,
+    formatDanglingFkStatusText,
+    formatSyncStatusText,
     friendlySyncError,
+    saveThenSyncSuccessMessage,
+    shouldTriggerSyncAfterSave,
 } from "./dataFolderSyncHelpers";
 
 interface DataFolderConfigFormProps {
@@ -23,6 +28,7 @@ interface SyncStatus {
     connected: boolean;
     running: boolean;
     syncing: boolean;
+    paused?: boolean;
     last_sync_at?: string | null;
     last_error?: string | null;
     pending_outbox_count: number;
@@ -32,6 +38,8 @@ interface SyncStatus {
     needs_reset: boolean;
     conflict_resolved_count: number;
     server_cursor: number;
+    dangling_fk_count?: number;
+    dangling_fk_summary?: string | null;
 }
 
 const STATUS_FALLBACK_POLL_MS = 30_000;
@@ -40,10 +48,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [status, setStatus] = useState<SyncStatus | null>(null);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    const [stopping, setStopping] = useState(false);
     const [retryingFailed, setRetryingFailed] = useState(false);
     const [retryingDeadLetters, setRetryingDeadLetters] = useState(false);
     const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
     const [resetting, setResetting] = useState(false);
+    const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+    const [cleaningDangling, setCleaningDangling] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
     const watchedServerUrl = useWatch({ control: form.control, name: "server_url" }) || "";
@@ -133,7 +144,11 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             token: "",
         });
         if (!opts?.quietSuccess) {
-            toast.success(nextStatus.mode === "self_hosted" ? "自建同步配置已保存" : "已切换为本地模式");
+            toast.success(
+                nextStatus.mode === "self_hosted"
+                    ? "自建同步配置已保存，后台将自动同步"
+                    : "已切换为本地模式",
+            );
         }
         if (nextStatus.mode === "self_hosted") {
             void loadStatus(false);
@@ -171,27 +186,53 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         try {
             if (decision.action === "save_then_sync") {
                 setSaving(true);
+                let saved: SyncStatus;
                 try {
-                    const saved = await persistSyncSettings({ quietSuccess: true });
+                    saved = await persistSyncSettings({ quietSuccess: true });
                     if (saved.mode === "self_hosted" && !saved.token_configured) {
                         toast.error("访问 token 未能保存成功，请检查后重试");
                         return;
                     }
-                    toast.success("配置已自动保存，开始同步…");
                 } finally {
                     setSaving(false);
                 }
+
+                // Normal self_hosted save already ran sync; only trigger again
+                // when save skipped sync (needs_reset) — one merged success toast.
+                const needSyncNow = shouldTriggerSyncAfterSave(saved);
+                if (needSyncNow) {
+                    const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
+                    setStatus(nextStatus);
+                } else {
+                    setStatus(saved);
+                }
+                toast.success(saveThenSyncSuccessMessage(needSyncNow));
+                return;
             }
 
+            // sync_only: save did not run, so trigger sync now.
             const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
             setStatus(nextStatus);
-            toast.success("同步已触发");
+            toast.success("已触发一次同步（平时会自动同步）");
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "触发同步失败"));
         } finally {
             setSyncing(false);
         }
     }, [form, persistSyncSettings, status?.server_url, status?.token_configured]);
+
+    const handleStopSync = useCallback(async () => {
+        setStopping(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("stop_sync");
+            setStatus(nextStatus);
+            toast.success(nextStatus.paused ? "已停止同步，后台同步已暂停" : "已停止同步");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "停止同步失败"));
+        } finally {
+            setStopping(false);
+        }
+    }, []);
 
     const handleRetryFailed = useCallback(async () => {
         setRetryingFailed(true);
@@ -233,16 +274,30 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
-    const statusText = useMemo(() => {
-        if (!status) {
-            return "读取中";
+    const handleCleanupDanglingFks = useCallback(async () => {
+        setCleanupConfirmOpen(false);
+        setCleaningDangling(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("cleanup_dangling_foreign_keys");
+            setStatus(nextStatus);
+            const notice = formatDanglingFkStatusText(nextStatus);
+            toast.success(notice || "已清理失效的本地引用");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "清理失效引用失败"));
+        } finally {
+            setCleaningDangling(false);
         }
-        if (status.mode === "local") {
-            return "本地模式：仅使用本机 SQLite，后台同步已停止。";
-        }
-        const state = status.syncing ? "同步中" : status.connected ? "已连接" : status.running ? "等待同步" : "未运行";
-        return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
-    }, [status]);
+    }, []);
+
+    const statusText = useMemo(() => formatSyncStatusText(status), [status]);
+    const danglingText = useMemo(() => formatDanglingFkStatusText(status), [status]);
+    const danglingCount = status?.dangling_fk_count ?? 0;
+    const stopEnabled = canStopSync({
+        mode,
+        syncing: Boolean(status?.syncing) || syncing,
+        running: Boolean(status?.running),
+        paused: status?.paused,
+    });
 
     const renderSyncStatusRow = useCallback(() => {
         const items = [
@@ -251,18 +306,28 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             { label: "最近错误", value: status?.last_error || "无" },
         ];
         return (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                {items.map((item) => (
-                    <div key={item.label} className="min-w-0 space-y-2">
-                        <div className="font-semibold text-sm text-foreground">{item.label}</div>
-                        <div className="text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap">
-                            {item.value}
+            <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    {items.map((item) => (
+                        <div key={item.label} className="min-w-0 space-y-2">
+                            <div className="font-semibold text-sm text-foreground">{item.label}</div>
+                            <div className="text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap">
+                                {item.value}
+                            </div>
                         </div>
+                    ))}
+                </div>
+                {danglingText ? (
+                    <div className="text-sm text-amber-700 dark:text-amber-300 px-3 py-2 bg-amber-50 dark:bg-amber-950/40 rounded-md break-words">
+                        {danglingText}
+                        {danglingCount > 0
+                            ? " 如需把本机对应字段也清空，可点下方「清理失效引用」。"
+                            : ""}
                     </div>
-                ))}
+                ) : null}
             </div>
         );
-    }, [status?.last_error, status?.last_sync_at, statusText]);
+    }, [danglingCount, danglingText, status?.last_error, status?.last_sync_at, statusText]);
 
     const renderSyncActionButtons = useCallback(() => {
         return (
@@ -271,14 +336,23 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                     type="button"
                     variant="outline"
                     className="hover:bg-muted hover:border-border"
-                    disabled={mode !== "self_hosted" || syncing || saving}
+                    disabled={mode !== "self_hosted" || syncing || saving || stopping}
                     onClick={handleSyncNow}
                 >
                     {syncing
                         ? "同步中..."
                         : status?.token_configured
-                          ? "立即同步"
+                          ? "立即同步一次"
                           : "保存并同步"}
+                </Button>
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="hover:bg-muted hover:border-border"
+                    disabled={!stopEnabled || stopping || saving}
+                    onClick={handleStopSync}
+                >
+                    {stopping ? "停止中..." : "停止同步"}
                 </Button>
                 <Button
                     type="button"
@@ -300,11 +374,28 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 >
                     {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
                 </Button>
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="hover:bg-muted hover:border-border"
+                    disabled={
+                        mode !== "self_hosted"
+                        || cleaningDangling
+                        || saving
+                        || danglingCount === 0
+                    }
+                    onClick={() => setCleanupConfirmOpen(true)}
+                >
+                    {cleaningDangling ? "清理中..." : "清理失效引用"}
+                </Button>
             </div>
         );
     }, [
+        cleaningDangling,
+        danglingCount,
         handleRetryDeadLetters,
         handleRetryFailed,
+        handleStopSync,
         handleSyncNow,
         mode,
         retryingDeadLetters,
@@ -313,6 +404,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         status?.dead_letter_count,
         status?.failed_outbox_count,
         status?.token_configured,
+        stopEnabled,
+        stopping,
         syncing,
     ]);
 
@@ -340,7 +433,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                     {
                         value: "self_hosted",
                         label: "自建同步",
-                        tooltip: "连接你自建的 AIPP sync-server，按业务对象同步核心数据。",
+                        tooltip: "连接你自建的 AIPP sync-server。配置完成后本地改动与远端变更会自动同步，一般无需点「立即同步一次」。",
                     },
                 ],
             },
@@ -371,6 +464,15 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 label: status?.token_configured ? "访问 token（留空则沿用已保存 token）" : "访问 token",
                 placeholder: status?.token_configured ? "已保存，可留空" : "Bearer token",
                 disabled: mode !== "self_hosted",
+                hidden: mode !== "self_hosted",
+            },
+        },
+        {
+            key: "autoSyncHint",
+            config: {
+                type: "static" as const,
+                label: "自动同步",
+                value: "已配置自建同步后，本地数据变更会在短暂防抖后自动推送，并定期/经服务器通知拉取远端变更。「立即同步一次」仅在需要马上跑一轮时使用；同步进行中可点「停止同步」暂停后台。",
                 hidden: mode !== "self_hosted",
             },
         },
@@ -429,6 +531,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 confirmText="将清空本机的同步游标、对象映射与待推送队列，然后与新服务器重新全量同步。本机数据本身不会被删除，但未推送的本地修改会以全量方式重新上传。确认继续？"
                 onConfirm={handleResetSyncState}
                 onCancel={() => setResetConfirmOpen(false)}
+            />
+            <ConfirmDialog
+                isOpen={cleanupConfirmOpen}
+                title="清理失效引用"
+                confirmText={`将把本机约 ${danglingCount} 处悬空外键（如 llm_model_id、message_id 等指向已不存在行的字段）置为空值。同步推送时本就会按空值处理；此操作会改写本地数据库，请确认后继续。`}
+                onConfirm={handleCleanupDanglingFks}
+                onCancel={() => setCleanupConfirmOpen(false)}
             />
         </>
     );

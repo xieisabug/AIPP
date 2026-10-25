@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    canStopSync,
     decideSyncNowAction,
+    formatDanglingFkStatusText,
+    formatSyncStatusText,
     friendlySyncError,
     normalizeSyncServerUrl,
+    saveThenSyncSuccessMessage,
+    shouldTriggerSyncAfterSave,
 } from "./dataFolderSyncHelpers";
 
 describe("dataFolderSyncHelpers", () => {
@@ -64,5 +69,91 @@ describe("dataFolderSyncHelpers", () => {
         expect(friendlySyncError("缺少同步 token，请先保存自建同步配置", "触发同步失败")).toContain(
             "自动保存",
         );
+        expect(friendlySyncError("同步已停止", "停止同步失败")).toBe("已停止同步");
+        expect(
+            friendlySyncError("变更过大被服务器拒绝（HTTP 413），已跳过并记入失败项", "触发同步失败"),
+        ).toContain("HTTP 413");
+    });
+
+    it("formatSyncStatusText explains auto sync and paused", () => {
+        expect(
+            formatSyncStatusText({
+                mode: "self_hosted",
+                syncing: false,
+                connected: true,
+                running: true,
+                paused: false,
+                pending_outbox_count: 0,
+                failed_outbox_count: 0,
+                server_cursor: 3,
+            }),
+        ).toContain("后台自动同步");
+        expect(
+            formatSyncStatusText({
+                mode: "self_hosted",
+                syncing: false,
+                connected: false,
+                running: false,
+                paused: true,
+                pending_outbox_count: 1,
+                failed_outbox_count: 0,
+                server_cursor: 3,
+            }),
+        ).toContain("已暂停");
+    });
+
+    it("canStopSync only when busy or worker running", () => {
+        expect(canStopSync({ mode: "self_hosted", syncing: true, running: false })).toBe(true);
+        expect(canStopSync({ mode: "self_hosted", syncing: false, running: true, paused: false })).toBe(
+            true,
+        );
+        expect(canStopSync({ mode: "self_hosted", syncing: false, running: false, paused: true })).toBe(
+            false,
+        );
+        expect(canStopSync({ mode: "local", syncing: true, running: true })).toBe(false);
+    });
+
+    it("shouldTriggerSyncAfterSave only when save skipped sync (needs_reset)", () => {
+        expect(
+            shouldTriggerSyncAfterSave({ mode: "self_hosted", needs_reset: false }),
+        ).toBe(false);
+        expect(
+            shouldTriggerSyncAfterSave({ mode: "self_hosted", needs_reset: true }),
+        ).toBe(true);
+        expect(shouldTriggerSyncAfterSave({ mode: "local", needs_reset: true })).toBe(false);
+    });
+
+    it("saveThenSyncSuccessMessage merges to one toast", () => {
+        expect(saveThenSyncSuccessMessage(false)).toContain("已开始同步");
+        expect(saveThenSyncSuccessMessage(true)).toContain("开始同步");
+    });
+
+    it("formatDanglingFkStatusText prefers backend summary", () => {
+        expect(
+            formatDanglingFkStatusText({
+                dangling_fk_count: 3,
+                dangling_fk_summary: "有 3 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×3）",
+            }),
+        ).toContain("有 3 条历史引用已失效");
+        expect(formatDanglingFkStatusText({ dangling_fk_count: 2 })).toBe(
+            "有 2 条历史引用已失效，已按空值同步",
+        );
+        expect(formatDanglingFkStatusText({ dangling_fk_count: 0 })).toBeNull();
+    });
+
+    it("formatSyncStatusText appends dangling FK notice", () => {
+        expect(
+            formatSyncStatusText({
+                mode: "self_hosted",
+                syncing: false,
+                connected: true,
+                running: true,
+                pending_outbox_count: 0,
+                failed_outbox_count: 0,
+                server_cursor: 1,
+                dangling_fk_count: 5,
+                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×5）",
+            }),
+        ).toContain("有 5 条历史引用已失效");
     });
 });

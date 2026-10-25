@@ -186,7 +186,7 @@ docker run -d --name aipp-sync \
 | `AIPP_SYNC_BOOTSTRAP_ACCOUNT_ID` | `bootstrap_account_id` | `default` | 启动时创建的 bootstrap 账号 id |
 | `AIPP_SYNC_BOOTSTRAP_TOKEN` | `bootstrap_token` | （空 / `None`） | 有值才创建 bootstrap token；非本机禁止空值与 `dev-token` |
 | `AIPP_SYNC_TOKEN_TTL_DAYS` | `token_ttl_days` | `365` | Token 有效期（天）；`0` = 永不过期 |
-| `AIPP_SYNC_MAX_REQUEST_BODY_BYTES` | `max_request_body_bytes` | `16777216`（16MB） | 按 `Content-Length` 提前拒绝过大请求体；`0` = 不限制 |
+| `AIPP_SYNC_MAX_REQUEST_BODY_BYTES` | `max_request_body_bytes` | `67108864`（64MB） | 按 `Content-Length` 提前拒绝过大请求体；`0` = 不限制 |
 | `AIPP_SYNC_MAX_PAYLOAD_BYTES` | `max_payload_bytes` | `0` | 单个对象 payload 上限；`0` = 应用层不限制 |
 | `AIPP_SYNC_MAX_EVENTS_PER_PUSH` | `max_events_per_push` | `500` | 单次 push 最多事件数（1–5000） |
 | `AIPP_SYNC_MIN_CLIENT_SCHEMA_VERSION` | `min_client_schema_version` | `1` | 接受的最小客户端 schema |
@@ -195,7 +195,12 @@ docker run -d --name aipp-sync \
 
 注意：
 
-- 若前面有反向代理，请把代理的 body 大小限制与预期最大同步对象对齐。
+- **反向代理 body 上限**：若前面有 nginx / Caddy / 其它反向代理，必须把代理的请求体限制调到 **≥ 64MB**，与默认 `AIPP_SYNC_MAX_REQUEST_BODY_BYTES=67108864` 对齐。否则大对话/附件 push 会在代理层先被拒绝（常见 HTTP 413），客户端分批也救不了。nginx 示例：
+
+  ```nginx
+  client_max_body_size 64m;
+  ```
+
 - ID 字段（`event_id` / `object_type` / `object_id` / `device_id`）允许字符 `[A-Za-z0-9._:+/=-]`，长度 1–128（含 `+/=` 以支持 `natural:<base64>` 形式的对象 id）。
 - `base_version` 必须 ≥ 0。
 
