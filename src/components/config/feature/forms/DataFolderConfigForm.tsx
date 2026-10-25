@@ -25,6 +25,7 @@ import {
     isAutoSyncEnabled,
     saveThenSyncSuccessMessage,
     shouldTriggerSyncAfterSave,
+    showsSelfHostedSyncControls,
     syncConflictNotice,
 } from "./dataFolderSyncHelpers";
 
@@ -411,9 +412,6 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                                 </span>
                             ))}
                         </div>
-                        {connectionState === "本地模式" ? (
-                            <p className="mt-1.5 text-xs text-muted-foreground">仅使用本机数据，后台同步已停止</p>
-                        ) : null}
                     </div>
                 </div>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -610,6 +608,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             config: {
                 type: "custom" as const,
                 label: "",
+                hidden: !showsSelfHostedSyncControls(mode),
                 customRender: renderSyncStatusRow,
             },
         },
@@ -618,7 +617,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             config: {
                 type: "custom" as const,
                 label: "同步操作",
-                tooltip: mode === "self_hosted" ? SYNC_ACTIONS_HINT : undefined,
+                tooltip: SYNC_ACTIONS_HINT,
+                hidden: !showsSelfHostedSyncControls(mode),
                 customRender: renderSyncActionButtons,
             },
         },
@@ -628,7 +628,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 type: "static" as const,
                 label: "同步状态待重置",
                 value: "检测到服务器地址或访问 token 已变更，本机数据需要先与新服务器重新对齐后才能继续同步。",
-                hidden: !status?.needs_reset,
+                hidden: !showsSelfHostedSyncControls(mode) || !status?.needs_reset,
             },
         },
         {
@@ -637,8 +637,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 type: "button" as const,
                 label: "重置同步状态",
                 value: resetting ? "重置中..." : "重置并重新全量同步",
-                hidden: !status?.needs_reset,
-                disabled: mode !== "self_hosted" || resetting || saving,
+                hidden: !showsSelfHostedSyncControls(mode) || !status?.needs_reset,
+                disabled: resetting || saving,
                 onClick: () => setResetConfirmOpen(true),
             },
         },

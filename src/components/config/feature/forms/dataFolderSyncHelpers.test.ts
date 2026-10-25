@@ -17,6 +17,7 @@ import {
     normalizeSyncServerUrl,
     saveThenSyncSuccessMessage,
     shouldTriggerSyncAfterSave,
+    showsSelfHostedSyncControls,
     syncConflictNotice,
 } from "./dataFolderSyncHelpers";
 
@@ -189,6 +190,12 @@ describe("dataFolderSyncHelpers", () => {
         expect(canStopSync({ mode: "local", syncing: true, running: true, paused: true })).toBe(
             false,
         );
+    });
+
+    it("hides self-hosted sync status and controls in local mode", () => {
+        expect(showsSelfHostedSyncControls("self_hosted")).toBe(true);
+        expect(showsSelfHostedSyncControls("local")).toBe(false);
+        expect(showsSelfHostedSyncControls(undefined)).toBe(false);
     });
 
     it("canShowSyncNow always in self_hosted; Stop when syncing", () => {

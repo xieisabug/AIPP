@@ -202,6 +202,11 @@ export function canShowSyncNow(input: SyncPrimaryControlInput): boolean {
     return input.mode === "self_hosted";
 }
 
+/** Connection status, queue, errors, retries, cleanup, and reset belong only to self-hosted sync. */
+export function showsSelfHostedSyncControls(mode: string | undefined | null): boolean {
+    return mode === "self_hosted";
+}
+
 /** Auto-sync is on when not paused (paused mirrors persisted auto_sync=false). */
 export function isAutoSyncEnabled(input: { mode?: string; paused?: boolean } | null | undefined): boolean {
     if (!input || input.mode !== "self_hosted") {
