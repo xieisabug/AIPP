@@ -114,7 +114,7 @@ export function formatDanglingFkStatusText(
     return null;
 }
 
-/** Human-readable sync status line for the settings row. */
+/** Human-readable sync status line for the connection-status row (no dangling notice). */
 export function formatSyncStatusText(status: SyncStatusSummaryInput | null | undefined): string {
     if (!status) {
         return "读取中";
@@ -122,24 +122,16 @@ export function formatSyncStatusText(status: SyncStatusSummaryInput | null | und
     if (status.mode === "local") {
         return "本地模式：仅使用本机 SQLite，后台同步已停止。";
     }
+    // Connection row: compact state + queue counters only (dangling lives in its own row).
     let state: string;
-    if (status.paused && !status.syncing) {
-        state = "后台同步已暂停";
-    } else if (status.syncing) {
+    if (status.syncing) {
         state = "同步中";
-    } else if (status.connected) {
-        state = "已连接（后台自动同步中）";
-    } else if (status.running) {
-        state = "等待同步（后台自动同步已开启）";
+    } else if (status.connected || status.running || status.paused) {
+        state = "已连接";
     } else {
-        state = "未运行";
+        state = "未连接";
     }
-    let text = `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
-    const dangling = formatDanglingFkStatusText(status);
-    if (dangling) {
-        text = `${text}。${dangling}`;
-    }
-    return text;
+    return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
 }
 
 export type SyncPrimaryControlInput = {
@@ -150,33 +142,32 @@ export type SyncPrimaryControlInput = {
 };
 
 /**
- * Whether the busy primary control「停止同步」applies.
- * True while a sync round is in flight, or the background worker is running and not paused
- * (status may say「后台自动同步中」even when syncing=false).
+ * Whether「停止同步」should show.
+ * Only while a manual Sync Now round is in flight with auto-sync OFF (`paused`).
+ * Auto-sync ON never shows Stop (turn auto off via the toggle instead).
  */
 export function canStopSync(input: SyncPrimaryControlInput): boolean {
     if (input.mode !== "self_hosted") {
         return false;
     }
-    if (input.syncing) {
-        return true;
-    }
-    if (input.running && !input.paused) {
-        return true;
-    }
-    return false;
+    return Boolean(input.syncing) && Boolean(input.paused);
 }
 
 /**
- * Whether the idle primary control「立即同步一次」should show.
- * Mutually exclusive with Stop: if canStopSync → hide Sync Now; else show Sync Now (and hide Stop).
- * When paused, Sync Now resumes background sync and runs a round.
+ * Whether「立即同步一次」should show.
+ * Always available in self_hosted (not mutually exclusive with Stop the old way).
+ * While a manual round is in flight (Stop visible), the button stays shown but disabled by the form.
  */
 export function canShowSyncNow(input: SyncPrimaryControlInput): boolean {
-    if (input.mode !== "self_hosted") {
+    return input.mode === "self_hosted";
+}
+
+/** Auto-sync is on when not paused (paused mirrors persisted auto_sync=false). */
+export function isAutoSyncEnabled(input: { mode?: string; paused?: boolean } | null | undefined): boolean {
+    if (!input || input.mode !== "self_hosted") {
         return false;
     }
-    return !canStopSync(input);
+    return !Boolean(input.paused);
 }
 
 /** Secondary:「重试失败」— only when failed outbox items exist (not a third sync mode). */

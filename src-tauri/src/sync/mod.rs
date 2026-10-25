@@ -28,6 +28,8 @@ mod divergence;
 const FEATURE_CODE: &str = "data_sync";
 const TOKEN_SCOPE: &str = "data_sync";
 const TOKEN_KEY: &str = "token";
+/// Persisted feature_config key: background auto-sync on/off ("true"/"false").
+const AUTO_SYNC_KEY: &str = "auto_sync";
 const SECURE_MASTER_KEY_FILE: &str = "secure-config-master-key.bin";
 const KEYRING_SERVICE: &str = "com.xieisabug.aipp";
 const KEYRING_MASTER_KEY_USER: &str = "sync-secure-master-key";
@@ -79,7 +81,8 @@ struct SyncRuntimeStatus {
     connected: bool,
     running: bool,
     syncing: bool,
-    /// User paused background sync (「停止同步」). Cleared by resume paths.
+    /// Background auto-sync is off (mirrors persisted `auto_sync=false`).
+    /// Stop cancels an in-flight round only; it does not set this flag.
     paused: bool,
     last_sync_at: Option<String>,
     last_error: Option<String>,
@@ -613,6 +616,7 @@ pub fn start_worker_from_config(app_handle: AppHandle) {
             return;
         }
         if matches!(load_settings(&app_handle).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
+            apply_persisted_auto_sync_to_runtime(&app_handle).await;
             start_worker(app_handle).await;
         }
     });
@@ -712,10 +716,13 @@ pub async fn save_sync_settings(
                 set_sync_meta(&conn, META_NEEDS_RESET, "1")?;
                 warn!("Sync server/account changed with existing local state; waiting for reset confirmation");
             }
-            clear_paused(&app_handle).await;
-            start_worker(app_handle.clone()).await;
-            if !reset_required {
-                run_sync_once(&app_handle).await;
+            // Respect persisted auto_sync (default on). Saving config does not force-enable.
+            apply_persisted_auto_sync_to_runtime(&app_handle).await;
+            if load_auto_sync_enabled(&app_handle) {
+                start_worker(app_handle.clone()).await;
+                if !reset_required {
+                    run_sync_once(&app_handle).await;
+                }
             }
         }
     }
@@ -737,14 +744,19 @@ pub async fn trigger_sync_now(app_handle: AppHandle) -> Result<SyncStatusDto, St
     // retry_failed_sync_outbox) then run a sync round. Otherwise Sync Now looks
     // idle when pending=0 while stale failed rows still hold HTTP 413 etc.
     let _ = reset_failed_events(&app_handle)?;
-    clear_paused(&app_handle).await;
-    start_worker(app_handle.clone()).await;
-    run_sync_once(&app_handle).await;
+    // Sync Now does NOT re-enable auto-sync. When auto is off, run one manual round.
+    apply_persisted_auto_sync_to_runtime(&app_handle).await;
+    if load_auto_sync_enabled(&app_handle) {
+        start_worker(app_handle.clone()).await;
+        run_sync_once(&app_handle).await;
+    } else {
+        run_sync_once_manual(&app_handle).await;
+    }
     sync_status(&app_handle).await
 }
 
-/// Stop in-flight sync and pause the background worker until the user resumes
-/// (「立即同步一次」/ save self_hosted / app restart).
+/// Cancel the in-flight sync round only. Does not turn off auto-sync / set paused.
+/// UI shows Stop only while a manual Sync Now is running with auto-sync off.
 #[tauri::command]
 pub async fn stop_sync(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
     let settings = load_settings(&app_handle)?;
@@ -754,39 +766,74 @@ pub async fn stop_sync(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
     let Some(state) = app_handle.try_state::<SyncState>() else {
         return sync_status(&app_handle).await;
     };
-    let was_busy = {
-        let runtime = state.status.lock().await;
-        runtime.syncing || runtime.running
-    };
-    // Mark paused first so debounce/worker won't immediately requeue.
-    {
-        let mut runtime = state.status.lock().await;
-        runtime.paused = true;
+    let was_syncing = state.status.lock().await.syncing;
+    if !was_syncing {
+        return sync_status(&app_handle).await;
     }
     request_cancel(&app_handle).await;
     // Give in-flight run_sync_once a short window to exit cooperatively
-    // (HTTP select! + between-stage checks) before aborting idle waiters.
+    // (HTTP select! + between-stage checks) before a hard abort.
     let cleared = wait_until_not_syncing(&app_handle, STOP_COOPERATIVE_TIMEOUT).await;
-    // Abort idle waiters (worker poll / SSE / debounce). If syncing is still
-    // stuck after the timeout, this is the same hard-abort path as before,
-    // plus an honest last_error noting forced stop / self-heal on next run.
-    abort_background_tasks(&app_handle).await;
-    {
-        let mut runtime = state.status.lock().await;
-        runtime.running = false;
-        runtime.connected = false;
-        runtime.syncing = false;
-        runtime.last_error = if !cleared {
-            Some(SYNC_FORCED_STOP_MSG.to_string())
-        } else if was_busy {
-            Some(SYNC_STOPPED_MSG.to_string())
-        } else {
-            runtime.last_error.clone()
-        };
+    if !cleared {
+        // Hard abort stuck round; restart background worker if auto-sync is still on.
+        abort_background_tasks(&app_handle).await;
+        {
+            let mut runtime = state.status.lock().await;
+            runtime.syncing = false;
+            runtime.connected = false;
+            runtime.last_error = Some(SYNC_FORCED_STOP_MSG.to_string());
+            if runtime.paused {
+                runtime.running = false;
+            }
+        }
+        replace_cancel_token(&app_handle).await;
+        if load_auto_sync_enabled(&app_handle) {
+            start_worker(app_handle.clone()).await;
+        }
+    } else {
+        // Cooperative path: run_sync_once already set last_error / cleared syncing.
+        replace_cancel_token(&app_handle).await;
     }
-    // Fresh token so the next resume isn't instantly cancelled.
-    replace_cancel_token(&app_handle).await;
     emit_status_changed(&app_handle).await;
+    sync_status(&app_handle).await
+}
+
+/// Persist and apply background auto-sync on/off.
+/// Off → pause worker (same gate as runtime `paused`); On → clear paused + start worker.
+#[tauri::command]
+pub async fn set_auto_sync(
+    app_handle: AppHandle,
+    feature_state: State<'_, crate::FeatureConfigState>,
+    enabled: bool,
+) -> Result<SyncStatusDto, String> {
+    let settings = load_settings(&app_handle)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return Err("当前是本地模式，无法切换自动同步".to_string());
+    }
+    persist_auto_sync_enabled(&app_handle, &feature_state, enabled).await?;
+    if enabled {
+        clear_paused(&app_handle).await;
+        start_worker(app_handle.clone()).await;
+        run_sync_once(&app_handle).await;
+    } else {
+        // Persist-pause: stop background worker; in-flight round is cancelled.
+        if let Some(state) = app_handle.try_state::<SyncState>() {
+            let mut runtime = state.status.lock().await;
+            runtime.paused = true;
+        }
+        request_cancel(&app_handle).await;
+        let _ = wait_until_not_syncing(&app_handle, STOP_COOPERATIVE_TIMEOUT).await;
+        abort_background_tasks(&app_handle).await;
+        if let Some(state) = app_handle.try_state::<SyncState>() {
+            let mut runtime = state.status.lock().await;
+            runtime.running = false;
+            runtime.connected = false;
+            runtime.syncing = false;
+            runtime.paused = true;
+        }
+        replace_cancel_token(&app_handle).await;
+        emit_status_changed(&app_handle).await;
+    }
     sync_status(&app_handle).await
 }
 
@@ -802,10 +849,14 @@ pub async fn retry_failed_sync_outbox(app_handle: AppHandle) -> Result<SyncStatu
 
     let retried = reset_failed_events(&app_handle)?;
     if retried > 0 {
-        clear_paused(&app_handle).await;
         emit_status_changed(&app_handle).await;
-        start_worker(app_handle.clone()).await;
-        run_sync_once(&app_handle).await;
+        apply_persisted_auto_sync_to_runtime(&app_handle).await;
+        if load_auto_sync_enabled(&app_handle) {
+            start_worker(app_handle.clone()).await;
+            run_sync_once(&app_handle).await;
+        } else {
+            run_sync_once_manual(&app_handle).await;
+        }
     }
     sync_status(&app_handle).await
 }
@@ -837,11 +888,15 @@ pub async fn reset_sync_state(app_handle: AppHandle) -> Result<SyncStatusDto, St
         let conn = open_sync_db(&app_handle)?;
         clear_sync_state(&conn)?;
     }
-    clear_paused(&app_handle).await;
     emit_status_changed(&app_handle).await;
-    // 重置完成后立即重新全量同步（bootstrap）
-    start_worker(app_handle.clone()).await;
-    run_sync_once(&app_handle).await;
+    // 重置完成后立即重新全量同步（bootstrap）；不强制打开自动同步
+    apply_persisted_auto_sync_to_runtime(&app_handle).await;
+    if load_auto_sync_enabled(&app_handle) {
+        start_worker(app_handle.clone()).await;
+        run_sync_once(&app_handle).await;
+    } else {
+        run_sync_once_manual(&app_handle).await;
+    }
     sync_status(&app_handle).await
 }
 
@@ -1030,15 +1085,24 @@ where
 }
 
 async fn run_sync_once(app_handle: &AppHandle) {
+    run_sync_once_with_options(app_handle, false).await;
+}
+
+/// One-shot sync that ignores the auto-sync paused gate (manual Sync Now while auto is off).
+async fn run_sync_once_manual(app_handle: &AppHandle) {
+    run_sync_once_with_options(app_handle, true).await;
+}
+
+async fn run_sync_once_with_options(app_handle: &AppHandle, allow_when_paused: bool) {
     let Some(state) = app_handle.try_state::<SyncState>() else {
         return;
     };
-    if state.status.lock().await.paused {
+    if state.status.lock().await.paused && !allow_when_paused {
         return;
     }
     let _guard = state.sync_lock.lock().await;
-    // Re-check after acquiring the lock: stop may have happened while waiting.
-    if state.status.lock().await.paused {
+    // Re-check after acquiring the lock: auto-off / stop may have happened while waiting.
+    if state.status.lock().await.paused && !allow_when_paused {
         return;
     }
     {
@@ -4281,10 +4345,14 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |row| row.get(0))
         .unwrap_or(0);
     let needs_reset = needs_reset(&conn).unwrap_or(false);
+    // Keep runtime.paused aligned with persisted auto_sync for status reads.
+    apply_persisted_auto_sync_to_runtime(app_handle).await;
     let runtime = if let Some(state) = app_handle.try_state::<SyncState>() {
         state.status.lock().await.clone()
     } else {
-        SyncRuntimeStatus::default()
+        let mut runtime = SyncRuntimeStatus::default();
+        runtime.paused = !load_auto_sync_enabled(app_handle);
+        runtime
     };
     let persisted_last_sync_at = get_device_last_sync_at(app_handle).unwrap_or(None);
     // Prefer runtime error from this run. Do NOT fall back to ancient outbox
@@ -4320,6 +4388,39 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
 async fn emit_status_changed(app_handle: &AppHandle) {
     if let Ok(status) = sync_status(app_handle).await {
         let _ = app_handle.emit("sync_status_changed", status);
+    }
+}
+
+fn parse_auto_sync_value(raw: &str) -> bool {
+    let normalized = raw.trim().to_ascii_lowercase();
+    !(normalized == "false" || normalized == "0" || normalized == "off" || normalized == "no")
+}
+
+/// Background auto-sync enabled? Missing key defaults to true (historical behavior).
+fn load_auto_sync_enabled(app_handle: &AppHandle) -> bool {
+    let Ok(db) = SystemDatabase::new(app_handle) else {
+        return true;
+    };
+    match db.get_feature_config(FEATURE_CODE, AUTO_SYNC_KEY) {
+        Ok(Some(config)) => parse_auto_sync_value(&config.value),
+        _ => true,
+    }
+}
+
+async fn persist_auto_sync_enabled(
+    app_handle: &AppHandle,
+    feature_state: &State<'_, crate::FeatureConfigState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let value = if enabled { "true" } else { "false" };
+    save_feature_config_value(app_handle, feature_state, AUTO_SYNC_KEY, value).await
+}
+
+async fn apply_persisted_auto_sync_to_runtime(app_handle: &AppHandle) {
+    let enabled = load_auto_sync_enabled(app_handle);
+    if let Some(state) = app_handle.try_state::<SyncState>() {
+        let mut runtime = state.status.lock().await;
+        runtime.paused = !enabled;
     }
 }
 
