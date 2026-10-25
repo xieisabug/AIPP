@@ -11,6 +11,7 @@ import {
     formatRecentSyncError,
     formatSyncStatusText,
     friendlySyncError,
+    isAutoSyncEnabled,
     normalizeSyncServerUrl,
     saveThenSyncSuccessMessage,
     shouldTriggerSyncAfterSave,
@@ -80,7 +81,7 @@ describe("dataFolderSyncHelpers", () => {
         ).toContain("HTTP 413");
     });
 
-    it("formatSyncStatusText explains auto sync and paused", () => {
+    it("formatSyncStatusText is compact connection + counters (no dangling / auto copy)", () => {
         expect(
             formatSyncStatusText({
                 mode: "self_hosted",
@@ -92,7 +93,21 @@ describe("dataFolderSyncHelpers", () => {
                 failed_outbox_count: 0,
                 server_cursor: 3,
             }),
-        ).toContain("后台自动同步");
+        ).toMatch(/^已连接；待推送/);
+        expect(
+            formatSyncStatusText({
+                mode: "self_hosted",
+                syncing: false,
+                connected: false,
+                running: false,
+                paused: true,
+                pending_outbox_count: 1,
+                failed_outbox_count: 0,
+                server_cursor: 3,
+                dangling_fk_count: 5,
+                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步",
+            }),
+        ).not.toContain("引用已失效");
         expect(
             formatSyncStatusText({
                 mode: "self_hosted",
@@ -104,41 +119,52 @@ describe("dataFolderSyncHelpers", () => {
                 failed_outbox_count: 0,
                 server_cursor: 3,
             }),
-        ).toContain("已暂停");
+        ).toContain("已连接");
     });
 
-    it("canStopSync only when busy or worker running", () => {
-        expect(canStopSync({ mode: "self_hosted", syncing: true, running: false })).toBe(true);
-        expect(canStopSync({ mode: "self_hosted", syncing: false, running: true, paused: false })).toBe(
-            true,
-        );
-        expect(canStopSync({ mode: "self_hosted", syncing: false, running: false, paused: true })).toBe(
+    it("canStopSync when self_hosted and syncing (manual or auto)", () => {
+        // Idle → no Stop
+        expect(
+            canStopSync({ mode: "self_hosted", syncing: false, running: true, paused: false }),
+        ).toBe(false);
+        // Auto on + syncing → Stop (cancel current round only)
+        expect(
+            canStopSync({ mode: "self_hosted", syncing: true, running: true, paused: false }),
+        ).toBe(true);
+        // Auto off + idle → no Stop
+        expect(
+            canStopSync({ mode: "self_hosted", syncing: false, running: false, paused: true }),
+        ).toBe(false);
+        // Auto off + manual sync in flight → Stop
+        expect(
+            canStopSync({ mode: "self_hosted", syncing: true, running: false, paused: true }),
+        ).toBe(true);
+        expect(canStopSync({ mode: "local", syncing: true, running: true, paused: true })).toBe(
             false,
         );
-        expect(canStopSync({ mode: "local", syncing: true, running: true })).toBe(false);
     });
 
-    it("canShowSyncNow is mutually exclusive with canStopSync", () => {
-        // Busy: background auto-sync running → Stop only (user complaint: both shown while 后台自动同步中)
-        const autoSyncing = { mode: "self_hosted", syncing: false, running: true, paused: false };
-        expect(canStopSync(autoSyncing)).toBe(true);
-        expect(canShowSyncNow(autoSyncing)).toBe(false);
+    it("canShowSyncNow always in self_hosted; Stop when syncing", () => {
+        const autoIdle = { mode: "self_hosted", syncing: false, running: true, paused: false };
+        expect(canStopSync(autoIdle)).toBe(false);
+        expect(canShowSyncNow(autoIdle)).toBe(true);
 
-        // Sync round in flight → Stop only
-        const syncing = { mode: "self_hosted", syncing: true, running: true, paused: false };
-        expect(canStopSync(syncing)).toBe(true);
-        expect(canShowSyncNow(syncing)).toBe(false);
+        const autoSyncRound = { mode: "self_hosted", syncing: true, running: true, paused: false };
+        expect(canStopSync(autoSyncRound)).toBe(true);
+        expect(canShowSyncNow(autoSyncRound)).toBe(true);
 
-        // Paused / idle → Sync Now only (resumes when paused)
+        const manualSyncing = { mode: "self_hosted", syncing: true, running: false, paused: true };
+        expect(canStopSync(manualSyncing)).toBe(true);
+        expect(canShowSyncNow(manualSyncing)).toBe(true);
+
         const paused = { mode: "self_hosted", syncing: false, running: false, paused: true };
         expect(canStopSync(paused)).toBe(false);
         expect(canShowSyncNow(paused)).toBe(true);
 
-        const idle = { mode: "self_hosted", syncing: false, running: false, paused: false };
-        expect(canStopSync(idle)).toBe(false);
-        expect(canShowSyncNow(idle)).toBe(true);
-
         expect(canShowSyncNow({ mode: "local", syncing: false, running: false })).toBe(false);
+        expect(isAutoSyncEnabled({ mode: "self_hosted", paused: false })).toBe(true);
+        expect(isAutoSyncEnabled({ mode: "self_hosted", paused: true })).toBe(false);
+        expect(isAutoSyncEnabled({ mode: "local", paused: false })).toBe(false);
     });
 
     it("secondary retry/cleanup actions hide when counts are zero", () => {
@@ -178,7 +204,7 @@ describe("dataFolderSyncHelpers", () => {
         expect(formatDanglingFkStatusText({ dangling_fk_count: 0 })).toBeNull();
     });
 
-    it("formatSyncStatusText appends dangling FK notice", () => {
+    it("formatSyncStatusText does not append dangling FK notice", () => {
         expect(
             formatSyncStatusText({
                 mode: "self_hosted",
@@ -191,7 +217,7 @@ describe("dataFolderSyncHelpers", () => {
                 dangling_fk_count: 5,
                 dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message_attachment.message_id×5）",
             }),
-        ).toContain("有 5 条历史引用已失效");
+        ).not.toContain("引用已失效");
     });
 
     it("formatRecentSyncError softens stale outbox HTTP errors", () => {

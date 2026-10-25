@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import {
@@ -18,6 +19,7 @@ import {
     formatRecentSyncError,
     formatSyncStatusText,
     friendlySyncError,
+    isAutoSyncEnabled,
     saveThenSyncSuccessMessage,
     shouldTriggerSyncAfterSave,
 } from "./dataFolderSyncHelpers";
@@ -54,6 +56,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [stopping, setStopping] = useState(false);
+    const [togglingAutoSync, setTogglingAutoSync] = useState(false);
     const [retryingFailed, setRetryingFailed] = useState(false);
     const [retryingDeadLetters, setRetryingDeadLetters] = useState(false);
     const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
@@ -218,26 +221,45 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             // sync_only: save did not run, so trigger sync now.
             const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
             setStatus(nextStatus);
-            toast.success("已触发一次同步（平时会自动同步）");
+            toast.success(
+                status?.paused ? "已触发一次同步（自动同步已关闭）" : "已触发一次同步",
+            );
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "触发同步失败"));
         } finally {
             setSyncing(false);
         }
-    }, [form, persistSyncSettings, status?.server_url, status?.token_configured]);
+    }, [form, persistSyncSettings, status?.paused, status?.server_url, status?.token_configured]);
 
     const handleStopSync = useCallback(async () => {
         setStopping(true);
         try {
             const nextStatus = await invoke<SyncStatus>("stop_sync");
             setStatus(nextStatus);
-            toast.success(nextStatus.paused ? "已停止同步，后台同步已暂停" : "已停止同步");
+            toast.success("已停止当前同步");
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "停止同步失败"));
         } finally {
             setStopping(false);
         }
     }, []);
+
+    const handleSetAutoSync = useCallback(async (enabled: boolean) => {
+        if (mode !== "self_hosted") {
+            toast.error("请先切换到「自建同步」并保存");
+            return;
+        }
+        setTogglingAutoSync(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("set_auto_sync", { enabled });
+            setStatus(nextStatus);
+            toast.success(enabled ? "已开启自动同步" : "已关闭自动同步");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "切换自动同步失败"));
+        } finally {
+            setTogglingAutoSync(false);
+        }
+    }, [mode]);
 
     const handleRetryFailed = useCallback(async () => {
         setRetryingFailed(true);
@@ -297,8 +319,10 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const statusText = useMemo(() => formatSyncStatusText(status), [status]);
     const danglingText = useMemo(() => formatDanglingFkStatusText(status), [status]);
     const danglingCount = status?.dangling_fk_count ?? 0;
+    const autoSyncOn = isAutoSyncEnabled({ mode, paused: status?.paused });
     const primaryControlInput = {
         mode,
+        // Stop whenever a round is in flight (backend syncing or local Sync Now click).
         syncing: Boolean(status?.syncing) || syncing,
         running: Boolean(status?.running),
         paused: status?.paused,
@@ -349,76 +373,92 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     }, [danglingCount, danglingText, status?.failed_outbox_count, status?.last_error, status?.last_sync_at, status?.syncing, statusText, syncing]);
 
     const renderSyncActionButtons = useCallback(() => {
-        // Primary: Sync Now | Stop are mutually exclusive. Secondary retries only when counts > 0.
+        // Auto-sync toggle is the persistent on/off. Stop shows while any round is syncing.
+        // 「同步中」lives only in the connection status row, not as a button label.
         return (
-            <div className="flex flex-wrap items-center gap-2">
-                {showSyncNow ? (
-                    <Button
-                        type="button"
-                        variant="outline"
-                        className="hover:bg-muted hover:border-border"
-                        disabled={syncing || saving || stopping}
-                        onClick={handleSyncNow}
-                    >
-                        {syncing
-                            ? "同步中..."
-                            : status?.token_configured
-                              ? "立即同步一次"
-                              : "保存并同步"}
-                    </Button>
-                ) : null}
-                {stopEnabled ? (
-                    <Button
-                        type="button"
-                        variant="outline"
-                        className="hover:bg-muted hover:border-border"
-                        disabled={stopping || saving}
-                        onClick={handleStopSync}
-                    >
-                        {stopping ? "停止中..." : "停止同步"}
-                    </Button>
-                ) : null}
-                {showRetryFailed ? (
-                    <Button
-                        type="button"
-                        variant="outline"
-                        className="hover:bg-muted hover:border-border"
-                        disabled={retryingFailed || saving}
-                        onClick={handleRetryFailed}
-                    >
-                        {retryingFailed ? "重试中..." : "重试失败"}
-                    </Button>
-                ) : null}
-                {showRetryDeadLetters ? (
-                    <Button
-                        type="button"
-                        variant="outline"
-                        className="hover:bg-muted hover:border-border"
-                        disabled={retryingDeadLetters || saving}
-                        onClick={handleRetryDeadLetters}
-                    >
-                        {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
-                    </Button>
-                ) : null}
-                {showCleanupDangling ? (
-                    <Button
-                        type="button"
-                        variant="outline"
-                        className="hover:bg-muted hover:border-border"
-                        disabled={cleaningDangling || saving}
-                        onClick={() => setCleanupConfirmOpen(true)}
-                    >
-                        {cleaningDangling ? "清理中..." : "清理失效引用"}
-                    </Button>
-                ) : null}
+            <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex items-center gap-2">
+                        <Switch
+                            checked={autoSyncOn}
+                            disabled={togglingAutoSync || saving || mode !== "self_hosted"}
+                            onCheckedChange={(value) => {
+                                void handleSetAutoSync(value);
+                            }}
+                        />
+                        <span className="text-sm text-foreground">
+                            {autoSyncOn ? "自动同步：开" : "自动同步：关"}
+                        </span>
+                    </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    {showSyncNow ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={syncing || saving || stopping || togglingAutoSync || Boolean(status?.syncing)}
+                            onClick={handleSyncNow}
+                        >
+                            {status?.token_configured ? "立即同步一次" : "保存并同步"}
+                        </Button>
+                    ) : null}
+                    {stopEnabled ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={stopping || saving}
+                            onClick={handleStopSync}
+                        >
+                            {stopping ? "停止中..." : "停止同步"}
+                        </Button>
+                    ) : null}
+                    {showRetryFailed ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={retryingFailed || saving}
+                            onClick={handleRetryFailed}
+                        >
+                            {retryingFailed ? "重试中..." : "重试失败"}
+                        </Button>
+                    ) : null}
+                    {showRetryDeadLetters ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={retryingDeadLetters || saving}
+                            onClick={handleRetryDeadLetters}
+                        >
+                            {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
+                        </Button>
+                    ) : null}
+                    {showCleanupDangling ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={cleaningDangling || saving}
+                            onClick={() => setCleanupConfirmOpen(true)}
+                        >
+                            {cleaningDangling ? "清理中..." : "清理失效引用"}
+                        </Button>
+                    ) : null}
+                </div>
             </div>
         );
     }, [
+        autoSyncOn,
         cleaningDangling,
         handleRetryDeadLetters,
         handleRetryFailed,
+        handleSetAutoSync,
         handleStopSync,
         handleSyncNow,
+        mode,
         retryingDeadLetters,
         retryingFailed,
         saving,
@@ -426,10 +466,12 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         showRetryDeadLetters,
         showRetryFailed,
         showSyncNow,
+        status?.syncing,
         status?.token_configured,
         stopEnabled,
         stopping,
         syncing,
+        togglingAutoSync,
     ]);
 
     const dataFolderConfig = [
@@ -494,8 +536,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             key: "autoSyncHint",
             config: {
                 type: "static" as const,
-                label: "自动同步",
-                value: "已配置自建同步后，本地数据变更会在短暂防抖后自动推送，并定期/经服务器通知拉取远端变更。主操作互斥：后台自动同步中或本轮同步中只显示「停止同步」；已暂停或空闲时只显示「立即同步一次」（暂停时点它会恢复后台、把失败项改回待推送并跑一轮）。「重试失败」仅在有失败队列项且未显示「立即同步」时作补充；「立即同步一次」也会一并重试失败项。",
+                label: "说明",
+                value: "开启自动同步后，本地变更会防抖推送并定期/经服务器通知拉取。关闭后后台 worker 持久暂停；仍可用「立即同步一次」手动跑一轮。无论自动开或关，同步进行中都可「停止同步」取消本轮（不会关自动同步）。「立即同步一次」也会重试失败项。",
                 hidden: mode !== "self_hosted",
             },
         },
