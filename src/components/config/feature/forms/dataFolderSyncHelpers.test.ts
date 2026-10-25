@@ -169,7 +169,7 @@ describe("dataFolderSyncHelpers", () => {
         expect(
             formatDanglingFkStatusText({
                 dangling_fk_count: 3,
-                dangling_fk_summary: "有 3 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×3）",
+                dangling_fk_summary: "有 3 条历史引用已失效，已按空值同步（conversation.message.conversation_id×3）",
             }),
         ).toContain("有 3 条历史引用已失效");
         expect(formatDanglingFkStatusText({ dangling_fk_count: 2 })).toBe(
@@ -189,7 +189,7 @@ describe("dataFolderSyncHelpers", () => {
                 failed_outbox_count: 0,
                 server_cursor: 1,
                 dangling_fk_count: 5,
-                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×5）",
+                dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message_attachment.message_id×5）",
             }),
         ).toContain("有 5 条历史引用已失效");
     });

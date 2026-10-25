@@ -181,10 +181,26 @@ struct SyncTableSpec {
     order_by: &'static str,
 }
 
-#[derive(Debug, Clone)]
+/// Soft refs (deleted llm models/providers) are normal; structural parent refs warn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FkKind {
+    /// Optional metadata (e.g. llm.model): NULL omit silently; not user-facing.
+    Soft,
+    /// Parent integrity (conversation_id, message_id, …): warn + optional cleanup.
+    Structural,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct ForeignKeySpec {
     column: &'static str,
     object_type: &'static str,
+    kind: FkKind,
+}
+
+impl ForeignKeySpec {
+    fn is_soft(self) -> bool {
+        matches!(self.kind, FkKind::Soft)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -315,7 +331,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
+            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
             // 白名单：只同步已知不含密钥的配置名。env 类配置（acp_env_vars / acp_env_* 等）
             // 的值可能内嵌 API key，刻意不同步；新增配置名时须评估敏感性后再加入。
             where_clause: Some("LOWER(name) IN ('endpoint', 'base_url', 'acp_cli_command', 'acp_working_directory', 'acp_additional_args', 'acp_claude_auth_mode')"),
@@ -330,7 +346,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
+            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
             where_clause: None,
             order_by: "id",
         },
@@ -343,7 +359,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider" }],
+            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
             where_clause: None,
             order_by: "id",
         },
@@ -369,7 +385,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant" }],
+            foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -383,8 +399,8 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
-                ForeignKeySpec { column: "provider_id", object_type: "llm.provider" },
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
+                ForeignKeySpec { column: "provider_id", object_type: "llm.provider", kind: FkKind::Soft },
             ],
             where_clause: None,
             order_by: "id",
@@ -399,8 +415,8 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
-                ForeignKeySpec { column: "assistant_model_id", object_type: "assistant.model" },
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
+                ForeignKeySpec { column: "assistant_model_id", object_type: "assistant.model", kind: FkKind::Structural },
             ],
             where_clause: None,
             order_by: "id",
@@ -427,7 +443,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &["server_id", "tool_name"],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
+            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -440,7 +456,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &["server_id", "resource_uri"],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
+            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -453,7 +469,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &["server_id", "prompt_name"],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server" }],
+            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -467,8 +483,8 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
-                ForeignKeySpec { column: "mcp_server_id", object_type: "mcp.server" },
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
+                ForeignKeySpec { column: "mcp_server_id", object_type: "mcp.server", kind: FkKind::Structural },
             ],
             where_clause: None,
             order_by: "id",
@@ -483,8 +499,8 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
-                ForeignKeySpec { column: "mcp_tool_id", object_type: "mcp.server_tool" },
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
+                ForeignKeySpec { column: "mcp_tool_id", object_type: "mcp.server_tool", kind: FkKind::Structural },
             ],
             where_clause: None,
             order_by: "id",
@@ -499,8 +515,8 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
-                ForeignKeySpec { column: "parent_butler_conversation_id", object_type: "conversation" },
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
+                ForeignKeySpec { column: "parent_butler_conversation_id", object_type: "conversation", kind: FkKind::Structural },
             ],
             where_clause: None,
             order_by: "id",
@@ -515,9 +531,9 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
-                ForeignKeySpec { column: "parent_id", object_type: "conversation.message" },
-                ForeignKeySpec { column: "llm_model_id", object_type: "llm.model" },
+                ForeignKeySpec { column: "conversation_id", object_type: "conversation", kind: FkKind::Structural },
+                ForeignKeySpec { column: "parent_id", object_type: "conversation.message", kind: FkKind::Structural },
+                ForeignKeySpec { column: "llm_model_id", object_type: "llm.model", kind: FkKind::Soft },
             ],
             where_clause: Some("(message_type != 'response' OR finish_time IS NOT NULL)"),
             order_by: "id",
@@ -531,7 +547,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "message_id", object_type: "conversation.message" }],
+            foreign_keys: &[ForeignKeySpec { column: "message_id", object_type: "conversation.message", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -544,7 +560,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation" }],
+            foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -557,7 +573,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation" }],
+            foreign_keys: &[ForeignKeySpec { column: "conversation_id", object_type: "conversation", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -583,7 +599,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant" }],
+            foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -2031,7 +2047,7 @@ fn read_local_snapshots(
     Ok((snapshots, present_ids))
 }
 
-/// 一轮本地扫描内悬空外键的聚合报告。
+/// 一轮本地扫描内 **structural** 悬空外键的聚合报告（soft/llm.* 不计）。
 ///
 /// 键为 (object_type, column, local_fk)；值为命中行数。整轮结束后打一条 INFO
 /// 摘要（detail 走 debug），并把友好中文摘要写入 SyncRuntimeStatus 供 UI 展示。
@@ -2186,6 +2202,10 @@ fn scan_or_null_dangling_local_fks(
                 for (idx, fk) in fk_cols.iter().enumerate() {
                     let value: Option<i64> = row.get(idx + 1).map_err(|e| e.to_string())?;
                     let Some(value) = value else { continue };
+                    // Soft refs (deleted models/providers) are not cleanup issues.
+                    if fk.is_soft() {
+                        continue;
+                    }
                     if is_provider_id_unset_sentinel(fk, value) {
                         continue;
                     }
@@ -2240,8 +2260,8 @@ enum FkLookup {
 /// 返回 `Ok(None)` 表示存在「行在但尚未映射」的依赖，调用方必须跳过该行，
 /// 避免把本地 rowid 作为外键值泄露到 payload 中。
 ///
-/// `dangling` 若提供，则按 (object_type, column, local_fk) 聚合计数，供整轮扫描后
-/// 打一条摘要日志，避免 per-row DEBUG 刷屏。
+/// `dangling` 若提供，则仅对 **structural** 悬空外键按 (object_type, column, local_fk)
+/// 聚合计数，供整轮扫描后打一条摘要日志 / UI 警告；soft（llm.*）只 debug、不计入。
 fn build_fk_refs(
     spec: &SyncTableSpec,
     raw_values: &HashMap<String, JsonValue>,
@@ -2265,7 +2285,15 @@ fn build_fk_refs(
                 FkLookup::Dangling => {
                     // 悬空外键：当作 NULL 推送，不永久卡住同步
                     fields.insert(fk.column.to_string(), JsonValue::Null);
-                    if let Some(report) = dangling.as_mut() {
+                    if fk.is_soft() {
+                        // llm.model / llm.provider 等被删是正常情况：静默省略，最多 debug
+                        debug!(
+                            object_type = %spec.object_type,
+                            column = %fk.column,
+                            local_fk = %value,
+                            "Soft dangling foreign key omitted from sync snapshot"
+                        );
+                    } else if let Some(report) = dangling.as_mut() {
                         report.record(spec.object_type, fk.column, value);
                     }
                 }
@@ -4848,9 +4876,9 @@ mod tests {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "conversation_id", object_type: "conversation" },
-                ForeignKeySpec { column: "parent_id", object_type: "conversation.message" },
-                ForeignKeySpec { column: "llm_model_id", object_type: "llm.model" },
+                ForeignKeySpec { column: "conversation_id", object_type: "conversation", kind: FkKind::Structural },
+                ForeignKeySpec { column: "parent_id", object_type: "conversation.message", kind: FkKind::Structural },
+                ForeignKeySpec { column: "llm_model_id", object_type: "llm.model", kind: FkKind::Soft },
             ],
             where_clause: None,
             order_by: "id",
@@ -4868,8 +4896,8 @@ mod tests {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "assistant_id", object_type: "assistant" },
-                ForeignKeySpec { column: "provider_id", object_type: "llm.provider" },
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
+                ForeignKeySpec { column: "provider_id", object_type: "llm.provider", kind: FkKind::Soft },
             ],
             where_clause: None,
             order_by: "id",
@@ -4935,9 +4963,9 @@ mod tests {
         assert!(!refs.contains_key("parent_id"));
     }
 
-    /// 悬空 llm_model_id：依赖行不存在时按 NULL 处理，仍可产出快照（不永久卡住）
+    /// Soft llm_model_id 悬空：按 NULL 推送，但不计入 dangling 警告/摘要
     #[test]
-    fn fk_refs_dangling_llm_model_id_nulls_field_and_pushes() {
+    fn fk_refs_dangling_llm_model_id_nulls_silently_without_warning() {
         let spec = message_spec();
         let raw_values = HashMap::from([
             ("id".to_string(), json!(1)),
@@ -4968,40 +4996,141 @@ mod tests {
         assert_eq!(refs.get("conversation_id").unwrap(), &json!("conv-10"));
         assert!(!refs.contains_key("llm_model_id"));
         assert_eq!(fields.get("llm_model_id").unwrap(), &JsonValue::Null);
+        // Soft: omitted silently — not a user-facing dangling problem
+        assert_eq!(dangling.total_hits, 0);
+        assert!(dangling.by_key.is_empty());
+        assert!(format_dangling_fk_summary(&dangling).is_none());
+    }
+
+    /// Structural conversation_id 悬空：按 NULL 推送，并计入警告摘要
+    #[test]
+    fn fk_refs_dangling_conversation_id_counts_as_structural_warning() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(1)),
+            ("conversation_id".to_string(), json!(10)),
+            ("parent_id".to_string(), JsonValue::Null),
+            ("llm_model_id".to_string(), JsonValue::Null),
+            ("content".to_string(), json!("hello")),
+        ]);
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(10)),
+            ("content".to_string(), json!("hello")),
+        ]);
+        let mut dangling = DanglingFkScanReport::default();
+        let refs = build_fk_refs(
+            &spec,
+            &raw_values,
+            &mut fields,
+            |object_type, value| match object_type {
+                "conversation" => Ok(FkLookup::Dangling),
+                other => panic!("unexpected fk target {other}={value}"),
+            },
+            Some(&mut dangling),
+        )
+        .unwrap()
+        .expect("dangling conversation_id must not block snapshot");
+        assert!(!refs.contains_key("conversation_id"));
+        assert_eq!(fields.get("conversation_id").unwrap(), &JsonValue::Null);
         assert_eq!(dangling.total_hits, 1);
         assert_eq!(
-            dangling.by_key.get(&("conversation.message".into(), "llm_model_id".into(), 1)),
+            dangling
+                .by_key
+                .get(&("conversation.message".into(), "conversation_id".into(), 10)),
             Some(&1)
         );
         let summary = format_dangling_fk_summary(&dangling).expect("summary");
         assert!(summary.contains("有 1 条历史引用已失效"));
-        assert!(summary.contains("llm_model_id"));
+        assert!(summary.contains("conversation_id"));
+    }
+
+    /// Soft 与 structural 混在同一行：只警告 structural
+    #[test]
+    fn fk_refs_mixed_soft_and_structural_dangling_only_counts_structural() {
+        let spec = message_spec();
+        let raw_values = HashMap::from([
+            ("id".to_string(), json!(1)),
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(99)),
+        ]);
+        let mut fields = Map::from_iter([
+            ("conversation_id".to_string(), json!(10)),
+            ("llm_model_id".to_string(), json!(99)),
+        ]);
+        let mut dangling = DanglingFkScanReport::default();
+        let _refs = build_fk_refs(
+            &spec,
+            &raw_values,
+            &mut fields,
+            |object_type, value| match object_type {
+                "conversation" => Ok(FkLookup::Dangling),
+                "llm.model" => Ok(FkLookup::Dangling),
+                other => panic!("unexpected fk target {other}={value}"),
+            },
+            Some(&mut dangling),
+        )
+        .unwrap()
+        .expect("must still push");
+        assert_eq!(fields.get("conversation_id").unwrap(), &JsonValue::Null);
+        assert_eq!(fields.get("llm_model_id").unwrap(), &JsonValue::Null);
+        assert_eq!(dangling.total_hits, 1);
+        assert!(dangling.by_kind.contains_key(&("conversation.message".into(), "conversation_id".into())));
+        assert!(!dangling.by_kind.contains_key(&("conversation.message".into(), "llm_model_id".into())));
+        let summary = format_dangling_fk_summary(&dangling).unwrap();
+        assert!(summary.contains("conversation_id"));
+        assert!(!summary.contains("llm_model_id"));
+    }
+
+    /// FK 分类：llm.* 为 soft，conversation/message 父引用为 structural
+    #[test]
+    fn fk_kind_classifies_llm_soft_and_conversation_structural() {
+        assert!(ForeignKeySpec { column: "llm_model_id", object_type: "llm.model", kind: FkKind::Soft }.is_soft());
+        assert!(ForeignKeySpec { column: "provider_id", object_type: "llm.provider", kind: FkKind::Soft }.is_soft());
+        assert!(!ForeignKeySpec { column: "conversation_id", object_type: "conversation", kind: FkKind::Structural }.is_soft());
+        assert!(!ForeignKeySpec { column: "message_id", object_type: "conversation.message", kind: FkKind::Structural }.is_soft());
+        assert!(!ForeignKeySpec { column: "parent_id", object_type: "conversation.message", kind: FkKind::Structural }.is_soft());
+        // Real message table specs match classification
+        let msg = message_spec();
+        let soft_cols: Vec<_> = msg
+            .foreign_keys
+            .iter()
+            .filter(|fk| fk.is_soft())
+            .map(|fk| fk.column)
+            .collect();
+        let structural_cols: Vec<_> = msg
+            .foreign_keys
+            .iter()
+            .filter(|fk| !fk.is_soft())
+            .map(|fk| fk.column)
+            .collect();
+        assert_eq!(soft_cols, vec!["llm_model_id"]);
+        assert_eq!(structural_cols, vec!["conversation_id", "parent_id"]);
     }
 
     /// 同一 (object_type, column, local_fk) 多次命中只聚合计数，摘要只出一条
     #[test]
     fn dangling_fk_report_aggregates_same_key() {
         let mut report = DanglingFkScanReport::default();
-        report.record("conversation.message", "llm_model_id", 1);
-        report.record("conversation.message", "llm_model_id", 1);
-        report.record("conversation.message", "llm_model_id", 2);
+        report.record("conversation.message", "conversation_id", 1);
+        report.record("conversation.message", "conversation_id", 1);
+        report.record("conversation.message", "conversation_id", 2);
         report.record("conversation.message_attachment", "message_id", 99);
         assert_eq!(report.total_hits, 4);
         assert_eq!(
             report
                 .by_key
-                .get(&("conversation.message".into(), "llm_model_id".into(), 1)),
+                .get(&("conversation.message".into(), "conversation_id".into(), 1)),
             Some(&2)
         );
         assert_eq!(
             report
                 .by_kind
-                .get(&("conversation.message".into(), "llm_model_id".into())),
+                .get(&("conversation.message".into(), "conversation_id".into())),
             Some(&3)
         );
         let summary = format_dangling_fk_summary(&report).unwrap();
         assert!(summary.starts_with("有 4 条历史引用已失效，已按空值同步"));
-        assert!(summary.contains("llm_model_id"));
+        assert!(summary.contains("conversation_id"));
     }
 
     #[test]
@@ -5727,10 +5856,7 @@ mod tests {
             unique_key_columns: &["server_id", "tool_name"],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec {
-                column: "server_id",
-                object_type: "mcp.server",
-            }],
+            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         }
@@ -5747,14 +5873,8 @@ mod tests {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec {
-                    column: "assistant_id",
-                    object_type: "assistant",
-                },
-                ForeignKeySpec {
-                    column: "assistant_model_id",
-                    object_type: "assistant.model",
-                },
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
+                ForeignKeySpec { column: "assistant_model_id", object_type: "assistant.model", kind: FkKind::Structural },
             ],
             where_clause: None,
             order_by: "id",
