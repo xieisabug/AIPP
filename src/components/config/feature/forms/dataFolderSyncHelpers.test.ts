@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    canStopSync,
     decideSyncNowAction,
+    formatSyncStatusText,
     friendlySyncError,
     normalizeSyncServerUrl,
 } from "./dataFolderSyncHelpers";
@@ -64,5 +66,47 @@ describe("dataFolderSyncHelpers", () => {
         expect(friendlySyncError("缺少同步 token，请先保存自建同步配置", "触发同步失败")).toContain(
             "自动保存",
         );
+        expect(friendlySyncError("同步已停止", "停止同步失败")).toBe("已停止同步");
+        expect(
+            friendlySyncError("变更过大被服务器拒绝（HTTP 413），已跳过并记入失败项", "触发同步失败"),
+        ).toContain("HTTP 413");
+    });
+
+    it("formatSyncStatusText explains auto sync and paused", () => {
+        expect(
+            formatSyncStatusText({
+                mode: "self_hosted",
+                syncing: false,
+                connected: true,
+                running: true,
+                paused: false,
+                pending_outbox_count: 0,
+                failed_outbox_count: 0,
+                server_cursor: 3,
+            }),
+        ).toContain("后台自动同步");
+        expect(
+            formatSyncStatusText({
+                mode: "self_hosted",
+                syncing: false,
+                connected: false,
+                running: false,
+                paused: true,
+                pending_outbox_count: 1,
+                failed_outbox_count: 0,
+                server_cursor: 3,
+            }),
+        ).toContain("已暂停");
+    });
+
+    it("canStopSync only when busy or worker running", () => {
+        expect(canStopSync({ mode: "self_hosted", syncing: true, running: false })).toBe(true);
+        expect(canStopSync({ mode: "self_hosted", syncing: false, running: true, paused: false })).toBe(
+            true,
+        );
+        expect(canStopSync({ mode: "self_hosted", syncing: false, running: false, paused: true })).toBe(
+            false,
+        );
+        expect(canStopSync({ mode: "local", syncing: true, running: true })).toBe(false);
     });
 });

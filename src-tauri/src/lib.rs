@@ -113,7 +113,7 @@ use crate::api::system_api::{
 };
 use crate::sync::{
     get_sync_status, reset_sync_state, retry_failed_sync_outbox, retry_sync_dead_letters,
-    save_sync_settings, trigger_sync_now,
+    save_sync_settings, stop_sync, trigger_sync_now,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
@@ -995,6 +995,7 @@ pub fn run() {
             retry_failed_sync_outbox,
             save_sync_settings,
             trigger_sync_now,
+            stop_sync,
             retry_sync_dead_letters,
             reset_sync_state,
             get_llm_providers,

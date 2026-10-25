@@ -8,7 +8,9 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import {
+    canStopSync,
     decideSyncNowAction,
+    formatSyncStatusText,
     friendlySyncError,
 } from "./dataFolderSyncHelpers";
 
@@ -23,6 +25,7 @@ interface SyncStatus {
     connected: boolean;
     running: boolean;
     syncing: boolean;
+    paused?: boolean;
     last_sync_at?: string | null;
     last_error?: string | null;
     pending_outbox_count: number;
@@ -40,6 +43,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [status, setStatus] = useState<SyncStatus | null>(null);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    const [stopping, setStopping] = useState(false);
     const [retryingFailed, setRetryingFailed] = useState(false);
     const [retryingDeadLetters, setRetryingDeadLetters] = useState(false);
     const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
@@ -133,7 +137,11 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             token: "",
         });
         if (!opts?.quietSuccess) {
-            toast.success(nextStatus.mode === "self_hosted" ? "自建同步配置已保存" : "已切换为本地模式");
+            toast.success(
+                nextStatus.mode === "self_hosted"
+                    ? "自建同步配置已保存，后台将自动同步"
+                    : "已切换为本地模式",
+            );
         }
         if (nextStatus.mode === "self_hosted") {
             void loadStatus(false);
@@ -185,13 +193,26 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
 
             const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
             setStatus(nextStatus);
-            toast.success("同步已触发");
+            toast.success("已触发一次同步（平时会自动同步）");
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "触发同步失败"));
         } finally {
             setSyncing(false);
         }
     }, [form, persistSyncSettings, status?.server_url, status?.token_configured]);
+
+    const handleStopSync = useCallback(async () => {
+        setStopping(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("stop_sync");
+            setStatus(nextStatus);
+            toast.success(nextStatus.paused ? "已停止同步，后台同步已暂停" : "已停止同步");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "停止同步失败"));
+        } finally {
+            setStopping(false);
+        }
+    }, []);
 
     const handleRetryFailed = useCallback(async () => {
         setRetryingFailed(true);
@@ -233,16 +254,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
-    const statusText = useMemo(() => {
-        if (!status) {
-            return "读取中";
-        }
-        if (status.mode === "local") {
-            return "本地模式：仅使用本机 SQLite，后台同步已停止。";
-        }
-        const state = status.syncing ? "同步中" : status.connected ? "已连接" : status.running ? "等待同步" : "未运行";
-        return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
-    }, [status]);
+    const statusText = useMemo(() => formatSyncStatusText(status), [status]);
+    const stopEnabled = canStopSync({
+        mode,
+        syncing: Boolean(status?.syncing) || syncing,
+        running: Boolean(status?.running),
+        paused: status?.paused,
+    });
 
     const renderSyncStatusRow = useCallback(() => {
         const items = [
@@ -271,14 +289,23 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                     type="button"
                     variant="outline"
                     className="hover:bg-muted hover:border-border"
-                    disabled={mode !== "self_hosted" || syncing || saving}
+                    disabled={mode !== "self_hosted" || syncing || saving || stopping}
                     onClick={handleSyncNow}
                 >
                     {syncing
                         ? "同步中..."
                         : status?.token_configured
-                          ? "立即同步"
+                          ? "立即同步一次"
                           : "保存并同步"}
+                </Button>
+                <Button
+                    type="button"
+                    variant="outline"
+                    className="hover:bg-muted hover:border-border"
+                    disabled={!stopEnabled || stopping || saving}
+                    onClick={handleStopSync}
+                >
+                    {stopping ? "停止中..." : "停止同步"}
                 </Button>
                 <Button
                     type="button"
@@ -305,6 +332,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     }, [
         handleRetryDeadLetters,
         handleRetryFailed,
+        handleStopSync,
         handleSyncNow,
         mode,
         retryingDeadLetters,
@@ -313,6 +341,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         status?.dead_letter_count,
         status?.failed_outbox_count,
         status?.token_configured,
+        stopEnabled,
+        stopping,
         syncing,
     ]);
 
@@ -340,7 +370,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                     {
                         value: "self_hosted",
                         label: "自建同步",
-                        tooltip: "连接你自建的 AIPP sync-server，按业务对象同步核心数据。",
+                        tooltip: "连接你自建的 AIPP sync-server。配置完成后本地改动与远端变更会自动同步，一般无需点「立即同步一次」。",
                     },
                 ],
             },
@@ -371,6 +401,15 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 label: status?.token_configured ? "访问 token（留空则沿用已保存 token）" : "访问 token",
                 placeholder: status?.token_configured ? "已保存，可留空" : "Bearer token",
                 disabled: mode !== "self_hosted",
+                hidden: mode !== "self_hosted",
+            },
+        },
+        {
+            key: "autoSyncHint",
+            config: {
+                type: "static" as const,
+                label: "自动同步",
+                value: "已配置自建同步后，本地数据变更会在短暂防抖后自动推送，并定期/经服务器通知拉取远端变更。「立即同步一次」仅在需要马上跑一轮时使用；同步进行中可点「停止同步」暂停后台。",
                 hidden: mode !== "self_hosted",
             },
         },

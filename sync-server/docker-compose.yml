@@ -10,6 +10,8 @@ services:
       AIPP_SYNC_BOOTSTRAP_TOKEN: dev-token
       # 生产环境请换成私有 token，且把 BASE_URL 改成非 localhost 的公网/域名地址
       # （非 localhost 时拒绝空 token 与公开的 dev-token）
+      # 默认请求体上限 64MB；若前面有 nginx 等代理，请同步调大 client_max_body_size
+      # AIPP_SYNC_MAX_REQUEST_BODY_BYTES: "67108864"
     restart: unless-stopped
 
 volumes:
