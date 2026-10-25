@@ -643,3 +643,130 @@ fn test_agent_session_table_migrates_and_isolates_agent_kinds() {
         .unwrap();
     assert_eq!(rows, vec![("acp".to_string(), "acp-old".to_string()), ("codex_app_server".to_string(), "thread-7".to_string())]);
 }
+
+/// 删除会话时级联清理附件 / 消息 / summary / todo，不留下悬空行
+#[test]
+fn test_conversation_delete_cascades_children() {
+    let conn = create_test_db();
+
+    conn.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, datetime('now'))",
+        ("Cascade Conv", Some(1i64)),
+    )
+    .unwrap();
+    let conversation_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO message (conversation_id, message_type, content, created_time) VALUES (?, ?, ?, datetime('now'))",
+        (conversation_id, "user", "hello"),
+    )
+    .unwrap();
+    let message_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO message_attachment (message_id, attachment_type, attachment_url) VALUES (?, ?, ?)",
+        (message_id, 1i64, "file:///a.png"),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO conversation_summary (conversation_id, summary, created_time) VALUES (?, ?, datetime('now'))",
+        (conversation_id, "sum"),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO conversation_todo (conversation_id, content, status, active_form, created_time, updated_time)
+         VALUES (?, ?, 'pending', '', datetime('now'), datetime('now'))",
+        (conversation_id, "todo"),
+    )
+    .unwrap();
+
+    // Keep a sibling conversation so cascade does not wipe the whole DB.
+    conn.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, datetime('now'))",
+        ("Keep Me", Some(1i64)),
+    )
+    .unwrap();
+    let keep_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO message (conversation_id, message_type, content, created_time) VALUES (?, ?, ?, datetime('now'))",
+        (keep_id, "user", "keep"),
+    )
+    .unwrap();
+
+    cascade_delete_conversation(&conn, conversation_id).unwrap();
+
+    let conv_left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM conversation WHERE id = ?",
+            [conversation_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let msg_left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM message WHERE conversation_id = ?",
+            [conversation_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let att_left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM message_attachment WHERE message_id = ?",
+            [message_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let summary_left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_summary WHERE conversation_id = ?",
+            [conversation_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let todo_left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_todo WHERE conversation_id = ?",
+            [conversation_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let keep_msg: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM message WHERE conversation_id = ?",
+            [keep_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(conv_left, 0);
+    assert_eq!(msg_left, 0);
+    assert_eq!(att_left, 0);
+    assert_eq!(summary_left, 0);
+    assert_eq!(todo_left, 0);
+    assert_eq!(keep_msg, 1);
+}
+
+/// Repository::delete 走同一套级联路径
+#[test]
+fn test_conversation_repo_delete_cascades_messages() {
+    let conn = create_test_db();
+    conn.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time) VALUES (?, ?, datetime('now'))",
+        ("Repo Cascade", Some(1i64)),
+    )
+    .unwrap();
+    let conversation_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO message (conversation_id, message_type, content, created_time) VALUES (?, ?, ?, datetime('now'))",
+        (conversation_id, "user", "x"),
+    )
+    .unwrap();
+
+    let repo = ConversationRepository::new(conn);
+    repo.delete(conversation_id).unwrap();
+
+    // Re-open via a fresh in-memory DB would be empty; instead verify through
+    // cascade_delete_conversation coverage above. Here we only assert the
+    // repository delete itself succeeds without erroring on child tables.
+    assert!(repo.read(conversation_id).unwrap().is_none());
+}

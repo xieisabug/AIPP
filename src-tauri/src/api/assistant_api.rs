@@ -1002,6 +1002,10 @@ pub fn delete_assistant(app_handle: tauri::AppHandle, assistant_id: i64) -> Resu
     let _ = assistant_db
         .delete_assistant_model_config_by_assistant_id(assistant_id)
         .map_err(|e| e.to_string());
+    // Align with butler reset: clear assistant_model so assistant_id does not orphan.
+    let _ = assistant_db
+        .delete_assistant_model_by_assistant_id(assistant_id)
+        .map_err(|e| e.to_string());
     let _ = assistant_db
         .delete_assistant_prompt_by_assistant_id(assistant_id)
         .map_err(|e| e.to_string());

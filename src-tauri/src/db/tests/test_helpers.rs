@@ -91,6 +91,34 @@ pub fn create_test_db() -> Connection {
     .unwrap();
 
     conn.execute(
+        "CREATE TABLE conversation_summary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            summary TEXT NOT NULL,
+            user_intent TEXT,
+            key_outcomes TEXT,
+            created_time TEXT NOT NULL
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
+        "CREATE TABLE conversation_todo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            active_form TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_time TEXT NOT NULL,
+            updated_time TEXT NOT NULL
+        )",
+        [],
+    )
+    .unwrap();
+
+    conn.execute(
         "CREATE TABLE queued_conversation_message (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             conversation_id INTEGER NOT NULL,

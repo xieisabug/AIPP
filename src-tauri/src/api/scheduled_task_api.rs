@@ -1113,19 +1113,7 @@ fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
     let conversation_db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     conversation_db
         .with_write_connection(|conn| {
-            conn.execute(
-                "DELETE FROM message_attachment WHERE message_id IN (SELECT id FROM message WHERE conversation_id = ?)",
-                params![conversation_id],
-            )
-            .map_err(crate::errors::AppError::from)?;
-            conn.execute("DELETE FROM message WHERE conversation_id = ?", params![conversation_id])
-                .map_err(crate::errors::AppError::from)?;
-            conn.execute(
-                "DELETE FROM conversation_summary WHERE conversation_id = ?",
-                params![conversation_id],
-            )
-            .map_err(crate::errors::AppError::from)?;
-            conn.execute("DELETE FROM conversation WHERE id = ?", params![conversation_id])
+            crate::db::conversation_db::cascade_delete_conversation(conn, conversation_id)
                 .map_err(crate::errors::AppError::from)?;
             Ok(())
         })
