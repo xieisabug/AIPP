@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,6 +46,11 @@ const NOTIFY_CONNECT_TIMEOUT_SECS: u64 = 10;
 const NOTIFY_RECONNECT_SECS: u64 = 3;
 /// Cooperative cancel / user stop — not a hard sync failure.
 const SYNC_STOPPED_MSG: &str = "同步已停止";
+/// Hard abort after cooperative cancel timed out; next run self-heals.
+const SYNC_FORCED_STOP_MSG: &str =
+    "同步已强制停止（协作取消超时）；下次同步会自动恢复";
+/// How long stop_sync waits for in-flight run_sync_once to exit cooperatively.
+const STOP_COOPERATIVE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -616,6 +621,12 @@ pub fn schedule_sync_after_local_change(app_handle: &AppHandle) {
 pub fn flush_before_exit(app_handle: &AppHandle) -> tauri::async_runtime::JoinHandle<()> {
     let app = app_handle.clone();
     tauri::async_runtime::spawn(async move {
+        // Respect user pause: do not flush on exit when sync was stopped.
+        if let Some(state) = app.try_state::<SyncState>() {
+            if state.status.lock().await.paused {
+                return;
+            }
+        }
         if matches!(load_settings(&app).map(|s| s.mode), Ok(SyncMode::SelfHosted)) {
             run_sync_once(&app).await;
         }
@@ -725,13 +736,21 @@ pub async fn stop_sync(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
         runtime.paused = true;
     }
     request_cancel(&app_handle).await;
+    // Give in-flight run_sync_once a short window to exit cooperatively
+    // (HTTP select! + between-stage checks) before aborting idle waiters.
+    let cleared = wait_until_not_syncing(&app_handle, STOP_COOPERATIVE_TIMEOUT).await;
+    // Abort idle waiters (worker poll / SSE / debounce). If syncing is still
+    // stuck after the timeout, this is the same hard-abort path as before,
+    // plus an honest last_error noting forced stop / self-heal on next run.
     abort_background_tasks(&app_handle).await;
     {
         let mut runtime = state.status.lock().await;
         runtime.running = false;
         runtime.connected = false;
         runtime.syncing = false;
-        runtime.last_error = if was_busy {
+        runtime.last_error = if !cleared {
+            Some(SYNC_FORCED_STOP_MSG.to_string())
+        } else if was_busy {
             Some(SYNC_STOPPED_MSG.to_string())
         } else {
             runtime.last_error.clone()
@@ -867,6 +886,24 @@ async fn abort_background_tasks(app_handle: &AppHandle) {
     }
 }
 
+/// Poll until `syncing` clears or `timeout` elapses. Returns true if cleared.
+async fn wait_until_not_syncing(app_handle: &AppHandle, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let syncing = match app_handle.try_state::<SyncState>() {
+            Some(state) => state.status.lock().await.syncing,
+            None => false,
+        };
+        if !syncing {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn stop_worker(app_handle: &AppHandle) {
     request_cancel(app_handle).await;
     abort_background_tasks(app_handle).await;
@@ -885,7 +922,10 @@ async fn clear_paused(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<SyncState>() {
         let mut runtime = state.status.lock().await;
         runtime.paused = false;
-        if runtime.last_error.as_deref() == Some(SYNC_STOPPED_MSG) {
+        if matches!(
+            runtime.last_error.as_deref(),
+            Some(SYNC_STOPPED_MSG) | Some(SYNC_FORCED_STOP_MSG)
+        ) {
             runtime.last_error = None;
         }
     }
@@ -1119,16 +1159,10 @@ async fn push_pending_loop(
         if events.is_empty() {
             return Ok(());
         }
-        // Work queue so 413 splits stay iterative (no recursive async futures).
-        let mut queue: Vec<Vec<(i64, PushEvent)>> = Vec::new();
-        let mut offset = 0usize;
-        while offset < events.len() {
-            let remaining = &events[offset..];
-            let take = select_push_batch_len(remaining, PUSH_BATCH_MAX_EVENTS, PUSH_BATCH_MAX_BYTES);
-            queue.push(remaining[..take].to_vec());
-            offset += take;
-        }
-        while let Some(batch) = queue.pop() {
+        // FIFO work queue so earlier outbox ids stay ahead of later ones
+        // (including after 413 splits). Iterative — no recursive async futures.
+        let mut queue = build_push_batch_queue(&events, PUSH_BATCH_MAX_EVENTS, PUSH_BATCH_MAX_BYTES);
+        while let Some(batch) = queue.pop_front() {
             ensure_not_cancelled(cancel)?;
             match push_event_batch_once(
                 app_handle,
@@ -1145,14 +1179,13 @@ async fn push_pending_loop(
                     *total_conflict_resolved += conflicts;
                 }
                 PushBatchOutcome::Split => {
-                    // Bisect oversized multi-event batch and retry smaller pieces first.
+                    // Bisect oversized multi-event batch; keep ascending-id order
+                    // by pushing second half then first half to the front.
                     warn!(
                         batch_len = batch.len(),
                         "Push batch rejected with HTTP 413; splitting and retrying"
                     );
-                    let mid = batch.len() / 2;
-                    queue.push(batch[mid..].to_vec());
-                    queue.push(batch[..mid].to_vec());
+                    requeue_split_batch_front(&mut queue, batch);
                 }
                 PushBatchOutcome::SkippedOversized => {
                     // Single event permanently failed; continue with remaining work.
@@ -1160,6 +1193,36 @@ async fn push_pending_loop(
             }
         }
     }
+}
+
+/// Slice pending events into size-aware batches in id-ascending order (FIFO).
+fn build_push_batch_queue(
+    events: &[(i64, PushEvent)],
+    max_events: usize,
+    max_bytes: usize,
+) -> VecDeque<Vec<(i64, PushEvent)>> {
+    let mut queue: VecDeque<Vec<(i64, PushEvent)>> = VecDeque::new();
+    let mut offset = 0usize;
+    while offset < events.len() {
+        let remaining = &events[offset..];
+        let take = select_push_batch_len(remaining, max_events, max_bytes);
+        queue.push_back(remaining[..take].to_vec());
+        offset += take;
+    }
+    queue
+}
+
+/// After a 413 Split, put first half before second half at the front of the queue.
+fn requeue_split_batch_front(
+    queue: &mut VecDeque<Vec<(i64, PushEvent)>>,
+    batch: Vec<(i64, PushEvent)>,
+) {
+    let mid = batch.len() / 2;
+    let second = batch[mid..].to_vec();
+    let first = batch[..mid].to_vec();
+    // push_front second then first → pop_front yields first, then second.
+    queue.push_front(second);
+    queue.push_front(first);
 }
 
 enum PushBatchOutcome {
@@ -4249,6 +4312,64 @@ mod tests {
         assert_eq!(select_push_batch_len(&only_huge, 25, 100), 1);
         // Generous budget takes multiple
         assert!(select_push_batch_len(&events[..2], 25, 10_000) >= 2);
+    }
+
+    fn tiny_push_event(id: &str) -> PushEvent {
+        PushEvent {
+            event_id: id.into(),
+            object_type: "message".into(),
+            object_id: id.into(),
+            operation: "upsert".into(),
+            base_version: None,
+            local_version: 1,
+            payload: Some(serde_json::json!({"fields": {"text": id}, "refs": {}})),
+            created_at: "now".into(),
+            client_schema_version: CLIENT_SCHEMA_VERSION,
+            object_schema_version: 1,
+        }
+    }
+
+    /// Multi-batch selection + FIFO queue keeps outbox ids ascending when drained.
+    #[test]
+    fn push_batch_queue_fifo_keeps_ascending_outbox_ids() {
+        // Force one-event batches via tiny byte budget so we get multiple queue entries.
+        let events: Vec<(i64, PushEvent)> = (1..=5)
+            .map(|id| (id, tiny_push_event(&format!("e{id}"))))
+            .collect();
+        let mut queue = build_push_batch_queue(&events, 25, 400);
+        assert!(queue.len() >= 3, "expected multiple batches, got {}", queue.len());
+        let mut drained_ids = Vec::new();
+        while let Some(batch) = queue.pop_front() {
+            for (id, _) in batch {
+                drained_ids.push(id);
+            }
+        }
+        assert_eq!(drained_ids, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// 413 Split requeue puts the first half before the second half (still FIFO).
+    #[test]
+    fn push_batch_split_requeue_keeps_first_half_before_second() {
+        let batch: Vec<(i64, PushEvent)> = (10..=13)
+            .map(|id| (id, tiny_push_event(&format!("e{id}"))))
+            .collect();
+        let mut queue: VecDeque<Vec<(i64, PushEvent)>> = VecDeque::new();
+        // Existing later work should stay behind the split halves.
+        queue.push_back(vec![(99, tiny_push_event("later"))]);
+        requeue_split_batch_front(&mut queue, batch);
+        let first = queue.pop_front().expect("first half");
+        let second = queue.pop_front().expect("second half");
+        let later = queue.pop_front().expect("later work");
+        assert_eq!(
+            first.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            second.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![12, 13]
+        );
+        assert_eq!(later[0].0, 99);
+        assert!(queue.is_empty());
     }
 
     #[test]

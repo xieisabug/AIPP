@@ -6,6 +6,8 @@ import {
     formatSyncStatusText,
     friendlySyncError,
     normalizeSyncServerUrl,
+    saveThenSyncSuccessMessage,
+    shouldTriggerSyncAfterSave,
 } from "./dataFolderSyncHelpers";
 
 describe("dataFolderSyncHelpers", () => {
@@ -108,5 +110,20 @@ describe("dataFolderSyncHelpers", () => {
             false,
         );
         expect(canStopSync({ mode: "local", syncing: true, running: true })).toBe(false);
+    });
+
+    it("shouldTriggerSyncAfterSave only when save skipped sync (needs_reset)", () => {
+        expect(
+            shouldTriggerSyncAfterSave({ mode: "self_hosted", needs_reset: false }),
+        ).toBe(false);
+        expect(
+            shouldTriggerSyncAfterSave({ mode: "self_hosted", needs_reset: true }),
+        ).toBe(true);
+        expect(shouldTriggerSyncAfterSave({ mode: "local", needs_reset: true })).toBe(false);
+    });
+
+    it("saveThenSyncSuccessMessage merges to one toast", () => {
+        expect(saveThenSyncSuccessMessage(false)).toContain("已开始同步");
+        expect(saveThenSyncSuccessMessage(true)).toContain("开始同步");
     });
 });

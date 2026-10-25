@@ -195,7 +195,12 @@ docker run -d --name aipp-sync \
 
 注意：
 
-- 若前面有反向代理，请把代理的 body 大小限制与预期最大同步对象对齐。
+- **反向代理 body 上限**：若前面有 nginx / Caddy / 其它反向代理，必须把代理的请求体限制调到 **≥ 64MB**，与默认 `AIPP_SYNC_MAX_REQUEST_BODY_BYTES=67108864` 对齐。否则大对话/附件 push 会在代理层先被拒绝（常见 HTTP 413），客户端分批也救不了。nginx 示例：
+
+  ```nginx
+  client_max_body_size 64m;
+  ```
+
 - ID 字段（`event_id` / `object_type` / `object_id` / `device_id`）允许字符 `[A-Za-z0-9._:+/=-]`，长度 1–128（含 `+/=` 以支持 `natural:<base64>` 形式的对象 id）。
 - `base_version` 必须 ≥ 0。
 

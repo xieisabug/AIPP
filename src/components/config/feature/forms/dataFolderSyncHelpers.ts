@@ -56,6 +56,31 @@ export function decideSyncNowAction(input: {
     return { action: "sync_only" };
 }
 
+/**
+ * After `save_sync_settings`, decide whether the UI still needs `trigger_sync_now`.
+ * Normal self_hosted save (no needs_reset) already ran a sync in the backend —
+ * calling sync-now again would double-sync. Only trigger when save skipped sync
+ * (needs_reset) or the decision was sync-only (handled by the caller).
+ */
+export function shouldTriggerSyncAfterSave(saved: {
+    mode: string;
+    needs_reset?: boolean;
+}): boolean {
+    if (saved.mode !== "self_hosted") {
+        return false;
+    }
+    // save_sync_settings skips run_sync_once when needs_reset is set.
+    return Boolean(saved.needs_reset);
+}
+
+/** One success toast after save_then_sync (merged; no separate sync toast). */
+export function saveThenSyncSuccessMessage(didTriggerSyncNow: boolean): string {
+    if (didTriggerSyncNow) {
+        return "配置已自动保存，开始同步…";
+    }
+    return "配置已自动保存并已开始同步";
+}
+
 export type SyncStatusSummaryInput = {
     mode: "local" | "self_hosted";
     syncing: boolean;
@@ -120,6 +145,9 @@ export function friendlySyncError(raw: string, fallbackPrefix: string): string {
     const lower = text.toLowerCase();
     if (text === "同步已停止" || text.includes("同步已停止")) {
         return "已停止同步";
+    }
+    if (text.includes("强制停止") || text.includes("协作取消超时")) {
+        return "已强制停止同步（将在下次同步时自动恢复）";
     }
     if (text.includes("413") || text.includes("变更过大")) {
         return text.includes("已跳过")

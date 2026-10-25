@@ -12,6 +12,8 @@ import {
     decideSyncNowAction,
     formatSyncStatusText,
     friendlySyncError,
+    saveThenSyncSuccessMessage,
+    shouldTriggerSyncAfterSave,
 } from "./dataFolderSyncHelpers";
 
 interface DataFolderConfigFormProps {
@@ -179,18 +181,31 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         try {
             if (decision.action === "save_then_sync") {
                 setSaving(true);
+                let saved: SyncStatus;
                 try {
-                    const saved = await persistSyncSettings({ quietSuccess: true });
+                    saved = await persistSyncSettings({ quietSuccess: true });
                     if (saved.mode === "self_hosted" && !saved.token_configured) {
                         toast.error("访问 token 未能保存成功，请检查后重试");
                         return;
                     }
-                    toast.success("配置已自动保存，开始同步…");
                 } finally {
                     setSaving(false);
                 }
+
+                // Normal self_hosted save already ran sync; only trigger again
+                // when save skipped sync (needs_reset) — one merged success toast.
+                const needSyncNow = shouldTriggerSyncAfterSave(saved);
+                if (needSyncNow) {
+                    const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
+                    setStatus(nextStatus);
+                } else {
+                    setStatus(saved);
+                }
+                toast.success(saveThenSyncSuccessMessage(needSyncNow));
+                return;
             }
 
+            // sync_only: save did not run, so trigger sync now.
             const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
             setStatus(nextStatus);
             toast.success("已触发一次同步（平时会自动同步）");
