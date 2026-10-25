@@ -15,6 +15,7 @@ import {
     canStopSync,
     decideSyncNowAction,
     formatDanglingFkStatusText,
+    formatRecentSyncError,
     formatSyncStatusText,
     friendlySyncError,
     saveThenSyncSuccessMessage,
@@ -314,7 +315,14 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         const items = [
             { label: "连接状态", value: statusText },
             { label: "上次同步时间", value: status?.last_sync_at || "尚未同步" },
-            { label: "最近错误", value: status?.last_error || "无" },
+            {
+                label: "最近错误",
+                value: formatRecentSyncError({
+                    last_error: status?.last_error,
+                    failed_outbox_count: status?.failed_outbox_count,
+                    syncing: Boolean(status?.syncing) || syncing,
+                }),
+            },
         ];
         return (
             <div className="space-y-3">
@@ -338,7 +346,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 ) : null}
             </div>
         );
-    }, [danglingCount, danglingText, status?.last_error, status?.last_sync_at, statusText]);
+    }, [danglingCount, danglingText, status?.failed_outbox_count, status?.last_error, status?.last_sync_at, status?.syncing, statusText, syncing]);
 
     const renderSyncActionButtons = useCallback(() => {
         // Primary: Sync Now | Stop are mutually exclusive. Secondary retries only when counts > 0.
@@ -487,7 +495,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             config: {
                 type: "static" as const,
                 label: "自动同步",
-                value: "已配置自建同步后，本地数据变更会在短暂防抖后自动推送，并定期/经服务器通知拉取远端变更。主操作互斥：后台自动同步中或本轮同步中只显示「停止同步」；已暂停或空闲时只显示「立即同步一次」（暂停时点它会恢复后台并跑一轮）。「重试失败」仅在有失败队列项时出现，用于重试失败的推送项，不是第三种同步模式。",
+                value: "已配置自建同步后，本地数据变更会在短暂防抖后自动推送，并定期/经服务器通知拉取远端变更。主操作互斥：后台自动同步中或本轮同步中只显示「停止同步」；已暂停或空闲时只显示「立即同步一次」（暂停时点它会恢复后台、把失败项改回待推送并跑一轮）。「重试失败」仅在有失败队列项且未显示「立即同步」时作补充；「立即同步一次」也会一并重试失败项。",
                 hidden: mode !== "self_hosted",
             },
         },

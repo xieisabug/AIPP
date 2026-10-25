@@ -223,3 +223,34 @@ export function friendlySyncError(raw: string, fallbackPrefix: string): string {
     }
     return `${fallbackPrefix}: ${text}`;
 }
+
+/**
+ * 「最近错误」display: prefer a live runtime error; when idle with failed outbox
+ * items only, show soft「有 N 条待重试」instead of raw stale HTTP 413 text.
+ */
+export function formatRecentSyncError(input: {
+    last_error?: string | null;
+    failed_outbox_count?: number;
+    syncing?: boolean;
+} | null | undefined): string {
+    if (!input) {
+        return "无";
+    }
+    const failed = input.failed_outbox_count ?? 0;
+    const raw = (input.last_error || "").trim();
+    if (!raw) {
+        return !input.syncing && failed > 0 ? `有 ${failed} 条待重试` : "无";
+    }
+    if (/^有 \d+ 条待重试$/.test(raw)) {
+        return raw;
+    }
+    // Defense: backend used to OR in ancient outbox last_error after a clean sync.
+    if (
+        !input.syncing &&
+        failed > 0 &&
+        (raw.includes("413") || raw.includes("变更过大") || /HTTP\s*\d+/i.test(raw))
+    ) {
+        return `有 ${failed} 条待重试`;
+    }
+    return raw;
+}

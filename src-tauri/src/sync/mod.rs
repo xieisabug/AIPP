@@ -717,6 +717,10 @@ pub async fn trigger_sync_now(app_handle: AppHandle) -> Result<SyncStatusDto, St
     if settings.token.as_deref().unwrap_or_default().trim().is_empty() {
         return Err("缺少同步 token：请填写访问 token 后点「立即同步」（会自动保存），或先保存配置再同步".to_string());
     }
+    // One click drains the failed queue too: reset failed → pending (same as
+    // retry_failed_sync_outbox) then run a sync round. Otherwise Sync Now looks
+    // idle when pending=0 while stale failed rows still hold HTTP 413 etc.
+    let _ = reset_failed_events(&app_handle)?;
     clear_paused(&app_handle).await;
     start_worker(app_handle.clone()).await;
     run_sync_once(&app_handle).await;
@@ -2029,8 +2033,8 @@ fn read_local_snapshots(
 
 /// 一轮本地扫描内悬空外键的聚合报告。
 ///
-/// 键为 (object_type, column, local_fk)；值为命中行数。整轮结束后打摘要日志，
-/// 并把友好中文摘要写入 SyncRuntimeStatus 供 UI 展示。
+/// 键为 (object_type, column, local_fk)；值为命中行数。整轮结束后打一条 INFO
+/// 摘要（detail 走 debug），并把友好中文摘要写入 SyncRuntimeStatus 供 UI 展示。
 #[derive(Debug, Default, Clone)]
 struct DanglingFkScanReport {
     /// 字段级命中总数（一行多列悬空会计多次）
@@ -2091,10 +2095,18 @@ fn log_dangling_fk_summary(report: &DanglingFkScanReport) {
     if report.total_hits <= 0 {
         return;
     }
+    // One INFO per scan (totals + top kinds). Per-(type,column,fk) detail stays
+    // at debug — UI already surfaces dangling_fk_count / summary.
+    info!(
+        total = report.total_hits,
+        kinds = report.by_kind.len(),
+        top = %format_dangling_kinds_suffix(&report.by_kind),
+        "Dangling foreign key scan summary"
+    );
     let mut keys: Vec<_> = report.by_key.iter().collect();
     keys.sort_by(|a, b| a.0.cmp(b.0));
     for ((object_type, column, local_fk), rows) in keys {
-        info!(
+        debug!(
             object_type = %object_type,
             column = %column,
             local_fk = %local_fk,
@@ -2102,11 +2114,6 @@ fn log_dangling_fk_summary(report: &DanglingFkScanReport) {
             "Dangling foreign key omitted from sync snapshot (aggregated)"
         );
     }
-    info!(
-        total = report.total_hits,
-        kinds = report.by_kind.len(),
-        "Dangling foreign key scan summary"
-    );
 }
 
 async fn store_dangling_fk_report(app_handle: &AppHandle, report: &DanglingFkScanReport) {
@@ -4126,6 +4133,26 @@ fn now_string() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Build the status `last_error` shown as「最近错误」.
+///
+/// - Runtime error from the current/last sync round wins.
+/// - After a clean idle run (`syncing=false`, no runtime error), never prefer
+///   raw failed-outbox row errors (stale HTTP 413 etc.); show soft copy when
+///   failed items remain so the UI still hints that retry is available.
+fn compose_status_last_error(
+    runtime_last_error: Option<String>,
+    syncing: bool,
+    failed_outbox_count: i64,
+) -> Option<String> {
+    if let Some(err) = runtime_last_error.filter(|e| !e.trim().is_empty()) {
+        return Some(err);
+    }
+    if !syncing && failed_outbox_count > 0 {
+        return Some(format!("有 {} 条待重试", failed_outbox_count));
+    }
+    None
+}
+
 async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
     let settings = load_settings(app_handle)?;
     ensure_sync_db(app_handle)?;
@@ -4147,17 +4174,6 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
             row.get(0)
         })
         .unwrap_or(0);
-    let latest_failed_error: Option<String> = conn
-        .query_row(
-            "SELECT last_error FROM sync_outbox
-             WHERE status = 'failed' AND last_error IS NOT NULL AND last_error != ''
-             ORDER BY id DESC
-             LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .unwrap_or(None);
     let dead_letter_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |row| row.get(0))
         .unwrap_or(0);
@@ -4168,7 +4184,14 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         SyncRuntimeStatus::default()
     };
     let persisted_last_sync_at = get_device_last_sync_at(app_handle).unwrap_or(None);
-    let last_error = runtime.last_error.or(latest_failed_error);
+    // Prefer runtime error from this run. Do NOT fall back to ancient outbox
+    // last_error (e.g. HTTP 413) after a clean successful sync — that made
+    // 「最近错误」look like the current round failed when pending=0.
+    let last_error = compose_status_last_error(
+        runtime.last_error.clone(),
+        runtime.syncing,
+        failed_outbox_count,
+    );
     Ok(SyncStatusDto {
         mode: settings.mode,
         server_url: settings.server_url,
@@ -4979,6 +5002,31 @@ mod tests {
         let summary = format_dangling_fk_summary(&report).unwrap();
         assert!(summary.starts_with("有 4 条历史引用已失效，已按空值同步"));
         assert!(summary.contains("llm_model_id"));
+    }
+
+    #[test]
+    fn compose_status_last_error_prefers_runtime_over_failed_count() {
+        assert_eq!(
+            compose_status_last_error(Some("网络错误".into()), false, 100),
+            Some("网络错误".into())
+        );
+        assert_eq!(
+            compose_status_last_error(Some("  ".into()), false, 3),
+            Some("有 3 条待重试".into())
+        );
+    }
+
+    #[test]
+    fn compose_status_last_error_softens_failed_outbox_when_idle() {
+        // Clean successful run: no runtime error, but failed rows remain → soft copy,
+        // never raw ancient outbox HTTP 413.
+        assert_eq!(
+            compose_status_last_error(None, false, 100),
+            Some("有 100 条待重试".into())
+        );
+        assert_eq!(compose_status_last_error(None, false, 0), None);
+        // While syncing, don't flash soft failed copy over a cleared runtime error.
+        assert_eq!(compose_status_last_error(None, true, 50), None);
     }
 
     /// sync HTTP client builders must disable system proxy (Clash LAN bypass)

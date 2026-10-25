@@ -8,6 +8,7 @@ import {
     canStopSync,
     decideSyncNowAction,
     formatDanglingFkStatusText,
+    formatRecentSyncError,
     formatSyncStatusText,
     friendlySyncError,
     normalizeSyncServerUrl,
@@ -191,5 +192,43 @@ describe("dataFolderSyncHelpers", () => {
                 dangling_fk_summary: "有 5 条历史引用已失效，已按空值同步（conversation.message.llm_model_id×5）",
             }),
         ).toContain("有 5 条历史引用已失效");
+    });
+
+    it("formatRecentSyncError softens stale outbox HTTP errors", () => {
+        expect(
+            formatRecentSyncError({
+                last_error: "有 100 条待重试",
+                failed_outbox_count: 100,
+                syncing: false,
+            }),
+        ).toBe("有 100 条待重试");
+        expect(
+            formatRecentSyncError({
+                last_error: "变更过大被服务器拒绝（HTTP 413），已跳过并记入失败项",
+                failed_outbox_count: 100,
+                syncing: false,
+            }),
+        ).toBe("有 100 条待重试");
+        expect(
+            formatRecentSyncError({
+                last_error: null,
+                failed_outbox_count: 5,
+                syncing: false,
+            }),
+        ).toBe("有 5 条待重试");
+        expect(
+            formatRecentSyncError({
+                last_error: "网络不可达",
+                failed_outbox_count: 5,
+                syncing: false,
+            }),
+        ).toBe("网络不可达");
+        expect(
+            formatRecentSyncError({
+                last_error: null,
+                failed_outbox_count: 0,
+                syncing: false,
+            }),
+        ).toBe("无");
     });
 });
