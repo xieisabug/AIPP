@@ -1512,22 +1512,9 @@ async fn pull_remote(
         let body = await_or_cancel(cancel, response.json::<PullResponse>()).await?;
         // 每页复用同一个 sync.db 连接应用所有变更
         let sync_conn = open_sync_db(app_handle)?;
-        let mut deferred: Vec<&PullChange> = Vec::new();
-        for change in &body.changes {
-            if let Err(err) = apply_change(app_handle, &sync_conn, change, device_id) {
-                if is_dependency_pending_error(&err) {
-                    // 依赖对象可能在本页后面的 change 里：先记下，本页处理完后重放一次
-                    deferred.push(change);
-                } else {
-                    record_dead_letter(&sync_conn, change, &err);
-                }
-            }
-        }
-        for change in deferred {
-            if let Err(err) = apply_change(app_handle, &sync_conn, change, device_id) {
-                record_dead_letter(&sync_conn, change, &err);
-            }
-        }
+        apply_pull_page(&sync_conn, &body.changes, |change| {
+            apply_change(app_handle, &sync_conn, change, device_id)
+        })?;
         drop(sync_conn);
         set_cursor(app_handle, body.cursor)?;
         emit_sync_domain_events(app_handle, body.changes.iter().map(|c| c.object_type.as_str()));
@@ -1577,10 +1564,54 @@ fn is_dependency_pending_error(err: &str) -> bool {
     err.starts_with("缺少同步依赖") || err.starts_with("远端变更缺少外键引用")
 }
 
+fn sync_dependency_rank(object_type: &str, operation: &str) -> usize {
+    let tables = specs();
+    let rank = tables.iter().position(|s| s.object_type == object_type).unwrap_or(tables.len());
+    if operation == "delete" { tables.len() * 2 - rank } else { rank }
+}
+
+/// Apply parents first, retry dependency chains until no progress. Cursor remains
+/// the server sequence cursor; only application order inside a page changes.
+fn apply_pull_page(
+    sync: &Connection,
+    changes: &[PullChange],
+    mut apply: impl FnMut(&PullChange) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut pending: Vec<_> = changes.iter().collect();
+    pending.sort_by_key(|c| (sync_dependency_rank(&c.object_type, &c.operation), c.seq));
+    loop {
+        let before = pending.len();
+        let mut deferred = Vec::new();
+        for change in pending {
+            match apply(change) {
+                Ok(()) => {
+                    sync.execute("DELETE FROM sync_dead_letter WHERE object_type = ?1 AND object_id = ?2
+                        AND json_extract(change_json, '$.seq') <= ?3",
+                        params![change.object_type, change.object_id, change.seq]).map_err(|e| e.to_string())?;
+                }
+                Err(err) if is_dependency_pending_error(&err) => deferred.push((change, err)),
+                Err(err) => record_dead_letter(sync, change, &err)?,
+            }
+        }
+        if deferred.len() == before || deferred.is_empty() {
+            for (change, err) in deferred { record_dead_letter(sync, change, &err)?; }
+            return Ok(());
+        }
+        pending = deferred.into_iter().map(|(change, _)| change).collect();
+    }
+}
+
 /// 将无法应用的远端变更写入死信表；同一对象只保留最新一条。
-/// 死信写入本身失败只记日志，不阻断 pull 主流程。
-fn record_dead_letter(conn: &Connection, change: &PullChange, error: &str) {
+/// 持久化失败必须阻断游标推进，避免永久丢失无法应用的变更。
+fn record_dead_letter(conn: &Connection, change: &PullChange, error: &str) -> Result<(), String> {
     let result = (|| -> Result<(), String> {
+        let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let newer: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_dead_letter WHERE object_type = ?1 AND object_id = ?2
+                AND json_extract(change_json, '$.seq') > ?3)",
+            params![change.object_type, change.object_id, change.seq], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if newer { return Ok(()); }
         let change_json =
             serde_json::to_string(change).map_err(|e| format!("serialize dead letter: {e}"))?;
         conn.execute(
@@ -1602,22 +1633,17 @@ fn record_dead_letter(conn: &Connection, change: &PullChange, error: &str) {
             ],
         )
         .map_err(|e| e.to_string())?;
+        transaction.commit().map_err(|e| e.to_string())?;
         Ok(())
     })();
-    if let Err(err) = result {
-        warn!(
-            object_type = %change.object_type,
-            object_id = %change.object_id,
-            error = %err,
-            "Failed to record sync dead letter"
-        );
-    }
+    result.map_err(|err| format!("无法持久化同步失败项 {}:{}；保留拉取游标以便重试: {err}", change.object_type, change.object_id))?;
     warn!(
         object_type = %change.object_type,
         object_id = %change.object_id,
         error = %error,
         "Remote change moved to sync dead letter"
     );
+    Ok(())
 }
 
 /// 按序重放死信表中的变更：成功则删除，失败则更新错误信息并保留。
@@ -1944,6 +1970,12 @@ fn local_row_exists(
 ) -> Result<bool, String> {
     let path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&path)?;
+    local_row_exists_in_db(sync_conn, &conn, spec, object_id)
+}
+
+fn local_row_exists_in_db(
+    sync_conn: &Connection, conn: &Connection, spec: &SyncTableSpec, object_id: &str,
+) -> Result<bool, String> {
     if spec.natural_key_columns.is_empty() {
         let Some(local_id) = find_local_id_by_object_id(sync_conn, spec.object_type, object_id)?
         else {
@@ -2033,6 +2065,19 @@ fn read_local_snapshots(
 ) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
     let path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&path)?;
+    let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
+    read_local_snapshots_from_db(&conn, spec, sync_conn, dangling, |object_type, value| {
+        dependency_row_exists(app_handle, object_type, value, &mut dep_conns)
+    })
+}
+
+fn read_local_snapshots_from_db(
+    conn: &Connection,
+    spec: &SyncTableSpec,
+    sync_conn: &Connection,
+    dangling: &mut DanglingFkScanReport,
+    mut dependency_exists: impl FnMut(&str, i64) -> Result<bool, String>,
+) -> Result<(Vec<LocalObjectSnapshot>, HashSet<String>), String> {
     let columns = existing_columns(&conn, spec.table, spec.columns)?;
     if columns.is_empty() || !columns.iter().any(|c| c == "id") {
         return Ok((Vec::new(), HashSet::new()));
@@ -2049,7 +2094,6 @@ fn read_local_snapshots(
     let mut snapshots = Vec::new();
     let mut present_ids = HashSet::new();
     // 跨库外键（如 message.llm_model_id → llm.model）在本表扫描内缓存连接
-    let mut dep_conns: HashMap<&'static str, Connection> = HashMap::new();
 
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let mut fields = Map::new();
@@ -2096,15 +2140,15 @@ fn read_local_snapshots(
             &raw_values,
             &mut fields,
             |object_type, value| {
+                // A mapping outlives deletion of its business row. Never publish
+                // its old UUID as a dependency that another device cannot fetch.
+                if !dependency_exists(object_type, value)? {
+                    return Ok(FkLookup::Dangling);
+                }
                 if let Some(sync_id) = find_object_id(sync_conn, object_type, value)? {
                     return Ok(FkLookup::Resolved(sync_id));
                 }
-                // 未入 map：区分「依赖行还在，只是本轮未映射」与「悬空外键」
-                if dependency_row_exists(app_handle, object_type, value, &mut dep_conns)? {
-                    Ok(FkLookup::Pending)
-                } else {
-                    Ok(FkLookup::Dangling)
-                }
+                Ok(FkLookup::Pending)
             },
             Some(dangling),
         )?
@@ -2728,21 +2772,38 @@ fn apply_change(
     change: &PullChange,
     local_device_id: &str,
 ) -> Result<(), String> {
-    if remote_change_already_applied(sync_conn, change)? {
-        upsert_shadow_from_remote(sync_conn, change)?;
-        return Ok(());
-    }
-    if change.device_id == local_device_id {
-        upsert_shadow_from_remote(sync_conn, change)?;
-        return Ok(());
-    }
-
     let Some(spec) = specs().into_iter().find(|s| s.object_type == change.object_type) else {
         warn!(object_type = %change.object_type, "Ignoring unknown sync object type");
         return Ok(());
     };
     let db_path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&db_path)?;
+    apply_change_to_db(sync_conn, &conn, &spec, change, local_device_id, |fields| {
+        maybe_fork_before_message_insert(app_handle, sync_conn, &conn, fields)
+    })
+}
+
+fn apply_change_to_db(
+    sync_conn: &Connection,
+    conn: &Connection,
+    spec: &SyncTableSpec,
+    change: &PullChange,
+    local_device_id: &str,
+    mut before_message_insert: impl FnMut(&mut Map<String, JsonValue>) -> Result<(), String>,
+) -> Result<(), String> {
+    if remote_change_already_applied(sync_conn, change)? {
+        upsert_shadow_from_remote(sync_conn, change)?;
+        return Ok(());
+    }
+    // Device identity survives resetting sync metadata. Old own-device changes
+    // must be restored when their map/row is absent, rather than shadowed as if
+    // applied (which would make the next scan upload false deletes).
+    if change.device_id == local_device_id
+        && local_row_exists_in_db(sync_conn, conn, spec, &change.object_id)?
+    {
+        upsert_shadow_from_remote(sync_conn, change)?;
+        return Ok(());
+    }
 
     if change.operation == "delete" {
         apply_delete(sync_conn, &conn, &spec, change)?;
@@ -2805,7 +2866,7 @@ fn apply_change(
     } else {
         // New insert: conversation.message may need concurrent-continue auto-fork.
         if change.object_type == "conversation.message" {
-            maybe_fork_before_message_insert(app_handle, sync_conn, &conn, &mut field_values)?;
+            before_message_insert(&mut field_values)?;
         }
         match insert_row(&conn, &spec, &field_values) {
             Ok(new_id) => {
@@ -2996,39 +3057,25 @@ fn local_has_unconfirmed_tip(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    for id in ids {
-        if exclude_message_id == Some(id) {
-            continue;
-        }
-        let sync_id: Option<String> = sync_conn
-            .query_row(
-                "SELECT sync_id FROM sync_object_map
-                 WHERE object_type = 'conversation.message' AND local_id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        let Some(sync_id) = sync_id else {
-            // Mapped on scan; unmapped local rows are still a local tip.
-            return Ok(true);
-        };
-        let shadowed: bool = sync_conn
-            .query_row(
-                "SELECT 1 FROM sync_shadow
-                 WHERE object_type = 'conversation.message' AND object_id = ?1
-                   AND deleted_at IS NULL",
-                params![sync_id],
-                |_| Ok(true),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
-            .unwrap_or(false);
-        if !shadowed {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let ids: Vec<_> = ids.into_iter().filter(|id| Some(*id) != exclude_message_id).collect();
+    message_ids_have_unconfirmed(sync_conn, &ids, false)
+}
+
+/// Query identities in one indexed operation instead of preparing two queries
+/// per historical message on every insert (quadratic SQL round trips on bootstrap).
+fn message_ids_have_unconfirmed(sync: &Connection, ids: &[i64], include_outbox: bool) -> Result<bool, String> {
+    if ids.is_empty() { return Ok(false); }
+    let ids_json = serde_json::to_string(ids).map_err(|e| e.to_string())?;
+    sync.query_row(
+        "SELECT EXISTS(SELECT 1 FROM json_each(?1) candidate
+         LEFT JOIN sync_object_map map ON map.object_type = 'conversation.message' AND map.local_id = candidate.value
+         LEFT JOIN sync_shadow shadow ON shadow.object_type = map.object_type AND shadow.object_id = map.sync_id
+         WHERE map.local_id IS NULL OR shadow.object_id IS NULL OR shadow.deleted_at IS NOT NULL
+           OR (?2 AND EXISTS(SELECT 1 FROM sync_outbox outbox WHERE outbox.object_type = map.object_type
+               AND outbox.object_id = map.sync_id AND outbox.operation = 'upsert'
+               AND outbox.status IN ('pending', 'pushing', 'failed'))))",
+        params![ids_json, include_outbox], |r| r.get(0),
+    ).map_err(|e| e.to_string())
 }
 
 /// Last message id that is confirmed in sync_shadow — the common-history tip.
@@ -3140,6 +3187,10 @@ fn gather_divergence_input(
         conversation_has_unfinished_response(data_conn, conversation_id, exclude_message_id)?;
     let unconfirmed_tip =
         local_has_unconfirmed_tip(data_conn, sync_conn, conversation_id, exclude_message_id)?;
+    let unconfirmed_sibling = local_has_unconfirmed_sibling(
+        data_conn, sync_conn, conversation_id, remote_parent_id,
+        remote_parent_group_id.as_deref(), remote_generation_group_id.as_deref(), exclude_message_id,
+    )?;
 
     Ok(divergence::DivergenceInput {
         is_new_insert,
@@ -3152,7 +3203,28 @@ fn gather_divergence_input(
         local_tip_generation_group_id: tip_group,
         local_runtime_running: runtime_running,
         local_has_unconfirmed_tip: unconfirmed_tip,
+        local_has_unconfirmed_sibling: unconfirmed_sibling,
     })
+}
+
+fn local_has_unconfirmed_sibling(
+    data: &Connection,
+    sync: &Connection,
+    conversation_id: i64,
+    parent_id: Option<i64>,
+    parent_group: Option<&str>,
+    generation_group: Option<&str>,
+    exclude_id: Option<i64>,
+) -> Result<bool, String> {
+    let mut stmt = data.prepare(
+        "SELECT id FROM message WHERE conversation_id = ?1 AND (?2 IS NULL OR id != ?2)
+         AND ((?3 IS NOT NULL AND parent_id = ?3)
+           OR (?3 IS NULL AND ?4 IS NOT NULL AND parent_group_id = ?4))
+         AND (?5 IS NULL OR generation_group_id IS NULL OR generation_group_id != ?5)"
+    ).map_err(|e| e.to_string())?;
+    let ids = stmt.query_map(params![conversation_id, exclude_id, parent_id, parent_group, generation_group], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    message_ids_have_unconfirmed(sync, &ids, true)
 }
 
 fn resolve_sync_fork_point(
@@ -3188,6 +3260,22 @@ fn maybe_fork_before_message_insert(
     data_conn: &Connection,
     field_values: &mut Map<String, JsonValue>,
 ) -> Result<(), String> {
+    maybe_fork_message_in_db(sync_conn, data_conn, field_values, |conversation_id, fork_point| {
+        let id = crate::api::conversation_api::fork_conversation_internal(
+            app_handle, conversation_id, fork_point,
+            crate::api::conversation_api::ForkNameStyle::SyncDivergence, false,
+        )?;
+        schedule_sync_after_local_change(app_handle);
+        Ok(id)
+    })
+}
+
+fn maybe_fork_message_in_db(
+    sync_conn: &Connection,
+    data_conn: &Connection,
+    field_values: &mut Map<String, JsonValue>,
+    fork: impl FnOnce(i64, Option<i64>) -> Result<i64, String>,
+) -> Result<(), String> {
     let conversation_id = field_as_i64(field_values, "conversation_id")
         .ok_or_else(|| "conversation.message insert missing conversation_id".to_string())?;
     if route_sync_branch(sync_conn, data_conn, field_values)? {
@@ -3210,13 +3298,7 @@ fn maybe_fork_before_message_insert(
         None,
     )?;
 
-    let forked_id = crate::api::conversation_api::fork_conversation_internal(
-        app_handle,
-        conversation_id,
-        fork_point,
-        crate::api::conversation_api::ForkNameStyle::SyncDivergence,
-        false,
-    )?;
+    let forked_id = fork(conversation_id, fork_point)?;
 
     // Ensure the forked conversation has a sync_id so subsequent local scan uploads C'.
     let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
@@ -3225,7 +3307,6 @@ fn maybe_fork_before_message_insert(
         "conversation_id".to_string(),
         JsonValue::Number(forked_id.into()),
     );
-    schedule_sync_after_local_change(app_handle);
     debug!(
         original_conversation_id = conversation_id,
         forked_conversation_id = forked_id,
@@ -3742,9 +3823,16 @@ fn upsert_natural_row(
 
 fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, PushEvent)>, String> {
     let conn = open_sync_db(app_handle)?;
+    load_pending_outbox_from_db(&conn, limit)
+}
+
+fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64, PushEvent)>, String> {
+    let rank_sql = specs().iter().enumerate().map(|(rank, spec)|
+        format!("WHEN '{}' THEN {rank}", spec.object_type)).collect::<Vec<_>>().join(" ");
+    let order_sql = format!("CASE object_type {rank_sql} ELSE 999 END");
     let mut stmt = conn
         .prepare(
-            "SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
+            &format!("SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
              WHERE status = 'pending'
                AND NOT EXISTS (SELECT 1 FROM sync_outbox earlier
@@ -3752,8 +3840,12 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
                      AND earlier.object_id = sync_outbox.object_id
                      AND earlier.id < sync_outbox.id AND earlier.status IN ('pending', 'pushing'))
                AND (next_retry_at IS NULL OR next_retry_at <= ?2)
-             ORDER BY id
-             LIMIT ?1",
+               AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.refs') ELSE NULL END) ref
+                   JOIN sync_outbox parent ON parent.object_id = ref.value
+                   WHERE parent.operation = 'upsert' AND parent.status IN ('pending', 'pushing', 'failed')
+                     AND parent.object_id != sync_outbox.object_id)
+             ORDER BY CASE WHEN operation = 'delete' THEN 1000 - ({order_sql}) ELSE {order_sql} END, id
+             LIMIT ?1"),
         )
         .map_err(|e| e.to_string())?;
     let raw_rows = stmt
@@ -4235,6 +4327,8 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             ON sync_outbox(status, id);
         CREATE INDEX IF NOT EXISTS idx_sync_outbox_object_status
             ON sync_outbox(object_type, object_id, status);
+        CREATE INDEX IF NOT EXISTS idx_sync_outbox_dependency
+            ON sync_outbox(object_id, status) WHERE operation = 'upsert';
         CREATE TABLE IF NOT EXISTS sync_shadow (
             object_type TEXT NOT NULL,
             object_id TEXT NOT NULL,
@@ -4483,8 +4577,7 @@ fn parse_official_object_id(object_id: &str, expected_object_type: &str) -> Opti
 }
 
 /// 官方/内置种子行使用确定性 object_id，保证各设备对同一内置行生成相同标识。
-/// 老设备上已存在的随机 UUID 映射在此被就地替换；服务器侧的旧随机对象
-/// 会经删除检测（scan_local_deletes）自然收敛清理。
+/// Preserve the old UUID as an alias: historical children still reference it.
 fn upsert_official_object_map(
     conn: &Connection,
     object_type: &str,
@@ -4492,13 +4585,7 @@ fn upsert_official_object_map(
     local_id: i64,
 ) -> Result<String, String> {
     let sync_id = official_object_id(object_type, local_id);
-    conn.execute(
-        "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(object_type, local_id) DO UPDATE SET sync_id = excluded.sync_id",
-        params![object_type, local_table, local_id, sync_id, now_string()],
-    )
-    .map_err(|e| e.to_string())?;
+    remap_sync_object_map(conn, object_type, local_table, local_id, &sync_id)?;
     Ok(sync_id)
 }
 
@@ -6270,6 +6357,7 @@ mod tests {
             is_new_insert: true,
             remote_parent_id: Some(42),
             sibling_exists_under_parent_id: true,
+            local_has_unconfirmed_sibling: true,
             ..divergence::DivergenceInput::default()
         };
         assert!(divergence::detect_concurrent_message_divergence(&input));
@@ -6284,6 +6372,7 @@ mod tests {
             remote_parent_group_id: Some("pg".into()),
             remote_generation_group_id: Some("g-remote".into()),
             local_has_sibling_under_parent_group: true,
+            local_has_unconfirmed_sibling: true,
             ..divergence::DivergenceInput::default()
         };
         assert!(divergence::detect_concurrent_message_divergence(&input));
@@ -6641,3 +6730,6 @@ mod tests {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod regression_tests;
+
+#[cfg(test)]
+mod convergence_tests;

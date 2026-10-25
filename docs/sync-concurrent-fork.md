@@ -12,8 +12,16 @@ written by conversation APIs).
 
 Fork when (new insert only):
 
-- legacy `parent_id` sibling exists, or
-- sibling `generation_group` under the same `parent_group_id`
+- an outstanding local write is a sibling at the same ancestor, and
+- legacy `parent_id` siblings or distinct generation groups under the same
+  `parent_group_id` establish that ancestry.
+
+Downloaded historical regenerations are ordinary history, including when multiple
+versions share a parent. A mapped/shadowed sibling without an outstanding local
+upsert must not fork during bootstrap or repeated replay. Pending writes under an
+unrelated ancestor do not establish a conflict. This is conservative: an already
+acknowledged local branch cannot prove concurrency using these facts alone; both
+message versions remain available, but automatic separation is not guaranteed.
 
 **Guarantee:** non-empty conversation + `parent_id` None normal insert → **no fork**.
 Unconfirmed local rows, delayed acknowledgements and unfinished historical responses
@@ -55,3 +63,26 @@ Required ownership references (for example message → conversation) must not be
 uploaded as NULL. Invalid historical changes remain in dead letters with their
 object ID and failure reason; no conversation is invented to hide missing data.
 Existing fork conversations are not automatically deleted or merged.
+
+Snapshots verify that referenced business rows still exist even when an old sync
+map remains. Deleted optional historical references are serialized as NULL;
+required owners block upload with a diagnostic. Official identity migration keeps
+old UUIDs as aliases so already uploaded children retain their reference identity.
+No alternative model is selected.
+
+Uploads prioritize dependencies and wait for queued parent upserts. Pull pages
+apply parents first, retry dependency failures to a fixed point, then replay
+cross-page failures at the end of pull. Ordering never alters the server cursor.
+Dead letters retain the latest sequence; a storage failure stops cursor advancement.
+Missing roots that were never delivered still require a corrected source snapshot.
+
+## Regression coverage
+
+`src-tauri/src/sync/convergence_tests.rs` exercises production snapshot, outbox,
+identity/FK application, fork routing and replay code using independent in-memory
+device databases. The opt-in `test_sync_server_multidevice_roundtrip` sends Rust
+protocol structs through real FastAPI authentication/push/merge/pull routes via
+`sync-server/app/tests/sync_client_bridge.py`. It uses 1,200 messages, three devices,
+multiple page sizes, duplicate uploads, full replay and same-device metadata reset.
+It does not launch Tauri windows or test network transport. Server API tests also
+cover a 10,000-message graph with children arriving before parents.

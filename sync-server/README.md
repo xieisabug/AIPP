@@ -379,6 +379,24 @@ Windows：
 
 若 pytest 无法写入默认临时目录，请在普通用户 shell 中运行，或设置可写的临时目录。
 
+同步 API 测试使用内存 SQLite，覆盖鉴权、账号隔离、幂等、冲突、删除、分页及
+10,000 条消息先于依赖对象到达的场景。数据库不写入本机或部署中的服务数据。
+
+另外，从仓库根目录可运行 Rust 客户端与实际 FastAPI 路由之间的集成测试：
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml sync::
+cargo test --manifest-path src-tauri/Cargo.toml test_sync_server_multidevice_roundtrip -- --ignored --nocapture
+```
+
+第二条需要先安装 `sync-server` 测试依赖，默认使用其 `.venv` 中的 Python，也可
+通过 `AIPP_SYNC_TEST_PYTHON` 指定 Python 可执行文件。客户端和服务端数据库均在
+内存中，测试不读取真实 token 或业务数据；它验证 1,200 条消息、三设备、重发、
+分页、重放及元数据重置。桥接使用 TestClient，因此不覆盖真实网络和桌面窗口。
+
+服务端保存有序事件日志，不猜测客户端对象关系，也不会凭空创建缺失助手或会话。
+依赖排序和落地重试由客户端执行；有限回归测试不能证明所有网络/并发情形均正确。
+
 ---
 
 ## 重置本地数据

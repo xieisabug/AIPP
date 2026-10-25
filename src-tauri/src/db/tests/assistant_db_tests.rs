@@ -23,6 +23,47 @@ fn test_model_configs_legacy_null_binding_uses_unbound_sentinel() {
     assert!(db.get_assistant_model_configs_with_model_id(1, 99).unwrap().is_empty());
 }
 
+#[test]
+fn test_quick_assistant_placeholder_preserves_explicit_bindings_and_unset_state() {
+    let db = AssistantDatabase {
+        conn: Connection::open_in_memory().unwrap(),
+        mcp_conn: Connection::open_in_memory().unwrap(),
+    };
+    db.create_tables().unwrap();
+    let placeholder = db.get_assistant_model(1).unwrap();
+    assert_eq!(placeholder.len(), 1);
+    assert_eq!(placeholder[0].provider_id, 0);
+    assert_eq!(placeholder[0].model_code, "");
+
+    // No such provider/model exists. Keep the explicit choice so execution
+    // reports its missing configuration instead of switching to another model.
+    let first = db.add_assistant_model(1, 777, "missing-model", "chosen").unwrap();
+    let second = db.add_assistant_model(1, 888, "comparison-model", "other").unwrap();
+    for _ in 0..2 {
+        db.init_assistant().unwrap();
+        let models = db.get_assistant_model(1).unwrap();
+        assert_eq!(models.iter().map(|m| m.id).collect::<Vec<_>>(), vec![first, second]);
+        assert_eq!(models[0].provider_id, 777);
+        assert_eq!(models[0].model_code, "missing-model");
+    }
+    assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM assistant_model", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    db.conn.execute("DELETE FROM assistant_model WHERE id != ?1", [placeholder[0].id]).unwrap();
+    assert_eq!(db.get_assistant_model(1).unwrap()[0].id, placeholder[0].id);
+}
+
+#[test]
+fn test_quick_assistant_placeholder_does_not_filter_other_assistants() {
+    let db = AssistantDatabase {
+        conn: Connection::open_in_memory().unwrap(),
+        mcp_conn: Connection::open_in_memory().unwrap(),
+    };
+    db.create_tables().unwrap();
+    let id = db.add_assistant("comparison", "", Some(1), false).unwrap();
+    let blank = db.add_assistant_model(id, 0, "", "").unwrap();
+    let explicit = db.add_assistant_model(id, 777, "chosen-model", "chosen").unwrap();
+    assert_eq!(db.get_assistant_model(id).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(), vec![blank, explicit]);
+}
+
 // ============================================================================
 // 测试辅助函数
 // ============================================================================

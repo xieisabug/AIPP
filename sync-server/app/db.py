@@ -8,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.config import Settings, get_settings
 from app.models import Base, SyncAccount, SyncToken
@@ -29,7 +30,10 @@ def configure_database(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     settings.ensure_sqlite_parent()
     connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-    engine = create_engine(settings.database_url, connect_args=connect_args, future=True)
+    # FastAPI executes synchronous routes in worker threads. An in-memory SQLite
+    # database must share one connection instead of creating an empty DB per thread.
+    pool_options = {"poolclass": StaticPool} if settings.database_url in ("sqlite://", "sqlite:///:memory:") else {}
+    engine = create_engine(settings.database_url, connect_args=connect_args, future=True, **pool_options)
     if settings.database_url.startswith("sqlite"):
         event.listen(engine, "connect", _set_sqlite_pragmas)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)

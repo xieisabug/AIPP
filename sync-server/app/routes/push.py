@@ -12,7 +12,7 @@ from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import SyncChange, SyncObject
 from app.schemas import AcceptedEvent, ConflictEvent, PushRequest, PushResponse, RejectedEvent
-from app.services.merge import process_push_event
+from app.services.merge import process_push_event, replay_existing_change
 from app.services.notify import NotifyHub
 
 logger = logging.getLogger(__name__)
@@ -36,13 +36,7 @@ def recover_from_integrity_error(
         )
     )
     if existing_change is not None:
-        return AcceptedEvent(
-            event_id=event.event_id,
-            object_type=existing_change.object_type,
-            object_id=existing_change.object_id,
-            server_version=existing_change.version,
-            server_seq=existing_change.seq,
-        )
+        return replay_existing_change(existing_change, event)
     current = db.get(SyncObject, (account_id, event.object_type, event.object_id))
     if current is not None:
         return ConflictEvent(

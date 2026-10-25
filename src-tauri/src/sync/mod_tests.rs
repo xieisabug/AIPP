@@ -214,7 +214,7 @@ fn test_reverting_unsent_edit_to_shadow_drops_obsolete_upload() {
 fn test_dead_letter_replay_resolves_reversed_dependencies_in_one_request() {
     let sync = sync_db();
     for id in ["child", "parent", "orphan"] {
-        record_dead_letter(&sync, &change("conversation", id, 1, json!({})), "initial");
+        record_dead_letter(&sync, &change("conversation", id, 1, json!({})), "initial").unwrap();
     }
     let mut parent_ready = false;
     let mut attempts = 0;

@@ -31,6 +31,25 @@ def payload_size(payload: dict | None) -> int:
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def replay_existing_change(existing: SyncChange, event: PushEvent) -> AcceptedEvent | RejectedEvent:
+    """Use identical idempotency checks for normal retries and uniqueness races."""
+    payload = None if event.operation == "delete" else payload_to_dict(event)
+    if (
+        existing.object_type != event.object_type
+        or existing.object_id != event.object_id
+        or existing.operation != event.operation
+        or existing.payload_json != payload
+    ):
+        return RejectedEvent(event_id=event.event_id, reason="event_id_conflict")
+    return AcceptedEvent(
+        event_id=event.event_id,
+        object_type=existing.object_type,
+        object_id=existing.object_id,
+        server_version=existing.version,
+        server_seq=existing.seq,
+    )
+
+
 def process_push_event(
     db: Session,
     settings: Settings,
@@ -56,20 +75,7 @@ def process_push_event(
     if existing_change is not None:
         # Idempotent replay must describe the same write; a reused event_id with
         # different content means a client bug and must not be acknowledged.
-        if (
-            existing_change.object_type != event.object_type
-            or existing_change.object_id != event.object_id
-            or existing_change.operation != event.operation
-            or existing_change.payload_json != payload
-        ):
-            return RejectedEvent(event_id=event.event_id, reason="event_id_conflict")
-        return AcceptedEvent(
-            event_id=event.event_id,
-            object_type=existing_change.object_type,
-            object_id=existing_change.object_id,
-            server_version=existing_change.version,
-            server_seq=existing_change.seq,
-        )
+        return replay_existing_change(existing_change, event)
 
     current = db.get(SyncObject, (account_id, event.object_type, event.object_id), with_for_update=True)
     if not should_accept_stale_event(event, current, set(settings.stale_lww_types)):

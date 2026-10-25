@@ -13,9 +13,10 @@ from app.factory import create_app
 from app.models import SyncAccount, SyncDevice, SyncToken
 
 
-def make_client(tmp_path, token: str = "test-token", **setting_overrides) -> TestClient:
+def make_client(token: str = "test-token", **setting_overrides) -> TestClient:
     settings = Settings(
-        database_url=f"sqlite:///{tmp_path / (str(uuid4()) + '.db')}",
+        _env_file=None,
+        database_url="sqlite:///:memory:",
         bootstrap_account_id="acct-a",
         bootstrap_token=token,
         **setting_overrides,
@@ -47,16 +48,16 @@ def sample_event(event_id: str, object_id: str, base_version: int = 0) -> dict:
     }
 
 
-def test_status_requires_bearer_token(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_status_requires_bearer_token() -> None:
+    client = make_client()
 
     response = client.get("/v1/sync/status")
 
     assert response.status_code == 401
 
 
-def test_push_is_idempotent_by_event_id(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_push_is_idempotent_by_event_id() -> None:
+    client = make_client()
     body = {"device_id": "device-a", "events": [sample_event("event-1", "conv-1")]}
 
     first = client.post("/v1/sync/push", headers=auth_headers(), json=body)
@@ -69,8 +70,8 @@ def test_push_is_idempotent_by_event_id(tmp_path) -> None:
     assert second.json()["conflicts"] == []
 
 
-def test_pull_returns_monotonic_cursor_and_changes(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_pull_returns_monotonic_cursor_and_changes() -> None:
+    client = make_client()
     push_body = {
         "device_id": "device-a",
         "events": [
@@ -104,8 +105,8 @@ def test_pull_returns_monotonic_cursor_and_changes(tmp_path) -> None:
     assert [change["event_id"] for change in next_body["changes"]] == ["event-2"]
 
 
-def test_stale_message_update_returns_conflict(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_stale_message_update_returns_conflict() -> None:
+    client = make_client()
     create = {
         "device_id": "device-a",
         "events": [
@@ -138,8 +139,8 @@ def test_stale_message_update_returns_conflict(tmp_path) -> None:
     assert body["conflicts"][0]["server_payload"]["fields"]["content"] == "remote"
 
 
-def test_push_accepts_large_payload_when_payload_limit_is_disabled(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_push_accepts_large_payload_when_payload_limit_is_disabled() -> None:
+    client = make_client()
     event = {
         **sample_event("event-large", "msg-large"),
         "object_type": "conversation.message",
@@ -161,8 +162,8 @@ def test_push_accepts_large_payload_when_payload_limit_is_disabled(tmp_path) -> 
     assert body["rejected"] == []
 
 
-def test_push_rejects_large_payload_when_payload_limit_is_configured(tmp_path) -> None:
-    client = make_client(tmp_path, max_payload_bytes=1024)
+def test_push_rejects_large_payload_when_payload_limit_is_configured() -> None:
+    client = make_client(max_payload_bytes=1024)
     event = {
         **sample_event("event-large", "msg-large"),
         "object_type": "conversation.message",
@@ -184,8 +185,8 @@ def test_push_rejects_large_payload_when_payload_limit_is_configured(tmp_path) -
     assert body["rejected"][0]["reason"] == "payload_too_large"
 
 
-def test_accounts_are_isolated_by_token(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_accounts_are_isolated_by_token() -> None:
+    client = make_client()
     token_b = "other-token"
     with get_sessionmaker()() as db:
         db.add(SyncAccount(id="acct-b", created_at=datetime.now(UTC)))
@@ -212,8 +213,8 @@ def test_accounts_are_isolated_by_token(tmp_path) -> None:
     assert response_b.json()["changes"] == []
 
 
-def test_revoked_device_cannot_push_or_pull(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_revoked_device_cannot_push_or_pull() -> None:
+    client = make_client()
     with get_sessionmaker()() as db:
         assert isinstance(db, Session)
         db.add(
@@ -239,11 +240,11 @@ def test_revoked_device_cannot_push_or_pull(tmp_path) -> None:
     assert pull_response.status_code == 403
 
 
-def test_non_localhost_without_bootstrap_token_refuses_to_start(tmp_path) -> None:
+def test_non_localhost_without_bootstrap_token_refuses_to_start() -> None:
     import pytest
 
     settings = Settings(
-        database_url=f"sqlite:///{tmp_path / 'no-token.db'}",
+        database_url="sqlite:///:memory:",
         base_url="https://sync.example.com",
         bootstrap_token=None,
     )
@@ -252,11 +253,11 @@ def test_non_localhost_without_bootstrap_token_refuses_to_start(tmp_path) -> Non
         create_app(settings)
 
 
-def test_non_localhost_with_public_default_token_refuses_to_start(tmp_path) -> None:
+def test_non_localhost_with_public_default_token_refuses_to_start() -> None:
     import pytest
 
     settings = Settings(
-        database_url=f"sqlite:///{tmp_path / 'dev-token.db'}",
+        database_url="sqlite:///:memory:",
         base_url="https://sync.example.com",
         bootstrap_token="dev-token",
     )
@@ -265,9 +266,8 @@ def test_non_localhost_with_public_default_token_refuses_to_start(tmp_path) -> N
         create_app(settings)
 
 
-def test_non_localhost_with_private_token_starts(tmp_path) -> None:
+def test_non_localhost_with_private_token_starts() -> None:
     client = make_client(
-        tmp_path,
         base_url="https://sync.example.com",
     )
 
@@ -276,8 +276,8 @@ def test_non_localhost_with_private_token_starts(tmp_path) -> None:
     assert response.status_code == 200
 
 
-def test_localhost_without_bootstrap_token_starts_but_creates_no_token(tmp_path) -> None:
-    client = make_client(tmp_path, token=None)
+def test_localhost_without_bootstrap_token_starts_but_creates_no_token() -> None:
+    client = make_client(token=None)
 
     response = client.get("/health")
     assert response.status_code == 200
@@ -288,17 +288,17 @@ def test_localhost_without_bootstrap_token_starts_but_creates_no_token(tmp_path)
     assert tokens == 0
 
 
-def test_busy_timeout_pragma_is_set(tmp_path) -> None:
+def test_busy_timeout_pragma_is_set() -> None:
     from sqlalchemy import text
 
-    make_client(tmp_path)
+    make_client()
     with get_sessionmaker()() as db:
         assert isinstance(db, Session)
         value = db.execute(text("PRAGMA busy_timeout")).scalar()
     assert value == 5000
 
 
-def test_push_batch_with_integrity_conflict_does_not_fail_whole_batch(tmp_path) -> None:
+def test_push_batch_with_integrity_conflict_does_not_fail_whole_batch() -> None:
     """预置一个 version=2 的 change（不同 event_id），再推一条会算出 version=2 的事件。
 
     唯一约束 uq_sync_change_account_object_version 触发 IntegrityError，
@@ -306,7 +306,7 @@ def test_push_batch_with_integrity_conflict_does_not_fail_whole_batch(tmp_path) 
     """
     from app.models import SyncChange, SyncObject
 
-    client = make_client(tmp_path)
+    client = make_client()
     with get_sessionmaker()() as db:
         assert isinstance(db, Session)
         now = datetime.now(UTC)
@@ -360,12 +360,12 @@ def test_push_batch_with_integrity_conflict_does_not_fail_whole_batch(tmp_path) 
     assert body["rejected"] == []
 
 
-def test_concurrent_duplicate_event_id_returns_idempotent_accept(tmp_path) -> None:
+def test_concurrent_duplicate_event_id_returns_idempotent_accept() -> None:
     """另一条连接抢先写入相同 event_id（模拟并发重试），API 仍返回幂等 accepted。"""
     from app.models import SyncChange, SyncObject
     from app.routes.push import recover_from_integrity_error
 
-    make_client(tmp_path)
+    make_client()
     now = datetime.now(UTC)
     with get_sessionmaker()() as db:
         assert isinstance(db, Session)
@@ -375,7 +375,7 @@ def test_concurrent_duplicate_event_id_returns_idempotent_accept(tmp_path) -> No
                 object_type="conversation",
                 object_id="conv-dup",
                 version=3,
-                payload_json={"fields": {"name": "已有"}},
+                payload_json={"fields": {"name": "已有"}, "refs": {}},
                 payload_hash="y" * 64,
                 deleted_at=None,
                 updated_at=now,
@@ -390,7 +390,7 @@ def test_concurrent_duplicate_event_id_returns_idempotent_accept(tmp_path) -> No
                 object_id="conv-dup",
                 operation="upsert",
                 version=3,
-                payload_json={"fields": {"name": "已有"}},
+                payload_json={"fields": {"name": "已有"}, "refs": {}},
                 deleted_at=None,
                 device_id="device-b",
                 created_at=now,
@@ -400,15 +400,17 @@ def test_concurrent_duplicate_event_id_returns_idempotent_accept(tmp_path) -> No
 
         from app.schemas import PushEvent
 
-        event = PushEvent(**sample_event("dup-event", "conv-dup"))
+        retry = sample_event("dup-event", "conv-dup")
+        retry["payload"] = {"fields": {"name": "已有"}, "refs": {}}
+        event = PushEvent(**retry)
         result = recover_from_integrity_error(db, "acct-a", event)
         assert result.event_id == "dup-event"
         assert result.server_version == 3
 
 
-def test_stale_write_conflicts_by_default_for_non_whitelisted_type(tmp_path) -> None:
+def test_stale_write_conflicts_by_default_for_non_whitelisted_type() -> None:
     """conversation（不在 LWW 白名单）的 stale 写入应返回 conflict，而不是静默覆盖。"""
-    client = make_client(tmp_path)
+    client = make_client()
     client.post(
         "/v1/sync/push",
         headers=auth_headers(),
@@ -432,8 +434,8 @@ def test_stale_write_conflicts_by_default_for_non_whitelisted_type(tmp_path) -> 
     assert conflict["server_operation"] == "upsert"
 
 
-def test_stale_write_accepted_for_whitelisted_lww_type(tmp_path) -> None:
-    client = make_client(tmp_path, stale_lww_types=["conversation"])
+def test_stale_write_accepted_for_whitelisted_lww_type() -> None:
+    client = make_client(stale_lww_types=["conversation"])
     client.post(
         "/v1/sync/push",
         headers=auth_headers(),
@@ -451,9 +453,9 @@ def test_stale_write_accepted_for_whitelisted_lww_type(tmp_path) -> None:
     assert body["conflicts"] == []
 
 
-def test_event_id_replay_with_different_content_is_rejected(tmp_path) -> None:
+def test_event_id_replay_with_different_content_is_rejected() -> None:
     """同一 event_id 携带不同内容重推（客户端 bug）不得被幂等确认。"""
-    client = make_client(tmp_path)
+    client = make_client()
     client.post(
         "/v1/sync/push",
         headers=auth_headers(),
@@ -473,9 +475,9 @@ def test_event_id_replay_with_different_content_is_rejected(tmp_path) -> None:
     assert body["rejected"] == [{"event_id": "event-1", "reason": "event_id_conflict"}]
 
 
-def test_conflict_with_tombstone_reports_delete_operation(tmp_path) -> None:
+def test_conflict_with_tombstone_reports_delete_operation() -> None:
     """服务器端对象是墓碑时，冲突响应必须带 server_operation=delete。"""
-    client = make_client(tmp_path)
+    client = make_client()
     client.post(
         "/v1/sync/push",
         headers=auth_headers(),
@@ -501,8 +503,8 @@ def test_conflict_with_tombstone_reports_delete_operation(tmp_path) -> None:
     assert body["conflicts"][0]["server_operation"] == "delete"
     assert body["conflicts"][0]["server_payload"] is None
 
-def test_push_rejects_invalid_object_id_chars(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_push_rejects_invalid_object_id_chars() -> None:
+    client = make_client()
     event = sample_event("event-1", "bad id with spaces")
     body = {"device_id": "device-a", "events": [event]}
 
@@ -511,8 +513,8 @@ def test_push_rejects_invalid_object_id_chars(tmp_path) -> None:
     assert response.status_code == 422
 
 
-def test_push_rejects_negative_base_version(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_push_rejects_negative_base_version() -> None:
+    client = make_client()
     event = sample_event("event-1", "conv-1")
     event["base_version"] = -1
     body = {"device_id": "device-a", "events": [event]}
@@ -522,8 +524,8 @@ def test_push_rejects_negative_base_version(tmp_path) -> None:
     assert response.status_code == 422
 
 
-def test_natural_object_id_with_base64_chars_accepted(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_natural_object_id_with_base64_chars_accepted() -> None:
+    client = make_client()
     event = sample_event("event-1", "natural:aGVsbG8rLz0=")
     body = {"device_id": "device-a", "events": [event]}
 
@@ -533,8 +535,8 @@ def test_natural_object_id_with_base64_chars_accepted(tmp_path) -> None:
     assert len(response.json()["accepted"]) == 1
 
 
-def test_request_body_over_limit_returns_413(tmp_path) -> None:
-    client = make_client(tmp_path, max_request_body_bytes=1024)
+def test_request_body_over_limit_returns_413() -> None:
+    client = make_client(max_request_body_bytes=1024)
     event = sample_event("event-1", "conv-1")
     event["payload"]["fields"]["blob"] = "x" * 8192
     body = {"device_id": "device-a", "events": [event]}
@@ -544,10 +546,10 @@ def test_request_body_over_limit_returns_413(tmp_path) -> None:
     assert response.status_code == 413
 
 
-def test_expired_token_rejected(tmp_path) -> None:
+def test_expired_token_rejected() -> None:
     from sqlalchemy import select
 
-    client = make_client(tmp_path)
+    client = make_client()
     with get_sessionmaker()() as db:
         row = db.scalar(select(SyncToken).where(SyncToken.name == "bootstrap"))
         assert row is not None
@@ -559,8 +561,8 @@ def test_expired_token_rejected(tmp_path) -> None:
     assert response.status_code == 401
 
 
-def test_admin_create_revoke_rotate_token(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_admin_create_revoke_rotate_token() -> None:
+    client = make_client()
 
     created = client.post("/v1/admin/tokens", headers=auth_headers(), json={"name": "laptop"})
     assert created.status_code == 201
@@ -582,8 +584,8 @@ def test_admin_create_revoke_rotate_token(tmp_path) -> None:
     assert client.get("/v1/sync/status", headers=auth_headers(rotated_token)).status_code == 200
 
 
-def test_admin_revoke_device_blocks_push(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_admin_revoke_device_blocks_push() -> None:
+    client = make_client()
     body = {"device_id": "device-a", "device_name": "Device A", "events": [sample_event("event-1", "conv-1")]}
     assert client.post("/v1/sync/push", headers=auth_headers(), json=body).status_code == 200
 
@@ -596,8 +598,8 @@ def test_admin_revoke_device_blocks_push(tmp_path) -> None:
     assert response.status_code == 403
 
 
-def test_notify_catchup_when_cursor_behind(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_notify_catchup_when_cursor_behind() -> None:
+    client = make_client()
     push_body = {"device_id": "device-a", "events": [sample_event("event-1", "conv-1")]}
     assert client.post("/v1/sync/push", headers=auth_headers(), json=push_body).status_code == 200
 
@@ -614,7 +616,7 @@ def test_notify_catchup_when_cursor_behind(tmp_path) -> None:
     assert '"cursor":1' in body
 
 
-def test_notify_hub_publish_delivers_to_subscriber(tmp_path) -> None:
+def test_notify_hub_publish_delivers_to_subscriber() -> None:
     """In-process hub delivers cursor advances to waiters (push → SSE path)."""
     import asyncio
 
@@ -633,7 +635,7 @@ def test_notify_hub_publish_delivers_to_subscriber(tmp_path) -> None:
     asyncio.run(exercise())
 
 
-def test_push_publishes_notify_for_accepted_events(tmp_path, monkeypatch) -> None:
+def test_push_publishes_notify_for_accepted_events(monkeypatch) -> None:
     """Successful push fans out to NotifyHub so SSE subscribers can wake."""
     from app.services.notify import NotifyHub
 
@@ -643,7 +645,7 @@ def test_push_publishes_notify_for_accepted_events(tmp_path, monkeypatch) -> Non
         calls.append((account_id, cursor, device_id))
 
     monkeypatch.setattr(NotifyHub, "publish_threadsafe", fake_publish)
-    client = make_client(tmp_path)
+    client = make_client()
     body = {"device_id": "device-a", "events": [sample_event("event-1", "conv-1")]}
     response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
     assert response.status_code == 200
@@ -652,7 +654,7 @@ def test_push_publishes_notify_for_accepted_events(tmp_path, monkeypatch) -> Non
 
 
 
-def test_notify_requires_auth_and_device(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_notify_requires_auth_and_device() -> None:
+    client = make_client()
     assert client.get("/v1/sync/notify").status_code == 401
     assert client.get("/v1/sync/notify", headers=auth_headers()).status_code == 400

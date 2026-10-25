@@ -31,6 +31,9 @@ pub struct DivergenceInput {
     /// Local tip messages exist that are not yet confirmed in `sync_shadow`
     /// (local continue not acked / not pulled from server).
     pub local_has_unconfirmed_tip: bool,
+    /// A sibling at the SAME ancestor is a local write not yet confirmed.
+    /// Historical regenerated versions downloaded from the server are not conflicts.
+    pub local_has_unconfirmed_sibling: bool,
 }
 
 /// Whether applying a **new insert** of `conversation.message` into conversation C
@@ -45,6 +48,12 @@ pub fn detect_concurrent_message_divergence(input: &DivergenceInput) -> bool {
 
     // Same generation group already local → same turn (e.g. response after user).
     if input.remote_generation_group_already_local {
+        return false;
+    }
+
+    // Sibling versions are normal conversation history. Only an outstanding local
+    // write at that ancestor is evidence of divergence; bootstrap/replay has none.
+    if !input.local_has_unconfirmed_sibling {
         return false;
     }
 
@@ -129,6 +138,7 @@ mod tests {
         let mut input = base_insert();
         input.remote_parent_id = Some(10);
         input.sibling_exists_under_parent_id = true;
+        input.local_has_unconfirmed_sibling = true;
         assert!(detect_concurrent_message_divergence(&input));
     }
 
@@ -146,6 +156,7 @@ mod tests {
         input.remote_parent_group_id = Some("parent-g".into());
         input.remote_generation_group_id = Some("remote-g".into());
         input.local_has_sibling_under_parent_group = true;
+        input.local_has_unconfirmed_sibling = true;
         assert!(detect_concurrent_message_divergence(&input));
     }
 

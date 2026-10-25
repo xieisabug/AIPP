@@ -480,7 +480,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn get_assistant_model(&self, assistant_id: i64) -> Result<Vec<AssistantModel>> {
-        let mut stmt = self.conn.prepare("SELECT id, assistant_id, provider_id, model_code, alias FROM assistant_model WHERE assistant_id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT id, assistant_id, provider_id, model_code, alias FROM assistant_model WHERE assistant_id = ? ORDER BY id")?;
         let assistant_model_iter = stmt.query_map(params![assistant_id], |row| {
             Ok(AssistantModel {
                 id: row.get(0)?,
@@ -494,6 +494,18 @@ impl AssistantDatabase {
         let mut assistant_models = Vec::new();
         for assistant_model in assistant_model_iter {
             assistant_models.push(assistant_model?);
+        }
+        // Every new client seeds quick assistant 1 with an empty selection.
+        // A synced explicit binding has a different natural key and coexists
+        // with that row. Do not expose the initialization row as model[0].
+        // Keep stored rows/identities intact, and keep all explicit bindings,
+        // including invalid ones: model validation must report those errors.
+        if assistant_id == 1
+            && assistant_models.iter().any(|m| m.provider_id != 0 || !m.model_code.is_empty())
+        {
+            assistant_models.retain(|m| {
+                m.provider_id != 0 || !m.model_code.is_empty() || !m.alias.is_empty()
+            });
         }
         Ok(assistant_models)
     }
