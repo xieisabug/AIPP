@@ -13,6 +13,31 @@ use crate::db::assistant_db::*;
 use rusqlite::Connection;
 
 #[test]
+fn test_quick_assistant_synced_prompts_do_not_get_masked_by_initialization() {
+    let db = AssistantDatabase {
+        conn: Connection::open_in_memory().unwrap(),
+        mcp_conn: Connection::open_in_memory().unwrap(),
+    };
+    db.create_tables().unwrap();
+    assert_eq!(db.get_assistant_prompt(1).unwrap()[0].prompt, "You are a helpful assistant.");
+    let first = db.add_assistant_prompt(1, "custom from first device").unwrap();
+    db.add_assistant_prompt(1, "You are a helpful assistant.").unwrap();
+    let second = db.add_assistant_prompt(1, "custom from second device").unwrap();
+    for _ in 0..2 {
+        db.init_assistant().unwrap();
+        assert_eq!(db.get_assistant_prompt(1).unwrap().iter().map(|p| p.id).collect::<Vec<_>>(), vec![first, second]);
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM assistant_prompt WHERE assistant_id=1", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+    }
+    let other = db.add_assistant("other", "", Some(0), false).unwrap();
+    db.add_assistant_prompt(other, "You are a helpful assistant.").unwrap();
+    db.add_assistant_prompt(other, "custom").unwrap();
+    assert_eq!(db.get_assistant_prompt(other).unwrap().len(), 2);
+    // Clearing the user's prompt is an explicit value, not a reason to reseed.
+    db.update_assistant_prompt(first, "").unwrap();
+    assert_eq!(db.get_assistant_prompt(1).unwrap()[0].prompt, "");
+}
+
+#[test]
 fn test_model_configs_legacy_null_binding_uses_unbound_sentinel() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE assistant_model_config(id INTEGER PRIMARY KEY, assistant_id INTEGER, assistant_model_id INTEGER, name TEXT, value TEXT, value_type TEXT);

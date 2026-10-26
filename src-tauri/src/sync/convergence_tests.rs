@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 const TEST_TYPES: &[&str] = &[
-    "llm.provider", "llm.model", "assistant", "assistant.model", "assistant.model_config",
+    "llm.provider", "llm.model", "assistant", "assistant.prompt", "assistant.model", "assistant.model_config",
     "conversation", "conversation.message", "conversation.message_attachment", "conversation.summary", "conversation.todo",
 ];
 
@@ -22,6 +22,7 @@ impl Device {
             CREATE TABLE llm_provider(id INTEGER PRIMARY KEY, name TEXT NOT NULL, is_official INTEGER DEFAULT 0);
             CREATE TABLE llm_model(id INTEGER PRIMARY KEY, name TEXT, llm_provider_id INTEGER NOT NULL REFERENCES llm_provider(id), code TEXT NOT NULL, UNIQUE(llm_provider_id, code));
             CREATE TABLE assistant(id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE assistant_prompt(id INTEGER PRIMARY KEY, assistant_id INTEGER NOT NULL REFERENCES assistant(id), prompt TEXT NOT NULL, created_time TEXT);
             CREATE TABLE assistant_model(id INTEGER PRIMARY KEY, assistant_id INTEGER NOT NULL REFERENCES assistant(id), provider_id INTEGER NOT NULL, model_code TEXT NOT NULL, alias TEXT, UNIQUE(assistant_id, provider_id, model_code));
             CREATE TABLE assistant_model_config(id INTEGER PRIMARY KEY, assistant_id INTEGER NOT NULL REFERENCES assistant(id), assistant_model_id INTEGER NOT NULL, name TEXT NOT NULL, value TEXT, UNIQUE(assistant_id, name));
             CREATE TABLE conversation(id INTEGER PRIMARY KEY, name TEXT NOT NULL, assistant_id INTEGER REFERENCES assistant(id), parent_butler_conversation_id INTEGER REFERENCES conversation(id));
@@ -138,6 +139,7 @@ fn test_sync_quick_assistant_initialized_receiver_loads_explicit_model_and_confi
             UPDATE assistant_model SET id=91, provider_id=71, model_code='selected-model', alias='selected';
             UPDATE assistant_model_config SET assistant_model_id=91;
             UPDATE assistant_model_config SET value='0.42' WHERE name='temperature';").unwrap();
+        source.data.execute("UPDATE assistant_prompt SET prompt='custom quick assistant prompt' WHERE assistant_id=1", []).unwrap();
         let mut changes = history(&source);
         if reversed { changes.reverse(); }
         let receiver = initialized_quick_assistant_device("device-b");
@@ -154,6 +156,8 @@ fn test_sync_quick_assistant_initialized_receiver_loads_explicit_model_and_confi
         };
         db.init_assistant().unwrap(); // Reopening the app must not restore the empty selection.
         assert_eq!(db.get_assistant(1).unwrap().name, "快速使用助手");
+        assert_eq!(db.get_assistant_prompt(1).unwrap()[0].prompt, "custom quick assistant prompt");
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM assistant_prompt WHERE assistant_id=1", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
         let models = db.get_assistant_model(1).unwrap();
         assert_eq!(models.len(), 1, "initialization placeholder must not become the selected model");
         let selected = &models[0];
@@ -171,6 +175,27 @@ fn test_sync_quick_assistant_initialized_receiver_loads_explicit_model_and_confi
         // Read-time handling leaves sync identities and rows intact for replay/deletes.
         assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM assistant_model", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
     }
+}
+
+#[test]
+fn test_sync_assistant_model_waits_for_its_provider_and_never_uses_local_numeric_hint() {
+    let source = initialized_quick_assistant_device("source");
+    source.data.execute_batch("INSERT INTO llm_provider VALUES(71, 'chosen provider', 0);
+        UPDATE assistant_model SET provider_id=71, model_code='chosen-model';").unwrap();
+    let changes = history(&source);
+    let provider = changes.iter().find(|e| e.object_type == "llm.provider").unwrap();
+    let model = changes.iter().find(|e| e.object_type == "assistant.model").unwrap();
+    let receiver = initialized_quick_assistant_device("receiver");
+    receiver.data.execute("INSERT INTO llm_provider VALUES(71, 'unrelated local provider', 0)", []).unwrap();
+    receiver.receive(std::slice::from_ref(changes.iter().find(|e| e.object_type == "assistant").unwrap()));
+    receiver.receive(std::slice::from_ref(model));
+    let error: String = receiver.sync.query_row("SELECT error FROM sync_dead_letter", [], |r| r.get(0)).unwrap();
+    assert!(error.contains("缺少同步依赖: assistant.model.provider_id"), "{error}");
+    assert_eq!(receiver.data.query_row("SELECT COUNT(*) FROM assistant_model WHERE model_code='chosen-model'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    receiver.receive(std::slice::from_ref(provider));
+    assert_eq!(receiver.replay().1, 0);
+    let provider_id: i64 = receiver.data.query_row("SELECT provider_id FROM assistant_model WHERE model_code='chosen-model'", [], |r| r.get(0)).unwrap();
+    assert_ne!(provider_id, 71);
 }
 
 #[test]

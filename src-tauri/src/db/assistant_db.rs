@@ -512,7 +512,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn get_assistant_prompt(&self, assistant_id: i64) -> Result<Vec<AssistantPrompt>> {
-        let mut stmt = self.conn.prepare("SELECT id, assistant_id, prompt, created_time FROM assistant_prompt WHERE assistant_id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT id, assistant_id, prompt, created_time FROM assistant_prompt WHERE assistant_id = ? ORDER BY id")?;
         let assistant_prompt_iter = stmt.query_map(params![assistant_id], |row| {
             Ok(AssistantPrompt {
                 id: row.get(0)?,
@@ -525,6 +525,14 @@ impl AssistantDatabase {
         let mut assistant_prompts = Vec::new();
         for assistant_prompt in assistant_prompt_iter {
             assistant_prompts.push(assistant_prompt?);
+        }
+        // Other devices' initialization prompts have independent sync UUIDs.
+        // Keep those rows for replay/deletion, but do not let a seed mask the
+        // user's prompt in callers that use prompts[0]. Preserve custom order.
+        if assistant_id == 1
+            && assistant_prompts.iter().any(|p| p.prompt != "You are a helpful assistant.")
+        {
+            assistant_prompts.retain(|p| p.prompt != "You are a helpful assistant.");
         }
         Ok(assistant_prompts)
     }

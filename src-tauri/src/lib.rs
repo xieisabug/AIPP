@@ -15,6 +15,7 @@ mod skills;
 mod slash;
 mod state;
 mod sync;
+pub use sync::prepare_assistant_recovery;
 mod template_engine;
 mod utils;
 mod window;

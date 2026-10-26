@@ -28,6 +28,102 @@ fn snapshot(conn: &Connection, content: &str) -> LocalObjectSnapshot {
 }
 
 #[test]
+fn test_llm_catalogue_children_wait_for_required_provider() {
+    for kind in ["llm.model", "llm.provider_config", "llm.model_request_mode_preference"] {
+        let spec = spec(kind);
+        let mut fields = Map::from_iter([("llm_provider_id".into(), json!(71))]);
+        let refs = Map::from_iter([("llm_provider_id".into(), json!("original-provider"))]);
+        let error = resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(None)).unwrap_err();
+        assert!(is_dependency_pending_error(&error), "{kind}: {error}");
+        resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(Some(209))).unwrap();
+        assert_eq!(fields["llm_provider_id"], json!(209));
+        let raw = HashMap::from_iter([("llm_provider_id".into(), json!(71))]);
+        assert!(build_fk_refs(&spec, &raw, &mut fields, |_, _| Ok(FkLookup::Dangling), None).unwrap().is_none());
+    }
+}
+
+#[test]
+fn test_sync_official_flag_keeps_imported_identity_without_rowid_collision() {
+    let sync = sync_db();
+    let data = Connection::open_in_memory().unwrap();
+    data.execute_batch("CREATE TABLE llm_provider(id INTEGER PRIMARY KEY, name TEXT, is_official INTEGER);
+        INSERT INTO llm_provider VALUES(40, 'imported', 1), (41, 'actual seed', 1);").unwrap();
+    remap_sync_object_map(&sync, "llm.provider", "llm_provider", 40, "imported-uuid").unwrap();
+    // A remote official identity has a different local rowid on this device.
+    remap_sync_object_map(&sync, "llm.provider", "llm_provider", 41, "official:llm.provider:40").unwrap();
+    let imported = change("llm.provider", "imported-uuid", 1,
+        json!({"fields":{"name":"imported","is_official":1},"refs":{}}));
+    upsert_shadow_from_remote(&sync, &imported).unwrap();
+    for _ in 0..2 {
+        let (snapshots, _) = read_local_snapshots_from_db(&data, &spec("llm.provider"), &sync,
+            &mut DanglingFkScanReport::default(), |_, _| Ok(true)).unwrap();
+        assert_eq!(snapshots[0].object_id, "imported-uuid");
+        assert_eq!(snapshots[1].object_id, "official:llm.provider:40");
+        assert!(!enqueue_snapshot_if_changed(&sync, &snapshots[0], "device-b").unwrap());
+        assert_eq!(find_local_id_by_object_id(&sync, "llm.provider", "official:llm.provider:40").unwrap(), Some(41));
+    }
+}
+
+#[test]
+fn test_sync_official_provider_import_does_not_overwrite_occupied_custom_rowid() {
+    for has_mapping in [false, true] {
+        let sync = sync_db();
+        let data = Connection::open_in_memory().unwrap();
+        data.execute_batch("CREATE TABLE llm_provider(id INTEGER PRIMARY KEY, name TEXT, is_official INTEGER);
+            INSERT INTO llm_provider VALUES(40, 'unrelated local provider', 0);").unwrap();
+        if has_mapping { remap_sync_object_map(&sync, "llm.provider", "llm_provider", 40, "local-provider-uuid").unwrap(); }
+        let event = change("llm.provider", "official:llm.provider:40", 1,
+            json!({"fields":{"name":"remote official provider","is_official":1},"refs":{}}));
+        for _ in 0..2 {
+            apply_change_to_db(&sync, &data, &spec("llm.provider"), &event, "b", |_| Ok(())).unwrap();
+        }
+        assert_eq!(data.query_row("SELECT name FROM llm_provider WHERE id=40", [], |r|r.get::<_,String>(0)).unwrap(), "unrelated local provider");
+        assert_eq!(data.query_row("SELECT COUNT(*) FROM llm_provider", [], |r|r.get::<_,i64>(0)).unwrap(), 2);
+        assert_eq!(find_local_id_by_object_id(&sync, "llm.provider", "official:llm.provider:40").unwrap(), Some(41));
+        let (snapshots, _) = read_local_snapshots_from_db(&data, &spec("llm.provider"), &sync,
+            &mut DanglingFkScanReport::default(), |_, _| Ok(true)).unwrap();
+        assert_eq!(snapshots[1].object_id, "official:llm.provider:40");
+        assert!(!enqueue_snapshot_if_changed(&sync, &snapshots[1], "b").unwrap());
+    }
+}
+
+#[test]
+fn test_sync_server_history_rollback_stops_with_old_receipts_intact() {
+    let sync = sync_db();
+    let old = change("assistant", "missing-parent", 1, json!({"fields":{"name":"original"},"refs":{}}));
+    upsert_shadow_from_remote(&sync, &old).unwrap();
+    sync.execute("INSERT INTO sync_cursor VALUES ('default', 118444, 'now')", []).unwrap();
+    let error = ensure_remote_history_is_compatible(&sync, 33289).unwrap_err();
+    assert!(error.contains("118444") && error.contains("33289") && error.contains("停止"));
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_shadow", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    ensure_remote_history_is_compatible(&sync, 118444).unwrap();
+    ensure_remote_history_is_compatible(&sync, 118445).unwrap();
+}
+
+#[test]
+fn test_sync_server_history_reset_cannot_hide_confirmed_sequences() {
+    let sync = sync_db();
+    let mut old = change("assistant", "original", 1, json!({"fields":{"name":"original"},"refs":{}}));
+    old.seq = 118444;
+    upsert_shadow_from_remote(&sync, &old).unwrap();
+    clear_sync_state(&sync).unwrap();
+    assert!(ensure_remote_history_is_compatible(&sync, 33289).is_err());
+    assert!(ensure_remote_history_is_compatible(&sync, 0).is_err());
+}
+
+#[test]
+fn test_sync_server_history_empty_server_rejects_legacy_receipts_but_allows_new_device() {
+    let sync = sync_db();
+    ensure_remote_history_is_compatible(&sync, 0).unwrap();
+    ensure_remote_history_is_compatible(&sync, 33289).unwrap();
+    let mut old = change("assistant", "original", 1, json!({"fields":{"name":"original"},"refs":{}}));
+    old.seq = 0; // Old clients did not record per-object server_seq.
+    upsert_shadow_from_remote(&sync, &old).unwrap();
+    assert!(ensure_remote_history_is_compatible(&sync, 0).is_err());
+}
+
+#[test]
 fn test_remote_optional_conversation_refs_clear_missing_targets() {
     let spec = spec("conversation");
     let mut fields = Map::from_iter([

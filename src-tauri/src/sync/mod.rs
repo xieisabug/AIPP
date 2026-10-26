@@ -24,6 +24,8 @@ use crate::db::get_db_path;
 use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 
 mod divergence;
+mod offline_recovery;
+pub use offline_recovery::prepare_assistant_recovery;
 
 const FEATURE_CODE: &str = "data_sync";
 const TOKEN_SCOPE: &str = "data_sync";
@@ -335,7 +337,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
+            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Structural }],
             // 白名单：只同步已知不含密钥的配置名。env 类配置（acp_env_vars / acp_env_* 等）
             // 的值可能内嵌 API key，刻意不同步；新增配置名时须评估敏感性后再加入。
             where_clause: Some("LOWER(name) IN ('endpoint', 'base_url', 'acp_cli_command', 'acp_working_directory', 'acp_additional_args', 'acp_claude_auth_mode')"),
@@ -350,7 +352,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &["llm_provider_id", "code"],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
+            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -363,7 +365,7 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &["llm_provider_id", "model_code"],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Soft }],
+            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Structural }],
             where_clause: None,
             order_by: "id",
         },
@@ -404,7 +406,7 @@ fn specs() -> Vec<SyncTableSpec> {
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
-                ForeignKeySpec { column: "provider_id", object_type: "llm.provider", kind: FkKind::Soft },
+                ForeignKeySpec { column: "provider_id", object_type: "llm.provider", kind: FkKind::Structural },
             ],
             where_clause: None,
             order_by: "id",
@@ -1189,6 +1191,7 @@ async fn run_sync_once_inner(
     let remote_status =
         fetch_remote_status(&settings.server_url, token, &device_id, cancel).await?;
     ensure_not_cancelled(cancel)?;
+    ensure_remote_history_is_compatible(&open_sync_db(app_handle)?, remote_status.latest_cursor)?;
 
     let local_empty = is_local_sync_scope_empty(app_handle)?;
     ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty)?;
@@ -2135,7 +2138,15 @@ fn read_local_snapshots_from_db(
             natural_object_id(spec, &raw_values)?
         } else if is_official_row {
             // 官方/内置种子行：确定性 object_id，各设备对同一内置行生成相同标识
-            upsert_official_object_map(sync_conn, spec.object_type, spec.table, local_id)?
+            if !spec.seed_official_ids.contains(&local_id) {
+                // A mutable official flag is not a cross-device numeric ID.
+                // Imported/previously synced rows must retain their identity;
+                // using this device's rowid can collide with a different seed.
+                find_object_id(sync_conn, spec.object_type, local_id)?
+                    .map(Ok).unwrap_or_else(|| upsert_official_object_map(sync_conn, spec.object_type, spec.table, local_id))?
+            } else {
+                upsert_official_object_map(sync_conn, spec.object_type, spec.table, local_id)?
+            }
         } else if let Some(child_id) =
             try_deterministic_child_object_id(sync_conn, spec, &raw_values)?
         {
@@ -2561,11 +2572,13 @@ fn required_sync_owner(object_type: &str, column: &str) -> bool {
     (orphan_cleanup_deletes_row(object_type, column)
         && !(object_type == "assistant.model_config" && column == "assistant_model_id"))
         || matches!((object_type, column),
-            ("mcp.server_tool", "server_id")
+            ("assistant.model", "provider_id")
+            | ("mcp.server_tool", "server_id")
             | ("mcp.server_resource", "server_id")
             | ("mcp.server_prompt", "server_id")
             | ("assistant.mcp_config", "mcp_server_id")
             | ("assistant.mcp_tool_config", "mcp_tool_id"))
+        || (object_type.starts_with("llm.") && column == "llm_provider_id")
 }
 
 /// 检查外键指向的依赖行是否在本地业务库中真实存在。
@@ -2629,6 +2642,7 @@ fn resolve_remote_foreign_keys(
                 }
             }
         } else if required_sync_owner(spec.object_type, fk.column)
+            && !is_provider_id_unset_sentinel(fk, 0)
             && field_values.get(fk.column).is_none_or(JsonValue::is_null)
         {
             return Err(format!("无法应用 {}: 必需归属 {} 为空且缺少 refs；来源变更未提供可恢复的同步身份", spec.object_type, fk.column));
@@ -2870,14 +2884,34 @@ fn apply_change_to_db(
         }
         update_row(&conn, &spec, local_id, &field_values)?;
     } else if let Some(official_id) = parse_official_object_id(&change.object_id, &change.object_type) {
-        // 官方/内置种子行按确定性 id 对齐：本机已有同 id 行则更新，
-        // 没有则按固定 id 插入，保证多端收敛到同一行。
-        if row_exists_by_id(&conn, &spec, official_id)? {
-            update_row(&conn, &spec, official_id, &field_values)?;
+        // Hard seeds keep fixed IDs; imported official rows may use another
+        // local rowid when that numeric slot belongs to a different identity.
+        let occupied = row_exists_by_id(&conn, &spec, official_id)?;
+        let known_identity = find_object_id(sync_conn, spec.object_type, official_id)?;
+        let seeded_slot = if let Some(column) = spec.official_column {
+            occupied && conn.query_row(&format!("SELECT COALESCE({column}, 0) != 0 FROM {} WHERE id=?1", spec.table),
+                params![official_id], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string())?
+        } else { false };
+        let unrelated_slot = occupied && !spec.seed_official_ids.contains(&official_id)
+            && (known_identity.as_ref().is_some_and(|id| id != &change.object_id)
+                || (known_identity.is_none() && !seeded_slot));
+        if unrelated_slot {
+            // The number inside an official sync ID is not a reservation of
+            // that rowid on every device. Never overwrite an unrelated provider.
+            if !spec.unique_key_columns.is_empty() {
+                upsert_by_unique_key(sync_conn, conn, spec, &change.object_id, &field_values)?;
+            } else {
+                let id = insert_row(conn, spec, &field_values)?;
+                remap_sync_object_map(sync_conn, spec.object_type, spec.table, id, &change.object_id)?;
+            }
         } else {
-            insert_row_with_id(&conn, &spec, official_id, &field_values)?;
+            if occupied {
+                update_row(&conn, &spec, official_id, &field_values)?;
+            } else {
+                insert_row_with_id(&conn, &spec, official_id, &field_values)?;
+            }
+            remap_sync_object_map(sync_conn, &change.object_type, spec.table, official_id, &change.object_id)?;
         }
-        remap_sync_object_map(sync_conn, &change.object_type, spec.table, official_id, &change.object_id)?;
     } else if !spec.natural_key_columns.is_empty() {
         upsert_natural_row(&conn, &spec, &field_values)?;
     } else if !spec.unique_key_columns.is_empty() {
@@ -4499,6 +4533,25 @@ fn ensure_initial_sync_is_safe(conn: &Connection, remote_empty: bool, local_empt
     ).map_err(|e| e.to_string())?;
     if has_baseline { return Ok(()); }
     Err("本地和远端都已有数据，但本机没有已确认的同步基线。已停止上传，避免同一历史生成新 UUID 和重复会话；请备份后在空数据目录从远端恢复，或恢复与本地数据库配套的 sync.db".to_string())
+}
+
+/// A rebuilt/rolled-back server cannot reuse receipts from its old history.
+/// Stop before scanning or pushing; clearing identities would create duplicates.
+fn ensure_remote_history_is_compatible(conn: &Connection, remote_cursor: i64) -> Result<(), String> {
+    let confirmed_cursor: i64 = conn.query_row(
+        "SELECT MAX(COALESCE((SELECT MAX(server_cursor) FROM sync_cursor), 0),
+                    COALESCE((SELECT MAX(server_seq) FROM sync_shadow), 0))",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let has_receipts: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_shadow)", [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if remote_cursor < confirmed_cursor || (remote_cursor == 0 && has_receipts) {
+        return Err(format!(
+            "同步服务端历史已回退或重建（远端游标 {remote_cursor}，本机已确认游标 {confirmed_cursor}）。已停止上传和拉取，旧确认状态不能证明数据仍在远端；请先备份并核验服务端数据，不要删除 sync.db 或直接重置后合并"
+        ));
+    }
+    Ok(())
 }
 
 fn open_sync_db(app_handle: &AppHandle) -> Result<Connection, String> {
