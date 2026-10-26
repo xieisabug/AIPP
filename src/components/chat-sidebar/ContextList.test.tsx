@@ -265,8 +265,8 @@ describe('ContextList skills', () => {
         const { container } = render(<ContextList items={items} onItemClick={() => undefined} />);
         const icon = container.querySelector('svg.lucide-image');
         expect(icon).toBeTruthy();
-        expect(icon?.className.baseVal || icon?.getAttribute('class') || '').toContain('text-muted-foreground');
-        expect(icon?.className.baseVal || icon?.getAttribute('class') || '').not.toContain('text-blue-500');
+        expect(icon?.getAttribute('class') || '').toContain('text-muted-foreground');
+        expect(icon?.getAttribute('class') || '').not.toContain('text-blue-500');
     });
 
     it('renders unknown/other tools with a clean wrench icon instead of a dead question-mark file', () => {

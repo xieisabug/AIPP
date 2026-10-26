@@ -626,8 +626,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             key: "needsResetWarning",
             config: {
                 type: "static" as const,
-                label: "同步状态待重置",
-                value: "检测到服务器地址或访问 token 已变更，本机数据需要先与新服务器重新对齐后才能继续同步。",
+                label: "同步账号范围已变更",
+                value: "服务器地址或访问 token 已变更。请先备份，再使用独立数据目录连接；重置无法安全合并两份已有历史。",
                 hidden: !showsSelfHostedSyncControls(mode) || !status?.needs_reset,
             },
         },
@@ -637,7 +637,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 type: "button" as const,
                 label: "重置同步状态",
                 value: resetting ? "重置中..." : "重置并重新全量同步",
-                hidden: !showsSelfHostedSyncControls(mode) || !status?.needs_reset,
+                hidden: !showsSelfHostedSyncControls(mode) || !!status?.needs_reset,
                 disabled: resetting || saving,
                 onClick: () => setResetConfirmOpen(true),
             },
@@ -658,7 +658,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             <ConfirmDialog
                 isOpen={resetConfirmOpen}
                 title="重置同步状态"
-                confirmText="将清空本机的同步游标、对象映射与待推送队列，然后与新服务器重新全量同步。本机数据本身不会被删除，但未推送的本地修改会以全量方式重新上传。确认继续？"
+                confirmText="将从头重新读取当前服务器的同步记录，保留对象身份、已确认版本和待上传修改，不会把历史会话重新生成为新对象。此操作仅适用于原服务器和账号；更换账号请先备份并使用独立数据目录。确认继续？"
                 onConfirm={handleResetSyncState}
                 onCancel={() => setResetConfirmOpen(false)}
             />

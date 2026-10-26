@@ -381,7 +381,7 @@ export function followScrollContainerBottom({
         });
     };
 
-    const resumeFollow = (reason: string, opts?: { force?: boolean }) => {
+    const resumeFollow = (_reason: string, opts?: { force?: boolean }) => {
         if (stopped || !pausedByUser) {
             return;
         }

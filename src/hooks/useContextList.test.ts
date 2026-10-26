@@ -520,7 +520,7 @@ describe('useContextList', () => {
                 result: JSON.stringify({
                     content: [{ type: 'text', text: 'preview shown' }],
                 }),
-                finished_time: '2026-06-12T00:00:00.000Z',
+                finished_time: new Date('2026-06-12T00:00:00.000Z'),
             }],
         ]);
 

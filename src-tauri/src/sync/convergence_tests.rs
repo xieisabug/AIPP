@@ -118,6 +118,19 @@ fn initialized_quick_assistant_device(id: &'static str) -> Device {
 }
 
 #[test]
+fn test_sync_optional_remote_refs_clear_missing_targets() {
+    let spec = specs().into_iter().find(|s| s.object_type == "conversation").unwrap();
+    let mut fields = serde_json::Map::from_iter([
+        ("name".into(), json!("historical")),
+        ("assistant_id".into(), json!(49)),
+        ("parent_butler_conversation_id".into(), JsonValue::Null),
+    ]);
+    let refs = serde_json::Map::from_iter([("assistant_id".into(), json!("missing-assistant"))]);
+    resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(None)).unwrap();
+    assert_eq!(fields.get("assistant_id"), Some(&JsonValue::Null));
+}
+
+#[test]
 fn test_sync_quick_assistant_initialized_receiver_loads_explicit_model_and_configs() {
     for reversed in [false, true] {
         let source = initialized_quick_assistant_device("device-a");
@@ -176,6 +189,70 @@ fn test_sync_historical_regenerations_and_repeated_replay_keep_one_conversation(
     assert_eq!(receiver.sync.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     let selected: (String, String) = receiver.data.query_row("SELECT p.name, m.model_code FROM assistant_model m JOIN llm_provider p ON p.id=m.provider_id", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert_eq!(selected, ("provider".into(), "model-code".into()));
+}
+
+#[test]
+fn test_sync_transport_reset_preserves_history_identities_and_does_not_echo() {
+    let source = Device::new("device-a"); source.seed(60);
+    let changes = history(&source);
+    let receiver = Device::new("device-b");
+    receiver.receive(&changes);
+    let before: Vec<_> = receiver.scan().into_iter().map(|s| (s.object_type, s.object_id)).collect();
+    for _ in 0..3 {
+        clear_sync_state(&receiver.sync).unwrap();
+        ensure_initial_sync_is_safe(&receiver.sync, false, false).unwrap();
+        for page in changes.chunks(7) { receiver.receive(page); }
+        let after: Vec<_> = receiver.scan().into_iter().map(|s| (s.object_type, s.object_id)).collect();
+        assert_eq!(before, after, "reset must not allocate replacement UUIDs");
+        assert_eq!(receiver.count("conversation"), 1);
+        assert_eq!(receiver.count("message"), 60);
+        assert_eq!(receiver.sync.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+}
+
+#[test]
+fn test_sync_populated_clone_without_baseline_stops_before_upload() {
+    let clone = Device::new("clone"); clone.seed(12);
+    // A copied business DB has the same history but none of the sync identities.
+    assert!(ensure_initial_sync_is_safe(&clone.sync, false, false).unwrap_err().contains("同步基线"));
+    assert_eq!(clone.sync.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    // An empty destination or empty server remains a supported bootstrap.
+    ensure_initial_sync_is_safe(&clone.sync, true, false).unwrap();
+    ensure_initial_sync_is_safe(&clone.sync, false, true).unwrap();
+    // Merely having scanned and allocated fresh UUIDs is not a confirmed baseline.
+    clone.scan();
+    assert!(ensure_initial_sync_is_safe(&clone.sync, false, false).is_err());
+}
+
+#[test]
+fn test_sync_missing_optional_reference_replay_and_reset_never_echo() {
+    let receiver = Device::new("device-b");
+    let event = change("conversation", "history", 1, json!({
+        "fields":{"name":"history", "assistant_id":49, "parent_butler_conversation_id":null},
+        "refs":{"assistant_id":"deleted-assistant"}
+    }));
+    for _ in 0..3 {
+        receiver.receive(&[event.clone()]);
+        receiver.scan();
+        assert_eq!(receiver.count("conversation"), 1);
+        assert_eq!(receiver.sync.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        clear_sync_state(&receiver.sync).unwrap();
+    }
+}
+
+#[test]
+fn test_sync_same_device_newer_event_updates_restored_row() {
+    let receiver = Device::new("device-a");
+    let mut event = change("conversation", "history", 1, json!({
+        "fields":{"name":"before", "assistant_id":null, "parent_butler_conversation_id":null}, "refs":{}
+    }));
+    receiver.receive(&[event.clone()]);
+    event.seq = 2; event.version = 2; event.event_id = "own-newer".into();
+    event.payload.as_mut().unwrap()["fields"]["name"] = json!("after");
+    receiver.receive(&[event]);
+    assert_eq!(receiver.data.query_row("SELECT name FROM conversation", [], |r| r.get::<_, String>(0)).unwrap(), "after");
+    receiver.scan();
+    assert_eq!(receiver.sync.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
 }
 
 #[test]
@@ -239,16 +316,16 @@ fn test_sync_unconfirmed_same_ancestor_forks_once_and_unrelated_write_does_not()
 }
 
 #[test]
-fn test_sync_all_reported_missing_dependencies_remain_traceable_and_newer_change_clears_failure() {
+fn test_sync_required_dependencies_remain_traceable_optional_refs_do_not_block() {
     let receiver = Device::new("device-b");
     let cases = [
         ("conversation.message", "conversation_id", json!({"conversation_id":99})),
-        ("conversation.message", "llm_model_id", json!({"conversation_id":null,"llm_model_id":99})),
+        ("conversation.message", "llm_model_id", json!({"conversation_id":null,"llm_model_id":99,"message_type":"user","content":"history"})),
         ("conversation.summary", "conversation_id", json!({"conversation_id":99})),
-        ("conversation", "assistant_id", json!({"assistant_id":99})),
+        ("conversation", "assistant_id", json!({"name":"history","assistant_id":99})),
         ("conversation.message_attachment", "message_id", json!({"message_id":99})),
         ("conversation.todo", "conversation_id", json!({"conversation_id":99})),
-        ("conversation", "parent_butler_conversation_id", json!({"parent_butler_conversation_id":99})),
+        ("conversation", "parent_butler_conversation_id", json!({"name":"history","parent_butler_conversation_id":99})),
     ];
     // Resolve the owner for the model case so it reaches the model diagnostic.
     receiver.data.execute("INSERT INTO conversation VALUES(1,'owner',NULL,NULL)", []).unwrap();
@@ -259,15 +336,19 @@ fn test_sync_all_reported_missing_dependencies_remain_traceable_and_newer_change
             fields["conversation_id"] = json!(1); refs.insert("conversation_id".into(), json!("owner"));
         }
         let incoming = change(kind, &format!("failed-{i}"), i as i64 + 1, json!({"fields":fields,"refs":refs}));
-        let err = receiver.apply(&incoming).unwrap_err();
-        assert!(is_dependency_pending_error(&err) && err.contains(column) && err.contains("missing-root"), "{err}");
+        if ["llm_model_id", "assistant_id", "parent_butler_conversation_id"].contains(&column) {
+            receiver.apply(&incoming).unwrap();
+        } else {
+            let err = receiver.apply(&incoming).unwrap_err();
+            assert!(is_dependency_pending_error(&err) && err.contains(column) && err.contains("missing-root"), "{err}");
+        }
         receiver.receive(&[incoming]);
     }
-    assert_eq!(receiver.replay().1, 7);
-    let replacement = change("conversation", "failed-3", 20,
-        json!({"fields":{"name":"valid newer snapshot","assistant_id":null},"refs":{}}));
+    assert_eq!(receiver.replay().1, 4);
+    let replacement = change("conversation.message", "failed-0", 20,
+        json!({"fields":{"conversation_id":1,"message_type":"user","content":"valid newer snapshot"},"refs":{"conversation_id":"owner"}}));
     receiver.receive(&[replacement]);
-    assert_eq!(receiver.replay().1, 6);
+    assert_eq!(receiver.replay().1, 3);
 }
 
 #[test]

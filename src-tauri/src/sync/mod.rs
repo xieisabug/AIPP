@@ -519,8 +519,10 @@ fn specs() -> Vec<SyncTableSpec> {
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[
-                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural },
-                ForeignKeySpec { column: "parent_butler_conversation_id", object_type: "conversation", kind: FkKind::Structural },
+                // Historical assistant metadata is optional; the conversation
+                // itself must remain available when that assistant is gone.
+                ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Soft },
+                ForeignKeySpec { column: "parent_butler_conversation_id", object_type: "conversation", kind: FkKind::Soft },
             ],
             where_clause: None,
             order_by: "id",
@@ -536,7 +538,9 @@ fn specs() -> Vec<SyncTableSpec> {
             official_column: None,
             foreign_keys: &[
                 ForeignKeySpec { column: "conversation_id", object_type: "conversation", kind: FkKind::Structural },
-                ForeignKeySpec { column: "parent_id", object_type: "conversation.message", kind: FkKind::Structural },
+                // Parent message is optional historical lineage. A missing
+                // parent must not block an otherwise valid message.
+                ForeignKeySpec { column: "parent_id", object_type: "conversation.message", kind: FkKind::Soft },
                 ForeignKeySpec { column: "llm_model_id", object_type: "llm.model", kind: FkKind::Soft },
             ],
             where_clause: Some("(message_type != 'response' OR finish_time IS NOT NULL)"),
@@ -699,7 +703,7 @@ pub async fn save_sync_settings(
                 return Err("自建同步模式需要填写访问 token（填写后点保存，或点「立即同步」会自动保存）".to_string());
             }
             // 服务器地址或账号 token 变更：若本地已有同步状态（cursor/shadow/map），
-            // 不能静默沿用——置 needs_reset，等用户确认后重新全量同步。
+            // 不能静默沿用；禁止通过清空身份元数据把两份历史直接合并。
             let url_changed = previous.server_url != server_url;
             let token_changed = !token.is_empty() && existing.as_deref() != Some(token.as_str());
             if !token.is_empty() {
@@ -715,7 +719,7 @@ pub async fn save_sync_settings(
             if reset_required {
                 let conn = open_sync_db(&app_handle)?;
                 set_sync_meta(&conn, META_NEEDS_RESET, "1")?;
-                warn!("Sync server/account changed with existing local state; waiting for reset confirmation");
+                warn!("Sync server/account changed with existing local state; a separate data directory is required");
             }
             // Respect persisted auto_sync (default on). Saving config does not force-enable.
             apply_persisted_auto_sync_to_runtime(&app_handle).await;
@@ -886,7 +890,16 @@ pub async fn reset_sync_state(app_handle: AppHandle) -> Result<SyncStatusDto, St
     }
     ensure_sync_db(&app_handle)?;
     {
+        // Serialize with scans/pulls; otherwise a reset can discard a cursor
+        // while the worker is still applying the page that owns it.
+        let state = app_handle.state::<SyncState>();
+        let _guard = state.sync_lock.lock().await;
         let conn = open_sync_db(&app_handle)?;
+        if needs_reset(&conn)? {
+            // Identity/version state is scoped to the original server/account.
+            // A blind reset cannot safely merge two already populated histories.
+            return Err("同步服务器或账号已变更：请先备份，再使用独立数据目录连接；不能通过重置把现有历史自动合并到新服务器".to_string());
+        }
         clear_sync_state(&conn)?;
     }
     emit_status_changed(&app_handle).await;
@@ -1165,7 +1178,7 @@ async fn run_sync_once_inner(
         let device_id = ensure_device_id(&conn)?;
         if needs_reset(&conn)? {
             return Err(
-                "检测到同步服务器或账号变更，请在设置中确认重置同步状态后再同步".to_string()
+                "检测到同步服务器或账号变更，已停止同步；请先备份，再使用独立数据目录连接，避免混用两个账号的历史".to_string()
             );
         }
         device_id
@@ -1178,6 +1191,7 @@ async fn run_sync_once_inner(
     ensure_not_cancelled(cancel)?;
 
     let local_empty = is_local_sync_scope_empty(app_handle)?;
+    ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty)?;
     if remote_status.remote_empty && !local_empty {
         let (queued, dangling) = scan_local_changes(app_handle)?;
         store_dangling_fk_report(app_handle, &dangling).await;
@@ -2597,13 +2611,23 @@ fn resolve_remote_foreign_keys(
             continue;
         }
         if let Some(JsonValue::String(ref_object_id)) = refs.get(fk.column) {
-            let local_id = resolve_local_id(fk.object_type, ref_object_id)?.ok_or_else(|| {
-                format!(
-                    "缺少同步依赖: {}.{} -> {}",
-                    spec.object_type, fk.column, ref_object_id
-                )
-            })?;
-            field_values.insert(fk.column.to_string(), JsonValue::Number(local_id.into()));
+            match resolve_local_id(fk.object_type, ref_object_id)? {
+                Some(local_id) => {
+                    field_values.insert(fk.column.to_string(), JsonValue::Number(local_id.into()));
+                }
+                None if fk.is_soft() => {
+                    // Optional historical metadata may refer to an object that
+                    // was deleted or never uploaded. Preserve the owner row
+                    // and clear only this relation; never guess another ID.
+                    field_values.insert(fk.column.to_string(), JsonValue::Null);
+                }
+                None => {
+                    return Err(format!(
+                        "缺少同步依赖: {}.{} -> {}",
+                        spec.object_type, fk.column, ref_object_id
+                    ));
+                }
+            }
         } else if required_sync_owner(spec.object_type, fk.column)
             && field_values.get(fk.column).is_none_or(JsonValue::is_null)
         {
@@ -2788,22 +2812,18 @@ fn apply_change_to_db(
     conn: &Connection,
     spec: &SyncTableSpec,
     change: &PullChange,
-    local_device_id: &str,
+    _local_device_id: &str,
     mut before_message_insert: impl FnMut(&mut Map<String, JsonValue>) -> Result<(), String>,
 ) -> Result<(), String> {
     if remote_change_already_applied(sync_conn, change)? {
-        upsert_shadow_from_remote(sync_conn, change)?;
+        // Keep the hash of the resolved local representation. Rehashing the
+        // original payload resurrects missing optional refs and causes echo
+        // uploads after replay/reset even though no local data changed.
         return Ok(());
     }
-    // Device identity survives resetting sync metadata. Old own-device changes
-    // must be restored when their map/row is absent, rather than shadowed as if
-    // applied (which would make the next scan upload false deletes).
-    if change.device_id == local_device_id
-        && local_row_exists_in_db(sync_conn, conn, spec, &change.object_id)?
-    {
-        upsert_shadow_from_remote(sync_conn, change)?;
-        return Ok(());
-    }
+    // A device ID identifies the author, not whether this local DB has applied
+    // the event (restored databases may predate that device's own writes).
+    // Only the confirmed version/sequence above is an application receipt.
 
     if change.operation == "delete" {
         apply_delete(sync_conn, &conn, &spec, change)?;
@@ -2835,7 +2855,7 @@ fn apply_change_to_db(
                     params![change.object_type, change.object_id, local_id],
                 ).map_err(|e| e.to_string())?;
             }
-            upsert_shadow_from_remote(sync_conn, change)?;
+            upsert_shadow_from_remote_with_fields(sync_conn, &spec, change, &field_values)?;
             return Ok(());
         }
     }
@@ -2879,7 +2899,7 @@ fn apply_change_to_db(
         }
     }
 
-    upsert_shadow_from_remote(sync_conn, change)?;
+    upsert_shadow_from_remote_with_fields(sync_conn, &spec, change, &field_values)?;
     Ok(())
 }
 
@@ -4247,6 +4267,42 @@ fn remote_row_change_is_stale(conn: &Connection, change: &PullChange, local_id: 
 
 fn upsert_shadow_from_remote(conn: &Connection, change: &PullChange) -> Result<(), String> {
     let payload_hash = sync_payload_hash(conn, change.payload.as_ref())?;
+    upsert_shadow_from_remote_with_hash(conn, change, payload_hash)
+}
+
+/// Store the shadow hash after remote foreign keys have been resolved locally.
+///
+/// A soft reference can legitimately be absent on this device. In that case
+/// `resolve_remote_foreign_keys` clears the local FK and the local scanner
+/// omits the reference from its payload. Hashing the untouched remote payload
+/// would retain the missing ref and make the next scan upload an unchanged row.
+fn upsert_shadow_from_remote_with_fields(
+    conn: &Connection,
+    spec: &SyncTableSpec,
+    change: &PullChange,
+    resolved_fields: &Map<String, JsonValue>,
+) -> Result<(), String> {
+    let Some(payload) = change.payload.as_ref() else {
+        return upsert_shadow_from_remote(conn, change);
+    };
+    let mut normalized = payload.clone();
+    normalized["fields"] = JsonValue::Object(resolved_fields.clone());
+    if let Some(refs) = normalized.get_mut("refs").and_then(JsonValue::as_object_mut) {
+        for fk in spec.foreign_keys {
+            if fk.is_soft() && resolved_fields.get(fk.column).is_some_and(JsonValue::is_null) {
+                refs.remove(fk.column);
+            }
+        }
+    }
+    let payload_hash = sync_payload_hash(conn, Some(&normalized))?;
+    upsert_shadow_from_remote_with_hash(conn, change, payload_hash)
+}
+
+fn upsert_shadow_from_remote_with_hash(
+    conn: &Connection,
+    change: &PullChange,
+    payload_hash: String,
+) -> Result<(), String> {
     conn.execute(
         "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at, server_seq)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -4402,7 +4458,7 @@ fn set_sync_meta(conn: &Connection, key: &str, value: &str) -> Result<(), String
     Ok(())
 }
 
-/// 是否处于"配置已变更、等待用户确认重置"状态。
+/// 配置已变更，旧账号的身份和版本状态不能用于新账号。
 fn needs_reset(conn: &Connection) -> Result<bool, String> {
     Ok(get_sync_meta(conn, META_NEEDS_RESET)?.as_deref() == Some("1"))
 }
@@ -4421,21 +4477,28 @@ fn has_sync_state(conn: &Connection) -> Result<bool, String> {
     Ok(false)
 }
 
-/// 清空全部同步状态（cursor/shadow/map/outbox/dead_letter）并解除 needs_reset。
-/// 调用方负责在此之前取得用户确认。
+/// Replay transport history without regenerating object identities or losing
+/// unacknowledged event IDs. Only safe within the same server/account.
 fn clear_sync_state(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
-        "DELETE FROM sync_cursor;
-         DELETE FROM sync_shadow;
-         DELETE FROM sync_object_map;
-         DELETE FROM sync_object_alias;
-         DELETE FROM sync_outbox;
+        "SAVEPOINT reset_sync_transport;
+         DELETE FROM sync_cursor;
          DELETE FROM sync_dead_letter;
-         DELETE FROM sync_branch_route;
-         DELETE FROM sync_meta WHERE key = 'needs_reset';",
+         UPDATE sync_outbox SET status = 'pending', next_retry_at = NULL
+             WHERE status IN ('pushing', 'failed');
+         RELEASE reset_sync_transport;",
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn ensure_initial_sync_is_safe(conn: &Connection, remote_empty: bool, local_empty: bool) -> Result<(), String> {
+    if remote_empty || local_empty { return Ok(()); }
+    let has_baseline: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_shadow)", [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if has_baseline { return Ok(()); }
+    Err("本地和远端都已有数据，但本机没有已确认的同步基线。已停止上传，避免同一历史生成新 UUID 和重复会话；请备份后在空数据目录从远端恢复，或恢复与本地数据库配套的 sync.db".to_string())
 }
 
 fn open_sync_db(app_handle: &AppHandle) -> Result<Connection, String> {
@@ -5739,6 +5802,16 @@ mod tests {
             .collect();
         assert_eq!(soft_cols, vec!["llm_model_id"]);
         assert_eq!(structural_cols, vec!["conversation_id", "parent_id"]);
+        let conversation = specs()
+            .into_iter()
+            .find(|spec| spec.object_type == "conversation")
+            .expect("conversation sync spec");
+        assert!(conversation
+            .foreign_keys
+            .iter()
+            .find(|fk| fk.column == "assistant_id")
+            .expect("conversation assistant reference")
+            .is_soft());
     }
 
     #[test]
@@ -6254,9 +6327,9 @@ mod tests {
         assert!(has_sync_state(&conn).unwrap());
     }
 
-    /// clear_sync_state 清空全部状态表并解除 needs_reset
+    /// Transport reset must retain the identities and pending event IDs.
     #[test]
-    fn clear_sync_state_wipes_all_state() {
+    fn test_clear_sync_state_preserves_identity_and_pending_event() {
         let conn = test_sync_conn();
         seed_shadow(&conn, "obj-1", false);
         conn.execute(
@@ -6286,9 +6359,11 @@ mod tests {
         set_sync_meta(&conn, META_NEEDS_RESET, "1").unwrap();
 
         clear_sync_state(&conn).unwrap();
-        assert!(!needs_reset(&conn).unwrap());
-        assert!(!has_sync_state(&conn).unwrap());
-        for table in ["sync_outbox", "sync_dead_letter"] {
+        assert!(needs_reset(&conn).unwrap());
+        assert!(has_sync_state(&conn).unwrap());
+        assert_eq!(ensure_object_id(&conn, "conversation", "conversation", 1).unwrap(), "obj-1");
+        assert_eq!(conn.query_row("SELECT event_id FROM sync_outbox", [], |r| r.get::<_, String>(0)).unwrap(), "e1");
+        for table in ["sync_cursor", "sync_dead_letter"] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
                 .unwrap();

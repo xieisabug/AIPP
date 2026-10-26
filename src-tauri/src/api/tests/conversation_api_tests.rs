@@ -1,9 +1,138 @@
 use crate::api::conversation_api::{
-    build_large_message_preview_metadata, process_message_versions,
+    build_conversation_list_results, build_large_message_preview_metadata,
+    fork_conversation_timestamps, process_message_versions, ForkNameStyle,
 };
-use crate::db::conversation_db::MessageDetail;
+use crate::db::conversation_db::{Conversation, Message, MessageDetail};
 use chrono::Utc;
 use uuid::Uuid;
+
+#[test]
+fn test_sync_fork_timestamps_preserve_historical_conversation_and_messages() {
+    let original_created = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let copied_first = original_created + chrono::Duration::hours(1);
+    let copied_last = original_created + chrono::Duration::hours(3);
+    let original = Conversation {
+        id: 10,
+        name: "history".into(),
+        assistant_id: Some(1),
+        created_time: original_created,
+        updated_time: original_created + chrono::Duration::days(1),
+        conversation_kind: "normal".into(),
+        parent_butler_conversation_id: None,
+        source_task_title: None,
+        is_hidden_from_normal_chat_list: false,
+        channel_source: None,
+        butler_task_status: None,
+        butler_task_summary: None,
+        butler_task_finalized_at: None,
+    };
+    let messages = vec![
+        Message {
+            id: 1,
+            parent_id: None,
+            conversation_id: 10,
+            message_type: "user".into(),
+            content: "first".into(),
+            llm_model_id: None,
+            llm_model_name: None,
+            created_time: copied_first,
+            start_time: None,
+            finish_time: None,
+            token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id: None,
+            parent_group_id: None,
+            tool_calls_json: None,
+            metadata_json: None,
+            first_token_time: None,
+            ttft_ms: None,
+        },
+        Message {
+            id: 2,
+            created_time: copied_last,
+            ..Message {
+                id: 1,
+                parent_id: None,
+                conversation_id: 10,
+                message_type: "assistant".into(),
+                content: "last".into(),
+                llm_model_id: None,
+                llm_model_name: None,
+                created_time: copied_last,
+                start_time: None,
+                finish_time: None,
+                token_count: 0,
+                input_token_count: 0,
+                output_token_count: 0,
+                generation_group_id: None,
+                parent_group_id: None,
+                tool_calls_json: None,
+                metadata_json: None,
+                first_token_time: None,
+                ttft_ms: None,
+            }
+        },
+    ];
+
+    let (created, updated) =
+        fork_conversation_timestamps(&original, &messages, ForkNameStyle::SyncDivergence);
+    assert_eq!(created, original_created);
+    assert_eq!(updated, copied_last);
+    assert_eq!(messages[0].created_time, copied_first);
+    assert_eq!(messages[1].created_time, copied_last);
+}
+
+#[test]
+fn test_conversation_list_preserves_history_without_assistant() {
+    use crate::db::conversation_db::Conversation;
+    use std::collections::HashMap;
+
+    let conversations: Vec<Conversation> = [None, Some(7), Some(99)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, assistant_id)| Conversation {
+            id: index as i64 + 1,
+            name: format!("history-{index}"),
+            assistant_id,
+            created_time: Utc::now(),
+            updated_time: Utc::now(),
+            conversation_kind: "normal".into(),
+            parent_butler_conversation_id: None,
+            source_task_title: None,
+            is_hidden_from_normal_chat_list: false,
+            channel_source: None,
+            butler_task_status: None,
+            butler_task_summary: None,
+            butler_task_finalized_at: None,
+        })
+        .collect();
+    let names = HashMap::from([
+        (0, "must not select a placeholder".to_string()),
+        (7, "existing assistant".to_string()),
+    ]);
+
+    let results = build_conversation_list_results(&conversations, &names);
+    assert_eq!(results.len(), 3);
+    for (result, original) in results.iter().zip(&conversations) {
+        assert_eq!(result.id, original.id);
+        assert_eq!(result.name, original.name);
+        assert_eq!(result.created_time, original.created_time);
+    }
+    assert_eq!(results[0].assistant_id, 0); // Existing frontend no-assistant representation.
+    assert_eq!(results[0].assistant_name, "未知");
+    assert_eq!(results[1].assistant_id, 7);
+    assert_eq!(results[1].assistant_name, "existing assistant");
+    assert_eq!(results[2].assistant_id, 99);
+    assert_eq!(results[2].assistant_name, "未知");
+}
+
+#[test]
+fn test_conversation_list_empty_history_returns_empty_list() {
+    assert!(build_conversation_list_results(&[], &std::collections::HashMap::new()).is_empty());
+}
 
 // ============================================================================
 // 辅助函数

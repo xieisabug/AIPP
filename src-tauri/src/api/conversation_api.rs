@@ -435,21 +435,32 @@ pub async fn list_conversations(
 ) -> Result<Vec<ConversationResult>, AppError> {
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
 
-    let conversations =
-        db.conversation_repo().unwrap().list(page, page_size).map_err(|e| e.to_string());
+    let conversations = db
+        .conversation_repo()
+        .map_err(AppError::from)?
+        .list(page, page_size)
+        .map_err(AppError::from)?;
+    let assistant_name_cache = name_cache_state.assistant_names.lock().await;
+    Ok(build_conversation_list_results(&conversations, &assistant_name_cache))
+}
 
-    let mut conversation_results = Vec::new();
-    let assistant_name_cache = name_cache_state.assistant_names.lock().await.clone();
-    if let Ok(conversations) = &conversations {
-        for conversation in conversations {
-            let assistant_name = assistant_name_cache.get(&conversation.assistant_id.unwrap());
-            conversation_results.push(to_conversation_result(
-                conversation,
-                assistant_name.unwrap_or(&"未知".to_string()).clone(),
-            ));
-        }
-    }
-    Ok(conversation_results)
+pub(crate) fn build_conversation_list_results(
+    conversations: &[crate::db::conversation_db::Conversation],
+    assistant_names: &HashMap<i64, String>,
+) -> Vec<ConversationResult> {
+    conversations
+        .iter()
+        .map(|conversation| {
+            // Historical conversations remain readable after their assistant
+            // is removed or its optional sync reference cannot be resolved.
+            let assistant_name = conversation
+                .assistant_id
+                .and_then(|id| assistant_names.get(&id))
+                .cloned()
+                .unwrap_or_else(|| "未知".to_string());
+            to_conversation_result(conversation, assistant_name)
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -625,6 +636,30 @@ pub enum ForkNameStyle {
     SyncDivergence,
 }
 
+/// Return the historical timestamps for a forked conversation.
+///
+/// A sync divergence is a historical view of an existing conversation. It
+/// must retain the source creation time and use the copied history's last
+/// activity, otherwise every recovered fork is sorted as a new conversation.
+/// User-created version forks retain the existing "created now" behavior.
+pub(crate) fn fork_conversation_timestamps(
+    original: &crate::db::conversation_db::Conversation,
+    copied_messages: &[Message],
+    name_style: ForkNameStyle,
+) -> (DateTime<Utc>, DateTime<Utc>) {
+    if matches!(name_style, ForkNameStyle::SyncDivergence) {
+        let updated_time = copied_messages
+            .iter()
+            .map(|message| message.created_time)
+            .max()
+            .unwrap_or(original.created_time);
+        (original.created_time, updated_time)
+    } else {
+        let now = Utc::now();
+        (now, now)
+    }
+}
+
 /// Internal fork used by the Tauri command and by sync auto-fork.
 ///
 /// `fork_at_message_id`:
@@ -705,12 +740,15 @@ pub fn fork_conversation_internal(
         }
     };
 
+    let (fork_created_time, fork_updated_time) =
+        fork_conversation_timestamps(&original_conversation, messages_to_copy, name_style);
+    let preserve_message_history = matches!(name_style, ForkNameStyle::SyncDivergence);
     let new_conversation = crate::db::conversation_db::Conversation {
         id: 0,
         name: new_conversation_name,
         assistant_id: original_conversation.assistant_id,
-        created_time: chrono::Utc::now(),
-        updated_time: chrono::Utc::now(),
+        created_time: fork_created_time,
+        updated_time: fork_updated_time,
         conversation_kind: "normal".to_string(),
         parent_butler_conversation_id: None,
         source_task_title: match name_style {
@@ -735,7 +773,9 @@ pub fn fork_conversation_internal(
         let mut new_message = message.clone();
         new_message.id = 0;
         new_message.conversation_id = created_conversation.id;
-        new_message.created_time = chrono::Utc::now();
+        if !preserve_message_history {
+            new_message.created_time = chrono::Utc::now();
+        }
 
         let created_message = message_repo.create(&new_message).map_err(|e| e.to_string())?;
 

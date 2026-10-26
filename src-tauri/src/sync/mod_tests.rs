@@ -28,6 +28,19 @@ fn snapshot(conn: &Connection, content: &str) -> LocalObjectSnapshot {
 }
 
 #[test]
+fn test_remote_optional_conversation_refs_clear_missing_targets() {
+    let spec = spec("conversation");
+    let mut fields = Map::from_iter([
+        ("name".into(), json!("historical")),
+        ("assistant_id".into(), json!(49)),
+        ("parent_butler_conversation_id".into(), JsonValue::Null),
+    ]);
+    let refs = Map::from_iter([("assistant_id".into(), json!("missing-assistant"))]);
+    resolve_remote_foreign_keys(&spec, &mut fields, &refs, |_, _| Ok(None)).unwrap();
+    assert_eq!(fields.get("assistant_id"), Some(&JsonValue::Null));
+}
+
+#[test]
 fn test_legacy_sync_schema_migration_preserves_attempted_events() {
     let sync = Connection::open_in_memory().unwrap();
     sync.execute_batch("CREATE TABLE sync_outbox(id INTEGER PRIMARY KEY);
@@ -66,6 +79,33 @@ fn test_payload_hash_ignores_device_local_foreign_keys() {
     assert_eq!(sync_payload_hash(&sync, Some(&source)).unwrap(), sync_payload_hash(&sync, Some(&destination)).unwrap());
     destination["fields"]["content"] = json!("changed");
     assert_ne!(sync_payload_hash(&sync, Some(&source)).unwrap(), sync_payload_hash(&sync, Some(&destination)).unwrap());
+}
+
+#[test]
+fn test_remote_missing_soft_reference_does_not_echo_after_pull() {
+    let sync = sync_db();
+    let spec = spec("conversation");
+    let remote = json!({
+        "fields": {"name": "historical", "assistant_id": 49},
+        "refs": {"assistant_id": "missing-assistant"}
+    });
+    let mut resolved_fields = remote["fields"].as_object().unwrap().clone();
+    resolved_fields.insert("assistant_id".into(), JsonValue::Null);
+    let change = change("conversation", "conversation-1", 1, remote);
+    upsert_shadow_from_remote_with_fields(&sync, &spec, &change, &resolved_fields).unwrap();
+
+    let local = json!({
+        "fields": {"name": "historical", "assistant_id": null},
+        "refs": {}
+    });
+    let shadow_hash: String = sync
+        .query_row(
+            "SELECT payload_hash FROM sync_shadow WHERE object_type = 'conversation' AND object_id = 'conversation-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(shadow_hash, sync_payload_hash(&sync, Some(&local)).unwrap());
 }
 
 #[test]
