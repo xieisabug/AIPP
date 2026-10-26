@@ -55,6 +55,7 @@ interface ConfigField {
     disabled?: boolean;
     hidden?: boolean;
     buttons?: ConfigFieldButton[];
+    hint?: React.ReactNode;
 }
 
 interface ConfigFormProps {
@@ -474,6 +475,9 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             )}
                         </FormLabel>
                         <FormControl>{renderField(fieldRenderData)}</FormControl>
+                        {field.hint ? (
+                            <p className="text-xs leading-5 text-muted-foreground">{field.hint}</p>
+                        ) : null}
                         <FormMessage />
                     </FormItem>
                 )}

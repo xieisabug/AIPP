@@ -66,7 +66,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         },
         {
             id: "data_folder",
-            name: "数据目录",
+            name: "数据",
             description: "管理和同步数据文件夹",
             icon: <FolderOpen className="h-5 w-5" />,
             code: "data_folder",

@@ -582,15 +582,9 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 placeholder: "https://sync.example.com",
                 disabled: mode !== "self_hosted",
                 hidden: mode !== "self_hosted",
-            },
-        },
-        {
-            key: "plaintextWarning",
-            config: {
-                type: "static" as const,
-                label: "安全警告",
-                value: "当前服务器地址使用 http:// 明文传输，同步数据（包含敏感配置）在传输过程中可能被窃听或篡改，生产环境请改用 https://。",
-                hidden: mode !== "self_hosted" || !isPlaintextUrl,
+                hint: isPlaintextUrl
+                    ? "当前地址使用 http:// 明文传输，同步数据可能被窃听或篡改，生产环境请改用 https://。"
+                    : undefined,
             },
         },
         {
@@ -647,7 +641,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     return (
         <>
             <ConfigForm
-                title="数据目录"
+                title="数据"
                 description="管理本地数据目录与自建同步。"
                 config={dataFolderConfig}
                 layout="default"
