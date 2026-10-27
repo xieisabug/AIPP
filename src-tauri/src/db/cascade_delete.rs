@@ -1,5 +1,6 @@
 //! Explicit ownership cleanup shared by repositories and remote tombstones.
 //! Existing profiles need no table rebuild and work with foreign_keys ON or OFF.
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -46,6 +47,93 @@ fn attach_related(conn: &Connection, table: &str) -> Result<()> {
     Ok(())
 }
 
+/// SQLite's super-journal provides crash atomicity only for durable rollback
+/// journals. Prepare before an outer importer transaction starts; never silently
+/// continue in WAL when another connection prevents the transition.
+pub(crate) struct JournalGuard<'a> {
+    conn: &'a Connection,
+    restore: Vec<(String, String, i64)>,
+}
+impl Drop for JournalGuard<'_> {
+    fn drop(&mut self) {
+        for (schema, mode, synchronous) in self.restore.iter().rev() {
+            let result = (|| -> Result<()> {
+                let actual: String = self.conn.query_row(&format!("PRAGMA {}.journal_mode={mode}", quote(schema)), [], |r| r.get(0))?;
+                if actual != *mode {
+                    return Err(diagnostic(format!("requested journal_mode={mode}, got {actual}")));
+                }
+                self.conn.execute_batch(&format!("PRAGMA {}.synchronous={synchronous}", quote(schema)))
+            })();
+            if let Err(error) = result {
+                // Keeping DELETE/EXTRA is safe; only the concurrency preference
+                // failed to restore. Do not claim the committed delete failed.
+                tracing::warn!(%schema, %error, "Could not restore database journal preference after cascade");
+            }
+        }
+    }
+}
+
+fn persistent_schemas(conn: &Connection) -> Result<Vec<String>> {
+    conn.prepare("PRAGMA database_list")?.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?.filter_map(|row| match row {
+        Ok((schema, file)) if !file.is_empty() && schema != "temp" => Some(Ok(schema)),
+        Ok(_) => None,
+        Err(error) => Some(Err(error)),
+    }).collect()
+}
+
+pub(crate) fn prepare_transaction<'a>(conn: &'a Connection, table: &str) -> Result<JournalGuard<'a>> {
+    attach_related(conn, table)?;
+    let schemas = persistent_schemas(conn)?;
+    prepare_schemas(conn, schemas)
+}
+
+fn prepare_schemas(conn: &Connection, schemas: Vec<String>) -> Result<JournalGuard<'_>> {
+    let mut guard = JournalGuard { conn, restore: Vec::new() };
+    if schemas.is_empty() { return Ok(guard); }
+    if !schemas.iter().any(|s| s == "main") {
+        return Err(diagnostic("跨库删除需要持久化 main 数据库，无法保证崩溃原子性"));
+    }
+    if schemas.len() < 2 || !conn.is_autocommit() { return Ok(guard); }
+    for schema in schemas {
+        let mode: String = conn.query_row(&format!("PRAGMA {}.journal_mode", quote(&schema)), [], |r| r.get(0))?;
+        let synchronous: i64 = conn.query_row(&format!("PRAGMA {}.synchronous", quote(&schema)), [], |r| r.get(0))?;
+        guard.restore.push((schema.clone(), mode, synchronous));
+        let actual: String = conn.query_row(&format!("PRAGMA {}.journal_mode=DELETE", quote(&schema)), [], |r| r.get(0))
+            .map_err(|e| diagnostic(format!("跨库删除准备失败：{schema} 切换回滚日志失败，尚未删除数据：{e}")))?;
+        if actual != "delete" {
+            return Err(diagnostic(format!("跨库删除准备失败：{schema} journal_mode={actual}，需要 DELETE；尚未删除数据")));
+        }
+        conn.execute_batch(&format!("PRAGMA {}.synchronous=EXTRA", quote(&schema)))?;
+    }
+    Ok(guard)
+}
+
+fn lock_and_verify_journals(conn: &Connection) -> Result<()> {
+    let schemas = persistent_schemas(conn)?;
+    verify_schemas(conn, &schemas)
+}
+
+fn verify_schemas(conn: &Connection, schemas: &[String]) -> Result<()> {
+    if !schemas.is_empty() && !schemas.iter().any(|s| s == "main") {
+        return Err(diagnostic("跨库删除需要持久化 main 数据库"));
+    }
+    if schemas.len() < 2 { return Ok(()); }
+    for schema in schemas {
+        // Take each database's write lock before checking its mode. This closes
+        // the race with another connection switching the mode after preparation.
+        let version: i64 = conn.query_row(&format!("PRAGMA {}.user_version", quote(schema)), [], |r| r.get(0))?;
+        conn.execute_batch(&format!("PRAGMA {}.user_version={version}", quote(schema)))?;
+        let mode: String = conn.query_row(&format!("PRAGMA {}.journal_mode", quote(schema)), [], |r| r.get(0))?;
+        let sync: i64 = conn.query_row(&format!("PRAGMA {}.synchronous", quote(schema)), [], |r| r.get(0))?;
+        if !schemas.iter().any(|s| s == "main") || mode != "delete" || sync < 3 {
+            return Err(diagnostic(format!("跨库删除事务未安全准备：{schema} journal_mode={mode}, synchronous={sync}；请在外层事务开始前准备 DELETE/EXTRA")));
+        }
+    }
+    Ok(())
+}
+
 struct RollbackOnDrop<'a> {
     conn: &'a Connection,
     committed: bool,
@@ -64,7 +152,7 @@ impl Drop for RollbackOnDrop<'_> {
 fn atomic<T>(conn: &Connection, f: impl FnOnce() -> Result<T>) -> Result<T> {
     conn.execute_batch("SAVEPOINT aipp_cascade_delete")?;
     let mut guard = RollbackOnDrop { conn, committed: false };
-    match f() {
+    match lock_and_verify_journals(conn).and_then(|_| f()) {
         Ok(value) => {
             conn.execute_batch("RELEASE aipp_cascade_delete")?;
             guard.committed = true;
@@ -79,16 +167,23 @@ fn atomic<T>(conn: &Connection, f: impl FnOnce() -> Result<T>) -> Result<T> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct DeletedRow {
+    pub table: String,
+    pub id: i64,
+}
+
 struct Tables<'a> {
     conn: &'a Connection,
     names: HashMap<String, String>,
     columns: HashMap<String, Vec<String>>,
+    deleted: RefCell<Vec<DeletedRow>>,
 }
 impl<'a> Tables<'a> {
     fn new(conn: &'a Connection) -> Result<Self> {
         let schemas: Vec<String> = conn.prepare("PRAGMA database_list")?
             .query_map([], |r| r.get(1))?.collect::<Result<_>>()?;
-        let mut result = Self { conn, names: HashMap::new(), columns: HashMap::new() };
+        let mut result = Self { conn, names: HashMap::new(), columns: HashMap::new(), deleted: RefCell::new(Vec::new()) };
         for schema in schemas.into_iter().filter(|s| s == "main" || s.starts_with("aipp_delete_")) {
             let tables: Vec<String> = conn.prepare(&format!("SELECT name FROM {}.sqlite_master WHERE type='table'", quote(&schema)))?
                 .query_map([], |r| r.get(0))?.collect::<Result<_>>()?;
@@ -108,6 +203,11 @@ impl<'a> Tables<'a> {
 
     fn remove(&self, table: &str, predicate: &str, id: i64) -> Result<()> {
         if let Some(name) = self.names.get(table) {
+            if self.has(table, "id") {
+                for row_id in self.ids(table, predicate, id)? {
+                    self.deleted.borrow_mut().push(DeletedRow { table: table.into(), id: row_id });
+                }
+            }
             self.conn.execute(&format!("DELETE FROM {name} WHERE {predicate}"), [id])
                 .map_err(|e| diagnostic(format!("delete {table}: {e}")))?;
         }
@@ -290,17 +390,23 @@ impl<'a> Tables<'a> {
 }
 
 pub(crate) fn delete(conn: &Connection, table: &str, id: i64) -> Result<()> {
-    attach_related(conn, table).map_err(|e| diagnostic(format!("delete {table} id={id}: attach related databases: {e}")))?;
+    delete_tracked(conn, table, id).map(|_| ())
+}
+
+/// Return deleted identities for the coordinated sync metadata transaction.
+pub(crate) fn delete_tracked(conn: &Connection, table: &str, id: i64) -> Result<Vec<DeletedRow>> {
+    let _journals = prepare_transaction(conn, table).map_err(|e| diagnostic(format!("delete {table} id={id}: prepare databases: {e}")))?;
     atomic(conn, || {
         let tables = Tables::new(conn)?;
         if !tables.names.contains_key(table) { return Err(diagnostic(format!("missing table {table}"))); }
-        tables.delete(table, id)
+        tables.delete(table, id)?;
+        Ok(tables.deleted.into_inner())
     }).map_err(|e| diagnostic(format!("delete {table} id={id}: {e}")))
 }
 
 /// Used for prompt/model replacement too: children must disappear before parents.
 pub(crate) fn delete_by_owner(conn: &Connection, table: &str, column: &str, owner: i64) -> Result<()> {
-    attach_related(conn, table)?;
+    let _journals = prepare_transaction(conn, table)?;
     atomic(conn, || {
         let tables = Tables::new(conn)?;
         for id in tables.ids(table, &format!("{}=?1", quote(column)), owner)? { tables.delete(table, id)?; }
@@ -311,7 +417,7 @@ pub(crate) fn delete_by_owner(conn: &Connection, table: &str, column: &str, owne
 /// A refresh retains invalid loaded-tool snapshots so the UI can explain why
 /// the capability disappeared. Explicit service/tool deletion removes them.
 pub(crate) fn remove_missing_tools(conn: &Connection, server: i64, keep: &[String]) -> Result<usize> {
-    attach_related(conn, "mcp_server_tool")?;
+    let _journals = prepare_transaction(conn, "mcp_server_tool")?;
     atomic(conn, || {
         let tables = Tables::new(conn)?;
         let name = &tables.names["mcp_server_tool"];
@@ -347,6 +453,10 @@ pub(crate) fn prune_model_preferences(conn: &Connection, provider: i64) -> Resul
 
 /// Attach before opening the transaction, including model list replacements.
 pub(crate) fn with_transaction<T>(conn: &Connection, table: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
-    attach_related(conn, table)?;
+    let _journals = prepare_transaction(conn, table)?;
     atomic(conn, f)
 }
+
+#[cfg(test)]
+#[path = "tests/cascade_journal_tests.rs"]
+mod journal_tests;

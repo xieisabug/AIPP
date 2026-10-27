@@ -2997,6 +2997,10 @@ fn apply_change_to_db(
     persistence::recover(sync_conn, conn)?;
     if acknowledge_pulled_outbox_event(sync_conn, change)? { return Ok(()); }
     if remote_change_already_applied(sync_conn, change)? { return Ok(()); }
+    let _delete_journals = if change.operation == "delete" {
+        Some(crate::db::cascade_delete::prepare_transaction(conn, spec.table)
+            .map_err(|e| format!("sync delete {} object={}: {e}", spec.object_type, change.object_id))?)
+    } else { None };
     persistence::coordinated(sync_conn, conn, || {
         apply_change_to_db_inner(sync_conn, conn, spec, change, before_message_insert)
     })
@@ -3069,6 +3073,13 @@ fn apply_change_to_db_inner(
         find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
     })?;
 
+    // Older cascade clients may leave mappings pointing at removed child rows.
+    // Keep shadow versions, but repair identity placement before UPDATE/INSERT.
+    if let Some(id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
+        if !row_exists_by_id(conn, spec, id)? {
+            clear_missing_row_mapping(sync_conn, spec.object_type, id)?;
+        }
+    }
     let merge_target = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?
         .or(find_row_by_unique_key(&conn, &spec, &field_values)?);
     if let Some(local_id) = merge_target {
@@ -3794,6 +3805,14 @@ fn try_fork_message_conflict_in_db(sync_conn: &Connection, data_conn: &Connectio
     Ok(true)
 }
 
+fn clear_missing_row_mapping(sync: &Connection, kind: &str, local_id: i64) -> Result<(), String> {
+    for table in ["sync_object_alias", "sync_object_map"] {
+        sync.execute(&format!("DELETE FROM {table} WHERE object_type=?1 AND local_id=?2"),
+            params![kind, local_id]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn apply_delete(
     sync_conn: &Connection,
     conn: &Connection,
@@ -3809,8 +3828,14 @@ fn apply_delete(
         return Ok(());
     }
     if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
-        crate::db::cascade_delete::delete(conn, spec.table, local_id)
+        let deleted = crate::db::cascade_delete::delete_tracked(conn, spec.table, local_id)
             .map_err(|e| format!("sync delete {} object={} local_id={local_id}: {e}", change.object_type, change.object_id))?;
+        let tables = specs();
+        for row in deleted {
+            if let Some(child) = tables.iter().find(|candidate| candidate.table == row.table) {
+                clear_missing_row_mapping(sync_conn, child.object_type, row.id)?;
+            }
+        }
         // 同步删除 object_map 映射：同 object_id 后续 upsert 时应重新 insert（对象复活），
         // 而不是命中这条指向已删除行的旧映射。
         sync_conn
@@ -3865,7 +3890,10 @@ fn update_row(
     }
     values.push(Value::Integer(local_id));
     let sql = format!("UPDATE {} SET {} WHERE id = ?", spec.table, set_columns.join(", "));
-    conn.execute(&sql, params_from_iter(values.iter())).map_err(|e| e.to_string())?;
+    let changed = conn.execute(&sql, params_from_iter(values.iter())).map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err(format!("同步更新 {} local_id={local_id} 失败：映射对应的业务行不存在", spec.object_type));
+    }
     Ok(())
 }
 

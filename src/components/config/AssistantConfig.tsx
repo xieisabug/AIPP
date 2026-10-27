@@ -1,5 +1,5 @@
 import { useDataRefresh } from "@/hooks/useDataRefresh";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
@@ -128,9 +128,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     );
 
     const loadPluginAssistantConfigValues = useCallback(
-        async (assistantId: number) => {
+        async (assistantId: number, isCurrent: () => boolean = () => true) => {
             if (pluginAssistantFormFields.length === 0) {
-                setPluginAssistantConfigValues({});
+                if (isCurrent()) setPluginAssistantConfigValues({});
                 return {};
             }
 
@@ -155,7 +155,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     ?.configValue;
                 nextValues[field.formKey] = normalizePluginAssistantFieldValue(field, rawValue);
             });
-            setPluginAssistantConfigValues(nextValues);
+            if (isCurrent()) setPluginAssistantConfigValues(nextValues);
             return nextValues;
         },
         [pluginAssistantFormFields]
@@ -302,15 +302,27 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             }
         });
     }, [loadAssistants]);
+    // Only explicit selections invalidate a refresh. Its own fallback selection
+    // must finish loading plugin values and resetting the form.
+    const [selectionRevision, setSelectionRevision] = useState(0);
+    const selectionRequestRef = useRef(0);
+    const invalidateSelection = useCallback(() => {
+        selectionRequestRef.current += 1;
+        setSelectionRevision((revision) => revision + 1);
+    }, []);
     // 选择助手
     const handleChooseAssistant = useCallback(
         (assistant: AssistantListItem, force = false, isCurrent: () => boolean = () => true) => {
             if (force || !currentAssistant || currentAssistant.assistant.id !== assistant.id) {
-                return loadAssistantDetail(assistant.id, isCurrent).then(async (assistantDetail) => {
+                const request = ++selectionRequestRef.current;
+                if (!force) setSelectionRevision((revision) => revision + 1);
+                const isSelectionCurrent = () => request === selectionRequestRef.current && isCurrent();
+                return loadAssistantDetail(assistant.id, isSelectionCurrent).then(async (assistantDetail) => {
+                    if (!isSelectionCurrent()) return;
                     const pluginConfigValues = await loadPluginAssistantConfigValues(
-                        assistantDetail.assistant.id
+                        assistantDetail.assistant.id, isSelectionCurrent
                     );
-                    if (!isCurrent()) return;
+                    if (!isSelectionCurrent()) return;
                     form.reset({
                         assistantType: assistantDetail.assistant.assistant_type,
                         model:
@@ -362,14 +374,15 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             const runtime = await invoke<{ agent_kind: string }>("get_agent_runtime_info", {
                                 assistantId: assistantDetail.assistant.id,
                             });
-                            if (!isCurrent()) return;
+                            if (!isSelectionCurrent()) return;
                             if (runtime.agent_kind === "codex_app_server") {
-                                await loadAgentModelOptions(assistantDetail, null, isCurrent);
+                                await loadAgentModelOptions(assistantDetail, null, isSelectionCurrent);
                             } else {
                                 setAgentModelOptions([]);
                                 setAgentModelError(null);
                             }
                         } catch (error) {
+                            if (!isSelectionCurrent()) return;
                             setAgentModelOptions([]);
                             setAgentModelError(`无法识别 Agent 提供商：${getErrorMessage(error)}`);
                         }
@@ -377,7 +390,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         setAgentModelOptions([]);
                         setAgentModelError(null);
                     }
-                    if (!isCurrent()) return;
+                    if (!isSelectionCurrent()) return;
                     setAssistantTypeCustomField([]);
                     const plugin = assistantTypePluginMap.get(assistantDetail.assistant.assistant_type);
                     plugin?.onAssistantTypeSelect?.(assistantTypeApi);
@@ -398,13 +411,18 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
     useDataRefresh({
         events: ["assistant_list_changed", "llm_provider_changed", "mcp_state_changed"],
-        identity: currentAssistant?.assistant.id ?? "",
+        identity: selectionRevision,
         refresh: async (isCurrent) => {
             const list = await loadAssistants(isCurrent);
             if (!isCurrent()) return;
             const selected = list.find((a) => a.id === currentAssistant?.assistant.id) ?? list[0];
             if (selected) await handleChooseAssistant(selected, true, isCurrent);
-            else { setCurrentAssistant(null); form.reset(); }
+            else {
+                selectionRequestRef.current += 1;
+                setCurrentAssistant(null);
+                setPluginAssistantConfigValues({});
+                form.reset();
+            }
         },
         onError: (error) => toast.error(`同步后刷新助手配置失败: ${getErrorMessage(error)}`),
     });
@@ -681,6 +699,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
     // 删除助手
     const handleDelete = useCallback(() => {
+        invalidateSelection();
         deleteAssistant()
             .then((result) => {
                 if (result.shouldSelectFirst && result.assistants.length > 0) {
@@ -691,11 +710,19 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             .catch(() => {
                 // 错误已在 hook 中处理
             });
-    }, [deleteAssistant, closeConfirmDeleteDialog, handleChooseAssistant]);
+    }, [deleteAssistant, closeConfirmDeleteDialog, handleChooseAssistant, invalidateSelection]);
+
+    const handleCopyAssistant = useCallback(async () => {
+        invalidateSelection();
+        const copied = await copyAssistant();
+        invalidateSelection();
+        await handleChooseAssistant(copied.assistant, true);
+    }, [copyAssistant, handleChooseAssistant, invalidateSelection]);
 
     // 添加新助手处理
     const handleAssistantAdded = useCallback(
         (assistantDetail: AssistantDetail) => {
+            invalidateSelection();
             addAssistant(assistantDetail);
             setPluginAssistantConfigValues({});
             setAgentModelOptions([]);
@@ -725,7 +752,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 codex_approvals_reviewer: "default",
             });
         },
-        [addAssistant, form]
+        [addAssistant, form, invalidateSelection]
     );
 
     // 分享助手
@@ -821,7 +848,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             form={form}
             assistantConfigApi={assistantConfigApi}
             onSave={handleAssistantFormSave}
-            onCopy={currentAssistant.assistant.id === 1 ? undefined : copyAssistant}
+            onCopy={currentAssistant.assistant.id === 1 ? undefined : handleCopyAssistant}
             onDelete={currentAssistant.assistant.id === 1 ? undefined : openConfirmDeleteDialog}
             onEdit={openUpdateFormDialog}
             onShare={handleShareAssistant}
@@ -832,7 +859,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             title="选择一个助手"
             description="从左侧列表中选择一个助手开始配置"
         />
-    ), [currentAssistant, formConfig, form, assistantConfigApi, handleAssistantFormSave, copyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
+    ), [currentAssistant, formConfig, form, assistantConfigApi, handleAssistantFormSave, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
 
     // 空状态
     if (assistants.length === 0) {

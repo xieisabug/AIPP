@@ -57,7 +57,7 @@ pub(super) fn recover(sync: &Connection, data: &Connection) -> Result<(), String
     if !sync.is_autocommit() || !data.is_autocommit() {
         return Err("同步恢复必须在独立事务中执行".into());
     }
-    data.execute_batch("PRAGMA synchronous=FULL").map_err(|e| e.to_string())?;
+    ensure_durable(data)?;
     data.execute_batch(JOURNAL_SCHEMA).map_err(|e| e.to_string())?;
     let rows = data.prepare("SELECT id, redo_sql FROM aipp_sync_apply_journal ORDER BY rowid")
         .map_err(|e| e.to_string())?.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
@@ -90,7 +90,7 @@ pub(super) fn coordinated<T>(sync: &Connection, data: &Connection, apply: impl F
         return Err("同步跨库写入必须在独立事务中执行".into());
     }
     // FULL also covers journal cleanup ordering under process/power failure.
-    data.execute_batch("PRAGMA synchronous=FULL").map_err(|e| e.to_string())?;
+    ensure_durable(data)?;
     recover(sync, data)?;
     prepare_capture(sync)?;
     let _capture = CaptureGuard(sync);
@@ -124,6 +124,12 @@ pub(super) fn coordinated<T>(sync: &Connection, data: &Connection, apply: impl F
     finish_savepoint(sync, "coordinated_sync_apply", Ok(()))?;
     cleanup(sync, data, &id)?;
     Ok(value)
+}
+
+fn ensure_durable(data: &Connection) -> Result<(), String> {
+    let current: i64 = data.query_row("PRAGMA synchronous", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if current < 2 { data.execute_batch("PRAGMA synchronous=FULL").map_err(|e| e.to_string())?; }
+    Ok(())
 }
 
 pub(super) fn finish_savepoint<T>(conn: &Connection, name: &str, result: Result<T, String>) -> Result<T, String> {

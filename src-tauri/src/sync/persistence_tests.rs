@@ -125,3 +125,11 @@ fn test_persistence_recovers_changed_primary_key_and_delete_rebase() {
     assert_eq!(sync.query_row("SELECT sync_id FROM sync_object_alias", [], |r| r.get::<_, String>(0)).unwrap(), "new");
     assert_eq!(sync.query_row("SELECT base_version FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
 }
+
+#[test]
+fn test_persistence_preserves_extra_durability_for_cascade_commit() {
+    let (sync, data) = databases();
+    data.execute_batch("PRAGMA synchronous=EXTRA").unwrap();
+    apply(&sync, &data, &event()).unwrap();
+    assert_eq!(data.query_row("PRAGMA synchronous", [], |r| r.get::<_,i64>(0)).unwrap(), 3);
+}

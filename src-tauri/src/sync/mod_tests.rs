@@ -1,5 +1,37 @@
 use super::*;
 
+#[test]
+fn test_cascade_delete_sync_children_can_revive_and_stale_aliases_are_repaired() {
+    for legacy_stale_mapping in [false, true] {
+        let sync = sync_db();
+        let data = Connection::open_in_memory().unwrap();
+        data.execute_batch("CREATE TABLE assistant(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+            CREATE TABLE assistant_prompt(id INTEGER PRIMARY KEY AUTOINCREMENT, assistant_id INTEGER, prompt TEXT);
+            INSERT INTO assistant VALUES(7,'old'); INSERT INTO assistant_prompt VALUES(10,7,'old');").unwrap();
+        save_object_map(&sync,"assistant","assistant",7,"owner").unwrap();
+        save_object_map(&sync,"assistant.prompt","assistant_prompt",10,"prompt").unwrap();
+        sync.execute("INSERT INTO sync_object_alias VALUES ('assistant.prompt','prompt-alias',10)", []).unwrap();
+        let mut deletion = change("assistant","owner",2,JsonValue::Null);
+        deletion.operation = "delete".into();
+        apply_change_to_db(&sync,&data,&spec("assistant"),&deletion,"local", |_|Ok(())).unwrap();
+        assert_eq!(find_local_id_by_object_id(&sync,"assistant.prompt","prompt").unwrap(),None);
+        assert_eq!(find_local_id_by_object_id(&sync,"assistant.prompt","prompt-alias").unwrap(),None);
+        if legacy_stale_mapping {
+            save_object_map(&sync,"assistant.prompt","assistant_prompt",10,"prompt").unwrap();
+            sync.execute("INSERT INTO sync_object_alias VALUES ('assistant.prompt','prompt-alias',10)", []).unwrap();
+        }
+        let parent = change("assistant","owner",3,json!({"fields":{"name":"revived"},"refs":{}}));
+        apply_change_to_db(&sync,&data,&spec("assistant"),&parent,"local", |_|Ok(())).unwrap();
+        let child = change("assistant.prompt","prompt",4,json!({"fields":{"prompt":"revived"},"refs":{"assistant_id":"owner"}}));
+        for _ in 0..2 {
+            apply_change_to_db(&sync,&data,&spec("assistant.prompt"),&child,"local", |_|Ok(())).unwrap();
+        }
+        assert_eq!(data.query_row("SELECT COUNT(*) FROM assistant_prompt p JOIN assistant a ON a.id=p.assistant_id WHERE a.name='revived' AND p.prompt='revived'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_ne!(find_local_id_by_object_id(&sync,"assistant.prompt","prompt").unwrap(),Some(10));
+        assert_eq!(find_local_id_by_object_id(&sync,"assistant.prompt","prompt-alias").unwrap(),None);
+    }
+}
+
 fn sync_db() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(SYNC_SCHEMA_SQL).unwrap();
@@ -618,4 +650,39 @@ fn test_cascade_delete_collected_artifact_survives_missing_assistant_on_import()
     }));
     apply_change_to_db(&sync,&data,&spec("artifacts.collection"),&event,"local", |_|Ok(())).unwrap();
     assert_eq!(data.query_row("SELECT COUNT(*) FROM artifacts_collection WHERE code='keep content' AND assistant_id IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+}
+
+#[test]
+fn test_cascade_delete_sync_attached_child_mapping_recovers_after_metadata_commit_failure() {
+    let sync = sync_db();
+    let data = Connection::open_in_memory().unwrap();
+    data.execute_batch("ATTACH ':memory:' AS aipp_delete_assistant;
+        CREATE TABLE mcp_server_tool(id INTEGER PRIMARY KEY, server_id INTEGER);
+        CREATE TABLE aipp_delete_assistant.assistant_mcp_tool_config(id INTEGER PRIMARY KEY, mcp_tool_id INTEGER);
+        INSERT INTO mcp_server_tool VALUES(5,1);
+        INSERT INTO aipp_delete_assistant.assistant_mcp_tool_config VALUES(9,5);").unwrap();
+    save_object_map(&sync,"mcp.server_tool","mcp_server_tool",5,"tool").unwrap();
+    save_object_map(&sync,"assistant.mcp_tool_config","assistant_mcp_tool_config",9,"config").unwrap();
+    sync.execute_batch("PRAGMA foreign_keys=ON;
+        CREATE TABLE required(id INTEGER PRIMARY KEY);
+        CREATE TABLE deferred_failure(id INTEGER REFERENCES required(id) DEFERRABLE INITIALLY DEFERRED);
+        CREATE TRIGGER fail_commit AFTER INSERT ON sync_apply_receipt BEGIN INSERT INTO deferred_failure VALUES(1); END;").unwrap();
+    let mut deletion = change("mcp.server_tool","tool",2,JsonValue::Null);
+    deletion.operation = "delete".into();
+    assert!(apply_change_to_db(&sync,&data,&spec("mcp.server_tool"),&deletion,"local", |_|Ok(())).is_err());
+    assert_eq!(data.query_row("SELECT COUNT(*) FROM aipp_delete_assistant.assistant_mcp_tool_config",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(find_local_id_by_object_id(&sync,"assistant.mcp_tool_config","config").unwrap(),Some(9));
+    sync.execute_batch("DROP TRIGGER fail_commit").unwrap();
+    apply_change_to_db(&sync,&data,&spec("mcp.server_tool"),&deletion,"local", |_|Ok(())).unwrap();
+    assert_eq!(find_local_id_by_object_id(&sync,"assistant.mcp_tool_config","config").unwrap(),None);
+    assert_eq!(find_local_id_by_object_id(&sync,"mcp.server_tool","tool").unwrap(),None);
+    assert!(remote_change_already_applied(&sync,&deletion).unwrap());
+}
+
+#[test]
+fn test_sync_update_missing_row_returns_error() {
+    let data = Connection::open_in_memory().unwrap();
+    data.execute_batch("CREATE TABLE assistant(id INTEGER PRIMARY KEY, name TEXT)").unwrap();
+    let fields = Map::from_iter([("name".into(),json!("missing"))]);
+    assert!(update_row(&data,&spec("assistant"),7,&fields).unwrap_err().contains("local_id=7"));
 }
