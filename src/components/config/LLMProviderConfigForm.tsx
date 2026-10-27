@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useEffect, useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import debounce from "lodash/debounce";
@@ -220,46 +221,25 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         return () => subscription.unsubscribe();
     }, [form, updateField]);
 
-    // 获取基础数据
-    useEffect(() => {
-        // 立即重置状态，避免显示旧的数据
-        form.reset({
-            endpoint: "",
-            api_key: "",
-            proxy_enabled: "false",
-            acp_cli_command: "",
-            acp_claude_auth_mode: "claude_settings",
-            acp_claude_env_vars: "",
-        });
-        setTags([]);
-        setHasApiKey(false);
-
-        invoke<Array<LLMProviderConfig>>("get_llm_provider_config", {
-            id,
-        }).then((configArray) => {
-            const newConfig: Record<string, string> = {};
-            configArray.forEach((item) => {
-                newConfig[item.name] = item.value;
-            });
-            form.reset({
-                ...defaultValues,
-                ...newConfig,
-            });
-
-            // 检查 GitHub Copilot 是否有 api_key
-            if (isCopilotProvider) {
-                const apiKey = configArray.find((item) => item.name === "api_key")?.value;
-                setHasApiKey(!!apiKey && apiKey.length > 0);
-            }
-        });
-
-        invoke<Array<LLMModel>>("get_llm_models", {
-            llmProviderId: "" + id,
-        }).then((modelList) => {
-            const newTags = modelList.map(toModelTagItem);
-            setTags(newTags);
-        });
-    }, [defaultValues, form, id, isCopilotProvider]);
+    useDataRefresh({
+        events: ["llm_provider_changed"],
+        identity: id,
+        initial: true,
+        onInvalidate: () => updateField.cancel(),
+        refresh: async (isCurrent) => {
+            const [configArray, modelList] = await Promise.all([
+                invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id }),
+                invoke<Array<LLMModel>>("get_llm_models", { llmProviderId: String(id) }),
+            ]);
+            if (!isCurrent()) return;
+            updateField.cancel();
+            const config = Object.fromEntries(configArray.map((item) => [item.name, item.value]));
+            form.reset({ ...defaultValues, ...config });
+            setHasApiKey(!!config.api_key);
+            setTags(modelList.map(toModelTagItem));
+        },
+        onError: (error) => toast.error(`同步后刷新模型提供商失败（provider=${id}）: ${String(error)}`),
+    });
 
     // 处理模型选择确认
     const handleModelSelectionConfirm = useCallback(

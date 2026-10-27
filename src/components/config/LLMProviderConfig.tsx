@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 import FormDialog from "../FormDialog";
 import ConfirmDialog from "../ConfirmDialog";
@@ -58,37 +58,23 @@ const LLMProviderConfig: React.FC = () => {
         }
     }, [LLMProviders, selectedProvider]);
 
-    const getLLMProviderList = useCallback(() => {
-        invoke<Array<LLMProvider>>('get_llm_providers')
+    const getLLMProviderList = useCallback((isCurrent: () => boolean = () => true) => {
+        return invoke<Array<LLMProvider>>('get_llm_providers')
             .then((providers) => {
+                if (!isCurrent()) return;
                 setLLMProviders(providers);
-                // 如果没有选中的提供商，选择第一个
-                if (!selectedProvider && providers.length > 0) {
-                    setSelectedProvider(providers[0]);
-                }
-                // 如果当前选中的提供商已被删除，选择第一个
-                if (selectedProvider && !providers.find(p => p.id === selectedProvider.id)) {
-                    setSelectedProvider(providers.length > 0 ? providers[0] : null);
-                }
+                setSelectedProvider((current) => providers.find((p) => p.id === current?.id) ?? providers[0] ?? null);
             })
             .catch((e) => {
                 toast.error('获取大模型提供商失败: ' + e);
             });
-    }, [selectedProvider]);
-
-    useEffect(() => {
-        getLLMProviderList();
     }, []);
 
-    // 自建同步 pull/冲突落地远端 llm.* 变更后刷新列表
-    useEffect(() => {
-        const unlistenPromise = listen('llm_provider_changed', () => {
-            getLLMProviderList();
-        });
-        return () => {
-            unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
-        };
-    }, [getLLMProviderList]);
+    useDataRefresh({
+        events: ["llm_provider_changed"],
+        initial: true,
+        refresh: async (isCurrent) => { await getLLMProviderList(isCurrent); },
+    });
 
     const [newProviderDialogOpen, setNewProviderDialogOpen] = useState(false);
     const [providerName, setProviderName] = useState('');

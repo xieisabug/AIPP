@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui/button";
@@ -43,13 +44,14 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
     const [loading, setLoading] = useState(false);
 
     // 获取可用的MCP服务器列表
-    const fetchAvailableServers = useCallback(async () => {
+    const fetchAvailableServers = useCallback(async (isCurrent: () => boolean = () => true) => {
         try {
             const serversWithTools = await invoke<(MCPServerInfo & { tools: MCPToolInfo[] })[]>(
                 'get_assistant_mcp_servers_with_tools',
                 { assistantId }
             );
 
+            if (!isCurrent()) return;
             // 提取服务器信息
             const servers = serversWithTools.map(server => ({
                 id: server.id,
@@ -66,9 +68,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
             setAllServerTools(toolsMap);
 
             // 如果没有选中的服务器且有可用服务器，选择第一个
-            if (!selectedServerId && servers.length > 0) {
-                setSelectedServerId(servers[0].id);
-            }
+            setSelectedServerId((current) => servers.some((server) => server.id === current) ? current : servers[0]?.id ?? null);
         } catch (error) {
             console.error('Failed to fetch available servers:', error);
             toast.error('获取MCP服务器列表失败: ' + error);
@@ -196,14 +196,16 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
         }
     }, [assistantId, fetchAvailableTools, onConfigChange]);
 
-    useEffect(() => {
-        fetchAvailableServers();
-    }, [fetchAvailableServers]);
+    useDataRefresh({
+        events: ["assistant_list_changed", "mcp_state_changed"],
+        identity: assistantId,
+        initial: true,
+        refresh: async (isCurrent) => { await fetchAvailableServers(isCurrent); },
+    });
 
     useEffect(() => {
-        if (selectedServerId) {
-            fetchAvailableTools(selectedServerId);
-        }
+        if (selectedServerId) fetchAvailableTools(selectedServerId);
+        else setAvailableTools([]);
     }, [selectedServerId, fetchAvailableTools]);
 
     const enabledServers = availableServers.filter(server => server.is_enabled);

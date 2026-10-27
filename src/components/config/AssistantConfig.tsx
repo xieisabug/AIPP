@@ -1,8 +1,8 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { AssistantDetail, AssistantListItem } from "../../data/Assistant";
-import { useAssistantListListener } from "../../hooks/useAssistantListListener";
 import { Bot, Settings, User, Download } from "lucide-react";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
@@ -88,7 +88,6 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const {
         assistants,
         currentAssistant,
-        setAssistants,
         setCurrentAssistant,
         saveAssistant,
         copyAssistant,
@@ -213,7 +212,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     );
 
     const loadAgentModelOptions = useCallback(
-        async (assistantDetail: AssistantDetail, providerId: number | null = null) => {
+        async (assistantDetail: AssistantDetail, providerId: number | null = null, isCurrent: () => boolean = () => true) => {
             const selectedProviderId = providerId ?? assistantDetail.model[0]?.provider_id ?? 0;
             if (assistantDetail.assistant.assistant_type !== 4 || selectedProviderId <= 0) {
                 setAgentModelOptions([]);
@@ -227,6 +226,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     assistantId: assistantDetail.assistant.id,
                     providerId,
                 });
+                if (!isCurrent()) return;
                 const useConfiguredValues = providerId == null
                     || providerId === assistantDetail.model[0]?.provider_id;
                 const configuredModel = useConfiguredValues
@@ -245,12 +245,13 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     applyAgentModelSelection(selection.model.code, selection.effort);
                 }
             } catch (error) {
+                if (!isCurrent()) return;
                 const message = `无法读取 Agent 默认配置：${getErrorMessage(error)}`;
                 setAgentModelOptions([]);
                 setAgentModelError(message);
                 toast.error(message);
             } finally {
-                setAgentModelLoading(false);
+                if (isCurrent()) setAgentModelLoading(false);
             }
         },
         [applyAgentModelSelection]
@@ -303,12 +304,13 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     }, [loadAssistants]);
     // 选择助手
     const handleChooseAssistant = useCallback(
-        (assistant: AssistantListItem) => {
-            if (!currentAssistant || currentAssistant.assistant.id !== assistant.id) {
-                loadAssistantDetail(assistant.id).then(async (assistantDetail) => {
+        (assistant: AssistantListItem, force = false, isCurrent: () => boolean = () => true) => {
+            if (force || !currentAssistant || currentAssistant.assistant.id !== assistant.id) {
+                return loadAssistantDetail(assistant.id, isCurrent).then(async (assistantDetail) => {
                     const pluginConfigValues = await loadPluginAssistantConfigValues(
                         assistantDetail.assistant.id
                     );
+                    if (!isCurrent()) return;
                     form.reset({
                         assistantType: assistantDetail.assistant.assistant_type,
                         model:
@@ -319,7 +321,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             assistantDetail.model[0]?.model_code && assistantDetail.model[0]?.provider_id > 0
                                 ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
                                 : "",
-                        prompt: assistantDetail.prompts[0].prompt,
+                        prompt: assistantDetail.prompts[0]?.prompt ?? "",
                         ...assistantDetail.model_configs.reduce((acc, config) => {
                             acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
                             return acc;
@@ -360,8 +362,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                             const runtime = await invoke<{ agent_kind: string }>("get_agent_runtime_info", {
                                 assistantId: assistantDetail.assistant.id,
                             });
+                            if (!isCurrent()) return;
                             if (runtime.agent_kind === "codex_app_server") {
-                                await loadAgentModelOptions(assistantDetail);
+                                await loadAgentModelOptions(assistantDetail, null, isCurrent);
                             } else {
                                 setAgentModelOptions([]);
                                 setAgentModelError(null);
@@ -374,6 +377,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         setAgentModelOptions([]);
                         setAgentModelError(null);
                     }
+                    if (!isCurrent()) return;
                     setAssistantTypeCustomField([]);
                     const plugin = assistantTypePluginMap.get(assistantDetail.assistant.assistant_type);
                     plugin?.onAssistantTypeSelect?.(assistantTypeApi);
@@ -392,32 +396,17 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         ]
     );
 
-    // 监听助手列表变化
-    useAssistantListListener({
-        onAssistantListChanged: useCallback(
-            (assistantList: AssistantListItem[]) => {
-                setAssistants(assistantList);
-
-                if (assistantList.length === 0) {
-                    setCurrentAssistant(null);
-                    return;
-                }
-
-                if (!currentAssistant) {
-                    handleChooseAssistant(assistantList[0]);
-                    return;
-                }
-
-                const currentAssistantExists = assistantList.some(
-                    (assistant) => assistant.id === currentAssistant.assistant.id
-                );
-
-                if (!currentAssistantExists) {
-                    handleChooseAssistant(assistantList[0]);
-                }
-            },
-            [currentAssistant, handleChooseAssistant, setAssistants, setCurrentAssistant]
-        ),
+    useDataRefresh({
+        events: ["assistant_list_changed", "llm_provider_changed", "mcp_state_changed"],
+        identity: currentAssistant?.assistant.id ?? "",
+        refresh: async (isCurrent) => {
+            const list = await loadAssistants(isCurrent);
+            if (!isCurrent()) return;
+            const selected = list.find((a) => a.id === currentAssistant?.assistant.id) ?? list[0];
+            if (selected) await handleChooseAssistant(selected, true, isCurrent);
+            else { setCurrentAssistant(null); form.reset(); }
+        },
+        onError: (error) => toast.error(`同步后刷新助手配置失败: ${getErrorMessage(error)}`),
     });
 
     // 修改配置

@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { invoke } from "@tauri-apps/api/core";
 import { useState, useEffect, useRef } from "react";
 import { Conversation, ConversationWithMessages, Message, FileInfo } from "../data/Conversation";
@@ -56,34 +57,18 @@ export function useAssistantRuntime({
         }
     }, [conversation, runtimeConversation]);
 
-    // Load assistant model ID when assistant changes
-    useEffect(() => {
-        const loadAssistantModelId = async () => {
-            try {
-                const effectiveConversation = getEffectiveConversation();
-                const assistantId = effectiveConversation?.assistant_id || selectedAssistant;
-                if (!assistantId) {
-                    setCachedModelId("");
-                    return;
-                }
-
-                const assistantDetail = await invoke<AssistantDetail>("get_assistant", {
-                    assistantId: +assistantId,
-                });
-
-                if (assistantDetail.model.length > 0) {
-                    setCachedModelId(assistantDetail.model[0].model_code);
-                } else {
-                    setCachedModelId("");
-                }
-            } catch (error) {
-                console.error("Failed to load assistant model ID:", error);
-                setCachedModelId("");
-            }
-        };
-
-        loadAssistantModelId();
-    }, [conversation?.assistant_id, selectedAssistant, runtimeConversation?.assistant_id]);
+    useDataRefresh({
+        events: ["assistant_list_changed", "llm_provider_changed"],
+        identity: `${conversation?.assistant_id}:${selectedAssistant}:${runtimeConversation?.assistant_id}`,
+        initial: true,
+        refresh: async (isCurrent) => {
+            const assistantId = getEffectiveConversation()?.assistant_id || selectedAssistant;
+            if (!assistantId || assistantId <= 0) { setCachedModelId(""); return; }
+            const detail = await invoke<AssistantDetail>("get_assistant", { assistantId });
+            if (isCurrent()) setCachedModelId(detail.model[0]?.model_code ?? "");
+        },
+        onError: (error) => { setCachedModelId(""); console.error("刷新助手模型失败:", error); },
+    });
 
     // 助手运行时API接口，提供给插件在运行时使用
     const assistantRunApi: AssistantRunApi = {

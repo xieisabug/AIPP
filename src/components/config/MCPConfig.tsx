@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
@@ -8,7 +9,6 @@ import { Trash2, Edit, RefreshCw, Zap } from "lucide-react";
 import MCP from "@/assets/mcp.svg?react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
-import { listen } from "@tauri-apps/api/event";
 import ConfirmDialog from "../ConfirmDialog";
 import MCPServerDialog from "./MCPServerDialog";
 import MCPActionDropdown from "./MCPActionDropdown";
@@ -131,53 +131,42 @@ const MCPConfig: React.FC = () => {
         setAllServerTools(toolsMap);
     }, []);
 
-    // 获取服务器工具列表
-    const getServerTools = useCallback((serverId: number) => {
-        invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })
-            .then(setServerTools)
-            .catch((e) => {
-                toast.error('获取服务器工具失败: ' + e);
-            });
-    }, []);
+    useDataRefresh({
+        events: ["mcp_state_changed"],
+        identity: `${selectedServer?.id ?? ""}:${editingServer?.id ?? ""}`,
+        initial: true,
+        refresh: async (isCurrent) => {
+            const servers = await invoke<MCPServer[]>("get_mcp_servers");
+            const selected = servers.find((server) => server.id === selectedServer?.id) ?? servers[0] ?? null;
+            const [tools, resources, prompts, allTools] = await Promise.all([
+                selected ? invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: selected.id }) : Promise.resolve([]),
+                selected ? invoke<MCPServerResource[]>("get_mcp_server_resources", { serverId: selected.id }) : Promise.resolve([]),
+                selected ? invoke<MCPServerPrompt[]>("get_mcp_server_prompts", { serverId: selected.id }) : Promise.resolve([]),
+                Promise.all(servers.map(async (server) => [server.id, await invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: server.id })] as const)),
+            ]);
+            if (!isCurrent()) return;
+            setMcpServers(servers);
+            setSelectedServer(selected);
+            setServerTools(tools);
+            setServerResources(resources);
+            setServerPrompts(prompts);
+            setAllServerTools(new Map(allTools));
+            if (editingServer) {
+                const updated = servers.find((server) => server.id === editingServer.id) ?? null;
+                setEditingServer(updated);
+                setBuiltinEditEnv(updated?.environment_variables ?? "");
+                setBuiltinEditName(updated?.name ?? "");
+                setBuiltinEditTimeout(updated?.timeout ?? null);
+                if (!updated) { setServerDialogOpen(false); setBuiltinEditOpen(false); }
+            }
+            if (deletingServerId && !servers.some((server) => server.id === deletingServerId)) {
+                setConfirmDialogOpen(false);
+                setDeletingServerId(null);
+            }
+        },
+        onError: (error) => toast.error(`同步后刷新 MCP 配置失败: ${String(error)}`),
+    });
 
-    // 获取服务器资源列表
-    const getServerResources = useCallback((serverId: number) => {
-        invoke<MCPServerResource[]>('get_mcp_server_resources', { serverId })
-            .then(setServerResources)
-            .catch((e) => {
-                toast.error('获取服务器资源失败: ' + e);
-            });
-    }, []);
-
-    // 获取服务器提示列表
-    const getServerPrompts = useCallback((serverId: number) => {
-        invoke<MCPServerPrompt[]>('get_mcp_server_prompts', { serverId })
-            .then(setServerPrompts)
-            .catch((e) => {
-                toast.error('获取服务器提示失败: ' + e);
-            });
-    }, []);
-
-    useEffect(() => {
-        getMcpServers();
-
-        // 监听后端 MCP 状态变更事件，自动刷新
-        const unlistenPromise = listen('mcp_state_changed', () => {
-            getMcpServers();
-        });
-
-        return () => {
-            unlistenPromise.then(unlisten => unlisten());
-        };
-    }, []);
-
-    useEffect(() => {
-        if (selectedServer) {
-            getServerTools(selectedServer.id);
-            getServerResources(selectedServer.id);
-            getServerPrompts(selectedServer.id);
-        }
-    }, [selectedServer, getServerTools, getServerResources, getServerPrompts]);
 
     // 切换服务器启用状态
     const handleToggleServer = useCallback(async (serverId: number, isEnabled: boolean) => {

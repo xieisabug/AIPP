@@ -884,7 +884,7 @@ pub async fn retry_sync_dead_letters(app_handle: AppHandle) -> Result<SyncStatus
         let conn = open_sync_db(&app_handle)?;
         ensure_device_id(&conn)?
     };
-    replay_dead_letters(&app_handle, &device_id)?;
+    replay_dead_letters(&app_handle, &device_id).await?;
     emit_status_changed(&app_handle).await;
     sync_status(&app_handle).await
 }
@@ -1482,7 +1482,7 @@ async fn push_event_batch_once(
         mark_events_failed(app_handle, events, &error)?;
         return Err(error);
     }
-    let conflicts = handle_push_response(app_handle, events, body)?;
+    let conflicts = handle_push_response(app_handle, events, body).await?;
     emit_status_changed(app_handle).await;
     Ok(PushBatchOutcome::Done { conflicts })
 }
@@ -1566,52 +1566,141 @@ async fn pull_remote(
         let body = await_or_cancel(cancel, response.json::<PullResponse>()).await?;
         // 每页复用同一个 sync.db 连接应用所有变更
         let sync_conn = open_sync_db(app_handle)?;
-        apply_pull_page(&sync_conn, &body.changes, |change| {
-            apply_change(app_handle, &sync_conn, change, device_id)
-        })?;
+        let mut applied_types = HashSet::new();
+        let result = apply_pull_page(&sync_conn, &body.changes, |change| {
+            apply_and_record(&sync_conn, change, &mut applied_types, || {
+                apply_change(app_handle, &sync_conn, change, device_id)
+            })
+        });
         drop(sync_conn);
+        // Notify committed changes even when a later row or cursor write fails.
+        let notification = emit_sync_domain_events(app_handle, &applied_types).await;
+        match (result, notification) {
+            (Err(error), Err(notify)) => return Err(format!("{error}; {notify}")),
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+            (Ok(_), Ok(())) => {}
+        }
         set_cursor(app_handle, body.cursor)?;
-        emit_sync_domain_events(app_handle, body.changes.iter().map(|c| c.object_type.as_str()));
         emit_status_changed(app_handle).await;
         if !body.has_more {
             // pull 全部完成后自愈重放一次存量死信：跨页的依赖此时已就位
-            if let Err(err) = replay_dead_letters(app_handle, device_id) {
-                warn!(error = %err, "Replay sync dead letters after pull failed");
+            if let Err(err) = replay_dead_letters(app_handle, device_id).await {
+                return Err(format!("拉取后重放同步失败项失败: {err}"));
             }
             return Ok(());
         }
     }
 }
 
-/// pull/冲突落地后按 object_type 域通知前端刷新对应列表。
-/// 复用既有事件约定：assistant_list_changed / mcp_state_changed；
-/// llm 域新增 llm_provider_changed（前端 LLMProviderConfig 监听）。
-fn emit_sync_domain_events<'a>(
-    app_handle: &AppHandle,
-    object_types: impl Iterator<Item = &'a str>,
-) {
-    let mut has_assistant = false;
-    let mut has_mcp = false;
-    let mut has_llm = false;
-    for object_type in object_types {
-        if object_type.starts_with("assistant") {
-            has_assistant = true;
-        } else if object_type.starts_with("mcp.") {
-            has_mcp = true;
-        } else if object_type.starts_with("llm.") {
-            has_llm = true;
+/// Collect successful applications rather than received rows (which may be deferred).
+fn apply_and_record(
+    conn: &Connection,
+    change: &PullChange,
+    applied_types: &mut HashSet<String>,
+    apply: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let already_applied = remote_change_already_applied(conn, change)?;
+    apply()?;
+    if !already_applied {
+        applied_types.insert(change.object_type.clone());
+    }
+    Ok(())
+}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+struct SyncUiDomains {
+    assistant: bool,
+    mcp: bool,
+    llm: bool,
+    conversation: bool,
+    feature: bool,
+    artifacts: bool,
+}
+
+impl SyncUiDomains {
+    fn from_types(types: &HashSet<String>) -> Self {
+        let mut domains = Self::default();
+        for object_type in types {
+            match object_type.as_str() {
+                "assistant" => domains.assistant = true,
+                "conversation" => domains.conversation = true,
+                "system.feature_config" => domains.feature = true,
+                "artifacts.collection" => domains.artifacts = true,
+                t if t.starts_with("assistant.") => domains.assistant = true,
+                t if t.starts_with("mcp.") => domains.mcp = true,
+                t if t.starts_with("llm.") => domains.llm = true,
+                t if t.starts_with("conversation.") => domains.conversation = true,
+                _ => {}
+            }
         }
-    }
-    if has_assistant {
-        let _ = app_handle.emit("assistant_list_changed", ());
-    }
-    if has_mcp {
-        let _ = app_handle.emit("mcp_state_changed", "sync_remote");
-    }
-    if has_llm {
-        let _ = app_handle.emit("llm_provider_changed", ());
+        domains
     }
 }
+
+/// Update reader caches before broadcasting invalidations to every window.
+async fn emit_sync_domain_events(app_handle: &AppHandle, types: &HashSet<String>) -> Result<(), String> {
+    let domains = SyncUiDomains::from_types(types);
+    let mut errors = Vec::new();
+    let emit = |event: &str, result: tauri::Result<()>| {
+        result.map_err(|error| format!("同步后广播 {event} 失败: {error}"))
+    };
+    if domains.feature {
+        let result = async {
+            let state = app_handle.state::<crate::FeatureConfigState>();
+            let mut configs = state.configs.lock().await;
+            let mut map = state.config_feature_map.lock().await;
+            let latest = SystemDatabase::new(app_handle).and_then(|db| db.get_all_feature_config())
+                .map_err(|e| format!("同步后重载功能配置缓存失败: {e}"))?;
+            let mut latest_map: HashMap<String, HashMap<String, FeatureConfig>> = HashMap::new();
+            for config in &latest {
+                latest_map.entry(config.feature_code.clone()).or_default()
+                    .insert(config.key.clone(), config.clone());
+            }
+            *configs = latest;
+            *map = latest_map;
+            Ok::<(), String>(())
+        }.await;
+        match result {
+            Ok(()) => {
+                if let Err(error) = emit("feature_config_changed", app_handle.emit("feature_config_changed", ())) { errors.push(error); }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    if domains.assistant {
+        let state = app_handle.state::<crate::NameCacheState>();
+        let mut names = state.assistant_names.lock().await;
+        let result = crate::db::assistant_db::AssistantDatabase::new(app_handle)
+            .and_then(|db| db.get_assistants());
+        match result {
+            Ok(assistants) => {
+                *names = assistants.into_iter().map(|a| (a.id, a.name)).collect();
+                drop(names);
+                if let Err(error) = emit("assistant_list_changed", app_handle.emit("assistant_list_changed", ())) { errors.push(error); }
+            }
+            Err(error) => errors.push(format!("同步后重载助手名称缓存失败: {error}")),
+        }
+    }
+    if domains.mcp {
+        if let Err(error) = emit("mcp_state_changed", app_handle.emit("mcp_state_changed", "sync_remote")) { errors.push(error); }
+    }
+    if domains.llm {
+        if let Err(error) = emit("llm_provider_changed", app_handle.emit("llm_provider_changed", ())) { errors.push(error); }
+    }
+    if domains.conversation {
+        app_handle.state::<crate::mcp::builtin_mcp::TodoState>().invalidate_cache();
+    }
+    if domains.conversation || domains.assistant {
+        if let Err(error) = emit("conversation_data_changed", app_handle.emit("conversation_data_changed", ())) { errors.push(error); }
+    }
+    if domains.artifacts {
+        if let Err(error) = emit("artifacts_collection_changed", app_handle.emit("artifacts_collection_changed", ())) { errors.push(error); }
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+}
+
+#[cfg(test)]
+mod ui_refresh_tests;
 
 /// 判断 apply 失败是否属于"依赖对象尚未同步"类错误（可等后续变更就位后重试）。
 fn is_dependency_pending_error(err: &str) -> bool {
@@ -1702,10 +1791,20 @@ fn record_dead_letter(conn: &Connection, change: &PullChange, error: &str) -> Re
 
 /// 按序重放死信表中的变更：成功则删除，失败则更新错误信息并保留。
 /// 返回（成功数，剩余数）。
-fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize, usize), String> {
+async fn replay_dead_letters(app_handle: &AppHandle, device_id: &str) -> Result<(usize, usize), String> {
     ensure_sync_db(app_handle)?;
     let conn = open_sync_db(app_handle)?;
-    replay_dead_letter_rows(&conn, |change| apply_change(app_handle, &conn, change, device_id))
+    let mut applied_types = HashSet::new();
+    let result = replay_dead_letter_rows(&conn, |change| {
+        apply_and_record(&conn, change, &mut applied_types, || apply_change(app_handle, &conn, change, device_id))
+    });
+    drop(conn);
+    let notification = emit_sync_domain_events(app_handle, &applied_types).await;
+    match (result, notification) {
+        (Err(error), Err(notify)) => Err(format!("{error}; {notify}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(counts), Ok(())) => Ok(counts),
+    }
 }
 
 fn replay_dead_letter_rows(conn: &Connection, mut apply: impl FnMut(&PullChange) -> Result<(), String>) -> Result<(usize, usize), String> {
@@ -4358,11 +4457,13 @@ fn validate_push_response(events: &[(i64, PushEvent)], response: &PushResponse) 
     Ok(())
 }
 
-fn handle_push_response(
+async fn handle_push_response(
     app_handle: &AppHandle,
     events: &[(i64, PushEvent)],
     response: PushResponse,
 ) -> Result<usize, String> {
+    let mut resolved_object_types = HashSet::new();
+    let result = (|| {
     let conn = open_sync_db(app_handle)?;
     let by_event_id: HashMap<&str, &(i64, PushEvent)> =
         events.iter().map(|item| (item.1.event_id.as_str(), item)).collect();
@@ -4390,7 +4491,6 @@ fn handle_push_response(
     }
 
     let mut conflict_resolved = 0usize;
-    let mut resolved_object_types: Vec<String> = Vec::new();
     let mut conflict_failures = 0usize;
     for conflict in response.conflicts {
         if let Some((id, event)) = by_event_id.get(conflict.event_id.as_str()) {
@@ -4430,10 +4530,10 @@ fn handle_push_response(
             };
             match apply_result {
                 Ok(()) => {
+                    resolved_object_types.insert(conflict.object_type.clone());
                     conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
                         .map_err(|e| e.to_string())?;
                     if !equivalent && !already_applied { conflict_resolved += 1; }
-                    resolved_object_types.push(conflict.object_type.clone());
                 }
                 Err(err) => {
                     // 落地失败（如依赖未就绪）：标 failed 等待重试，保留已发送事件的基线。
@@ -4446,9 +4546,6 @@ fn handle_push_response(
             }
         }
     }
-    if !resolved_object_types.is_empty() {
-        emit_sync_domain_events(app_handle, resolved_object_types.iter().map(String::as_str));
-    }
     if rejected_count + conflict_failures > 0 {
         return Err(format!(
             "同步服务器拒绝 {} 条，冲突落地失败 {} 条；最近原因：{}",
@@ -4457,6 +4554,13 @@ fn handle_push_response(
         ));
     }
     Ok(conflict_resolved)
+    })();
+    let notification = emit_sync_domain_events(app_handle, &resolved_object_types).await;
+    match (result, notification) {
+        (Err(error), Err(notify)) => Err(format!("{error}; {notify}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(count), Ok(())) => Ok(count),
+    }
 }
 
 /// Device-local FK numbers are transport hints only. refs carry identity.

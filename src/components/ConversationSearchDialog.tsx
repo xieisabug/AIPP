@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CommandDialog, CommandInput } from "./ui/command";
 import { searchConversations } from "../services/conversationSearchService";
@@ -148,6 +149,14 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
         }
     }, []);
 
+    useDataRefresh({
+        events: ["conversation_data_changed"],
+        identity: `${open}:${query}`,
+        paused: !open,
+        onInvalidate: () => { requestIdRef.current += 1; },
+        refresh: async () => { if (open) await runSearch(query); },
+    });
+
     const loadMore = useCallback(async () => {
         if (isLoadingMore || isLoading || !hasMore) {
             return;
@@ -157,8 +166,10 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
             return;
         }
         setIsLoadingMore(true);
+        const requestId = requestIdRef.current;
         try {
             const results = await searchConversations(trimmed, 50, hits.length);
+            if (requestId !== requestIdRef.current) return;
             if (results.length > 0) {
                 setHits((prev) => [...prev, ...results]);
             }

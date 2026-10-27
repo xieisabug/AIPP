@@ -55,7 +55,7 @@ use crate::api::butler_api::{
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
-    get_conversation_with_messages, list_conversations, search_conversations,
+    conversation_exists, get_conversation_with_messages, list_conversations, search_conversations,
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
@@ -1048,6 +1048,7 @@ pub fn run() {
             get_butler_task_detail,
             reset_butler_main_conversation,
             spawn_butler_task_conversation,
+            conversation_exists,
             get_conversation_with_messages,
             create_conversation_with_messages,
             delete_conversation,

@@ -185,7 +185,7 @@ function ChatUIWindow() {
     useTheme("chat_ui");
 
     // 防泄露模式配置
-    const { getConfigValue, loadFeatureConfig } = useFeatureConfig();
+    const { getConfigValue } = useFeatureConfig();
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
 
     // 检测移动端
@@ -722,17 +722,6 @@ function ChatUIWindow() {
             unlistenRegistryChanged.then((unlisten) => unlisten());
         };
     }, []);
-
-    // 监听配置变更事件，当 Settings 窗口修改配置后重新加载
-    useEffect(() => {
-        const unlisten = listen("feature_config_changed", () => {
-            console.log("[ChatUI] feature_config_changed event received, reloading config");
-            loadFeatureConfig();
-        });
-        return () => {
-            unlisten.then((f) => f());
-        };
-    }, [loadFeatureConfig]);
 
     useEffect(() => {
         const api = {

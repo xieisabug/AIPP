@@ -39,6 +39,11 @@ impl TodoState {
         *self.app_handle.write().unwrap() = Some(app_handle);
     }
 
+    /// Discard reader cache after remote writes without writing back to storage.
+    pub(crate) fn invalidate_cache(&self) {
+        self.todos.write().unwrap().clear();
+    }
+
     /// Get todos for a conversation (from cache or database)
     pub fn get_todos(&self, conversation_id: i64) -> Vec<TodoItem> {
         // First check in-memory cache

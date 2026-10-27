@@ -36,6 +36,7 @@ type DisplayConfigStore = {
     state: DisplayConfigState;
     listeners: Set<() => void>;
     loadPromise?: Promise<void>;
+    reloadAfterPending?: boolean;
 };
 
 const store: DisplayConfigStore = {
@@ -116,6 +117,10 @@ const loadConfig = async () => {
             });
         } finally {
             store.loadPromise = undefined;
+            if (store.reloadAfterPending) {
+                store.reloadAfterPending = false;
+                void loadConfig();
+            }
         }
     })();
 
@@ -141,6 +146,10 @@ function ensureDisplayConfigSubscriptions() {
         return;
     }
     displayConfigEventsBound = true;
+    void listen('feature_config_changed', () => {
+        if (store.loadPromise) store.reloadAfterPending = true;
+        else void loadConfig();
+    });
     void listen('display-config-changed', () => {
         void loadConfig();
     });

@@ -239,7 +239,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
 
     // 监听 featureConfig 变化，更新表单值
     useEffect(() => {
-        if (!loading && featureConfig.size > 0) {
+        if (!loading) {
             console.log("feature config loaded", featureConfig);
 
             const displayConfig = featureConfig.get("display");
@@ -247,7 +247,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             displayForm.reset(buildDisplayFormValues(displayConfig, experimentalConfig));
 
             // 更新 summary 表单 - 支持新旧配置键兼容
-            const summaryConfig = featureConfig.get("conversation_summary");
+            const summaryConfig = featureConfig.get("conversation_summary") ?? new Map<string, string>();
             if (summaryConfig) {
                 // 读取新配置键
                 const titleModel = summaryConfig.get("title_model") || "";
@@ -319,7 +319,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             experimentalForm.reset(buildExperimentalConfigFormValues(featureConfig));
 
             // 更新 preview 表单
-            const previewConfig = featureConfig.get("preview");
+            const previewConfig = featureConfig.get("preview") ?? new Map<string, string>();
             if (previewConfig) {
                 previewForm.reset({
                     preview_type: previewConfig.get("preview_type") || "service",
@@ -330,7 +330,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             }
 
             // 更新 network 表单
-            const networkConfig = featureConfig.get("network_config");
+            const networkConfig = featureConfig.get("network_config") ?? new Map<string, string>();
             if (networkConfig) {
                 networkForm.reset({
                     request_timeout: networkConfig.get("request_timeout") || "180",
@@ -362,7 +362,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             }
 
             // 更新 shortcuts 表单
-            const shortcutsConfig = featureConfig.get("shortcuts");
+            const shortcutsConfig = featureConfig.get("shortcuts") ?? new Map<string, string>();
             if (shortcutsConfig) {
                 const shortcut = shortcutsConfig.get("shortcut");
                 const modifier_key = shortcutsConfig.get("modifier_key") || (isMac ? "option" : "alt");
@@ -390,7 +390,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             // 更新 autostart 表单
             const autostartConfig = featureConfig.get("autostart");
             let autostartEnabled = otherForm.getValues("autostart_enabled") ?? "false";
-            let toolErrorContinueEnabled = otherForm.getValues("tool_error_continue_enabled") ?? "true";
+            let toolErrorContinueEnabled = "true";
             if (autostartConfig) {
                 autostartEnabled = autostartConfig.get("autostart_enabled") || "false";
             }

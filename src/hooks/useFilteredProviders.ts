@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
@@ -22,27 +23,34 @@ export const useFilteredProviders = (assistantType: number | null, shouldFetch: 
     const [loading, setLoading] = useState(shouldFetch);
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
+    useDataRefresh({
+        events: ["llm_provider_changed"],
+        identity: `${shouldFetch}:${assistantType}`,
+        initial: true,
+        refresh: async (isCurrent) => {
         if (!shouldFetch || assistantType === null) {
             setLoading(false);
             return;
         }
 
         setLoading(true);
-        invoke<Array<ProviderForSelect>>("get_filtered_providers", { assistantType })
+        await invoke<Array<ProviderForSelect>>("get_filtered_providers", { assistantType })
             .then((providerList) => {
+                if (!isCurrent()) return;
                 setProviders(providerList);
                 setError(null);
             })
             .catch((err) => {
+                if (!isCurrent()) return;
                 const errorMsg = "获取提供商列表失败: " + getErrorMessage(err);
                 setError(errorMsg);
                 toast.error(errorMsg);
             })
             .finally(() => {
-                setLoading(false);
+                if (isCurrent()) setLoading(false);
             });
-    }, [shouldFetch, assistantType]);
+        },
+    });
 
     return { providers, loading, error };
 };

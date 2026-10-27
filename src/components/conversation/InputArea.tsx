@@ -492,10 +492,11 @@ const InputArea = React.memo(
 
                 // Listen for artifact collection updates
                 const setupArtifactListener = async () => {
-                    const unlisten = await listen("artifact-collection-updated", () => {
-                        loadArtifacts();
-                    });
-                    return unlisten;
+                    const unlisteners = await Promise.all([
+                        listen("artifact-collection-updated", loadArtifacts),
+                        listen("artifacts_collection_changed", loadArtifacts),
+                    ]);
+                    return () => unlisteners.forEach((unlisten) => unlisten());
                 };
 
                 const setupSlashListener = async () => {

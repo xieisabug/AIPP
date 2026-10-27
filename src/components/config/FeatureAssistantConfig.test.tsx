@@ -1,4 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { emit } from "@tauri-apps/api/event";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FeatureAssistantConfig from "@/components/config/FeatureAssistantConfig";
@@ -101,6 +102,28 @@ describe("FeatureAssistantConfig network config", () => {
                 })
             );
         });
+    });
+
+    it("should replace unsaved form values with remote values without saving them back", async () => {
+        window.innerWidth = 1400;
+        window.dispatchEvent(new Event("resize"));
+
+        let proxy = "http://initial";
+        mockInvokeHandler("get_all_feature_config", () => [
+            { id: 1, feature_code: "network_config", key: "network_proxy", value: proxy },
+        ]);
+        mockInvokeHandler("list_syntect_themes", () => []);
+        mockInvokeHandler("get_enabled_plugins", () => []);
+        render(<FeatureAssistantConfig />);
+        const user = userEvent.setup();
+        await user.click(await screen.findByRole("button", { name: /网络配置/ }));
+        const input = await screen.findByPlaceholderText("http://127.0.0.1:7890");
+        await waitFor(() => expect(input).toHaveValue("http://initial"));
+        fireEvent.change(input, { target: { value: "http://unsaved" } });
+        proxy = "http://remote";
+        await act(async () => { await emit("feature_config_changed"); });
+        await waitFor(() => expect(screen.getByPlaceholderText("http://127.0.0.1:7890")).toHaveValue("http://remote"));
+        expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_feature_config")).toHaveLength(0);
     });
 
     it("hides the shortcuts settings on Android", async () => {

@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import React, { useCallback, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { Button } from "../ui/button";
 import { Settings } from "lucide-react";
 import AssistantMCPConfigDialog from './AssistantMCPConfigDialog';
@@ -34,7 +34,7 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
     const [error, setError] = useState<string | null>(null);
 
     // 获取 MCP 配置摘要
-    const fetchMCPSummary = useCallback(async () => {
+    const fetchMCPSummary = useCallback(async (isCurrent: () => boolean = () => true) => {
         try {
             setLoading(true);
             setError(null);
@@ -45,6 +45,7 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
                 { assistantId }
             );
 
+            if (!isCurrent()) return;
             const totalServers = serversWithTools.length;
             const enabledServers = serversWithTools.filter(server => server.is_enabled).length;
 
@@ -68,24 +69,18 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
 
         } catch (error) {
             console.error('Failed to fetch MCP summary:', error);
-            setError(error as string);
+            if (isCurrent()) setError(String(error));
         } finally {
-            setLoading(false);
+            if (isCurrent()) setLoading(false);
         }
     }, [assistantId]);
 
-    useEffect(() => {
-        fetchMCPSummary();
-
-        // 监听 MCP 状态变更事件，自动刷新
-        const unlistenPromise = listen('mcp_state_changed', () => {
-            fetchMCPSummary();
-        });
-
-        return () => {
-            unlistenPromise.then(unlisten => unlisten());
-        };
-    }, [fetchMCPSummary]);
+    useDataRefresh({
+        events: ["assistant_list_changed", "mcp_state_changed"],
+        identity: assistantId,
+        initial: true,
+        refresh: async (isCurrent) => { await fetchMCPSummary(isCurrent); },
+    });
 
     const handleOpenConfig = useCallback(() => {
         if (mcpSummary.totalServers === 0) {

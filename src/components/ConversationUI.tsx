@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { invoke } from "@tauri-apps/api/core";
 import {
     Fragment,
@@ -350,6 +351,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
+        const syncScrollPositionRef = useRef<{ conversationId: string; top: number } | null>(null);
         const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
         const smartScrollRef = useRef<
@@ -387,7 +389,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const { resetReveal } = useAntiLeakage();
         const {
             getConfigValue,
-            loadFeatureConfig,
             loading: featureConfigLoading,
         } = useFeatureConfig();
         const { config: displayConfig } = useDisplayConfig();
@@ -397,15 +398,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             : !["false", "0"].includes(
                 getConfigValue("tool_error_continue", "enabled", "true").trim().toLowerCase(),
             );
-
-        useEffect(() => {
-            const unlisten = listen("feature_config_changed", () => {
-                void loadFeatureConfig();
-            });
-            return () => {
-                unlisten.then((f) => f());
-            };
-        }, [loadFeatureConfig]);
 
         // ============= Chat Sidebar Hooks =============
 
@@ -1155,6 +1147,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 对话加载和管理逻辑
         // 注意：为避免 React StrictMode 下的双调用导致“取消”标记错误触发，使用 requestId 跳过过期请求
         useEffect(() => {
+            const requestId = ++loadRequestIdRef.current;
             // 仅依赖 conversationId，保持函数引用稳定
             if (!conversationId) {
                 // 无对话 ID时，清理状态并加载助手列表
@@ -1174,8 +1167,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
 
             // 使用递增的 requestId 避免旧请求覆盖最新状态
-            const requestId = (loadRequestIdRef.current || 0) + 1;
-            loadRequestIdRef.current = requestId;
 
             // 加载指定对话的消息和信息
             setIsLoadingShow(true);
@@ -1234,6 +1225,38 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
             // 不使用清理函数的取消标记，依赖 requestId 判定最新请求
         }, [conversationId]);
+
+        useDataRefresh({
+            events: ["conversation_data_changed"],
+            identity: conversationId,
+            paused: effectiveAiIsResponsing,
+            refresh: async (isCurrent) => {
+                if (!conversationId) return;
+                const requestId = ++loadRequestIdRef.current;
+                const result = await invoke<ConversationWithMessages>("get_conversation_with_messages", {
+                    conversationId: +conversationId,
+                });
+                if (!isCurrent() || requestId !== loadRequestIdRef.current) return;
+                setConversation(result.conversation);
+                const container = scrollContainerRef.current;
+                if (container) syncScrollPositionRef.current = { conversationId, top: container.scrollTop };
+                // The local run has finished: the persisted snapshot is authoritative,
+                // including remote edits that shorten content or delete messages.
+                clearStreamingMessages();
+                setMessages(result.messages);
+                setIsLoadingShow(false);
+            },
+            onError: (error) => toast.error(`同步后刷新聊天失败（conversation=${conversationId}）: ${String(error)}`),
+        });
+
+        useLayoutEffect(() => {
+            const position = syncScrollPositionRef.current;
+            syncScrollPositionRef.current = null;
+            if (position?.conversationId === conversationId && scrollContainerRef.current) {
+                scrollContainerRef.current.scrollTop = position.top;
+                syncScrollState();
+            }
+        }, [messages, conversationId, syncScrollState]);
 
         // 监听对话标题变化
         useEffect(() => {

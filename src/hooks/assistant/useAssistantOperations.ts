@@ -69,10 +69,10 @@ export const useAssistantOperations = () => {
     }, [currentAssistant, assistants]);
 
     // 获取助手列表
-    const loadAssistants = useCallback(() => {
+    const loadAssistants = useCallback((isCurrent: () => boolean = () => true) => {
         return invoke<Array<AssistantListItem>>("get_assistants")
             .then((assistantList) => {
-                setAssistants(assistantList);
+                if (isCurrent()) setAssistants(assistantList);
                 return assistantList;
             })
             .catch((error) => {
@@ -82,10 +82,10 @@ export const useAssistantOperations = () => {
     }, []);
 
     // 获取助手详情
-    const loadAssistantDetail = useCallback((assistantId: number) => {
+    const loadAssistantDetail = useCallback((assistantId: number, isCurrent: () => boolean = () => true) => {
         return invoke<AssistantDetail>("get_assistant", { assistantId })
             .then((assistant) => {
-                setCurrentAssistant(assistant);
+                if (isCurrent()) setCurrentAssistant(assistant);
                 return assistant;
             })
             .catch((error) => {

@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui/button";
@@ -96,7 +97,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     }, [assistantId]);
 
     // 获取可用的MCP服务器列表（用于初始化）
-    const fetchAvailableServers = useCallback(async () => {
+    const fetchAvailableServers = useCallback(async (isCurrent: () => boolean = () => true) => {
         if (!isOpen) return;
 
         try {
@@ -105,6 +106,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                 { assistantId }
             );
 
+            if (!isCurrent()) return;
             // 提取服务器信息
             const servers = serversWithTools.map(server => ({
                 id: server.id,
@@ -296,13 +298,14 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
         }
     }, [expandedServers, serverTools]);
 
-    useEffect(() => {
-        if (isOpen) {
-            fetchAvailableServers();
-        } else {
-            setSearchQuery('');
-        }
-    }, [isOpen, assistantId]);
+    useDataRefresh({
+        events: ["assistant_list_changed", "mcp_state_changed"],
+        identity: `${assistantId}:${isOpen}`,
+        initial: true,
+        paused: !isOpen,
+        refresh: async (isCurrent) => { await fetchAvailableServers(isCurrent); },
+    });
+    useEffect(() => { if (!isOpen) setSearchQuery(""); }, [isOpen]);
 
     const enabledServers = availableServers.filter(server => server.is_enabled);
 

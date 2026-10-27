@@ -464,6 +464,13 @@ pub(crate) fn build_conversation_list_results(
 }
 
 #[tauri::command]
+pub fn conversation_exists(app_handle: tauri::AppHandle, conversation_id: i64) -> Result<bool, String> {
+    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    db.conversation_repo().map_err(|e| e.to_string())?.read(conversation_id)
+        .map(|row| row.is_some()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn get_conversation_with_messages(
     app_handle: tauri::AppHandle,
     name_cache_state: tauri::State<'_, NameCacheState>,
