@@ -510,7 +510,8 @@ def test_push_rejects_invalid_object_id_chars() -> None:
 
     response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["rejected"][0]["event_id"] == "event-1"
 
 
 def test_push_rejects_negative_base_version() -> None:
@@ -521,7 +522,8 @@ def test_push_rejects_negative_base_version() -> None:
 
     response = client.post("/v1/sync/push", headers=auth_headers(), json=body)
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["rejected"][0]["event_id"] == "event-1"
 
 
 def test_natural_object_id_with_base64_chars_accepted() -> None:
@@ -658,3 +660,29 @@ def test_notify_requires_auth_and_device() -> None:
     client = make_client()
     assert client.get("/v1/sync/notify").status_code == 401
     assert client.get("/v1/sync/notify", headers=auth_headers()).status_code == 400
+
+
+def test_push_isolates_invalid_events_from_valid_neighbors() -> None:
+    client = make_client()
+    invalid = sample_event("invalid", "bad id")
+    long_id = sample_event("too-long", "x" * 129)
+    negative = sample_event("negative", "negative-object")
+    negative["base_version"] = -1
+    response = client.post(
+        "/v1/sync/push", headers=auth_headers(),
+        json={"device_id": "device-a", "events": [
+            invalid, sample_event("valid", "valid-object"), long_id, negative, None,
+            {"event_id": 42},
+        ]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert [e["event_id"] for e in body["accepted"]] == ["valid"]
+    assert len(body["rejected"]) == 5
+    assert all(e["reason"].startswith("invalid_event:") for e in body["rejected"])
+    pull = client.get(
+        "/v1/sync/pull",
+        headers=auth_headers(device_id="device-a"),
+        params={"cursor": 0},
+    ).json()
+    assert [e["event_id"] for e in pull["changes"]] == ["valid"]

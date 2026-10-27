@@ -276,7 +276,7 @@ fn test_old_remote_and_ack_do_not_roll_back_shadow_or_mapping() {
     let older = change("conversation", "c", 2, json!({"fields":{"name":"old"}}));
     assert!(remote_change_already_applied(&sync, &older).unwrap());
     upsert_shadow_from_remote(&sync, &older).unwrap();
-    apply_ack_to_shadow(&sync, "conversation", "c", 3, "delete", "old").unwrap();
+    apply_ack_to_shadow(&sync, "conversation", "c", 3, 0, "delete", "old").unwrap();
     assert_eq!(sync.query_row("SELECT server_version FROM sync_shadow", [], |r| r.get::<_, i64>(0)).unwrap(), 9);
     assert_eq!(find_local_id_by_object_id(&sync, "conversation", "c").unwrap(), Some(2));
 }
@@ -340,7 +340,7 @@ fn test_unsent_streaming_snapshots_coalesce_but_retries_are_immutable() {
 fn test_reverting_unsent_edit_to_shadow_drops_obsolete_upload() {
     let sync = sync_db();
     let original = snapshot(&sync, "original");
-    apply_ack_to_shadow(&sync, &original.object_type, &original.object_id, 1, "upsert", &original.payload_hash).unwrap();
+    apply_ack_to_shadow(&sync, &original.object_type, &original.object_id, 1, 0, "upsert", &original.payload_hash).unwrap();
     enqueue_snapshot_if_changed(&sync, &snapshot(&sync, "temporary"), "device").unwrap();
     assert!(!enqueue_snapshot_if_changed(&sync, &original, "device").unwrap());
     assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
@@ -385,4 +385,166 @@ fn test_remote_turn_response_and_descendants_reuse_one_fork() {
     child["conversation_id"] = json!(1);
     child.remove("parent_group_id");
     assert!(route_sync_branch(&sync, &data, &mut child).unwrap());
+}
+
+#[test]
+fn test_sync_unknown_outcome_keeps_identity_blocks_successors_and_pull_echo_preserves_latest() {
+    let sync = sync_db();
+    let data = Connection::open_in_memory().unwrap();
+    data.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY,name TEXT); INSERT INTO conversation VALUES(1,'latest')").unwrap();
+    remap_sync_object_map(&sync,"conversation","conversation",1,"c").unwrap();
+    let make = |name: &str| {
+        let payload = json!({"fields":{"name":name},"refs":{}});
+        LocalObjectSnapshot {object_type:"conversation".into(),object_id:"c".into(),payload_json:payload.to_string(),payload_hash:sync_payload_hash(&sync,Some(&payload)).unwrap()}
+    };
+    enqueue_snapshot_if_changed(&sync,&make("old"),"local").unwrap();
+    let first = load_pending_outbox_from_db(&sync,10).unwrap();
+    mark_events_pushing_in_db(&sync,&first).unwrap();
+    for _ in 0..20 { record_event_failure(&sync,first[0].0,"ACK lost").unwrap(); }
+    enqueue_snapshot_if_changed(&sync,&make("latest"),"local").unwrap();
+    assert!(load_pending_outbox_from_db(&sync,10).unwrap().is_empty());
+    // A legacy failed attempted event must also block the new edit.
+    sync.execute("UPDATE sync_outbox SET status='failed' WHERE id=?1",params![first[0].0]).unwrap();
+    assert!(load_pending_outbox_from_db(&sync,10).unwrap().is_empty());
+    let mut echo = change("conversation","c",1,first[0].1.payload.clone().unwrap());
+    echo.event_id=first[0].1.event_id.clone(); echo.seq=90;
+    apply_change_to_db(&sync,&data,&spec("conversation"),&echo,"local",|_|Ok(())).unwrap();
+    assert_eq!(data.query_row("SELECT name FROM conversation",[],|r|r.get::<_,String>(0)).unwrap(),"latest");
+    let next=load_pending_outbox_from_db(&sync,10).unwrap();
+    assert_eq!(next.len(),1); assert_eq!(next[0].1.base_version,Some(1));
+    assert_eq!(next[0].1.payload.as_ref().unwrap()["fields"]["name"],"latest");
+}
+
+#[test]
+fn test_sync_attempted_delete_intent_survives_echo_for_message_and_natural_config() {
+    for kind in ["conversation.message","system.feature_config"] {
+        for attempted in [false,true] {
+            let sync=sync_db(); let data=Connection::open_in_memory().unwrap();
+            data.execute_batch("CREATE TABLE feature_config(id INTEGER PRIMARY KEY,feature_code TEXT,key TEXT,value TEXT);
+                CREATE TABLE message(id INTEGER PRIMARY KEY,conversation_id INTEGER,content TEXT)").unwrap();
+            let payload=if kind=="system.feature_config" {json!({"fields":{"feature_code":"f","key":"k","value":"v"},"refs":{}})}
+                else {json!({"fields":{"conversation_id":1,"content":"v"},"refs":{"conversation_id":"c"}})};
+            let id=if kind=="system.feature_config" {natural_object_id(&spec(kind),&HashMap::from_iter([("feature_code".into(),json!("f")),("key".into(),json!("k"))])).unwrap()} else {"m".into()};
+            let row=LocalObjectSnapshot{object_type:kind.into(),object_id:id.clone(),payload_json:payload.to_string(),payload_hash:sync_payload_hash(&sync,Some(&payload)).unwrap()};
+            enqueue_snapshot_if_changed(&sync,&row,"local").unwrap();
+            let events=load_pending_outbox_from_db(&sync,10).unwrap();
+            if attempted {mark_events_pushing_in_db(&sync,&events).unwrap();}
+            scan_local_deletes_in_db(&sync,&spec(kind),&HashSet::new(),|_|Ok(false)).unwrap();
+            if !attempted {
+                assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+                continue;
+            }
+            assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            let mut echo=change(kind,&id,1,payload); echo.event_id=events[0].1.event_id.clone();
+            apply_change_to_db(&sync,&data,&spec(kind),&echo,"local",|_|Ok(())).unwrap();
+            let next=load_pending_outbox_from_db(&sync,10).unwrap();
+            assert_eq!(next.len(),1);assert_eq!(next[0].1.operation,"delete");assert_eq!(next[0].1.base_version,Some(1));
+            // A replay using a different event ID also cannot restore the row.
+            echo.event_id="another-author".into();echo.version=2;echo.seq=2;
+            apply_change_to_db(&sync,&data,&spec(kind),&echo,"local",|_|Ok(())).unwrap();
+            let table=if kind=="system.feature_config" {"feature_config"} else {"message"};
+            assert_eq!(data.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        }
+    }
+}
+
+#[test]
+fn test_sync_ack_failure_rolls_back_receipt_outbox_and_successor_rebase() {
+    let sync=sync_db();
+    enqueue_snapshot_if_changed(&sync,&snapshot(&sync,"first"),"local").unwrap();
+    let events=load_pending_outbox_from_db(&sync,10).unwrap();
+    mark_events_pushing_in_db(&sync,&events).unwrap();
+    enqueue_snapshot_if_changed(&sync,&snapshot(&sync,"second"),"local").unwrap();
+    sync.execute_batch("CREATE TRIGGER fail_ack BEFORE DELETE ON sync_outbox BEGIN SELECT RAISE(ABORT,'cannot delete outbox'); END").unwrap();
+    let ack=AcceptedEvent{event_id:events[0].1.event_id.clone(),object_type:events[0].1.object_type.clone(),object_id:events[0].1.object_id.clone(),server_version:2,server_seq:20};
+    assert!(consume_accepted_event(&sync,events[0].0,&events[0].1,&ack).is_err());
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_shadow",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    sync.execute_batch("DROP TRIGGER fail_ack").unwrap();
+    consume_accepted_event(&sync,events[0].0,&events[0].1,&ack).unwrap();
+    apply_ack_to_shadow(&sync,&ack.object_type,&ack.object_id,2,0,"upsert","same-version").unwrap();
+    apply_ack_to_shadow(&sync,&ack.object_type,&ack.object_id,1,5,"upsert","older").unwrap();
+    assert_eq!(sync.query_row("SELECT server_seq FROM sync_shadow",[],|r|r.get::<_,i64>(0)).unwrap(),20);
+    assert_eq!(load_pending_outbox_from_db(&sync,10).unwrap()[0].1.base_version,Some(2));
+}
+
+#[test]
+fn test_sync_bootstrap_recovery_requires_bound_origin_and_recorded_attempts() {
+    let sync=sync_db();
+    enqueue_snapshot_if_changed(&sync,&snapshot(&sync,"first"),"local").unwrap();
+    assert!(ensure_bootstrap_origin(&sync,"https://one","account-a").is_err());
+    assert!(load_outbox_from_db(&sync,10,true).unwrap().is_empty());
+    bind_remote_account(&sync,"https://one/","account-a",true).unwrap();
+    let events=load_pending_outbox_from_db(&sync,10).unwrap();
+    mark_events_pushing_in_db(&sync,&events).unwrap();
+    record_event_failure(&sync,events[0].0,"first response lost").unwrap();
+    enqueue_snapshot_if_changed(&sync,&snapshot(&sync,"latest"),"local").unwrap();
+    ensure_bootstrap_origin(&sync,"https://one","account-a").unwrap();
+    assert!(ensure_bootstrap_origin(&sync,"https://one","account-b").is_err());
+    assert!(bind_remote_account(&sync,"https://one","account-b",false).is_err());
+    assert!(ensure_bootstrap_origin(&sync,"https://two","account-a").is_err());
+    let retry=load_outbox_from_db(&sync,10,true).unwrap();
+    assert_eq!(retry.len(),1);assert_eq!(retry[0].1.event_id,events[0].1.event_id);
+    let ack=AcceptedEvent{event_id:retry[0].1.event_id.clone(),object_type:retry[0].1.object_type.clone(),object_id:retry[0].1.object_id.clone(),server_version:1,server_seq:1};
+    consume_accepted_event(&sync,retry[0].0,&retry[0].1,&ack).unwrap();
+    assert!(load_outbox_from_db(&sync,10,true).unwrap().is_empty());
+    ensure_initial_sync_is_safe(&sync,false,false).unwrap();
+}
+
+#[test]
+fn test_sync_bounded_natural_identity_retains_keys_for_remote_delete() {
+    let sync=sync_db(); let data=Connection::open_in_memory().unwrap();
+    data.execute_batch("CREATE TABLE feature_config(id INTEGER PRIMARY KEY,feature_code TEXT,key TEXT,value TEXT)").unwrap();
+    let spec=spec("system.feature_config");
+    let key="长配置项".repeat(100);
+    let fields=HashMap::from_iter([("feature_code".into(),json!("feature")),("key".into(),json!(key))]);
+    let id=natural_object_id(&spec,&fields).unwrap();assert!(id.starts_with("natural-sha256:"));assert!(valid_sync_id(&id));
+    let mut event=change(spec.object_type,&id,1,json!({"fields":{"feature_code":"feature","key":key,"value":"v"},"refs":{}}));
+    apply_change_to_db(&sync,&data,&spec,&event,"local",|_|Ok(())).unwrap();
+    assert!(local_row_exists_in_db(&sync,&data,&spec,&id).unwrap());
+    event.version=2;event.seq=2;event.operation="delete".into();event.payload=None;
+    apply_change_to_db(&sync,&data,&spec,&event,"local",|_|Ok(())).unwrap();
+    assert!(!local_row_exists_in_db(&sync,&data,&spec,&id).unwrap());
+    // No-key tombstone is valid on a fresh receiver.
+    let fresh=sync_db(); apply_change_to_db(&fresh,&data,&spec,&event,"local",|_|Ok(())).unwrap();
+    let a=HashMap::from_iter([("feature_code".into(),json!("a\u{1f}b")),("key".into(),json!("c"))]);
+    let b=HashMap::from_iter([("feature_code".into(),json!("a")),("key".into(),json!("b\u{1f}c"))]);
+    assert_ne!(natural_object_id(&spec,&a).unwrap(),natural_object_id(&spec,&b).unwrap());
+}
+
+#[test]
+fn test_sync_invalid_outbox_id_isolates_only_bad_event() {
+    let sync=sync_db();
+    let mut bad=snapshot(&sync,"bad");bad.object_id="invalid @ model".into();
+    enqueue_snapshot_if_changed(&sync,&bad,"local").unwrap();
+    enqueue_snapshot_if_changed(&sync,&snapshot(&sync,"good"),"local").unwrap();
+    let events=load_pending_outbox_from_db(&sync,10).unwrap();
+    assert_eq!(events.len(),1);assert_eq!(events[0].1.object_id,"message-1");
+    assert_eq!(sync.query_row("SELECT status FROM sync_outbox WHERE object_id=?1",params![bad.object_id],|r|r.get::<_,String>(0)).unwrap(),"failed");
+}
+
+#[test]
+fn test_sync_push_response_requires_exact_complete_matching_results() {
+    let sync = sync_db();
+    enqueue_snapshot_if_changed(&sync, &snapshot(&sync, "first"), "local").unwrap();
+    let events = load_pending_outbox_from_db(&sync, 10).unwrap();
+    let event = &events[0].1;
+    let accepted = AcceptedEvent { event_id: event.event_id.clone(), object_type: event.object_type.clone(),
+        object_id: event.object_id.clone(), server_version: 1, server_seq: 1 };
+    let mut response = PushResponse { accepted: vec![], rejected: vec![], conflicts: vec![] };
+    assert!(validate_push_response(&events, &response).unwrap_err().contains("缺少"));
+    response.accepted.push(accepted.clone());
+    validate_push_response(&events, &response).unwrap();
+    response.rejected.push(RejectedEvent { event_id: event.event_id.clone(), reason: "duplicate".into() });
+    assert!(validate_push_response(&events, &response).unwrap_err().contains("重复"));
+    response.rejected.clear();
+    response.accepted[0].object_id = "wrong-object".into();
+    assert!(validate_push_response(&events, &response).unwrap_err().contains("身份不匹配"));
+    response.accepted[0] = accepted;
+    response.accepted[0].event_id = "unknown-event".into();
+    assert!(validate_push_response(&events, &response).unwrap_err().contains("未提交"));
+    response.accepted.clear();
+    response.conflicts.push(ConflictEvent { event_id: event.event_id.clone(), object_type: event.object_type.clone(),
+        object_id: "wrong-object".into(), server_version: 1, server_payload: None, server_operation: "delete".into() });
+    assert!(validate_push_response(&events, &response).unwrap_err().contains("身份不匹配"));
 }

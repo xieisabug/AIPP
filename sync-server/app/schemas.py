@@ -35,7 +35,8 @@ class PushEvent(BaseModel):
 class PushRequest(BaseModel):
     device_id: SyncId
     device_name: str | None = Field(default=None, max_length=256)
-    events: list[PushEvent] = Field(default_factory=list)
+    # Validate individual events in the route so one invalid ID cannot reject its neighbors.
+    events: list[Any] = Field(default_factory=list)
 
 
 class AcceptedEvent(BaseModel):

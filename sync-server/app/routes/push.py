@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -11,7 +12,7 @@ from app.auth import AuthContext, ensure_device, require_auth
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import SyncChange, SyncObject
-from app.schemas import AcceptedEvent, ConflictEvent, PushRequest, PushResponse, RejectedEvent
+from app.schemas import AcceptedEvent, ConflictEvent, PushEvent, PushRequest, PushResponse, RejectedEvent
 from app.services.merge import process_push_event, replay_existing_change
 from app.services.notify import NotifyHub
 
@@ -67,7 +68,14 @@ def push_events(
     conflicts: list[ConflictEvent] = []
     rejected: list[RejectedEvent] = []
 
-    for event in request.events:
+    for raw_event in request.events:
+        try:
+            event = PushEvent.model_validate(raw_event)
+        except ValidationError as error:
+            raw_id = raw_event.get("event_id") if isinstance(raw_event, dict) else None
+            event_id = raw_id if isinstance(raw_id, str) else ""
+            rejected.append(RejectedEvent(event_id=event_id, reason=f"invalid_event: {error}"))
+            continue
         # Each event runs in a savepoint: a single bad event (or a concurrent
         # duplicate push) must not roll back the whole batch with a 500.
         try:

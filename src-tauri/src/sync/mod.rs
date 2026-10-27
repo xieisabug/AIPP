@@ -24,6 +24,9 @@ use crate::db::get_db_path;
 use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 
 mod divergence;
+mod persistence;
+#[cfg(test)]
+mod persistence_tests;
 mod offline_recovery;
 pub use offline_recovery::prepare_assistant_recovery;
 
@@ -302,6 +305,7 @@ struct PullChange {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RemoteStatus {
+    account_id: String,
     #[allow(dead_code)]
     latest_cursor: i64,
     remote_empty: bool,
@@ -1170,6 +1174,7 @@ async fn run_sync_once_inner(
     if settings.mode != SyncMode::SelfHosted {
         return Ok(());
     }
+    recover_pending_business_applies(app_handle)?;
     let token = settings
         .token
         .as_deref()
@@ -1194,7 +1199,28 @@ async fn run_sync_once_inner(
     ensure_remote_history_is_compatible(&open_sync_db(app_handle)?, remote_status.latest_cursor)?;
 
     let local_empty = is_local_sync_scope_empty(app_handle)?;
-    ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty)?;
+    {
+        let conn = open_sync_db(app_handle)?;
+        bind_remote_account(&conn, &settings.server_url, &remote_status.account_id, remote_status.remote_empty)?;
+    }
+    if ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty).is_err() {
+        // Recover only durable first-upload attempts, before scanning new edits.
+        let conn = open_sync_db(app_handle)?;
+        ensure_bootstrap_origin(&conn, &settings.server_url, &remote_status.account_id)?;
+        drop(conn);
+        loop {
+            let events = load_outbox_from_db(&open_sync_db(app_handle)?, PUSH_BATCH_MAX_EVENTS as i64, true)?;
+            if events.is_empty() { break; }
+            let mut queue = build_push_batch_queue(&events, PUSH_BATCH_MAX_EVENTS, PUSH_BATCH_MAX_BYTES);
+            while let Some(batch) = queue.pop_front() {
+                match push_event_batch_once(app_handle, &settings, token, &device_id, &device_name, &batch, cancel).await? {
+                    PushBatchOutcome::Split => requeue_split_batch_front(&mut queue, batch),
+                    _ => (),
+                }
+            }
+        }
+        ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty)?;
+    }
     if remote_status.remote_empty && !local_empty {
         let (queued, dangling) = scan_local_changes(app_handle)?;
         store_dangling_fk_report(app_handle, &dangling).await;
@@ -1207,6 +1233,10 @@ async fn run_sync_once_inner(
     }
 
     if !remote_status.remote_empty && local_empty {
+        // An empty business scope can be the result of deleting an attempted
+        // first upload. Persist those tombstones before pulling its echoes.
+        scan_local_changes(app_handle)?;
+        push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await?;
         pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
         return Ok(());
     }
@@ -1414,15 +1444,17 @@ async fn push_event_batch_once(
         }
     };
     let status = response.status();
-    if status == StatusCode::PAYLOAD_TOO_LARGE {
+    if status == StatusCode::PAYLOAD_TOO_LARGE || status == StatusCode::UNPROCESSABLE_ENTITY {
         if events.len() > 1 {
             return Ok(PushBatchOutcome::Split);
         }
         let (id, event) = &events[0];
-        let reason = format!(
-            "{OVERSIZED_PUSH_REASON}（{}/{}）",
-            event.object_type, event.object_id
-        );
+        let reason = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            format!("{OVERSIZED_PUSH_REASON}（{}/{}）", event.object_type, event.object_id)
+        } else {
+            let detail = await_or_cancel(cancel, response.text()).await?;
+            format!("同步事件校验失败 HTTP 422（{}/{}）: {detail}", event.object_type, event.object_id)
+        };
         warn!(
             event_id = %event.event_id,
             object_type = %event.object_type,
@@ -1445,6 +1477,10 @@ async fn push_event_batch_once(
             return Err(err);
         }
     };
+    if let Err(error) = validate_push_response(events, &body) {
+        mark_events_failed(app_handle, events, &error)?;
+        return Err(error);
+    }
     let conflicts = handle_push_response(app_handle, events, body)?;
     emit_status_changed(app_handle).await;
     Ok(PushBatchOutcome::Done { conflicts })
@@ -1855,8 +1891,22 @@ fn parse_sse_sync_cursor(block: &str) -> Option<i64> {
     value.get("cursor")?.as_i64()
 }
 
+fn recover_pending_business_applies(app_handle: &AppHandle) -> Result<(), String> {
+    let sync = open_sync_db(app_handle)?;
+    let mut seen = HashSet::new();
+    for spec in specs() {
+        if seen.insert(spec.db_name) {
+            let data = open_data_db(&get_db_path(app_handle, spec.db_name)?)?;
+            data.execute_batch("PRAGMA synchronous=FULL").map_err(|e| e.to_string())?;
+            persistence::recover(&sync, &data)?;
+        }
+    }
+    Ok(())
+}
+
 fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanReport), String> {
     ensure_sync_db(app_handle)?;
+    recover_pending_business_applies(app_handle)?;
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
     let mut sync_conn = open_sync_db(app_handle)?;
     let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
@@ -1887,13 +1937,22 @@ fn scan_local_deletes(
     spec: &SyncTableSpec,
     present_ids: &HashSet<String>,
 ) -> Result<usize, String> {
+    scan_local_deletes_in_db(sync_conn, spec, present_ids, |object_id| {
+        local_row_exists(app_handle, sync_conn, spec, object_id)
+    })
+}
+
+fn scan_local_deletes_in_db(
+    sync_conn: &Connection, spec: &SyncTableSpec, present_ids: &HashSet<String>,
+    mut exists: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<usize, String> {
     let device_id = ensure_device_id(sync_conn)?;
     let mut enqueued = 0;
 
     let candidates = find_deleted_candidates(sync_conn, spec.object_type, present_ids)?;
     for (object_id, base_version) in candidates {
         // 行可能只是被 where_clause 过滤出同步范围，必须确认行真的不存在
-        if local_row_exists(app_handle, sync_conn, spec, &object_id)? {
+        if exists(&object_id)? {
             continue;
         }
         if enqueue_delete_event(sync_conn, spec, &object_id, base_version, &device_id)? {
@@ -1905,22 +1964,24 @@ fn scan_local_deletes(
     // 不清理的话会把已删除的对象推上服务器（幽灵复活）。
     let stale_upserts = find_stale_pending_upserts(sync_conn, spec.object_type, present_ids)?;
     for object_id in stale_upserts {
-        if local_row_exists(app_handle, sync_conn, spec, &object_id)? {
+        if exists(&object_id)? {
             continue;
         }
-        debug!(
-            object_type = %spec.object_type,
-            object_id = %object_id,
-            "Dropping stale pending upsert for locally deleted row"
-        );
-        sync_conn
-            .execute(
-            "DELETE FROM sync_outbox
-             WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert'
-               AND status IN ('pending', 'failed')",
-            params![spec.object_type, object_id],
-        )
-        .map_err(|e| e.to_string())?;
+        let attempted: bool = sync_conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type=?1 AND object_id=?2 AND sent_once=1)",
+            params![spec.object_type, object_id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if attempted {
+            let version = sync_conn.query_row(
+                "SELECT server_version FROM sync_shadow WHERE object_type=?1 AND object_id=?2",
+                params![spec.object_type, object_id], |r| r.get(0),
+            ).optional().map_err(|e| e.to_string())?.unwrap_or(0);
+            if enqueue_delete_event(sync_conn, spec, &object_id, version, &device_id)? { enqueued += 1; }
+        } else {
+            sync_conn.execute("DELETE FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+                AND operation='upsert' AND sent_once=0 AND status IN ('pending','failed')",
+                params![spec.object_type, object_id]).map_err(|e| e.to_string())?;
+        }
     }
     Ok(enqueued)
 }
@@ -1962,7 +2023,7 @@ fn find_stale_pending_upserts(
         .prepare(
             "SELECT DISTINCT object_id FROM sync_outbox
              WHERE object_type = ?1 AND operation = 'upsert'
-               AND status IN ('pending', 'failed')",
+               AND status IN ('pending', 'pushing', 'failed')",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -2008,7 +2069,7 @@ fn local_row_exists_in_db(
             .map_err(|e| e.to_string())?;
         return Ok(found.is_some());
     }
-    let values = natural_values_from_object_id(object_id)?;
+    let Some(values) = natural_values_for_object(sync_conn, spec.object_type, object_id)? else { return Ok(false); };
     let where_clause = spec
         .natural_key_columns
         .iter()
@@ -2052,7 +2113,7 @@ fn enqueue_delete_event(
     conn.execute(
         "DELETE FROM sync_outbox
          WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert'
-           AND status IN ('pending', 'failed')",
+           AND status IN ('pending', 'failed') AND sent_once = 0",
         params![spec.object_type, object_id],
     )
     .map_err(|e| e.to_string())?;
@@ -2135,7 +2196,9 @@ fn read_local_snapshots_from_db(
                 .and_then(JsonValue::as_i64)
                 .is_some_and(|value| value != 0);
         let object_id = if !spec.natural_key_columns.is_empty() {
-            natural_object_id(spec, &raw_values)?
+            let id = natural_object_id(spec, &raw_values)?;
+            remember_natural_key(sync_conn, spec, &id, &raw_values)?;
+            id
         } else if is_official_row {
             // 官方/内置种子行：确定性 object_id，各设备对同一内置行生成相同标识
             if !spec.seed_official_ids.contains(&local_id) {
@@ -2151,8 +2214,10 @@ fn read_local_snapshots_from_db(
             try_deterministic_child_object_id(sync_conn, spec, &raw_values)?
         {
             // 内置父行下的子配置（tool/resource/prompt/model…）：确定性 id，避免多端各推 UUID
-            remap_sync_object_map(sync_conn, spec.object_type, spec.table, local_id, &child_id)?;
-            child_id
+            let existing = find_object_id(sync_conn, spec.object_type, local_id)?;
+            let id = existing.filter(|id| valid_sync_id(id)).unwrap_or(child_id);
+            remap_sync_object_map(sync_conn, spec.object_type, spec.table, local_id, &id)?;
+            id
         } else {
             ensure_object_id(sync_conn, spec.object_type, spec.table, local_id)?
         };
@@ -2798,7 +2863,7 @@ fn drop_failed_upserts_for_object(
 ) -> Result<usize, String> {
     conn.execute(
         "DELETE FROM sync_outbox
-         WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert' AND status = 'failed'",
+         WHERE object_type = ?1 AND object_id = ?2 AND operation = 'upsert' AND status = 'failed' AND sent_once = 0",
         params![object_type, object_id],
     )
     .map_err(|e| e.to_string())
@@ -2827,6 +2892,38 @@ fn apply_change_to_db(
     spec: &SyncTableSpec,
     change: &PullChange,
     _local_device_id: &str,
+    before_message_insert: impl FnMut(&mut Map<String, JsonValue>) -> Result<(), String>,
+) -> Result<(), String> {
+    persistence::recover(sync_conn, conn)?;
+    if acknowledge_pulled_outbox_event(sync_conn, change)? { return Ok(()); }
+    if remote_change_already_applied(sync_conn, change)? { return Ok(()); }
+    persistence::coordinated(sync_conn, conn, || {
+        apply_change_to_db_inner(sync_conn, conn, spec, change, before_message_insert)
+    })
+}
+
+// A pull echo is also a durable ACK. In particular, never apply an old
+// accepted payload over a newer local edit while its transport retry backs off.
+fn acknowledge_pulled_outbox_event(sync: &Connection, change: &PullChange) -> Result<bool, String> {
+    if change.seq <= 0 { return Ok(false); }
+    let row: Option<(i64, String, Option<String>)> = sync.query_row(
+        "SELECT id, operation, payload_json FROM sync_outbox WHERE event_id=?1 AND object_type=?2 AND object_id=?3 AND sent_once=1",
+        params![change.event_id, change.object_type, change.object_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((id, operation, raw)) = row else { return Ok(false); };
+    let payload: Option<JsonValue> = raw.map(|s| serde_json::from_str(&s)).transpose().map_err(|e| e.to_string())?;
+    if operation != change.operation || payload != change.payload { return Ok(false); }
+    let event = PushEvent { event_id: change.event_id.clone(), object_type: change.object_type.clone(),
+        object_id: change.object_id.clone(), operation, payload, base_version: None,
+        local_version: 0, created_at: now_string(), client_schema_version: CLIENT_SCHEMA_VERSION, object_schema_version: 1 };
+    consume_accepted_event(sync, id, &event, &AcceptedEvent { event_id: change.event_id.clone(),
+        object_type: change.object_type.clone(), object_id: change.object_id.clone(),
+        server_version: change.version, server_seq: change.seq })?;
+    Ok(true)
+}
+
+fn apply_change_to_db_inner(
+    sync_conn: &Connection, conn: &Connection, spec: &SyncTableSpec, change: &PullChange,
     mut before_message_insert: impl FnMut(&mut Map<String, JsonValue>) -> Result<(), String>,
 ) -> Result<(), String> {
     if remote_change_already_applied(sync_conn, change)? {
@@ -2842,6 +2939,19 @@ fn apply_change_to_db(
     if change.operation == "delete" {
         apply_delete(sync_conn, &conn, &spec, change)?;
         upsert_shadow_from_remote(sync_conn, change)?;
+        return Ok(());
+    }
+
+    let deleting: bool = sync_conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+         AND operation='delete' AND status IN ('pending','pushing','failed'))",
+        params![change.object_type, change.object_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if deleting {
+        upsert_shadow_from_remote(sync_conn, change)?;
+        sync_conn.execute("UPDATE sync_outbox SET base_version=MAX(COALESCE(base_version,0),?3)
+            WHERE object_type=?1 AND object_id=?2 AND operation='delete' AND sent_once=0",
+            params![change.object_type, change.object_id, change.version]).map_err(|e| e.to_string())?;
         return Ok(());
     }
 
@@ -2913,6 +3023,7 @@ fn apply_change_to_db(
             remap_sync_object_map(sync_conn, &change.object_type, spec.table, official_id, &change.object_id)?;
         }
     } else if !spec.natural_key_columns.is_empty() {
+        remember_natural_key(sync_conn, spec, &change.object_id, &field_values.clone().into_iter().collect())?;
         upsert_natural_row(&conn, &spec, &field_values)?;
     } else if !spec.unique_key_columns.is_empty() {
         // UNIQUE / 种子软身份：合并到已有行，远端 sync_id 获胜，避免 UNIQUE 死信
@@ -3308,6 +3419,65 @@ fn resolve_sync_fork_point(
 
 /// If inserting this remote message into C would diverge, fork C → C' and remap
 /// `conversation_id` in `field_values` to C' so the insert lands on the fork.
+// Use the same business connection as the incoming message. Fork creation,
+// copied history, routing and message identity then share the recovery journal.
+fn fork_sync_conversation_in_db(data: &Connection, source: i64, point: Option<i64>) -> Result<i64, String> {
+    fn copy(data: &Connection, table: &str, id: i64, overrides: &Map<String, JsonValue>) -> Result<i64, String> {
+        let mut stmt = data.prepare(&format!("SELECT * FROM {table} WHERE id=?1")).map_err(|e| e.to_string())?;
+        let columns = stmt.column_names().iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut fields = stmt.query_row(params![id], |r| {
+            let mut fields = Map::new();
+            for (i, name) in columns.iter().enumerate() {
+                if name != "id" { fields.insert(name.clone(), json_from_value_ref(r.get_ref(i)?)); }
+            }
+            Ok(fields)
+        }).map_err(|e| e.to_string())?;
+        for (key, value) in overrides {
+            if fields.contains_key(key) { fields.insert(key.clone(), value.clone()); }
+        }
+        let names = fields.keys().map(String::as_str).collect::<Vec<_>>().join(",");
+        let marks = vec!["?"; fields.len()].join(",");
+        data.execute(&format!("INSERT INTO {table} ({names}) VALUES ({marks})"),
+            params_from_iter(fields.values().map(sql_value_from_json))).map_err(|e| e.to_string())?;
+        Ok(data.last_insert_rowid())
+    }
+    let name: String = data.query_row("SELECT name FROM conversation WHERE id=?1", params![source], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let mut overrides = Map::from_iter([
+        ("name".into(), json!(format!("{} 同步分叉", name.trim_end_matches(" 同步分叉").trim()))),
+        ("conversation_kind".into(), json!("normal")), ("parent_butler_conversation_id".into(), JsonValue::Null),
+        ("source_task_title".into(), json!("sync_fork:concurrent_continue")),
+        ("is_hidden_from_normal_chat_list".into(), json!(false)),
+        ("butler_task_status".into(), JsonValue::Null), ("butler_task_summary".into(), JsonValue::Null),
+        ("butler_task_finalized_at".into(), JsonValue::Null),
+    ]);
+    let ids: Vec<i64> = if let Some(point) = point {
+        if !data.query_row("SELECT EXISTS(SELECT 1 FROM message WHERE conversation_id=?1 AND id=?2)", params![source, point], |r| r.get::<_, bool>(0)).map_err(|e| e.to_string())? {
+            return Err(format!("同步分叉点不存在: conversation={source}, message={point}"));
+        }
+        data.prepare("SELECT id FROM message WHERE conversation_id=?1 AND id<=?2 ORDER BY id").map_err(|e| e.to_string())?
+            .query_map(params![source, point], |r| r.get(0)).map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    } else { Vec::new() };
+    let has_times = existing_columns(data, "conversation", &["created_time", "updated_time"])?.len() == 2;
+    if has_times {
+        let updated: String = if let Some(point) = point {
+            data.query_row("SELECT COALESCE(MAX(created_time), (SELECT created_time FROM conversation WHERE id=?1)) FROM message WHERE conversation_id=?1 AND id<=?2", params![source, point], |r| r.get(0))
+        } else {
+            data.query_row("SELECT created_time FROM conversation WHERE id=?1", params![source], |r| r.get(0))
+        }.map_err(|e| e.to_string())?;
+        overrides.insert("updated_time".into(), json!(updated));
+    }
+    let fork = copy(data, "conversation", source, &overrides)?;
+    for id in ids {
+        let message = copy(data, "message", id, &Map::from_iter([("conversation_id".into(), json!(fork))]))?;
+        let attachments: Vec<i64> = data.prepare("SELECT id FROM message_attachment WHERE message_id=?1 ORDER BY id").map_err(|e| e.to_string())?
+            .query_map(params![id], |r| r.get(0)).map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        for attachment in attachments { copy(data, "message_attachment", attachment, &Map::from_iter([("message_id".into(), json!(message))]))?; }
+    }
+    Ok(fork)
+}
+
 fn maybe_fork_before_message_insert(
     app_handle: &AppHandle,
     sync_conn: &Connection,
@@ -3315,10 +3485,7 @@ fn maybe_fork_before_message_insert(
     field_values: &mut Map<String, JsonValue>,
 ) -> Result<(), String> {
     maybe_fork_message_in_db(sync_conn, data_conn, field_values, |conversation_id, fork_point| {
-        let id = crate::api::conversation_api::fork_conversation_internal(
-            app_handle, conversation_id, fork_point,
-            crate::api::conversation_api::ForkNameStyle::SyncDivergence, false,
-        )?;
+        let id = fork_sync_conversation_in_db(data_conn, conversation_id, fork_point)?;
         schedule_sync_after_local_change(app_handle);
         Ok(id)
     })
@@ -3424,6 +3591,12 @@ fn try_fork_message_conflict_instead_of_overwrite(
     let db_path = get_db_path(app_handle, spec.db_name)?;
     let data_conn = open_data_db(&db_path)?;
 
+    persistence::coordinated(sync_conn, &data_conn, || {
+        try_fork_message_conflict_in_db(sync_conn, &data_conn, &spec, change)
+    })
+}
+
+fn try_fork_message_conflict_in_db(sync_conn: &Connection, data_conn: &Connection, spec: &SyncTableSpec, change: &PullChange) -> Result<bool, String> {
     let payload = match change.payload.as_ref() {
         Some(p) => p,
         None => return Ok(false),
@@ -3477,13 +3650,7 @@ fn try_fork_message_conflict_instead_of_overwrite(
 
     let forked_id = if routed {
         field_as_i64(&field_values, "conversation_id").expect("routed conversation")
-    } else { crate::api::conversation_api::fork_conversation_internal(
-        app_handle,
-        conversation_id,
-        fork_point,
-        crate::api::conversation_api::ForkNameStyle::SyncDivergence,
-        false,
-    )? };
+    } else { fork_sync_conversation_in_db(data_conn, conversation_id, fork_point)? };
     let _ = ensure_object_id(sync_conn, "conversation", "conversation", forked_id)?;
     remember_sync_branch(sync_conn, conversation_id, &field_values, forked_id)?;
 
@@ -3518,7 +3685,6 @@ fn try_fork_message_conflict_instead_of_overwrite(
         &change.object_id,
     )?;
     upsert_shadow_from_remote(sync_conn, change)?;
-    schedule_sync_after_local_change(app_handle);
     debug!(
         original_conversation_id = conversation_id,
         forked_conversation_id = forked_id,
@@ -3560,7 +3726,7 @@ fn apply_delete(
         return Ok(());
     }
     if !spec.natural_key_columns.is_empty() {
-        let values = natural_values_from_object_id(&change.object_id)?;
+        let Some(values) = natural_values_for_object(sync_conn, spec.object_type, &change.object_id)? else { return Ok(()); };
         let where_clause = spec
             .natural_key_columns
             .iter()
@@ -3708,16 +3874,15 @@ fn try_deterministic_child_object_id(
     let Some(parent) = parent_sync_id else {
         return Ok(None);
     };
-    if name_parts.is_empty() {
-        Ok(Some(format!("official:{}:{}", spec.object_type, parent)))
+    let legacy = if name_parts.is_empty() {
+        format!("official:{}:{}", spec.object_type, parent)
     } else {
-        Ok(Some(format!(
-            "official:{}:{}:{}",
-            spec.object_type,
-            parent,
-            name_parts.join(":")
-        )))
-    }
+        format!("official:{}:{}:{}", spec.object_type, parent, name_parts.join(":"))
+    };
+    // Preserve all valid legacy IDs. Invalid/oversized keys use an unambiguous
+    // tuple encoding before hashing so ':' in different parts cannot collide.
+    let identity = serde_json::to_string(&(spec.object_type, parent, name_parts)).map_err(|e| e.to_string())?;
+    Ok(Some(if valid_sync_id(&legacy) { legacy } else { format!("child-sha256:{}", hash_text(&identity)) }))
 }
 
 /// 远端 sync_id 获胜：清掉占用该 sync_id 的旧映射，再按 local_id upsert。
@@ -3881,23 +4046,30 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
 }
 
 fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64, PushEvent)>, String> {
+    load_outbox_from_db(conn, limit, false)
+}
+
+fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> Result<Vec<(i64, PushEvent)>, String> {
     let rank_sql = specs().iter().enumerate().map(|(rank, spec)|
         format!("WHEN '{}' THEN {rank}", spec.object_type)).collect::<Vec<_>>().join(" ");
     let order_sql = format!("CASE object_type {rank_sql} ELSE 999 END");
+    let filter = if bootstrap_only {
+        "sent_once=1 AND outcome_known=0 AND status IN ('pending','pushing','failed') AND event_id IN (SELECT event_id FROM sync_bootstrap_attempt)"
+    } else { "status = 'pending'" };
     let mut stmt = conn
         .prepare(
             &format!("SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
-             WHERE status = 'pending'
-               AND NOT EXISTS (SELECT 1 FROM sync_outbox earlier
+             WHERE ({filter})
+               AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM sync_outbox earlier
                    WHERE earlier.object_type = sync_outbox.object_type
                      AND earlier.object_id = sync_outbox.object_id
-                     AND earlier.id < sync_outbox.id AND earlier.status IN ('pending', 'pushing'))
-               AND (next_retry_at IS NULL OR next_retry_at <= ?2)
-               AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.refs') ELSE NULL END) ref
+                     AND earlier.id < sync_outbox.id AND earlier.status IN ('pending', 'pushing', 'failed')))
+               AND ({bootstrap_only} OR next_retry_at IS NULL OR next_retry_at <= ?2)
+               AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.refs') ELSE NULL END) ref
                    JOIN sync_outbox parent ON parent.object_id = ref.value
                    WHERE parent.operation = 'upsert' AND parent.status IN ('pending', 'pushing', 'failed')
-                     AND parent.object_id != sync_outbox.object_id)
+                     AND parent.object_id != sync_outbox.object_id))
              ORDER BY CASE WHEN operation = 'delete' THEN 1000 - ({order_sql}) ELSE {order_sql} END, id
              LIMIT ?1"),
         )
@@ -3937,6 +4109,11 @@ fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64
             },
             None => None,
         };
+        if ![event_id.as_str(), object_type.as_str(), object_id.as_str()].iter().all(|v| valid_sync_id(v)) {
+            conn.execute("UPDATE sync_outbox SET status='failed', outcome_known=1, last_error=?2 WHERE id=?1",
+                params![id, format!("同步 ID 不符合协议（1–128 ASCII 字符）: {object_type}/{object_id}, event={event_id}")]).map_err(|e| e.to_string())?;
+            continue;
+        }
         events.push((
             id,
             PushEvent {
@@ -3958,15 +4135,24 @@ fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64
 
 fn mark_events_pushing(app_handle: &AppHandle, events: &[(i64, PushEvent)]) -> Result<(), String> {
     let conn = open_sync_db(app_handle)?;
-    for (id, _) in events {
-        conn.execute("UPDATE sync_outbox SET status = 'pushing', sent_once = 1 WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    mark_events_pushing_in_db(&conn, events)
 }
 
-/// 推送失败的退避策略：网络/5xx 类失败保持 pending 并按 retry_count 指数退避
-/// （封顶 300s），连续失败达到上限才转 failed 等待人工重试。
+fn mark_events_pushing_in_db(conn: &Connection, events: &[(i64, PushEvent)]) -> Result<(), String> {
+    conn.execute_batch("SAVEPOINT mark_sync_attempt").map_err(|e| e.to_string())?;
+    let result = (|| {
+        for (id, event) in events {
+            if get_sync_meta(conn, "bootstrap_origin")?.is_some() {
+                conn.execute("INSERT OR IGNORE INTO sync_bootstrap_attempt VALUES (?1)", params![event.event_id]).map_err(|e| e.to_string())?;
+            }
+            conn.execute("UPDATE sync_outbox SET status='pushing', sent_once=1, outcome_known=0 WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    persistence::finish_savepoint(conn, "mark_sync_attempt", result)
+}
+
+/// 推送失败按 retry_count 指数退避。已发送且结果未知的事件不能因重试次数耗尽被丢弃。
 const MAX_EVENT_RETRY_COUNT: i64 = 10;
 const MAX_RETRY_BACKOFF_SECS: i64 = 300;
 
@@ -3975,13 +4161,13 @@ fn compute_next_retry_at(retry_count: i64) -> i64 {
     Utc::now().timestamp() + backoff
 }
 
-/// 记录一次推送失败：retry_count+1 并设置退避时间；超过上限转 failed。
+/// 记录一次失败：已发送事件持续 pending；未发送的本地准备失败达到上限转 failed。
 fn record_event_failure(conn: &Connection, id: i64, error: &str) -> Result<(), String> {
-    let retry_count: i64 = conn
-        .query_row("SELECT retry_count FROM sync_outbox WHERE id = ?1", params![id], |row| row.get(0))
+    let (retry_count, sent_once): (i64, bool) = conn
+        .query_row("SELECT retry_count, sent_once FROM sync_outbox WHERE id = ?1", params![id], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|e| e.to_string())?;
     let next_retry_count = retry_count + 1;
-    let (status, next_retry_at): (&str, Option<i64>) = if next_retry_count >= MAX_EVENT_RETRY_COUNT {
+    let (status, next_retry_at): (&str, Option<i64>) = if next_retry_count >= MAX_EVENT_RETRY_COUNT && !sent_once {
         ("failed", None)
     } else {
         ("pending", Some(compute_next_retry_at(next_retry_count)))
@@ -4014,7 +4200,7 @@ fn mark_event_failed_permanent(app_handle: &AppHandle, id: i64, error: &str) -> 
     let conn = open_sync_db(app_handle)?;
     conn.execute(
         "UPDATE sync_outbox
-         SET status = 'failed', retry_count = retry_count + 1, last_error = ?2, next_retry_at = NULL
+         SET status = 'failed', outcome_known = 1, retry_count = retry_count + 1, last_error = ?2, next_retry_at = NULL
          WHERE id = ?1",
         params![id, error],
     )
@@ -4027,7 +4213,7 @@ fn reset_pushing_events(app_handle: &AppHandle) -> Result<(), String> {
     conn.execute(
         "UPDATE sync_outbox
          SET status = 'pending', last_error = NULL
-         WHERE status = 'pushing'",
+         WHERE status = 'pushing' OR (status = 'failed' AND sent_once = 1 AND outcome_known = 0)",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -4065,6 +4251,7 @@ fn apply_ack_to_shadow(
     object_type: &str,
     object_id: &str,
     server_version: i64,
+    server_seq: i64,
     operation: &str,
     payload_hash: &str,
 ) -> Result<(), String> {
@@ -4076,13 +4263,14 @@ fn apply_ack_to_shadow(
     if operation == "delete" {
         let now = now_string();
         conn.execute(
-            "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at, server_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
              ON CONFLICT(object_type, object_id)
              DO UPDATE SET server_version = excluded.server_version,
                            deleted_at = excluded.deleted_at,
-                           updated_at = excluded.updated_at",
-            params![object_type, object_id, server_version, payload_hash, now],
+                           updated_at = excluded.updated_at,
+                           server_seq = MAX(sync_shadow.server_seq, excluded.server_seq)",
+            params![object_type, object_id, server_version, payload_hash, now, server_seq],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -4102,16 +4290,70 @@ fn apply_ack_to_shadow(
         return Ok(());
     }
     conn.execute(
-        "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, NULL, ?5)
+        "INSERT INTO sync_shadow (object_type, object_id, server_version, payload_hash, deleted_at, updated_at, server_seq)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)
          ON CONFLICT(object_type, object_id)
          DO UPDATE SET server_version = excluded.server_version,
                        payload_hash = excluded.payload_hash,
                        deleted_at = NULL,
-                       updated_at = excluded.updated_at",
-        params![object_type, object_id, server_version, payload_hash, now_string()],
+                       updated_at = excluded.updated_at,
+                           server_seq = MAX(sync_shadow.server_seq, excluded.server_seq)",
+        params![object_type, object_id, server_version, payload_hash, now_string(), server_seq],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn consume_accepted_event(conn: &Connection, id: i64, event: &PushEvent, ack: &AcceptedEvent) -> Result<(), String> {
+    if ack.object_type != event.object_type || ack.object_id != event.object_id || ack.event_id != event.event_id {
+        return Err(format!("同步 ACK 身份不匹配: event={}", event.event_id));
+    }
+    conn.execute_batch("SAVEPOINT consume_sync_ack").map_err(|e| e.to_string())?;
+    let result = (|| {
+        let hash = sync_payload_hash(conn, event.payload.as_ref())?;
+        apply_ack_to_shadow(conn, &ack.object_type, &ack.object_id, ack.server_version,
+            ack.server_seq, &event.operation, &hash)?;
+        conn.execute("DELETE FROM sync_outbox WHERE id=?1 AND event_id=?2", params![id, ack.event_id]).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM sync_bootstrap_attempt WHERE event_id=?1", params![ack.event_id]).map_err(|e| e.to_string())?;
+        conn.execute("UPDATE sync_outbox SET base_version=MAX(COALESCE(base_version,0),?3)
+            WHERE object_type=?1 AND object_id=?2 AND status IN ('pending','failed') AND sent_once=0",
+            params![ack.object_type, ack.object_id, ack.server_version]).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    persistence::finish_savepoint(conn, "consume_sync_ack", result)
+}
+
+// Check every outcome before any local mutation. Missing results are unknown
+// transport outcomes; fail this attempt so bootstrap recovery cannot spin.
+fn validate_push_response(events: &[(i64, PushEvent)], response: &PushResponse) -> Result<(), String> {
+    let by_event_id: HashMap<&str, &(i64, PushEvent)> =
+        events.iter().map(|item| (item.1.event_id.as_str(), item)).collect();
+    let mut response_ids = HashSet::new();
+    for event_id in response.accepted.iter().map(|item| item.event_id.as_str())
+        .chain(response.rejected.iter().map(|item| item.event_id.as_str()))
+        .chain(response.conflicts.iter().map(|item| item.event_id.as_str())) {
+        if !by_event_id.contains_key(event_id) {
+            return Err(format!("同步服务器返回未提交事件结果: {event_id}"));
+        }
+        if !response_ids.insert(event_id.to_string()) {
+            return Err(format!("同步服务器重复返回事件结果: {event_id}"));
+        }
+    }
+    for accepted in &response.accepted {
+        let (_, event) = by_event_id[accepted.event_id.as_str()];
+        if accepted.object_type != event.object_type || accepted.object_id != event.object_id {
+            return Err(format!("同步 ACK 身份不匹配: event={}", accepted.event_id));
+        }
+    }
+    for conflict in &response.conflicts {
+        let (_, event) = by_event_id[conflict.event_id.as_str()];
+        if conflict.object_type != event.object_type || conflict.object_id != event.object_id {
+            return Err(format!("同步冲突身份不匹配: event={}", conflict.event_id));
+        }
+    }
+    if response_ids.len() != events.len() {
+        return Err(format!("同步服务器响应缺少 {} 条事件结果", events.len() - response_ids.len()));
+    }
     Ok(())
 }
 
@@ -4125,28 +4367,7 @@ fn handle_push_response(
         events.iter().map(|item| (item.1.event_id.as_str(), item)).collect();
     for accepted in response.accepted {
         if let Some((id, event)) = by_event_id.get(accepted.event_id.as_str()) {
-            // ack 后直接删除 outbox 行，不再永久残留 'acked' 记录
-            conn.execute("DELETE FROM sync_outbox WHERE id = ?1", params![id])
-                .map_err(|e| e.to_string())?;
-            let payload_hash = event
-                .payload
-                .as_ref()
-                .map(|payload| sync_payload_hash(&conn, Some(payload)))
-                .transpose()?
-                .unwrap_or_else(|| hash_text("null"));
-            apply_ack_to_shadow(
-                &conn,
-                &accepted.object_type,
-                &accepted.object_id,
-                accepted.server_version,
-                &event.operation,
-                &payload_hash,
-            )?;
-            conn.execute(
-                "UPDATE sync_outbox SET base_version = ?3 WHERE object_type = ?1 AND object_id = ?2
-                 AND status = 'pending' AND sent_once = 0",
-                params![accepted.object_type, accepted.object_id, accepted.server_version],
-            ).map_err(|e| e.to_string())?;
+            consume_accepted_event(&conn, *id, event, &accepted)?;
         }
     }
 
@@ -4159,7 +4380,7 @@ fn handle_push_response(
             latest_failure = Some(rejected.reason.clone());
             conn.execute(
                 "UPDATE sync_outbox
-                 SET status = 'failed', retry_count = retry_count + 1, last_error = ?2
+                 SET status = 'failed', outcome_known = 1, retry_count = retry_count + 1, last_error = ?2
                  WHERE id = ?1",
                 params![id, rejected.reason],
             )
@@ -4169,6 +4390,7 @@ fn handle_push_response(
 
     let mut conflict_resolved = 0usize;
     let mut resolved_object_types: Vec<String> = Vec::new();
+    let mut conflict_failures = 0usize;
     for conflict in response.conflicts {
         if let Some((id, event)) = by_event_id.get(conflict.event_id.as_str()) {
             let equivalent = event.operation == conflict.server_operation
@@ -4217,13 +4439,8 @@ fn handle_push_response(
                     // 服务器变更后续也会经 pull 正常下发。
                     let message = format!("冲突落地失败: {err}");
                     latest_failure = Some(message.clone());
-                    conn.execute(
-                        "UPDATE sync_outbox
-                         SET status = 'failed', retry_count = retry_count + 1, last_error = ?2
-                         WHERE id = ?1",
-                        params![id, message],
-                    )
-                    .map_err(|e| e.to_string())?;
+                    conflict_failures += 1;
+                    record_event_failure(&conn, *id, &message)?;
                 }
             }
         }
@@ -4231,10 +4448,10 @@ fn handle_push_response(
     if !resolved_object_types.is_empty() {
         emit_sync_domain_events(app_handle, resolved_object_types.iter().map(String::as_str));
     }
-    if rejected_count > 0 {
+    if rejected_count + conflict_failures > 0 {
         return Err(format!(
-            "同步服务器拒绝 {} 条；最近原因：{}",
-            rejected_count,
+            "同步服务器拒绝 {} 条，冲突落地失败 {} 条；最近原因：{}",
+            rejected_count, conflict_failures,
             latest_failure.unwrap_or_else(|| "未提供原因".to_string())
         ));
     }
@@ -4410,6 +4627,7 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
                 CHECK(status IN ('pending', 'pushing', 'acked', 'failed')),
             retry_count INTEGER NOT NULL DEFAULT 0,
             sent_once INTEGER NOT NULL DEFAULT 0,
+            outcome_known INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
             next_retry_at INTEGER
         );
@@ -4441,6 +4659,12 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
         );
         CREATE INDEX IF NOT EXISTS idx_sync_dead_letter_object
             ON sync_dead_letter(object_type, object_id);
+        CREATE TABLE IF NOT EXISTS sync_bootstrap_attempt (event_id TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS sync_apply_receipt (id TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS sync_natural_key (
+            object_type TEXT NOT NULL, object_id TEXT NOT NULL, values_json TEXT NOT NULL,
+            PRIMARY KEY (object_type, object_id)
+        );
         CREATE TABLE IF NOT EXISTS sync_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -4457,6 +4681,7 @@ fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
 fn ensure_sync_db_columns(conn: &Connection) -> Result<(), String> {
     ensure_column(conn, "sync_shadow", "server_seq", "ALTER TABLE sync_shadow ADD COLUMN server_seq INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "sync_outbox", "next_retry_at", "ALTER TABLE sync_outbox ADD COLUMN next_retry_at INTEGER")?;
+    ensure_column(conn, "sync_outbox", "outcome_known", "ALTER TABLE sync_outbox ADD COLUMN outcome_known INTEGER NOT NULL DEFAULT 0")?;
     // Existing events may already have reached the server before an interrupted push.
     ensure_column(conn, "sync_outbox", "sent_once", "ALTER TABLE sync_outbox ADD COLUMN sent_once INTEGER NOT NULL DEFAULT 1")
 }
@@ -4526,6 +4751,36 @@ fn clear_sync_state(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn remote_scope(server_url: &str, account_id: &str) -> String {
+    json!([server_url.trim_end_matches('/'), account_id]).to_string()
+}
+
+fn bind_remote_account(conn: &Connection, server_url: &str, account_id: &str, remote_empty: bool) -> Result<(), String> {
+    let scope = remote_scope(server_url, account_id);
+    if let Some(previous) = get_sync_meta(conn, "remote_account_scope")? {
+        if previous != scope {
+            return Err("同步服务端返回的账号身份已变更，已停止同步；请使用配套的数据目录，避免混合账号历史".into());
+        }
+    }
+    set_sync_meta(conn, "remote_account_scope", &scope)?;
+    let has_baseline: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sync_shadow)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if remote_empty && !has_baseline {
+        set_sync_meta(conn, "bootstrap_origin", &scope)?;
+    } else if has_baseline {
+        conn.execute("DELETE FROM sync_meta WHERE key='bootstrap_origin'", []).map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM sync_bootstrap_attempt", []).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn ensure_bootstrap_origin(conn: &Connection, server_url: &str, account_id: &str) -> Result<(), String> {
+    let scope = remote_scope(server_url, account_id);
+    if get_sync_meta(conn, "bootstrap_origin")?.as_deref() != Some(scope.as_str()) {
+        return Err("首次同步缺少同服务器、同账号的初始上传记录，无法自动恢复回执；请保留配套数据库并核验远端历史".into());
+    }
+    Ok(())
+}
+
 fn ensure_initial_sync_is_safe(conn: &Connection, remote_empty: bool, local_empty: bool) -> Result<(), String> {
     if remote_empty || local_empty { return Ok(()); }
     let has_baseline: bool = conn.query_row(
@@ -4557,7 +4812,7 @@ fn ensure_remote_history_is_compatible(conn: &Connection, remote_cursor: i64) ->
 fn open_sync_db(app_handle: &AppHandle) -> Result<Connection, String> {
     let path = get_db_path(app_handle, "sync.db")?;
     let conn = open_data_db(&path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;")
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;")
         .map_err(|e| e.to_string())?;
     Ok(conn)
 }
@@ -4757,7 +5012,33 @@ fn natural_object_id(
             .ok_or_else(|| format!("natural key {column} missing"))?;
         parts.push(value.as_str().map(ToOwned::to_owned).unwrap_or_else(|| value.to_string()));
     }
-    Ok(format!("natural:{}", BASE64.encode(parts.join("\u{1f}"))))
+    let legacy = format!("natural:{}", BASE64.encode(parts.join("\u{1f}")));
+    if valid_sync_id(&legacy) && parts.iter().all(|p| !p.contains('\u{1f}')) { return Ok(legacy); }
+    Ok(format!("natural-sha256:{}", hash_text(&serde_json::to_string(&parts).map_err(|e| e.to_string())?)))
+}
+
+fn valid_sync_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.bytes().all(|c|
+        c.is_ascii_alphanumeric() || b"._:+/=-".contains(&c))
+}
+
+fn remember_natural_key(sync: &Connection, spec: &SyncTableSpec, id: &str, fields: &HashMap<String, JsonValue>) -> Result<(), String> {
+    let values = spec.natural_key_columns.iter().map(|key| {
+        let value = fields.get(*key).ok_or_else(|| format!("natural key {key} missing"))?;
+        Ok(value.as_str().map(ToOwned::to_owned).unwrap_or_else(|| value.to_string()))
+    }).collect::<Result<Vec<_>, String>>()?;
+    sync.execute("INSERT INTO sync_natural_key VALUES (?1,?2,?3)
+        ON CONFLICT(object_type,object_id) DO UPDATE SET values_json=excluded.values_json",
+        params![spec.object_type, id, serde_json::to_string(&values).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn natural_values_for_object(sync: &Connection, object_type: &str, id: &str) -> Result<Option<Vec<String>>, String> {
+    if id.starts_with("natural:") { return natural_values_from_object_id(id).map(Some); }
+    if !id.starts_with("natural-sha256:") { return Err(format!("invalid natural object id: {id}")); }
+    let values: Option<String> = sync.query_row("SELECT values_json FROM sync_natural_key WHERE object_type=?1 AND object_id=?2",
+        params![object_type, id], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+    values.map(|v| serde_json::from_str(&v).map_err(|e| e.to_string())).transpose()
 }
 
 fn natural_values_from_object_id(object_id: &str) -> Result<Vec<String>, String> {
@@ -4892,7 +5173,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         .unwrap_or(0);
     let pushing_outbox_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sync_outbox WHERE status = 'pushing'",
+            "SELECT COUNT(*) FROM sync_outbox WHERE status = 'pushing' OR (status = 'failed' AND sent_once = 1 AND outcome_known = 0)",
             [],
             |row| row.get(0),
         )
@@ -6133,7 +6414,7 @@ mod tests {
         )
         .unwrap();
 
-        apply_ack_to_shadow(&conn, "conversation", "obj-1", 4, "delete", "hash").unwrap();
+        apply_ack_to_shadow(&conn, "conversation", "obj-1", 4, 0, "delete", "hash").unwrap();
         let deleted_at: Option<String> = conn
             .query_row(
                 "SELECT deleted_at FROM sync_shadow WHERE object_type = 'conversation' AND object_id = 'obj-1'",
@@ -6150,7 +6431,7 @@ mod tests {
         assert_eq!(map_count, 0);
 
         // upsert ack 会清除墓碑标记（对象复活场景）
-        apply_ack_to_shadow(&conn, "conversation", "obj-1", 5, "upsert", "hash2").unwrap();
+        apply_ack_to_shadow(&conn, "conversation", "obj-1", 5, 0, "upsert", "hash2").unwrap();
         let (deleted_at, version): (Option<String>, i64) = conn
             .query_row(
                 "SELECT deleted_at, server_version FROM sync_shadow WHERE object_id = 'obj-1'",

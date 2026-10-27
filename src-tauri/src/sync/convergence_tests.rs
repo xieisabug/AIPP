@@ -528,7 +528,7 @@ fn test_sync_server_multidevice_roundtrip() {
         for (id, event) in events {
             let ack = first["accepted"].as_array().unwrap().iter().find(|a| a["event_id"] == event.event_id).unwrap();
             apply_ack_to_shadow(&source.sync, &event.object_type, &event.object_id,
-                ack["server_version"].as_i64().unwrap(), &event.operation,
+                ack["server_version"].as_i64().unwrap(), ack["server_seq"].as_i64().unwrap(), &event.operation,
                 &sync_payload_hash(&source.sync, event.payload.as_ref()).unwrap()).unwrap();
             source.sync.execute("DELETE FROM sync_outbox WHERE id=?1", params![id]).unwrap();
         }
@@ -553,4 +553,157 @@ fn test_sync_server_multidevice_roundtrip() {
     let restored = Device::new("device-a"); let mut reset_cursor = 0;
     server.pull(&restored, &mut reset_cursor, 211);
     assert_eq!(restored.count("conversation"), 1); assert_eq!(restored.count("message"), 1200);
+}
+
+// Exercises the production SQLite helpers against the real FastAPI routes;
+// transport loss is injected by deliberately omitting ACK consumption.
+mod fixes_2_7 {
+    use super::*;
+
+    fn push(server: &mut ServerBridge, device: &Device, events: &[(i64, PushEvent)]) -> JsonValue {
+        mark_events_pushing_in_db(&device.sync, events).unwrap();
+        server.request(json!({"method":"POST","path":"/v1/sync/push","body":PushRequest {
+            device_id:device.id.into(),device_name:"regression".into(),
+            events:events.iter().map(|(_,e)|e.clone()).collect()
+        }}))
+    }
+
+    fn ack(device: &Device, events: &[(i64, PushEvent)], response: &JsonValue) {
+        for value in response["accepted"].as_array().unwrap() {
+            let receipt: AcceptedEvent = serde_json::from_value(value.clone()).unwrap();
+            let (id,event)=events.iter().find(|(_,e)|e.event_id==receipt.event_id).unwrap();
+            consume_accepted_event(&device.sync,*id,event,&receipt).unwrap();
+        }
+    }
+
+    fn accept_all(server: &mut ServerBridge, device: &Device) {
+        loop {
+            let events=load_pending_outbox_from_db(&device.sync,100).unwrap();
+            if events.is_empty() {break;}
+            let response=push(server,device,&events);
+            assert_eq!(response["conflicts"],json!([]));assert_eq!(response["rejected"],json!([]));
+            ack(device,&events,&response);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires sync-server Python test dependencies"]
+    fn test_sync_lost_ack_retries_or_pull_echo_preserve_latest_edit() {
+        for pull_echo in [false,true] {
+            let mut server=ServerBridge::new(); let device=Device::new("writer");
+            device.data.execute("INSERT INTO conversation(id,name) VALUES(1,'baseline')",[]).unwrap();
+            device.scan();accept_all(&mut server,&device);
+            device.data.execute("UPDATE conversation SET name='old-accepted'",[]).unwrap();device.scan();
+            let first=load_pending_outbox_from_db(&device.sync,100).unwrap();
+            let lost=push(&mut server,&device,&first);
+            for _ in 0..20 {record_event_failure(&device.sync,first[0].0,"injected lost ACK").unwrap();}
+            device.data.execute("UPDATE conversation SET name='latest-edit'",[]).unwrap();device.scan();
+            assert!(load_pending_outbox_from_db(&device.sync,100).unwrap().is_empty());
+            let mut cursor=0;
+            if pull_echo {
+                server.pull(&device,&mut cursor,100);
+                assert_eq!(device.data.query_row("SELECT name FROM conversation",[],|r|r.get::<_,String>(0)).unwrap(),"latest-edit");
+            } else {
+                device.sync.execute("UPDATE sync_outbox SET next_retry_at=NULL",[]).unwrap();
+                let retry=load_pending_outbox_from_db(&device.sync,100).unwrap();
+                assert_eq!(retry.len(),1);assert_eq!(retry[0].1.event_id,first[0].1.event_id);
+                let repeated=push(&mut server,&device,&retry);assert_eq!(repeated,lost);ack(&device,&retry,&repeated);
+            }
+            accept_all(&mut server,&device);server.pull(&device,&mut cursor,100);
+            let receiver=Device::new("receiver");let mut other_cursor=0;server.pull(&receiver,&mut other_cursor,100);
+            assert_eq!(receiver.data.query_row("SELECT name FROM conversation",[],|r|r.get::<_,String>(0)).unwrap(),"latest-edit");
+            device.scan();assert!(load_pending_outbox_from_db(&device.sync,100).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires sync-server Python test dependencies"]
+    fn test_sync_attempted_creates_deleted_before_ack_converge_without_resurrection() {
+        for kind in ["conversation.message","system.feature_config"] {
+            let mut server=ServerBridge::new();let device=Device::new("writer");
+            device.data.execute("INSERT INTO conversation(id,name) VALUES(1,'baseline')",[]).unwrap();
+            device.scan();accept_all(&mut server,&device);
+            device.data.execute_batch("CREATE TABLE feature_config(id INTEGER PRIMARY KEY,feature_code TEXT,key TEXT,value TEXT)").unwrap();
+            if kind=="conversation.message" {
+                device.data.execute("INSERT INTO message(id,conversation_id,message_type,content,finish_time) VALUES(1,1,'user','to-delete','finished')",[]).unwrap();
+                device.scan();
+            } else {
+                device.data.execute("INSERT INTO feature_config VALUES(1,'feature','key','to-delete')",[]).unwrap();
+                let spec=specs().into_iter().find(|s|s.object_type==kind).unwrap();
+                let (rows,_)=read_local_snapshots_from_db(&device.data,&spec,&device.sync,&mut DanglingFkScanReport::default(),|_,_|Ok(true)).unwrap();
+                enqueue_snapshot_if_changed(&device.sync,&rows[0],device.id).unwrap();
+            }
+            let events=load_pending_outbox_from_db(&device.sync,100).unwrap();assert_eq!(events.len(),1);
+            let lost=push(&mut server,&device,&events);assert_eq!(lost["accepted"].as_array().unwrap().len(),1);
+            let table=if kind=="conversation.message" {"message"} else {"feature_config"};
+            device.data.execute(&format!("DELETE FROM {table}"),[]).unwrap();
+            let spec=specs().into_iter().find(|s|s.object_type==kind).unwrap();
+            scan_local_deletes_in_db(&device.sync,&spec,&HashSet::new(),|id|local_row_exists_in_db(&device.sync,&device.data,&spec,id)).unwrap();
+            let mut cursor=0;server.pull(&device,&mut cursor,100);
+            assert_eq!(device.count(table),0);
+            accept_all(&mut server,&device);server.pull(&device,&mut cursor,100);
+            let receiver=Device::new("receiver");receiver.data.execute_batch("CREATE TABLE feature_config(id INTEGER PRIMARY KEY,feature_code TEXT,key TEXT,value TEXT)").unwrap();
+            let mut remote_cursor=0;server.pull(&receiver,&mut remote_cursor,100);
+            assert_eq!(receiver.count(table),0);assert_eq!(device.replay().1,0);assert_eq!(receiver.replay().1,0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires sync-server Python test dependencies"]
+    fn test_sync_alias_history_cannot_overwrite_later_canonical_ack() {
+        let mut server=ServerBridge::new();let device=Device::new("writer");
+        let remote = |server: &mut ServerBridge,id: &str,kind: &str,object: &str,base: i64,payload: JsonValue| {
+            server.request(json!({"method":"POST","path":"/v1/sync/push","body":{"device_id":"legacy","events":[{
+                "event_id":id,"object_type":kind,"object_id":object,"base_version":base,"operation":"upsert","payload":payload
+            }]}}))
+        };
+        let model=|name: &str|json!({"fields":{"name":name,"code":"x","llm_provider_id":0},"refs":{"llm_provider_id":"provider"}});
+        remote(&mut server,"provider-e","llm.provider","provider",0,json!({"fields":{"name":"custom","is_official":0},"refs":{}}));
+        remote(&mut server,"alias-v1","llm.model","alias",0,model("alias-v1"));
+        remote(&mut server,"canonical-v1","llm.model","canonical",0,model("canonical-v1"));
+        let mut cursor=0;server.pull(&device,&mut cursor,100);assert_eq!(device.count("llm_model"),1);
+        remote(&mut server,"alias-v2","llm.model","alias",1,model("older-alias"));
+        device.data.execute("UPDATE llm_model SET name='latest-confirmed'",[]).unwrap();device.scan();accept_all(&mut server,&device);
+        server.pull(&device,&mut cursor,100);
+        assert_eq!(device.data.query_row("SELECT name FROM llm_model",[],|r|r.get::<_,String>(0)).unwrap(),"latest-confirmed");
+        device.scan();assert!(load_pending_outbox_from_db(&device.sync,100).unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires sync-server Python test dependencies"]
+    fn test_sync_bootstrap_exact_receipt_recovery_precedes_new_scanning() {
+        let mut server=ServerBridge::new();let device=Device::new("writer");
+        device.data.execute("INSERT INTO conversation(id,name) VALUES(1,'first-upload')",[]).unwrap();
+        let status=server.request(json!({"path":"/v1/sync/status"}));assert_eq!(status["remote_empty"],true);
+        let account=status["account_id"].as_str().unwrap();
+        bind_remote_account(&device.sync,"https://same-server",account,true).unwrap();
+        device.scan();let events=load_pending_outbox_from_db(&device.sync,100).unwrap();let lost=push(&mut server,&device,&events);
+        record_event_failure(&device.sync,events[0].0,"lost first receipt").unwrap();
+        device.data.execute("UPDATE conversation SET name='after-first-upload'",[]).unwrap();
+        let status=server.request(json!({"path":"/v1/sync/status"}));assert_eq!(status["remote_empty"],false);
+        assert!(ensure_initial_sync_is_safe(&device.sync,false,false).is_err());
+        ensure_bootstrap_origin(&device.sync,"https://same-server",account).unwrap();
+        let retry=load_outbox_from_db(&device.sync,100,true).unwrap();assert_eq!(retry.len(),1);
+        let receipt=push(&mut server,&device,&retry);assert_eq!(receipt,lost);ack(&device,&retry,&receipt);
+        ensure_initial_sync_is_safe(&device.sync,false,false).unwrap();
+        device.scan();accept_all(&mut server,&device);
+        let receiver=Device::new("receiver");let mut cursor=0;server.pull(&receiver,&mut cursor,100);
+        assert_eq!(receiver.data.query_row("SELECT name FROM conversation",[],|r|r.get::<_,String>(0)).unwrap(),"after-first-upload");
+    }
+
+    #[test]
+    #[ignore = "requires sync-server Python test dependencies"]
+    fn test_sync_special_or_long_model_ids_upload_with_valid_neighbor() {
+        for code in ["vendor/model@2026".to_string(),"x".repeat(160)] {
+            let mut server=ServerBridge::new();let device=Device::new("writer");
+            device.data.execute("INSERT INTO llm_provider VALUES(71,'official',1)",[]).unwrap();device.scan();accept_all(&mut server,&device);
+            device.data.execute("INSERT INTO llm_model VALUES(83,'model',71,?1)",params![code]).unwrap();
+            device.data.execute("INSERT INTO conversation(id,name) VALUES(1,'valid-neighbor')",[]).unwrap();
+            let rows=device.scan();let id=&rows.iter().find(|r|r.object_type=="llm.model").unwrap().object_id;
+            assert!(valid_sync_id(id));assert!(id.starts_with("child-sha256:"));
+            let events=load_pending_outbox_from_db(&device.sync,100).unwrap();assert_eq!(events.len(),2);
+            let response=push(&mut server,&device,&events);assert_eq!(response["accepted"].as_array().unwrap().len(),2);
+            ack(&device,&events,&response);device.scan();assert!(load_pending_outbox_from_db(&device.sync,100).unwrap().is_empty());
+        }
+    }
 }
