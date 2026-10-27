@@ -327,8 +327,8 @@ impl PluginDatabase {
 
     #[instrument(level = "debug", skip(self), fields(plugin_id))]
     pub fn delete_plugin(&self, plugin_id: i64) -> Result<()> {
-        let affected = self.conn.execute("DELETE FROM Plugins WHERE plugin_id = ?", [plugin_id])?;
-        debug!(affected, "Deleted plugin");
+        super::cascade_delete::delete(&self.conn, "Plugins", plugin_id)?;
+        debug!(plugin_id, "Deleted plugin and owned records");
         Ok(())
     }
 

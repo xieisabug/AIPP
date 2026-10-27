@@ -690,30 +690,9 @@ impl Repository<Conversation> for ConversationRepository {
     }
 }
 
-/// Cascade-delete a conversation and owned children in ownership order so sync
-/// can observe each missing row and enqueue deletes:
-/// `message_attachment` → `message` → `conversation_summary` → `conversation_todo` → `conversation`.
-///
-/// Matches `cleanup_conversation` in scheduled_task_api; prefer this shared path
-/// for any user-facing or scheduled conversation wipe.
+/// Delete owned data through the same transaction used by remote tombstones.
 pub fn cascade_delete_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
-    conn.execute(
-        "DELETE FROM message_attachment WHERE message_id IN (SELECT id FROM message WHERE conversation_id = ?1)",
-        params![conversation_id],
-    )?;
-    conn.execute("DELETE FROM message WHERE conversation_id = ?1", params![conversation_id])?;
-    // summary / todo declare ON DELETE CASCADE, but delete explicitly so behavior
-    // does not depend on PRAGMA foreign_keys and so the wipe order stays obvious.
-    conn.execute(
-        "DELETE FROM conversation_summary WHERE conversation_id = ?1",
-        params![conversation_id],
-    )?;
-    conn.execute(
-        "DELETE FROM conversation_todo WHERE conversation_id = ?1",
-        params![conversation_id],
-    )?;
-    conn.execute("DELETE FROM conversation WHERE id = ?1", params![conversation_id])?;
-    Ok(())
+    super::cascade_delete::delete(conn, "conversation", conversation_id)
 }
 
 pub struct MessageRepository {
@@ -971,11 +950,7 @@ impl Repository<Message> for MessageRepository {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn delete(&self, id: i64) -> Result<()> {
-        self.with_serialized_write(|conn| {
-            delete_attachments_for_message(conn, id)?;
-            conn.execute("DELETE FROM message WHERE id = ?1", params![id])?;
-            Ok(())
-        })
+        self.with_serialized_write(|conn| super::cascade_delete::delete(conn, "message", id))
     }
 }
 

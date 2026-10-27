@@ -19,7 +19,6 @@ use crate::{
             Assistant, AssistantDatabase, AssistantMCPConfig, AssistantMCPToolConfig,
             AssistantModel, AssistantModelConfig, AssistantPrompt, AssistantPromptParam,
         },
-        conversation_db::ConversationDatabase,
         llm_db::LLMDatabase,
     },
     utils::share_utils::{
@@ -998,27 +997,6 @@ pub fn delete_assistant(app_handle: tauri::AppHandle, assistant_id: i64) -> Resu
     if is_butler_system_assistant(&assistant) {
         return Err("系统保留的总管家助手不能删除".to_string());
     }
-
-    let _ = assistant_db
-        .delete_assistant_model_config_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string());
-    // Align with butler reset: clear assistant_model so assistant_id does not orphan.
-    let _ = assistant_db
-        .delete_assistant_model_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string());
-    let _ = assistant_db
-        .delete_assistant_prompt_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string());
-    let _ = assistant_db
-        .delete_assistant_prompt_param_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string());
-
-    let conversation_db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let _ = conversation_db
-        .conversation_repo()
-        .unwrap()
-        .update_assistant_id(assistant_id, Some(1))
-        .map_err(|e| e.to_string())?;
 
     assistant_db.delete_assistant(assistant_id).map_err(|e| e.to_string())?;
 

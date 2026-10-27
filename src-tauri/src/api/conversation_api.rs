@@ -575,17 +575,8 @@ pub fn delete_conversation(
     crate::api::ai::acp::schedule_acp_session_delete(&app_handle, conversation_id);
 
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    // Cascade: attachments → messages → summary → todos → conversation (see
-    // ConversationRepository::delete / cascade_delete_conversation). Sync scan
-    // then records child deletes via schedule_sync_after_local_change.
-    db.conversation_repo().unwrap().delete(conversation_id).map_err(|e| e.to_string())?;
-
-    if let Ok(mcp_db) = crate::db::mcp_db::MCPDatabase::new(&app_handle) {
-        let _ = mcp_db.conn.execute(
-            "DELETE FROM mcp_tool_call WHERE conversation_id = ?",
-            params![conversation_id],
-        );
-    }
+    db.conversation_repo().map_err(|e| e.to_string())?
+        .delete(conversation_id).map_err(|e| e.to_string())?;
 
     // 发送删除事件通知前端更新列表
     let _ = app_handle.emit("conversation_deleted", conversation_id);

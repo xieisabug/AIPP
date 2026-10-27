@@ -773,8 +773,7 @@ impl MCPDatabase {
     }
 
     pub fn delete_mcp_server(&self, id: i64) -> Result<()> {
-        // Cascade delete will handle tools and resources
-        self.conn.execute("DELETE FROM mcp_server WHERE id = ?", params![id])?;
+        super::cascade_delete::delete(&self.conn, "mcp_server", id)?;
         Ok(())
     }
 
@@ -880,33 +879,7 @@ impl MCPDatabase {
         server_id: i64,
         keep_names: &[String],
     ) -> Result<usize> {
-        if keep_names.is_empty() {
-            // 如果没有需要保留的工具，直接删除该服务器下所有工具
-            let rows = self
-                .conn
-                .execute("DELETE FROM mcp_server_tool WHERE server_id = ?", params![server_id])?;
-            return Ok(rows as usize);
-        }
-
-        // 构造 NOT IN (?, ?, ...) 语句
-        let mut sql =
-            String::from("DELETE FROM mcp_server_tool WHERE server_id = ? AND tool_name NOT IN (");
-        for (i, _) in keep_names.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            sql.push('?');
-        }
-        sql.push(')');
-
-        let mut params_vec: Vec<Value> = Vec::with_capacity(1 + keep_names.len());
-        params_vec.push(Value::from(server_id));
-        for name in keep_names {
-            params_vec.push(Value::from(name.as_str().to_string()));
-        }
-
-        let rows = self.conn.execute(&sql, params_from_iter(params_vec))?;
-        Ok(rows as usize)
+        super::cascade_delete::remove_missing_tools(&self.conn, server_id, keep_names)
     }
 
     pub fn update_mcp_server_tool(

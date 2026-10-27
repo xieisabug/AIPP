@@ -613,7 +613,8 @@ fn specs() -> Vec<SyncTableSpec> {
             unique_key_columns: &[],
             seed_official_ids: &[],
             official_column: None,
-            foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Structural }],
+            // Collected artifacts survive deletion of their originating assistant.
+            foreign_keys: &[ForeignKeySpec { column: "assistant_id", object_type: "assistant", kind: FkKind::Soft }],
             where_clause: None,
             order_by: "id",
         },
@@ -3709,8 +3710,8 @@ fn apply_delete(
         return Ok(());
     }
     if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
-        conn.execute(&format!("DELETE FROM {} WHERE id = ?1", spec.table), params![local_id])
-            .map_err(|e| e.to_string())?;
+        crate::db::cascade_delete::delete(conn, spec.table, local_id)
+            .map_err(|e| format!("sync delete {} object={} local_id={local_id}: {e}", change.object_type, change.object_id))?;
         // 同步删除 object_map 映射：同 object_id 后续 upsert 时应重新 insert（对象复活），
         // 而不是命中这条指向已删除行的旧映射。
         sync_conn

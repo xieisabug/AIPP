@@ -548,3 +548,74 @@ fn test_sync_push_response_requires_exact_complete_matching_results() {
         object_id: "wrong-object".into(), server_version: 1, server_payload: None, server_operation: "delete".into() });
     assert!(validate_push_response(&events, &response).unwrap_err().contains("身份不匹配"));
 }
+
+/// Parent-first tombstones must use production cleanup even on connections
+/// without foreign-key enforcement, and leave child deletes visible to scanning.
+#[test]
+fn test_cascade_delete_sync_parent_first_replay_and_scan_do_not_resurrect_children() {
+    for foreign_keys in [false, true] {
+        let sync = sync_db();
+        let data = Connection::open_in_memory().unwrap();
+        data.pragma_update(None, "foreign_keys", foreign_keys).unwrap();
+        data.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE message(id INTEGER PRIMARY KEY, conversation_id INTEGER REFERENCES conversation(id), parent_id INTEGER);
+            CREATE TABLE message_attachment(id INTEGER PRIMARY KEY, message_id INTEGER REFERENCES message(id));
+            CREATE TABLE acp_session(conversation_id INTEGER, session_id TEXT);
+            INSERT INTO conversation VALUES(1,'delete'),(2,'keep');
+            INSERT INTO message VALUES(11,1,NULL),(22,2,11);
+            INSERT INTO message_attachment VALUES(111,11),(222,22);
+            INSERT INTO acp_session VALUES(1,'session'),(2,'keep');").unwrap();
+        for (kind,table,id,key) in [("conversation","conversation",1,"owner"),
+            ("conversation.message","message",11,"message"),("conversation.message_attachment","message_attachment",111,"attachment")] {
+            save_object_map(&sync,kind,table,id,key).unwrap();
+            upsert_shadow_from_remote(&sync,&change(kind,key,1,json!({"fields":{}}))).unwrap();
+        }
+        let mut deletion = change("conversation","owner",2,JsonValue::Null);
+        deletion.operation="delete".into(); deletion.deleted_at=Some("now".into());
+        apply_change_to_db(&sync,&data,&spec("conversation"),&deletion,"local", |_|Ok(())).unwrap();
+        apply_change_to_db(&sync,&data,&spec("conversation"),&deletion,"local", |_|Ok(())).unwrap();
+        assert_eq!(data.query_row("SELECT COUNT(*) FROM message_attachment WHERE message_id=11",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(data.query_row("SELECT COUNT(*) FROM message WHERE id=22 AND parent_id IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(data.query_row("SELECT COUNT(*) FROM acp_session WHERE conversation_id=1",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(find_deleted_candidates(&sync,"conversation",&HashSet::new()).unwrap().is_empty());
+        for kind in ["conversation.message","conversation.message_attachment"] {
+            assert_eq!(scan_local_deletes_in_db(&sync,&spec(kind),&HashSet::new(),|_|Ok(false)).unwrap(),1);
+            assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox WHERE object_type=?1 AND operation='delete'",[kind],|r|r.get::<_,i64>(0)).unwrap(),1);
+            deletion.object_type=kind.into();
+            deletion.object_id=if kind=="conversation.message" {"message"} else {"attachment"}.into();
+            apply_change_to_db(&sync,&data,&spec(kind),&deletion,"local", |_|Ok(())).unwrap();
+            assert_eq!(find_local_id_by_object_id(&sync,kind,&deletion.object_id).unwrap(),None);
+        }
+    }
+}
+
+#[test]
+fn test_cascade_delete_sync_failure_keeps_mapping_and_does_not_ack_tombstone() {
+    let sync=sync_db(); let data=Connection::open_in_memory().unwrap();
+    data.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY);
+        CREATE TABLE message(id INTEGER PRIMARY KEY, conversation_id INTEGER);
+        CREATE TABLE message_attachment(id INTEGER PRIMARY KEY, message_id INTEGER);
+        INSERT INTO conversation VALUES(1); INSERT INTO message VALUES(11,1); INSERT INTO message_attachment VALUES(111,11);
+        CREATE TRIGGER fail_message_delete BEFORE DELETE ON message BEGIN SELECT RAISE(ABORT,'injected message delete failure'); END;").unwrap();
+    save_object_map(&sync,"conversation","conversation",1,"owner").unwrap();
+    let mut deletion=change("conversation","owner",2,JsonValue::Null);
+    deletion.operation="delete".into(); deletion.deleted_at=Some("now".into());
+    let error=apply_change_to_db(&sync,&data,&spec("conversation"),&deletion,"local", |_|Ok(())).unwrap_err();
+    assert!(error.contains("owner") && error.contains("injected message delete failure"),"{error}");
+    assert_eq!(find_local_id_by_object_id(&sync,"conversation","owner").unwrap(),Some(1));
+    assert_eq!(data.query_row("SELECT COUNT(*) FROM message_attachment",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert!(!remote_change_already_applied(&sync,&deletion).unwrap());
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_shadow",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+}
+
+#[test]
+fn test_cascade_delete_collected_artifact_survives_missing_assistant_on_import() {
+    let sync=sync_db(); let data=Connection::open_in_memory().unwrap();
+    data.execute_batch("CREATE TABLE artifacts_collection(id INTEGER PRIMARY KEY, name TEXT, code TEXT, assistant_id INTEGER);").unwrap();
+    let event=change("artifacts.collection","artifact",1,json!({
+        "fields":{"name":"saved","code":"keep content","assistant_id":99},
+        "refs":{"assistant_id":"deleted-assistant"}
+    }));
+    apply_change_to_db(&sync,&data,&spec("artifacts.collection"),&event,"local", |_|Ok(())).unwrap();
+    assert_eq!(data.query_row("SELECT COUNT(*) FROM artifacts_collection WHERE code='keep content' AND assistant_id IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+}

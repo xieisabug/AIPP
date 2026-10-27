@@ -20,7 +20,8 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - `add_mcp_server` - 添加新服务器
 - `get_mcp_servers` - 获取服务器列表
 - `update_mcp_server` - 更新服务器配置
-- `delete_mcp_server` - 删除服务器
+- `delete_mcp_server` - 删除服务器，同时清理工具、资源、提示词、调用及审查日志、能力目录、加载记录和助手授权关联。
+- 工具刷新时移除的工具会清理目录与助手配置，已加载快照保留为“工具已删除”，用于说明能力失效原因。
 - `test_mcp_server` - 测试服务器连接
 
 ### 服务器启动与停止

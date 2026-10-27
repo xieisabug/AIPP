@@ -271,7 +271,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn delete_assistant(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM assistant WHERE id = ?", params![id])?;
+        super::cascade_delete::delete(&self.conn, "assistant", id)?;
         debug!("assistant deleted");
         Ok(())
     }
@@ -297,10 +297,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn delete_assistant_prompt_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM assistant_prompt WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
+        super::cascade_delete::delete_by_owner(&self.conn, "assistant_prompt", "assistant_id", assistant_id)?;
         debug!("assistant prompts deleted by assistant_id");
         Ok(())
     }
@@ -387,8 +384,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn delete_assistant_model_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM assistant_model WHERE assistant_id = ?", params![assistant_id])?;
+        super::cascade_delete::delete_by_owner(&self.conn, "assistant_model", "assistant_id", assistant_id)?;
         debug!("assistant models deleted by assistant_id");
         Ok(())
     }

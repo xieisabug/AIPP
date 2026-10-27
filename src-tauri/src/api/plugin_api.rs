@@ -1,5 +1,4 @@
 use crate::db::assistant_db::{AssistantDatabase, AssistantPrompt};
-use crate::db::connection::params;
 use crate::db::conversation_db::{
     AttachmentType, ConversationDatabase, Message, MessageAttachment, Repository,
 };
@@ -2683,30 +2682,6 @@ pub async fn uninstall_plugin(app_handle: tauri::AppHandle, plugin_id: i64) -> R
         })?;
     }
 
-    db.conn
-        .execute("DELETE FROM PluginData WHERE plugin_id = ?", params![plugin_id])
-        .map_err(|e| e.to_string())?;
-    db.conn
-        .execute("DELETE FROM PluginConfigurations WHERE plugin_id = ?", params![plugin_id])
-        .map_err(|e| e.to_string())?;
-    db.conn
-        .execute("DELETE FROM PluginStatus WHERE plugin_id = ?", params![plugin_id])
-        .map_err(|e| e.to_string())?;
-    db.conn
-        .execute("DELETE FROM PluginHookRegistration WHERE plugin_id = ?", params![plugin_id])
-        .map_err(|e| e.to_string())?;
-    db.conn
-        .execute("DELETE FROM PluginHookAuditLog WHERE plugin_id = ?", params![plugin_id])
-        .map_err(|e| e.to_string())?;
-    db.conn
-        .execute(
-            "DELETE FROM PluginAssistantConfigurations WHERE plugin_id = ?",
-            params![plugin_id],
-        )
-        .map_err(|e| e.to_string())?;
-    db.conn
-        .execute("DELETE FROM PluginRuntime WHERE plugin_id = ?", params![plugin_id])
-        .map_err(|e| e.to_string())?;
     db.delete_plugin(plugin_id).map_err(|e| e.to_string())?;
 
     emit_plugin_registry_changed(&app_handle, "uninstalled");

@@ -251,15 +251,7 @@ impl LLMDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn delete_llm_provider(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn
-            .execute("DELETE FROM llm_provider_config WHERE llm_provider_id = ?", params![id])?;
-        self.conn.execute(
-            "DELETE FROM llm_model_request_mode_preference WHERE llm_provider_id = ?",
-            params![id],
-        )?;
-        self.conn.execute("DELETE FROM llm_model WHERE llm_provider_id = ?", params![id])?;
-        self.conn.execute("DELETE FROM llm_provider WHERE id = ?", params![id])?;
-        Ok(())
+        super::cascade_delete::delete(&self.conn, "llm_provider", id)
     }
 
     #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id))]
@@ -539,18 +531,51 @@ impl LLMDatabase {
 
     #[instrument(level = "debug", skip(self), fields(provider_id = provider_id, code = code))]
     pub fn delete_llm_model(&self, provider_id: i64, code: String) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "DELETE FROM llm_model WHERE llm_provider_id = ? AND code = ?",
-            params![provider_id, code],
-        )?;
+        use rusqlite::OptionalExtension;
+        let id = self.conn.query_row(
+            "SELECT id FROM llm_model WHERE llm_provider_id=?1 AND code=?2",
+            params![provider_id, code], |row| row.get::<_, i64>(0),
+        ).optional()?;
+        if let Some(id) = id {
+            super::cascade_delete::delete(&self.conn, "llm_model", id)?;
+        } else {
+            super::cascade_delete::delete_model_preferences(&self.conn, provider_id, Some(&code))?;
+        }
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self), fields(provider_id = provider_id))]
     pub fn delete_llm_model_by_provider(&self, provider_id: i64) -> rusqlite::Result<()> {
-        self.conn
-            .execute("DELETE FROM llm_model WHERE llm_provider_id = ?", params![provider_id])?;
-        Ok(())
+        super::cascade_delete::with_transaction(&self.conn, "llm_model", || {
+            super::cascade_delete::delete_by_owner(&self.conn, "llm_model", "llm_provider_id", provider_id)?;
+            super::cascade_delete::delete_model_preferences(&self.conn, provider_id, None)?;
+            Ok(())
+        })
+    }
+
+    /// Replace a provider's selection atomically, retaining IDs and preferences
+    /// for surviving codes. Removed codes use the ordinary cascade path.
+    pub fn replace_llm_models(&self, provider_id: i64, models: &[LLMModel], save_request_modes: bool) -> rusqlite::Result<()> {
+        super::cascade_delete::with_transaction(&self.conn, "llm_model", || {
+            let existing = self.get_llm_models(provider_id.to_string())?;
+            for row in &existing {
+                if !models.iter().any(|model| model.code == row.3) {
+                    super::cascade_delete::delete(&self.conn, "llm_model", row.0)?;
+                }
+            }
+            for model in models {
+                if let Some(row) = existing.iter().find(|row| row.3 == model.code) {
+                    self.conn.execute("UPDATE llm_model SET name=?1, description=?2, vision_support=?3, audio_support=?4, video_support=?5 WHERE id=?6",
+                        params![model.name, model.description, model.vision_support, model.audio_support, model.video_support, row.0])?;
+                } else {
+                    self.add_llm_model(&model.name, provider_id, &model.code, &model.description, model.vision_support, model.audio_support, model.video_support)?;
+                }
+                if save_request_modes {
+                    self.upsert_model_request_mode(provider_id, &model.code, &model.request_mode)?;
+                }
+            }
+            super::cascade_delete::prune_model_preferences(&self.conn, provider_id)
+        })
     }
 
     #[instrument(level = "debug", skip(self))]

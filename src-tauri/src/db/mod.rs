@@ -14,6 +14,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 pub mod assistant_db;
 pub mod connection;
+pub(crate) mod cascade_delete;
 pub mod conversation_db;
 pub mod llm_db;
 pub mod mcp_db;

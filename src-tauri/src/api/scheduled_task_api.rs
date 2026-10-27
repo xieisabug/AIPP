@@ -1,4 +1,3 @@
-use crate::db::connection::params;
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1119,12 +1118,6 @@ fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
         })
         .map_err(|e| e.to_string())?;
 
-    if let Ok(mcp_db) = MCPDatabase::new(app_handle) {
-        let _ = mcp_db.conn.execute(
-            "DELETE FROM mcp_tool_call WHERE conversation_id = ?",
-            params![conversation_id],
-        );
-    }
 
     Ok(())
 }

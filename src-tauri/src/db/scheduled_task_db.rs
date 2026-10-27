@@ -316,12 +316,7 @@ impl ScheduledTaskDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn delete_task(&self, id: i64) -> Result<()> {
-        self.with_write_lock(|| {
-            let _ = self.conn.execute("DELETE FROM scheduled_task_log WHERE task_id = ?", [id]);
-            let _ = self.conn.execute("DELETE FROM scheduled_task_run WHERE task_id = ?", [id]);
-            self.conn.execute("DELETE FROM scheduled_task WHERE id = ?", [id])?;
-            Ok(())
-        })
+        self.with_write_lock(|| super::cascade_delete::delete(&self.conn, "scheduled_task", id))
     }
 
     #[instrument(level = "debug", skip(self, now), fields(now = %now))]
@@ -340,11 +335,14 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self, log), fields(task_id = log.task_id))]
     pub fn add_log(&self, log: &ScheduledTaskLog) -> Result<ScheduledTaskLog> {
         self.with_write_lock(|| {
-            self.conn.execute(
+            let inserted = self.conn.execute(
                 "INSERT INTO scheduled_task_log (task_id, run_id, message_type, content, created_time)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM scheduled_task WHERE id=?1)",
                 params![log.task_id, log.run_id, log.message_type, log.content, log.created_time],
             )?;
+            if inserted == 0 {
+                return Err(rusqlite::Error::InvalidParameterName(format!("定时任务 {} 已删除，拒绝写入日志 run={}", log.task_id, log.run_id)));
+            }
             let id = self.conn.last_insert_rowid();
             Ok(ScheduledTaskLog { id, ..log.clone() })
         })
@@ -421,9 +419,9 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self, run), fields(task_id = run.task_id, status = %run.status))]
     pub fn create_run(&self, run: &ScheduledTaskRun) -> Result<ScheduledTaskRun> {
         self.with_write_lock(|| {
-            self.conn.execute(
+            let inserted = self.conn.execute(
                 "INSERT INTO scheduled_task_run (task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE EXISTS(SELECT 1 FROM scheduled_task WHERE id=?1)",
                 params![
                     run.task_id,
                     run.run_id,
@@ -436,6 +434,9 @@ impl ScheduledTaskDatabase {
                     run.butler_followup_status
                 ],
             )?;
+            if inserted == 0 {
+                return Err(rusqlite::Error::InvalidParameterName(format!("定时任务 {} 已删除，拒绝创建运行记录 run={}", run.task_id, run.run_id)));
+            }
             let id = self.conn.last_insert_rowid();
             Ok(ScheduledTaskRun { id, ..run.clone() })
         })
@@ -544,3 +545,7 @@ mod tests {
         assert!(ids.contains(&task_b.id));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/scheduled_task_db_tests.rs"]
+mod cascade_tests;

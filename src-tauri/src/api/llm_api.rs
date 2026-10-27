@@ -31,6 +31,15 @@ pub struct LlmModel {
     pub request_mode: String,
 }
 
+fn persisted_model(model: &LlmModel) -> crate::db::llm_db::LLMModel {
+    crate::db::llm_db::LLMModel {
+        id: model.id, name: model.name.clone(), llm_provider_id: model.llm_provider_id,
+        code: model.code.clone(), description: model.description.clone(),
+        vision_support: model.vision_support, audio_support: model.audio_support,
+        video_support: model.video_support, request_mode: model.request_mode.clone(),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct LlmProviderConfig {
     pub id: i64,
@@ -128,9 +137,6 @@ pub async fn delete_llm_provider(
     llm_provider_id: i64,
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let assistant_db = crate::db::assistant_db::AssistantDatabase::new(&app_handle)
-        .map_err(|e| e.to_string())?;
-    assistant_db.clear_provider_references(llm_provider_id).map_err(|e| e.to_string())?;
     db.delete_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
@@ -269,8 +275,6 @@ pub async fn fetch_model_list(
 
     match client.all_models(adapter_kind).await {
         Ok(models) => {
-            db.delete_llm_model_by_provider(llm_provider_id).map_err(|e| e.to_string())?;
-
             let mut result = Vec::new();
             for model in &models {
                 let model = LlmModel {
@@ -295,20 +299,11 @@ pub async fn fetch_model_list(
                         }),
                 };
 
-                db.add_llm_model(
-                    &model.name,
-                    llm_provider_id,
-                    &model.code,
-                    &model.description,
-                    model.vision_support,
-                    model.audio_support,
-                    model.video_support,
-                )
-                .map_err(|e| e.to_string())?;
-
                 result.push(model);
             }
 
+            db.replace_llm_models(llm_provider_id, &result.iter().map(persisted_model).collect::<Vec<_>>(), false)
+                .map_err(|e| e.to_string())?;
             crate::sync::schedule_sync_after_local_change(&app_handle);
             Ok(result)
         }
@@ -546,33 +541,14 @@ pub async fn update_selected_models(
         }
     }
 
-    // 删除所有该提供商的现有模型
-    db.delete_llm_model_by_provider(llm_provider_id).map_err(|e| e.to_string())?;
-
-    // 添加选中的模型
-    for model in selected_models.iter().filter(|m| m.is_selected) {
-        db.add_llm_model(
-            &model.name,
-            llm_provider_id,
-            &model.code,
-            &model.description,
-            model.vision_support,
-            model.audio_support,
-            model.video_support,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    if supports_request_mode {
-        for model in &selected_models {
-            db.upsert_model_request_mode(
-                llm_provider_id,
-                &model.code,
-                normalize_request_mode(Some(&model.request_mode)),
-            )
-            .map_err(|e| e.to_string())?;
-        }
-    }
+    let models = selected_models.iter().filter(|model| model.is_selected).map(|model| crate::db::llm_db::LLMModel {
+        id: 0, name: model.name.clone(), llm_provider_id,
+        code: model.code.clone(), description: model.description.clone(),
+        vision_support: model.vision_support, audio_support: model.audio_support,
+        video_support: model.video_support,
+        request_mode: normalize_request_mode(Some(&model.request_mode)).to_string(),
+    }).collect::<Vec<_>>();
+    db.replace_llm_models(llm_provider_id, &models, supports_request_mode).map_err(|e| e.to_string())?;
 
     crate::sync::schedule_sync_after_local_change(&app_handle);
     Ok(())
