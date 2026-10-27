@@ -25,6 +25,7 @@ use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 
 mod divergence;
 mod persistence;
+mod quick_assistant;
 #[cfg(test)]
 mod persistence_tests;
 mod offline_recovery;
@@ -2009,6 +2010,8 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
     recover_pending_business_applies(app_handle)?;
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
     let mut sync_conn = open_sync_db(app_handle)?;
+    let assistant_db = open_data_db(&get_db_path(app_handle, "assistant.db")?)?;
+    quick_assistant::prepare(&sync_conn, &assistant_db)?;
     let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
     let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
@@ -3041,6 +3044,7 @@ fn apply_change_to_db_inner(
     // Only the confirmed version/sequence above is an application receipt.
 
     if change.operation == "delete" {
+        if quick_assistant::apply_delete(sync_conn, conn, change)? { return Ok(()); }
         apply_delete(sync_conn, &conn, &spec, change)?;
         upsert_shadow_from_remote(sync_conn, change)?;
         return Ok(());
@@ -3072,6 +3076,10 @@ fn apply_change_to_db_inner(
     resolve_remote_foreign_keys(&spec, &mut field_values, &refs, |object_type, ref_object_id| {
         find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
     })?;
+
+    if quick_assistant::apply_model(sync_conn, conn, spec, change, &field_values)? {
+        return Ok(());
+    }
 
     // Older cascade clients may leave mappings pointing at removed child rows.
     // Keep shadow versions, but repair identity placement before UPDATE/INSERT.
@@ -4193,13 +4201,20 @@ fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> R
                    WHERE earlier.object_type = sync_outbox.object_type
                      AND earlier.object_id = sync_outbox.object_id
                      AND earlier.id < sync_outbox.id AND earlier.status IN ('pending', 'pushing', 'failed')))
+               AND ({bootstrap_only} OR sync_outbox.object_type != 'assistant.model'
+                    OR sync_outbox.object_id != '{quick_model_id}' OR NOT EXISTS (
+                        SELECT 1 FROM sync_outbox legacy JOIN sync_object_alias alias
+                        ON alias.object_type=legacy.object_type AND alias.sync_id=legacy.object_id
+                        JOIN sync_object_map canonical ON canonical.object_type=alias.object_type AND canonical.local_id=alias.local_id
+                        WHERE canonical.sync_id='{quick_model_id}' AND legacy.sent_once=1 AND legacy.outcome_known=0
+                        AND legacy.status IN ('pending','pushing','failed')))
                AND ({bootstrap_only} OR next_retry_at IS NULL OR next_retry_at <= ?2)
                AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.refs') ELSE NULL END) ref
                    JOIN sync_outbox parent ON parent.object_id = ref.value
                    WHERE parent.operation = 'upsert' AND parent.status IN ('pending', 'pushing', 'failed')
                      AND parent.object_id != sync_outbox.object_id))
              ORDER BY CASE WHEN operation = 'delete' THEN 1000 - ({order_sql}) ELSE {order_sql} END, id
-             LIMIT ?1"),
+             LIMIT ?1", quick_model_id = quick_assistant::MODEL_ID),
         )
         .map_err(|e| e.to_string())?;
     let raw_rows = stmt
@@ -4407,8 +4422,10 @@ fn apply_ack_to_shadow(
             params![object_type, object_id],
         ).map_err(|e| e.to_string())?;
         conn.execute(
-            "DELETE FROM sync_object_alias WHERE object_type = ?1 AND sync_id = ?2",
-            params![object_type, object_id],
+            "DELETE FROM sync_object_alias WHERE object_type = ?1 AND sync_id = ?2
+             AND NOT (object_type='assistant.model' AND local_id IN
+                 (SELECT local_id FROM sync_object_map WHERE object_type='assistant.model' AND sync_id=?3))",
+            params![object_type, object_id, quick_assistant::MODEL_ID],
         ).map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2",
@@ -4641,6 +4658,9 @@ fn remote_change_already_applied(conn: &Connection, change: &PullChange) -> Resu
 /// Versions belong to individual UUIDs. Merged UUIDs can only be ordered by server sequence.
 fn remote_row_change_is_stale(conn: &Connection, change: &PullChange, local_id: i64) -> Result<bool, String> {
     if change.seq <= 0 { return Ok(false); }
+    if change.object_type == "assistant.model" && change.object_id == quick_assistant::MODEL_ID {
+        return Ok(false); // Only the fixed identity's own version orders its updates.
+    }
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sync_shadow s WHERE s.object_type = ?1 AND s.server_seq >= ?3
          AND s.object_id IN (SELECT sync_id FROM sync_object_map WHERE object_type = ?1 AND local_id = ?2

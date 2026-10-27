@@ -35,6 +35,7 @@ impl Device {
     }
 
     fn scan(&self) -> Vec<LocalObjectSnapshot> {
+        quick_assistant::prepare(&self.sync, &self.data).unwrap();
         let mut result = Vec::new();
         for spec in specs().into_iter().filter(|s| TEST_TYPES.contains(&s.object_type)) {
             let (rows, _) = read_local_snapshots_from_db(&self.data, &spec, &self.sync,
@@ -172,8 +173,8 @@ fn test_sync_quick_assistant_initialized_receiver_loads_explicit_model_and_confi
         assert!(configs.iter().all(|c| c.assistant_model_id == selected.id));
         assert_eq!(configs.iter().find(|c| c.name == "temperature").unwrap().value.as_deref(), Some("0.42"));
         assert_eq!(db.get_assistant_model_configs_with_model_id(1, selected.id).unwrap().len(), 4);
-        // Read-time handling leaves sync identities and rows intact for replay/deletes.
-        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM assistant_model", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        // The fixed slot merges initialization rows and preserves old IDs as aliases.
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM assistant_model", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 }
 
@@ -707,3 +708,6 @@ mod fixes_2_7 {
         }
     }
 }
+
+#[path = "quick_assistant_tests.rs"]
+mod quick_assistant_tests;
