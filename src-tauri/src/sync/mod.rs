@@ -2274,6 +2274,8 @@ fn read_local_snapshots_from_db(
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut snapshots = Vec::new();
     let mut present_ids = HashSet::new();
+    let mut skipped_rows = 0usize;
+    let mut skipped_examples = Vec::new();
     // 跨库外键（如 message.llm_model_id → llm.model）在本表扫描内缓存连接
 
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
@@ -2348,17 +2350,16 @@ fn read_local_snapshots_from_db(
         else {
             // 外键指向的依赖行存在但尚未建立映射：本轮跳过该行，
             // 绝不把本地 rowid 作为外键值推送出去。下轮扫描会自然重试。
-            debug!(
-                object_type = %spec.object_type,
-                local_id,
-                "Skipping sync snapshot with unresolved foreign key"
-            );
+            skipped_rows += 1;
+            if skipped_examples.len() < 3 { skipped_examples.push(local_id); }
             continue;
         };
 
         if let Some((_, provider_id)) = embedded_provider_value(spec.object_type, &fields) {
             let Some(provider_sync_id) = find_object_id(sync_conn, "llm.provider", provider_id)? else {
                 // Never transport a device-local provider ID without its sync identity.
+                skipped_rows += 1;
+                if skipped_examples.len() < 3 { skipped_examples.push(local_id); }
                 continue;
             };
             refs.insert("value_provider_id".into(), json!(provider_sync_id));
@@ -2374,6 +2375,14 @@ fn read_local_snapshots_from_db(
             payload_json,
             payload_hash,
         });
+    }
+    if skipped_rows > 0 {
+        debug!(
+            object_type = %spec.object_type,
+            skipped_rows,
+            example_local_ids = ?skipped_examples,
+            "Sync snapshots skipped with unresolved foreign keys (scan summary)"
+        );
     }
     Ok((snapshots, present_ids))
 }
@@ -2669,7 +2678,7 @@ enum FkLookup {
 /// 避免把本地 rowid 作为外键值泄露到 payload 中。
 ///
 /// `dangling` 若提供，则仅对 **structural** 悬空外键按 (object_type, column, local_fk)
-/// 聚合计数，供整轮扫描后打一条摘要日志 / UI 警告；soft（llm.*）只 debug、不计入。
+/// 聚合计数，供整轮扫描后打一条摘要日志 / UI 警告；soft（llm.*）静默省略、不计入。
 fn build_fk_refs(
     spec: &SyncTableSpec,
     raw_values: &HashMap<String, JsonValue>,
@@ -2708,15 +2717,8 @@ fn build_fk_refs(
                 FkLookup::Dangling => {
                     // 悬空外键：当作 NULL 推送，不永久卡住同步
                     fields.insert(fk.column.to_string(), JsonValue::Null);
-                    if fk.is_soft() {
-                        // llm.model / llm.provider 等被删是正常情况：静默省略，最多 debug
-                        debug!(
-                            object_type = %spec.object_type,
-                            column = %fk.column,
-                            local_fk = %value,
-                            "Soft dangling foreign key omitted from sync snapshot"
-                        );
-                    } else {
+                    // 历史模型被删属于正常情况；逐行记录会在每轮扫描重复刷屏。
+                    if !fk.is_soft() {
                         if let Some(report) = dangling.as_mut() {
                             report.record(spec.object_type, fk.column, value);
                         }
