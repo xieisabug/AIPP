@@ -18,11 +18,15 @@ function InputAreaHarness({
     planMode = false,
     planModeSwitching = false,
     onPlanModeToggle,
+    isMobile = false,
+    placement = "bottom",
 }: {
     initialText?: string;
     planMode?: boolean;
     planModeSwitching?: boolean;
     onPlanModeToggle?: () => void;
+    isMobile?: boolean;
+    placement?: "top" | "bottom";
 }) {
     const [inputText, setInputText] = useState(initialText);
 
@@ -36,6 +40,8 @@ function InputAreaHarness({
             handleDeleteFile={() => {}}
             handleSend={() => {}}
             aiIsResponsing={false}
+            placement={placement}
+            isMobile={isMobile}
             planMode={planMode}
             planModeSwitching={planModeSwitching}
             onPlanModeToggle={onPlanModeToggle}
@@ -191,5 +197,68 @@ describe("InputArea Plan mode", () => {
         const button = screen.getByRole("button", { name: "Plan" });
         expect(button).toHaveAttribute("aria-pressed", "true");
         expect(button).toBeDisabled();
+    });
+});
+
+describe("InputArea mobile vs desktop layout", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_bang_list", () => []);
+        mockInvokeHandler("get_assistants", () => []);
+        mockInvokeHandler("get_artifacts_for_completion", () => []);
+        mockInvokeHandler("get_skills_for_slash_completion", () => []);
+    });
+
+    it("applies mobile class and keeps add/send slots without desktop inline right", () => {
+        const { container } = render(<InputAreaHarness isMobile placement="bottom" />);
+
+        const root = container.querySelector('[data-aipp-slot="chat-input-area"]');
+        expect(root).toHaveClass("input-area");
+        expect(root).toHaveClass("bottom");
+        expect(root).toHaveClass("mobile");
+
+        const textareaContainer = container.querySelector(
+            '[data-aipp-slot="chat-input-area-container"]',
+        ) as HTMLElement;
+        expect(textareaContainer).toBeTruthy();
+        // mobile must not carry desktop sidebar inline right
+        expect(textareaContainer.style.right).toBe("");
+
+        const add = container.querySelector(
+            '[data-aipp-slot="chat-input-add-button"]',
+        ) as HTMLElement;
+        const send = container.querySelector(
+            '[data-aipp-slot="chat-input-send-button"]',
+        ) as HTMLElement;
+        expect(add).toHaveClass("input-area-add-button");
+        expect(send).toHaveClass("input-area-send-button");
+        // CircleButton medium = h-8 w-8; CSS forces 44px send on mobile
+        expect(send.className).toMatch(/\bh-8\b/);
+        expect(send.className).not.toMatch(/\bh-14\b/);
+        expect(add.style.right).toBe("");
+        expect(send.style.right).toBe("");
+    });
+
+    it("keeps desktop wide layout: no mobile class, large send, inline right present", () => {
+        const { container } = render(
+            <InputAreaHarness isMobile={false} placement="bottom" />,
+        );
+
+        const root = container.querySelector('[data-aipp-slot="chat-input-area"]');
+        expect(root).toHaveClass("input-area");
+        expect(root).toHaveClass("bottom");
+        expect(root).not.toHaveClass("mobile");
+
+        const textareaContainer = container.querySelector(
+            '[data-aipp-slot="chat-input-area-container"]',
+        ) as HTMLElement;
+        // desktop bottom uses inline right for sidebar clearance
+        expect(textareaContainer.style.right).not.toBe("");
+
+        const send = container.querySelector(
+            '[data-aipp-slot="chat-input-send-button"]',
+        ) as HTMLElement;
+        expect(send.className).toMatch(/\bh-14\b/);
+        expect(send.style.right).not.toBe("");
     });
 });
