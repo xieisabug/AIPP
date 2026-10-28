@@ -65,6 +65,15 @@ impl BashOperations {
         state: &OperationState,
         request: ExecuteBashRequest,
     ) -> Result<ExecuteBashResponse, String> {
+        // 移动端无可用 shell 环境；aipp:operation 其它轻量工具仍可走内置路径
+        #[cfg(mobile)]
+        {
+            let _ = (app_handle, state, &request);
+            return Err(crate::api::system_api::mobile_unsupported_error(
+                "脚本执行（execute_bash）",
+            ));
+        }
+
         let command = &request.command;
         let run_in_background = request.run_in_background.unwrap_or(false);
         let timeout_ms = Self::resolve_timeout_ms(request.timeout);

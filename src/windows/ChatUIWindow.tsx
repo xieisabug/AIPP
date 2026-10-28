@@ -20,7 +20,7 @@ import {
 import { Conversation, ConversationSearchHit } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
-import { usePlatform } from "../hooks/use-platform";
+import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
 import {
     useAcpPermission,
     useOperationPermission,
@@ -189,7 +189,10 @@ function ChatUIWindow() {
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
 
     // 检测移动端
-    const isMobile = useIsMobile();
+    const isNarrow = useIsMobile();
+    const isMobilePlatform = useIsMobilePlatform();
+    // 移动平台一律走单 WebView 壳；桌面窄屏仅做布局响应（能力仍按平台判断）
+    const isMobile = isMobilePlatform || isNarrow;
     const platform = usePlatform();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [conversationTitle, setConversationTitle] = useState("");
@@ -866,7 +869,7 @@ function ChatUIWindow() {
                                 data-aipp-slot="chat-mobile-sidebar"
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
-                                <ChatUIInfomation showArtifacts={false} showSchedule={false} isMobile={true} />
+                                <ChatUIInfomation showArtifacts={false} showSchedule={false} isMobile={true} preferInAppNavigation={isMobilePlatform} />
                                 <ChatUIToolbar
                                     onNewConversation={handleNewConversation}
                                     onSearch={() => setSearchOpen(true)}

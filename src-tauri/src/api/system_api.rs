@@ -372,6 +372,17 @@ pub async fn copy_image_to_clipboard(_image_data: String) -> Result<(), String> 
 /// 用于前端区分"移动平台"与"窄屏布局"（窄屏判断见前端 useIsMobile）。
 #[tauri::command]
 pub async fn get_platform() -> Result<String, String> {
+    // 桌面调试用：允许用环境变量强制平台，便于验证移动能力门禁与单 WebView 壳（不改变编译期 cfg）。
+    if let Ok(forced) = std::env::var("AIPP_FORCE_PLATFORM") {
+        let forced = forced.trim().to_ascii_lowercase();
+        if matches!(
+            forced.as_str(),
+            "android" | "ios" | "windows" | "macos" | "linux" | "unknown"
+        ) {
+            return Ok(forced);
+        }
+    }
+
     let platform = if cfg!(target_os = "android") {
         "android"
     } else if cfg!(target_os = "ios") {

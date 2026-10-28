@@ -5,6 +5,9 @@ import { useIsMobilePlatform } from "@/hooks/use-platform"
  *
  * 用途：前端按平台隐藏对应入口，而不是等用户点了才在运行期报错。
  * 桌面平台一律视为可用，这里只列出移动端的限制。
+ *
+ * 与 PRD §3.1 A 类 / MOB-02 对齐：能力判断不得依赖窗口宽度或 MCP transport 字符串一刀切；
+ * aipp:* 进程内工具即使登记为 stdio 也必须单独识别，不能与外部 stdio 一起误禁。
  */
 export type MobileUnsupportedFeature =
     // 开机自启动：Rust 侧 get_autostart_state / set_autostart 在移动端直接返回 Err
@@ -13,10 +16,26 @@ export type MobileUnsupportedFeature =
     | "global_shortcut"
     // 应用内更新：Rust 侧 check_update / download_and_install_update 在移动端返回 Err
     | "app_updater"
-    // 脚本/代码执行：Android 无 shell 环境，代码块"运行"按钮（run_artifacts 执行脚本类语言）运行期必败
+    // 脚本/代码执行：Android 无 shell 环境，代码块"运行"按钮与 aipp:operation execute_bash 运行期必败
     | "script_execution"
     // 浏览器模式搜索：chromiumoxide 仅桌面编译，搜索工具中浏览器相关的配置项在移动端无意义
     | "browser_search"
+    // 外部 stdio MCP：需要本机进程；不含 aipp:* 内置
+    | "external_stdio_mcp"
+    // 本地 CLI Agent：Codex app-server / Claude Code / ACP CLI
+    | "local_cli_agent"
+    // 桌面多窗口：Schedule / Artifact / Butler / Plugin / Sidebar 等独立 WebView
+    | "desktop_multi_window"
+    // React/Vue 预览运行时（Bun/Vite）
+    | "react_vue_preview"
+    // PDF 导出
+    | "pdf_export"
+    // 剪贴板图片复制
+    | "clipboard_image"
+    // Skills 本机目录管理（M2，本期隐藏入口避免点了才炸）
+    | "skills_manager"
+    // 进程型插件（M2，本期隐藏入口）
+    | "process_plugin"
 
 export const MOBILE_UNSUPPORTED_FEATURES: ReadonlySet<MobileUnsupportedFeature> = new Set([
     "autostart",
@@ -24,6 +43,14 @@ export const MOBILE_UNSUPPORTED_FEATURES: ReadonlySet<MobileUnsupportedFeature> 
     "app_updater",
     "script_execution",
     "browser_search",
+    "external_stdio_mcp",
+    "local_cli_agent",
+    "desktop_multi_window",
+    "react_vue_preview",
+    "pdf_export",
+    "clipboard_image",
+    "skills_manager",
+    "process_plugin",
 ])
 
 /**
@@ -60,9 +87,40 @@ export const MOBILE_UNSUPPORTED_ERROR_PREFIX = "MOBILE_UNSUPPORTED"
 
 /**
  * 判断一个后端错误是否为"移动端不支持"错误，便于前端统一提示。
+ * 兼容 AppError 包装后的文案（前缀不一定在字符串最开头）。
  */
 export function isMobileUnsupportedError(error: unknown): boolean {
     const message =
         typeof error === "string" ? error : error instanceof Error ? error.message : String(error)
-    return message.startsWith(MOBILE_UNSUPPORTED_ERROR_PREFIX)
+    return message.includes(MOBILE_UNSUPPORTED_ERROR_PREFIX)
+}
+
+/** 是否 aipp:* 进程内内置命令（即使 transport=stdio 也不走外部进程）。 */
+export function isAippBuiltinCommand(command: string | null | undefined): boolean {
+    if (!command) return false
+    return command.trim().startsWith("aipp:")
+}
+
+/**
+ * 移动端是否允许执行该 MCP 服务器。
+ * - HTTP：允许
+ * - aipp:* 内置（不论 transport）：允许走进程内实现
+ * - 外部 stdio / 其它：不允许
+ */
+export function isMobileExecutableMcpServer(server: {
+    transport_type?: string | null
+    command?: string | null
+    is_builtin?: boolean | null
+}): boolean {
+    if (isAippBuiltinCommand(server.command) || server.is_builtin) {
+        return true
+    }
+    const transport = (server.transport_type || "").toLowerCase()
+    return transport === "http" || transport === "sse"
+}
+
+/** 普通 API 对话助手（非本地 CLI Agent、非插件类型）。assistant_type 0 或未设置。 */
+export function isMobileExecutableAssistantType(assistantType: number | null | undefined): boolean {
+    // 0 = 普通对话；4 = Codex/Claude/ACP 本地 Agent；其它为插件类型（M2）
+    return assistantType === 0 || assistantType == null
 }

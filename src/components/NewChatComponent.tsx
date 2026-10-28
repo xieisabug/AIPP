@@ -2,6 +2,8 @@ import AskWindowPrepare from "./AskWindowPrepare";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { useIsMobile } from "../hooks/use-mobile";
+import { useIsMobilePlatform } from "../hooks/use-platform";
+import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -95,6 +97,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
     onAgentConfigChange,
 }: NewChatComponentProps) => {
     const isMobile = useIsMobile();
+    const isMobilePlatform = useIsMobilePlatform();
     const [models, setModels] = useState<AgentModelOption[]>([]);
     const [efforts, setEfforts] = useState<string[]>([]);
     const [isAgentAssistant, setIsAgentAssistant] = useState(false);
@@ -176,14 +179,27 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                     <SelectValue placeholder="选择一个助手" />
                 </SelectTrigger>
                 <SelectContent>
-                    {assistants.map((assistant) => (
-                        <SelectItem key={assistant.id} value={assistant.id.toString()}>
-                            {assistant.name}
-                        </SelectItem>
-                    ))}
+                    {assistants.map((assistant) => {
+                        const executable = !isMobilePlatform || isMobileExecutableAssistantType(assistant.assistant_type);
+                        return (
+                            <SelectItem key={assistant.id} value={assistant.id.toString()}>
+                                <span className="flex items-center gap-2">
+                                    <span>{assistant.name}</span>
+                                    {!executable && (
+                                        <span className="text-[10px] text-muted-foreground">此设备不可执行</span>
+                                    )}
+                                </span>
+                            </SelectItem>
+                        );
+                    })}
                 </SelectContent>
             </Select>
-            {isAgentAssistant ? (
+            {isMobilePlatform && isAgentAssistant ? (
+                <p className="mt-3 w-88 text-xs text-amber-600 dark:text-amber-400" data-aipp-slot="chat-new-conversation-mobile-agent-warning">
+                    当前助手依赖本机 CLI（Codex / Claude Code / ACP），移动端不可执行。请改选普通 API 助手，不会自动换模型或通道。
+                </p>
+            ) : null}
+            {isAgentAssistant && !isMobilePlatform ? (
                 <div className="mt-3 flex w-88 flex-col gap-1">
                     <div className="flex items-center gap-2">
                         <AgentCompactSelect

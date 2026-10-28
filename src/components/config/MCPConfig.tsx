@@ -29,8 +29,11 @@ import { MCPServer, MCPServerTool, MCPServerResource, MCPServerPrompt, MCPServer
 import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { isMobileExecutableMcpServer } from "@/lib/mobileUnsupported";
 
 const MCPConfig: React.FC = () => {
+    const isMobilePlatform = useIsMobilePlatform();
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
     const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
     const [serverTools, setServerTools] = useState<MCPServerTool[]>([]);
@@ -487,6 +490,9 @@ const MCPConfig: React.FC = () => {
                     <div className="flex items-center w-full">
                         <div className="flex-1 truncate">
                             <div className="font-medium truncate">{server.name}</div>
+                            {isMobilePlatform && !isMobileExecutableMcpServer(server) && (
+                                <div className="text-[10px] text-muted-foreground truncate">此设备不可执行</div>
+                            )}
                         </div>
                         {server.is_enabled && (
                             <Zap className="h-3 w-3 ml-2 flex-shrink-0" />
@@ -495,7 +501,7 @@ const MCPConfig: React.FC = () => {
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [filteredMcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport, searchQuery]);
+    ), [filteredMcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport, searchQuery, isMobilePlatform]);
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => selectedServer ? (
@@ -506,6 +512,11 @@ const MCPConfig: React.FC = () => {
                     <div className='mr-8 mb-5'>
                         <h3 className="text-lg font-semibold text-foreground">{selectedServer.name}</h3>
                         <p className="text-sm text-muted-foreground">{selectedServer.description || '暂无描述'}</p>
+                        {isMobilePlatform && !isMobileExecutableMcpServer(selectedServer) && (
+                            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                                此 MCP 依赖外部进程，移动端不可执行（可查看配置；HTTP 与 aipp:* 内置仍可用）。
+                            </p>
+                        )}
                     </div>
                     <div className="flex items-center gap-1">
                         <Switch
@@ -694,7 +705,7 @@ const MCPConfig: React.FC = () => {
             title="选择一个MCP服务器"
             description="从左侧列表中选择一个服务器开始配置"
         />
-    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText]);
+    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText, isMobilePlatform]);
 
     // 空状态
     if (mcpServers.length === 0) {
