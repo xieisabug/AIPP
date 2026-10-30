@@ -3561,10 +3561,13 @@ mod tests {
         result.summary = Some("y".repeat(TASK_RESULT_DETAIL_LIMIT + 500));
         let msg = build_butler_task_result_system_message(&task, &definition, &result, false);
 
-        // detail_excerpt should be truncated
-        assert!(msg.contains("detail_excerpt="));
-        // The full long string should not appear
-        assert!(!msg.contains(&"y".repeat(TASK_RESULT_DETAIL_LIMIT + 500)));
+        // Only detail_excerpt is truncated; summary= is intentionally kept whole.
+        let detail_line = msg
+            .lines()
+            .find(|line| line.starts_with("detail_excerpt="))
+            .expect("detail_excerpt line should exist");
+        let detail_value = detail_line.trim_start_matches("detail_excerpt=");
+        assert_eq!(detail_value, format!("{}...", "y".repeat(TASK_RESULT_DETAIL_LIMIT)));
     }
 
     // --- build_batched_followup_prompt tests ---
