@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 const ORIGIN_FEISHU: &str = "feishu";
 const FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT: usize = 2800;
+/// 每个分段对应一张飞书卡片，飞书官方限制单张卡片最多 5 个表格。
 const FEISHU_ASSISTANT_TABLE_BLOCK_SOFT_LIMIT: usize = 5;
 
 struct FeishuAssistantBlockPart {
@@ -468,48 +469,135 @@ fn split_content_for_feishu(content: &str, max_chars: usize) -> Vec<String> {
     }
 }
 
+/// 正在累积的一个飞书分段（对应一张卡片）。
+#[derive(Default)]
+struct FeishuAssistantChunk {
+    pieces: Vec<String>,
+    len: usize,
+    table_block_count: usize,
+}
+
+impl FeishuAssistantChunk {
+    fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    fn separator_len(&self) -> usize {
+        usize::from(!self.pieces.is_empty()) * 2
+    }
+
+    fn push(&mut self, piece: String, table_block_count: usize) {
+        self.len += self.separator_len() + piece.chars().count();
+        self.pieces.push(piece);
+        self.table_block_count += table_block_count;
+    }
+
+    fn needs_break_before(&self, part_len: usize, part_tables: usize, max_chars: usize) -> bool {
+        !self.is_empty()
+            && (self.len + self.separator_len() + part_len > max_chars
+                || self.table_block_count + part_tables > FEISHU_ASSISTANT_TABLE_BLOCK_SOFT_LIMIT)
+    }
+
+    /// 取出末尾紧挨着下一部分的纯标题块，让标题跟随其后的内容（如表格）进入下一分段。
+    /// 至少保留一个块在当前分段，且带走的标题加上下一部分不超过 max_chars。
+    fn take_trailing_headings(&mut self, next_part_len: usize, max_chars: usize) -> Vec<String> {
+        let mut carried = Vec::new();
+        let mut carried_len = next_part_len;
+        while self.pieces.len() > 1 {
+            let Some(last) = self.pieces.last() else {
+                break;
+            };
+            if !is_markdown_heading_block(last) {
+                break;
+            }
+            let last_len = last.chars().count();
+            if carried_len + 2 + last_len > max_chars {
+                break;
+            }
+            carried_len += 2 + last_len;
+            let piece = self.pieces.pop().unwrap_or_default();
+            self.len = self.len.saturating_sub(last_len + 2);
+            carried.push(piece);
+        }
+        carried.reverse();
+        carried
+    }
+
+    /// 末尾连续纯标题块的长度（含分隔符），用于给紧随其后的超长表格预留空间。
+    fn trailing_heading_len(&self) -> usize {
+        self.pieces
+            .iter()
+            .rev()
+            .take_while(|piece| is_markdown_heading_block(piece))
+            .map(|piece| piece.chars().count() + 2)
+            .sum()
+    }
+
+    fn into_content(self) -> String {
+        self.pieces.join("\n\n")
+    }
+}
+
+pub(crate) fn is_markdown_heading_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&level)
+        && trimmed[level..].chars().next().map_or(true, |ch| ch == ' ' || ch == '\t')
+}
+
+fn is_markdown_heading_block(block: &str) -> bool {
+    let mut has_heading = false;
+    for line in block.lines().filter(|line| !line.trim().is_empty()) {
+        if !is_markdown_heading_line(line) {
+            return false;
+        }
+        has_heading = true;
+    }
+    has_heading
+}
+
 fn split_assistant_content_for_feishu(content: &str, max_chars: usize) -> Vec<String> {
     if max_chars == 0 {
         return vec![content.to_string()];
     }
 
     let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_len = 0usize;
-    let mut current_table_block_count = 0usize;
+    let mut current = FeishuAssistantChunk::default();
 
     for block in split_markdown_blocks_for_feishu(content) {
-        for part in split_markdown_block_for_feishu(&block, max_chars) {
+        // 超长表格需要拆分时，首段给前面的标题预留空间，保证标题能和首段表格放在一起
+        let heading_reserve = current.trailing_heading_len();
+        let block_parts = if heading_reserve > 0
+            && heading_reserve * 2 < max_chars
+            && block.chars().count() > max_chars
+            && looks_like_markdown_table_block(&block)
+        {
+            split_markdown_table_block_for_feishu(&block, max_chars - heading_reserve, max_chars)
+        } else {
+            split_markdown_block_for_feishu(&block, max_chars)
+        };
+        for part in block_parts {
             let trimmed = part.content.trim();
             if trimmed.is_empty() {
                 continue;
             }
 
-            let separator_len = usize::from(!current.is_empty()) * 2;
             let part_len = trimmed.chars().count();
-            let next_table_block_count = current_table_block_count + part.table_block_count;
-            if !current.is_empty()
-                && (current_len + separator_len + part_len > max_chars
-                    || next_table_block_count > FEISHU_ASSISTANT_TABLE_BLOCK_SOFT_LIMIT)
-            {
-                chunks.push(current);
-                current = String::new();
-                current_len = 0;
-                current_table_block_count = 0;
+            if current.needs_break_before(part_len, part.table_block_count, max_chars) {
+                // 标题不能留在上一分段而让它的表格/正文跑到下一分段
+                let carried = current.take_trailing_headings(part_len, max_chars);
+                chunks.push(std::mem::take(&mut current).into_content());
+                for heading in carried {
+                    current.push(heading, 0);
+                }
             }
 
-            if !current.is_empty() {
-                current.push_str("\n\n");
-                current_len += 2;
-            }
-            current.push_str(trimmed);
-            current_len += part_len;
-            current_table_block_count += part.table_block_count;
+            current.push(trimmed.to_string(), part.table_block_count);
         }
     }
 
     if !current.is_empty() {
-        chunks.push(current);
+        chunks.push(current.into_content());
     }
 
     if chunks.is_empty() {
@@ -525,10 +613,14 @@ fn split_markdown_blocks_for_feishu(content: &str) -> Vec<String> {
     let mut in_fence = false;
     let mut fence_marker = '`';
     let mut fence_length = 0usize;
+    let mut lines = content.lines().peekable();
 
-    for line in content.lines() {
+    while let Some(line) = lines.next() {
         if let Some((marker, length)) = parse_markdown_fence_delimiter(line) {
             if !in_fence {
+                if current_block_is_table(&current) {
+                    flush_feishu_markdown_block(&mut blocks, &mut current);
+                }
                 in_fence = true;
                 fence_marker = marker;
                 fence_length = length;
@@ -544,11 +636,30 @@ fn split_markdown_blocks_for_feishu(content: &str) -> Vec<String> {
             continue;
         }
 
+        // 表格总是单独成块（即使与上下文之间没有空行），
+        // 这样每个块最多包含一个表格，表格计数和标题跟随才可靠。
+        if !in_fence {
+            let table_starts_here = lines.peek().is_some_and(|next| {
+                looks_like_markdown_table_block(&format!("{}\n{}", line, next))
+            });
+            let table_ends_here = current.last().is_some_and(|prev: &String| prev.contains('|'))
+                && !line.contains('|')
+                && current_block_is_table(&current);
+            if table_starts_here || table_ends_here {
+                flush_feishu_markdown_block(&mut blocks, &mut current);
+            }
+        }
+
         current.push(line.to_string());
     }
 
     flush_feishu_markdown_block(&mut blocks, &mut current);
     blocks
+}
+
+fn current_block_is_table(current: &[String]) -> bool {
+    current.len() >= 2
+        && looks_like_markdown_table_block(&format!("{}\n{}", current[0], current[1]))
 }
 
 fn flush_feishu_markdown_block(blocks: &mut Vec<String>, current: &mut Vec<String>) {
@@ -576,7 +687,7 @@ fn split_markdown_block_for_feishu(block: &str, max_chars: usize) -> Vec<FeishuA
         }];
     }
     if looks_like_markdown_table_block(trimmed) {
-        return split_markdown_table_block_for_feishu(trimmed, max_chars);
+        return split_markdown_table_block_for_feishu(trimmed, max_chars, max_chars);
     }
     if let Some(parts) = split_fenced_code_block_for_feishu(trimmed, max_chars) {
         return parts
@@ -608,8 +719,10 @@ fn looks_like_markdown_table_block(block: &str) -> bool {
         && separator.chars().all(|ch| ch == '|' || ch == '-' || ch == ':' || ch == ' ')
 }
 
+/// 按行拆分超长表格，每段都重复表头。`first_part_max_chars` 用于首段（可为前置标题预留空间）。
 fn split_markdown_table_block_for_feishu(
     block: &str,
+    first_part_max_chars: usize,
     max_chars: usize,
 ) -> Vec<FeishuAssistantBlockPart> {
     let lines: Vec<&str> = block.lines().collect();
@@ -645,7 +758,8 @@ fn split_markdown_table_block_for_feishu(
                 .collect();
         }
 
-        if row_count > 0 && current_len + 1 + row_len > max_chars {
+        let part_max_chars = if parts.is_empty() { first_part_max_chars } else { max_chars };
+        if row_count > 0 && current_len + 1 + row_len > part_max_chars {
             parts.push(FeishuAssistantBlockPart { content: current, table_block_count: 1 });
             current = repeated_prefix.clone();
             current_len = prefix_len;
@@ -1974,10 +2088,11 @@ mod tests {
     #[test]
     fn feishu_response_split_table_repeats_table_header() {
         let rows = (1..=24)
-            .map(|index| format!("| 项目{} | {} |", index, "超长说明".repeat(18)))
+            .map(|index| format!("| 项目{} | {} |", index, "超长说明".repeat(30)))
             .collect::<Vec<_>>()
             .join("\n");
         let content = format!("## 表格拆分验证\n\n| 项目 | 说明 |\n|------|------|\n{}", rows);
+        assert!(content.chars().count() > FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT);
         let message = build_message("response", &content);
 
         let parts = render_message_for_external_channel(
@@ -1986,9 +2101,55 @@ mod tests {
         );
 
         assert!(parts.len() >= 2);
-        assert!(parts[0].contains("## 表格拆分验证"));
-        assert!(parts.iter().filter(|part| part.contains("| 项目 | 说明 |")).count() >= 2);
-        assert!(parts.iter().filter(|part| part.contains("|------|------|")).count() >= 2);
+        // 标题和表格首段在同一分段
+        assert!(parts[0].starts_with("## 表格拆分验证\n\n| 项目 | 说明 |"));
+        assert!(parts.iter().all(|part| part.contains("| 项目 | 说明 |\n|------|------|")));
+        assert!(parts
+            .iter()
+            .all(|part| part.chars().count() <= FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT));
+    }
+
+    #[test]
+    fn feishu_response_keeps_heading_with_following_table_when_length_forces_new_part() {
+        let intro = "这是一段很长的说明文字。".repeat(230);
+        let content = format!(
+            "{}\n\n## 关键数据\n\n| 指标 | 数值 |\n|------|------|\n| 用户数 | 100 |\n| 留存 | 80% |",
+            intro
+        );
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert_eq!(parts.len(), 2);
+        assert!(!parts[0].contains("## 关键数据"));
+        assert!(parts[1].starts_with("## 关键数据\n\n| 指标 | 数值 |"));
+    }
+
+    #[test]
+    fn feishu_response_counts_tables_without_blank_line_after_heading() {
+        let content = (1..=6)
+            .map(|index| {
+                format!(
+                    "## 小节{}\n| 维度 | 说明 |\n|------|------|\n| 项目{} | 简短 |",
+                    index, index
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let message = build_message("response", &content);
+
+        let parts = render_message_for_external_channel(
+            &message,
+            &RenderContext { channel: "feishu", relay_origin: "aipp" },
+        );
+
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("## 小节5"));
+        assert!(!parts[0].contains("## 小节6"));
+        assert!(parts[1].starts_with("## 小节6\n\n| 维度 | 说明 |"));
     }
 
     #[test]
