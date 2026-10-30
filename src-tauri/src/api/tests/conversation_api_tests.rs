@@ -306,14 +306,20 @@ async fn test_version_management_logic() {
     // 测试核心业务逻辑
     let final_messages = process_message_versions(message_details);
 
-    // 验证结果
-    assert_eq!(final_messages.len(), 2, "Expected 2 messages but got {}", final_messages.len());
-    assert_eq!(final_messages[0].message_type, "user");
-    assert_eq!(final_messages[0].content, "Original user message");
-    assert_eq!(final_messages[1].message_type, "assistant");
-    assert_eq!(final_messages[1].content, "Regenerated AI response v2 (latest)");
-    assert_eq!(final_messages[0].generation_group_id, Some(group_id.clone()));
-    assert_eq!(final_messages[1].generation_group_id, Some(group_id));
+    // 后端不再按 parent_id 过滤旧版本（版本选择在前端 useMessageGroups.ts 中完成），
+    // 所有版本都应按时间顺序原样返回，regenerate 数组也不再由后端填充。
+    let contents: Vec<&str> = final_messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(
+        contents,
+        vec![
+            "Original user message",
+            "Original AI response",
+            "Regenerated AI response v1",
+            "Regenerated AI response v2 (latest)",
+        ]
+    );
+    assert!(final_messages.iter().all(|m| m.regenerate.is_empty()));
+    assert!(final_messages.iter().all(|m| m.generation_group_id == Some(group_id.clone())));
 }
 
 #[tokio::test]
@@ -347,7 +353,16 @@ async fn test_single_user_message() {
 
 // ============================================================================
 // 版本管理高级测试
+//
+// 自 1c47d16 起，parent_id 不再写入，后端 process_message_versions 只负责排序，
+// 不再按 parent_id 折叠版本链，也不再填充 regenerate 数组；
+// 版本选择完全由前端 useMessageGroups.ts 基于 generation_group_id / parent_group_id 完成。
+// 以下测试断言：即使传入了遗留的 parent_id，所有版本也都按时间顺序原样保留。
 // ============================================================================
+
+fn ids(messages: &[MessageDetail]) -> Vec<i64> {
+    messages.iter().map(|m| m.id).collect()
+}
 
 /// 测试没有子版本的消息应该保持不变
 #[tokio::test]
@@ -377,9 +392,9 @@ async fn test_single_regeneration() {
 
     let result = process_message_versions(messages);
 
-    assert_eq!(result.len(), 2);
+    assert_eq!(ids(&result), vec![1, 2, 3]);
     assert_eq!(result[0].content, "What is 2+2?");
-    assert_eq!(result[1].content, "Regenerated: 2+2=4");
+    assert_eq!(result[2].content, "Regenerated: 2+2=4");
 }
 
 /// 测试多层版本链（多次重发）
@@ -395,9 +410,8 @@ async fn test_multi_level_regeneration() {
 
     let result = process_message_versions(messages);
 
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[1].content, "V4 (latest)");
-    assert_eq!(result[1].id, 5);
+    assert_eq!(ids(&result), vec![1, 2, 3, 4, 5]);
+    assert_eq!(result[4].content, "V4 (latest)");
 }
 
 /// 测试多个独立消息各自有版本链
@@ -415,11 +429,11 @@ async fn test_multiple_independent_version_chains() {
 
     let result = process_message_versions(messages);
 
-    assert_eq!(result.len(), 4);
+    assert_eq!(ids(&result), vec![1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(result[0].content, "First question");
-    assert_eq!(result[1].content, "Answer 1 V2"); // 最新版本
-    assert_eq!(result[2].content, "Second question");
-    assert_eq!(result[3].content, "Answer 2 V3"); // 最新版本
+    assert_eq!(result[2].content, "Answer 1 V2");
+    assert_eq!(result[3].content, "Second question");
+    assert_eq!(result[6].content, "Answer 2 V3");
 }
 
 /// 测试带有 reasoning 和 response 的消息组
@@ -492,10 +506,9 @@ async fn test_regenerate_array_populated() {
 
     let result = process_message_versions(messages);
 
-    // 最终显示的消息
-    assert_eq!(result.len(), 2);
-    // 应该显示最新版本（V3 或 V4 取决于实现）
-    // 注意：当前实现中 V3 和 V4 都指向 V1，所以会取时间最晚的
+    // 后端不再填充 regenerate 数组，也不折叠版本
+    assert_eq!(ids(&result), vec![1, 2, 3, 4]);
+    assert!(result.iter().all(|m| m.regenerate.is_empty()));
 }
 
 // ============================================================================
@@ -584,8 +597,9 @@ async fn test_deep_version_chain() {
 
     let result = process_message_versions(messages);
 
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[1].content, "V51"); // 最深层版本
+    assert_eq!(result.len(), 52);
+    assert_eq!(ids(&result), (1..53).collect::<Vec<i64>>());
+    assert_eq!(result[51].content, "V51"); // 最深层版本排在最后
 }
 
 // ============================================================================
@@ -969,11 +983,9 @@ async fn test_reasoning_response_with_regeneration() {
 
     let result = process_message_versions(messages);
 
-    // 应该显示最新版本的 reasoning 和 response
-    assert_eq!(result.len(), 3);
-    assert_eq!(result[0].message_type, "user");
-    assert_eq!(result[1].message_type, "reasoning");
-    assert_eq!(result[2].message_type, "response");
-    assert_eq!(result[1].content, "Correct reasoning");
-    assert_eq!(result[2].content, "Correct answer: 4");
+    // 两组都保留，按时间排序，每组内 reasoning 在 response 之前
+    let types: Vec<&str> = result.iter().map(|m| m.message_type.as_str()).collect();
+    assert_eq!(types, vec!["user", "reasoning", "response", "reasoning", "response"]);
+    assert_eq!(result[3].content, "Correct reasoning");
+    assert_eq!(result[4].content, "Correct answer: 4");
 }
