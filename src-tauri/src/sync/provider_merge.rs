@@ -157,6 +157,37 @@ pub(super) fn find_duplicates(llm: &Connection) -> Result<Vec<DuplicateProviderP
     Ok(pairs)
 }
 
+/// Names of same-name provider groups whose API keys differ; never auto-merged.
+pub(super) fn find_key_conflicts(llm: &Connection) -> Result<Vec<String>, String> {
+    let with_type = has_column(llm, "llm_provider", "api_type")?;
+    let group_cols = if with_type { "name, api_type" } else { "name" };
+    let mut groups = llm.prepare(&format!(
+        "SELECT name, GROUP_CONCAT(id) FROM llm_provider WHERE COALESCE(is_official,0)=0
+         GROUP BY {group_cols} HAVING COUNT(*) > 1 ORDER BY name"))
+        .map_err(|e| e.to_string())?;
+    let rows = groups.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    for (name, ids) in rows {
+        let mut keys = HashSet::new();
+        for id in ids.split(',').filter_map(|v| v.parse::<i64>().ok()) {
+            if let Some(key) = api_key_of(llm, id)? { keys.insert(key); }
+        }
+        if keys.len() > 1 && !names.contains(&name) { names.push(name); }
+    }
+    Ok(names)
+}
+
+/// Fold every safe duplicate group (see find_duplicates). Returns merged count.
+/// Callers must finish redirects afterwards (finish_redirects / next scan).
+pub(super) fn auto_merge(sync: &Connection, llm: &Connection) -> Result<usize, String> {
+    let pairs = find_duplicates(llm)?;
+    for pair in &pairs {
+        merge_in_llm(sync, llm, pair.keep_id, pair.duplicate_id)?;
+    }
+    Ok(pairs.len())
+}
+
 fn alias_all(sync: &Connection, object_type: &str, from: i64, to: i64) -> Result<(), String> {
     for sync_id in identities(sync, object_type, from)? {
         sync.execute("INSERT OR REPLACE INTO sync_object_alias (object_type, sync_id, local_id) VALUES (?1, ?2, ?3)",

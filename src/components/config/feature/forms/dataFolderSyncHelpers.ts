@@ -307,17 +307,11 @@ export function secretSyncTone(state: string | null | undefined): "ok" | "warn" 
     return "muted";
 }
 
-/** Primary passphrase button: create on a fresh account, otherwise verify the shared one. */
-export function syncPassphraseActionLabel(state: string | null | undefined): string {
-    if (!state || state === "not_configured") {
-        return "设置口令";
-    }
-    return state === "ready" ? "重新验证口令" : "验证口令";
-}
+/** Backend error code prefix: the passphrase differs from the account's existing one. */
+export const SYNC_PASSPHRASE_MISMATCH_CODE = "SYNC_PASSPHRASE_MISMATCH";
 
-/** Replacing only makes sense once a passphrase exists somewhere. */
-export function canReplaceSyncPassphrase(state: string | null | undefined): boolean {
-    return state === "ready" || state === "needs_passphrase" || state === "mismatch";
+export function isSyncPassphraseMismatch(error: string | null | undefined): boolean {
+    return Boolean(error?.startsWith(SYNC_PASSPHRASE_MISMATCH_CODE));
 }
 
 /** Client-side check mirroring the backend minimum; null when acceptable. */
@@ -331,10 +325,10 @@ export function validateSyncPassphrase(value: string): string | null {
     return null;
 }
 
-/** Notice shown when older syncs left keyless same-name provider copies behind. */
-export function duplicateProviderNotice(count: number | null | undefined): string | null {
-    if (!count || count <= 0) {
+/** Same-name providers whose API Keys differ are left unmerged; name them once. */
+export function providerConflictNotice(names: string[] | null | undefined): string | null {
+    if (!names || names.length === 0) {
         return null;
     }
-    return `发现 ${count} 个同名重复的供应商（旧版本同步遗留，通常没有 API Key）。可合并到有 API Key 的那个，并把助手、模型和历史消息的引用一起迁移。`;
+    return `同名供应商「${names.join("」「")}」的 API Key 不一致，未自动合并`;
 }

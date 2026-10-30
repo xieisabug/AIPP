@@ -26,6 +26,9 @@ const ENVELOPE_ALG: &str = "aipp-e2e-aes256gcm-v1";
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
 const CHECK_LABEL: &[u8] = b"aipp-sync-secret-key-check-v1";
 pub(super) const MIN_PASSPHRASE_CHARS: usize = 8;
+/// Error prefix for "a passphrase already exists and this one does not match".
+/// The settings UI turns it into a single "replace the passphrase?" confirmation.
+pub(super) const PASSPHRASE_MISMATCH_CODE: &str = "SYNC_PASSPHRASE_MISMATCH";
 #[cfg(not(test))]
 pub(super) const KDF_ITERATIONS: u32 = 600_000;
 /// Tests only exercise the protocol; production cost lives in the record.
@@ -101,11 +104,11 @@ impl SecretState {
     }
     pub fn message(&self, pending: i64) -> String {
         match self {
-            SecretState::NotConfigured => "未设置同步口令：API Key 不会同步，本机 API Key 保持不变".into(),
-            SecretState::NeedsPassphrase => "需要输入同步口令才能同步 API Key（其他设备已启用加密同步），在此之前本机 API Key 保持不变".into(),
-            SecretState::Mismatch => "同步口令与其他设备不一致（口令错误或已在其他设备更换），已暂停同步 API Key，本机 API Key 保持不变；请重新输入同步口令".into(),
-            SecretState::Ready(_) if pending > 0 => format!("已启用 API Key 端到端加密同步；有 {pending} 条 API Key 无法用当前口令解密，已保留本机值"),
-            SecretState::Ready(_) => "已启用 API Key 端到端加密同步（服务器只保存密文）".into(),
+            SecretState::NotConfigured => "未设置口令，API Key 不同步".into(),
+            SecretState::NeedsPassphrase => "需要输入同步口令才能同步 API Key".into(),
+            SecretState::Mismatch => "同步口令已在其他设备更换，请输入新口令".into(),
+            SecretState::Ready(_) if pending > 0 => format!("API Key 已加密同步（{pending} 条无法解密，已保留本机值）"),
+            SecretState::Ready(_) => "API Key 已加密同步".into(),
         }
     }
 }
@@ -268,12 +271,6 @@ fn load_local_key(system: &Connection, master: &[u8; 32]) -> Result<Option<Secre
     Ok(Some(SecretKey { enc: decode(&stored.enc)?, mac: decode(&stored.mac)?, record: stored.record }))
 }
 
-pub(super) fn clear_local_key(system: &Connection) -> Result<(), String> {
-    system.execute("DELETE FROM secure_config WHERE scope=?1 AND key=?2", params![LOCAL_SCOPE, LOCAL_KEY])
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Resolve the current secret-sync state from system.db (record + local key).
 pub(super) fn state_from_db(system: &Connection, master: &[u8; 32]) -> Result<SecretState, String> {
     let record = read_record(system)?;
@@ -307,7 +304,7 @@ pub(super) fn set_passphrase(
         Some(record) if !replace_existing => {
             let key = derive_with_record(passphrase, &record)?;
             if key.record != record {
-                return Err("同步口令错误：与其他设备设置的同步口令不一致。如确需更换口令，请使用「更换口令」（其他设备需重新输入新口令）".into());
+                return Err(format!("{PASSPHRASE_MISMATCH_CODE}: 输入的口令与已有同步口令不一致"));
             }
             key
         }
@@ -386,6 +383,107 @@ fn park(sync: &Connection, change: &PullChange, reason: &str) -> Result<(), Stri
     Ok(())
 }
 
+// ---------- server copies & first-unlock reconciliation ----------
+//
+// `sync_secret_server` keeps the latest server version (ciphertext only) of every
+// secret this device has seen: pulled, parked, conflict-resolved or accepted from
+// its own push. When a device unlocks an existing passphrase, these copies win
+// over local values, so keys typed while locked are never mistaken for newer writes.
+
+const RECONCILE_META: &str = "secret_server_wins_pending";
+
+fn remember_server_copy(sync: &Connection, change: &PullChange) -> Result<(), String> {
+    let change_json = serde_json::to_string(change).map_err(|e| e.to_string())?;
+    sync.execute(
+        "INSERT INTO sync_secret_server (object_id, version, change_json) VALUES (?1, ?2, ?3)
+         ON CONFLICT(object_id) DO UPDATE SET version=excluded.version, change_json=excluded.change_json
+         WHERE excluded.version >= sync_secret_server.version",
+        params![change.object_id, change.version, change_json],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub(super) fn forget_server_copy(sync: &Connection, object_id: &str) -> Result<(), String> {
+    sync.execute("DELETE FROM sync_secret_server WHERE object_id=?1", params![object_id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub(super) fn remember_accepted_push(sync: &Connection, event: &PushEvent, ack: &AcceptedEvent) -> Result<(), String> {
+    if event.operation == "delete" {
+        return forget_server_copy(sync, &event.object_id);
+    }
+    remember_server_copy(sync, &PullChange {
+        seq: ack.server_seq, event_id: event.event_id.clone(), device_id: String::new(),
+        object_type: event.object_type.clone(), object_id: event.object_id.clone(),
+        operation: event.operation.clone(), version: ack.server_version, payload: event.payload.clone(),
+        deleted_at: None, created_at: now_string(),
+    })
+}
+
+/// Called when this device unlocks an already existing passphrase (not when it
+/// creates or replaces one). Until reconciled, local secrets are not scanned.
+pub(super) fn begin_server_wins(sync: &Connection) -> Result<(), String> {
+    set_sync_meta(sync, RECONCILE_META, "1")
+}
+
+pub(super) fn cancel_server_wins(sync: &Connection) -> Result<(), String> {
+    sync.execute("DELETE FROM sync_meta WHERE key=?1", params![RECONCILE_META]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub(super) fn server_wins_pending(sync: &Connection) -> bool {
+    get_sync_meta(sync, RECONCILE_META).ok().flatten().as_deref() == Some("1")
+}
+
+/// Overwrite local secrets with every known server copy that the current key can
+/// open, then clear the flag. Secrets the server lacks stay local and are pushed
+/// by the next scan; afterwards normal last-writer-wins applies.
+pub(super) fn reconcile_server_wins(
+    sync: &Connection,
+    key: &SecretKey,
+    mut apply: impl FnMut(&PullChange) -> Result<(), String>,
+) -> Result<usize, String> {
+    let rows: Vec<String> = sync.prepare("SELECT change_json FROM sync_secret_server ORDER BY object_id")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| r.get(0)).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    let mut applied = 0;
+    for raw in rows {
+        let mut change: PullChange = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let fields = change.payload.as_ref().and_then(|p| p.get("fields")).and_then(JsonValue::as_object);
+        let name = fields.and_then(|f| f.get("name")).and_then(JsonValue::as_str).unwrap_or_default();
+        let envelope = fields.and_then(|f| f.get("value")).cloned().unwrap_or(JsonValue::Null);
+        if open(key, &change.object_id, name, &envelope).is_err() {
+            continue; // Sealed with an older passphrase: a newer server write will follow.
+        }
+        let unpushed: bool = sync.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type=?1 AND object_id=?2)",
+            params![OBJECT_TYPE, change.object_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if unpushed { continue; } // A real edit made while unlocked is already queued.
+        // Re-apply the server version even though it is already "seen": drop the
+        // receipt so the apply path does not skip it, restore it if apply fails.
+        let shadow: Option<(i64, i64, String, Option<String>, String)> = sync.query_row(
+            "SELECT server_version, server_seq, payload_hash, deleted_at, updated_at FROM sync_shadow WHERE object_type=?1 AND object_id=?2",
+            params![OBJECT_TYPE, change.object_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        sync.execute("DELETE FROM sync_shadow WHERE object_type=?1 AND object_id=?2", params![OBJECT_TYPE, change.object_id])
+            .map_err(|e| e.to_string())?;
+        change.seq = 0; // Not ordered against merged identities: this is the server state.
+        if let Err(err) = apply(&change) {
+            if let Some((version, seq, hash, deleted_at, updated_at)) = shadow {
+                sync.execute("INSERT OR REPLACE INTO sync_shadow (object_type, object_id, server_version, server_seq, payload_hash, deleted_at, updated_at)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![OBJECT_TYPE, change.object_id, version, seq, hash, deleted_at, updated_at]).map_err(|e| e.to_string())?;
+            }
+            warn!(error = %err, "Server-wins reconcile skipped one API key");
+            continue;
+        }
+        applied += 1;
+    }
+    sync.execute("DELETE FROM sync_meta WHERE key=?1", params![RECONCILE_META]).map_err(|e| e.to_string())?;
+    Ok(applied)
+}
+
 pub(super) fn pending_count(sync: &Connection) -> i64 {
     sync.query_row("SELECT COUNT(*) FROM sync_secret_pending", [], |r| r.get(0)).unwrap_or(0)
 }
@@ -399,6 +497,7 @@ pub(super) fn apply_upsert(
     change: &PullChange,
     resolved: &Map<String, JsonValue>,
 ) -> Result<(), String> {
+    remember_server_copy(sync, change)?;
     let Some(key) = current_key() else {
         return park(sync, change, "需要输入正确的同步口令才能同步 API Key");
     };

@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
-    canReplaceSyncPassphrase,
     canShowCleanupDangling,
     canShowRetryDeadLetters,
     canShowRetryFailed,
     canShowSyncNow,
     canStopSync,
     decideSyncNowAction,
-    duplicateProviderNotice,
     formatDanglingFkStatusText,
     formatLastSyncAt,
     formatRecentSyncError,
@@ -22,7 +20,8 @@ import {
     shouldTriggerSyncAfterSave,
     showsSelfHostedSyncControls,
     syncConflictNotice,
-    syncPassphraseActionLabel,
+    isSyncPassphraseMismatch,
+    providerConflictNotice,
     validateSyncPassphrase,
 } from "./dataFolderSyncHelpers";
 
@@ -345,13 +344,9 @@ describe("encrypted API Key sync helpers", () => {
         expect(secretSyncTone("mismatch")).toBe("warn");
         expect(secretSyncTone("not_configured")).toBe("muted");
         expect(secretSyncTone(undefined)).toBe("muted");
-        expect(syncPassphraseActionLabel("not_configured")).toBe("设置口令");
-        expect(syncPassphraseActionLabel(undefined)).toBe("设置口令");
-        expect(syncPassphraseActionLabel("needs_passphrase")).toBe("验证口令");
-        expect(syncPassphraseActionLabel("mismatch")).toBe("验证口令");
-        expect(syncPassphraseActionLabel("ready")).toBe("重新验证口令");
-        expect(canReplaceSyncPassphrase("not_configured")).toBe(false);
-        expect(canReplaceSyncPassphrase("mismatch")).toBe(true);
+        expect(isSyncPassphraseMismatch("SYNC_PASSPHRASE_MISMATCH: 输入的口令与已有同步口令不一致")).toBe(true);
+        expect(isSyncPassphraseMismatch("同步口令至少需要 8 个字符")).toBe(false);
+        expect(isSyncPassphraseMismatch(undefined)).toBe(false);
     });
 
     it("validates the passphrase length by characters", () => {
@@ -361,9 +356,10 @@ describe("encrypted API Key sync helpers", () => {
         expect(validateSyncPassphrase("12345678")).toBeNull();
     });
 
-    it("only shows the duplicate provider notice when there is something to merge", () => {
-        expect(duplicateProviderNotice(0)).toBeNull();
-        expect(duplicateProviderNotice(undefined)).toBeNull();
-        expect(duplicateProviderNotice(2)).toContain("发现 2 个同名重复的供应商");
+    it("names conflicting same-name providers and stays silent otherwise", () => {
+        expect(providerConflictNotice([])).toBeNull();
+        expect(providerConflictNotice(undefined)).toBeNull();
+        expect(providerConflictNotice(["Relay"])).toBe("同名供应商「Relay」的 API Key 不一致，未自动合并");
+        expect(providerConflictNotice(["A", "B"])).toBe("同名供应商「A」「B」的 API Key 不一致，未自动合并");
     });
 });

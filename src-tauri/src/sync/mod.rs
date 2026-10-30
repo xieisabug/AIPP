@@ -130,8 +130,8 @@ pub struct SyncStatusDto {
     secret_sync_message: String,
     /// 因缺少/不匹配口令而暂存、未写入本地的远端 API Key 变更数
     secret_pending_count: i64,
-    /// 可安全合并的同名重复供应商数量（历史同步遗留）
-    duplicate_provider_count: i64,
+    /// API Key 不一致、因此未自动合并的同名供应商名称
+    duplicate_provider_conflicts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1273,6 +1273,7 @@ async fn run_sync_once_inner(
     // Remote secrets parked while no passphrase was set win over local values
     // that were never synced (same rule as any other conflict: remote first).
     replay_secret_pending(app_handle).await?;
+    auto_merge_duplicate_providers(app_handle).await?;
     let (queued, dangling) = scan_local_changes(app_handle)?;
     store_dangling_fk_report(app_handle, &dangling).await;
     if queued > 0 || dangling.total_hits > 0 {
@@ -1283,6 +1284,10 @@ async fn run_sync_once_inner(
     ensure_not_cancelled(cancel)?;
     pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
     replay_secret_pending(app_handle).await?;
+    if auto_merge_duplicate_providers(app_handle).await? > 0 {
+        // Push the moved children/references in the next round.
+        schedule_sync_after_local_change(app_handle);
+    }
     Ok(())
 }
 
@@ -2057,6 +2062,8 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
         let secret_key = if spec.object_type == secrets::OBJECT_TYPE {
             // Without a matching passphrase secrets are neither pushed nor tombstoned.
             let Some(key) = secret_state.ready_key() else { continue };
+            // Just unlocked: server values must land first (replay_secret_pending).
+            if secrets::server_wins_pending(&sync_conn) { continue; }
             Some(key)
         } else { None };
         let (snapshots, present_ids) =
@@ -3097,6 +3104,7 @@ fn apply_change_to_db_inner(
 
     if change.operation == "delete" {
         if quick_assistant::apply_delete(sync_conn, conn, change)? { return Ok(()); }
+        if spec.object_type == secrets::OBJECT_TYPE { secrets::forget_server_copy(sync_conn, &change.object_id)?; }
         apply_delete(sync_conn, &conn, &spec, change)?;
         upsert_shadow_from_remote(sync_conn, change)?;
         return Ok(());
@@ -4528,6 +4536,9 @@ fn consume_accepted_event(conn: &Connection, id: i64, event: &PushEvent, ack: &A
         let hash = sync_payload_hash(conn, event.payload.as_ref())?;
         apply_ack_to_shadow(conn, &ack.object_type, &ack.object_id, ack.server_version,
             ack.server_seq, &event.operation, &hash)?;
+        if event.object_type == secrets::OBJECT_TYPE {
+            secrets::remember_accepted_push(conn, event, ack)?;
+        }
         conn.execute("DELETE FROM sync_outbox WHERE id=?1 AND event_id=?2", params![id, ack.event_id]).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM sync_bootstrap_attempt WHERE event_id=?1", params![ack.event_id]).map_err(|e| e.to_string())?;
         conn.execute("UPDATE sync_outbox SET base_version=MAX(COALESCE(base_version,0),?3)
@@ -4898,6 +4909,11 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             change_json TEXT NOT NULL,
             reason TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_secret_server (
+            object_id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            change_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS sync_identity_origin (
             object_type TEXT NOT NULL,
@@ -5439,11 +5455,10 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         warn!(error = %err, "Failed to read sync passphrase state");
         secrets::SecretState::NotConfigured
     });
-    let duplicate_provider_count = get_db_path(app_handle, "llm.db")
+    let duplicate_provider_conflicts = get_db_path(app_handle, "llm.db")
         .and_then(|path| open_data_db(&path))
-        .and_then(|llm| provider_merge::find_duplicates(&llm))
-        .map(|pairs| pairs.len() as i64)
-        .unwrap_or(0);
+        .and_then(|llm| provider_merge::find_key_conflicts(&llm))
+        .unwrap_or_default();
     // Keep runtime.paused aligned with persisted auto_sync for status reads.
     apply_persisted_auto_sync_to_runtime(app_handle).await;
     let runtime = if let Some(state) = app_handle.try_state::<SyncState>() {
@@ -5485,7 +5500,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         secret_sync_state: secret_state.code().to_string(),
         secret_sync_message: secret_state.message(secret_pending_count),
         secret_pending_count,
-        duplicate_provider_count,
+        duplicate_provider_conflicts,
     })
 }
 
@@ -5551,16 +5566,43 @@ fn load_secret_state(app_handle: &AppHandle) -> Result<secrets::SecretState, Str
 async fn replay_secret_pending(app_handle: &AppHandle) -> Result<usize, String> {
     let applied = {
         let sync = open_sync_db(app_handle)?;
-        if secrets::pending_count(&sync) == 0 || load_secret_state(app_handle)?.ready_key().is_none() {
-            return Ok(0);
+        let state = load_secret_state(app_handle)?;
+        let Some(key) = state.ready_key() else { return Ok(0) };
+        let mut applied = 0;
+        if secrets::pending_count(&sync) > 0 {
+            applied += secrets::replay_pending(&sync, |change| apply_change(app_handle, &sync, change, ""))?.0;
         }
-        secrets::replay_pending(&sync, |change| apply_change(app_handle, &sync, change, ""))?.0
+        if secrets::server_wins_pending(&sync) {
+            applied += secrets::reconcile_server_wins(&sync, key, |change| apply_change(app_handle, &sync, change, ""))?;
+        }
+        applied
     };
     if applied > 0 {
         let types = HashSet::from([secrets::OBJECT_TYPE.to_string()]);
         emit_sync_domain_events(app_handle, &types).await?;
     }
     Ok(applied)
+}
+
+/// Fold same-name duplicate providers left by earlier syncs when their API keys
+/// do not conflict (runs inside every sync round, under the sync lock).
+async fn auto_merge_duplicate_providers(app_handle: &AppHandle) -> Result<usize, String> {
+    let merged = {
+        let sync = open_sync_db(app_handle)?;
+        let llm = open_data_db(&get_db_path(app_handle, "llm.db")?)?;
+        let merged = provider_merge::auto_merge(&sync, &llm)?;
+        if merged > 0 {
+            let assistant = open_data_db(&get_db_path(app_handle, "assistant.db")?)?;
+            finish_provider_merge_redirects(app_handle, &sync, &assistant)?;
+        }
+        merged
+    };
+    if merged > 0 {
+        info!(merged, "Auto-merged duplicate providers without API key conflicts");
+        let types = HashSet::from(["llm.provider".to_string(), "assistant.model".to_string(), "system.feature_config".to_string()]);
+        emit_sync_domain_events(app_handle, &types).await?;
+    }
+    Ok(merged)
 }
 
 fn finish_provider_merge_redirects(app_handle: &AppHandle, sync: &Connection, assistant: &Connection) -> Result<usize, String> {
@@ -5591,26 +5633,37 @@ pub async fn set_sync_passphrase(
         return Err(format!("同步口令至少需要 {} 个字符", secrets::MIN_PASSPHRASE_CHARS));
     }
     ensure_sync_db(&app_handle)?;
-    // Pull first so a record created by another device is verified, not replaced.
+    // Pull first: an existing record must be verified (not replaced) and the
+    // latest server API keys must be known before they win over local values.
     let settings = load_settings(&app_handle)?;
+    if settings.mode == SyncMode::SelfHosted && settings.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+        run_sync_once_manual(&app_handle).await;
+    }
     let has_record = {
         let system = open_data_db(&get_db_path(&app_handle, "system.db")?)?;
         secrets::read_record(&system)?.is_some()
     };
-    if !replace_existing && !has_record && settings.mode == SyncMode::SelfHosted
-        && settings.token.as_deref().is_some_and(|t| !t.trim().is_empty())
-    {
-        run_sync_once_manual(&app_handle).await;
-    }
     let master = get_or_create_master_key(&app_handle)?;
     let system_path = get_db_path(&app_handle, "system.db")?;
+    // Unlocking an existing passphrase: server keys win over local ones once.
+    // Creating or replacing the passphrase is the deliberate write instead.
+    // Flag first so no concurrent scan can upload local keys in between.
+    let server_wins = has_record && !replace_existing;
+    let sync = open_sync_db(&app_handle)?;
+    let flag_was_set = secrets::server_wins_pending(&sync);
+    if server_wins { secrets::begin_server_wins(&sync)?; }
     // PBKDF2 is intentionally slow; keep it off the async runtime.
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let system = open_data_db(&system_path)?;
         secrets::set_passphrase(&system, &master, &passphrase, replace_existing).map(|_| ())
     })
     .await
-    .map_err(|e| format!("设置同步口令失败: {e}"))??;
+    .map_err(|e| format!("设置同步口令失败: {e}"))
+    .and_then(|r| r);
+    if let Err(err) = result {
+        if server_wins && !flag_was_set { secrets::cancel_server_wins(&sync)?; }
+        return Err(err);
+    }
     info!(replace_existing, "Sync passphrase configured on this device");
     let types = HashSet::from(["system.feature_config".to_string()]);
     let _ = emit_sync_domain_events(&app_handle, &types).await;
@@ -5619,41 +5672,6 @@ pub async fn set_sync_passphrase(
     }
     schedule_sync_after_local_change(&app_handle);
     emit_status_changed(&app_handle).await;
-    sync_status(&app_handle).await
-}
-
-/// 清除本机保存的同步口令：之后不再上传/接收 API Key，本机已有 API Key 不变。
-#[tauri::command]
-pub async fn clear_sync_passphrase(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
-    let system = open_data_db(&get_db_path(&app_handle, "system.db")?)?;
-    secrets::clear_local_key(&system)?;
-    emit_status_changed(&app_handle).await;
-    sync_status(&app_handle).await
-}
-
-/// 合并历史同步遗留的同名重复供应商（仅限无冲突 API Key 的组），保留有 Key 的那个。
-#[tauri::command]
-pub async fn merge_duplicate_sync_providers(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
-    ensure_sync_db(&app_handle)?;
-    let merged = {
-        let state = app_handle.state::<SyncState>();
-        let _guard = state.sync_lock.lock().await;
-        let sync = open_sync_db(&app_handle)?;
-        let llm = open_data_db(&get_db_path(&app_handle, "llm.db")?)?;
-        let assistant = open_data_db(&get_db_path(&app_handle, "assistant.db")?)?;
-        let pairs = provider_merge::find_duplicates(&llm)?;
-        for pair in &pairs {
-            provider_merge::merge_in_llm(&sync, &llm, pair.keep_id, pair.duplicate_id)?;
-        }
-        finish_provider_merge_redirects(&app_handle, &sync, &assistant)?;
-        pairs.len()
-    };
-    if merged > 0 {
-        info!(merged, "Merged duplicate providers created by earlier syncs");
-        let types = HashSet::from(["llm.provider".to_string(), "assistant.model".to_string(), "system.feature_config".to_string()]);
-        let _ = emit_sync_domain_events(&app_handle, &types).await;
-        schedule_sync_after_local_change(&app_handle);
-    }
     sync_status(&app_handle).await
 }
 

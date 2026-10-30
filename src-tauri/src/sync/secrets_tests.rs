@@ -51,8 +51,20 @@ impl KDev {
         secrets::state_from_db(&self.system, &self.master).unwrap()
     }
 
+    /// Mirrors set_sync_passphrase: unlocking an existing record is server-wins.
     fn passphrase(&self, value: &str, replace: bool) -> Result<(), String> {
-        secrets::set_passphrase(&self.system, &self.master, value, replace).map(|_| ())
+        let server_wins = secrets::read_record(&self.system)?.is_some() && !replace;
+        let was_set = secrets::server_wins_pending(&self.sync);
+        if server_wins { secrets::begin_server_wins(&self.sync)?; }
+        let result = secrets::set_passphrase(&self.system, &self.master, value, replace).map(|_| ());
+        if result.is_err() && server_wins && !was_set { secrets::cancel_server_wins(&self.sync)?; }
+        result?;
+        self.replay_secrets();
+        Ok(())
+    }
+
+    fn lock(&self) {
+        self.system.execute("DELETE FROM secure_config WHERE scope='data_sync' AND key='secret_key'", []).unwrap();
     }
 
     /// Mirrors scan_local_changes (repairs, sealing, delete detection).
@@ -65,6 +77,7 @@ impl KDev {
         for spec in specs().into_iter().filter(|s| TYPES.contains(&s.object_type)) {
             let key = if spec.object_type == secrets::OBJECT_TYPE {
                 let Some(key) = state.ready_key() else { continue };
+                if secrets::server_wins_pending(&self.sync) { continue; }
                 Some(key.clone())
             } else { None };
             let (rows, present) = read_local_snapshots_from_db(self.conn(&spec), &spec, &self.sync,
@@ -90,8 +103,15 @@ impl KDev {
         })
     }
 
-    fn replay_secrets(&self) -> (usize, usize) {
-        secrets::replay_pending(&self.sync, |change| self.apply(change)).unwrap()
+    /// Mirrors replay_secret_pending: parked changes, then first-unlock server-wins.
+    fn replay_secrets(&self) -> usize {
+        let state = self.state();
+        let Some(key) = state.ready_key() else { return 0 };
+        let mut applied = secrets::replay_pending(&self.sync, |change| self.apply(change)).unwrap().0;
+        if secrets::server_wins_pending(&self.sync) {
+            applied += secrets::reconcile_server_wins(&self.sync, key, |change| self.apply(change)).unwrap();
+        }
+        applied
     }
 
     fn key_of(&self, provider: i64) -> Option<String> {
@@ -164,10 +184,12 @@ impl MiniServer {
     /// One production-ordered round: replay parked → scan → push → pull → replay.
     fn round(&mut self, d: &KDev, cursor: &mut i64) {
         d.replay_secrets();
+        provider_merge::auto_merge(&d.sync, &d.data).unwrap();
         d.scan();
         self.push(d);
         self.pull(d, cursor);
         d.replay_secrets();
+        provider_merge::auto_merge(&d.sync, &d.data).unwrap();
     }
 }
 
@@ -258,7 +280,7 @@ fn test_secret_sync_wrong_passphrase_never_overwrites_and_reports() {
     server.round(&a, &mut ca);
     server.round(&b, &mut cb);
     let err = b.passphrase("wrong passphrase", false).unwrap_err();
-    assert!(err.contains("同步口令错误"), "{err}");
+    assert!(err.starts_with(secrets::PASSPHRASE_MISMATCH_CODE), "{err}");
     assert!(matches!(b.state(), secrets::SecretState::NeedsPassphrase), "nothing stored for a wrong passphrase");
     server.round(&b, &mut cb);
     assert_eq!(b.key_of(1).as_deref(), Some("sk-B-local"));
@@ -274,7 +296,7 @@ fn test_secret_sync_wrong_passphrase_never_overwrites_and_reports() {
     server.round(&a, &mut ca);
     server.round(&b, &mut cb);
     assert!(matches!(b.state(), secrets::SecretState::Mismatch));
-    assert!(b.state().message(0).contains("同步口令与其他设备不一致"));
+    assert!(b.state().message(0).contains("同步口令已在其他设备更换"));
     assert_eq!(b.key_of(1).as_deref(), Some("sk-A"), "mismatch must never write garbage or the new value");
     assert!(!b.pending_upserts().iter().any(|e| e.object_type == secrets::OBJECT_TYPE));
     b.passphrase("brand new passphrase", false).unwrap();
@@ -297,7 +319,7 @@ fn test_device_without_passphrase_keeps_local_key_and_never_uploads_it() {
     assert!(!server.received.iter().any(|p| p.contains("\"device-b\"") && p.contains(secrets::OBJECT_TYPE)));
     // Nothing configured anywhere: secrets stay local, status explains it.
     let c = KDev::new("device-c");
-    assert!(c.state().message(0).contains("API Key 不会同步"));
+    assert!(c.state().message(0).contains("API Key 不同步"));
 }
 
 #[test]
@@ -366,11 +388,13 @@ fn test_same_device_duplicates_are_not_folded_on_receiver() {
     let mut server = MiniServer::default();
     let (a, b) = (KDev::new("device-a"), KDev::new("device-b"));
     seed_custom(&a, 5, "Relay", Some("sk-1"));
-    a.data.execute("INSERT INTO llm_provider(id, name, api_type) VALUES (6, 'Relay', 'openai_api')", []).unwrap();
+    seed_custom(&a, 6, "Relay", Some("sk-2")); // different key: a real second provider
     let (mut ca, mut cb) = (0, 0);
     server.round(&a, &mut ca);
     server.round(&b, &mut cb);
     assert_eq!(providers_named(&b, "Relay"), 2, "two distinct providers authored by one device stay distinct");
+    assert_eq!(providers_named(&a, "Relay"), 2, "conflicting keys are never auto-merged");
+    assert_eq!(provider_merge::find_key_conflicts(&a.data).unwrap(), vec!["Relay".to_string()]);
 }
 
 /// Official providers share an identity; endpoints used to be inserted as a
@@ -453,4 +477,116 @@ fn test_duplicates_with_conflicting_keys_are_left_alone() {
     seed_custom(&d, 9, "Relay", Some("sk-1"));
     seed_custom(&d, 12, "Relay", Some("sk-2"));
     assert!(provider_merge::find_duplicates(&d.data).unwrap().is_empty());
+}
+
+#[test]
+fn test_auto_merge_folds_safe_duplicates_and_reports_key_conflicts() {
+    let d = KDev::new("device-b");
+    seed_custom(&d, 9, "SiliconFlow", Some("sk-B"));
+    seed_custom(&d, 12, "SiliconFlow", None);
+    seed_custom(&d, 20, "Relay", Some("sk-1"));
+    seed_custom(&d, 21, "Relay", Some("sk-2"));
+    d.data.execute("UPDATE assistant_model SET provider_id=12, model_code='qwen-max' WHERE assistant_id=1", []).unwrap();
+    d.scan();
+    assert_eq!(provider_merge::auto_merge(&d.sync, &d.data).unwrap(), 1);
+    d.scan();
+    assert_eq!(providers_named(&d, "SiliconFlow"), 1);
+    assert_eq!(quick_provider(&d), 9);
+    assert_eq!(providers_named(&d, "Relay"), 2, "conflicting keys are never merged");
+    assert_eq!(provider_merge::find_key_conflicts(&d.data).unwrap(), vec!["Relay".to_string()]);
+    assert_eq!(provider_merge::auto_merge(&d.sync, &d.data).unwrap(), 0, "idempotent");
+    assert!(!d.pending_upserts().iter().any(|e| e.operation == "delete"));
+}
+
+
+/// First unlock on B: server values win over B's stale local keys; keys the
+/// server lacks are pushed; afterwards a real edit on B is last-writer-wins.
+#[test]
+fn test_first_unlock_is_server_wins_then_edits_propagate() {
+    let mut server = MiniServer::default();
+    let (a, b) = (KDev::new("device-a"), KDev::new("device-b"));
+    a.data.execute("INSERT INTO llm_provider_config(llm_provider_id, name, value) VALUES (1, 'api_key', 'sk-A-server')", []).unwrap();
+    b.data.execute("INSERT INTO llm_provider_config(llm_provider_id, name, value) VALUES (1, 'api_key', 'sk-B-stale')", []).unwrap();
+    seed_custom(&b, 7, "OnlyOnB", Some("sk-B-only"));
+    a.passphrase("shared passphrase", false).unwrap(); // first device: pushes its keys
+    let (mut ca, mut cb) = (0, 0);
+    server.round(&a, &mut ca);
+    server.round(&b, &mut cb);
+    assert_eq!(b.key_of(1).as_deref(), Some("sk-B-stale"), "locked: local kept");
+
+    b.passphrase("shared passphrase", false).unwrap();
+    assert_eq!(b.key_of(1).as_deref(), Some("sk-A-server"), "unlock adopts the server key");
+    let before = server.received.len();
+    server.round(&b, &mut cb);
+    assert!(!server.received[before..].iter().any(|p| p.contains("official:llm.provider_secret")),
+        "B must not upload its stale key for a secret the server already has");
+    server.round(&a, &mut ca);
+    assert_eq!(a.key_of(1).as_deref(), Some("sk-A-server"));
+    let only_b: i64 = a.data.query_row("SELECT id FROM llm_provider WHERE name='OnlyOnB'", [], |r| r.get(0)).unwrap();
+    assert_eq!(a.key_of(only_b).as_deref(), Some("sk-B-only"), "a key the server lacked is pushed from B");
+
+    b.data.execute("UPDATE llm_provider_config SET value='sk-B-edited' WHERE llm_provider_id=1 AND name='api_key'", []).unwrap();
+    server.round(&b, &mut cb);
+    server.round(&a, &mut ca);
+    assert_eq!(a.key_of(1).as_deref(), Some("sk-B-edited"), "after reconciliation a real edit wins");
+    assert!(!server.received.iter().any(|p| p.contains("sk-B-edited")), "still ciphertext only");
+}
+
+/// B had synced before, then lost its key and edited locally while locked.
+/// Re-entering the passphrase must restore the server value, not upload the edit.
+#[test]
+fn test_unlock_after_offline_edit_restores_server_value() {
+    let mut server = MiniServer::default();
+    let (a, b) = (KDev::new("device-a"), KDev::new("device-b"));
+    a.data.execute("INSERT INTO llm_provider_config(llm_provider_id, name, value) VALUES (1, 'api_key', 'sk-A')", []).unwrap();
+    a.passphrase("shared passphrase", false).unwrap();
+    let (mut ca, mut cb) = (0, 0);
+    server.round(&a, &mut ca);
+    server.round(&b, &mut cb);
+    b.passphrase("shared passphrase", false).unwrap();
+    server.round(&b, &mut cb);
+    assert_eq!(b.key_of(1).as_deref(), Some("sk-A"));
+    // Locked again (key removed) and edited offline: no pending remote change exists.
+    b.lock();
+    b.data.execute("UPDATE llm_provider_config SET value='sk-B-offline' WHERE name='api_key'", []).unwrap();
+    server.round(&b, &mut cb);
+    assert_eq!(secrets::pending_count(&b.sync), 0);
+    let before = server.received.len();
+    b.passphrase("shared passphrase", false).unwrap();
+    assert_eq!(b.key_of(1).as_deref(), Some("sk-A"), "server copy wins on unlock");
+    server.round(&b, &mut cb);
+    assert_eq!(server.received.len(), before, "nothing uploaded by the unlock");
+    server.round(&a, &mut ca);
+    assert_eq!(a.key_of(1).as_deref(), Some("sk-A"));
+}
+
+/// Rotation on A is the deliberate write; B adopts the server values after
+/// entering the new passphrase, even if it edited keys while mismatched.
+#[test]
+fn test_rotation_wins_and_mismatched_device_adopts_server_values() {
+    let mut server = MiniServer::default();
+    let (a, b) = (KDev::new("device-a"), KDev::new("device-b"));
+    a.data.execute("INSERT INTO llm_provider_config(llm_provider_id, name, value) VALUES (1, 'api_key', 'sk-A')", []).unwrap();
+    a.passphrase("old passphrase", false).unwrap();
+    let (mut ca, mut cb) = (0, 0);
+    server.round(&a, &mut ca);
+    server.round(&b, &mut cb);
+    b.passphrase("old passphrase", false).unwrap();
+    server.round(&b, &mut cb);
+
+    a.passphrase("new passphrase", true).unwrap(); // rotation re-encrypts and pushes A's keys
+    server.round(&a, &mut ca);
+    server.round(&b, &mut cb);
+    assert!(matches!(b.state(), secrets::SecretState::Mismatch));
+    b.data.execute("UPDATE llm_provider_config SET value='sk-B-while-mismatched' WHERE name='api_key'", []).unwrap();
+    server.round(&b, &mut cb);
+    let err = b.passphrase("old passphrase", false).unwrap_err();
+    assert!(err.starts_with(secrets::PASSPHRASE_MISMATCH_CODE), "{err}");
+    assert!(!secrets::server_wins_pending(&b.sync), "a rejected passphrase leaves no reconcile flag");
+    b.passphrase("new passphrase", false).unwrap();
+    server.round(&b, &mut cb);
+    server.round(&a, &mut ca);
+    assert_eq!(b.key_of(1).as_deref(), Some("sk-A"));
+    assert_eq!(a.key_of(1).as_deref(), Some("sk-A"));
+    assert!(!server.received.iter().any(|p| p.contains("sk-B-while-mismatched")));
 }

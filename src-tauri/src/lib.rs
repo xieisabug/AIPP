@@ -113,8 +113,8 @@ use crate::api::system_api::{
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
 use crate::sync::{
-    cleanup_dangling_foreign_keys, clear_sync_passphrase, get_sync_status,
-    merge_duplicate_sync_providers, reset_sync_state, retry_failed_sync_outbox,
+    cleanup_dangling_foreign_keys, get_sync_status,
+    reset_sync_state, retry_failed_sync_outbox,
     retry_sync_dead_letters, save_sync_settings, set_auto_sync, set_sync_passphrase, stop_sync,
     trigger_sync_now,
 };
@@ -998,8 +998,6 @@ pub fn run() {
             retry_failed_sync_outbox,
             save_sync_settings,
             set_sync_passphrase,
-            clear_sync_passphrase,
-            merge_duplicate_sync_providers,
             trigger_sync_now,
             stop_sync,
             set_auto_sync,

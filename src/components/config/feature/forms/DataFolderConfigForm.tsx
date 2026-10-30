@@ -10,14 +10,12 @@ import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import {
-    canReplaceSyncPassphrase,
     canShowCleanupDangling,
     canShowRetryDeadLetters,
     canShowRetryFailed,
     canShowSyncNow,
     canStopSync,
     decideSyncNowAction,
-    duplicateProviderNotice,
     formatDanglingFkStatusText,
     formatLastSyncAt,
     formatRecentSyncError,
@@ -31,7 +29,8 @@ import {
     shouldTriggerSyncAfterSave,
     showsSelfHostedSyncControls,
     syncConflictNotice,
-    syncPassphraseActionLabel,
+    isSyncPassphraseMismatch,
+    providerConflictNotice,
     validateSyncPassphrase,
 } from "./dataFolderSyncHelpers";
 
@@ -62,7 +61,7 @@ interface SyncStatus {
     secret_sync_state?: string;
     secret_sync_message?: string;
     secret_pending_count?: number;
-    duplicate_provider_count?: number;
+    duplicate_provider_conflicts?: string[];
 }
 
 const STATUS_FALLBACK_POLL_MS = 30_000;
@@ -124,9 +123,6 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [passphraseError, setPassphraseError] = useState<string | null>(null);
     const [savingPassphrase, setSavingPassphrase] = useState(false);
     const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false);
-    const [clearPassphraseConfirmOpen, setClearPassphraseConfirmOpen] = useState(false);
-    const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
-    const [mergingProviders, setMergingProviders] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
     const watchedServerUrl = useWatch({ control: form.control, name: "server_url" }) || "";
@@ -405,45 +401,23 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             });
             setStatus(nextStatus);
             form.setValue(PASSPHRASE_FIELD, "");
-            toast.success(replaceExisting ? "已更换同步口令，其他设备需输入新口令" : "同步口令已验证，API Key 将加密同步");
+            toast.success(replaceExisting ? "已更换同步口令" : "同步口令已保存");
         } catch (error) {
+            const message = getErrorMessage(error) || "设置同步口令失败";
+            // One button: a different passphrase than the account's means "replace",
+            // which only happens after the user confirms it.
+            if (!replaceExisting && isSyncPassphraseMismatch(message)) {
+                setReplaceConfirmOpen(true);
+                return;
+            }
             // Passphrase errors are already user-facing; do not route them through the
             // generic "解密" → token hint mapping.
-            const message = getErrorMessage(error) || "设置同步口令失败";
             setPassphraseError(message);
             toast.error(message);
         } finally {
             setSavingPassphrase(false);
         }
     }, [form]);
-
-    const handleClearPassphrase = useCallback(async () => {
-        setClearPassphraseConfirmOpen(false);
-        setSavingPassphrase(true);
-        try {
-            const nextStatus = await invoke<SyncStatus>("clear_sync_passphrase");
-            setStatus(nextStatus);
-            toast.success("已清除本机同步口令，API Key 停止同步（本机 API Key 不变）");
-        } catch (error) {
-            toast.error(friendlySyncError(getErrorMessage(error), "清除同步口令失败"));
-        } finally {
-            setSavingPassphrase(false);
-        }
-    }, []);
-
-    const handleMergeDuplicateProviders = useCallback(async () => {
-        setMergeConfirmOpen(false);
-        setMergingProviders(true);
-        try {
-            const nextStatus = await invoke<SyncStatus>("merge_duplicate_sync_providers");
-            setStatus(nextStatus);
-            toast.success("已合并重复的供应商");
-        } catch (error) {
-            toast.error(friendlySyncError(getErrorMessage(error), "合并重复供应商失败"));
-        } finally {
-            setMergingProviders(false);
-        }
-    }, []);
 
     const connectionState = useMemo(() => formatSyncConnectionState(status), [status]);
     const statusMetrics = useMemo(() => formatSyncStatusMetrics(status), [status]);
@@ -535,8 +509,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
 
     const secretState = status?.secret_sync_state;
     const secretTone = secretSyncTone(secretState);
-    const duplicateCount = status?.duplicate_provider_count ?? 0;
-    const duplicateNotice = duplicateProviderNotice(duplicateCount);
+    const conflictNotice = providerConflictNotice(status?.duplicate_provider_conflicts);
 
     const renderSecretSyncRow = useCallback((field: { value?: string; onChange: (value: string) => void }) => {
         const passphrase = field.value || "";
@@ -574,66 +547,25 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                             }
                         }}
                     />
-                    <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                            type="button"
-                            variant="outline"
-                            className="hover:bg-muted hover:border-border"
-                            disabled={busy || !passphrase}
-                            onClick={() => void submitPassphrase(false)}
-                        >
-                            {savingPassphrase ? "处理中..." : syncPassphraseActionLabel(secretState)}
-                        </Button>
-                        {canReplaceSyncPassphrase(secretState) ? (
-                            <Button
-                                type="button"
-                                variant="outline"
-                                className="hover:bg-muted hover:border-border"
-                                disabled={busy || !passphrase}
-                                onClick={() => {
-                                    const invalid = validateSyncPassphrase(form.getValues(PASSPHRASE_FIELD) || "");
-                                    if (invalid) {
-                                        setPassphraseError(invalid);
-                                        return;
-                                    }
-                                    setReplaceConfirmOpen(true);
-                                }}
-                            >
-                                更换口令
-                            </Button>
-                        ) : null}
-                        {secretState === "ready" || secretState === "mismatch" ? (
-                            <Button
-                                type="button"
-                                variant="outline"
-                                className="hover:bg-muted hover:border-border"
-                                disabled={busy}
-                                onClick={() => setClearPassphraseConfirmOpen(true)}
-                            >
-                                清除本机口令
-                            </Button>
-                        ) : null}
-                    </div>
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={busy || !passphrase}
+                        onClick={() => void submitPassphrase(false)}
+                    >
+                        {savingPassphrase ? "处理中..." : "保存口令"}
+                    </Button>
                 </div>
                 {passphraseError ? <p className="text-sm text-destructive break-words">{passphraseError}</p> : null}
-                {duplicateNotice ? (
-                    <div className="space-y-2 text-sm text-amber-700 dark:text-amber-300 px-3 py-2 bg-amber-50 dark:bg-amber-950/40 rounded-md break-words">
-                        <div>{duplicateNotice}</div>
-                        <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="hover:bg-muted hover:border-border"
-                            disabled={mergingProviders || busy}
-                            onClick={() => setMergeConfirmOpen(true)}
-                        >
-                            {mergingProviders ? "合并中..." : "合并重复供应商"}
-                        </Button>
-                    </div>
+                {conflictNotice ? (
+                    <p className="text-sm text-amber-700 dark:text-amber-300 break-words" data-testid="provider-conflict-status">
+                        {conflictNotice}
+                    </p>
                 ) : null}
             </div>
         );
-    }, [duplicateNotice, form, mergingProviders, passphraseError, saving, savingPassphrase, secretState, secretTone, status?.secret_sync_message, submitPassphrase]);
+    }, [conflictNotice, passphraseError, saving, savingPassphrase, secretTone, status?.secret_sync_message, submitPassphrase]);
 
     const renderSyncActionButtons = useCallback(() => {
         // Auto-sync toggle is the persistent on/off. Stop shows while any round is syncing.
@@ -861,26 +793,12 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             <ConfirmDialog
                 isOpen={replaceConfirmOpen}
                 title="更换同步口令"
-                confirmText="将用新口令重新加密并上传本机的 API Key，其他设备会提示口令不一致，需要在每台设备重新输入新口令后才能继续同步 API Key（在此之前它们的本机 API Key 保持不变）。确认更换？"
+                confirmText="输入的口令与已有同步口令不一致。继续将更换所有设备的同步口令，其他设备需要重新输入新口令。"
                 onConfirm={() => {
                     setReplaceConfirmOpen(false);
                     void submitPassphrase(true);
                 }}
                 onCancel={() => setReplaceConfirmOpen(false)}
-            />
-            <ConfirmDialog
-                isOpen={clearPassphraseConfirmOpen}
-                title="清除本机同步口令"
-                confirmText="清除后本机不再上传或接收 API Key，已有的本机 API Key 不会被删除。之后可随时重新输入口令恢复同步。确认清除？"
-                onConfirm={handleClearPassphrase}
-                onCancel={() => setClearPassphraseConfirmOpen(false)}
-            />
-            <ConfirmDialog
-                isOpen={mergeConfirmOpen}
-                title="合并重复供应商"
-                confirmText={`将合并 ${duplicateCount} 个同名重复的供应商：保留有 API Key 的那个，把模型、助手（含快捷助手）和历史消息的引用迁移过去，再删除重复项。只合并 API Key 不冲突的组。确认继续？`}
-                onConfirm={handleMergeDuplicateProviders}
-                onCancel={() => setMergeConfirmOpen(false)}
             />
             <ConfirmDialog
                 isOpen={cleanupConfirmOpen}
