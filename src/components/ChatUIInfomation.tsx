@@ -5,20 +5,36 @@ import { useLogoState } from "../hooks/useLogoState";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { Button } from "./ui/button";
 import { memo } from "react";
+import { useIsMobilePlatform } from "../hooks/use-platform";
+import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 
 interface ChatUIInfomationProps {
     showArtifacts?: boolean;
     showSchedule?: boolean;
-    /** 移动端模式，使用内部视图切换而非多窗口 */
+    /** 窄屏布局模式（来自宽度），用于样式；导航切换另看 preferInAppNavigation / 平台 */
     isMobile?: boolean;
+    /**
+     * 是否优先在单 WebView 内切换视图（移动平台必须为 true）。
+     * 未传时回退到 useIsMobilePlatform()，避免仅靠宽度误开多窗口。
+     */
+    preferInAppNavigation?: boolean;
 }
 
 const ChatUIInfomation = memo(function ChatUIInfomation({
     showArtifacts = true,
     showSchedule = true,
     isMobile = false,
+    preferInAppNavigation,
 }: ChatUIInfomationProps) {
     const { enabled: antiLeakageEnabled, isRevealed, toggleReveal } = useAntiLeakage();
+    const isMobilePlatform = useIsMobilePlatform();
+    const multiWindowAvailable = useFeatureAvailableOnPlatform("desktop_multi_window");
+    // 移动平台必须单 WebView 内切换；窄屏沿用既有 in-app 行为；显式 prefer 亦可强制开启
+    const useInAppNav = isMobilePlatform || isMobile || preferInAppNavigation === true;
+
+    // 移动平台隐藏桌面多窗口入口（即使父组件误传 show*=true）
+    const canShowArtifacts = showArtifacts && multiWindowAvailable;
+    const canShowSchedule = showSchedule && multiWindowAvailable;
 
     const {
         state: logoState,
@@ -32,8 +48,8 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     });
 
     const openConfig = async () => {
-        // 移动端使用内部视图切换
-        if (isMobile) {
+        // 移动平台 / 单 WebView：内部视图切换，禁止尝试创建第二窗口
+        if (useInAppNav) {
             const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
             if (switchWindow) {
                 switchWindow("config");
@@ -89,12 +105,12 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
                 <Button onClick={openConfig} variant={"ghost"} data-aipp-slot="chat-info-open-config">
                     <Settings />
                 </Button>
-                {showArtifacts && (
+                {canShowArtifacts && (
                     <Button onClick={openArtifactsCollections} variant={"ghost"} data-aipp-slot="chat-info-open-artifacts">
                         <PackageOpen />
                     </Button>
                 )}
-                {showSchedule && (
+                {canShowSchedule && (
                     <Button onClick={openScheduleWindow} variant={"ghost"} data-aipp-slot="chat-info-open-schedule">
                         <CalendarClock />
                     </Button>

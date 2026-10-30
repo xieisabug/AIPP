@@ -10,6 +10,8 @@ import {
 } from '../ui/dropdown-menu';
 import { ChevronDown, Plus } from 'lucide-react';
 import { MCP_QUICK_TEMPLATES, MCPTemplate } from '../../data/MCPTemplates';
+import { useIsMobilePlatform } from '@/hooks/use-platform';
+import { isAippBuiltinCommand, isMobileExecutableMcpServer } from '@/lib/mobileUnsupported';
 
 interface MCPActionDropdownProps {
     onTemplateSelect: (template: MCPTemplate) => void;
@@ -30,8 +32,23 @@ const MCPActionDropdown: React.FC<MCPActionDropdownProps> = ({
     showIcon = true,
     disabled = false
 }) => {
-    const quickStartTemplates = MCP_QUICK_TEMPLATES.filter(t => t.category === 'Quick Start');
-    const importTemplates = MCP_QUICK_TEMPLATES.filter(t => t.category === 'Import');
+    const isMobilePlatform = useIsMobilePlatform();
+    const quickStartTemplates = MCP_QUICK_TEMPLATES.filter((t) => {
+        if (t.category !== 'Quick Start') return false;
+        if (!isMobilePlatform) return true;
+        return isMobileExecutableMcpServer({
+            transport_type: t.template.transport_type,
+            command: t.template.command,
+            is_builtin: t.template.is_builtin,
+        });
+    });
+    const importTemplates = MCP_QUICK_TEMPLATES.filter((t) => {
+        if (t.category !== 'Import') return false;
+        if (!isMobilePlatform) return true;
+        // 保留 JSON 导入与 aipp:* 内置；隐藏会引导外部 stdio 的项
+        if (t.id === 'json-import') return true;
+        return isAippBuiltinCommand(t.template.command) || Boolean(t.template.is_builtin);
+    });
 
     const handleTemplateClick = (template: MCPTemplate) => {
         if (template.id === 'json-import') {

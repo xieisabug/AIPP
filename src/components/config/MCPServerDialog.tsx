@@ -10,6 +10,8 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '..
 import { toast } from 'sonner';
 import { MCPServer, MCPServerRequest, MCP_TRANSPORT_TYPES } from '../../data/MCP';
 import CustomSelect from '../CustomSelect';
+import { useIsMobilePlatform } from '@/hooks/use-platform';
+import { isAippBuiltinCommand } from '@/lib/mobileUnsupported';
 
 interface MCPServerDialogProps {
     isOpen: boolean;
@@ -28,11 +30,12 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
     initialServerType,
     initialConfig
 }) => {
+    const isMobilePlatform = useIsMobilePlatform();
     // Form state
     const [formData, setFormData] = useState<MCPServerRequest>({
         name: '',
         description: '',
-        transport_type: 'stdio',
+        transport_type: 'http',
         command: '',
         environment_variables: '',
         headers: '',
@@ -109,7 +112,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
             const defaultConfig: MCPServerRequest = {
                 name: '',
                 description: '',
-                transport_type: initialServerType || 'stdio',
+                transport_type: initialServerType || (isMobilePlatform ? 'http' : 'stdio'),
                 command: '',
                 environment_variables: '',
                 headers: '',
@@ -127,7 +130,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
             // initialize rows from default/initial config
             setHeaderRows(parseHeadersToRows(finalConfig.headers));
         }
-    }, [editingServer, isOpen, initialServerType, initialConfig]);
+    }, [editingServer, isOpen, initialServerType, initialConfig, isMobilePlatform]);
 
     // 更新表单字段
     const updateField = useCallback((field: keyof MCPServerRequest, value: any) => {
@@ -179,6 +182,15 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
 
         if (formData.transport_type === 'stdio' && !formData.command?.trim()) {
             toast.error('Stdio类型需要提供命令');
+            return;
+        }
+
+        if (
+            isMobilePlatform
+            && formData.transport_type === 'stdio'
+            && !isAippBuiltinCommand(formData.command)
+        ) {
+            toast.error('MOBILE_UNSUPPORTED: 外部 stdio MCP 不支持移动平台；请使用 HTTP MCP 或 aipp:* 内置工具');
             return;
         }
 
@@ -268,6 +280,11 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                 value={formData.transport_type}
                                 onChange={(value) => updateField('transport_type', value)}
                             />
+                            {isMobilePlatform && formData.transport_type === 'stdio' && !isAippBuiltinCommand(formData.command) && (
+                                <p className="text-xs text-amber-600 dark:text-amber-400">
+                                    移动端外部 stdio 进程不可执行。请改用 HTTP，或将命令设为 aipp:* 内置工具（不会与外部 stdio 一并禁用）。
+                                </p>
+                            )}
                         </div>
 
 

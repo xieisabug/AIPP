@@ -102,40 +102,77 @@
     transition: height 0.2s;
 }
 
-/* 移动端输入框样式 - 使用 .mobile 类控制 */
+/* 移动端输入框：底部栏占位 + 胶囊固定高度，按钮相对胶囊垂直居中 */
+.input-area.mobile.bottom {
+    position: relative;
+    bottom: auto;
+    /* 12 顶边距 + 48 胶囊 + 12 底边距 + safe-area，避免与消息区脱节的大块空白 */
+    flex: 0 0 auto;
+    width: 100%;
+    height: calc(72px + env(safe-area-inset-bottom, 0px));
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
+}
+
 .input-area.mobile.bottom .input-area-textarea-container {
     left: 12px;
-    right: 12px;
-    /* 底部预留手势条安全区 */
-    bottom: calc(12px + env(safe-area-inset-bottom));
-    min-height: 50px;
-    border-radius: 25px;
-    padding: 0 55px 0 45px;
+    /* 右侧留给 44px 发送钮 + 间距；!important 防止桌面 inline right 残留 */
+    right: 64px !important;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    /* 锁定高度，避免 textarea/边框把胶囊撑破「+」 */
+    height: 48px !important;
+    min-height: 48px !important;
+    max-height: 48px;
+    border-radius: 24px;
+    /* 左侧给 32px「+」留白 */
+    padding: 0 12px 0 44px !important;
+    opacity: 1;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
 }
 
 .input-area.mobile .input-area-textarea {
-    padding: 12px 5px 8px 5px;
-    font-size: 15px;
-    height: 50px;
+    padding: 0 4px;
+    /* 16px 避免部分 WebView 聚焦时强制缩放 */
+    font-size: 16px;
+    height: 100% !important;
+    min-height: 0 !important;
+    max-height: 100%;
+    line-height: 44px; /* 贴合 border-box 48 - 2*2 边框后的内容区 */
+    margin: 0;
 }
 
-/* 移动端发送按钮 - 覆盖 large 尺寸，改为更小的尺寸 */
+/*
+ * 发送钮 44×44，相对 48px 胶囊垂直居中：
+ * capsule bottom = 12+safe → button bottom = 12+safe + (48-44)/2 = 14+safe
+ */
 .input-area.mobile.bottom .input-area-send-button {
-    bottom: calc(45px + env(safe-area-inset-bottom));
-    right: 16px;
+    position: absolute !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    right: 12px !important;
+    left: auto !important;
     height: 44px !important;
     width: 44px !important;
+    min-height: 44px !important;
+    min-width: 44px !important;
     border-radius: 22px !important;
 }
 
-/* 移动端添加按钮 */
+/*
+ * 「+」32×32 置于胶囊内侧左侧并垂直居中：
+ * button bottom = 12+safe + (48-32)/2 = 20+safe
+ */
 .input-area.mobile.bottom .input-area-add-button {
-    bottom: calc(54px + env(safe-area-inset-bottom));
-    left: 20px;
-    right: auto;
-    height: 28px !important;
-    width: 28px !important;
-    border-radius: 14px !important;
+    position: absolute !important;
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px)) !important;
+    left: 20px !important;
+    right: auto !important;
+    height: 32px !important;
+    width: 32px !important;
+    min-height: 32px !important;
+    min-width: 32px !important;
+    border-radius: 16px !important;
 }
 
 .input-area-textarea {
@@ -187,23 +224,25 @@
 }
 
 .input-area.mobile.bottom .input-area-plan-mode-button {
-    bottom: calc(54px + env(safe-area-inset-bottom));
-    left: 20px;
-    right: auto;
-    height: 28px;
-    min-height: 28px;
+    position: absolute !important;
+    bottom: calc(20px + env(safe-area-inset-bottom, 0px)) !important;
+    left: 20px !important;
+    right: auto !important;
+    height: 32px;
+    min-height: 32px;
     width: auto;
     padding-left: 8px;
     padding-right: 8px;
     font-size: 12px;
+    z-index: 20;
 }
 
 .input-area.mobile.bottom.has-plan-mode .input-area-add-button {
-    left: 80px;
+    left: 84px !important;
 }
 
 .input-area.mobile.bottom.has-plan-mode .input-area-textarea-container {
-    padding-left: 104px;
+    padding-left: 108px;
 }
 
 .top .input-area-send-button {

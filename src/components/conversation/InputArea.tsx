@@ -1265,7 +1265,7 @@ const InputArea = React.memo(
                 >
                     <div
                         className={`input-area-textarea-container ${showPlanModeButton ? 'has-plan-mode' : ''}`}
-                        style={{ right: baseRight}}
+                        style={isMobile ? undefined : { right: baseRight }}
                         data-theme-slot="input-area-container"
                         data-aipp-slot="chat-input-area-container"
                     >
@@ -1344,7 +1344,7 @@ const InputArea = React.memo(
                         }
                     />
                     <CircleButton
-                        size={placement === "bottom" ? "large" : "medium"}
+                        size={isMobile ? "medium" : placement === "bottom" ? "large" : "medium"}
                         onClick={handleSend}
                         icon={sendButtonVisual ?? sendButtonIcon ?? defaultSendButtonIcon}
                         primary
