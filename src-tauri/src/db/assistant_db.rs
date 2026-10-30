@@ -88,6 +88,16 @@ pub struct AssistantSummary {
     pub updated_time: Option<String>,
 }
 
+/// Seed values written by `init_assistant` for the quick assistant (id 1).
+/// Sync uses them to recognise a device that only has defaults.
+pub const DEFAULT_QUICK_ASSISTANT_PROMPT: &str = "You are a helpful assistant.";
+pub const DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS: [(&str, &str, &str); 4] = [
+    ("max_tokens", "1000", "number"),
+    ("temperature", "0.75", "float"),
+    ("top_p", "1.0", "float"),
+    ("stream", "false", "boolean"),
+];
+
 pub struct AssistantDatabase {
     pub conn: Connection,
     pub mcp_conn: Connection,
@@ -618,7 +628,7 @@ impl AssistantDatabase {
         // 2) 默认 prompt：仅当该助手没有任何 prompt 时再插入
         let prompts = self.get_assistant_prompt(1)?;
         if prompts.is_empty() {
-            self.add_assistant_prompt(1, "You are a helpful assistant.")?;
+            self.add_assistant_prompt(1, DEFAULT_QUICK_ASSISTANT_PROMPT)?;
         }
 
         // 3) 确保存在一个默认 model
@@ -641,14 +651,7 @@ impl AssistantDatabase {
         let mut existing_names: std::collections::HashSet<String> =
             existing_configs.into_iter().map(|c| c.name).collect();
 
-        let defaults = vec![
-            ("max_tokens", "1000", "number"),
-            ("temperature", "0.75", "float"),
-            ("top_p", "1.0", "float"),
-            ("stream", "false", "boolean"),
-        ];
-
-        for (name, value, value_type) in defaults {
+        for (name, value, value_type) in DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS {
             if !existing_names.contains(name) {
                 let _ = self.add_assistant_model_config(1, model_id, name, value, value_type)?;
                 existing_names.insert(name.to_string());

@@ -23,6 +23,15 @@ pub struct SecureConfigEntry {
     pub updated_time: Option<String>,
 }
 
+/// Seed values written by `init_feature_config` (feature `conversation_summary`).
+/// Sync uses them to recognise a device that only has defaults.
+pub const DEFAULT_SUMMARY_LENGTH: &str = "100";
+pub const DEFAULT_SUMMARY_PROMPT: &str = "请根据提供的大模型问答对话,总结一个简洁明了的标题。标题要求:
+- 字数在5-15个字左右，必须是中文，不要包含标点符号
+- 准确概括对话的核心主题，尽量贴近用户的提问
+- 不要透露任何私人信息
+- 用祈使句或陈述句";
+
 pub struct SystemDatabase {
     pub conn: Connection,
 }
@@ -259,7 +268,7 @@ impl SystemDatabase {
             id: None,
             feature_code: "conversation_summary".to_string(),
             key: "summary_length".to_string(),
-            value: "100".to_string(),
+            value: DEFAULT_SUMMARY_LENGTH.to_string(),
             data_type: "string".to_string(),
             description: Some("对话总结使用长度".to_string()),
         })?;
@@ -267,12 +276,7 @@ impl SystemDatabase {
             id: None,
             feature_code: "conversation_summary".to_string(),
             key: "prompt".to_string(),
-            value: "请根据提供的大模型问答对话,总结一个简洁明了的标题。标题要求:
-- 字数在5-15个字左右，必须是中文，不要包含标点符号
-- 准确概括对话的核心主题，尽量贴近用户的提问
-- 不要透露任何私人信息
-- 用祈使句或陈述句"
-                .to_string(),
+            value: DEFAULT_SUMMARY_PROMPT.to_string(),
             data_type: "string".to_string(),
             description: Some("对话总结使用长度".to_string()),
         })?;

@@ -26,6 +26,7 @@ use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 mod divergence;
 mod persistence;
 mod quick_assistant;
+mod seed;
 mod secrets;
 mod provider_merge;
 #[cfg(test)]
@@ -1264,9 +1265,15 @@ async fn run_sync_once_inner(
     if !remote_status.remote_empty && local_empty {
         // An empty business scope can be the result of deleting an attempted
         // first upload. Persist those tombstones before pulling its echoes.
-        scan_local_changes(app_handle)?;
-        push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await?;
+        // A fresh device has no identities to tombstone: pull first so its
+        // install seeds merge into the account's rows instead of being uploaded.
+        if has_local_identities(&open_sync_db(app_handle)?)? {
+            scan_local_changes(app_handle)?;
+            push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await?;
+        }
         pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
+        let assistant_db = open_data_db(&get_db_path(app_handle, "assistant.db")?)?;
+        seed::drop_superseded_seeds(&open_sync_db(app_handle)?, &assistant_db)?;
         return Ok(());
     }
 
@@ -2053,6 +2060,7 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
     provider_merge::dedupe_provider_configs(&sync_conn, &llm_db)?;
     drop(llm_db);
     quick_assistant::prepare(&sync_conn, &assistant_db)?;
+    seed::drop_superseded_seeds(&sync_conn, &assistant_db)?;
     let secret_state = load_secret_state(app_handle)?;
     let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
     let device_id = ensure_device_id(&sync_conn)?;
@@ -5031,6 +5039,13 @@ fn bind_remote_account(conn: &Connection, server_url: &str, account_id: &str, re
     Ok(())
 }
 
+fn has_local_identities(conn: &Connection) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sync_object_map) OR EXISTS(SELECT 1 FROM sync_outbox)",
+        [], |r| r.get(0),
+    ).map_err(|e| e.to_string())
+}
+
 fn ensure_bootstrap_origin(conn: &Connection, server_url: &str, account_id: &str) -> Result<(), String> {
     let scope = remote_scope(server_url, account_id);
     if get_sync_meta(conn, "bootstrap_origin")?.as_deref() != Some(scope.as_str()) {
@@ -5325,43 +5340,10 @@ fn existing_columns(
         .collect())
 }
 
+/// Empty = only official rows and pristine install seeds (see `seed`), so a
+/// fresh device can join an existing account by pulling.
 fn is_local_sync_scope_empty(app_handle: &AppHandle) -> Result<bool, String> {
-    for spec in specs() {
-        if spec.object_type == secrets::OBJECT_TYPE {
-            // Secret rows mirror llm_provider_config; keep the historical bootstrap decision.
-            continue;
-        }
-        let path = get_db_path(app_handle, spec.db_name)?;
-        let conn = open_data_db(&path)?;
-        // 判空时排除官方/内置种子行：每台设备都有它们，
-        // 不排除的话"纯拉取 bootstrap"分支永远不可达。
-        let mut conditions: Vec<String> = spec.where_clause.map(|w| format!("({w})")).into_iter().collect();
-        if let Some(column) = spec.official_column {
-            conditions.push(format!("COALESCE({column}, 0) = 0"));
-        }
-        if !spec.seed_official_ids.is_empty() {
-            let ids = spec
-                .seed_official_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            conditions.push(format!("id NOT IN ({ids})"));
-        }
-        let where_sql =
-            if conditions.is_empty() { String::new() } else { format!(" WHERE {}", conditions.join(" AND ")) };
-        let count: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM {}{}", spec.table, where_sql),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if count > 0 {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    seed::local_scope_is_empty(|db_name| open_data_db(&get_db_path(app_handle, db_name)?))
 }
 
 fn json_from_value_ref(value: ValueRef<'_>) -> JsonValue {
@@ -7531,6 +7513,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "seed_tests.rs"]
+mod seed_tests;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod regression_tests;
