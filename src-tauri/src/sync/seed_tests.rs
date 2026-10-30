@@ -39,7 +39,7 @@ fn fresh_install() -> Connection {
 }
 
 fn is_empty(data: &Connection) -> bool {
-    specs().iter().all(|spec| seed::user_row_count(data, spec).unwrap() == 0)
+    seed::local_scope_is_empty(|_| Ok(data)).unwrap()
 }
 
 fn sync_db() -> Connection {
@@ -60,6 +60,19 @@ fn test_fresh_install_only_has_seed_rows_and_may_join_by_pulling() {
     let sync = sync_db();
     ensure_initial_sync_is_safe(&sync, false, is_empty(&data)).unwrap();
     assert!(!has_local_identities(&sync).unwrap(), "fresh device pulls before scanning");
+}
+
+#[test]
+fn test_fresh_device_without_api_keys_still_joins_by_pulling() {
+    let data = fresh_install();
+    // Key rows saved on official providers (blank or not yet synced) are the
+    // encrypted-key object type; they must not make the device look populated.
+    data.execute_batch("INSERT INTO llm_provider_config(name, llm_provider_id, value) VALUES ('api_key', 1, '');
+        INSERT INTO llm_provider_config(name, llm_provider_id, value) VALUES ('api_key', 2, '');").unwrap();
+    let secret_spec = specs().into_iter().find(|s| s.object_type == secrets::OBJECT_TYPE).unwrap();
+    assert!(seed::user_row_count(&data, &secret_spec).unwrap() > 0, "key rows are present");
+    assert!(is_empty(&data), "API-key rows alone do not count as user data");
+    ensure_initial_sync_is_safe(&sync_db(), false, is_empty(&data)).unwrap();
 }
 
 #[test]

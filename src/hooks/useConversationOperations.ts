@@ -6,6 +6,8 @@ import { Message, Conversation, FileInfo } from "../data/Conversation";
 import { AssistantListItem } from "../data/Assistant";
 import { extractAssistantFromMessage } from "../utils/assistantMentions";
 import useConversationManager from "./useConversationManager";
+import { useIsMobilePlatform } from "./use-platform";
+import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 
 // 从 plugin.d.ts 导入的接口类型
 interface AiResponse {
@@ -88,6 +90,7 @@ export function useConversationOperations({
     selectedAgentSandbox = "",
     selectedAgentMode = "",
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
+    const isMobilePlatform = useIsMobilePlatform();
 
     // 对话标题管理相关状态
     const [titleEditDialogIsOpen, setTitleEditDialogIsOpen] = useState<boolean>(false);
@@ -337,6 +340,16 @@ export function useConversationOperations({
             // ACP 助手 (assistant_type === 4) 走后端 ask_ai 路径，不作为插件处理
             // 注意：如果 assistantData 为 undefined（助手不在列表中），应该走普通 ask_ai 路径
             const assistantType = assistantData?.assistant_type;
+            // 移动端：本地 CLI Agent / 插件助手不可执行，明确报错且不静默换模型或通道
+            if (isMobilePlatform && !isMobileExecutableAssistantType(assistantType)) {
+                setAiIsResponsing(false);
+                toast.error(
+                    assistantType === 4
+                        ? "MOBILE_UNSUPPORTED: 本地 CLI Agent（Codex/Claude/ACP）不支持移动平台，请改选普通 API 助手"
+                        : "MOBILE_UNSUPPORTED: 该助手类型在移动端不可执行，请改选普通 API 助手",
+                );
+                return;
+            }
             const isPluginAssistant = assistantType !== undefined && assistantType !== 0 && assistantType !== 4;
             
             console.log("[SEND DEBUG] Assistant info:", {

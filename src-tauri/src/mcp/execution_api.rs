@@ -3255,6 +3255,15 @@ async fn execute_stdio_tool(
     parameters: &str,
     cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    // 外部 stdio 在移动端不可执行。aipp:* 已在 execute_tool_by_transport 分流到 builtin，不会进入此函数。
+    #[cfg(mobile)]
+    {
+        let _ = (_app_handle, server, tool_name, parameters, cancel_token);
+        return Err(anyhow!(crate::api::system_api::mobile_unsupported_error(
+            "外部 stdio MCP",
+        )));
+    }
+
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.as_ref().ok_or_else(|| anyhow!("未为 stdio 传输指定命令"))?;
     let parts = split_command_line(command);

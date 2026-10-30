@@ -12,7 +12,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
-import { usePlatform } from "../hooks/use-platform";
+import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
+import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
 import { Home, Menu } from "lucide-react";
@@ -46,50 +47,69 @@ const configPageFallback = (
 function ConfigWindow() {
     // 集成主题系统
     useTheme("config");
-    const isMobile = useIsMobile();
+    const isNarrow = useIsMobile();
+    const isMobilePlatform = useIsMobilePlatform();
+    // 移动平台一律移动壳；桌面窄屏仅布局
+    const isMobile = isMobilePlatform || isNarrow;
     const platform = usePlatform();
+    const skillsAvailable = useFeatureAvailableOnPlatform("skills_manager");
+    const pluginsAvailable = useFeatureAvailableOnPlatform("process_plugin");
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
-    const menuList: Array<MenuItem> = [
-        {
-            id: "llm-provider-config",
-            name: "模型提供商",
-            icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
-            iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "assistant-config",
-            name: "个人助手",
-            icon: <Bot className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Bot className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "mcp-config",
-            name: "MCP",
-            icon: <MCP className="w-full h-full text-muted-foreground" />,
-            iconSelected: <MCP className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "skills-config",
-            name: "Skills",
-            icon: <Sparkles className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Sparkles className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "plugins-config",
-            name: "插件",
-            icon: <Puzzle className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Puzzle className="w-full h-full text-foreground" />,
-        },
-        {
+    const menuList: Array<MenuItem> = useMemo(() => {
+        const items: Array<MenuItem> = [
+            {
+                id: "llm-provider-config",
+                name: "模型提供商",
+                icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
+                iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
+            },
+            {
+                id: "assistant-config",
+                name: "个人助手",
+                icon: <Bot className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Bot className="w-full h-full text-foreground" />,
+            },
+            {
+                id: "mcp-config",
+                name: "MCP",
+                icon: <MCP className="w-full h-full text-muted-foreground" />,
+                iconSelected: <MCP className="w-full h-full text-foreground" />,
+            },
+        ];
+        // Skills / 插件属 M2：移动端先隐藏入口，避免点了才炸（A 类只保留基础可配）
+        if (skillsAvailable) {
+            items.push({
+                id: "skills-config",
+                name: "Skills",
+                icon: <Sparkles className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Sparkles className="w-full h-full text-foreground" />,
+            });
+        }
+        if (pluginsAvailable) {
+            items.push({
+                id: "plugins-config",
+                name: "插件",
+                icon: <Puzzle className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Puzzle className="w-full h-full text-foreground" />,
+            });
+        }
+        items.push({
             id: "feature-assistant-config",
             name: "程序功能",
             icon: <Settings className="w-full h-full text-muted-foreground" />,
             iconSelected: <Settings className="w-full h-full text-foreground" />,
-        },
-    ];
+        });
+        return items;
+    }, [skillsAvailable, pluginsAvailable]);
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
+    useEffect(() => {
+        if (!menuList.some((item) => item.id === selectedMenu)) {
+            setSelectedMenu(menuList[0]?.id ?? "llm-provider-config");
+        }
+    }, [menuList, selectedMenu]);
+
     const [subNav, setSubNav] = useState<string | undefined>(undefined);
     const [pluginList, setPluginList] = useState<any[]>([]);
 
@@ -198,8 +218,8 @@ function ConfigWindow() {
     );
 
     const handleBackHome = async () => {
-        // 移动端优先在单 webview 内直接切换视图，避免多窗口体验割裂
-        if (isMobile) {
+        // 移动平台必须单 webview 内切换；窄屏桌面亦可用 in-app（与 ChatUIInfomation 一致）
+        if (isMobilePlatform || isMobile) {
             const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
             if (switchWindow) {
                 switchWindow("chat_ui");
@@ -236,7 +256,7 @@ function ConfigWindow() {
                         </SheetTrigger>
                         <SheetContent
                             side="left"
-                            className="w-[280px] p-0 flex flex-col"
+                            className={`w-[280px] p-0 flex flex-col safe-top${platform === "android" ? " safe-top-android" : ""}`}
                             aria-describedby={undefined}
                             hideCloseButton
                             data-aipp-slot="config-mobile-sidebar"

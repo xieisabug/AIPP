@@ -106,13 +106,20 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             icon: <Info className="h-5 w-5" />,
             code: "about",
         },
-    ].filter((feature) => platform !== "android" || feature.id !== "shortcuts"), [platform]);
+    ].filter((feature) => {
+        if (platform !== "android" && platform !== "ios") return true;
+        // 移动平台：隐藏快捷键、React/Vue 预览（C/M3）；保留显示/数据同步/网络/基础项
+        return feature.id !== "shortcuts" && feature.id !== "preview";
+    }), [platform]);
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
     const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
 
     useEffect(() => {
-        if (platform === "android" && selectedFeature.id === "shortcuts") {
+        const mobileHidden = platform === "android" || platform === "ios"
+            ? selectedFeature.id === "shortcuts" || selectedFeature.id === "preview"
+            : false;
+        if (mobileHidden) {
             setSelectedFeature(featureList[0]);
         }
     }, [featureList, platform, selectedFeature.id]);

@@ -5,6 +5,8 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Windo
 use tauri::{LogicalPosition, LogicalSize};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
+#[cfg(mobile)]
+use crate::api::system_api::mobile_unsupported_error;
 
 /// 当按照显示器大小调整窗口尺寸时保留的屏幕占比（90%）
 #[cfg(desktop)]
@@ -637,6 +639,11 @@ pub async fn open_artifact_preview_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app_handle, source_window);
+        return Err(mobile_unsupported_error("Artifact 预览窗口"));
+    }
     if app_handle.get_webview_window("artifact_preview").is_none() {
         debug!("Creating artifact preview window");
 
@@ -720,6 +727,11 @@ pub async fn open_butler_experiment_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app_handle, source_window);
+        return Err(mobile_unsupported_error("Butler 窗口"));
+    }
     if let Some(window) = app_handle.get_webview_window("butler_experiment") {
         debug!("Showing butler_experiment window");
         #[cfg(desktop)]
@@ -753,6 +765,11 @@ pub async fn open_plugin_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app_handle, source_window);
+        return Err(mobile_unsupported_error("插件窗口"));
+    }
     if app_handle.get_webview_window("plugin").is_none() {
         debug!("Creating window");
 
@@ -1013,6 +1030,11 @@ pub async fn open_artifact_collections_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app_handle, source_window);
+        return Err(mobile_unsupported_error("Artifact 合集窗口"));
+    }
     if app_handle.get_webview_window("artifact_collections").is_none() {
         debug!("Creating artifact collections window");
         create_artifact_collections_window(&app_handle);
@@ -1036,6 +1058,11 @@ pub async fn open_artifact_window(
     app_handle: AppHandle,
     artifact: ArtifactCollection,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app_handle, artifact);
+        return Err(mobile_unsupported_error("Artifact 窗口"));
+    }
     let window_label = "artifact";
     if app_handle.get_webview_window(&window_label).is_none() {
         debug!(label=%window_label, "Creating artifact window");
@@ -1116,6 +1143,11 @@ pub async fn open_schedule_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app_handle, source_window);
+        return Err(mobile_unsupported_error("定时任务窗口"));
+    }
     if let Some(window) = app_handle.get_webview_window("schedule") {
         debug!("Showing schedule window");
         #[cfg(desktop)]
@@ -1230,6 +1262,11 @@ pub async fn open_sidebar_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app_handle, source_window);
+        return Err(mobile_unsupported_error("Sidebar 窗口"));
+    }
     if let Some(window) = app_handle.get_webview_window("sidebar") {
         debug!("Showing sidebar window");
         #[cfg(desktop)]

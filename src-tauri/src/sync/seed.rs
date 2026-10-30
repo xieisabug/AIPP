@@ -6,6 +6,7 @@
 //! lost its sync baseline. A seed row edited by the user is no longer pristine
 //! and counts as real data again.
 use super::*;
+use std::borrow::Borrow;
 use crate::db::assistant_db::{DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS, DEFAULT_QUICK_ASSISTANT_PROMPT};
 use crate::db::system_db::{DEFAULT_SUMMARY_LENGTH, DEFAULT_SUMMARY_PROMPT};
 
@@ -61,12 +62,17 @@ pub(super) fn user_row_count(conn: &Connection, spec: &SyncTableSpec) -> Result<
 }
 
 /// True when every synced table holds only official rows and pristine seeds.
-pub(super) fn local_scope_is_empty(
-    mut open: impl FnMut(&str) -> Result<Connection, String>,
+/// API-key rows (`secrets::OBJECT_TYPE`) are skipped, as before key sync:
+/// a device without keys must still be able to join by pulling.
+pub(super) fn local_scope_is_empty<C: Borrow<Connection>>(
+    mut open: impl FnMut(&str) -> Result<C, String>,
 ) -> Result<bool, String> {
     for spec in specs() {
+        if spec.object_type == secrets::OBJECT_TYPE {
+            continue;
+        }
         let conn = open(spec.db_name)?;
-        if user_row_count(&conn, &spec)? > 0 {
+        if user_row_count(conn.borrow(), &spec)? > 0 {
             return Ok(false);
         }
     }
