@@ -8,6 +8,7 @@ import { extractAssistantFromMessage } from "../utils/assistantMentions";
 import useConversationManager from "./useConversationManager";
 import { useIsMobilePlatform } from "./use-platform";
 import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
+import { AskAiResponse, describeAskAiError } from "../lib/askAiError";
 
 // 从 plugin.d.ts 导入的接口类型
 interface AiResponse {
@@ -441,7 +442,7 @@ export function useConversationOperations({
                         agentOverrideConfig.permission_mode = selectedAgentMode;
                     }
                 }
-                invoke<AiResponse>("ask_ai", {
+                invoke<AskAiResponse>("ask_ai", {
                     request: {
                         prompt: finalPrompt,
                         conversation_id: conversationId,
@@ -455,8 +456,16 @@ export function useConversationOperations({
                 })
                     .then((res) => {
                         console.log("ask ai response", res);
+                        // 先切到对话（新对话也能立即出现在列表和消息区），再处理请求前失败
                         if (conversationId != String(res.conversation_id)) {
                             onChangeConversationId(String(res.conversation_id));
+                        }
+                        if (res.error_message) {
+                            setAiIsResponsing(false);
+                            clearShiningMessages();
+                            toast.error(`${assistantData?.name ?? "Agent"} 运行失败`, {
+                                description: res.error_message,
+                            });
                         }
                     })
                     .catch((error) => {
@@ -465,7 +474,7 @@ export function useConversationOperations({
                         clearShiningMessages();
                         const assistantName = assistantData?.name ?? "Agent";
                         toast.error(`${assistantName} 运行失败`, {
-                            description: error instanceof Error ? error.message : String(error),
+                            description: describeAskAiError(error),
                         });
                     });
             }

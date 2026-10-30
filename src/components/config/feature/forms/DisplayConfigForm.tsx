@@ -31,6 +31,13 @@ export function withCurrentCodeThemeOption(
     return [{ value: current, label: known ? known.name : current }, ...options];
 }
 
+/** 「显示」分区副标题：只提及当前平台实际展示的配置项（移动端没有「默认主页窗口」，且文案要短到窄屏单行不被截断）。 */
+export function getDisplayConfigDescription(isMobilePlatform: boolean): string {
+    return isMobilePlatform
+        ? "配置外观主题、深浅色模式和消息渲染方式"
+        : "配置默认主页窗口、系统外观主题、深浅色模式和用户消息渲染方式";
+}
+
 export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     form,
     onSave,
@@ -361,7 +368,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     return (
         <ConfigForm
             title="显示"
-            description="配置默认主页窗口、系统外观主题、深浅色模式和用户消息渲染方式"
+            description={getDisplayConfigDescription(isMobilePlatform)}
             config={DISPLAY_FORM_CONFIG}
             layout="default"
             classNames="bottom-space"
