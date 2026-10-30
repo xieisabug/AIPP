@@ -2311,6 +2311,15 @@ fn create_structured_error_message<E: std::fmt::Display>(
     }
 }
 
+/// 401/403 等认证、权限错误：重试不会改变结果，不应重复请求
+pub(crate) fn is_non_retryable_auth_error<E: std::fmt::Display + ?Sized>(error: &E) -> bool {
+    let error_str = error.to_string().to_lowercase();
+    error_str.contains("401 unauthorized")
+        || error_str.contains("403 forbidden")
+        || error_str.contains("status: 401")
+        || error_str.contains("status: 403")
+}
+
 // 将错误信息转换为用户友好的中文提示
 fn get_user_friendly_error_message<E: std::fmt::Display>(error: &E) -> String {
     let error_str = error.to_string().to_lowercase();
@@ -2318,6 +2327,9 @@ fn get_user_friendly_error_message<E: std::fmt::Display>(error: &E) -> String {
     if error_str.contains("network")
         || error_str.contains("connection")
         || error_str.contains("timeout")
+        || error_str.contains("error sending request")
+        || error_str.contains("unreachable")
+        || error_str.contains("dns error")
     {
         "网络连接异常，请检查网络设置".to_string()
     } else if error_str.contains("unauthorized") || error_str.contains("401") {
@@ -2647,7 +2659,8 @@ pub async fn handle_stream_chat(
             Err(e) => {
                 warn!(attempt = main_attempts, error = %e, "stream chat failed attempt");
 
-                if main_attempts >= max_retry_attempts {
+                // 认证/权限错误重试不会成功，直接按最终失败处理
+                if main_attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) {
                     // 最终失败，提取 HTTP 错误详情并构建结构化错误
                     let http_details = extract_http_details_from_anyhow(&e);
                     let user_friendly = get_user_friendly_error_message(&e);
@@ -4024,7 +4037,7 @@ pub async fn handle_non_stream_chat(
                         &format!("Non-Stream Chat (attempt {}/{})", attempts, max_retry_attempts),
                     )
                     .await;
-                    if attempts >= max_retry_attempts {
+                    if attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) {
                         let http_details = extract_http_error_details(&e);
                         let raw_error = e.to_string();
                         let final_error =
@@ -4497,5 +4510,28 @@ pub async fn handle_non_stream_chat(
             error!(error = %e, "chat error");
             Err(anyhow::anyhow!("Chat error: {}", e))
         }
+    }
+}
+
+#[cfg(test)]
+mod pr40_error_handling_tests {
+    use super::{get_user_friendly_error_message, is_non_retryable_auth_error};
+
+    #[test]
+    fn auth_errors_are_not_retried() {
+        assert!(is_non_retryable_auth_error(
+            "Web stream error.\nCause: HTTP error.\nStatus: 401 Unauthorized"
+        ));
+        assert!(is_non_retryable_auth_error("Status: 403 Forbidden"));
+        assert!(!is_non_retryable_auth_error("Status: 429 Too Many Requests"));
+        assert!(!is_non_retryable_auth_error("error sending request for url (http://x)"));
+    }
+
+    #[test]
+    fn send_failures_are_classified_as_network() {
+        assert_eq!(
+            get_user_friendly_error_message(&"Cause: error sending request for url (http://10.0.2.2:18080/v1/chat/completions)"),
+            "网络连接异常，请检查网络设置"
+        );
     }
 }

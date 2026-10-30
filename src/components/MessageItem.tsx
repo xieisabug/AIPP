@@ -18,6 +18,7 @@ import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useDisplayConfig } from "../hooks/useDisplayConfig";
 import { useFeishuDebugResend } from "../hooks/useFeishuDebugResend";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
+import { useIsMobilePlatform } from "../hooks/use-platform";
 import { maskContent } from "../utils/antiLeakage";
 import { recordMessageItemRender } from "../utils/messageItemRenderStats";
 import { splitClosedMarkdownBlocks } from "../utils/streamingMarkdownBlocks";
@@ -333,6 +334,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const isUserMessage = message.message_type === "user";
         const isStreaming = !!streamEvent && !streamEvent.is_done;
+        const isMobilePlatform = useIsMobilePlatform();
         const userMessageCharacters = useMemo(
             () => isUserMessage ? Array.from(displayContent) : [],
             [displayContent, isUserMessage],
@@ -533,7 +535,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const bubbleElement = (
             <div
-                className="group relative inline-block max-w-[65%] rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200"
+                className={`group relative inline-block ${isMobilePlatform ? "max-w-[92%] min-w-0" : "max-w-[65%]"} rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200`}
             >
                 {shouldShowShineBorder && (
                     <ShineBorder

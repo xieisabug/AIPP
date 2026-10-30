@@ -3,6 +3,7 @@ import IconButton from "../IconButton";
 import { Copy, Check } from "lucide-react";
 import { useCopyHandler } from "@/hooks/useCopyHandler";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface ErrorMessageProps {
     content: string;
@@ -42,6 +43,14 @@ const getStatusBadgeStyle = (status: number): string => {
     return "bg-gray-200 text-gray-800 border-gray-300";
 };
 
+/** 从 genai 的多行错误里取根因："Cause: xxx" 优先，否则取最后一行。 */
+export function extractRootCause(originalError: string): string {
+    const lines = originalError.split("\n").map((line) => line.trim()).filter(Boolean);
+    const causeLine = lines.find((line) => /^cause:/i.test(line));
+    const cause = causeLine ? causeLine.replace(/^cause:\s*/i, "") : lines[lines.length - 1] ?? "";
+    return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
+}
+
 const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
     const [isExpanded, setIsExpanded] = useState(false);
     const { copyIconState, handleCopy } = useCopyHandler(content);
@@ -68,8 +77,11 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
             if (parsed.message && (parsed.details !== undefined)) {
                 return {
                     mainMessage: parsed.message,
-                    details: typeof parsed.details === "string" ? parsed.details : JSON.stringify(parsed.details),
-                    hasDetails: !!parsed.details,
+                    details: parsed.details == null
+                        ? null
+                        : typeof parsed.details === "string" ? parsed.details : JSON.stringify(parsed.details),
+                    // 没有响应体时（如网络错误）也要能看到原始错误
+                    hasDetails: !!parsed.details || !!parsed.original_error,
                     meta: parsed,
                 };
             }
@@ -129,6 +141,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
     };
 
     const { mainMessage, details, hasDetails, meta } = parseErrorContent(content);
+    const isMobilePlatform = useIsMobilePlatform();
+    // 无响应体时，直接展示原始错误中的根因（如 "error sending request for url ..."）
+    const rootCause = !details && meta?.original_error ? extractRootCause(String(meta.original_error)) : null;
 
     const formatDetails = (details: string) => {
         try {
@@ -146,7 +161,7 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
             data-message-item
             data-message-id={messageId}
             data-message-type="error"
-            className="group relative w-fit max-w-[min(65%,56rem)] overflow-hidden rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-800 transition-all duration-200 self-start"
+            className={`group relative ${isMobilePlatform ? "w-full max-w-full" : "w-fit max-w-[min(65%,56rem)]"} overflow-hidden rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-800 transition-all duration-200 self-start`}
         >
             <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 w-5 h-5 mt-0.5">
@@ -169,6 +184,12 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                     <div className="prose prose-sm max-w-none break-words text-red-700">
                         {mainMessage}
                     </div>
+                    {rootCause && (
+                        <div className="mt-1 text-xs text-red-700 break-words" data-aipp-slot="error-root-cause">
+                            <span className="text-red-600/80">原因：</span>
+                            {rootCause}
+                        </div>
+                    )}
                     {meta && (
                         <div className="mt-2 text-xs text-red-700 space-y-2">
                             {/* HTTP 状态码 - 突出显示 */}
@@ -283,7 +304,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                     )}
                 </div>
             </div>
-            <div className="hidden group-hover:flex items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-red-200 bg-red-50 left-0">
+            <div className={isMobilePlatform
+                ? "aipp-mobile-action-bar mt-3 flex w-fit items-center px-1 box-border rounded-[26px] border border-red-200 bg-red-50"
+                : "hidden group-hover:flex items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-red-200 bg-red-50 left-0"}>
                 <IconButton
                     icon={
                         copyIconState === "copy" ? (

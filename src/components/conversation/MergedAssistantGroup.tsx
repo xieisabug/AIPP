@@ -5,6 +5,7 @@ import { ShineBorder } from "../magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import MessageActionButtons from "../message-item/MessageActionButtons";
 import MessageItem from "../MessageItem";
+import { useIsMobilePlatform } from "../../hooks/use-platform";
 import type { InlineInteractionItem } from "../ConversationUI";
 import {
     reportMergedGroupSegmentWidth,
@@ -245,6 +246,8 @@ function MergedGroupToolbar({ props }: { props: MergedAssistantGroupProps }) {
 function MergedAssistantGroup(props: MergedAssistantGroupProps) {
     const { groupMessages, anyShining } = props;
     const lastMsg = groupMessages[groupMessages.length - 1];
+    // 手机上 65% 太窄（宽表格/错误卡片被挤压）；仅移动平台放宽
+    const bubbleMaxWidthClass = useIsMobilePlatform() ? "max-w-[92%] min-w-0" : "max-w-[65%]";
 
     return (
         <div
@@ -253,7 +256,7 @@ function MergedAssistantGroup(props: MergedAssistantGroupProps) {
             data-message-id={lastMsg.id}
             data-message-type="merged"
         >
-            <div className="group relative inline-block max-w-[65%] self-start rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200">
+            <div className={`group relative inline-block ${bubbleMaxWidthClass} self-start rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200`}>
                 {anyShining && (
                     <ShineBorder
                         shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -278,6 +281,8 @@ function MergedAssistantGroupSegmentComponent(props: MergedAssistantGroupSegment
     const lastMsg = segmentMessages[segmentMessages.length - 1];
     const contentRef = useRef<HTMLDivElement | null>(null);
     const groupWidth = useMergedGroupWidth(groupKey);
+    const isMobilePlatform = useIsMobilePlatform();
+    const maxWidthPercent = isMobilePlatform ? "92%" : "65%";
 
     useEffect(() => {
         const content = contentRef.current;
@@ -310,8 +315,8 @@ function MergedAssistantGroupSegmentComponent(props: MergedAssistantGroupSegment
             data-merged-segment={isFirstSegment ? "first" : isLastSegment ? "last" : "middle"}
         >
             <div
-                className={`relative max-w-[65%] self-start border-x border-border bg-background px-5 text-foreground ${chromeClassName}`}
-                style={groupWidth > 0 ? { minWidth: `min(${groupWidth}px, 65%)` } : undefined}
+                className={`relative ${isMobilePlatform ? "max-w-[92%] min-w-0" : "max-w-[65%]"} self-start border-x border-border bg-background px-5 text-foreground ${chromeClassName}`}
+                style={groupWidth > 0 ? { minWidth: `min(${groupWidth}px, ${maxWidthPercent})` } : undefined}
             >
                 {anyShining && (
                     <ShineBorder
