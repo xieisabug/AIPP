@@ -588,9 +588,9 @@ pub(crate) fn parse_trusted_workspaces(raw: &str) -> Vec<ButlerTrustedWorkspace>
                     })
                 })
                 .collect();
-            if !result.is_empty() {
-                return dedupe_workspaces(result);
-            }
+            // 合法 JSON 数组（包括 `[]` 或全部为空路径）即视为最终结果，
+            // 不能再退回按行解析，否则会把整段 JSON 当成一个路径。
+            return dedupe_workspaces(result);
         }
     }
 
@@ -713,7 +713,7 @@ mod butler_workspace_config_tests {
         let workspace_config = build_butler_workspace_config(
             None,
             None,
-            r#"[{"path":"E:\main","description":""},{"path":"E:\extra","description":"extra"}]"#,
+            r#"[{"path":"E:\\main","description":""},{"path":"E:\\extra","description":"extra"}]"#,
         );
 
         assert_eq!(
