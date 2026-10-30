@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+    canReplaceSyncPassphrase,
     canShowCleanupDangling,
     canShowRetryDeadLetters,
     canShowRetryFailed,
     canShowSyncNow,
     canStopSync,
     decideSyncNowAction,
+    duplicateProviderNotice,
     formatDanglingFkStatusText,
     formatLastSyncAt,
     formatRecentSyncError,
@@ -16,9 +18,12 @@ import {
     isAutoSyncEnabled,
     normalizeSyncServerUrl,
     saveThenSyncSuccessMessage,
+    secretSyncTone,
     shouldTriggerSyncAfterSave,
     showsSelfHostedSyncControls,
     syncConflictNotice,
+    syncPassphraseActionLabel,
+    validateSyncPassphrase,
 } from "./dataFolderSyncHelpers";
 
 describe("dataFolderSyncHelpers", () => {
@@ -330,5 +335,35 @@ describe("syncConflictNotice", () => {
     });
     it("should avoid a notice when an older counter arrives", () => {
         expect(syncConflictNotice({ count: 100, pending: 5 }, 0, false).delta).toBe(0);
+    });
+});
+
+describe("encrypted API Key sync helpers", () => {
+    it("maps backend states to tones and actions", () => {
+        expect(secretSyncTone("ready")).toBe("ok");
+        expect(secretSyncTone("needs_passphrase")).toBe("warn");
+        expect(secretSyncTone("mismatch")).toBe("warn");
+        expect(secretSyncTone("not_configured")).toBe("muted");
+        expect(secretSyncTone(undefined)).toBe("muted");
+        expect(syncPassphraseActionLabel("not_configured")).toBe("设置口令");
+        expect(syncPassphraseActionLabel(undefined)).toBe("设置口令");
+        expect(syncPassphraseActionLabel("needs_passphrase")).toBe("验证口令");
+        expect(syncPassphraseActionLabel("mismatch")).toBe("验证口令");
+        expect(syncPassphraseActionLabel("ready")).toBe("重新验证口令");
+        expect(canReplaceSyncPassphrase("not_configured")).toBe(false);
+        expect(canReplaceSyncPassphrase("mismatch")).toBe(true);
+    });
+
+    it("validates the passphrase length by characters", () => {
+        expect(validateSyncPassphrase("")).toBe("请输入同步口令");
+        expect(validateSyncPassphrase("1234567")).toContain("至少需要 8 个字符");
+        expect(validateSyncPassphrase("八个汉字的同步口令")).toBeNull();
+        expect(validateSyncPassphrase("12345678")).toBeNull();
+    });
+
+    it("only shows the duplicate provider notice when there is something to merge", () => {
+        expect(duplicateProviderNotice(0)).toBeNull();
+        expect(duplicateProviderNotice(undefined)).toBeNull();
+        expect(duplicateProviderNotice(2)).toContain("发现 2 个同名重复的供应商");
     });
 });

@@ -290,3 +290,51 @@ export function formatRecentSyncError(input: {
     }
     return raw;
 }
+
+/** Backend `secret_sync_state` codes for end-to-end encrypted API Key sync. */
+export type SecretSyncState = "not_configured" | "needs_passphrase" | "mismatch" | "ready";
+
+export const SYNC_PASSPHRASE_MIN_CHARS = 8;
+
+/** Status dot / text tone for the API Key sync row. */
+export function secretSyncTone(state: string | null | undefined): "ok" | "warn" | "muted" {
+    if (state === "ready") {
+        return "ok";
+    }
+    if (state === "needs_passphrase" || state === "mismatch") {
+        return "warn";
+    }
+    return "muted";
+}
+
+/** Primary passphrase button: create on a fresh account, otherwise verify the shared one. */
+export function syncPassphraseActionLabel(state: string | null | undefined): string {
+    if (!state || state === "not_configured") {
+        return "设置口令";
+    }
+    return state === "ready" ? "重新验证口令" : "验证口令";
+}
+
+/** Replacing only makes sense once a passphrase exists somewhere. */
+export function canReplaceSyncPassphrase(state: string | null | undefined): boolean {
+    return state === "ready" || state === "needs_passphrase" || state === "mismatch";
+}
+
+/** Client-side check mirroring the backend minimum; null when acceptable. */
+export function validateSyncPassphrase(value: string): string | null {
+    if (!value) {
+        return "请输入同步口令";
+    }
+    if (Array.from(value).length < SYNC_PASSPHRASE_MIN_CHARS) {
+        return `同步口令至少需要 ${SYNC_PASSPHRASE_MIN_CHARS} 个字符`;
+    }
+    return null;
+}
+
+/** Notice shown when older syncs left keyless same-name provider copies behind. */
+export function duplicateProviderNotice(count: number | null | undefined): string | null {
+    if (!count || count <= 0) {
+        return null;
+    }
+    return `发现 ${count} 个同名重复的供应商（旧版本同步遗留，通常没有 API Key）。可合并到有 API Key 的那个，并把助手、模型和历史消息的引用一起迁移。`;
+}
