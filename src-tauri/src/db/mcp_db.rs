@@ -609,7 +609,7 @@ impl MCPDatabase {
             Ok(MCPServer {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                description: row.get(2)?,
+                description: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 transport_type: row.get(3)?,
                 command: row.get(4)?,
                 environment_variables: row.get(5)?,
@@ -644,7 +644,7 @@ impl MCPDatabase {
                 Ok(MCPServer {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    description: row.get(2)?,
+                    description: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     transport_type: row.get(3)?,
                     command: row.get(4)?,
                     environment_variables: row.get(5)?,
@@ -689,7 +689,7 @@ impl MCPDatabase {
             Ok(MCPServer {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                description: row.get(2)?,
+                description: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 transport_type: row.get(3)?,
                 command: row.get(4)?,
                 environment_variables: row.get(5)?,
@@ -2055,5 +2055,26 @@ impl MCPDatabase {
             result.push(row?);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod null_description_tests {
+    use super::MCPDatabase;
+    use rusqlite::Connection;
+
+    #[test]
+    fn get_mcp_servers_tolerates_null_description() {
+        let db = MCPDatabase { conn: Connection::open_in_memory().unwrap() };
+        db.create_tables().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO mcp_server (name, description, transport_type, url, is_enabled) VALUES ('n', NULL, 'http', 'http://x/mcp', 1)",
+                [],
+            )
+            .unwrap();
+        let servers = db.get_mcp_servers().expect("NULL description must not break the list");
+        let server = servers.iter().find(|s| s.name == "n").unwrap();
+        assert_eq!(server.description, "");
     }
 }
