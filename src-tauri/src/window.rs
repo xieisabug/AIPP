@@ -5,7 +5,6 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Windo
 use tauri::{LogicalPosition, LogicalSize};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
-#[cfg(mobile)]
 use crate::api::system_api::mobile_unsupported_error;
 
 /// 当按照显示器大小调整窗口尺寸时保留的屏幕占比（90%）
@@ -635,13 +634,13 @@ pub async fn open_artifact_preview_window_inner(app_handle: AppHandle) {
 }
 
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_artifact_preview_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    {
-        let _ = (app_handle, source_window);
+    if cfg!(mobile) {
         return Err(mobile_unsupported_error("Artifact 预览窗口"));
     }
     if app_handle.get_webview_window("artifact_preview").is_none() {
@@ -723,13 +722,13 @@ pub async fn open_chat_ui_window(
 }
 
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_butler_experiment_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    {
-        let _ = (app_handle, source_window);
+    if cfg!(mobile) {
         return Err(mobile_unsupported_error("Butler 窗口"));
     }
     if let Some(window) = app_handle.get_webview_window("butler_experiment") {
@@ -761,13 +760,13 @@ pub async fn open_butler_experiment_window(
 }
 
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_plugin_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    {
-        let _ = (app_handle, source_window);
+    if cfg!(mobile) {
         return Err(mobile_unsupported_error("插件窗口"));
     }
     if app_handle.get_webview_window("plugin").is_none() {
@@ -1026,13 +1025,13 @@ fn create_artifact_window(app_handle: &AppHandle, artifact: &ArtifactCollection)
 
 /// Open artifact collections management window
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_artifact_collections_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    {
-        let _ = (app_handle, source_window);
+    if cfg!(mobile) {
         return Err(mobile_unsupported_error("Artifact 合集窗口"));
     }
     if app_handle.get_webview_window("artifact_collections").is_none() {
@@ -1054,13 +1053,13 @@ pub async fn open_artifact_collections_window(
 }
 
 /// Open artifact window to display a single artifact
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_artifact_window(
     app_handle: AppHandle,
     artifact: ArtifactCollection,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    {
-        let _ = (app_handle, artifact);
+    if cfg!(mobile) {
         return Err(mobile_unsupported_error("Artifact 窗口"));
     }
     let window_label = "artifact";
@@ -1139,13 +1138,13 @@ fn create_schedule_window_with_visibility(app_handle: &AppHandle, visible: bool)
 
 /// Open schedule window
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_schedule_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    {
-        let _ = (app_handle, source_window);
+    if cfg!(mobile) {
         return Err(mobile_unsupported_error("定时任务窗口"));
     }
     if let Some(window) = app_handle.get_webview_window("schedule") {
@@ -1258,13 +1257,13 @@ fn create_sidebar_window(app_handle: &AppHandle) {
 
 /// Open sidebar window
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_sidebar_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    #[cfg(mobile)]
-    {
-        let _ = (app_handle, source_window);
+    if cfg!(mobile) {
         return Err(mobile_unsupported_error("Sidebar 窗口"));
     }
     if let Some(window) = app_handle.get_webview_window("sidebar") {

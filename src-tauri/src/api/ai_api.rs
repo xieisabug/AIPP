@@ -1246,8 +1246,7 @@ pub async fn ask_ai(
         info!("ACP assistant detected (type=4), routing to ACP session");
 
         // 移动端不支持本机 CLI Agent；禁止静默换模型/通道
-        #[cfg(mobile)]
-        {
+        if cfg!(mobile) {
             return Err(AppError::InternalError(
                 crate::api::system_api::mobile_unsupported_error(
                     "本地 CLI Agent（Codex/Claude/ACP）",

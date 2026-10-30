@@ -3256,9 +3256,7 @@ async fn execute_stdio_tool(
     cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
     // 外部 stdio 在移动端不可执行。aipp:* 已在 execute_tool_by_transport 分流到 builtin，不会进入此函数。
-    #[cfg(mobile)]
-    {
-        let _ = (_app_handle, server, tool_name, parameters, cancel_token);
+    if cfg!(mobile) {
         return Err(anyhow!(crate::api::system_api::mobile_unsupported_error(
             "外部 stdio MCP",
         )));
