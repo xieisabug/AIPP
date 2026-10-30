@@ -588,9 +588,9 @@ pub(crate) fn parse_trusted_workspaces(raw: &str) -> Vec<ButlerTrustedWorkspace>
                     })
                 })
                 .collect();
-            if !result.is_empty() {
-                return dedupe_workspaces(result);
-            }
+            // 合法 JSON 数组（包括 `[]` 或全部为空路径）即视为最终结果，
+            // 不能再退回按行解析，否则会把整段 JSON 当成一个路径。
+            return dedupe_workspaces(result);
         }
     }
 
@@ -713,7 +713,7 @@ mod butler_workspace_config_tests {
         let workspace_config = build_butler_workspace_config(
             None,
             None,
-            r#"[{"path":"E:\main","description":""},{"path":"E:\extra","description":"extra"}]"#,
+            r#"[{"path":"E:\\main","description":""},{"path":"E:\\extra","description":"extra"}]"#,
         );
 
         assert_eq!(
@@ -3561,10 +3561,13 @@ mod tests {
         result.summary = Some("y".repeat(TASK_RESULT_DETAIL_LIMIT + 500));
         let msg = build_butler_task_result_system_message(&task, &definition, &result, false);
 
-        // detail_excerpt should be truncated
-        assert!(msg.contains("detail_excerpt="));
-        // The full long string should not appear
-        assert!(!msg.contains(&"y".repeat(TASK_RESULT_DETAIL_LIMIT + 500)));
+        // Only detail_excerpt is truncated; summary= is intentionally kept whole.
+        let detail_line = msg
+            .lines()
+            .find(|line| line.starts_with("detail_excerpt="))
+            .expect("detail_excerpt line should exist");
+        let detail_value = detail_line.trim_start_matches("detail_excerpt=");
+        assert_eq!(detail_value, format!("{}...", "y".repeat(TASK_RESULT_DETAIL_LIMIT)));
     }
 
     // --- build_batched_followup_prompt tests ---

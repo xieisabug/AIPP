@@ -184,7 +184,7 @@ mod tests {
         let request: SearchRequest = serde_json::from_str(json).unwrap();
 
         assert_eq!(request.query, "hello");
-        assert_eq!(request.result_type, SearchResultType::Html); // default
+        assert_eq!(request.result_type, SearchResultType::Markdown); // default
     }
 
     // ============================================

@@ -7,7 +7,9 @@ use tracing::{debug, warn};
 
 use crate::api::ai::acp::{AcpPermissionRequestSnapshot, AcpPermissionState};
 use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
-use crate::external_channels::presentation::{render_message_for_external_channel, RenderContext};
+use crate::external_channels::presentation::{
+    is_markdown_heading_line, render_message_for_external_channel, RenderContext,
+};
 use crate::mcp::builtin_mcp::interaction::{
     inline_local_text_preview_files, prepare_preview_file_request_for_ui, PreviewFileRequest,
 };
@@ -18,6 +20,10 @@ use super::relay::{find_latest_feishu_target, insert_external_link};
 use super::types::*;
 
 pub(super) const FEISHU_MARKDOWN_ELEMENT_SOFT_LIMIT: usize = 3000;
+/// 飞书官方限制：单个富文本（markdown）组件最多 4 个表格。
+pub(super) const FEISHU_MARKDOWN_ELEMENT_TABLE_LIMIT: usize = 4;
+/// 飞书官方限制：单张卡片最多 5 个表格。
+pub(super) const FEISHU_CARD_TABLE_LIMIT: usize = 5;
 
 pub(super) fn build_feishu_http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -74,13 +80,29 @@ pub(super) fn build_feishu_markdown_card(markdown: &str) -> Result<Value, String
             FeishuCardBlock::Markdown(content) => {
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
-                    markdown_segments.push(trimmed.to_string());
+                    markdown_segments.push(FeishuMarkdownSegment {
+                        content: trimmed.to_string(),
+                        is_table: false,
+                    });
                 }
             }
             FeishuCardBlock::Table(table) => {
-                markdown_segments.push(render_markdown_table_block(&table));
+                markdown_segments.push(FeishuMarkdownSegment {
+                    content: render_markdown_table_block(&table),
+                    is_table: true,
+                });
             }
         }
+    }
+
+    let table_count = markdown_segments.iter().filter(|segment| segment.is_table).count();
+    if table_count > FEISHU_CARD_TABLE_LIMIT {
+        // 正常发送链路会先按每张卡片最多 5 个表格拆分（见 external_channels::presentation），
+        // 这里兜底：飞书会拒绝超限卡片，直接返回错误让调用方回退为文本。
+        return Err(format!(
+            "飞书卡片最多支持 {} 个表格，当前内容包含 {} 个",
+            FEISHU_CARD_TABLE_LIMIT, table_count
+        ));
     }
 
     let elements = coalesce_feishu_markdown_segments(&markdown_segments)
@@ -280,35 +302,84 @@ fn build_feishu_markdown_element(content: &str) -> Value {
     })
 }
 
-fn coalesce_feishu_markdown_segments(segments: &[String]) -> Vec<String> {
+struct FeishuMarkdownSegment {
+    content: String,
+    is_table: bool,
+}
+
+/// 若 `content` 以标题结尾（末尾若干非空行都是标题），把这些标题从末尾切下返回，
+/// 便于让标题跟随下一个元素。全是标题时不切分（返回 None），避免产生空元素。
+fn split_off_trailing_headings(content: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut cut = lines.len();
+    let mut has_heading = false;
+    while cut > 0 {
+        let line = lines[cut - 1];
+        if line.trim().is_empty() {
+            cut -= 1;
+            continue;
+        }
+        if !is_markdown_heading_line(line) {
+            break;
+        }
+        has_heading = true;
+        cut -= 1;
+    }
+    if !has_heading {
+        return None;
+    }
+    let kept = lines[..cut].join("\n").trim_end().to_string();
+    if kept.trim().is_empty() {
+        return None;
+    }
+    let carried = lines[cut..].join("\n").trim().to_string();
+    Some((kept, carried))
+}
+
+/// 将块合并为 markdown 元素：每个元素不超过 FEISHU_MARKDOWN_ELEMENT_SOFT_LIMIT 字符
+/// 且最多 FEISHU_MARKDOWN_ELEMENT_TABLE_LIMIT 个表格；换元素时，上一个元素末尾的标题
+/// 会随下一个块一起移到新元素中，避免标题和其后的表格被拆开。
+fn coalesce_feishu_markdown_segments(segments: &[FeishuMarkdownSegment]) -> Vec<String> {
     let mut merged = Vec::new();
     let mut current = String::new();
     let mut current_len = 0usize;
+    let mut current_tables = 0usize;
 
     for segment in segments {
-        let trimmed = segment.trim();
+        let trimmed = segment.content.trim();
         if trimmed.is_empty() {
             continue;
         }
 
         let segment_len = trimmed.chars().count();
-        let separator = if current.is_empty() { "" } else { "\n\n" };
+        let segment_tables = usize::from(segment.is_table);
         let separator_len = if current.is_empty() { 0 } else { 2 };
 
         if !current.is_empty()
-            && current_len + separator_len + segment_len > FEISHU_MARKDOWN_ELEMENT_SOFT_LIMIT
+            && (current_len + separator_len + segment_len > FEISHU_MARKDOWN_ELEMENT_SOFT_LIMIT
+                || current_tables + segment_tables > FEISHU_MARKDOWN_ELEMENT_TABLE_LIMIT)
         {
-            merged.push(current);
-            current = String::new();
-            current_len = 0;
+            let mut carried = String::new();
+            if let Some((kept, headings)) = split_off_trailing_headings(&current) {
+                if headings.chars().count() + 2 + segment_len <= FEISHU_MARKDOWN_ELEMENT_SOFT_LIMIT
+                {
+                    current = kept;
+                    carried = headings;
+                }
+            }
+            merged.push(std::mem::take(&mut current));
+            current_tables = 0;
+            current_len = carried.chars().count();
+            current = carried;
         }
 
         if !current.is_empty() {
-            current.push_str(separator);
-            current_len += separator_len;
+            current.push_str("\n\n");
+            current_len += 2;
         }
         current.push_str(trimmed);
         current_len += segment_len;
+        current_tables += segment_tables;
     }
 
     if !current.is_empty() {
