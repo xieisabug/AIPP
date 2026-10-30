@@ -256,7 +256,7 @@ function ConfigWindow() {
                         </SheetTrigger>
                         <SheetContent
                             side="left"
-                            className="w-[280px] p-0 flex flex-col"
+                            className={`w-[280px] p-0 flex flex-col safe-top${platform === "android" ? " safe-top-android" : ""}`}
                             aria-describedby={undefined}
                             hideCloseButton
                             data-aipp-slot="config-mobile-sidebar"

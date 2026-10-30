@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+    getMcpServerDisplayLabel,
     isAippBuiltinCommand,
     isMobileExecutableAssistantType,
     isMobileExecutableMcpServer,
@@ -56,5 +57,16 @@ describe("mobileUnsupported helpers", () => {
             isMobileUnsupportedError(`未知错误: ${MOBILE_UNSUPPORTED_ERROR_PREFIX}: 外部 stdio MCP`),
         ).toBe(true);
         expect(isMobileUnsupportedError("network timeout")).toBe(false);
+    });
+
+    it("marks external stdio MCP in the mobile dropdown label only", () => {
+        const stdio = { name: "filesystem", transport_type: "stdio", command: "npx -y server-filesystem /tmp" };
+        const builtin = { name: "搜索", transport_type: "stdio", command: "aipp:search", is_builtin: true };
+        const http = { name: "remote", transport_type: "http", command: null };
+        expect(getMcpServerDisplayLabel(stdio, true)).toBe("filesystem（此设备不可执行）");
+        expect(getMcpServerDisplayLabel(builtin, true)).toBe("搜索");
+        expect(getMcpServerDisplayLabel(http, true)).toBe("remote");
+        // 桌面平台不追加标记
+        expect(getMcpServerDisplayLabel(stdio, false)).toBe("filesystem");
     });
 });

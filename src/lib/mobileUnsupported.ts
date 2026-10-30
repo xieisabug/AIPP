@@ -119,6 +119,23 @@ export function isMobileExecutableMcpServer(server: {
     return transport === "http" || transport === "sse"
 }
 
+/** 移动端 MCP 不可执行标记文案（侧栏列表与窄屏下拉共用）。 */
+export const MOBILE_UNEXECUTABLE_LABEL = "此设备不可执行"
+
+/**
+ * MCP 服务器在列表/下拉中的显示名：移动平台且不可执行时追加「（此设备不可执行）」。
+ * 桌面平台原样返回名称。
+ */
+export function getMcpServerDisplayLabel(
+    server: { name: string } & Parameters<typeof isMobileExecutableMcpServer>[0],
+    isMobilePlatform: boolean,
+): string {
+    if (isMobilePlatform && !isMobileExecutableMcpServer(server)) {
+        return `${server.name}（${MOBILE_UNEXECUTABLE_LABEL}）`
+    }
+    return server.name
+}
+
 /** 普通 API 对话助手（非本地 CLI Agent、非插件类型）。assistant_type 0 或未设置。 */
 export function isMobileExecutableAssistantType(assistantType: number | null | undefined): boolean {
     // 0 = 普通对话；4 = Codex/Claude/ACP 本地 Agent；其它为插件类型（M2）

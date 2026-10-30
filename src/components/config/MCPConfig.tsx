@@ -30,7 +30,7 @@ import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
-import { isMobileExecutableMcpServer } from "@/lib/mobileUnsupported";
+import { getMcpServerDisplayLabel, isMobileExecutableMcpServer } from "@/lib/mobileUnsupported";
 
 const MCPConfig: React.FC = () => {
     const isMobilePlatform = useIsMobilePlatform();
@@ -428,9 +428,10 @@ const MCPConfig: React.FC = () => {
     const selectOptions: SelectOption[] = useMemo(() =>
         mcpServers.map(server => ({
             id: server.id.toString(),
-            label: server.name,
+            // 移动端窄屏用下拉代替侧栏列表，同样需要标注外部 stdio 不可执行
+            label: getMcpServerDisplayLabel(server, isMobilePlatform),
             icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <MCP className="h-4 w-4" />
-        })), [mcpServers]);
+        })), [mcpServers, isMobilePlatform]);
 
     // 下拉菜单选择回调
     const handleSelectFromDropdown = useCallback((serverId: string) => {
