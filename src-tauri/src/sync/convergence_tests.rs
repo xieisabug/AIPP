@@ -711,3 +711,6 @@ mod fixes_2_7 {
 
 #[path = "quick_assistant_tests.rs"]
 mod quick_assistant_tests;
+
+#[path = "secrets_tests.rs"]
+mod secrets_tests;

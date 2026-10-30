@@ -16,9 +16,13 @@ import {
     isAutoSyncEnabled,
     normalizeSyncServerUrl,
     saveThenSyncSuccessMessage,
+    secretSyncTone,
     shouldTriggerSyncAfterSave,
     showsSelfHostedSyncControls,
     syncConflictNotice,
+    isSyncPassphraseMismatch,
+    providerConflictNotice,
+    validateSyncPassphrase,
 } from "./dataFolderSyncHelpers";
 
 describe("dataFolderSyncHelpers", () => {
@@ -330,5 +334,32 @@ describe("syncConflictNotice", () => {
     });
     it("should avoid a notice when an older counter arrives", () => {
         expect(syncConflictNotice({ count: 100, pending: 5 }, 0, false).delta).toBe(0);
+    });
+});
+
+describe("encrypted API Key sync helpers", () => {
+    it("maps backend states to tones and actions", () => {
+        expect(secretSyncTone("ready")).toBe("ok");
+        expect(secretSyncTone("needs_passphrase")).toBe("warn");
+        expect(secretSyncTone("mismatch")).toBe("warn");
+        expect(secretSyncTone("not_configured")).toBe("muted");
+        expect(secretSyncTone(undefined)).toBe("muted");
+        expect(isSyncPassphraseMismatch("SYNC_PASSPHRASE_MISMATCH: 输入的口令与已有同步口令不一致")).toBe(true);
+        expect(isSyncPassphraseMismatch("同步口令至少需要 8 个字符")).toBe(false);
+        expect(isSyncPassphraseMismatch(undefined)).toBe(false);
+    });
+
+    it("validates the passphrase length by characters", () => {
+        expect(validateSyncPassphrase("")).toBe("请输入同步口令");
+        expect(validateSyncPassphrase("1234567")).toContain("至少需要 8 个字符");
+        expect(validateSyncPassphrase("八个汉字的同步口令")).toBeNull();
+        expect(validateSyncPassphrase("12345678")).toBeNull();
+    });
+
+    it("names conflicting same-name providers and stays silent otherwise", () => {
+        expect(providerConflictNotice([])).toBeNull();
+        expect(providerConflictNotice(undefined)).toBeNull();
+        expect(providerConflictNotice(["Relay"])).toBe("同名供应商「Relay」的 API Key 不一致，未自动合并");
+        expect(providerConflictNotice(["A", "B"])).toBe("同名供应商「A」「B」的 API Key 不一致，未自动合并");
     });
 });

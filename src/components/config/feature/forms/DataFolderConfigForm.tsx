@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
@@ -24,9 +25,13 @@ import {
     type SyncStatusMetric,
     isAutoSyncEnabled,
     saveThenSyncSuccessMessage,
+    secretSyncTone,
     shouldTriggerSyncAfterSave,
     showsSelfHostedSyncControls,
     syncConflictNotice,
+    isSyncPassphraseMismatch,
+    providerConflictNotice,
+    validateSyncPassphrase,
 } from "./dataFolderSyncHelpers";
 
 interface DataFolderConfigFormProps {
@@ -53,6 +58,10 @@ interface SyncStatus {
     server_cursor: number;
     dangling_fk_count?: number;
     dangling_fk_summary?: string | null;
+    secret_sync_state?: string;
+    secret_sync_message?: string;
+    secret_pending_count?: number;
+    duplicate_provider_conflicts?: string[];
 }
 
 const STATUS_FALLBACK_POLL_MS = 30_000;
@@ -75,6 +84,22 @@ function connectionStateDotClass(state: string): string {
     }
 }
 
+function secretToneDotClass(tone: ReturnType<typeof secretSyncTone>): string {
+    switch (tone) {
+        case "ok":
+            return "bg-emerald-500";
+        case "warn":
+            return "bg-amber-500";
+        default:
+            return "bg-muted-foreground";
+    }
+}
+
+const PASSPHRASE_FIELD = "sync_passphrase";
+
+const SECRET_SYNC_HINT =
+    "API Key 等密钥只在本机用同步口令加密后上传，服务器只保存密文。每台设备输入相同口令后才会同步 API Key；口令不会上传，忘记口令可「更换口令」（其他设备需重新输入）。";
+
 function metricValueClass(metric: SyncStatusMetric): string {
     if (metric.value > 0 && (metric.label === "失败" || metric.label === "无法应用")) {
         return "text-destructive";
@@ -95,6 +120,9 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const [resetting, setResetting] = useState(false);
     const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
     const [cleaningDangling, setCleaningDangling] = useState(false);
+    const [passphraseError, setPassphraseError] = useState<string | null>(null);
+    const [savingPassphrase, setSavingPassphrase] = useState(false);
+    const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
     const watchedServerUrl = useWatch({ control: form.control, name: "server_url" }) || "";
@@ -355,6 +383,42 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
+    // The passphrase lives in the form (not component state): ConfigForm remounts
+    // custom rows whenever this component re-renders, which would drop focus on
+    // every keystroke. It is never part of save_sync_settings.
+    const submitPassphrase = useCallback(async (replaceExisting: boolean) => {
+        const passphrase: string = form.getValues(PASSPHRASE_FIELD) || "";
+        const invalid = validateSyncPassphrase(passphrase);
+        if (invalid) {
+            setPassphraseError(invalid);
+            return;
+        }
+        setPassphraseError(null);
+        setSavingPassphrase(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("set_sync_passphrase", {
+                request: { passphrase, replace_existing: replaceExisting },
+            });
+            setStatus(nextStatus);
+            form.setValue(PASSPHRASE_FIELD, "");
+            toast.success(replaceExisting ? "已更换同步口令" : "同步口令已保存");
+        } catch (error) {
+            const message = getErrorMessage(error) || "设置同步口令失败";
+            // One button: a different passphrase than the account's means "replace",
+            // which only happens after the user confirms it.
+            if (!replaceExisting && isSyncPassphraseMismatch(message)) {
+                setReplaceConfirmOpen(true);
+                return;
+            }
+            // Passphrase errors are already user-facing; do not route them through the
+            // generic "解密" → token hint mapping.
+            setPassphraseError(message);
+            toast.error(message);
+        } finally {
+            setSavingPassphrase(false);
+        }
+    }, [form]);
+
     const connectionState = useMemo(() => formatSyncConnectionState(status), [status]);
     const statusMetrics = useMemo(() => formatSyncStatusMetrics(status), [status]);
     const danglingText = useMemo(() => formatDanglingFkStatusText(status), [status]);
@@ -442,6 +506,66 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             </div>
         );
     }, [connectionState, danglingCount, danglingText, statusReadError, status?.dead_letter_count, status?.dead_letter_summary, status?.failed_outbox_count, status?.last_error, status?.last_sync_at, status?.syncing, statusMetrics, syncing]);
+
+    const secretState = status?.secret_sync_state;
+    const secretTone = secretSyncTone(secretState);
+    const conflictNotice = providerConflictNotice(status?.duplicate_provider_conflicts);
+
+    const renderSecretSyncRow = useCallback((field: { value?: string; onChange: (value: string) => void }) => {
+        const passphrase = field.value || "";
+        const busy = savingPassphrase || saving;
+        return (
+            <div className="space-y-3">
+                <div
+                    className="flex items-start gap-2 px-3 py-2 bg-muted rounded-md text-sm"
+                    data-testid="secret-sync-status"
+                >
+                    <span
+                        className={`mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full ${secretToneDotClass(secretTone)}`}
+                        aria-hidden
+                    />
+                    <span
+                        className={`min-w-0 break-words ${secretTone === "warn" ? "text-amber-700 dark:text-amber-300" : "text-foreground"}`}
+                    >
+                        {status?.secret_sync_message || "读取中"}
+                    </span>
+                </div>
+                <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                    <Input
+                        type="password"
+                        autoComplete="new-password"
+                        aria-label="同步口令"
+                        className="w-full md:max-w-xs"
+                        placeholder="同步口令（至少 8 个字符，所有设备相同）"
+                        value={passphrase}
+                        disabled={busy}
+                        onChange={(event) => field.onChange(event.target.value)}
+                        onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                                event.preventDefault();
+                                void submitPassphrase(false);
+                            }
+                        }}
+                    />
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={busy || !passphrase}
+                        onClick={() => void submitPassphrase(false)}
+                    >
+                        {savingPassphrase ? "处理中..." : "保存口令"}
+                    </Button>
+                </div>
+                {passphraseError ? <p className="text-sm text-destructive break-words">{passphraseError}</p> : null}
+                {conflictNotice ? (
+                    <p className="text-sm text-amber-700 dark:text-amber-300 break-words" data-testid="provider-conflict-status">
+                        {conflictNotice}
+                    </p>
+                ) : null}
+            </div>
+        );
+    }, [conflictNotice, passphraseError, saving, savingPassphrase, secretTone, status?.secret_sync_message, submitPassphrase]);
 
     const renderSyncActionButtons = useCallback(() => {
         // Auto-sync toggle is the persistent on/off. Stop shows while any round is syncing.
@@ -617,6 +741,16 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             },
         },
         {
+            key: PASSPHRASE_FIELD,
+            config: {
+                type: "custom" as const,
+                label: "API Key 加密同步",
+                tooltip: SECRET_SYNC_HINT,
+                hidden: !showsSelfHostedSyncControls(mode),
+                customRender: renderSecretSyncRow,
+            },
+        },
+        {
             key: "needsResetWarning",
             config: {
                 type: "static" as const,
@@ -655,6 +789,16 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 confirmText="将从头重新读取当前服务器的同步记录，保留对象身份、已确认版本和待上传修改，不会把历史会话重新生成为新对象。此操作仅适用于原服务器和账号；更换账号请先备份并使用独立数据目录。确认继续？"
                 onConfirm={handleResetSyncState}
                 onCancel={() => setResetConfirmOpen(false)}
+            />
+            <ConfirmDialog
+                isOpen={replaceConfirmOpen}
+                title="更换同步口令"
+                confirmText="输入的口令与已有同步口令不一致。继续将更换所有设备的同步口令，其他设备需要重新输入新口令。"
+                onConfirm={() => {
+                    setReplaceConfirmOpen(false);
+                    void submitPassphrase(true);
+                }}
+                onCancel={() => setReplaceConfirmOpen(false)}
             />
             <ConfirmDialog
                 isOpen={cleanupConfirmOpen}

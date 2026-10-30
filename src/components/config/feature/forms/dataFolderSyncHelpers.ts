@@ -290,3 +290,45 @@ export function formatRecentSyncError(input: {
     }
     return raw;
 }
+
+/** Backend `secret_sync_state` codes for end-to-end encrypted API Key sync. */
+export type SecretSyncState = "not_configured" | "needs_passphrase" | "mismatch" | "ready";
+
+export const SYNC_PASSPHRASE_MIN_CHARS = 8;
+
+/** Status dot / text tone for the API Key sync row. */
+export function secretSyncTone(state: string | null | undefined): "ok" | "warn" | "muted" {
+    if (state === "ready") {
+        return "ok";
+    }
+    if (state === "needs_passphrase" || state === "mismatch") {
+        return "warn";
+    }
+    return "muted";
+}
+
+/** Backend error code prefix: the passphrase differs from the account's existing one. */
+export const SYNC_PASSPHRASE_MISMATCH_CODE = "SYNC_PASSPHRASE_MISMATCH";
+
+export function isSyncPassphraseMismatch(error: string | null | undefined): boolean {
+    return Boolean(error?.startsWith(SYNC_PASSPHRASE_MISMATCH_CODE));
+}
+
+/** Client-side check mirroring the backend minimum; null when acceptable. */
+export function validateSyncPassphrase(value: string): string | null {
+    if (!value) {
+        return "请输入同步口令";
+    }
+    if (Array.from(value).length < SYNC_PASSPHRASE_MIN_CHARS) {
+        return `同步口令至少需要 ${SYNC_PASSPHRASE_MIN_CHARS} 个字符`;
+    }
+    return null;
+}
+
+/** Same-name providers whose API Keys differ are left unmerged; name them once. */
+export function providerConflictNotice(names: string[] | null | undefined): string | null {
+    if (!names || names.length === 0) {
+        return null;
+    }
+    return `同名供应商「${names.join("」「")}」的 API Key 不一致，未自动合并`;
+}
