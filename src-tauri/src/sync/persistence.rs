@@ -19,7 +19,8 @@ fn prepare_capture(sync: &Connection) -> Result<(), String> {
         CREATE TEMP TABLE sync_apply_capture_active (enabled INTEGER);").map_err(|e| e.to_string())?;
     // Only client-owned metadata tables. quote() encodes values locally; no
     // server-provided identifiers or executable SQL enter the redo log.
-    for table in ["sync_object_map", "sync_object_alias", "sync_branch_route", "sync_shadow", "sync_natural_key", "sync_outbox"] {
+    for table in ["sync_object_map", "sync_object_alias", "sync_branch_route", "sync_shadow", "sync_natural_key", "sync_outbox",
+        "sync_secret_pending", "sync_identity_origin", "sync_merge_redirect"] {
         let mut stmt = sync.prepare(&format!("PRAGMA table_info({table})")).map_err(|e| e.to_string())?;
         let columns = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?)))
             .map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;

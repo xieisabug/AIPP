@@ -26,6 +26,8 @@ use crate::db::system_db::{FeatureConfig, SecureConfigEntry, SystemDatabase};
 mod divergence;
 mod persistence;
 mod quick_assistant;
+mod secrets;
+mod provider_merge;
 #[cfg(test)]
 mod persistence_tests;
 mod offline_recovery;
@@ -123,6 +125,13 @@ pub struct SyncStatusDto {
     dangling_fk_count: i64,
     /// 友好中文摘要（无悬空时为 null）
     dangling_fk_summary: Option<String>,
+    /// API Key 加密同步状态：not_configured / needs_passphrase / mismatch / ready
+    secret_sync_state: String,
+    secret_sync_message: String,
+    /// 因缺少/不匹配口令而暂存、未写入本地的远端 API Key 变更数
+    secret_pending_count: i64,
+    /// 可安全合并的同名重复供应商数量（历史同步遗留）
+    duplicate_provider_count: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -339,13 +348,31 @@ fn specs() -> Vec<SyncTableSpec> {
             object_type: "llm.provider_config",
             columns: &["id", "name", "llm_provider_id", "value", "append_location", "is_addition"],
             natural_key_columns: &[],
-            unique_key_columns: &[],
+            // 每个供应商每个配置名只有一行（update_llm_provider_config 语义）。按此合并远端行，
+            // 避免两端各自的 endpoint 变成两行、读取时“最后一行”盖掉本机值。
+            unique_key_columns: &["llm_provider_id", "name"],
             seed_official_ids: &[],
             official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Structural }],
-            // 白名单：只同步已知不含密钥的配置名。env 类配置（acp_env_vars / acp_env_* 等）
-            // 的值可能内嵌 API key，刻意不同步；新增配置名时须评估敏感性后再加入。
+            // 白名单：只以明文同步已知不含密钥的配置名。api_key 与 env 类配置（acp_env_vars /
+            // acp_claude_env_vars / acp_env_* 等）走下方 llm.provider_secret 端到端加密同步；
+            // 新增配置名时须评估敏感性后再加入。
             where_clause: Some("LOWER(name) IN ('endpoint', 'base_url', 'acp_cli_command', 'acp_working_directory', 'acp_additional_args', 'acp_claude_auth_mode')"),
+            order_by: "id",
+        },
+        SyncTableSpec {
+            // 同一张表里的敏感配置：value 在推送前用同步口令派生的密钥加密（服务器只见密文），
+            // 拉取后解密写回本地明文。没有口令/口令不匹配的设备不推送也不覆盖本地值。
+            db_name: "llm.db",
+            table: "llm_provider_config",
+            object_type: secrets::OBJECT_TYPE,
+            columns: &["id", "name", "llm_provider_id", "value", "append_location", "is_addition"],
+            natural_key_columns: &[],
+            unique_key_columns: &["llm_provider_id", "name"],
+            seed_official_ids: &[],
+            official_column: None,
+            foreign_keys: &[ForeignKeySpec { column: "llm_provider_id", object_type: "llm.provider", kind: FkKind::Structural }],
+            where_clause: Some(secrets::SECRET_NAME_SQL),
             order_by: "id",
         },
         SyncTableSpec {
@@ -1243,6 +1270,9 @@ async fn run_sync_once_inner(
         return Ok(());
     }
 
+    // Remote secrets parked while no passphrase was set win over local values
+    // that were never synced (same rule as any other conflict: remote first).
+    replay_secret_pending(app_handle).await?;
     let (queued, dangling) = scan_local_changes(app_handle)?;
     store_dangling_fk_report(app_handle, &dangling).await;
     if queued > 0 || dangling.total_hits > 0 {
@@ -1252,6 +1282,7 @@ async fn run_sync_once_inner(
     push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await?;
     ensure_not_cancelled(cancel)?;
     pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
+    replay_secret_pending(app_handle).await?;
     Ok(())
 }
 
@@ -2011,14 +2042,29 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
     // 整轮扫描复用同一个 sync.db 连接，避免每行/每对象都重开连接
     let mut sync_conn = open_sync_db(app_handle)?;
     let assistant_db = open_data_db(&get_db_path(app_handle, "assistant.db")?)?;
+    // Finish any interrupted duplicate-provider merge before reading references.
+    finish_provider_merge_redirects(app_handle, &sync_conn, &assistant_db)?;
+    let llm_db = open_data_db(&get_db_path(app_handle, "llm.db")?)?;
+    provider_merge::dedupe_provider_configs(&sync_conn, &llm_db)?;
+    drop(llm_db);
     quick_assistant::prepare(&sync_conn, &assistant_db)?;
+    let secret_state = load_secret_state(app_handle)?;
     let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
     let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
     let mut dangling = DanglingFkScanReport::default();
     for spec in specs() {
+        let secret_key = if spec.object_type == secrets::OBJECT_TYPE {
+            // Without a matching passphrase secrets are neither pushed nor tombstoned.
+            let Some(key) = secret_state.ready_key() else { continue };
+            Some(key)
+        } else { None };
         let (snapshots, present_ids) =
             read_local_snapshots(app_handle, &spec, &sync_conn, &mut dangling)?;
+        let snapshots = match secret_key {
+            Some(key) => secrets::seal_snapshots(&sync_conn, key, snapshots)?,
+            None => snapshots,
+        };
         for snapshot in snapshots {
             if enqueue_snapshot_if_changed(&sync_conn, &snapshot, &device_id)? {
                 enqueued += 1;
@@ -2986,8 +3032,12 @@ fn apply_change(
     };
     let db_path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&db_path)?;
-    apply_change_to_db(sync_conn, &conn, &spec, change, local_device_id, |fields| {
-        maybe_fork_before_message_insert(app_handle, sync_conn, &conn, fields)
+    // Only secret rows need the passphrase state; avoid touching system.db per message.
+    let secret_state = if spec.object_type == secrets::OBJECT_TYPE { Some(load_secret_state(app_handle)?) } else { None };
+    secrets::with_state(secret_state, || {
+        apply_change_to_db(sync_conn, &conn, &spec, change, local_device_id, |fields| {
+            maybe_fork_before_message_insert(app_handle, sync_conn, &conn, fields)
+        })
     })
 }
 
@@ -3079,6 +3129,10 @@ fn apply_change_to_db_inner(
         find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
     })?;
 
+    if spec.object_type == secrets::OBJECT_TYPE {
+        return secrets::apply_upsert(sync_conn, conn, spec, change, &field_values);
+    }
+
     if quick_assistant::apply_model(sync_conn, conn, spec, change, &field_values)? {
         return Ok(());
     }
@@ -3090,8 +3144,21 @@ fn apply_change_to_db_inner(
             clear_missing_row_mapping(sync_conn, spec.object_type, id)?;
         }
     }
-    let merge_target = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?
-        .or(find_row_by_unique_key(&conn, &spec, &field_values)?);
+    let mapped_id = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?;
+    // A same-named provider created independently on this device is the same
+    // provider for the user: link instead of inserting a keyless duplicate.
+    let provider_link = if mapped_id.is_none() {
+        provider_merge::find_link_target(sync_conn, conn, change, &field_values)?
+    } else { None };
+    let merge_target = mapped_id
+        .or(find_row_by_unique_key(&conn, &spec, &field_values)?)
+        .or(provider_link);
+    if let Some(local_id) = provider_link {
+        let stale = remote_row_change_is_stale(sync_conn, change, local_id)?;
+        provider_merge::link(sync_conn, conn, spec, change, local_id, &field_values, stale)?;
+        upsert_shadow_from_remote_with_fields(sync_conn, &spec, change, &field_values)?;
+        return Ok(());
+    }
     if let Some(local_id) = merge_target {
         if remote_row_change_is_stale(sync_conn, change, local_id)? {
             if find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)?.is_none() {
@@ -3165,6 +3232,7 @@ fn apply_change_to_db_inner(
         }
     }
 
+    provider_merge::record_origin(sync_conn, change)?;
     upsert_shadow_from_remote_with_fields(sync_conn, &spec, change, &field_values)?;
     Ok(())
 }
@@ -4823,6 +4891,25 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
         CREATE TABLE IF NOT EXISTS sync_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_secret_pending (
+            object_id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            change_json TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_identity_origin (
+            object_type TEXT NOT NULL,
+            sync_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            PRIMARY KEY (object_type, sync_id)
+        );
+        CREATE TABLE IF NOT EXISTS sync_merge_redirect (
+            kind TEXT NOT NULL,
+            from_id INTEGER NOT NULL,
+            to_id INTEGER NOT NULL,
+            PRIMARY KEY (kind, from_id)
         );";
 
 fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
@@ -5224,6 +5311,10 @@ fn existing_columns(
 
 fn is_local_sync_scope_empty(app_handle: &AppHandle) -> Result<bool, String> {
     for spec in specs() {
+        if spec.object_type == secrets::OBJECT_TYPE {
+            // Secret rows mirror llm_provider_config; keep the historical bootstrap decision.
+            continue;
+        }
         let path = get_db_path(app_handle, spec.db_name)?;
         let conn = open_data_db(&path)?;
         // 判空时排除官方/内置种子行：每台设备都有它们，
@@ -5343,6 +5434,16 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         .unwrap_or(0);
     let dead_letter_summary = summarize_dead_letters(&conn)?;
     let needs_reset = needs_reset(&conn).unwrap_or(false);
+    let secret_pending_count = secrets::pending_count(&conn);
+    let secret_state = load_secret_state(app_handle).unwrap_or_else(|err| {
+        warn!(error = %err, "Failed to read sync passphrase state");
+        secrets::SecretState::NotConfigured
+    });
+    let duplicate_provider_count = get_db_path(app_handle, "llm.db")
+        .and_then(|path| open_data_db(&path))
+        .and_then(|llm| provider_merge::find_duplicates(&llm))
+        .map(|pairs| pairs.len() as i64)
+        .unwrap_or(0);
     // Keep runtime.paused aligned with persisted auto_sync for status reads.
     apply_persisted_auto_sync_to_runtime(app_handle).await;
     let runtime = if let Some(state) = app_handle.try_state::<SyncState>() {
@@ -5381,6 +5482,10 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
         server_cursor: get_cursor(app_handle).unwrap_or(0),
         dangling_fk_count: runtime.dangling_fk_count,
         dangling_fk_summary: runtime.dangling_fk_summary.clone(),
+        secret_sync_state: secret_state.code().to_string(),
+        secret_sync_message: secret_state.message(secret_pending_count),
+        secret_pending_count,
+        duplicate_provider_count,
     })
 }
 
@@ -5433,6 +5538,123 @@ async fn apply_persisted_auto_sync_to_runtime(app_handle: &AppHandle) {
         let mut runtime = state.status.lock().await;
         runtime.paused = !enabled;
     }
+}
+
+
+fn load_secret_state(app_handle: &AppHandle) -> Result<secrets::SecretState, String> {
+    let system = open_data_db(&get_db_path(app_handle, "system.db")?)?;
+    let master = get_or_create_master_key(app_handle)?;
+    secrets::state_from_db(&system, &master)
+}
+
+/// Apply remote API keys that were parked while this device had no (matching) passphrase.
+async fn replay_secret_pending(app_handle: &AppHandle) -> Result<usize, String> {
+    let applied = {
+        let sync = open_sync_db(app_handle)?;
+        if secrets::pending_count(&sync) == 0 || load_secret_state(app_handle)?.ready_key().is_none() {
+            return Ok(0);
+        }
+        secrets::replay_pending(&sync, |change| apply_change(app_handle, &sync, change, ""))?.0
+    };
+    if applied > 0 {
+        let types = HashSet::from([secrets::OBJECT_TYPE.to_string()]);
+        emit_sync_domain_events(app_handle, &types).await?;
+    }
+    Ok(applied)
+}
+
+fn finish_provider_merge_redirects(app_handle: &AppHandle, sync: &Connection, assistant: &Connection) -> Result<usize, String> {
+    let pending: i64 = sync.query_row("SELECT COUNT(*) FROM sync_merge_redirect", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if pending == 0 { return Ok(0); }
+    let conversation = open_data_db(&get_db_path(app_handle, "conversation.db")?)?;
+    let system = open_data_db(&get_db_path(app_handle, "system.db")?)?;
+    provider_merge::finish_redirects(sync, Some(assistant), Some(&conversation), Some(&system))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetSyncPassphraseRequest {
+    passphrase: String,
+    /// true：更换口令（生成新 salt，其他设备需要重新输入新口令）
+    #[serde(default)]
+    replace_existing: bool,
+}
+
+/// 设置/验证本机同步口令。口令只在本机派生密钥，派生密钥用本地主密钥加密保存，
+/// 不会上传；服务器只保存不含密钥的 salt 与校验值。
+#[tauri::command]
+pub async fn set_sync_passphrase(
+    app_handle: AppHandle,
+    request: SetSyncPassphraseRequest,
+) -> Result<SyncStatusDto, String> {
+    let SetSyncPassphraseRequest { passphrase, replace_existing } = request;
+    if passphrase.chars().count() < secrets::MIN_PASSPHRASE_CHARS {
+        return Err(format!("同步口令至少需要 {} 个字符", secrets::MIN_PASSPHRASE_CHARS));
+    }
+    ensure_sync_db(&app_handle)?;
+    // Pull first so a record created by another device is verified, not replaced.
+    let settings = load_settings(&app_handle)?;
+    let has_record = {
+        let system = open_data_db(&get_db_path(&app_handle, "system.db")?)?;
+        secrets::read_record(&system)?.is_some()
+    };
+    if !replace_existing && !has_record && settings.mode == SyncMode::SelfHosted
+        && settings.token.as_deref().is_some_and(|t| !t.trim().is_empty())
+    {
+        run_sync_once_manual(&app_handle).await;
+    }
+    let master = get_or_create_master_key(&app_handle)?;
+    let system_path = get_db_path(&app_handle, "system.db")?;
+    // PBKDF2 is intentionally slow; keep it off the async runtime.
+    tauri::async_runtime::spawn_blocking(move || {
+        let system = open_data_db(&system_path)?;
+        secrets::set_passphrase(&system, &master, &passphrase, replace_existing).map(|_| ())
+    })
+    .await
+    .map_err(|e| format!("设置同步口令失败: {e}"))??;
+    info!(replace_existing, "Sync passphrase configured on this device");
+    let types = HashSet::from(["system.feature_config".to_string()]);
+    let _ = emit_sync_domain_events(&app_handle, &types).await;
+    if let Err(err) = replay_secret_pending(&app_handle).await {
+        warn!(error = %err, "Replaying parked API keys after passphrase change failed");
+    }
+    schedule_sync_after_local_change(&app_handle);
+    emit_status_changed(&app_handle).await;
+    sync_status(&app_handle).await
+}
+
+/// 清除本机保存的同步口令：之后不再上传/接收 API Key，本机已有 API Key 不变。
+#[tauri::command]
+pub async fn clear_sync_passphrase(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    let system = open_data_db(&get_db_path(&app_handle, "system.db")?)?;
+    secrets::clear_local_key(&system)?;
+    emit_status_changed(&app_handle).await;
+    sync_status(&app_handle).await
+}
+
+/// 合并历史同步遗留的同名重复供应商（仅限无冲突 API Key 的组），保留有 Key 的那个。
+#[tauri::command]
+pub async fn merge_duplicate_sync_providers(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    ensure_sync_db(&app_handle)?;
+    let merged = {
+        let state = app_handle.state::<SyncState>();
+        let _guard = state.sync_lock.lock().await;
+        let sync = open_sync_db(&app_handle)?;
+        let llm = open_data_db(&get_db_path(&app_handle, "llm.db")?)?;
+        let assistant = open_data_db(&get_db_path(&app_handle, "assistant.db")?)?;
+        let pairs = provider_merge::find_duplicates(&llm)?;
+        for pair in &pairs {
+            provider_merge::merge_in_llm(&sync, &llm, pair.keep_id, pair.duplicate_id)?;
+        }
+        finish_provider_merge_redirects(&app_handle, &sync, &assistant)?;
+        pairs.len()
+    };
+    if merged > 0 {
+        info!(merged, "Merged duplicate providers created by earlier syncs");
+        let types = HashSet::from(["llm.provider".to_string(), "assistant.model".to_string(), "system.feature_config".to_string()]);
+        let _ = emit_sync_domain_events(&app_handle, &types).await;
+        schedule_sync_after_local_change(&app_handle);
+    }
+    sync_status(&app_handle).await
 }
 
 fn load_settings(app_handle: &AppHandle) -> Result<SyncSettings, String> {
@@ -7297,3 +7519,4 @@ mod regression_tests;
 
 #[cfg(test)]
 mod convergence_tests;
+
