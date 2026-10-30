@@ -1634,7 +1634,12 @@ mod tests {
     #[test]
     fn test_get_tools_for_ui_interaction_command() {
         let tools = get_builtin_tools_for_command("aipp:ui_interaction");
-        assert_eq!(tools.len(), 2, "UI interaction command should have 2 tools");
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["ask_user_question", "preview_file", "preview_code"],
+            "UI interaction command should have 3 tools"
+        );
     }
 
     #[test]
