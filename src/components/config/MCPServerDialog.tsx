@@ -233,7 +233,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         } finally {
             setIsSubmitting(false);
         }
-    }, [formData, editingServer, onSubmit]);
+    }, [formData, editingServer, onSubmit, isMobilePlatform]);
 
     // 处理取消
     const handleCancel = useCallback(() => {

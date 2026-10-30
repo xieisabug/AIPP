@@ -66,9 +66,7 @@ impl BashOperations {
         request: ExecuteBashRequest,
     ) -> Result<ExecuteBashResponse, String> {
         // 移动端无可用 shell 环境；aipp:operation 其它轻量工具仍可走内置路径
-        #[cfg(mobile)]
-        {
-            let _ = (app_handle, state, &request);
+        if cfg!(mobile) {
             return Err(crate::api::system_api::mobile_unsupported_error(
                 "脚本执行（execute_bash）",
             ));

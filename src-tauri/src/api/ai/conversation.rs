@@ -457,6 +457,11 @@ pub fn build_chat_messages_with_context(
     for (message_type, content, attachment_list) in init_message_list.iter() {
         debug!(message_type, preview = %content.chars().take(50).collect::<String>(), "processing message");
 
+        // 失败轮次的错误卡片（message_type=error）只用于展示，不能作为 assistant 历史发给模型
+        if message_type == "error" {
+            continue;
+        }
+
         if message_type != "reasoning" && message_type != "response" && message_type != "assistant"
         {
             flush_pending_reasoning_message(&mut chat_messages, &mut pending_reasoning_content);
@@ -689,6 +694,10 @@ fn build_native_toolcall_paired_messages(
     }
 
     for (message_type, content, attachment_list) in init_message_list.iter() {
+        // 错误卡片不进入模型上下文
+        if message_type == "error" {
+            continue;
+        }
         if message_type != "reasoning" && message_type != "response" && message_type != "assistant"
         {
             flush_pending_reasoning_message(&mut chat_messages, &mut pending_reasoning_content);
@@ -1287,4 +1296,22 @@ pub fn init_conversation(
         message_result_array.push(message.clone());
     }
     Ok((conversation_clone, message_result_array))
+}
+
+#[cfg(test)]
+mod error_message_context_tests {
+    use super::build_chat_messages;
+
+    #[test]
+    fn error_cards_are_not_sent_as_history() {
+        let list = vec![
+            ("system".to_string(), "sys".to_string(), Vec::new()),
+            ("user".to_string(), "q1".to_string(), Vec::new()),
+            ("error".to_string(), "{\"message\":\"AI请求失败\"}".to_string(), Vec::new()),
+            ("user".to_string(), "q2".to_string(), Vec::new()),
+        ];
+        let messages = build_chat_messages(&list);
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().all(|m| !format!("{:?}", m.content).contains("AI请求失败")));
+    }
 }

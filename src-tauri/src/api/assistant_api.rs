@@ -1173,6 +1173,11 @@ pub async fn ensure_acp_session_connected(
         return Ok(None);
     }
 
+    // 移动端不能启动本机 CLI Agent 进程（MOB-02）
+    if cfg!(mobile) {
+        return Err(crate::api::system_api::mobile_unsupported_error("本地 CLI Agent（Codex/Claude/ACP）"));
+    }
+
     // ask_ai may have just created the authoritative Claude session using a
     // per-message provider/model override. Never auto-connect a second session
     // for the same conversation and replace its state.
@@ -1292,6 +1297,11 @@ pub async fn get_acp_launch_diagnostics(
 
     if assistant.assistant_type != Some(4) {
         return Err("Assistant is not ACP type".to_string());
+    }
+
+    // 移动端不探测/启动本机 CLI（MOB-02）
+    if cfg!(mobile) {
+        return Err(crate::api::system_api::mobile_unsupported_error("本地 CLI Agent 启动诊断"));
     }
 
     let assistant_model_configs =

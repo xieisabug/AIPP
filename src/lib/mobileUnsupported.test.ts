@@ -70,3 +70,15 @@ describe("mobileUnsupported helpers", () => {
         expect(getMcpServerDisplayLabel(stdio, false)).toBe("filesystem");
     });
 });
+
+describe("isMobileUnexecutableBuiltinTool", () => {
+    it("marks only browser/shell tools of aipp:* servers", async () => {
+        const { isMobileUnexecutableBuiltinTool } = await import("./mobileUnsupported")
+        expect(isMobileUnexecutableBuiltinTool("aipp:search", "search_web")).toBe(true)
+        expect(isMobileUnexecutableBuiltinTool("aipp:search", "fetch_url")).toBe(false)
+        expect(isMobileUnexecutableBuiltinTool("aipp:operation", "execute_bash")).toBe(true)
+        expect(isMobileUnexecutableBuiltinTool("aipp:operation", "read_file")).toBe(false)
+        expect(isMobileUnexecutableBuiltinTool("npx foo", "search_web")).toBe(false)
+        expect(isMobileUnexecutableBuiltinTool(null, "search_web")).toBe(false)
+    })
+})

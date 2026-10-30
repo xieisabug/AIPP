@@ -572,3 +572,59 @@ body {
 .safe-bottom-bar {
     padding-bottom: calc(env(safe-area-inset-bottom) + 8px);
 }
+
+/* ===== 移动平台触控适配（仅 <html class="aipp-mobile-platform">，桌面不受影响） ===== */
+
+/* 消息操作栏（点击气泡切换显示）：按钮 ≥44×44 */
+.aipp-mobile-action-bar button {
+    min-width: 44px;
+    min-height: 44px;
+}
+
+/* Markdown 宽表格：局部横向滚动，不挤压列宽 */
+.aipp-mobile-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 1em 0;
+}
+.aipp-mobile-table-scroll > table {
+    width: max-content;
+    min-width: 100%;
+    margin: 0;
+}
+.aipp-mobile-table-scroll th,
+.aipp-mobile-table-scroll td {
+    min-width: 6rem;
+    max-width: 18rem;
+}
+
+/* 抽屉 / 设置等常用入口：触控目标 ≥44px */
+.aipp-mobile-platform [data-aipp-slot="chat-info-open-config"],
+.aipp-mobile-platform [data-aipp-slot="chat-info-open-artifacts"],
+.aipp-mobile-platform [data-aipp-slot="chat-info-open-schedule"] {
+    min-width: 44px;
+    min-height: 44px;
+}
+.aipp-mobile-platform [data-aipp-slot="chat-toolbar-search"],
+.aipp-mobile-platform [data-aipp-slot="chat-toolbar-new-conversation"] {
+    min-height: 44px;
+}
+/* 会话行菜单：移动端无 hover，常驻可见并放大到 44px；状态图标让到左侧 */
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-item-menu-trigger"] {
+    visibility: visible;
+    width: 44px;
+    height: 44px;
+    inset: auto;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+.aipp-mobile-platform [data-aipp-slot^="chat-conversation-item-status"] {
+    transform: translateX(-40px);
+}
+/* 表单控件高度 ≥44px */
+.aipp-mobile-platform [data-slot="input"],
+.aipp-mobile-platform [data-slot="select-trigger"] {
+    min-height: 44px;
+}

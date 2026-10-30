@@ -9,6 +9,7 @@ import {
 } from "../ui/tooltip";
 import { MCPServerTool } from "../../data/MCP";
 import MCPToolParameters from "./MCPToolParameters";
+import { MOBILE_UNEXECUTABLE_LABEL } from "../../lib/mobileUnsupported";
 
 interface MCPToolItemProps {
     tool: MCPServerTool;
@@ -20,6 +21,8 @@ interface MCPToolItemProps {
         isAutoRun: boolean,
     ) => void;
     truncateText: (text: string, maxLines?: number) => string;
+    /** 移动平台上该工具不可执行（仅追加标记，不隐藏配置） */
+    mobileUnexecutable?: boolean;
 }
 
 const MCPToolItem: React.FC<MCPToolItemProps> = ({
@@ -28,6 +31,7 @@ const MCPToolItem: React.FC<MCPToolItemProps> = ({
     onToggleExpansion,
     onUpdateTool,
     truncateText,
+    mobileUnexecutable = false,
 }) => {
     const hasParameters =
         tool.parameters &&
@@ -60,6 +64,12 @@ const MCPToolItem: React.FC<MCPToolItemProps> = ({
                             </button>
                         )}
                     </div>
+                    {/* 单独一行，避免在窄屏上把工具名挤没 */}
+                    {mobileUnexecutable && (
+                        <div className="-mt-1 mb-2 text-[10px] text-muted-foreground" data-aipp-slot="mcp-tool-mobile-unexecutable">
+                            {MOBILE_UNEXECUTABLE_LABEL}
+                        </div>
+                    )}
                     {tool.tool_description && (
                         <TooltipProvider delayDuration={1500}>
                             <Tooltip>

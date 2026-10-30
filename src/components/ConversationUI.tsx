@@ -80,6 +80,7 @@ import { useContextList } from "@/hooks/useContextList";
 import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -1303,10 +1304,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [activeAssistantId, assistants]);
 
+        // 移动端不能连接/启动本机 CLI Agent（MOB-02），不自动连接 ACP 会话
+        const isMobilePlatform = useIsMobilePlatform();
+
         // Fetch ACP working directory for current assistant
         useEffect(() => {
             const assistantId = activeAssistantId;
-            if (!assistantId || !isAcpAssistant) {
+            if (!assistantId || !isAcpAssistant || isMobilePlatform) {
                 setAcpWorkingDirectory(null);
                 setConfiguredAgentKind(null);
                 applyAcpSessionState(null);
@@ -1353,6 +1357,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [
             activeAssistantId,
             isAcpAssistant,
+            isMobilePlatform,
             conversationId,
             applyAcpSessionState,
             showAcpConnectionError,

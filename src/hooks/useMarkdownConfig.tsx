@@ -14,6 +14,7 @@ import CodeBlock from "@/components/RustCodeBlock";
 import LazyImage from "@/components/common/LazyImage";
 import { resolveCodeBlockMeta } from "@/react-markdown/remarkCodeBlockMeta";
 import { useMarkdownRegistrySnapshot } from "@/services/markdownRegistry";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
@@ -47,6 +48,8 @@ function extractMarkdownAttributes(props: Record<string, unknown>): Record<strin
 
 export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: UseMarkdownConfigOptions = {}) => {
     const registeredMarkdownTags = useMarkdownRegistrySnapshot();
+    // 移动平台：宽表格放进局部横向滚动容器，避免列被挤成 1~2 个字（MOB-03）
+    const isMobilePlatform = useIsMobilePlatform();
 
     // 换行处理函数 - 完全按原样展示文本，保留所有换行和空行
     const renderTextWithBreaks = useCallback((children: React.ReactNode): React.ReactNode => {
@@ -146,8 +149,18 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
                 );
             },
             img: ({ src, alt, ...props }: any) => <LazyImage src={src} alt={alt} {...props} />,
+            ...(isMobilePlatform && !disableMarkdownSyntax
+                ? {
+                    table: ({ node: _node, ...props }: any) => (
+                        <div className="aipp-mobile-table-scroll" data-no-action-toggle>
+                            <table {...props} />
+                        </div>
+                    ),
+                }
+                : {}),
         }),
         [
+            isMobilePlatform,
             disableMarkdownSyntax,
             onCodeRun,
             pluginMarkdownComponents,

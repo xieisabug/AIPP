@@ -386,6 +386,11 @@ pub async fn test_mcp_connection(
 
 // 测试stdio连接
 async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
+    // 外部 stdio 在移动端不可执行（aipp:* 内置已在 test_mcp_connection 分流）
+    if cfg!(mobile) {
+        let _ = server;
+        return Err(crate::api::system_api::mobile_unsupported_error("外部 stdio MCP"));
+    }
     use rmcp::{
         transport::{ConfigureCommandExt, TokioChildProcess},
         ServiceExt,
@@ -592,9 +597,7 @@ async fn get_stdio_capabilities(
     server: MCPServer,
 ) -> Result<(), String> {
     // 外部 stdio 在移动端不可执行（aipp:* 内置已在调用方分流，不会进入此函数）。
-    #[cfg(mobile)]
-    {
-        let _ = (&app_handle, server_id, &server);
+    if cfg!(mobile) {
         return Err(crate::api::system_api::mobile_unsupported_error("外部 stdio MCP"));
     }
 

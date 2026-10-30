@@ -256,6 +256,11 @@ pub async fn conversation_has_feishu_target(
 
 #[tauri::command]
 pub async fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
+    // 移动端没有系统文件管理器可调起（open::that 会尝试 exec 进程并 EACCES）
+    if cfg!(mobile) {
+        let _ = &app;
+        return Err(mobile_unsupported_error("打开数据文件夹"));
+    }
     let app_dir = app.path().app_data_dir().unwrap();
     let db_path = app_dir.join("db");
     if let Err(e) = open::that(db_path) {
@@ -373,13 +378,16 @@ pub async fn copy_image_to_clipboard(_image_data: String) -> Result<(), String> 
 #[tauri::command]
 pub async fn get_platform() -> Result<String, String> {
     // 桌面调试用：允许用环境变量强制平台，便于验证移动能力门禁与单 WebView 壳（不改变编译期 cfg）。
-    if let Ok(forced) = std::env::var("AIPP_FORCE_PLATFORM") {
-        let forced = forced.trim().to_ascii_lowercase();
-        if matches!(
-            forced.as_str(),
-            "android" | "ios" | "windows" | "macos" | "linux" | "unknown"
-        ) {
-            return Ok(forced);
+    // 仅 debug 构建生效，release 包不受环境变量影响
+    if cfg!(debug_assertions) {
+        if let Ok(forced) = std::env::var("AIPP_FORCE_PLATFORM") {
+            let forced = forced.trim().to_ascii_lowercase();
+            if matches!(
+                forced.as_str(),
+                "android" | "ios" | "windows" | "macos" | "linux" | "unknown"
+            ) {
+                return Ok(forced);
+            }
         }
     }
 
@@ -515,4 +523,14 @@ pub async fn open_image(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod mobile_unsupported_tests {
+    #[test]
+    fn mobile_unsupported_error_has_stable_prefix_and_feature() {
+        let msg = super::mobile_unsupported_error("打开数据文件夹");
+        assert!(msg.starts_with("MOBILE_UNSUPPORTED: "));
+        assert!(msg.contains("打开数据文件夹"));
+    }
 }
