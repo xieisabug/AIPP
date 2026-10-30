@@ -5,6 +5,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import { toast } from "sonner";
 import { AVAILABLE_CODE_THEMES } from "@/hooks/useCodeTheme";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { useSyntectThemes } from "@/hooks/highlight/useSyntectThemes";
 import { pluginRuntime } from "@/services/PluginRuntime";
 import {
@@ -19,6 +20,17 @@ interface DisplayConfigFormProps {
     showButlerHomeWindow: boolean;
 }
 
+export function withCurrentCodeThemeOption(
+    options: Array<{ value: string; label: string }>,
+    current: string | undefined,
+): Array<{ value: string; label: string }> {
+    if (!current || options.some((option) => option.value === current)) {
+        return options;
+    }
+    const known = AVAILABLE_CODE_THEMES.find((theme) => theme.id === current);
+    return [{ value: current, label: known ? known.name : current }, ...options];
+}
+
 export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     form,
     onSave,
@@ -27,6 +39,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
     const mcpToolComponents = useMcpToolComponentRegistrySnapshot();
+    const isMobilePlatform = useIsMobilePlatform();
     const [pluginThemeOptions, setPluginThemeOptions] = useState<Array<{ value: string; label: string }>>([]);
 
     useEffect(() => {
@@ -161,12 +174,25 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
         }));
     }, []);
 
-    const lightCodeThemeOptions = syntectThemeOptionsByMode?.light?.length
+    const lightCodeThemeOptionsBase = syntectThemeOptionsByMode?.light?.length
         ? syntectThemeOptionsByMode.light
         : syntectThemeOptions ?? fallbackLightOptions;
-    const darkCodeThemeOptions = syntectThemeOptionsByMode?.dark?.length
+    const darkCodeThemeOptionsBase = syntectThemeOptionsByMode?.dark?.length
         ? syntectThemeOptionsByMode.dark
         : syntectThemeOptions ?? fallbackDarkOptions;
+
+    // 已保存的值可能是旧的 UI 主题 id（如默认的 github / github-dark，后端会映射到 syntect 主题），
+    // 不在 syntect 选项里时下拉框会显示为空；把当前值补进选项，保证选择框有可见值且不改动已保存配置。
+    const currentLightCodeTheme = form.watch("code_theme_light");
+    const currentDarkCodeTheme = form.watch("code_theme_dark");
+    const lightCodeThemeOptions = useMemo(
+        () => withCurrentCodeThemeOption(lightCodeThemeOptionsBase, currentLightCodeTheme),
+        [lightCodeThemeOptionsBase, currentLightCodeTheme],
+    );
+    const darkCodeThemeOptions = useMemo(
+        () => withCurrentCodeThemeOption(darkCodeThemeOptionsBase, currentDarkCodeTheme),
+        [darkCodeThemeOptionsBase, currentDarkCodeTheme],
+    );
 
     const handleSaveDisplayConfig = useCallback(async () => {
         const values = form.getValues();
@@ -235,15 +261,20 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     }, [form, onSave]);
 
     const DISPLAY_FORM_CONFIG = [
-        {
-            key: "default_home_window",
-            config: {
-                type: "select" as const,
-                label: "默认主页窗口",
-                options: defaultHomeWindowOptions,
-                tooltip: "影响应用启动、托盘点击和唤醒时默认打开的主窗口",
-            },
-        },
+        // 移动端只有单 WebView 主界面，没有 Ask 悬浮窗/托盘，隐藏「默认主页窗口」
+        ...(isMobilePlatform
+            ? []
+            : [
+                {
+                    key: "default_home_window",
+                    config: {
+                        type: "select" as const,
+                        label: "默认主页窗口",
+                        options: defaultHomeWindowOptions,
+                        tooltip: "影响应用启动、托盘点击和唤醒时默认打开的主窗口",
+                    },
+                },
+            ]),
         {
             key: "theme",
             config: {

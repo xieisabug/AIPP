@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 import {
     canShowCleanupDangling,
     canShowRetryDeadLetters,
@@ -108,6 +109,7 @@ function metricValueClass(metric: SyncStatusMetric): string {
 }
 
 export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form }) => {
+    const isMobilePlatform = useIsMobilePlatform();
     const [status, setStatus] = useState<SyncStatus | null>(null);
     const [statusReadError, setStatusReadError] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
@@ -670,15 +672,20 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     ]);
 
     const dataFolderConfig = [
-        {
-            key: "openDataFolder",
-            config: {
-                type: "button" as const,
-                label: "数据文件夹",
-                value: "打开",
-                onClick: handleOpenDataFolder,
-            },
-        },
+        // 移动端没有可调起的系统文件管理器，隐藏「打开数据文件夹」（后端同样返回 MOBILE_UNSUPPORTED）
+        ...(isMobilePlatform
+            ? []
+            : [
+                {
+                    key: "openDataFolder",
+                    config: {
+                        type: "button" as const,
+                        label: "数据文件夹",
+                        value: "打开",
+                        onClick: handleOpenDataFolder,
+                    },
+                },
+            ]),
         {
             key: "mode",
             config: {

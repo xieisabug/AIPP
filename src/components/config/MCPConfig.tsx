@@ -30,7 +30,7 @@ import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
-import { getMcpServerDisplayLabel, isMobileExecutableMcpServer } from "@/lib/mobileUnsupported";
+import { getMcpServerDisplayLabel, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
 
 const MCPConfig: React.FC = () => {
     const isMobilePlatform = useIsMobilePlatform();
@@ -638,6 +638,10 @@ const MCPConfig: React.FC = () => {
                                                 onToggleExpansion={toggleToolExpansion}
                                                 onUpdateTool={handleUpdateTool}
                                                 truncateText={truncateText}
+                                                mobileUnexecutable={
+                                                    isMobilePlatform
+                                                    && isMobileUnexecutableBuiltinTool(selectedServer?.command, tool.tool_name)
+                                                }
                                             />
                                         ))}
                                     </div>

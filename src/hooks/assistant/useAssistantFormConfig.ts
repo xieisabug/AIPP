@@ -10,6 +10,7 @@ import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFiel
 import AssistantWorkspaceFieldDisplay from "@/components/config/AssistantWorkspaceFieldDisplay";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useFilteredProviders } from "@/hooks/useFilteredProviders";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 import type { AgentModelOption } from "@/utils/agentDefaults";
 
@@ -130,6 +131,9 @@ export const useAssistantFormConfig = ({
         },
         [currentAssistant, onConfigChange]
     );
+
+    // 移动端：Skills 管理与本机工作区（信任路径）都依赖桌面文件系统/进程，不展示
+    const isMobilePlatform = useIsMobilePlatform();
 
     // 获取 ACP 配置值的辅助函数
     const getAcpConfigValue = useCallback((configName: string, defaultValue: string) => {
@@ -557,7 +561,7 @@ export const useAssistantFormConfig = ({
             });
         }
 
-        if (!assistantTypeHideField.includes("skills_config")) {
+        if (!assistantTypeHideField.includes("skills_config") && !isMobilePlatform) {
             baseConfigs.push({
                 key: "skills_config",
                 config: {
@@ -577,7 +581,7 @@ export const useAssistantFormConfig = ({
         }
 
         // 工作区配置（信任路径）
-        if (!assistantTypeHideField.includes("workspace_config")) {
+        if (!assistantTypeHideField.includes("workspace_config") && !isMobilePlatform) {
             baseConfigs.push({
                 key: "workspace_config",
                 config: {
@@ -709,6 +713,7 @@ export const useAssistantFormConfig = ({
         pluginAssistantConfigValues,
         pluginAssistantFormFields,
         getAcpConfigValue,
+        isMobilePlatform,
     ]);
 
     return { formConfig };

@@ -141,3 +141,21 @@ export function isMobileExecutableAssistantType(assistantType: number | null | u
     // 0 = 普通对话；4 = Codex/Claude/ACP 本地 Agent；其它为插件类型（M2）
     return assistantType === 0 || assistantType == null
 }
+
+/**
+ * aipp:* 内置服务器中，移动端仍不可执行的单个工具（需要浏览器或 shell）。
+ * 其余内置工具（含 aipp:search 的 HTTP fetch_url）在移动端可用。
+ */
+const MOBILE_UNEXECUTABLE_BUILTIN_TOOLS: Readonly<Record<string, ReadonlySet<string>>> = {
+    "aipp:search": new Set(["search_web"]),
+    "aipp:operation": new Set(["execute_bash"]),
+}
+
+export function isMobileUnexecutableBuiltinTool(
+    command: string | null | undefined,
+    toolName: string,
+): boolean {
+    if (!command) return false
+    const key = command.trim().split(/\s+/)[0]
+    return MOBILE_UNEXECUTABLE_BUILTIN_TOOLS[key]?.has(toolName) ?? false
+}
