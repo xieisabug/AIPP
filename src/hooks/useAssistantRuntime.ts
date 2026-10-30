@@ -125,6 +125,11 @@ export function useAssistantRuntime({
                     if (!suppressConversationSwitch && conversationId != res.conversation_id + "") {
                         onChangeConversationId(res.conversation_id + "");
                     }
+                    // 对话已创建但请求在调用模型前失败（如未配置模型）：错误已写入对话，这里结束响应状态
+                    if (res.error_message) {
+                        setAiIsResponsing(false);
+                        clearShiningMessages();
+                    }
 
                     // 事件处理现在由共享的 useConversationEvents hook 处理
 

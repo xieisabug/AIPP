@@ -182,6 +182,160 @@ mod butler_mcp_override_tests {
     }
 }
 
+/// 解析 ask_ai 本次要用的模型：覆盖模型优先，否则用助手默认模型。
+/// 失败时返回给用户看的中文说明；不做任何回退选模。
+fn resolve_ask_model_detail(
+    llm_db: &LLMDatabase,
+    override_model_id: Option<&str>,
+    assistant_detail: &AssistantDetail,
+) -> Result<crate::db::llm_db::ModelDetail, String> {
+    if let Some(override_model_id) = override_model_id {
+        info!(override_model_id, "using override model id");
+        let (model_code, provider_id) = parse_override_model_id(override_model_id)?;
+        return llm_db.get_llm_model_detail(&provider_id, &model_code).map_err(|error| {
+            describe_model_lookup_failure(provider_id, &model_code, true, &error)
+        });
+    }
+    let Some(assistant_model) = assistant_detail.model.first() else {
+        return Err(NO_MODEL_CONFIGURED_MESSAGE.to_string());
+    };
+    let provider_id = assistant_model.provider_id;
+    let model_code = assistant_model.model_code.clone();
+    if is_unconfigured_assistant_model(provider_id, &model_code) {
+        return Err(NO_MODEL_CONFIGURED_MESSAGE.to_string());
+    }
+    llm_db
+        .get_llm_model_detail(&provider_id, &model_code)
+        .map_err(|error| describe_model_lookup_failure(provider_id, &model_code, false, &error))
+}
+
+pub(crate) const NO_MODEL_CONFIGURED_MESSAGE: &str =
+    "当前助手尚未配置模型，请先在「设置 → 模型提供商」中添加模型，并在「个人助手」中为该助手选择模型后重试。";
+
+/// 新建助手时写入的占位模型是 provider_id = 0、model_code = ""，表示「未配置」。
+fn is_unconfigured_assistant_model(provider_id: i64, model_code: &str) -> bool {
+    provider_id <= 0 || model_code.trim().is_empty()
+}
+
+fn parse_override_model_id(override_model_id: &str) -> Result<(String, i64), String> {
+    let parts: Vec<&str> = override_model_id.split("%%").collect();
+    if parts.len() != 2 || parts[0].trim().is_empty() {
+        return Err(format!("所选模型 ID「{override_model_id}」格式无效，请重新选择模型后重试。"));
+    }
+    let provider_id = parts[1]
+        .parse::<i64>()
+        .map_err(|_| format!("所选模型 ID「{override_model_id}」中的提供商 ID 无效，请重新选择模型后重试。"))?;
+    Ok((parts[0].to_string(), provider_id))
+}
+
+fn describe_model_lookup_failure(
+    provider_id: i64,
+    model_code: &str,
+    is_override: bool,
+    error: &rusqlite::Error,
+) -> String {
+    let subject = if is_override { "所选模型" } else { "当前助手配置的模型" };
+    match error {
+        rusqlite::Error::QueryReturnedNoRows => format!(
+            "{subject}「{model_code}」（提供商 ID {provider_id}）不存在或已被删除，请在「个人助手」中为该助手重新选择模型后重试。"
+        ),
+        other => format!("读取{subject}「{model_code}」（提供商 ID {provider_id}）失败：{other}"),
+    }
+}
+
+/// 模型请求开始前的失败：写入一条 error 消息，通知所有聊天窗口，并结束对话的活动状态。
+async fn report_pre_request_error_in_conversation(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    error_text: &str,
+) {
+    let now = chrono::Utc::now();
+    match add_message(
+        app_handle,
+        None,
+        conversation_id,
+        "error".to_string(),
+        error_text.to_string(),
+        None,
+        None,
+        Some(now),
+        Some(now),
+        0,
+        None,
+        None,
+    ) {
+        Ok(message) => {
+            send_conversation_event_to_chat_windows(
+                app_handle,
+                conversation_id,
+                ConversationEvent {
+                    r#type: "message_add".to_string(),
+                    data: serde_json::json!({"message_id": message.id, "message_type": "error"}),
+                },
+            );
+            send_conversation_event_to_chat_windows(
+                app_handle,
+                conversation_id,
+                ConversationEvent {
+                    r#type: "message_update".to_string(),
+                    data: serde_json::json!({
+                        "message_id": message.id, "message_type": "error",
+                        "content": error_text, "is_done": true,
+                    }),
+                },
+            );
+        }
+        Err(persist_error) => {
+            error!(conversation_id, error = %persist_error, "failed to persist pre-request error");
+        }
+    }
+    if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
+        manager.clear_focus(app_handle, conversation_id).await;
+    }
+    let _ = app_handle.emit(
+        crate::api::ai::events::ERROR_NOTIFICATION_EVENT,
+        crate::api::ai::events::ErrorNotificationPayload {
+            conversation_id: Some(conversation_id),
+            error_message: error_text.to_string(),
+        },
+    );
+}
+
+#[cfg(test)]
+mod ask_model_resolution_tests {
+    use super::{
+        describe_model_lookup_failure, is_unconfigured_assistant_model, parse_override_model_id,
+    };
+
+    #[test]
+    fn placeholder_assistant_model_counts_as_unconfigured() {
+        assert!(is_unconfigured_assistant_model(0, ""));
+        assert!(is_unconfigured_assistant_model(3, "  "));
+        assert!(is_unconfigured_assistant_model(0, "gpt-4o"));
+        assert!(!is_unconfigured_assistant_model(3, "gpt-4o"));
+    }
+
+    #[test]
+    fn override_model_id_is_parsed_without_fallback() {
+        assert_eq!(parse_override_model_id("gpt-4o%%7"), Ok(("gpt-4o".to_string(), 7)));
+        assert!(parse_override_model_id("gpt-4o").is_err());
+        assert!(parse_override_model_id("gpt-4o%%x").is_err());
+        assert!(parse_override_model_id("%%7").is_err());
+    }
+
+    #[test]
+    fn missing_model_message_names_the_model() {
+        let text = describe_model_lookup_failure(
+            7,
+            "gpt-4o",
+            false,
+            &rusqlite::Error::QueryReturnedNoRows,
+        );
+        assert!(text.contains("gpt-4o"));
+        assert!(text.contains("不存在或已被删除"));
+    }
+}
+
 fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
     if context.trim().is_empty() {
         prompt.to_string()
@@ -1401,7 +1555,7 @@ pub async fn ask_ai(
                 activity_manager.clear_focus(&app_handle, conversation_id).await;
                 return Err(error);
             }
-            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
+            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt, error_message: None });
         }
 
         if provider_api_type == CLAUDE_SDK_API_TYPE {
@@ -1502,7 +1656,7 @@ pub async fn ask_ai(
                 activity_manager.clear_focus(&app_handle, conversation_id).await;
                 return Err(error);
             }
-            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt });
+            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt, error_message: None });
         }
 
         if provider_api_type != "acp" {
@@ -1670,6 +1824,7 @@ pub async fn ask_ai(
         return Ok(AiResponse {
             conversation_id,
             request_prompt_result_with_context: processed_request.prompt,
+            error_message: None,
         });
     }
 
@@ -1677,28 +1832,29 @@ pub async fn ask_ai(
     // 在异步任务外获取模型详情（避免线程安全问题）
     let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
 
-    // 检查是否需要覆盖模型
-    let model_detail = if let Some(override_model_id) = &processed_request.override_model_id {
-        info!(override_model_id, "using override model id");
-        let parts: Vec<&str> = override_model_id.split("%%").collect();
-        if parts.len() != 2 {
-            return Err(AppError::UnknownError("Invalid override model ID format".to_string()));
+    // 检查是否需要覆盖模型。
+    // 此时对话和用户消息已经落库：解析失败不能直接返回 Err（前端拿不到 conversation_id，
+    // 新对话要重启后才出现），也绝不能静默换用其他模型；而是把明确的错误写进对话并返回该对话。
+    let model_detail = match resolve_ask_model_detail(
+        &llm_db,
+        processed_request.override_model_id.as_deref(),
+        &assistant_detail,
+    ) {
+        Ok(detail) => detail,
+        Err(error_text) => {
+            warn!(conversation_id, error = %error_text, "ask_ai model resolution failed after conversation init");
+            report_pre_request_error_in_conversation(
+                &app_handle,
+                conversation_id,
+                &error_text,
+            )
+            .await;
+            return Ok(AiResponse {
+                conversation_id,
+                request_prompt_result_with_context: processed_request.prompt,
+                error_message: Some(error_text),
+            });
         }
-        let (model_code, provider_id) = (parts[0], parts[1]);
-        let provider_id_i64 = provider_id
-            .parse::<i64>()
-            .map_err(|e| AppError::UnknownError(format!("Invalid provider_id: {}", e)))?;
-        let model_code_string = model_code.to_string();
-        llm_db
-            .get_llm_model_detail(&provider_id_i64, &model_code_string)
-            .context("Failed to get LLM model detail")?
-    } else {
-        // 使用助手的默认模型
-        let provider_id = &assistant_detail.model[0].provider_id;
-        let model_code = &assistant_detail.model[0].model_code;
-        llm_db
-            .get_llm_model_detail(provider_id, model_code)
-            .context("Failed to get LLM model detail")?
     };
 
     // 重新克隆 window，因为前面的 ACP 分支可能已经消费了
@@ -2059,7 +2215,7 @@ pub async fn ask_ai(
 
     info!("Ask AI end");
 
-    Ok(AiResponse { conversation_id, request_prompt_result_with_context })
+    Ok(AiResponse { conversation_id, request_prompt_result_with_context, error_message: None })
 }
 
 #[instrument(skip(app_handle, feature_config_state, window, tool_result), fields(conversation_id = %conversation_id, assistant_id, tool_call_id))]
@@ -2180,6 +2336,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         return Ok(AiResponse {
             conversation_id: conversation_id_i64,
             request_prompt_result_with_context: "Queued interrupt message dispatched".to_string(),
+            error_message: None,
         });
     }
 
@@ -2553,6 +2710,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     Ok(AiResponse {
         conversation_id: conversation_id_i64,
         request_prompt_result_with_context: format!("Tool result: {}", tool_result),
+        error_message: None,
     })
 }
 
@@ -2595,6 +2753,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         return Ok(AiResponse {
             conversation_id,
             request_prompt_result_with_context: "Queued interrupt message dispatched".to_string(),
+            error_message: None,
         });
     }
 
@@ -2953,6 +3112,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     Ok(AiResponse {
         conversation_id,
         request_prompt_result_with_context: "Batch tool results sent".to_string(),
+        error_message: None,
     })
 }
 
@@ -3540,7 +3700,7 @@ pub async fn regenerate_ai(
 
     info!("Regenerate AI dispatched (background task started)");
 
-    Ok(AiResponse { conversation_id, request_prompt_result_with_context: String::new() })
+    Ok(AiResponse { conversation_id, request_prompt_result_with_context: String::new(), error_message: None })
 }
 
 pub(crate) fn add_message(

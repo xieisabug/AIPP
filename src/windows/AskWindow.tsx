@@ -21,10 +21,12 @@ import { useAppShortcuts } from "../hooks/useAppShortcuts";
 import { useOperationPermission } from "../hooks/useOperationPermission";
 import { OperationPermissionDialog } from "../components/OperationPermissionDialog";
 import { pluginRuntime } from "../services/PluginRuntime";
+import { describeAskAiError } from "../lib/askAiError";
 const appWindow = getCurrentWebviewWindow();
 
 interface AiResponse {
     conversation_id: number;
+    error_message?: string | null;
 }
 
 function AskWindow() {
@@ -181,6 +183,12 @@ function AskWindow() {
                 }
 
                 console.log("ask ai response", res);
+                // 对话已创建但在调用模型前失败（如未配置模型）：直接展示错误并结束响应
+                if (res.error_message) {
+                    setAiIsResponsing(false);
+                    setShouldShowShineBorder(false);
+                    setErrorMessage(res.error_message);
+                }
                 // 事件处理现在由共享的 useConversationEvents hook 管理
             })
             .catch((error) => {
@@ -189,7 +197,7 @@ function AskWindow() {
                 setShouldShowShineBorder(false); // 请求失败时关闭边框
 
                 // 显示错误信息
-                const errorMsg = typeof error === "string" ? error : "Unknown error occurred";
+                const errorMsg = describeAskAiError(error);
                 setErrorMessage(errorMsg);
             });
     };
