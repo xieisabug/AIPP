@@ -23,7 +23,9 @@
         {
             "identifier": "fs:scope",
             "allow": [
-                "**"
+                "$APPDATA/files/mobile-files/**",
+                "$APPDATA/skills/**",
+                "$APPCACHE/exports/**"
             ]
         },
         "opener:allow-open-url",
