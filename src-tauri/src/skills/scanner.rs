@@ -20,6 +20,12 @@ pub struct SkillScanner {
 impl SkillScanner {
     /// Create a new scanner with default built-in sources
     pub fn new(home_dir: PathBuf, app_data_dir: PathBuf) -> Self {
+        #[cfg(mobile)]
+        return Self { home_dir, app_data_dir, sources: vec![SkillSourceConfig {
+            source_type: crate::skills::types::SkillSourceType::Agents,
+            display_name: "应用内 Skills".into(), paths: vec!["{app_data}/skills".into()],
+            file_pattern: "SKILL.md".into(), is_enabled: true, is_builtin: true,
+        }] };
         Self { home_dir, app_data_dir, sources: SkillSourceConfig::builtin_sources() }
     }
 
@@ -214,6 +220,12 @@ impl SkillScanner {
         let relative_path = file_name.to_string();
         let identifier = ScannedSkill::make_identifier(&source.source_type, &relative_path);
 
+        #[cfg(mobile)]
+        {
+            let root = self.app_data_dir.join("skills").canonicalize().ok()?;
+            let resolved = file_path.canonicalize().ok()?;
+            if !resolved.starts_with(root) || !resolved.is_file() { return None; }
+        }
         match SkillParser::parse_metadata(file_path) {
             Ok(metadata) => {
                 let display_name = metadata
@@ -258,6 +270,8 @@ impl SkillScanner {
 
         for entry in entries.flatten() {
             let entry_path = entry.path();
+            #[cfg(mobile)]
+            if entry.file_type().map(|kind| kind.is_symlink()).unwrap_or(true) { continue; }
 
             // Skills are always directories (folders)
             if entry_path.is_dir() {
@@ -330,6 +344,12 @@ impl SkillScanner {
         let relative_path = format!("{}/{}", plugin_name, skill_name);
         let identifier = format!("{}:{}", source.source_type.as_str(), relative_path);
 
+        #[cfg(mobile)]
+        {
+            let root = self.app_data_dir.join("skills").canonicalize().ok()?;
+            let resolved = skill_file.canonicalize().ok()?;
+            if !resolved.starts_with(root) || !resolved.is_file() { return None; }
+        }
         match SkillParser::parse_metadata(skill_file) {
             Ok(metadata) => {
                 let display_name = Self::resolve_folder_display_name(
@@ -390,6 +410,12 @@ impl SkillScanner {
     ) -> Option<ScannedSkill> {
         let identifier = ScannedSkill::make_identifier(&source.source_type, folder_name);
 
+        #[cfg(mobile)]
+        {
+            let root = self.app_data_dir.join("skills").canonicalize().ok()?;
+            let resolved = skill_file.canonicalize().ok()?;
+            if !resolved.starts_with(root) || !resolved.is_file() { return None; }
+        }
         match SkillParser::parse_metadata(skill_file) {
             Ok(metadata) => {
                 let display_name = Self::resolve_folder_display_name(
@@ -439,6 +465,8 @@ impl SkillScanner {
 
     /// Check if a specific skill exists by identifier
     pub fn skill_exists(&self, identifier: &str) -> bool {
+        #[cfg(mobile)]
+        return self.get_skill(identifier).is_some();
         if let Some((source_type, relative_path)) = ScannedSkill::parse_identifier(identifier) {
             // Find the source config
             for source in &self.sources {
@@ -514,6 +542,8 @@ impl SkillScanner {
 
     /// Get a single skill by identifier
     pub fn get_skill(&self, identifier: &str) -> Option<ScannedSkill> {
+        #[cfg(mobile)]
+        return self.scan_all().into_iter().find(|skill| skill.identifier == identifier);
         if let Some((source_type, relative_path)) = ScannedSkill::parse_identifier(identifier) {
             // Find the source config
             for source in &self.sources {

@@ -1042,6 +1042,8 @@ pub fn run() {
             import_llm_provider,
             add_attachment,
             mobile_files::mobile_file_action,
+            api::skill_api::install_mobile_skill_archive,
+            api::skill_api::get_mobile_skill_compatibility,
             open_attachment_with_default_app,
             get_assistants,
             get_assistant,

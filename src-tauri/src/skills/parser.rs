@@ -190,6 +190,14 @@ impl SkillParser {
 
         for relative_path in requires_files {
             let file_path = skill_dir.join(relative_path);
+            #[cfg(mobile)]
+            {
+                let root = skill_dir.canonicalize().map_err(|e| e.to_string())?;
+                let resolved = file_path.canonicalize().map_err(|e| format!("Required skill file {relative_path}: {e}"))?;
+                if !resolved.starts_with(root) || !resolved.is_file() {
+                    return Err(format!("MOBILE_FILE authorization: required skill file escapes its directory: {relative_path}"));
+                }
+            }
 
             if file_path.exists() {
                 match fs::read_to_string(&file_path) {

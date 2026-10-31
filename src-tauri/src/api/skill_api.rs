@@ -90,7 +90,46 @@ fn get_app_data_dir(app_handle: &tauri::AppHandle) -> PathBuf {
     app_handle.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// One installation root for every entry point; mobile never writes desktop home paths.
+pub fn skills_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(mobile)]
+    { Ok(app.path().app_data_dir().map_err(|e| format!("Skills directory: {e}"))?.join("skills")) }
+    #[cfg(desktop)]
+    { let _ = app; Ok(get_home_dir().join(".agents/skills")) }
+}
+
 /// Create a skill scanner with proper paths
+#[tauri::command]
+pub async fn install_mobile_skill_archive(app_handle: tauri::AppHandle, path: String) -> Result<Vec<String>, String> {
+    crate::mobile_files::require_attachment_path(&app_handle, Path::new(&path))?;
+    let directory = skills_directory(&app_handle)?;
+    let installed = tauri::async_runtime::spawn_blocking(move || {
+        let result = crate::skills::installer::install_local_archive(Path::new(&path), &directory);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.metadata.json"));
+        if let Some(parent) = Path::new(&path).parent() { let _ = std::fs::remove_dir(parent); }
+        result
+    }).await.map_err(|e| format!("Skill import worker: {e}"))??;
+    scan_skills(app_handle).await?;
+    Ok(installed)
+}
+
+#[tauri::command]
+pub async fn get_mobile_skill_compatibility(app_handle: tauri::AppHandle, identifier: String) -> Result<String, String> {
+    let skill = create_scanner(&app_handle).get_skill(&identifier).ok_or("Skill not found")?;
+    let path = Path::new(&skill.file_path);
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let folder = path.parent().ok_or("Skill has no directory")?;
+    let lower = content.to_lowercase();
+    if folder.join("scripts").exists() || ["```bash", "```sh", "```powershell", "python ", "npm ", "npx ", "bun ", "执行脚本", "运行脚本"].iter().any(|token| lower.contains(token)) {
+        return Ok("需要本地执行：可查看，Android 不支持执行其脚本；不能省略这些步骤后宣称完成".into());
+    }
+    if skill.metadata.tags.iter().any(|tag| tag == "instruction-only") && skill.metadata.requires_files.is_empty() {
+        return Ok("纯指令技能（作者声明）：可绑定与按需加载；仍需核对实际指令".into());
+    }
+    Ok("兼容性未验证：安装不代表可执行，请核对工具、账号和本地运行依赖".into())
+}
+
 fn create_scanner(app_handle: &tauri::AppHandle) -> SkillScanner {
     SkillScanner::new(get_home_dir(), get_app_data_dir(app_handle))
 }
@@ -135,6 +174,8 @@ fn inspection_to_selections(inspection: &SkillArchiveInspection) -> Vec<SkillIns
 
 /// Migrate skills from old {app_data}/skills to new ~/.agents/skills
 pub fn migrate_skills_to_agents_dir(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    #[cfg(mobile)]
+    return Ok(());
     let home_dir = get_home_dir();
     let app_data_dir = get_app_data_dir(app_handle);
 
@@ -318,6 +359,14 @@ pub async fn get_skill_content_internal(
         crate::errors::AppError::UnknownError(format!("Failed to parse skill: {}", e))
     })?;
 
+    #[cfg(mobile)]
+    let content = {
+        let mut content = content;
+        let status = get_mobile_skill_compatibility(app_handle.clone(), identifier.to_string()).await
+            .map_err(crate::errors::AppError::UnknownError)?;
+        content.content = format!("[Android 技能兼容性] {status}\n任何不可执行步骤必须明确报错，不可跳过或替换执行通道。\n\n{}", content.content);
+        content
+    };
     Ok(content)
 }
 
@@ -534,8 +583,10 @@ pub async fn cleanup_orphaned_skill_configs(app_handle: tauri::AppHandle) -> Res
 
 /// Open the skills folder in the system file manager
 #[tauri::command]
-pub async fn open_skills_folder(_app_handle: tauri::AppHandle) -> Result<(), String> {
-    let skills_dir = get_home_dir().join(".agents/skills");
+pub async fn open_skills_folder(app_handle: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(mobile)]
+    return Err("MOBILE_UNSUPPORTED skills_folder: 请在应用内 Skills 页面查看技能".into());
+    let skills_dir = skills_directory(&app_handle)?;
 
     // Create if not exists
     std::fs::create_dir_all(&skills_dir).map_err(|e| e.to_string())?;
@@ -568,6 +619,8 @@ pub async fn open_skills_folder(_app_handle: tauri::AppHandle) -> Result<(), Str
 /// Open the parent folder of a skill file in the system file manager
 #[tauri::command]
 pub async fn open_skill_parent_folder(file_path: String) -> Result<(), String> {
+    #[cfg(mobile)]
+    return Err("MOBILE_UNSUPPORTED skills_folder: 请在应用内 Skills 页面查看技能".into());
     let path = PathBuf::from(&file_path);
     let parent = path.parent().ok_or_else(|| "Invalid file path".to_string())?;
 
@@ -596,8 +649,8 @@ pub async fn open_skill_parent_folder(file_path: String) -> Result<(), String> {
 
 /// Get skills directory path
 #[tauri::command]
-pub async fn get_skills_directory(_app_handle: tauri::AppHandle) -> Result<String, String> {
-    let skills_dir = get_home_dir().join(".agents/skills");
+pub async fn get_skills_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let skills_dir = skills_directory(&app_handle)?;
     Ok(skills_dir.to_string_lossy().to_string())
 }
 
@@ -662,8 +715,11 @@ pub async fn fetch_official_skills(
 /// Load a JSON skill install recipe from disk.
 #[tauri::command]
 pub async fn load_skill_install_recipe_file(
+    app_handle: tauri::AppHandle,
     recipe_path: String,
 ) -> Result<SkillInstallRecipe, String> {
+    #[cfg(mobile)]
+    crate::mobile_files::require_attachment_path(&app_handle, Path::new(&recipe_path))?;
     load_skill_install_recipe_from_file(Path::new(&recipe_path))
 }
 
@@ -674,7 +730,7 @@ pub async fn inspect_skill_install_recipe(
     recipe: SkillInstallRecipe,
     use_proxy: bool,
 ) -> Result<SkillInstallPlan, String> {
-    let skills_dir = get_home_dir().join(".agents/skills");
+    let skills_dir = skills_directory(&app_handle)?;
     let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
     inspect_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await
 }
@@ -686,8 +742,10 @@ pub async fn inspect_skill_install_recipe_file(
     recipe_path: String,
     use_proxy: bool,
 ) -> Result<SkillInstallPlan, String> {
+    #[cfg(mobile)]
+    crate::mobile_files::require_attachment_path(&app_handle, Path::new(&recipe_path))?;
     let recipe = load_skill_install_recipe_from_file(Path::new(&recipe_path))?;
-    let skills_dir = get_home_dir().join(".agents/skills");
+    let skills_dir = skills_directory(&app_handle)?;
     let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
     inspect_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await
 }
@@ -699,7 +757,7 @@ pub async fn install_skill_install_recipe(
     recipe: SkillInstallRecipe,
     use_proxy: bool,
 ) -> Result<SkillInstallResult, String> {
-    let skills_dir = get_home_dir().join(".agents/skills");
+    let skills_dir = skills_directory(&app_handle)?;
     let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
     let result = install_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await?;
     let _ = scan_skills(app_handle).await?;
@@ -713,8 +771,10 @@ pub async fn install_skill_install_recipe_file(
     recipe_path: String,
     use_proxy: bool,
 ) -> Result<SkillInstallResult, String> {
+    #[cfg(mobile)]
+    crate::mobile_files::require_attachment_path(&app_handle, Path::new(&recipe_path))?;
     let recipe = load_skill_install_recipe_from_file(Path::new(&recipe_path))?;
-    let skills_dir = get_home_dir().join(".agents/skills");
+    let skills_dir = skills_directory(&app_handle)?;
     let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
     let result = install_recipe_internal(&recipe, &skills_dir, proxy_url.as_deref()).await?;
     let _ = scan_skills(app_handle).await?;
@@ -729,7 +789,7 @@ pub async fn inspect_skill_archive_source(
     dirs: Option<Vec<SkillInstallRecipeDir>>,
     use_proxy: bool,
 ) -> Result<SkillArchiveInspection, String> {
-    let skills_dir = get_home_dir().join(".agents/skills");
+    let skills_dir = skills_directory(&app_handle)?;
     let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
     inspect_archive_internal(&source, dirs.as_deref(), &skills_dir, proxy_url.as_deref()).await
 }
@@ -742,7 +802,7 @@ pub async fn install_skill_archive_source(
     selections: Vec<SkillInstallRecipeDir>,
     use_proxy: bool,
 ) -> Result<SkillArchiveInstallResult, String> {
-    let skills_dir = get_home_dir().join(".agents/skills");
+    let skills_dir = skills_directory(&app_handle)?;
     let proxy_url = resolve_proxy_url(&app_handle, use_proxy).await?;
     let result =
         install_archive_internal(&source, &selections, &skills_dir, proxy_url.as_deref()).await?;
@@ -762,7 +822,7 @@ pub async fn install_official_skill(
         git_ref: "main".to_string(),
         url: Some(download_url),
     };
-    let skills_dir = get_home_dir().join(".agents/skills");
+    let skills_dir = skills_directory(&app_handle)?;
     let inspection = inspect_archive_internal(&source, None, &skills_dir, None).await?;
     let selections = inspection_to_selections(&inspection);
     let _ = install_archive_internal(&source, &selections, &skills_dir, None).await?;
