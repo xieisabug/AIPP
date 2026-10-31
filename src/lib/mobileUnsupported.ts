@@ -1,4 +1,4 @@
-import { useIsMobilePlatform } from "@/hooks/use-platform"
+import { useIsMobilePlatform, usePlatform } from "@/hooks/use-platform"
 
 /**
  * 移动端（android / ios）不支持的功能中央清单。
@@ -75,7 +75,9 @@ export const BROWSER_SEARCH_ENV_KEYS: ReadonlySet<string> = new Set([
  */
 export function useFeatureAvailableOnPlatform(feature: MobileUnsupportedFeature): boolean {
     const isMobile = useIsMobilePlatform()
+    const platform = usePlatform()
     if (!isMobile) return true
+    if (platform === "android" && feature === "skills_manager") return true
     return !MOBILE_UNSUPPORTED_FEATURES.has(feature)
 }
 

@@ -7,10 +7,11 @@ import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
 import AssistantMCPFieldDisplay from "@/components/config/AssistantMCPFieldDisplay";
 import AssistantSkillsFieldDisplay from "@/components/config/AssistantSkillsFieldDisplay";
+import MobileSkillsManager from "@/components/config/MobileSkillsManager";
 import AssistantWorkspaceFieldDisplay from "@/components/config/AssistantWorkspaceFieldDisplay";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useFilteredProviders } from "@/hooks/useFilteredProviders";
-import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { useIsMobilePlatform, usePlatform } from "@/hooks/use-platform";
 import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 import type { AgentModelOption } from "@/utils/agentDefaults";
 
@@ -132,8 +133,9 @@ export const useAssistantFormConfig = ({
         [currentAssistant, onConfigChange]
     );
 
-    // 移动端：Skills 管理与本机工作区（信任路径）都依赖桌面文件系统/进程，不展示
+    // Android Skills 使用应用私有目录；本机工作区仍仅用于桌面。
     const isMobilePlatform = useIsMobilePlatform();
+    const platform = usePlatform();
 
     // 获取 ACP 配置值的辅助函数
     const getAcpConfigValue = useCallback((configName: string, defaultValue: string) => {
@@ -561,13 +563,16 @@ export const useAssistantFormConfig = ({
             });
         }
 
-        if (!assistantTypeHideField.includes("skills_config") && !isMobilePlatform) {
+        if (!assistantTypeHideField.includes("skills_config") && (!isMobilePlatform || platform === "android")) {
             baseConfigs.push({
                 key: "skills_config",
                 config: {
                     type: "custom" as const,
                     label: "Skills",
                     customRender: () => {
+                        if (platform === "android") {
+                            return React.createElement(MobileSkillsManager, { assistantId: currentAssistant?.assistant.id });
+                        }
                         return React.createElement(AssistantSkillsFieldDisplay, {
                             assistantId: currentAssistant?.assistant.id ?? 0,
                             onConfigChange: () => {
@@ -714,6 +719,7 @@ export const useAssistantFormConfig = ({
         pluginAssistantFormFields,
         getAcpConfigValue,
         isMobilePlatform,
+        platform,
     ]);
 
     return { formConfig };

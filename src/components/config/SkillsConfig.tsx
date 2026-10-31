@@ -27,6 +27,8 @@ import {
 import SkillActionDropdown from "./SkillActionDropdown";
 import SkillInstallGuideDialog from "./SkillInstallGuideDialog";
 import { useSkillsMcpValidation } from "../../hooks/useSkillsMcpValidation";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import MobileSkillsManager from "./MobileSkillsManager";
 
 interface SkillsManagerProps {
     /** Optional: if provided, shows skills config for an assistant */
@@ -594,4 +596,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     );
 };
 
-export default SkillsManager;
+export default function PlatformSkillsManager(props: SkillsManagerProps) {
+    const mobile = useIsMobilePlatform();
+    return mobile ? <MobileSkillsManager {...props} /> : <SkillsManager {...props} />;
+}
