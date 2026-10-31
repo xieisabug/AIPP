@@ -43,6 +43,7 @@ describe.each([
     beforeEach(() => {
         platformState.mobile = mobile;
         clearAllMockHandlers();
+        mockInvokeHandler("get_assistant_execution_capability", () => ({ available: true, issues: [] }));
         vi.mocked(invoke).mockClear();
         toastMock.error.mockClear();
     });
