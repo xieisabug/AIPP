@@ -1,4 +1,6 @@
 import { useDataRefresh } from "@/hooks/useDataRefresh";
+import { useMobileResume } from "@/hooks/useMobileResume";
+import MobileRecoveryNotice from "./conversation/MobileRecoveryNotice";
 import { invoke } from "@tauri-apps/api/core";
 import {
     Fragment,
@@ -1227,7 +1229,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             // 不使用清理函数的取消标记，依赖 requestId 判定最新请求
         }, [conversationId]);
 
-        useDataRefresh({
+        const refreshPersistedConversation = useDataRefresh({
             events: ["conversation_data_changed"],
             identity: conversationId,
             paused: effectiveAiIsResponsing,
@@ -1249,6 +1251,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             },
             onError: (error) => toast.error(`同步后刷新聊天失败（conversation=${conversationId}）: ${String(error)}`),
         });
+        useMobileResume(refreshPersistedConversation, conversationId);
 
         useLayoutEffect(() => {
             const position = syncScrollPositionRef.current;
@@ -1960,6 +1963,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     )}
                     {/* Main content area：min-h-0 防止嵌套 flex（如总管家）把滚动区撑破导致占位过高 */}
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-aipp-slot="chat-conversation-main">
+                        {isMobilePlatform && conversationId && <MobileRecoveryNotice conversationId={conversationId} />}
                         {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
                         {!isMobile && !hideHeader && (
                             <ConversationHeader

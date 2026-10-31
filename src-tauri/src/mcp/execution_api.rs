@@ -58,6 +58,38 @@ fn tool_cancel_registry() -> &'static ToolCancelRegistry {
     TOOL_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
+pub(crate) fn with_local_tool_activity<T>(read: impl FnOnce(&HashSet<i64>) -> T) -> T {
+    let activity = local_tool_activity().lock().unwrap_or_else(|error| error.into_inner());
+    let ids = activity.keys().copied().collect();
+    read(&ids)
+}
+
+// Covers state transition, execution and final persistence, including cancellation/future drop.
+fn local_tool_activity() -> &'static std::sync::Mutex<HashMap<i64, usize>> {
+    static ACTIVITY: OnceLock<std::sync::Mutex<HashMap<i64, usize>>> = OnceLock::new();
+    ACTIVITY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+struct LocalToolActivity(i64);
+#[cfg(test)]
+#[path = "mobile_activity_tests.rs"]
+mod mobile_activity_tests;
+impl LocalToolActivity {
+    fn enter(id: i64) -> Self {
+        *local_tool_activity().lock().unwrap_or_else(|error| error.into_inner()).entry(id).or_default() += 1;
+        Self(id)
+    }
+}
+impl Drop for LocalToolActivity {
+    fn drop(&mut self) {
+        let mut activity = local_tool_activity().lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(count) = activity.get_mut(&self.0) {
+            *count -= 1;
+            if *count == 0 { activity.remove(&self.0); }
+        }
+    }
+}
+
 fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
     CONTINUATION_LOCKS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
@@ -1991,6 +2023,7 @@ pub async fn execute_mcp_tool_call(
     call_id: i64,
     trigger_continuation: bool,
 ) -> std::result::Result<MCPToolCall, String> {
+    let _local_activity = LocalToolActivity::enter(call_id);
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
     // 获取工具调用信息

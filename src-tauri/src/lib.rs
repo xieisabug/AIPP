@@ -1266,6 +1266,9 @@ pub fn run() {
             // Platform detection command
             get_platform,
             crate::api::mobile_capability::get_assistant_execution_capability,
+            crate::api::mobile_recovery::get_mobile_recovery_snapshot,
+            crate::api::mobile_recovery::get_mobile_draft,
+            crate::api::mobile_recovery::save_mobile_draft,
             // Updater commands
             check_update,
             check_update_with_proxy,

@@ -186,9 +186,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             }
         };
         window.addEventListener("focus", refresh);
+        window.addEventListener("online", refresh);
+        window.addEventListener("aipp:mobile-navigate", refresh);
         document.addEventListener("visibilitychange", refreshWhenVisible);
         return () => {
             window.removeEventListener("focus", refresh);
+            window.removeEventListener("online", refresh);
+            window.removeEventListener("aipp:mobile-navigate", refresh);
             document.removeEventListener("visibilitychange", refreshWhenVisible);
         };
     }, [loadStatus]);

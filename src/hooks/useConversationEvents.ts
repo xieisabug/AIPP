@@ -26,6 +26,7 @@ import { MCPToolCall } from "@/data/MCPToolCall";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 import { noteToolReview } from "@/hooks/toolReviewStore";
 import { invalidateMcpToolCall } from "@/services/conversationResourceCache";
+import { useMobileResume } from "./useMobileResume";
 
 export interface UseConversationEventsOptions {
     conversationId: string | number;
@@ -1195,6 +1196,14 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     }, [options.conversationId, syncRuntimeState, syncShineState, syncAcpSessionState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState]); // 只依赖 conversationId
 
     // 初始化获取已存在的 MCP 调用状态
+    useMobileResume(() => {
+        const id = Number(options.conversationId);
+        if (!id) return;
+        syncRuntimeState(id);
+        syncShineState(id);
+        void refreshMcpToolCalls();
+    }, options.conversationId);
+
     useEffect(() => {
         if (!options.conversationId) {
             return;
