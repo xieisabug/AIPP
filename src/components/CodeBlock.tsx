@@ -8,6 +8,9 @@ import { listen } from "@tauri-apps/api/event";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useTheme } from "../hooks/useTheme";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { previewMobile } from "@/mobile/navigation";
+import { STATIC_PREVIEW_TYPES } from "@/mobile/previewDocument";
 
 // 固定工具栏位置由 IntersectionObserver 控制，无需动态计算偏移
 
@@ -32,6 +35,8 @@ const CodeBlock = React.memo(
         const { resolvedTheme } = useTheme();
         // 脚本执行依赖 shell 环境，移动端不支持，隐藏"运行"按钮
         const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
+        const mobile = useIsMobilePlatform();
+        const mobilePreviewAvailable = mobile && (STATIC_PREVIEW_TYPES.has(language.toLowerCase()) || ["react", "jsx", "vue"].includes(language.toLowerCase()));
         const [forceUpdate, setForceUpdate] = useState(0);
         const codeString = useMemo(() => (typeof children === 'string' ? children : String(children)), [children]);
         const lineCount = useMemo(() => codeString.split(/\r?\n/).length, [codeString]);
@@ -91,7 +96,7 @@ const CodeBlock = React.memo(
 
         const ButtonGroup = () => (
             <div
-                className="flex items-center gap-1 bg-background/90 dark:bg-muted/90 opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100 transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm"
+                className={`flex items-center gap-1 bg-background/90 dark:bg-muted/90 ${mobile ? "opacity-100" : "opacity-0 group-hover/codeblock:opacity-100 hover:opacity-100"} transition-opacity duration-200 rounded-md p-1 backdrop-blur-sm`}
                 onMouseDown={(event) => {
                     // 点击复制时保留代码选区
                     event.preventDefault();
@@ -100,7 +105,10 @@ const CodeBlock = React.memo(
                 <IconButton
                     icon={copyIconState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
+                    title="复制代码"
+                    className={mobile ? "min-h-11 min-w-11" : undefined}
                 />
+                {mobilePreviewAvailable && <IconButton title="预览制品" className="min-h-11 min-w-11" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => previewMobile({ language, code: codeString })} />}
                 {codeRunAvailable && (
                     <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun(language, getCodeString())} />
                 )}
