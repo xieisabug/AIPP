@@ -3,7 +3,7 @@
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/files/mobile-files/**", "$APPDATA/skills/**"]
+        "scope": ["$APPDATA/files/mobile-files/**", "$APPDATA/skills/**", "$APPDATA/plugin/**"]
       }
     }
   }
