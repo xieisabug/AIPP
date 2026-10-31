@@ -41,30 +41,31 @@ describe("MessageActionButtons", () => {
         expect(bar.className).not.toContain("aipp-mobile-action-bar");
     });
 
-    it("on mobile toggles the bar by tapping the bubble and keeps copy / token reachable", () => {
+    it("on mobile keeps the more button visible and expands actions", () => {
         platformState.mobile = true;
         const { bar, onCopy } = renderInBubble();
-        expect(bar.className).toContain("hidden");
+        expect(bar).toBeVisible();
         expect(bar.className).toContain("aipp-mobile-action-bar");
         expect(bar.className).not.toContain("group-hover");
 
-        act(() => {
-            fireEvent.click(screen.getByTestId("text"));
-        });
-        expect(bar.className.split(" ")).toContain("flex");
-        expect(screen.getByLabelText("token-info")).toBeTruthy();
+        const more = screen.getByRole("button", { name: "消息操作" });
+        expect(more).toHaveAttribute("aria-expanded", "false");
+        expect(screen.getByLabelText("token-info").parentElement).toHaveClass("hidden");
+        fireEvent.click(more);
+        expect(more).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getByLabelText("token-info").parentElement).toHaveClass("contents");
 
         // 点击操作栏里的按钮不会把栏收起
-        const buttons = bar.querySelectorAll("button");
         act(() => {
-            fireEvent.click(buttons[buttons.length - 1]);
+            fireEvent.click(screen.getByTitle("复制消息"));
         });
         expect(onCopy).toHaveBeenCalledTimes(1);
-        expect(bar.className.split(" ")).toContain("flex");
+        expect(more).toHaveAttribute("aria-expanded", "true");
 
         act(() => {
             fireEvent.click(screen.getByTestId("text"));
         });
-        expect(bar.className.split(" ")).toContain("hidden");
+        expect(more).toHaveAttribute("aria-expanded", "false");
+        expect(more).toBeVisible();
     });
 });

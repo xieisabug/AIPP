@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Edit2, GitBranch, Copy, Check, RefreshCw, Send } from "lucide-react";
+import { Edit2, GitBranch, Copy, Check, RefreshCw, Send, MoreHorizontal } from "lucide-react";
 import IconButton from "../IconButton";
 import { MessageTokenTooltip } from "../token-statistics";
 import MessageExportDialog from "./MessageExportDialog";
@@ -67,10 +67,15 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
             data-aipp-slot="message-action-bar"
             className={
                 mobileMode
-                    ? `${mobileOpen || isTokenTooltipOpen || isExportDialogOpen ? "flex" : "hidden"} aipp-mobile-action-bar z-10 mt-3 w-fit max-w-full flex-wrap items-center gap-1 px-1 box-border rounded-[26px] border border-border bg-background ${isUserMessage ? "ml-auto" : ""}`
+                    ? `flex aipp-mobile-action-bar z-10 mt-3 w-fit max-w-full flex-wrap items-center gap-1 px-1 box-border rounded-[26px] border border-border bg-background ${isUserMessage ? "ml-auto" : ""}`
                     : `${isTokenTooltipOpen || isExportDialogOpen ? "flex" : "hidden group-hover:flex"} z-10 items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-border bg-background ${isUserMessage ? "right-0" : "left-0"}`
             }
         >
+            {mobileMode && <button type="button" aria-label="消息操作" aria-expanded={mobileOpen}
+                className="flex h-11 w-11 items-center justify-center" onClick={() => setMobileOpen(open => !open)}>
+                <MoreHorizontal className="h-5 w-5 text-muted-foreground" />
+            </button>}
+            <div className={mobileMode && !mobileOpen && !isTokenTooltipOpen && !isExportDialogOpen ? "hidden" : "contents"}>
             {showEditRegenerate && onEdit && (
                 <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} />
             )}
@@ -113,7 +118,9 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
                     copyIconState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />
                 }
                 onClick={onCopy}
+                title="复制消息"
             />
+            </div>
         </div>
     );
 };
