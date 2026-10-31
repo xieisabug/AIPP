@@ -77,13 +77,13 @@ const MessageActionButtons: React.FC<MessageActionButtonsProps> = ({
             </button>}
             <div className={mobileMode && !mobileOpen && !isTokenTooltipOpen && !isExportDialogOpen ? "hidden" : "contents"}>
             {showEditRegenerate && onEdit && (
-                <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} />
+                <IconButton icon={<Edit2 size={16} className="text-icon" />} onClick={onEdit} title="编辑消息" />
             )}
             {showEditRegenerate && onRegenerate && (
-                <IconButton icon={<RefreshCw size={16} className="text-icon" />} onClick={onRegenerate} />
+                <IconButton icon={<RefreshCw size={16} className="text-icon" />} onClick={onRegenerate} title="重新生成" />
             )}
             {messageType === "response" && onFork && (
-                <IconButton icon={<GitBranch size={16} className="text-icon" />} onClick={onFork} />
+                <IconButton icon={<GitBranch size={16} className="text-icon" />} onClick={onFork} title="分叉会话" />
             )}
             {pluginActions}
             {(messageType === "response" || messageType === "tool_result") && onResendToFeishuDebug && (
