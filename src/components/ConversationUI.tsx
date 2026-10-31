@@ -52,6 +52,8 @@ interface AgentRuntimeInfo {
 // 导入新创建的 hooks
 import { usePluginManagement } from "@/hooks/usePluginManagement";
 import { useScrollManagement } from "@/hooks/useScrollManagement";
+import { useConversationDraft } from "@/hooks/useConversationDraft";
+import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
@@ -65,6 +67,7 @@ import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail from "./conversation/ConversationTurnRail";
 import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
+import { Button } from "./ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
@@ -327,6 +330,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 对话加载状态
         const [isLoadingShow, setIsLoadingShow] = useState(false);
         const [renderingConversationId, setRenderingConversationId] = useState<string | null>(null);
+        const readingPositions = useRef(new Map<string, number>());
 
         useEffect(() => {
             if (renderingConversationId !== conversationId || isLoadingShow) return;
@@ -338,6 +342,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 if (isPositioning && performance.now() < deadline) {
                     frame = requestAnimationFrame(finishAfterPositioning);
                 } else {
+                    const saved = readingPositions.current.get(conversationId);
+                    if (saved !== undefined && scrollContainerRef.current) {
+                        handleUserScrollIntent();
+                        scrollContainerRef.current.scrollTop = saved;
+                        syncScrollState();
+                    }
                     setRenderingConversationId(null);
                 }
             };
@@ -365,7 +375,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [aiIsResponsing, setAiIsResponsing] = useState<boolean>(false);
 
         // 输入相关状态
-        const [inputText, setInputText] = useState("");
+        const [inputText, setInputText] = useConversationDraft(conversationId);
+        const [showBackToBottom, setShowBackToBottom] = useState(false);
         const inputAreaRef = useRef<InputAreaRef>(null);
         // 加载请求标识，避免旧请求覆盖最新状态（StrictMode 双调用等场景）
         const loadRequestIdRef = useRef<number>(0);
@@ -1045,7 +1056,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleEditSave,
             handleEditSaveAndRegenerate,
             handleSend,
-            handleArtifact,
+            handleArtifact: handleDesktopArtifact,
             editDialogIsOpen,
             editingMessage,
             closeEditDialog,
@@ -1077,6 +1088,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             selectedAgentSandbox,
             selectedAgentMode,
         });
+
+        const mobilePlatform = useIsMobilePlatform();
+        const handleArtifact = useCallback((language: string, code: string) => {
+            if (mobilePlatform) previewMobile({ language, code });
+            else handleDesktopArtifact(language, code);
+        }, [mobilePlatform, handleDesktopArtifact]);
 
         // ============= 初始化和生命周期逻辑 =============
 
@@ -1932,7 +1949,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 const shrunk = lastHeight - viewport.height;
                 lastHeight = viewport.height;
                 if (shrunk > 150) {
-                    requestAnimationFrame(() => smartScroll(true, "auto"));
+                    requestAnimationFrame(() => smartScroll(false, "auto"));
                 }
             };
             viewport.addEventListener("resize", onResize);
@@ -1985,6 +2002,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             ref={scrollContainerRef}
                             onWheelCapture={handleUserScrollIntent}
                             onTouchMoveCapture={handleUserScrollIntent}
+                            onScroll={event => {
+                                const container = event.currentTarget;
+                                if (!isLoadingShow && renderingConversationId === null && !container.closest('[hidden]')) readingPositions.current.set(conversationId, container.scrollTop);
+                                setShowBackToBottom(container.scrollHeight - container.scrollTop - container.clientHeight > 96);
+                            }}
                             className={`conversation-scroll-transparent-track min-h-0 h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                             data-aipp-slot="chat-conversation-scroll"
                             style={{ overflowAnchor: "none" }}
@@ -2038,6 +2060,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                         {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
+                        {isMobile && showBackToBottom && <Button variant="secondary" className="self-center min-h-11 shrink-0"
+                            onClick={() => { smartScroll(true, "auto"); setShowBackToBottom(false); }}>
+                            <ChevronDown className="h-4 w-4" />回到底部
+                        </Button>}
                         <InputArea
                             ref={inputAreaRef}
                             inputText={inputText}
