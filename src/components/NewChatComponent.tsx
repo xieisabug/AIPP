@@ -160,7 +160,9 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
 
     return (
         <div
-            className="relative flex flex-col items-center justify-center h-full select-none p-10 theme-background-image"
+            className={`relative flex h-full min-h-0 flex-col items-center justify-center select-none p-10 theme-background-image ${
+                isMobilePlatform || isMobile ? "[@media(max-height:600px)]:justify-start [@media(max-height:600px)]:overflow-y-auto [@media(max-height:600px)]:py-4" : ""
+            }`}
             data-aipp-slot="chat-new-conversation"
             {...dragProps}
         >

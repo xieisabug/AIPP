@@ -4,6 +4,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 export interface SelectOption {
     id: string;
     label: string;
+    description?: string;
     icon?: React.ReactNode;
 }
 
@@ -58,24 +59,30 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
         return (
             <div className="flex-shrink-0 px-4 pt-6 pb-4">
                 <div className="flex items-center gap-3">
-                    <div className="flex-1">
+                    <div className="min-w-0 flex-1">
                         <Select value={selectedOptionId} onValueChange={onSelectOption}>
-                            <SelectTrigger className="w-full">
+                            <SelectTrigger className="w-full h-auto min-h-11 [&>[data-slot=select-value]]:min-w-0 [&>[data-slot=select-value]]:line-clamp-none">
                                 <SelectValue placeholder={selectPlaceholder}>
                                     {selectedOption && (
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex min-w-0 items-center gap-2 text-left">
                                             {selectedOption.icon}
-                                            <span>{selectedOption.label}</span>
+                                            <span className="min-w-0 flex-1">
+                                                <span className="block truncate">{selectedOption.label}</span>
+                                                {selectedOption.description && <span className="block text-xs text-muted-foreground">{selectedOption.description}</span>}
+                                            </span>
                                         </div>
                                     )}
                                 </SelectValue>
                             </SelectTrigger>
-                            <SelectContent>
+                            <SelectContent className="w-[var(--radix-select-trigger-width)]">
                                 {selectOptions?.map((option) => (
-                                    <SelectItem key={option.id} value={option.id}>
-                                        <div className="flex items-center gap-2">
+                                    <SelectItem key={option.id} value={option.id} className="min-h-11 [&>[data-slot=select-item-text]]:min-w-0 [&>span:last-child]:min-w-0 [&>span:last-child]:flex-1">
+                                        <div className="flex min-w-0 flex-1 items-center gap-2">
                                             {option.icon}
-                                            <span>{option.label}</span>
+                                            <span className="min-w-0 flex-1">
+                                                <span className="block truncate">{option.label}</span>
+                                                {option.description && <span className="block text-xs text-muted-foreground">{option.description}</span>}
+                                            </span>
                                         </div>
                                     </SelectItem>
                                 ))}
@@ -121,4 +128,4 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
     );
 };
 
-export default memo(ConfigPageLayout); 
+export default memo(ConfigPageLayout);

@@ -30,7 +30,7 @@ import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
-import { getMcpServerDisplayLabel, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
+import { MOBILE_UNEXECUTABLE_LABEL, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
 
 const MCPConfig: React.FC = () => {
     const isMobilePlatform = useIsMobilePlatform();
@@ -429,7 +429,8 @@ const MCPConfig: React.FC = () => {
         mcpServers.map(server => ({
             id: server.id.toString(),
             // 移动端窄屏用下拉代替侧栏列表，同样需要标注外部 stdio 不可执行
-            label: getMcpServerDisplayLabel(server, isMobilePlatform),
+            label: server.name,
+            description: isMobilePlatform && !isMobileExecutableMcpServer(server) ? MOBILE_UNEXECUTABLE_LABEL : undefined,
             icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <MCP className="h-4 w-4" />
         })), [mcpServers, isMobilePlatform]);
 
