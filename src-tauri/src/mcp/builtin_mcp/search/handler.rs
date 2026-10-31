@@ -498,28 +498,5 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
 /// 而是返回包含真实原因的错误（需要 JS 渲染的页面在移动端不可抓取）。
 #[cfg(mobile)]
 async fn fetch_url_http_only(url: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-    let resp = client
-        .get(url)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch URL: HTTP request error: {}", e))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("Failed to fetch URL: HTTP status {} when fetching {}", status.as_u16(), url));
-    }
-    let text = resp.text().await.map_err(|e| format!("Failed to read response body: {}", e))?;
-    if text.trim().is_empty() {
-        return Err(format!(
-            "Failed to fetch URL: empty response body; {}",
-            crate::api::system_api::mobile_unsupported_error("浏览器渲染抓取")
-        ));
-    }
-    Ok(text)
+    super::mobile_http::fetch_document(url).await
 }
