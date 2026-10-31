@@ -11,7 +11,7 @@ import { toast } from 'sonner';
 import { MCPServer, MCPServerRequest, MCP_TRANSPORT_TYPES } from '../../data/MCP';
 import CustomSelect from '../CustomSelect';
 import { useIsMobilePlatform } from '@/hooks/use-platform';
-import { isAippBuiltinCommand } from '@/lib/mobileUnsupported';
+import { isAippBuiltinCommand, isMobileExecutableMcpServer } from '@/lib/mobileUnsupported';
 
 interface MCPServerDialogProps {
     isOpen: boolean;
@@ -31,6 +31,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
     initialConfig
 }) => {
     const isMobilePlatform = useIsMobilePlatform();
+    const readOnly = isMobilePlatform && !!editingServer && !isMobileExecutableMcpServer(editingServer);
     // Form state
     const [formData, setFormData] = useState<MCPServerRequest>({
         name: '',
@@ -48,6 +49,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
 
     // UI state
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [fieldError, setFieldError] = useState<{ field: string; message: string } | null>(null);
     // Header rows state for HTTP
     type HeaderRow = { id: string; key: string; value: string };
     const [headerRows, setHeaderRows] = useState<HeaderRow[]>([]);
@@ -174,8 +176,10 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
 
     // 处理表单提交
     const handleSubmit = useCallback(async () => {
+        if (readOnly) return;
         // Validation
         if (!formData.name.trim()) {
+            setFieldError({ field: 'name', message: '请输入MCP服务器名称' });
             toast.error('请输入MCP服务器名称');
             return;
         }
@@ -195,9 +199,21 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         }
 
         if ((formData.transport_type === 'http') && !formData.url?.trim()) {
+            setFieldError({ field: 'url', message: 'HTTP类型需要提供URL' });
             toast.error('HTTP类型需要提供URL');
             return;
         }
+
+        if (formData.transport_type === 'http') {
+            try {
+                const parsed = new URL(formData.url || '');
+                if (!['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('地址必须使用 HTTP/HTTPS；认证请使用请求头');
+            } catch (error) {
+                setFieldError({ field: 'url', message: `无效的 MCP 地址：${String(error)}` });
+                return;
+            }
+        }
+        setFieldError(null);
 
         setIsSubmitting(true);
 
@@ -223,7 +239,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                     toast.success('自动获取服务器能力成功');
                 } catch (e) {
                     console.warn('自动获取能力失败:', e);
-                    toast.warning('服务器添加成功，但获取能力失败，请手动刷新');
+                    toast.warning(`服务器 ${serverId} 已保存，但连接/获取能力失败：${String(e)}`);
                 }
             }
 
@@ -233,7 +249,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         } finally {
             setIsSubmitting(false);
         }
-    }, [formData, editingServer, onSubmit, isMobilePlatform]);
+    }, [formData, editingServer, onSubmit, isMobilePlatform, readOnly]);
 
     // 处理取消
     const handleCancel = useCallback(() => {
@@ -243,18 +259,21 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
     return (
         <Dialog open={isOpen} onOpenChange={(open) => !open && handleCancel()}>
             <DialogContent className="max-w-3xl h-[85vh] flex flex-col">
+                {fieldError && <p role="alert" className="text-destructive text-sm">{fieldError.field}: {fieldError.message}</p>}
                 <DialogHeader>
                     <DialogTitle>
                         {editingServer ? '编辑MCP服务器' : '新增MCP服务器'}
                     </DialogTitle>
                 </DialogHeader>
-                <div className="space-y-6 py-4 overflow-y-auto pr-1 flex-1 min-h-0">
+                {readOnly && <p role="status">此工具依赖桌面执行能力，移动端只读保留原配置。</p>}
+                <fieldset disabled={readOnly} className="space-y-6 py-4 overflow-y-auto pr-1 flex-1 min-h-0">
                     {/* 基本信息 */}
                     <div className="space-y-4">
                         <div className="space-y-2">
                             <Label htmlFor="name">ID *</Label>
                             <Input
                                 id="name"
+                                aria-invalid={fieldError?.field === 'name'}
                                 placeholder="例如：fetch-mcp"
                                 value={formData.name}
                                 onChange={(e) => updateField('name', e.target.value)}
@@ -308,6 +327,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                 <Label htmlFor="url">URL *</Label>
                                 <Input
                                     id="url"
+                                    aria-invalid={fieldError?.field === 'url'}
                                     type="url"
                                     placeholder="例如：http://localhost:3000/mcp"
                                     value={formData.url}
@@ -372,6 +392,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                                     />
                                                     <Input
                                                         placeholder="Header 值，例如 Bearer ${API_KEY}"
+                                                        type="password"
                                                         value={row.value}
                                                         onChange={(e) => updateHeaderRow(row.id, { value: e.target.value })}
                                                         className="flex-1"
@@ -410,7 +431,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                             </AccordionContent>
                         </AccordionItem>
                     </Accordion>
-                </div>
+                </fieldset>
                 <DialogFooter className="flex-shrink-0">
                     <Button
                         variant="outline"
@@ -421,7 +442,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                     </Button>
                     <Button
                         onClick={handleSubmit}
-                        disabled={isSubmitting}
+                        disabled={isSubmitting || readOnly}
                     >
                         {isSubmitting ? '保存中...' : '确定'}
                     </Button>

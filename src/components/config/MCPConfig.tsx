@@ -532,8 +532,10 @@ const MCPConfig: React.FC = () => {
                                     size="sm"
                                     onClick={() => handleRefreshServerCapabilities(selectedServer.id)}
                                     disabled={isRefreshing}
+                                    aria-label="测试连接并刷新能力"
                                 >
                                     <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                    {isMobilePlatform && <span>测试连接</span>}
                                 </Button>
                             </TooltipTrigger>
                             <TooltipContent>重新获取能力</TooltipContent>

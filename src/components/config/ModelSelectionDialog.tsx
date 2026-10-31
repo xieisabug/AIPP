@@ -164,7 +164,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 
                     {/* 模型列表 */}
                     <ScrollArea className="h-96">
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {filteredModels.map((model) => (
                                 <div 
                                     key={model.code} 
