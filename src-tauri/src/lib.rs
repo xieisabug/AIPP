@@ -1184,6 +1184,8 @@ pub fn run() {
             execute_mcp_tool_call,
             reject_mcp_tool_call,
             get_tool_review,
+            crate::mcp::tool_review_output::get_tool_review_output_capability,
+            crate::mcp::tool_review_output::reset_tool_review_output_capability,
             list_tool_reviews,
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,

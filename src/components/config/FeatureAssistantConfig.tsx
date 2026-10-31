@@ -180,6 +180,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             memory_summary_enabled: false,
             memory_summary_model: "",
             auto_review_model: "",
+            auto_review_output_mode: "auto",
             // 上下文压缩（底层仍存储在 experimental）
             context_compaction_enabled: false,
             context_max_input_tokens: "128000",
@@ -285,6 +286,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),
+                    auto_review_output_mode: summaryConfig.get("auto_review_output_mode") || "auto",
                     auto_review_model: (() => {
                         const model = summaryConfig.get("auto_review_model") || "";
                         const providerId = summaryConfig.get("auto_review_provider_id") || "";
@@ -312,6 +314,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                     memory_summary_enabled: false,
                     memory_summary_model: "",
                     auto_review_model: "",
+                    auto_review_output_mode: "auto",
                     context_compaction_enabled:
                         experimentalConfig?.get("context_compaction_enabled") === "true",
                     context_max_input_tokens:
@@ -486,6 +489,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             memory_summary_provider_id: memorySummaryModel.provider_id,
             auto_review_model: autoReviewModel.model_code,
             auto_review_provider_id: autoReviewModel.provider_id,
+            auto_review_output_mode: values.auto_review_output_mode,
         });
 
         const currentExperimentalConfig = featureConfig.get("experimental");

@@ -141,7 +141,7 @@ describe("FeatureAssistantConfig network config", () => {
         expect(screen.queryByRole("button", { name: /快捷键/ })).not.toBeInTheDocument();
     });
 
-    it("should save an empty auto review model when auxiliary AI config is saved", async () => {
+    it.each(["auto", "schema", "prompt"])("should save output mode %s when auxiliary AI config is saved", async (mode) => {
         window.innerWidth = 1400;
         window.dispatchEvent(new Event("resize"));
 
@@ -153,6 +153,7 @@ describe("FeatureAssistantConfig network config", () => {
             { id: 5, feature_code: "conversation_summary", key: "title_summary_length", value: "100" },
             { id: 6, feature_code: "conversation_summary", key: "auto_review_model", value: "" },
             { id: 7, feature_code: "conversation_summary", key: "auto_review_provider_id", value: "" },
+            { id: 8, feature_code: "conversation_summary", key: "auto_review_output_mode", value: mode },
         ]);
         mockInvokeHandler("save_feature_config", () => undefined);
         mockInvokeHandler("get_models_for_select", () => []);
@@ -177,6 +178,7 @@ describe("FeatureAssistantConfig network config", () => {
                     config: expect.objectContaining({
                         auto_review_model: "",
                         auto_review_provider_id: "",
+                        auto_review_output_mode: mode,
                         title_model: "title-model",
                         title_provider_id: "2",
                     }),

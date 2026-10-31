@@ -415,3 +415,118 @@ fn test_normalize_review_mode_uses_assistant_choice_only() {
     assert_eq!(normalize_review_mode(None), "off");
     assert_eq!(normalize_review_mode(Some("unexpected")), "off");
 }
+
+// Exercise the actual review request/retry path with a local HTTP provider.
+async fn run_review_output_fixture(mode: &str, remembered: bool, responses: Vec<(u16, String)>)
+    -> (Result<(ReviewRecordDraft, bool, Option<String>), String>, Vec<serde_json::Value>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut payloads = Vec::new();
+        for (status, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let (header_end, length) = loop {
+                let mut buf = [0; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buf[..n]);
+                if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..pos]);
+                    let length: usize = header.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+                    }).unwrap();
+                    break (pos + 4, length);
+                }
+            };
+            while bytes.len() < header_end + length {
+                let mut buf = [0; 4096];
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buf[..n]);
+            }
+            payloads.push(serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap());
+            socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+        payloads
+    });
+    let resolver = genai::resolver::ServiceTargetResolver::from_resolver_fn(move |target: genai::ServiceTarget| {
+        Ok(genai::ServiceTarget {
+            endpoint: genai::resolver::Endpoint::from_owned(endpoint.clone()),
+            auth: genai::resolver::AuthData::from_single("fixture"),
+            model: genai::ModelIden::new(AdapterKind::OpenAI, target.model.model_name),
+        })
+    });
+    let client = genai::Client::builder().with_service_target_resolver(resolver).build();
+    let request = build_chat_request_from_messages(&[
+        ("system".into(), REVIEW_SYSTEM_PROMPT.into(), Vec::new()),
+        ("user".into(), "审核只读调用".into(), Vec::new()),
+    ], ToolCallStrategy::NonNative, None).chat_request;
+    let result = tokio::time::timeout(Duration::from_secs(5), execute_review_output(
+        &client, "review-model", 41, 25, request, review_chat_options(AdapterKind::OpenAI),
+        mode, mode == "prompt" || remembered, None, Instant::now(),
+    )).await.unwrap();
+    let payloads = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    (result, payloads)
+}
+
+fn fixture_success(text: &str) -> (u16, String) {
+    (200, serde_json::json!({"id":"review", "object":"chat.completion", "model":"review-model", "choices":[{"index":0,"message":{"role":"assistant","content":text},"finish_reason":"stop"}]}).to_string())
+}
+
+fn fixture_unsupported(status: u16) -> (u16, String) {
+    (status, serde_json::json!({"error":{"message":"This response_format type is unavailable now", "type":"invalid_request_error"}}).to_string())
+}
+
+#[tokio::test]
+async fn test_review_output_auto_retries_once_and_validates_safe_and_risky() {
+    for safe in [true, false] {
+        let text = serde_json::json!({"safe":safe, "reason":"范围明确"}).to_string();
+        let (result, payloads) = run_review_output_fixture("auto", false, vec![fixture_unsupported(400), fixture_success(&text)]).await;
+        let (outcome, prompt, first) = result.unwrap();
+        assert_eq!(outcome.verdict, if safe { "safe" } else { "risky" });
+        assert!(prompt);
+        assert!(first.unwrap().contains("unavailable"));
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0]["response_format"]["type"], "json_schema");
+        assert!(payloads[1].get("response_format").is_none());
+        assert_eq!(payloads[0]["model"], payloads[1]["model"]);
+        assert_eq!(payloads[0]["messages"], payloads[1]["messages"]);
+        assert!(payloads.iter().all(|p| p.get("tools").is_none()));
+    }
+}
+
+#[tokio::test]
+async fn test_review_output_explicit_and_remembered_modes_do_not_probe() {
+    for (mode, remembered) in [("prompt", false), ("auto", true)] {
+        let (result, payloads) = run_review_output_fixture(mode, remembered, vec![fixture_success(r#"{"safe":true,"reason":"只读"}"#)]).await;
+        assert!(result.unwrap().1);
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].get("response_format").is_none());
+    }
+    let (result, payloads) = run_review_output_fixture("schema", false, vec![fixture_unsupported(400)]).await;
+    assert!(result.is_err());
+    assert_eq!(payloads.len(), 1);
+}
+
+#[tokio::test]
+async fn test_review_output_operational_errors_do_not_retry() {
+    for status in [401, 429, 500] {
+        let (result, payloads) = run_review_output_fixture("auto", false, vec![fixture_unsupported(status)]).await;
+        assert!(result.is_err());
+        assert_eq!(payloads.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_review_output_failed_retry_preserves_both_causes() {
+    for response in [fixture_success(r#"{"safe":"true","reason":"只读"}"#), fixture_unsupported(400)] {
+        let (result, payloads) = run_review_output_fixture("auto", false, vec![fixture_unsupported(400), response]).await;
+        let error = result.unwrap_err();
+        assert!(error.contains("Format 请求失败"));
+        assert!(error.contains("Prompt 重试失败"));
+        assert_eq!(payloads.len(), 2);
+    }
+}

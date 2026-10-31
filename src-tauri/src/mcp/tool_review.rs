@@ -15,7 +15,8 @@ use crate::api::assistant_api::get_assistant_field_value;
 use crate::api::genai_client;
 use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::{MCPDatabase, MCPServerTool, NewToolReviewLog, ToolReviewLog};
-use crate::db::system_db::FeatureConfig;
+use crate::db::system_db::{FeatureConfig, SystemDatabase};
+use super::tool_review_output::{capability_key, load_capability, remember_prompt, unsupported_format_error};
 use genai::adapter::AdapterKind;
 use genai::chat::{ChatOptions, ChatResponse, JsonSpec, StopReason};
 use serde::Deserialize;
@@ -82,7 +83,8 @@ const REVIEW_SYSTEM_PROMPT: &str = r#"你是工具调用安全审核员，不是
 - 下载后直接执行、执行无法理解的编码命令、提权或放宽权限、关闭安全防护、修改启动项/计划任务/系统服务/注册表、结束关键进程或耗尽资源。
 - 向外部发送消息、邮件、请求或发布内容，但内容、收件方或目标不受控。
 
-按指定 JSON schema 返回 safe 和 reason，不要 Markdown 或额外文本。
+只返回一个 JSON 对象，包含布尔字段 safe 和非空字符串字段 reason，不允许其他字段，不要 Markdown 或额外文本。
+示例：{"safe":false,"reason":"目标范围不明确，需要人工确认"}
 reason 必须用一句中文指出放行依据或需要人工确认的具体风险/缺失信息，不泄露敏感值，不复述调用内容。"#;
 
 fn review_chat_options(adapter: AdapterKind) -> Result<ChatOptions, String> {
@@ -532,6 +534,66 @@ fn configured_review_model(
     Ok((model_code, provider_id))
 }
 
+async fn execute_review_output(
+    client: &genai::Client,
+    model_code: &str,
+    provider_id: i64,
+    call_id: i64,
+    chat_request: genai::chat::ChatRequest,
+    schema_options: Result<ChatOptions, String>,
+    output_mode: &str,
+    mut use_prompt: bool,
+    fallback_reason: Option<String>,
+    started: Instant,
+) -> Result<(ReviewRecordDraft, bool, Option<String>), String> {
+    let elapsed = || started.elapsed().as_millis() as i64;
+    let prompt_options = ChatOptions::default().with_capture_raw_body(true);
+    let mut first_failure = fallback_reason;
+    loop {
+        let options = if use_prompt { &prompt_options } else { schema_options.as_ref().unwrap() };
+        let response = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(started + Duration::from_secs(REVIEW_TIMEOUT_SECS)),
+            client.exec_chat(model_code, chat_request.clone(), Some(options)),
+        ).await {
+            Ok(response) => response,
+            Err(_) => return Err(match first_failure {
+                Some(first) => format!("Format 请求失败: {first}；Prompt 重试失败: {}", timeout_reason()),
+                None => timeout_reason(),
+            }),
+        };
+        match response {
+            Ok(response) => {
+                let text = review_response_text(&response).map_err(|detail| match &first_failure {
+                    Some(first) => format!("Format 请求失败: {first}；Prompt 重试失败: {detail}"),
+                    None => detail,
+                })?;
+                let mut outcome = outcome_from_model_text(&text, &model_code, provider_id, elapsed());
+                if outcome.verdict == "error" {
+                    return match first_failure {
+                        Some(first) => Err(format!("Format 请求失败: {first}；Prompt 重试失败: {}", outcome.reason)),
+                        None => Ok((outcome, use_prompt, None)),
+                    };
+                }
+                if use_prompt { outcome.reason.push_str("（使用 Prompt JSON 模式）"); }
+                return Ok((outcome, use_prompt, first_failure));
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                if output_mode == "auto" && !use_prompt && unsupported_format_error(&error) {
+                    warn!(call_id, model = %model_code, provider_id, error = %detail, "审核接口不支持 JSON Schema，同模型重试 Prompt JSON");
+                    first_failure = Some(detail);
+                    use_prompt = true;
+                    continue;
+                }
+                return Err(match first_failure {
+                    Some(first) => format!("Format 请求失败: {first}；Prompt 重试失败: {detail}"),
+                    None => detail,
+                });
+            }
+        }
+    }
+}
+
 async fn review_with_configured_model(
     app_handle: &tauri::AppHandle,
     call_id: i64,
@@ -574,13 +636,37 @@ async fn review_with_configured_model(
         &model_detail.provider.api_type,
         Some(&model_detail.model.request_mode),
     );
-    let options = match validate_review_parameters(parameters)
-        .and_then(|_| review_chat_options(adapter))
-    {
-        Ok(options) => options,
-        Err(detail) => return error_outcome(
+    if let Err(detail) = validate_review_parameters(parameters) {
+        return error_outcome(
             &model_code, Some(provider_id), started.elapsed().as_millis() as i64, detail,
-        ),
+        );
+    }
+    let output_mode = config_feature_map.get("conversation_summary")
+        .and_then(|c| c.get("auto_review_output_mode"))
+        .map(|c| c.value.as_str()).unwrap_or("auto");
+    if !matches!(output_mode, "auto" | "schema" | "prompt") {
+        return error_outcome(&model_code, Some(provider_id), started.elapsed().as_millis() as i64,
+            format!("无效的自动审核输出方式: {output_mode}"));
+    }
+    let cache_key = capability_key(&model_detail);
+    let capability = if output_mode == "auto" {
+        match SystemDatabase::new(app_handle).map_err(|e| e.to_string())
+            .and_then(|db| load_capability(&db, &cache_key)) {
+            Ok(value) => value,
+            Err(detail) => return error_outcome(&model_code, Some(provider_id), started.elapsed().as_millis() as i64, detail),
+        }
+    } else { Default::default() };
+    let schema_options = review_chat_options(adapter);
+    let mut use_prompt = output_mode == "prompt" || (output_mode == "auto" && capability.prompt);
+    let mut fallback_reason = None;
+    if !use_prompt {
+        if let Err(detail) = &schema_options {
+            if output_mode == "schema" {
+                return error_outcome(&model_code, Some(provider_id), started.elapsed().as_millis() as i64, detail);
+            }
+            use_prompt = true;
+            fallback_reason = Some(detail.clone());
+        }
     };
 
     let network_proxy = get_network_proxy_from_config(&config_feature_map);
@@ -638,23 +724,22 @@ async fn review_with_configured_model(
     .chat_request;
 
     let elapsed = || started.elapsed().as_millis() as i64;
-    match tokio::time::timeout(
-        Duration::from_secs(REVIEW_TIMEOUT_SECS),
-        client.exec_chat(&model_detail.model.code, chat_request, Some(&options)),
-    )
-    .await
-    {
-        Ok(Ok(response)) => match review_response_text(&response) {
-            Ok(text) => outcome_from_model_text(&text, &model_code, provider_id, elapsed()),
-            Err(detail) => error_outcome(&model_code, Some(provider_id), elapsed(), detail),
+    let request = execute_review_output(&client, &model_code, provider_id, call_id, chat_request,
+        schema_options, output_mode, use_prompt, fallback_reason, started);
+    match request.await {
+        Ok((outcome, used_prompt, first_failure)) => {
+            if output_mode == "auto" && used_prompt && !capability.prompt && outcome.verdict != "error" {
+                let saved = SystemDatabase::new(app_handle).map_err(|e| format!("保存审核输出检测记录失败: {e}"))
+                    .and_then(|db| remember_prompt(&db, &cache_key, capability.generation,
+                        first_failure.as_deref().unwrap_or("当前适配器不支持 JSON Schema")));
+                if let Err(detail) = saved {
+                    return error_outcome(&model_code, Some(provider_id), elapsed(), detail);
+                }
+            }
+            outcome
         },
-        Ok(Err(error)) => error_outcome(
-            &model_code,
-            Some(provider_id),
-            elapsed(),
-            format!("自动审核结构化输出请求失败 (call_id={call_id}, model={model_code}, provider_id={provider_id}): {error}"),
-        ),
-        Err(_) => error_outcome(&model_code, Some(provider_id), elapsed(), timeout_reason()),
+        Err(detail) => error_outcome(&model_code, Some(provider_id), elapsed(),
+            format!("自动审核输出请求失败 (call_id={call_id}, model={model_code}, provider_id={provider_id}): {detail}")),
     }
 }
 
