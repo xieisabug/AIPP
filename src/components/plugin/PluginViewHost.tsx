@@ -17,6 +17,19 @@ interface RenderableView {
     description?: string | null;
 }
 
+class PluginViewBoundary extends React.Component<{ children: React.ReactNode; pluginCode: string; instance: unknown }, { error: string | null }> {
+    state: { error: string | null } = { error: null };
+    static getDerivedStateFromError(error: unknown) {
+        return { error: error instanceof Error ? error.message : String(error) };
+    }
+    componentDidUpdate(previous: Readonly<{ children: React.ReactNode; pluginCode: string; instance: unknown }>) {
+        if (previous.instance !== this.props.instance && this.state.error) this.setState({ error: null });
+    }
+    render() {
+        return this.state.error ? <p role="alert" className="break-words text-sm text-destructive">插件 {this.props.pluginCode} 界面执行失败：{this.state.error}</p> : this.props.children;
+    }
+}
+
 const PluginViewHost: React.FC<PluginViewHostProps> = ({
     pluginList,
     location,
@@ -82,7 +95,7 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                                     <span>{errorText}</span>
                                 </div>
                             ) : (
-                                content
+                                <PluginViewBoundary pluginCode={plugin.code} instance={instance}>{content}</PluginViewBoundary>
                             )}
                         </CardContent>
                     </Card>
