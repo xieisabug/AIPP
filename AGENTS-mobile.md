@@ -19,6 +19,7 @@
 - **启动差异**：移动端启动时 Rust 侧只创建 `chat_ui` 一个窗口（`src-tauri/src/lib.rs` 中移动端分支），桌面端会预创建多个隐藏窗口。
 - **能力配置**：移动端权限在 `src-tauri/capabilities/mobile.json`（与桌面端 `migrated.json` 分离）。修改移动端可用的 Tauri API 时必须更新此文件，且注意 fs scope 不要无限制放开。
 - **Android 原生配置**：`src-tauri/gen/android/app/src/main/AndroidManifest.xml` 当前声明 `INTERNET` 权限，Activity 已配置 `windowSoftInputMode="adjustResize"`；尚无 deep link 和系统分享接收 intent。修改原生权限与入口时需同步检查 Manifest、Tauri capability 和 Android 生命周期行为。
+- **HTTPS 初始化**：reqwest 0.13 的 Android 系统证书校验依赖 `MainActivity.onWebViewCreate` 调用 JNI 初始化，以及 Gradle 引入 Cargo 锁定版本附带的 `rustls-platform-verifier-android` AAR；缺少初始化会使请求线程 panic。更新依赖时须同步检查这条链路及 ProGuard 保留规则。
 
 ## 核心机制与已知坑
 

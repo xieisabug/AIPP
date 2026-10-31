@@ -3813,6 +3813,13 @@ async fn attempt_stream_chat(
             }
             Some(Err(e)) => {
                 let _user_friendly_error = enhanced_error_logging_v2(&e, "Stream Processing").await;
+                // genai's Display omits the transport source (for example a revoked
+                // TLS certificate). Preserve it in the persisted/UI error details.
+                if let genai::Error::WebStream { error, .. } = &e {
+                    return Err(anyhow::anyhow!(
+                        "Stream processing failed: {}; transport: {:?}", e, error
+                    ));
+                }
                 return Err(anyhow::anyhow!("Stream processing failed: {}", e));
             }
             None => {

@@ -660,6 +660,22 @@ fn copy_selection_via_clipboard_fallback() -> Option<String> {
     }
 }
 
+// reqwest 0.13 uses Android's trust store through this verifier. Initialize it
+// before the WebView can dispatch HTTPS commands, including after Activity recreation.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xieisabug_aipp_MainActivity_initCertificateVerifier(
+    mut env: jni::JNIEnv,
+    activity: jni::objects::JObject,
+) {
+    if let Err(error) = rustls_platform_verifier::android::init_with_env(&mut env, activity) {
+        let _ = env.throw_new(
+            "java/lang/IllegalStateException",
+            format!("Android TLS certificate verifier initialization failed: {error}"),
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 初始化 tracing 日志 (RUST_LOG 环境变量可覆盖)
