@@ -4,6 +4,10 @@ use reqwest::Url;
 
 const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 
+fn request_error(error: reqwest::Error) -> String {
+    format!("{:#}", anyhow::Error::new(error.without_url()))
+}
+
 pub(crate) fn validate_url(raw: &str) -> Result<Url, String> {
     let url = Url::parse(raw).map_err(|_| "fetch_url: URL 无效（仅支持 HTTP/HTTPS）".to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -40,7 +44,16 @@ pub(crate) fn decode_document(bytes: &[u8], content_type: &str) -> Result<String
     Ok(text.into_owned())
 }
 
-pub(crate) async fn fetch_document(raw: &str) -> Result<String, String> {
+fn render_document(bytes: &[u8], content_type: &str, result_type: &str) -> Result<String, String> {
+    let text = decode_document(bytes, content_type)?;
+    let mime = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    if result_type == "markdown" && matches!(mime.as_str(), "text/html" | "application/xhtml+xml") {
+        return Ok(super::engines::base::SearchEngineBase::html_to_markdown(&text));
+    }
+    Ok(text)
+}
+
+pub(crate) async fn fetch_document(raw: &str, result_type: &str) -> Result<String, String> {
     let url = validate_url(raw)?;
     let host = url.host_str().unwrap_or_default().to_string();
     let client = reqwest::Client::builder()
@@ -54,9 +67,9 @@ pub(crate) async fn fetch_document(raw: &str) -> Result<String, String> {
             attempt.follow()
         }))
         .timeout(std::time::Duration::from_secs(30))
-        .build().map_err(|e| format!("fetch_url: 创建 HTTP 客户端失败: {}", e.without_url()))?;
+        .build().map_err(|e| format!("fetch_url: 创建 HTTP 客户端失败: {}", request_error(e)))?;
     let response = client.get(url).header("Accept", "text/html,application/xhtml+xml,text/plain,text/markdown,application/json")
-        .send().await.map_err(|e| format!("fetch_url: host={host}; 请求失败: {}", e.without_url()))?;
+        .send().await.map_err(|e| format!("fetch_url: host={host}; 请求失败: {}", request_error(e)))?;
     if !response.status().is_success() {
         return Err(format!("fetch_url: host={host}; HTTP {}", response.status().as_u16()));
     }
@@ -68,13 +81,13 @@ pub(crate) async fn fetch_document(raw: &str) -> Result<String, String> {
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("fetch_url: host={host}; 读取正文失败: {}", e.without_url()))?;
+        let chunk = chunk.map_err(|e| format!("fetch_url: host={host}; 读取正文失败: {}", request_error(e)))?;
         if bytes.len().saturating_add(chunk.len()) > MAX_DOCUMENT_BYTES {
             return Err("fetch_url: 流式响应超过 4 MiB 上限，未返回截断内容".to_string());
         }
         bytes.extend_from_slice(&chunk);
     }
-    decode_document(&bytes, &content_type)
+    render_document(&bytes, &content_type, result_type)
 }
 
 #[cfg(test)]

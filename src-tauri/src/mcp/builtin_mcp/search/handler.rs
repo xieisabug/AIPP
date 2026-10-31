@@ -353,11 +353,7 @@ impl SearchHandler {
         url: &str,
         result_type: &str,
     ) -> Result<String, String> {
-        let html = fetch_url_http_only(url).await?;
-        match result_type {
-            "markdown" => Ok(super::engines::base::SearchEngineBase::html_to_markdown(&html)),
-            _ => Ok(html),
-        }
+        super::mobile_http::fetch_document(url, result_type).await
     }
 
     /// 从数据库加载搜索配置
@@ -494,9 +490,3 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
     Ok(config)
 }
 
-/// 移动端 fetch_url：与桌面 HTTP-first 的第一步一致，失败时不回退浏览器，
-/// 而是返回包含真实原因的错误（需要 JS 渲染的页面在移动端不可抓取）。
-#[cfg(mobile)]
-async fn fetch_url_http_only(url: &str) -> Result<String, String> {
-    super::mobile_http::fetch_document(url).await
-}
