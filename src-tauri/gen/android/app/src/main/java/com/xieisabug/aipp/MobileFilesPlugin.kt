@@ -134,16 +134,7 @@ class MobileFilesPlugin(private val activity: Activity) : Plugin(activity) {
                         var count = 0L
                         resolver.openInputStream(uri)?.use { input ->
                             target.outputStream().use { output ->
-                                val buffer = ByteArray(64 * 1024)
-                                while (true) {
-                                    val n = input.read(buffer)
-                                    if (n < 0) break
-                                    count += n
-                                    require(count <= singleLimit && total + count <= batchLimit) { "document/batch size limit exceeded (20/50 MiB)" }
-                                    check(dir.usableSpace > n + 1024 * 1024) { "insufficient storage: need 1 MiB safety reserve" }
-                                    output.write(buffer, 0, n)
-                                }
-                                output.flush()
+                                count = copyMobileFile(input, output, singleLimit, batchLimit, total) { dir.usableSpace }
                             }
                         } ?: error("ContentResolver returned no readable stream (grant/provider failure)")
                         var thumbnail: String? = null
