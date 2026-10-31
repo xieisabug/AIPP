@@ -15,6 +15,7 @@ pub mod highlight_api;
 pub mod llm_api;
 pub mod mobile_capability;
 pub mod mobile_recovery;
+pub mod mobile_tasks;
 pub mod operation_api;
 pub mod plugin_api;
 pub mod scheduled_task_api;

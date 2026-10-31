@@ -1268,6 +1268,8 @@ pub fn run() {
             crate::api::mobile_capability::get_assistant_execution_capability,
             crate::api::mobile_recovery::get_mobile_recovery_snapshot,
             crate::api::mobile_recovery::get_mobile_draft,
+            crate::api::mobile_tasks::get_mobile_butler_overview,
+            crate::api::mobile_tasks::stop_mobile_feishu_runtime,
             crate::api::mobile_recovery::save_mobile_draft,
             crate::api::plugin_api::validate_mobile_plugin_command,
             // Updater commands

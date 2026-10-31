@@ -7,6 +7,7 @@ const FeatureAssistantConfig = React.lazy(() => import("../components/config/Fea
 const MCPConfig = React.lazy(() => import("../components/config/MCPConfig"));
 const SkillsConfig = React.lazy(() => import("../components/config/SkillsConfig"));
 const PluginCenterConfig = React.lazy(() => import("../components/config/PluginCenterConfig"));
+const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTasksConfig"));
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
@@ -35,6 +36,7 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "mcp-config": MCPConfig,
     "skills-config": SkillsConfig,
     "plugins-config": PluginCenterConfig,
+    "mobile-tasks": MobileTasksConfig,
 };
 
 // 设置页动态加载时的占位，保持黑白灰主色调
@@ -77,7 +79,7 @@ function ConfigWindow() {
                 iconSelected: <MCP className="w-full h-full text-foreground" />,
             },
         ];
-        // Skills / 插件属 M2：移动端先隐藏入口，避免点了才炸（A 类只保留基础可配）
+        if (isMobilePlatform) items.push({ id: "mobile-tasks", name: "本机任务", icon: <Bot className="h-full w-full text-muted-foreground" />, iconSelected: <Bot className="h-full w-full text-foreground" /> });
         if (skillsAvailable) {
             items.push({
                 id: "skills-config",
@@ -101,7 +103,7 @@ function ConfigWindow() {
             iconSelected: <Settings className="w-full h-full text-foreground" />,
         });
         return items;
-    }, [skillsAvailable, pluginsAvailable]);
+    }, [skillsAvailable, pluginsAvailable, isMobilePlatform]);
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
     useEffect(() => {
