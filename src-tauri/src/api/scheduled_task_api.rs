@@ -1,11 +1,11 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, State};
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -148,6 +148,8 @@ pub struct ScheduledTaskRunDTO {
     pub error_message: Option<String>,
     pub started_time: String,
     pub finished_time: Option<String>,
+    /// True only when this process owns the cancellation token for this run.
+    pub local_running: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -173,23 +175,31 @@ const AGENTIC_LOOP_TOTAL_TIMEOUT_SECS: u64 = 3000;
 const SCHEDULED_TASK_LOG_ADDED_EVENT: &str = "scheduled_task_log_added";
 const SCHEDULED_TASK_RUN_CREATED_EVENT: &str = "scheduled_task_run_created";
 const SCHEDULED_TASK_RUN_UPDATED_EVENT: &str = "scheduled_task_run_updated";
-type ScheduledRunCancelRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
+type ScheduledRunCancelRegistry = Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>;
 static SCHEDULED_RUN_CANCEL_REGISTRY: OnceLock<ScheduledRunCancelRegistry> = OnceLock::new();
 
 fn scheduled_run_cancel_registry() -> &'static ScheduledRunCancelRegistry {
-    SCHEDULED_RUN_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+    SCHEDULED_RUN_CANCEL_REGISTRY.get_or_init(|| Arc::new(std::sync::Mutex::new(HashMap::new())))
 }
 
-async fn register_scheduled_run_cancel_token(run_id: &str) -> CancellationToken {
+struct ScheduledRunRegistration { run_id: String, token: CancellationToken }
+
+impl Drop for ScheduledRunRegistration {
+    fn drop(&mut self) {
+        scheduled_run_cancel_registry().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.run_id);
+    }
+}
+
+fn register_scheduled_run_cancel_token(run_id: &str) -> ScheduledRunRegistration {
     let token = CancellationToken::new();
-    let mut registry = scheduled_run_cancel_registry().lock().await;
+    let mut registry = scheduled_run_cancel_registry().lock().unwrap_or_else(|e| e.into_inner());
     registry.insert(run_id.to_string(), token.clone());
-    token
+    ScheduledRunRegistration { run_id: run_id.to_string(), token }
 }
 
 async fn cancel_scheduled_run(run_id: &str) -> bool {
     let token_opt = {
-        let registry = scheduled_run_cancel_registry().lock().await;
+        let registry = scheduled_run_cancel_registry().lock().unwrap_or_else(|e| e.into_inner());
         registry.get(run_id).cloned()
     };
     if let Some(token) = token_opt {
@@ -198,11 +208,6 @@ async fn cancel_scheduled_run(run_id: &str) -> bool {
     } else {
         false
     }
-}
-
-async fn unregister_scheduled_run_cancel_token(run_id: &str) {
-    let mut registry = scheduled_run_cancel_registry().lock().await;
-    registry.remove(run_id);
 }
 
 // ── Agentic Loop Types ──────────────────────────────────────────────────
@@ -1401,6 +1406,7 @@ fn run_to_dto(run: ScheduledTaskRun) -> ScheduledTaskRunDTO {
         error_message: run.error_message,
         started_time: run.started_time.to_rfc3339(),
         finished_time: run.finished_time.map(|v| v.to_rfc3339()),
+        local_running: false,
     }
 }
 
@@ -1450,7 +1456,13 @@ pub async fn list_scheduled_task_runs(
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let limit_value = limit.unwrap_or(50).min(200);
     let runs = db.list_runs_by_task(task_id, limit_value).map_err(|e| e.to_string())?;
-    Ok(ListScheduledTaskRunsResponse { runs: runs.into_iter().map(run_to_dto).collect() })
+    let registry = scheduled_run_cancel_registry().lock().unwrap_or_else(|e| e.into_inner());
+    let runs = runs.into_iter().map(|run| {
+        let mut dto = run_to_dto(run);
+        dto.local_running = registry.contains_key(&dto.run_id);
+        dto
+    }).collect();
+    Ok(ListScheduledTaskRunsResponse { runs })
 }
 
 fn serialize_json_array(arr: &Option<Vec<i32>>) -> Option<String> {
@@ -1594,11 +1606,25 @@ pub async fn run_scheduled_task_now(
     feature_config_state: State<'_, FeatureConfigState>,
     task_id: i64,
 ) -> Result<RunScheduledTaskResult, String> {
+    let scheduler = app_handle.state::<crate::scheduler::SchedulerState>();
+    let _claim = scheduler.claim_scheduled_task(task_id)
+        .ok_or_else(|| format!("定时任务 {task_id} 已在本机执行"))?;
+    run_scheduled_task_now_claimed(&app_handle, &feature_config_state, task_id).await
+}
+
+async fn run_scheduled_task_now_claimed(
+    app_handle: &tauri::AppHandle,
+    feature_config_state: &FeatureConfigState,
+    task_id: i64,
+) -> Result<RunScheduledTaskResult, String> {
     let db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let task = db
         .read_task(task_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "任务不存在".to_string())?;
+    crate::api::mobile_capability::ensure_assistant_execution(
+        app_handle, task.assistant_id, "scheduled_manual_preflight", "not_created",
+    ).await.map_err(|e| format!("task_id={task_id}; {e}"))?;
     let now = Utc::now();
     let next_run_at = if task.schedule_type == "once" {
         None
@@ -1623,9 +1649,8 @@ pub async fn run_scheduled_task_now(
         updated_time: now,
         ..task.clone()
     };
-    db.update_task(&updated).map_err(|e| e.to_string())?;
 
-    match execute_scheduled_task(&app_handle, &feature_config_state, &updated).await {
+    match execute_scheduled_task(app_handle, feature_config_state, &task, &updated).await {
         Ok(result) => Ok(result),
         Err(e) => Ok(RunScheduledTaskResult {
             task_id,
@@ -1670,16 +1695,52 @@ pub async fn stop_scheduled_task_run(
     Ok(true)
 }
 
+fn create_scheduled_run_atomically(
+    conn: &mut rusqlite::Connection,
+    original: &ScheduledTask,
+    updated: &ScheduledTask,
+    run: &ScheduledTaskRun,
+) -> Result<ScheduledTaskRun, String> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("task_id={}; run_id={}; 创建事务失败: {e}", original.id, run.run_id))?;
+    let current: Option<DateTime<Utc>> = tx.query_row(
+        "SELECT updated_time FROM scheduled_task WHERE id=?1", [original.id],
+        |row| crate::utils::db_utils::get_required_datetime_from_row(row, 0, "updated_time"),
+    ).optional().map_err(|e| format!("task_id={}; run_id={}; 读取计划失败: {e}", original.id, run.run_id))?;
+    if current != Some(original.updated_time) {
+        return Err(format!("task_id={}; run_id={}; 任务已变更或删除，请刷新后重试", original.id, run.run_id));
+    }
+    let changed = tx.execute(
+        "UPDATE scheduled_task SET is_enabled=?1, next_run_at=?2, last_run_at=?3, updated_time=?4 WHERE id=?5",
+        rusqlite::params![updated.is_enabled, updated.next_run_at, updated.last_run_at, updated.updated_time, original.id],
+    ).map_err(|e| format!("task_id={}; run_id={}; 更新计划失败: {e}", original.id, run.run_id))?;
+    if changed != 1 {
+        return Err(format!("task_id={}; run_id={}; 任务已变更或删除，请刷新后重试", original.id, run.run_id));
+    }
+    tx.execute(
+        "INSERT INTO scheduled_task_run (task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![run.task_id, run.run_id, run.status, run.notify, run.summary, run.error_message, run.started_time, run.finished_time, run.butler_followup_status],
+    ).map_err(|e| format!("task_id={}; run_id={}; 创建运行记录失败: {e}", original.id, run.run_id))?;
+    let id = tx.last_insert_rowid();
+    tx.commit().map_err(|e| format!("task_id={}; run_id={}; 提交运行记录失败: {e}", original.id, run.run_id))?;
+    Ok(ScheduledTaskRun { id, ..run.clone() })
+}
+
+#[cfg(test)]
+#[path = "scheduled_task_atomic_tests.rs"]
+mod atomic_tests;
+
 pub async fn execute_scheduled_task(
     app_handle: &tauri::AppHandle,
     feature_config_state: &FeatureConfigState,
+    original: &ScheduledTask,
     task: &ScheduledTask,
 ) -> Result<RunScheduledTaskResult, String> {
     let run_id = Uuid::new_v4().to_string();
-    let run_cancel_token = register_scheduled_run_cancel_token(&run_id).await;
+    let mut log_db = ScheduledTaskDatabase::new(app_handle)
+        .map_err(|e| format!("task_id={}; run_id={run_id}; 打开运行记录数据库失败: {e}", task.id))?;
     let run_started_at = Utc::now();
     {
-        let log_db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let running = ScheduledTaskRun {
             id: 0,
             task_id: task.id,
@@ -1696,25 +1757,26 @@ pub async fn execute_scheduled_task(
                 None
             },
         };
-        if let Ok(created_run) = log_db.create_run(&running) {
-            let _ = app_handle.emit(SCHEDULED_TASK_RUN_CREATED_EVENT, run_to_dto(created_run));
-        }
-    }
-    log_task_message(app_handle, task.id, &run_id, "start", "开始执行定时任务");
-    let run_result = execute_scheduled_task_inner(
-        app_handle,
-        feature_config_state,
-        task,
-        &run_id,
-        run_cancel_token,
-    )
-    .await;
+        let created_run = create_scheduled_run_atomically(&mut log_db.conn, original, task, &running)?;
+        let registration = register_scheduled_run_cancel_token(&run_id);
+        let mut dto = run_to_dto(created_run);
+        dto.local_running = true;
+        let _ = app_handle.emit(SCHEDULED_TASK_RUN_CREATED_EVENT, dto);
+        log_task_message(app_handle, task.id, &run_id, "start", "开始执行定时任务");
+        let run_result = match crate::api::mobile_capability::ensure_assistant_execution(
+            app_handle, task.assistant_id, "scheduled_run_preflight", "not_created",
+        ).await {
+            Ok(()) => execute_scheduled_task_inner(
+                app_handle, feature_config_state, task, &run_id, registration.token.clone(),
+            ).await,
+            Err(error) => Err(format!("task_id={}; run_id={run_id}; {error}", task.id)),
+        };
 
-    if let Err(err) = &run_result {
-        update_task_run(app_handle, &run_id, "failed", false, None, Some(err), Some(Utc::now()));
+        if let Err(err) = &run_result {
+            update_task_run(app_handle, &run_id, "failed", false, None, Some(err), Some(Utc::now()));
+        }
+        run_result
     }
-    unregister_scheduled_run_cancel_token(&run_id).await;
-    run_result
 }
 
 async fn execute_scheduled_task_inner(
