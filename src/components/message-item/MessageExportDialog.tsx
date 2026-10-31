@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import IconButton from "../IconButton";
 import { conversationExportService } from "@/services/conversationExportService";
+import { usePlatform } from "@/hooks/use-platform";
 import { Loader2, FileText, FileImage, File, FileType, Download } from "lucide-react";
 
 interface MessageExportDialogProps {
@@ -24,6 +25,7 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
     onOpenChange,
 }) => {
     const [open, setOpen] = useState(false);
+    const platform = usePlatform();
     const [exporting, setExporting] = useState<string | null>(null);
 
     const handleOpenChange = useCallback(
@@ -137,7 +139,7 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
                             ) : (
                                 <File className="h-4 w-4" />
                             )}
-                            <span className="text-xs">PDF</span>
+                            <span className="text-xs">{platform === "android" ? "打印 / PDF" : "PDF"}</span>
                         </Button>
 
                         <Button

@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import IconButton from "../IconButton";
 import { conversationExportService } from "@/services/conversationExportService";
+import { usePlatform } from "@/hooks/use-platform";
 import type { ConversationExportOptions } from "@/utils/exportFormatters";
 import type { ExportData } from "@/utils/exportFormatters";
 import { Loader2, FileText, FileImage, File, FileType, Download } from "lucide-react";
@@ -35,6 +36,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
     onExternalOpenChange,
 }) => {
     const [internalOpen, setInternalOpen] = useState(false);
+    const platform = usePlatform();
     const open = externalOpen !== undefined ? externalOpen : internalOpen;
     const setOpen = onExternalOpenChange || setInternalOpen;
     const [loading, setLoading] = useState(false);
@@ -274,7 +276,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                     ) : (
                                         <File className="h-4 w-4" />
                                     )}
-                                    <span className="text-xs">PDF</span>
+                                    <span className="text-xs">{platform === "android" ? "打印 / PDF" : "PDF"}</span>
                                 </Button>
 
                                 <Button
