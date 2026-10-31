@@ -3,6 +3,9 @@
 pub mod builtin_mcp;
 pub mod detection;
 pub mod execution_api;
+pub(crate) mod http_transport;
+#[cfg(test)]
+mod http_transport_tests;
 pub mod tool_review;
 pub mod tool_review_output;
 pub mod prompt;

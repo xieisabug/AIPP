@@ -25,8 +25,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rmcp::{
     model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation},
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
-        StreamableHttpClientTransport, TokioChildProcess,
+        ConfigureCommandExt, TokioChildProcess,
     },
     ServiceExt,
 };
@@ -3283,8 +3282,6 @@ pub async fn execute_tool_by_transport(
         }
     }
 }
-// Reuse shared MCP header parsing utilities
-use crate::mcp::util::{parse_server_headers, sanitize_headers_for_log};
 /// 通过 stdio 传输执行工具（外部进程）。
 /// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
 #[instrument(skip(_app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
@@ -3502,7 +3499,6 @@ async fn execute_http_tool(
     cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
-    let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for HTTP transport"))?;
 
     // 获取代理配置
     let network_proxy = if server.proxy_enabled {
@@ -3512,29 +3508,8 @@ async fn execute_http_tool(
         None
     };
 
-    // 解析自定义头，仅支持将 Authorization 传入 auth_header（其余头部未来可通过自定义 client 实现）
-    let (auth_header, _all) = parse_server_headers(server);
-    let mut config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-    if let Some(auth) = auth_header.clone() {
-        config = config.auth_header(auth);
-    }
-    // 使用新版 rmcp 提供的便捷方法（reqwest feature 已启用）
     let transport = {
-        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-        let (_auth_header, all_headers) = parse_server_headers(server);
-        let mut header_map = HeaderMap::new();
-        if let Some(hdrs) = all_headers.as_ref() {
-            let to_log = sanitize_headers_for_log(hdrs);
-            info!(server_id = server.id, headers = ?to_log, "Using HTTP headers");
-            for (k, v) in hdrs.iter() {
-                if let (Ok(name), Ok(value)) =
-                    (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                {
-                    header_map.insert(name, value);
-                }
-            }
-        }
-        let mut client_builder = reqwest::Client::builder().default_headers(header_map);
+        let mut client_builder = reqwest::Client::builder();
 
         // 配置代理
         if let Some(ref proxy_url) = network_proxy {
@@ -3551,8 +3526,8 @@ async fn execute_http_tool(
             }
         }
 
-        let client = client_builder.build().context("Failed to build reqwest client for HTTP")?;
-        StreamableHttpClientTransport::with_client(client, config)
+        crate::mcp::http_transport::create_http_transport(server, client_builder)
+            .map_err(anyhow::Error::msg)?
     };
     let client_info = ClientInfo {
         meta: None,
