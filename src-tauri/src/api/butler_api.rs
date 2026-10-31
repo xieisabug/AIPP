@@ -2686,7 +2686,6 @@ pub(crate) async fn spawn_butler_task_with_window(
 ) -> Result<SpawnButlerTaskResponse, String> {
     ensure_butler_enabled(app_handle).await?;
 
-    let _ = ensure_butler_system_assistant(app_handle).await?;
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
     let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
@@ -2715,6 +2714,12 @@ pub(crate) async fn spawn_butler_task_with_window(
     if goal.is_empty() {
         return Err("任务目标不能为空".to_string());
     }
+
+    crate::api::mobile_capability::ensure_assistant_execution(
+        app_handle, executor_assistant.id, "butler_dispatch_preflight",
+        &request.butler_conversation_id.to_string(),
+    ).await?;
+    let _ = ensure_butler_system_assistant(app_handle).await?;
 
     let created_task = conversation_repo
         .create(&build_butler_conversation(
