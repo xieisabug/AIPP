@@ -3166,6 +3166,13 @@ pub async fn execute_tool_by_transport(
     cancel_token: Option<CancellationToken>,
 ) -> std::result::Result<String, String> {
     // 如果没有提供 cancel_token，创建一个永远不会取消的令牌
+    if cfg!(mobile) {
+        if let Some(issue) = crate::api::mobile_capability::tool_issue(
+            &server.transport_type, server.command.as_deref(), Some(tool_name),
+        ) {
+            return Err(issue.error("tool_dispatch", &format!("server_id={}; tool={}; conversation_id={:?}", server.id, tool_name, conversation_id)));
+        }
+    }
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
 
     match server.transport_type.as_str() {

@@ -1180,7 +1180,7 @@ impl QueuedConversationMessageRepository {
         let mut stmt = self.conn.prepare(
             "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
              FROM queued_conversation_message
-             WHERE conversation_id = ?1 AND status = 'queued'
+             WHERE conversation_id = ?1 AND status IN ('queued', 'paused')
              ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], Self::queued_message_from_row)?;
@@ -1192,8 +1192,8 @@ impl QueuedConversationMessageRepository {
         self.with_serialized_write(|conn| {
             let changed = conn.execute(
                 "UPDATE queued_conversation_message
-                 SET queue_kind = 'interrupt', updated_time = CURRENT_TIMESTAMP
-                 WHERE id = ?1 AND status = 'queued'",
+                 SET queue_kind = 'interrupt', status = 'queued', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status IN ('queued', 'paused')",
                 params![id],
             )?;
             if changed == 0 {
@@ -1260,12 +1260,20 @@ impl QueuedConversationMessageRepository {
 
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn reset_dispatch(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.set_dispatch_status(id, "queued")
+    }
+
+    pub fn pause_dispatch(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.set_dispatch_status(id, "paused")
+    }
+
+    fn set_dispatch_status(&self, id: i64, status: &str) -> Result<Option<QueuedConversationMessage>> {
         self.with_serialized_write(|conn| {
             conn.execute(
                 "UPDATE queued_conversation_message
-                 SET status = 'queued', updated_time = CURRENT_TIMESTAMP
+                 SET status = ?2, updated_time = CURRENT_TIMESTAMP
                  WHERE id = ?1",
-                params![id],
+                params![id, status],
             )?;
             conn.query_row(
                 "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time

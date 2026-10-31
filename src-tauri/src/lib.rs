@@ -1265,6 +1265,7 @@ pub fn run() {
             set_autostart,
             // Platform detection command
             get_platform,
+            crate::api::mobile_capability::get_assistant_execution_capability,
             // Updater commands
             check_update,
             check_update_with_proxy,

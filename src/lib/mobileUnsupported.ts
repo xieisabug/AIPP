@@ -112,11 +112,20 @@ export function isMobileExecutableMcpServer(server: {
     command?: string | null
     is_builtin?: boolean | null
 }): boolean {
-    if (isAippBuiltinCommand(server.command) || server.is_builtin) {
-        return true
-    }
-    const transport = (server.transport_type || "").toLowerCase()
-    return transport === "http" || transport === "sse"
+    const transport = server.transport_type || ""
+    if (transport === "http" || transport === "sse") return true
+    return (transport === "stdio" || transport === "builtin") &&
+        MOBILE_BUILTIN_COMMANDS.has(server.command?.trim() ?? "")
+}
+
+const MOBILE_BUILTIN_COMMANDS: ReadonlySet<string> = new Set([
+    "aipp:search", "aipp:operation", "aipp:artifact", "aipp:dynamic_mcp",
+    "aipp:ui_interaction", "aipp:agent", "aipp:superadmin",
+])
+
+export interface AssistantExecutionCapability {
+    available: boolean
+    issues: Array<{ code: string; capability: string; reason: string }>
 }
 
 /** 移动端 MCP 不可执行标记文案（侧栏列表与窄屏下拉共用）。 */
@@ -148,7 +157,8 @@ export function isMobileExecutableAssistantType(assistantType: number | null | u
  */
 const MOBILE_UNEXECUTABLE_BUILTIN_TOOLS: Readonly<Record<string, ReadonlySet<string>>> = {
     "aipp:search": new Set(["search_web"]),
-    "aipp:operation": new Set(["execute_bash"]),
+    "aipp:operation": new Set(["execute_bash", "get_bash_output", "kill_bash"]),
+    "aipp:artifact": new Set(["capture_artifact_screenshot"]),
 }
 
 export function isMobileUnexecutableBuiltinTool(

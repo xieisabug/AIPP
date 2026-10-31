@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { throttle } from "lodash";
@@ -92,6 +92,13 @@ export function useConversationOperations({
     selectedAgentMode = "",
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
     const isMobilePlatform = useIsMobilePlatform();
+    const latestInput = useRef({ conversationId: conversation?.id, fileInfoList });
+    latestInput.current = { conversationId: conversation?.id, fileInfoList };
+    const clearAcceptedMobileInput = () => {
+        setInputText(current => current === inputText ? "" : current);
+        if (latestInput.current.conversationId === conversation?.id &&
+            latestInput.current.fileInfoList === fileInfoList) clearFileInfoList();
+    };
 
     // 对话标题管理相关状态
     const [titleEditDialogIsOpen, setTitleEditDialogIsOpen] = useState<boolean>(false);
@@ -246,7 +253,7 @@ export function useConversationOperations({
     }, []);
 
     // 发送消息的主要处理函数，使用节流防止频繁点击
-    const handleSend = throttle(() => {
+    const handleSend = throttle(async () => {
         if (aiIsResponsing) {
             if (inputText.trim() !== "" && conversation?.id) {
                 let assistantId = conversation.assistant_id ?? selectedAssistant;
@@ -277,8 +284,8 @@ export function useConversationOperations({
                     queueKind: busySendBehavior === "interrupt" ? "interrupt" : "normal",
                 })
                     .then(() => {
-                        setInputText("");
-                        clearFileInfoList();
+                        if (isMobilePlatform) clearAcceptedMobileInput();
+                        else { setInputText(""); clearFileInfoList(); }
                     })
                     .catch((error) => {
                         console.error("Queue message error:", error);
@@ -352,6 +359,22 @@ export function useConversationOperations({
                 return;
             }
             const isPluginAssistant = assistantType !== undefined && assistantType !== 0 && assistantType !== 4;
+            if (isMobilePlatform) {
+                try {
+                    const capability = await invoke<import("../lib/mobileUnsupported").AssistantExecutionCapability>(
+                        "get_assistant_execution_capability", { assistantId: parsedAssistantId },
+                    );
+                    if (!capability.available) {
+                        setAiIsResponsing(false);
+                        toast.error(capability.issues.map((issue) => `${issue.code}: ${issue.reason}`).join("\n"));
+                        return;
+                    }
+                } catch (error) {
+                    setAiIsResponsing(false);
+                    toast.error(`移动执行能力检查失败（assistant_id=${parsedAssistantId}）: ${String(error)}`);
+                    return;
+                }
+            }
             
             console.log("[SEND DEBUG] Assistant info:", {
                 parsedAssistantId,
@@ -442,7 +465,7 @@ export function useConversationOperations({
                         agentOverrideConfig.permission_mode = selectedAgentMode;
                     }
                 }
-                invoke<AskAiResponse>("ask_ai", {
+                await invoke<AskAiResponse>("ask_ai", {
                     request: {
                         prompt: finalPrompt,
                         conversation_id: conversationId,
@@ -466,6 +489,8 @@ export function useConversationOperations({
                             toast.error(`${assistantData?.name ?? "Agent"} 运行失败`, {
                                 description: res.error_message,
                             });
+                        } else if (isMobilePlatform) {
+                            clearAcceptedMobileInput();
                         }
                     })
                     .catch((error) => {
@@ -479,8 +504,10 @@ export function useConversationOperations({
                     });
             }
 
-            setInputText("");
-            clearFileInfoList();
+            if (!isMobilePlatform) {
+                setInputText("");
+                clearFileInfoList();
+            }
         }
     }, 200);
 

@@ -174,6 +174,9 @@ pub async fn collect_mcp_info_for_assistant(
     mcp_override_config: Option<&crate::api::ai::types::McpOverrideConfig>,
     enabled_servers_filter: Option<&Vec<String>>, // 可选过滤：服务器名称或ID（字符串）
 ) -> Result<MCPInfoForAssistant, AppError> {
+    crate::api::mobile_capability::ensure_assistant_execution(
+        app_handle, assistant_id, "collect_tools_preflight", "unavailable_at_tool_collection",
+    ).await.map_err(AppError::UnknownError)?;
     let dynamic_loading_enabled =
         is_dynamic_mcp_loading_enabled_for_assistant(app_handle, assistant_id).await;
     let use_native_toolcall = match crate::api::assistant_api::get_assistant_field_value(
@@ -289,6 +292,21 @@ pub async fn collect_mcp_info_for_assistant(
         all_servers.into_iter().filter(|s| s.is_enabled).collect()
     };
 
+    if cfg!(mobile) && !dynamic_loading_enabled {
+        let db = MCPDatabase::new(app_handle).map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        for configured in &enabled_servers {
+            let server = db.get_mcp_server(configured.id).map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            let context = format!("assistant_id={assistant_id}; server_id={}", server.id);
+            if let Some(issue) = crate::api::mobile_capability::tool_issue(&server.transport_type, server.command.as_deref(), None) {
+                return Err(AppError::UnknownError(issue.error("selected_tools_preflight", &context)));
+            }
+            for tool in configured.tools.iter().filter(|tool| tool.is_enabled) {
+                if let Some(issue) = crate::api::mobile_capability::tool_issue(&server.transport_type, server.command.as_deref(), Some(&tool.name)) {
+                    return Err(AppError::UnknownError(issue.error("selected_tools_preflight", &format!("{context}; tool={}", tool.name))));
+                }
+            }
+        }
+    }
     debug!(
         enabled_server_count = enabled_servers.len(),
         native_toolcall = final_use_native_toolcall,

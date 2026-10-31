@@ -704,6 +704,9 @@ pub async fn enqueue_conversation_message(
             .ok_or_else(|| AppError::DatabaseError("对话未关联助手".to_string()))?
     };
     let mut queued_request = request;
+    crate::api::mobile_capability::ensure_assistant_execution(
+        &app_handle, assistant_id, "enqueue_preflight", &conversation_id.to_string(),
+    ).await.map_err(AppError::UnknownError)?;
     queued_request.conversation_id = conversation_id.to_string();
     queued_request.assistant_id = assistant_id;
     let request_json = serde_json::to_string(&queued_request)
@@ -784,6 +787,19 @@ fn dispatch_queued_message(
                         warn!(queued_id, error = %error, "failed to get queued message repo after dispatch");
                     }
                 }
+            }
+            Err(error) if cfg!(mobile) => {
+                let paused = db.queued_message_repo().and_then(|repo| Ok(repo.pause_dispatch(queued_id)?));
+                let detail = match paused {
+                    Ok(Some(row)) => {
+                        emit_queued_message_payload(&app_handle, "queued_message_add", &row);
+                        "原输入已保留，自动派发已暂停；修正后可手动立即发送。".to_string()
+                    }
+                    Ok(None) => "队列记录已不存在，未自动重发。".to_string(),
+                    Err(persist_error) => format!("暂停队列状态写入失败: {persist_error}"),
+                };
+                report_pre_request_error_in_conversation(&app_handle, queued.conversation_id,
+                    &format!("stage=queued_dispatch; queue_id={queued_id}; conversation_id={}; assistant_id={}; {error}; {detail}", queued.conversation_id, queued.assistant_id)).await;
             }
             Err(error) => match db.queued_message_repo() {
                 Ok(repo) => match repo.reset_dispatch(queued_id) {
@@ -1138,6 +1154,9 @@ pub async fn ask_ai(
     // 处理 @assistant_name 提取和消息清理
     let (actual_assistant_id, cleaned_prompt) =
         extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?;
+    crate::api::mobile_capability::ensure_assistant_execution(
+        &app_handle, actual_assistant_id, "send_preflight", &request.conversation_id,
+    ).await.map_err(AppError::UnknownError)?;
     let slash_parse_result = parse_slash_prompt(&app_handle, &cleaned_prompt).await?;
 
     debug!(?actual_assistant_id, ?cleaned_prompt, "assistant extraction result");
@@ -1182,6 +1201,10 @@ pub async fn ask_ai(
         let attachment_ids = attachments.iter().filter_map(|value| value.as_i64()).collect();
         processed_request.attachment_list = Some(attachment_ids);
     }
+
+    crate::api::mobile_capability::ensure_assistant_execution(
+        &app_handle, processed_request.assistant_id, "after_send_hook", &processed_request.conversation_id,
+    ).await.map_err(AppError::UnknownError)?;
 
     let template_engine = build_template_engine(&app_handle)
         .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
@@ -3261,14 +3284,11 @@ pub async fn regenerate_ai(
     let messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
 
     // 重新生成开始时，优先让被点击的消息闪亮（可被后续 streaming 覆盖）
-    if message.message_type == "user" {
-        activity_manager.set_user_pending(&app_handle, conversation_id, message_id).await;
-    } else {
-        activity_manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await;
-    }
-
-    message_token_manager.reset_cancel_token(conversation_id).await;
-
+    let execution_assistant_id = conversation.assistant_id
+        .ok_or_else(|| AppError::UnknownError(format!("regenerate_preflight: conversation_id={conversation_id}; message_id={message_id}; 对话未关联助手")))?;
+    crate::api::mobile_capability::ensure_assistant_execution(
+        &app_handle, execution_assistant_id, "regenerate_preflight", &conversation_id.to_string(),
+    ).await.map_err(AppError::UnknownError)?;
     // 根据消息类型决定处理逻辑
     let (filtered_messages, _parent_message_id) = if message.message_type == "user" {
         // 用户消息重发：包含当前用户消息和之前的所有消息，新生成的assistant消息没有parent（新一轮对话）
@@ -3345,6 +3365,14 @@ pub async fn regenerate_ai(
     let model_detail = llm_db
         .get_llm_model_detail(provider_id, model_code)
         .context("Failed to get LLM model detail")?;
+
+    if message.message_type == "user" {
+        activity_manager.set_user_pending(&app_handle, conversation_id, message_id).await;
+    } else {
+        activity_manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await;
+    }
+
+    message_token_manager.reset_cancel_token(conversation_id).await;
 
     let window_clone = window.clone(); // 在移动之前克隆
     let app_handle_clone = app_handle.clone(); // 添加这行
@@ -3509,18 +3537,8 @@ pub async fn regenerate_ai(
 
         let tool_call_strategy = select_tool_call_strategy(has_available_tools);
         let tool_config = if has_available_tools {
-            if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
-                &app_handle_clone,
-                assistant_id,
-                None,
-                None,
-            )
-            .await
-            {
-                build_tool_config(&app_handle_clone, &mcp_info, true, Some(conversation_id))
-            } else {
-                None
-            }
+            // Reuse the validated snapshot; a second failed lookup must not silently remove tools.
+            build_tool_config(&app_handle_clone, &mcp_info, true, Some(conversation_id))
         } else {
             None
         };

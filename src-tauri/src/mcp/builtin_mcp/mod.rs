@@ -1055,6 +1055,12 @@ pub async fn execute_aipp_builtin_tool(
 ) -> Result<String, String> {
     use search::types::{SearchRequest, SearchResponse, SearchResultType};
 
+    if cfg!(mobile) {
+        if let Some(issue) = crate::api::mobile_capability::tool_issue("builtin", Some(&server_command), Some(&tool_name)) {
+            return Err(issue.error("builtin_dispatch", &format!("tool={}; conversation_id={:?}", tool_name, conversation_id)));
+        }
+    }
+
     let args = parse_builtin_parameters(&parameters)?;
 
     let cmd_id = builtin_command_id(&server_command).ok_or("Not a builtin command")?;

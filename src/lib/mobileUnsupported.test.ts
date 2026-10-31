@@ -9,6 +9,12 @@ import {
 } from "./mobileUnsupported";
 
 describe("mobileUnsupported helpers", () => {
+    it("should reject forged builtin metadata when the command needs an external process", () => {
+        expect(isMobileExecutableMcpServer({ transport_type: "stdio", command: "npx server", is_builtin: true })).toBe(false);
+        expect(isMobileExecutableMcpServer({ transport_type: "stdio", command: "aipp:unknown", is_builtin: true })).toBe(false);
+        expect(isMobileExecutableMcpServer({ transport_type: "builtin", command: "aipp:search" })).toBe(true);
+        expect(isMobileExecutableMcpServer({ transport_type: "stdio", command: "aipp:search --execute" })).toBe(false);
+    });
     it("recognizes aipp:* builtin commands even when registered as stdio", () => {
         expect(isAippBuiltinCommand("aipp:search")).toBe(true);
         expect(isAippBuiltinCommand(" aipp:operation ")).toBe(true);
