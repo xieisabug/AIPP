@@ -1269,6 +1269,7 @@ pub fn run() {
             crate::api::mobile_recovery::get_mobile_recovery_snapshot,
             crate::api::mobile_recovery::get_mobile_draft,
             crate::api::mobile_recovery::save_mobile_draft,
+            crate::api::plugin_api::validate_mobile_plugin_command,
             // Updater commands
             check_update,
             check_update_with_proxy,

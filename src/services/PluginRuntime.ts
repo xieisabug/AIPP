@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { createPluginInvoke } from "./mobilePluginInvoke";
 import { emit, listen } from "@tauri-apps/api/event";
 import { appDataDir } from "@tauri-apps/api/path";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -558,6 +559,8 @@ class PluginRuntime {
 
     private createSystemApi(plugin: BackendPluginItem, normalizedBaseDir: string): SystemApi {
         const pluginId = plugin.pluginId;
+        // All SDK commands (including the generic bridge) share the same mobile contract.
+        const pluginInvoke = createPluginInvoke(pluginId);
         const pluginCode = plugin.code;
         const normalizePositiveId = (value: number | string, fieldName: string): number => {
             const normalizedValue = Number(value);
@@ -570,12 +573,12 @@ class PluginRuntime {
         const comfyuiApi = {
             testConnection: async (request: PluginComfyUiConnectionRequest) => {
                 this.assertPluginPermission(plugin, "network.comfyui");
-                await invoke("plugin_comfyui_test_connection", { pluginId, request });
+                await pluginInvoke("plugin_comfyui_test_connection", { pluginId, request });
             },
             generateAndAttach: async (request: PluginComfyUiGenerateRequest) => {
                 this.assertPluginPermission(plugin, "network.comfyui");
                 this.assertPluginPermission(plugin, "conversation.write");
-                return invoke<PluginComfyUiGenerateResult>("plugin_comfyui_generate_and_attach", { pluginId, request });
+                return pluginInvoke<PluginComfyUiGenerateResult>("plugin_comfyui_generate_and_attach", { pluginId, request });
             },
         };
 
@@ -596,15 +599,15 @@ class PluginRuntime {
             executeTask: async (request: PluginImageTaskRequest) => {
                 this.assertPluginPermission(plugin, "network.image-generation");
                 this.assertPluginPermission(plugin, "conversation.write");
-                return invoke<PluginImageTaskResult>("plugin_execute_image_task", { pluginId, request });
+                return pluginInvoke<PluginImageTaskResult>("plugin_execute_image_task", { pluginId, request });
             },
         };
 
         return {
             pluginId,
             pluginCode,
-            listAssistants: async () => invoke<AssistantSystemItem[]>("get_assistants"),
-            listModels: async () => invoke<ModelSystemItem[]>("get_models_for_select"),
+            listAssistants: async () => pluginInvoke<AssistantSystemItem[]>("get_assistants"),
+            listModels: async () => pluginInvoke<ModelSystemItem[]>("get_models_for_select"),
             getData: async (key: string, sessionId = "global") => {
                 const dataMap = await this.getPluginDataMap(pluginId, sessionId);
                 return dataMap.get(key) ?? null;
@@ -622,7 +625,7 @@ class PluginRuntime {
                 return result;
             },
             setData: async (key: string, value: string | null, sessionId = "global") => {
-                await invoke("set_plugin_data", {
+                await pluginInvoke("set_plugin_data", {
                     pluginId,
                     sessionId,
                     key,
@@ -634,7 +637,7 @@ class PluginRuntime {
                 if (!Number.isFinite(assistantId) || assistantId <= 0) {
                     throw new Error("assistantId must be a positive number");
                 }
-                return invoke<TextRunResponse>("artifact_ai_ask", {
+                return pluginInvoke<TextRunResponse>("artifact_ai_ask", {
                     request: {
                         assistant_id: assistantId,
                         prompt: options.prompt,
@@ -648,7 +651,7 @@ class PluginRuntime {
                 if (!modelId) {
                     throw new Error("modelId is required");
                 }
-                return invoke<TextRunResponse>("artifact_model_ask", {
+                return pluginInvoke<TextRunResponse>("artifact_model_ask", {
                     request: {
                         model_id: modelId,
                         prompt: options.prompt,
@@ -711,7 +714,7 @@ class PluginRuntime {
                 query: async (request: PluginDataQueryRequest) => {
                     const database = this.normalizeDataDatabaseName(request.database);
                     this.assertPluginPermission(plugin, `data.read.${database}`);
-                    return invoke<PluginSqlQueryResult>("plugin_data_query", {
+                    return pluginInvoke<PluginSqlQueryResult>("plugin_data_query", {
                         pluginId,
                         request: {
                             ...request,
@@ -722,7 +725,7 @@ class PluginRuntime {
                 schema: async (databaseName: string) => {
                     const database = this.normalizeDataDatabaseName(databaseName);
                     this.assertPluginPermission(plugin, `data.read.${database}`);
-                    return invoke<PluginDatabaseSchema>("plugin_data_schema", {
+                    return pluginInvoke<PluginDatabaseSchema>("plugin_data_schema", {
                         pluginId,
                         database,
                     });
@@ -731,21 +734,21 @@ class PluginRuntime {
             storage: {
                 query: async (request: PluginSqlQueryRequest) => {
                     this.assertPluginPermission(plugin, "plugin.storage");
-                    return invoke<PluginSqlQueryResult>("plugin_storage_query", {
+                    return pluginInvoke<PluginSqlQueryResult>("plugin_storage_query", {
                         pluginId,
                         request,
                     });
                 },
                 execute: async (request: PluginSqlExecuteRequest) => {
                     this.assertPluginPermission(plugin, "plugin.storage");
-                    return invoke<PluginSqlExecuteResult>("plugin_storage_execute", {
+                    return pluginInvoke<PluginSqlExecuteResult>("plugin_storage_execute", {
                         pluginId,
                         request,
                     });
                 },
                 schema: async () => {
                     this.assertPluginPermission(plugin, "plugin.storage");
-                    return invoke<PluginDatabaseSchema>("plugin_storage_schema", {
+                    return pluginInvoke<PluginDatabaseSchema>("plugin_storage_schema", {
                         pluginId,
                     });
                 },
@@ -753,7 +756,7 @@ class PluginRuntime {
             conversations: {
                 getWithMessages: async (conversationId: number | string) => {
                     this.assertPluginPermission(plugin, "conversation.read");
-                    return invoke<ConversationWithMessages>("plugin_get_conversation_with_messages", {
+                    return pluginInvoke<ConversationWithMessages>("plugin_get_conversation_with_messages", {
                         pluginId,
                         conversationId: normalizePositiveId(conversationId, "conversationId"),
                     });
@@ -762,7 +765,7 @@ class PluginRuntime {
             assistants: {
                 getDetail: async (assistantId: number | string) => {
                     this.assertPluginPermission(plugin, "assistant.read");
-                    return invoke<AssistantDetail>("plugin_get_assistant_detail", {
+                    return pluginInvoke<AssistantDetail>("plugin_get_assistant_detail", {
                         pluginId,
                         assistantId: normalizePositiveId(assistantId, "assistantId"),
                     });
@@ -773,7 +776,7 @@ class PluginRuntime {
                     if (!prompt) {
                         throw new Error("prompt is required");
                     }
-                    return invoke<AssistantPrompt>("plugin_update_assistant_prompt", {
+                    return pluginInvoke<AssistantPrompt>("plugin_update_assistant_prompt", {
                         pluginId,
                         request: {
                             assistantId: normalizePositiveId(request.assistantId, "assistantId"),
@@ -788,7 +791,7 @@ class PluginRuntime {
                 get: async (assistantId: number | string, key: string) => {
                     this.assertPluginPermission(plugin, "assistant.config");
                     const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
-                    const configs = await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
+                    const configs = await pluginInvoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
                         pluginId,
                         assistantId: normalizedAssistantId,
                     });
@@ -797,7 +800,7 @@ class PluginRuntime {
                 getAll: async (assistantId: number | string) => {
                     this.assertPluginPermission(plugin, "assistant.config");
                     const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
-                    const configs = await invoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
+                    const configs = await pluginInvoke<PluginAssistantConfigItem[]>("get_plugin_assistant_configs", {
                         pluginId,
                         assistantId: normalizedAssistantId,
                     });
@@ -810,7 +813,7 @@ class PluginRuntime {
                 set: async (assistantId: number | string, key: string, value: string | null) => {
                     this.assertPluginPermission(plugin, "assistant.config");
                     const normalizedAssistantId = normalizePositiveId(assistantId, "assistantId");
-                    await invoke("set_plugin_assistant_config", {
+                    await pluginInvoke("set_plugin_assistant_config", {
                         pluginId,
                         assistantId: normalizedAssistantId,
                         key,
@@ -821,21 +824,21 @@ class PluginRuntime {
             actions: {
                 createConversation: async (request: PluginCreateConversationRequest) => {
                     this.assertPluginPermission(plugin, "conversation.write");
-                    return invoke<number>("plugin_create_conversation", {
+                    return pluginInvoke<number>("plugin_create_conversation", {
                         pluginId,
                         request,
                     });
                 },
                 appendMessage: async (request: PluginAppendMessageRequest) => {
                     this.assertPluginPermission(plugin, "conversation.write");
-                    return invoke<Message>("plugin_append_message", {
+                    return pluginInvoke<Message>("plugin_append_message", {
                         pluginId,
                         request,
                     });
                 },
                 updateMessageMetadata: async (request: PluginUpdateMessageMetadataRequest) => {
                     this.assertPluginPermission(plugin, "conversation.write");
-                    return invoke<Message>("plugin_update_message_metadata", {
+                    return pluginInvoke<Message>("plugin_update_message_metadata", {
                         pluginId,
                         request,
                     });
@@ -890,7 +893,7 @@ class PluginRuntime {
             invoke: async <T = unknown>(
                 command: string,
                 args?: Record<string, unknown>
-            ): Promise<T> => invoke<T>(command, args ?? {}),
+            ): Promise<T> => pluginInvoke<T>(command, args ?? {}),
         };
     }
 

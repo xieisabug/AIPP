@@ -50,6 +50,8 @@ const IGNORED_PLUGIN_DISCOVERY_SEGMENTS: &[&str] = &[
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginListItem {
+    #[serde(default)]
+    pub mobile_unavailable_reason: Option<String>,
     pub plugin_id: i64,
     pub name: String,
     pub version: String,
@@ -877,6 +879,7 @@ fn assert_plugin_permission(
     plugin_id: i64,
     permission: &str,
 ) -> Result<ResolvedPluginManifest, String> {
+    ensure_mobile_plugin(app_handle, plugin_id)?;
     let db = PluginDatabase::new(app_handle).map_err(|e| e.to_string())?;
     sync_registry(&db, app_handle)?;
     let plugin = db
@@ -2249,13 +2252,13 @@ fn ensure_default_plugins(
         }
         if let Some(plugin) = by_code.get(code) {
             if db.get_plugin_status(plugin.plugin_id).map_err(|e| e.to_string())?.is_none() {
-                db.upsert_plugin_status(plugin.plugin_id, true, None).map_err(|e| e.to_string())?;
+                db.upsert_plugin_status(plugin.plugin_id, !cfg!(mobile), None).map_err(|e| e.to_string())?;
             }
         } else {
             let plugin_id = db
                 .add_plugin(name, version, code, Some("AIPP builtin plugin"), Some("AIPP"))
                 .map_err(|e| e.to_string())?;
-            db.upsert_plugin_status(plugin_id, true, None).map_err(|e| e.to_string())?;
+            db.upsert_plugin_status(plugin_id, !cfg!(mobile), None).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -2291,7 +2294,7 @@ fn sync_discovered_plugins(
         };
 
         if db.get_plugin_status(plugin_id).map_err(|e| e.to_string())?.is_none() {
-            db.upsert_plugin_status(plugin_id, true, None).map_err(|e| e.to_string())?;
+            db.upsert_plugin_status(plugin_id, !cfg!(mobile), None).map_err(|e| e.to_string())?;
         }
 
         let plugin_type_value = plugin_types_to_json(&discovered_plugin.plugin_type)?;
@@ -2340,6 +2343,7 @@ fn plugin_to_item(
     let code = plugin.folder_name.clone();
     let manifest = resolve_plugin_manifest_for_code(app_handle, &code);
     Ok(PluginListItem {
+        mobile_unavailable_reason: manifest.as_ref().and_then(crate::plugin::mobile::compatibility_issue),
         plugin_id: plugin.plugin_id,
         name: plugin.name,
         version: plugin.version,
@@ -2373,6 +2377,9 @@ pub fn get_enabled_plugin_manifests(
             continue;
         }
         if let Some(mut manifest) = resolve_plugin_manifest_for_code(app_handle, &plugin.folder_name) {
+            if cfg!(mobile) && crate::plugin::mobile::compatibility_issue(&manifest).is_some() {
+                continue;
+            }
             manifest.plugin_id = Some(plugin.plugin_id);
             manifests.push(manifest);
         }
@@ -2483,6 +2490,9 @@ pub async fn install_plugin_archive_source(
         let all_plugins = db.get_plugins().map_err(|e| e.to_string())?;
         for installed in &plugins {
             if let Some(plugin) = all_plugins.iter().find(|item| item.folder_name == installed.to) {
+                if cfg!(mobile) && ensure_mobile_plugin(&app_handle, plugin.plugin_id).is_err() {
+                    continue; // Keep the installed record and its explicit compatibility reason; do not auto-enable.
+                }
                 db.upsert_plugin_status(plugin.plugin_id, true, None).map_err(|e| e.to_string())?;
             }
         }
@@ -2582,6 +2592,11 @@ pub async fn verify_plugin_entry_checksum(
 ) -> Result<(), String> {
     let manifest = resolve_plugin_manifest_for_code(&app_handle, &code)
         .ok_or_else(|| format!("Plugin manifest not found or invalid: {}", code))?;
+    if cfg!(mobile) {
+        if let Some(reason) = crate::plugin::mobile::compatibility_issue(&manifest) {
+            return Err(format!("MOBILE_UNSUPPORTED: capability=plugin; stage=load; plugin={code}; {reason}"));
+        }
+    }
     let entry_path = manifest.plugin_dir.join(&manifest.runtime.entry);
     verify_runtime_entry_checksum(&entry_path, manifest.runtime.checksum.as_deref())
 }
@@ -2607,7 +2622,8 @@ pub async fn get_enabled_plugins(
     let plugins = list_plugins(app_handle.clone()).await?;
     Ok(plugins
         .into_iter()
-        .filter(|plugin| plugin.is_active && plugin_entry_exists(&app_handle, &plugin.code))
+        .filter(|plugin| plugin.is_active && plugin_entry_exists(&app_handle, &plugin.code)
+            && (!cfg!(mobile) || plugin.mobile_unavailable_reason.is_none()))
         .collect())
 }
 
@@ -2642,7 +2658,7 @@ pub async fn install_plugin(
                 .map_err(|e| e.to_string())?
         };
 
-    db.upsert_plugin_status(plugin_id, true, None).map_err(|e| e.to_string())?;
+    db.upsert_plugin_status(plugin_id, !cfg!(mobile), None).map_err(|e| e.to_string())?;
     let plugin_types =
         normalize_plugin_types(&plugin_type.unwrap_or_else(|| vec!["assistantType".to_string()]));
     let plugin_types_json = plugin_types_to_json(&plugin_types)?;
@@ -2691,8 +2707,32 @@ pub async fn uninstall_plugin(app_handle: tauri::AppHandle, plugin_id: i64) -> R
 #[tauri::command]
 pub async fn enable_plugin(app_handle: tauri::AppHandle, plugin_id: i64) -> Result<(), String> {
     let db = PluginDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    ensure_mobile_plugin(&app_handle, plugin_id)?;
     db.upsert_plugin_status(plugin_id, true, None).map_err(|e| e.to_string())?;
     emit_plugin_registry_changed(&app_handle, "enabled");
+    Ok(())
+}
+
+fn ensure_mobile_plugin(app_handle: &tauri::AppHandle, plugin_id: i64) -> Result<(), String> {
+    if !cfg!(mobile) { return Ok(()); }
+    let db = PluginDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let plugin = db.get_plugin(plugin_id).map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("plugin_id={plugin_id}; 插件不存在"))?;
+    let manifest = resolve_plugin_manifest_for_code(app_handle, &plugin.folder_name)
+        .ok_or_else(|| format!("plugin_id={plugin_id}; 插件 manifest 不可用"))?;
+    if let Some(reason) = crate::plugin::mobile::compatibility_issue(&manifest) {
+        return Err(format!("MOBILE_UNSUPPORTED: capability=plugin; stage=plugin_api; plugin_id={plugin_id}; {reason}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn validate_mobile_plugin_command(app_handle: tauri::AppHandle, plugin_id: i64, command: String) -> Result<(), String> {
+    if !cfg!(mobile) { return Ok(()); }
+    ensure_mobile_plugin(&app_handle, plugin_id)?;
+    if !crate::plugin::mobile::command_allowed(&command) {
+        return Err(format!("MOBILE_UNSUPPORTED: capability=plugin_command; plugin_id={plugin_id}; command={command}; 此命令不属于移动插件 API v1"));
+    }
     Ok(())
 }
 

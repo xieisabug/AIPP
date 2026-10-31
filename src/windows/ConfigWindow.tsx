@@ -53,7 +53,7 @@ function ConfigWindow() {
     const isMobile = isMobilePlatform || isNarrow;
     const platform = usePlatform();
     const skillsAvailable = useFeatureAvailableOnPlatform("skills_manager");
-    const pluginsAvailable = useFeatureAvailableOnPlatform("process_plugin");
+    const pluginsAvailable = true; // Manager remains available; each plugin is capability-checked.
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
     const menuList: Array<MenuItem> = useMemo(() => {
