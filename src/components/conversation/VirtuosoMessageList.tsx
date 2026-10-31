@@ -458,11 +458,13 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             }
 
             setInitialBottomVisibleConversationId(conversationId);
-            container.scrollTop = Math.max(
-                0,
-                container.scrollHeight - container.clientHeight,
-            );
-            onScrollStateChange?.(container);
+            if (!container.closest('[data-aipp-mobile-shell] [hidden]')) {
+                container.scrollTop = Math.max(
+                    0,
+                    container.scrollHeight - container.clientHeight,
+                );
+                onScrollStateChange?.(container);
+            }
             // live-only follow：cleanup 时 stop；shouldContinue 不依赖 pin-done ref
             const stopFollow = followScrollContainerBottom({
                 container,

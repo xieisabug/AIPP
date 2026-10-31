@@ -90,6 +90,45 @@ describe("followScrollContainerBottom", () => {
         vi.unstubAllGlobals();
     });
 
+    it("does not follow stream growth while the mobile page is hidden", () => {
+        const { container, setScrollHeight } = makeContainer(1000);
+        const shell = document.createElement("div");
+        shell.setAttribute("data-aipp-mobile-shell", "");
+        const page = document.createElement("div");
+        shell.append(page);
+        page.append(container);
+        document.body.append(shell);
+        const stop = followScrollContainerBottom({ container, shouldContinue: () => true });
+        page.hidden = true;
+        container.scrollTop = 200;
+        setScrollHeight(1600);
+        triggerResize();
+        expect(container.scrollTop).toBe(200);
+        stop();
+        shell.remove();
+    });
+
+    it("does not pin after the mobile page becomes hidden", () => {
+        const frames: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+        const { container, setScrollHeight } = makeContainer(1000);
+        const shell = document.createElement("div");
+        shell.setAttribute("data-aipp-mobile-shell", "");
+        const page = document.createElement("div");
+        shell.append(page);
+        page.append(container);
+        document.body.append(shell);
+        const stop = pinScrollContainerToBottom({ container, shouldContinue: () => true });
+        page.hidden = true;
+        container.scrollTop = 200;
+        setScrollHeight(1600);
+        triggerResize();
+        frames.splice(0).forEach(callback => callback(0));
+        expect(container.scrollTop).toBe(200);
+        stop();
+        shell.remove();
+    });
+
     it("should re-pin to bottom when late content grows after initial pin", () => {
         const { container, setScrollHeight } = makeContainer(1000);
         const onScrollStateChange = vi.fn();

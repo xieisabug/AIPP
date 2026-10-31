@@ -40,6 +40,40 @@ describe("useScrollManagement", () => {
         vi.unstubAllGlobals();
     });
 
+    it("does not execute queued scrolling after the mobile page becomes hidden", () => {
+        const frames: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+            frames.push(callback);
+            return frames.length;
+        }));
+        const shell = document.createElement("div");
+        shell.setAttribute("data-aipp-mobile-shell", "");
+        const page = document.createElement("div");
+        const container = document.createElement("div");
+        const tail = document.createElement("div");
+        container.append(tail);
+        page.append(container);
+        shell.append(page);
+        document.body.append(shell);
+        Object.defineProperty(container, "scrollHeight", { value: 1000 });
+        Object.defineProperty(container, "clientHeight", { value: 400 });
+        container.scrollTo = vi.fn();
+        const { result } = renderHook(() => useScrollManagement());
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.smartScroll(true, "auto");
+        });
+        expect(frames.length).toBeGreaterThan(0);
+        page.hidden = true;
+        act(() => {
+            frames.splice(0).forEach(callback => callback(0));
+            const observer = ResizeObserverMock.instances.at(-1);
+            observer?.callback([], observer as unknown as ResizeObserver);
+        });
+        expect(container.scrollTo).not.toHaveBeenCalled();
+        shell.remove();
+    });
+
     it("replays smartScroll after scrollToUserMessage releases its smooth-scroll lock", () => {
         const container = {
             scrollTop: 120,
@@ -50,6 +84,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -142,6 +177,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -180,6 +216,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -217,6 +254,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -250,6 +288,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: tail,
@@ -292,6 +331,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: tail,
@@ -329,6 +369,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -377,6 +418,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -420,6 +462,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -454,6 +497,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -489,6 +533,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -529,6 +574,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -564,3 +610,4 @@ describe("useScrollManagement", () => {
     });
 
 });
+

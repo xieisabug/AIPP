@@ -251,6 +251,7 @@ export function useScrollManagement(
 
     // 智能滚动函数
     const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
+        if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
         if (isChatScrollPerfProbeActive()) {
             return;
         }
@@ -275,6 +276,7 @@ export function useScrollManagement(
         smartScrollOptionsRef.current = { forceScroll, behaviorOverride };
 
         const scrollToBottom = () => {
+            if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
             const options = smartScrollOptionsRef.current;
             // 用户已经开始滚（滚轮或滚动条）时，排队中的强制滚动也不能再抢到底部。
             if (
@@ -354,6 +356,7 @@ export function useScrollManagement(
 
     // 发送用户消息后滚动到最后一组消息所在的底部位置，利用 min-height 占位让用户消息贴近顶部
     const scrollToUserMessage = useCallback(() => {
+        if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
         if (isChatScrollPerfProbeActive()) {
             return;
         }
@@ -424,7 +427,7 @@ export function useScrollManagement(
         const step = () => {
             stableScrollFrameRef.current = null;
             const target = scrollContainerRef.current;
-            if (!target) {
+            if (!target || target.closest('[data-aipp-mobile-shell] [hidden]')) {
                 isAutoScrolling.current = false;
                 return;
             }

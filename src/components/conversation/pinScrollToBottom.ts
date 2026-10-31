@@ -66,6 +66,10 @@ function observeAllContentElements(
 
 const SCROLLBAR_GUTTER_MIN_PX = 16;
 
+export function isHiddenMobileConversation(container: HTMLElement): boolean {
+    return !!container.closest('[data-aipp-mobile-shell] [hidden]');
+}
+
 /** 指针落在容器右缘滚动条上。内容区点击的坐标在这个窄条之外。 */
 export function isScrollbarPointerEvent(
     container: HTMLElement,
@@ -110,7 +114,7 @@ export function pinScrollContainerToBottom({
     let lastScrollHeight = container.scrollHeight;
 
     const pinToBottom = () => {
-        if (completed || !shouldContinue()) {
+        if (completed || !shouldContinue() || isHiddenMobileConversation(container)) {
             return;
         }
 
@@ -347,7 +351,7 @@ export function followScrollContainerBottom({
         getDistanceToBottom() <= resumeBottomThresholdPx;
 
     const pinToBottom = () => {
-        if (stopped || pausedByUser || !shouldContinue()) {
+        if (stopped || pausedByUser || !shouldContinue() || isHiddenMobileConversation(container)) {
             return;
         }
 
