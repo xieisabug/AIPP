@@ -760,6 +760,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         if (!currentLoadedPlugin) {
             return "插件运行时未加载该插件，请刷新插件运行时。";
         }
+        if (currentLoadedPlugin.loadError) {
+            return currentLoadedPlugin.loadError;
+        }
         if (!currentLoadedPlugin.instance) {
             return "插件加载失败（实例为空），请检查插件脚本导出。";
         }
