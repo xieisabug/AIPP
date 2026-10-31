@@ -65,6 +65,9 @@ const normalizePluginAssistantFieldValue = (
 };
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
+    const isDirty = form.formState.isDirty;
+    const dirtyRef = useRef(isDirty);
+    dirtyRef.current = isDirty;
     const [searchQuery, setSearchQuery] = useState('');
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
@@ -415,8 +418,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         refresh: async (isCurrent) => {
             const list = await loadAssistants(isCurrent);
             if (!isCurrent()) return;
+            if (dirtyRef.current && currentAssistant) {
+                toast.warning("助手配置已更新，未保存的编辑已保留；保存或切换助手后可重新加载。");
+                return;
+            }
             const selected = list.find((a) => a.id === currentAssistant?.assistant.id) ?? list[0];
-            if (selected) await handleChooseAssistant(selected, true, isCurrent);
+            if (selected) await handleChooseAssistant(selected, true, () => isCurrent() && !dirtyRef.current);
             else {
                 selectionRequestRef.current += 1;
                 setCurrentAssistant(null);

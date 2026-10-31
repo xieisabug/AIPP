@@ -55,6 +55,18 @@ function setup() {
 describe("AssistantConfig sync selection", () => {
     afterEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
 
+    it("preserves a dirty prompt on external refresh while allowing explicit selection", async () => {
+        setup();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "unsaved" } });
+        await act(async () => { await emit("mcp_state_changed"); });
+        await act(async () => { await new Promise(resolve => setTimeout(resolve, 150)); });
+        expect(screen.getByLabelText("prompt")).toHaveValue("unsaved");
+        expect(screen.getByTestId("selected")).toHaveTextContent("1");
+        fireEvent.click(screen.getByRole("button", { name: "assistant-3" }));
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-3"));
+    });
+
     it("should keep copied assistant form when an older refresh finishes", async () => {
         const state = setup();
         mockInvokeHandler("copy_assistant", () => detail(4));

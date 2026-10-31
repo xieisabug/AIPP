@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Maximize2 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 import {
     Dialog,
     DialogContent,
@@ -25,6 +26,7 @@ const ExpandableTextareaField: React.FC<ExpandableTextareaFieldProps> = ({
     fieldRenderData,
 }) => {
     const [open, setOpen] = useState(false);
+    const mobile = useIsMobilePlatform();
 
     // 大文本框只复用 value/onChange/onBlur，避免和小文本框共用同一个 ref
     const { ref: _ref, ...bindable } = fieldRenderData ?? {};
@@ -44,7 +46,7 @@ const ExpandableTextareaField: React.FC<ExpandableTextareaFieldProps> = ({
                     size="icon"
                     disabled={disabled}
                     onClick={() => setOpen(true)}
-                    className="absolute top-1.5 right-1.5 h-7 w-7 text-muted-foreground hover:text-foreground"
+                    className={`absolute top-1.5 right-1.5 ${mobile ? "h-11 w-11" : "h-7 w-7"} text-muted-foreground hover:text-foreground`}
                     aria-label="扩展编辑"
                 >
                     <Maximize2 className="h-4 w-4" />
@@ -52,7 +54,7 @@ const ExpandableTextareaField: React.FC<ExpandableTextareaFieldProps> = ({
             </div>
 
             <Dialog open={open} onOpenChange={setOpen}>
-                <DialogContent className="w-[70vw] max-w-[70vw] h-[80vh] max-h-[80vh] flex flex-col overflow-hidden">
+                <DialogContent className={mobile ? "fixed inset-0 left-0 top-0 translate-x-0 translate-y-0 w-full max-w-none h-screen max-h-none flex flex-col overflow-hidden safe-top safe-bottom" : "w-[70vw] max-w-[70vw] h-[80vh] max-h-[80vh] flex flex-col overflow-hidden"}>
                     <DialogHeader className="flex-shrink-0">
                         <DialogTitle>{label}</DialogTitle>
                     </DialogHeader>
