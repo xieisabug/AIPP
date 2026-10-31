@@ -367,6 +367,7 @@ export interface LoadedPlugin {
     pluginType: string[];
     contributions?: PluginContributions;
     instance: AippPlugin | AippAssistantTypePlugin | null;
+    loadError?: string;
 }
 
 class PluginRuntime {
@@ -434,6 +435,7 @@ class PluginRuntime {
                     pluginType: plugin.pluginType,
                     contributions: plugin.contributions,
                     instance: null,
+                    loadError: `plugin_id=${plugin.pluginId}; plugin=${plugin.code}; stage=load: ${error instanceof Error ? error.message : String(error)}`,
                 });
             }
         }

@@ -71,7 +71,9 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                 let errorText: string | null = null;
 
                 try {
-                    if (typeof instance?.renderView === "function") {
+                    if (plugin.loadError) {
+                        errorText = plugin.loadError;
+                    } else if (typeof instance?.renderView === "function") {
                         content = instance.renderView(viewId, context);
                     } else {
                         errorText = "插件未实现 renderView()。";
@@ -90,9 +92,9 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                         </CardHeader>
                         <CardContent>
                             {errorText ? (
-                                <div className="flex items-start gap-2 rounded-md border border-dashed border-destructive/40 p-3 text-sm text-destructive">
+                                <div role="alert" className="flex items-start gap-2 rounded-md border border-dashed border-destructive/40 p-3 text-sm text-destructive">
                                     <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
-                                    <span>{errorText}</span>
+                                    <span className="min-w-0 break-words">{errorText}</span>
                                 </div>
                             ) : (
                                 <PluginViewBoundary pluginCode={plugin.code} instance={instance}>{content}</PluginViewBoundary>
