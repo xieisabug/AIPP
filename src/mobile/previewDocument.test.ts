@@ -11,5 +11,14 @@ describe("staticPreviewDocument", () => {
         expect(doc.querySelector("[onclick], [onerror], [xlink\\:href]")).toBeNull();
         expect(doc.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute("content")).toContain("img-src data:");
     });
+
+    it("preserves static styles and SVG while removing external resource containers", () => {
+        const html = staticPreviewDocument('<style>circle { fill: red }</style><svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" /></svg><iframe src="https://evil.test/frame"></iframe><link rel="stylesheet" href="https://evil.test/style">');
+        const template = document.createElement("template");
+        template.innerHTML = html;
+        expect(template.content.querySelector("style")?.textContent).toContain("fill: red");
+        expect(template.content.querySelector("svg circle")?.getAttribute("r")).toBe("4");
+        expect(template.content.querySelector("iframe, link")).toBeNull();
+    });
 });
 
