@@ -12,6 +12,7 @@ mod mcp;
 mod plugin;
 mod scheduler;
 mod skills;
+mod mobile_files;
 mod slash;
 mod state;
 mod sync;
@@ -698,6 +699,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
         .plugin(tauri_plugin_notification::init())
+        .plugin(mobile_files::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -1039,6 +1041,7 @@ pub fn run() {
             export_llm_provider,
             import_llm_provider,
             add_attachment,
+            mobile_files::mobile_file_action,
             open_attachment_with_default_app,
             get_assistants,
             get_assistant,
