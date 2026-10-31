@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { emit } from "@tauri-apps/api/event";
@@ -20,6 +20,7 @@ function InputAreaHarness({
     onPlanModeToggle,
     isMobile = false,
     placement = "bottom",
+    onSend = () => {},
 }: {
     initialText?: string;
     planMode?: boolean;
@@ -27,6 +28,7 @@ function InputAreaHarness({
     onPlanModeToggle?: () => void;
     isMobile?: boolean;
     placement?: "top" | "bottom";
+    onSend?: () => void;
 }) {
     const [inputText, setInputText] = useState(initialText);
 
@@ -38,7 +40,7 @@ function InputAreaHarness({
             handleChooseFile={() => {}}
             handlePaste={() => {}}
             handleDeleteFile={() => {}}
-            handleSend={() => {}}
+            handleSend={onSend}
             aiIsResponsing={false}
             placement={placement}
             isMobile={isMobile}
@@ -207,6 +209,23 @@ describe("InputArea mobile vs desktop layout", () => {
         mockInvokeHandler("get_assistants", () => []);
         mockInvokeHandler("get_artifacts_for_completion", () => []);
         mockInvokeHandler("get_skills_for_slash_completion", () => []);
+    });
+
+    it("does not send when Enter confirms Chinese composition, then sends after the debounce", async () => {
+        const onSend = vi.fn();
+        render(<InputAreaHarness isMobile initialText="你好" onSend={onSend} />);
+        const textarea = screen.getByRole("textbox");
+
+        fireEvent.compositionStart(textarea);
+        // WebKit may report isComposing=false even while confirming a candidate.
+        fireEvent.keyDown(textarea, { key: "Enter", isComposing: false });
+        fireEvent.compositionEnd(textarea, { data: "你好" });
+        fireEvent.keyDown(textarea, { key: "Enter", isComposing: false });
+        expect(onSend).not.toHaveBeenCalled();
+
+        await act(async () => { await new Promise(resolve => setTimeout(resolve, 120)); });
+        fireEvent.keyDown(textarea, { key: "Enter", isComposing: false });
+        expect(onSend).toHaveBeenCalledOnce();
     });
 
     it("applies mobile class and keeps add/send slots without desktop inline right", () => {
