@@ -66,8 +66,10 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                                     },
                                 );
                                 newFile.id = res.attachment_id;
+                                if (newFile.id <= 0) throw new Error("附件登记未返回有效 ID");
                             } catch (error) {
-                                toast.error("文件上传失败: " + error);
+                                reject(error);
+                                return;
                             }
 
                             resolve(newFile);
@@ -83,7 +85,9 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
             );
 
             try {
-                const newFiles = await Promise.all(filePromises);
+                const results = await Promise.allSettled(filePromises);
+                const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+                results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + String(result.reason)); });
                 setFileInfoList((prev) => [...(prev || []), ...newFiles]);
                 if (onFileSelect) {
                     onFileSelect(newFiles);
@@ -135,14 +139,18 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                             },
                         );
                         newFile.id = res.attachment_id;
+                        if (newFile.id <= 0) throw new Error("附件登记未返回有效 ID");
                     } catch (error) {
-                        toast.error("文件上传失败: " + JSON.stringify(error));
+                        if (thumbnail) URL.revokeObjectURL(thumbnail);
+                        throw error;
                     }
 
                     return newFile;
                 });
 
-                const newFiles = await Promise.all(filePromises);
+                const results = await Promise.allSettled(filePromises);
+                const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+                results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + String(result.reason)); });
                 setFileInfoList((prev) => [...(prev || []), ...newFiles]);
                 if (onFileSelect) {
                     onFileSelect(newFiles);
