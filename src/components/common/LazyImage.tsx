@@ -8,6 +8,8 @@ import {
     ContextMenuSeparator,
 } from '@/components/ui/context-menu';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
+import { isAndroid, mobileFileAction, encodeMobileExport, outputMobileFile } from '@/services/mobileFileService';
 
 interface LazyImageProps {
     src?: string;
@@ -209,6 +211,14 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
         const target = resolvedSrc ?? imageSrc;
         if (!target) return;
         try {
+            if (await isAndroid()) {
+                const blob = await getBlobForCopyOrSave();
+                if (!blob) throw new Error('无法读取图片');
+                const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' } as Record<string, string>)[blob.type];
+                if (!ext) throw new Error(`不支持打开图片格式：${blob.type}`);
+                await outputMobileFile('open', new Uint8Array(await blob.arrayBuffer()), `image.${ext}`);
+                return;
+            }
             // 获取 conversationId 和 messageId 用于生成固定的临时文件名
             const container = containerRef.current;
             const host = container?.closest('[data-conversation-id]') as HTMLElement | null;
@@ -222,6 +232,7 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
             });
         } catch (e) {
             console.error('Open image failed', e);
+            toast.error(`图片打开失败: ${String(e)}`);
         }
     }, [resolvedSrc, imageSrc]);
 
@@ -230,15 +241,44 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
         if (!target) return;
         try {
             // 使用 Tauri 后端 API 复制图片到剪贴板
+            if (await isAndroid()) {
+                const image = imgRef.current;
+                if (!image?.complete || !image.naturalWidth || !image.naturalHeight) throw new Error('图片尚未加载完成，请加载完成后重试');
+                if (image.naturalWidth * image.naturalHeight > 16_000_000) throw new Error('图片超过 1600 万像素复制限制');
+                const bitmap = await createImageBitmap(image);
+                try {
+                    if (bitmap.width * bitmap.height > 16_000_000) throw new Error('图片超过 1600 万像素复制限制');
+                    const canvas = document.createElement('canvas');
+                    canvas.width = bitmap.width; canvas.height = bitmap.height;
+                    const context = canvas.getContext('2d');
+                    if (!context) throw new Error('图片转换上下文不可用');
+                    context.drawImage(bitmap, 0, 0);
+                    const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('PNG 编码失败')), 'image/png'));
+                    await mobileFileAction('copyImage', { name: 'image.png', mime: 'image/png', data: encodeMobileExport(new Uint8Array(await png.arrayBuffer())) });
+                    toast.info('已写入图片剪贴板；仅支持可读取图片 URI 的应用，请在目标应用确认粘贴结果');
+                } finally { bitmap.close(); }
+                return;
+            }
             await invoke('copy_image_to_clipboard', { imageData: target });
         } catch (e) {
             console.error('Copy image failed', e);
+            toast.error(`图片复制失败: ${String(e)}`);
         }
     }, [resolvedSrc, imageSrc]);
 
     const handleSaveImage = useCallback(async () => {
+        try {
         const blob = await getBlobForCopyOrSave();
-        if (!blob) return;
+        if (!blob) { toast.error('图片保存失败：无法读取图片内容，请检查图片来源与访问权限'); return; }
+        if (await isAndroid()) {
+            try {
+                const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' } as Record<string, string>)[blob.type];
+                if (!ext) throw new Error(`不支持保存图片格式：${blob.type}`);
+                const result = await outputMobileFile('save', new Uint8Array(await blob.arrayBuffer()), `image.${ext}`);
+                if (result.status === 'saved') toast.success('图片已保存');
+            } catch (error) { toast.error(`图片保存失败: ${String(error)}`); }
+            return;
+        }
         const url = URL.createObjectURL(blob);
         try {
             const a = document.createElement('a');
@@ -257,6 +297,7 @@ const LazyImage: React.FC<LazyImageProps> = ({ src, alt = '', className = '', ..
         } finally {
             URL.revokeObjectURL(url);
         }
+        } catch (error) { toast.error(`图片保存失败: ${String(error)}`); }
     }, [getBlobForCopyOrSave, inlineAlt]);
 
     // 如果没有 src，不渲染
