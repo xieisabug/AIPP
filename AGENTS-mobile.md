@@ -85,3 +85,11 @@ cargo check --manifest-path src-tauri/Cargo.toml
 # Android 开发调试（需设备/模拟器）
 npm run android
 ```
+
+## B 类文件服务接入（2026-10-31）
+
+- `mobile_files::mobile_file_action` 注册 `MobileFilesPlugin` 原生桥接；系统 SAF 导入/保存、FileProvider 分享/打开、系统打印及图片 ClipData 均复用此服务。外部 URI 只能从系统选择结果获得，Rust 附件命令另行验证应用导入目录。
+- `mobileFileService.ts` 分离生成与输出；Android 导出取消不返回成功，打印返回 `print_launched` 不能报告 PDF 已生成，分享返回 `share_launched` 不能报告接收端完成。桌面导出保留原路径。
+- `tauri.android.conf.json` 将移动 asset 协议限制在私有附件及技能目录；`mobile.json` 不再开放全盘 fs。修改路径时同步 FileProvider XML，禁止恢复 `**`。
+- Skills 移动安装目录统一走 `skill_api::skills_directory` 的 app_data/skills；扫描器移动分支不扫描 desktop home、不执行旧目录迁移。`MobileSkillsManager` 提供应用内安装/查看/绑定，不创建新 WebView。
+- 原生行为及接收应用兼容性验证记录在 `tmp/worklog/mobile-files-output-device.md`；未有设备证据的项目不能视为已验收。
