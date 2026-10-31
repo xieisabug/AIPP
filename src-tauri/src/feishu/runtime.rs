@@ -61,7 +61,6 @@ pub(super) async fn set_feishu_runtime_ready_status(
     mutate_status(app_handle, |status| {
         status.running = true;
         status.connected = true;
-        status.last_error = None;
         status.status_text = "飞书机器人已连接，等待消息".to_string();
         status.status_detail = Some(detail);
     })
@@ -75,6 +74,17 @@ pub(super) fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> St
         message.clone()
     } else {
         "unknown panic payload".to_string()
+    }
+}
+
+pub(super) fn merge_runtime_errors(current: Option<String>, journal: Option<String>) -> Option<String> {
+    match (current, journal) {
+        (Some(current), Some(journal)) if current == journal || current.contains(&journal) => Some(current),
+        (Some(current), Some(journal)) if journal.contains(&current) => Some(journal),
+        (Some(current), Some(journal)) => Some(format!("{current}\n{journal}")),
+        (Some(current), None) => Some(current),
+        (None, Some(journal)) => Some(journal),
+        (None, None) => None,
     }
 }
 
@@ -93,6 +103,7 @@ pub(crate) async fn get_runtime_status(
     status.allow_p2p = config.allow_p2p;
     status.allow_group = config.allow_group;
     status.group_require_mention = config.group_require_mention;
+    status.last_error = merge_runtime_errors(status.last_error, super::journal::latest_problem(app_handle)?);
     Ok(status)
 }
 
@@ -107,8 +118,10 @@ pub(crate) fn refresh_runtime_async(app_handle: &AppHandle) {
 
 pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRuntimeStatus, String> {
     crate::ensure_rustls_crypto_provider();
-    let config = load_runtime_config(app_handle).await?;
     let state = app_handle.state::<FeishuButlerState>();
+    let _control = state.runtime_control.lock().await;
+    let config = load_runtime_config(app_handle).await?;
+    *state.relay_enabled.write().await = false;
 
     let previous_handle = {
         let mut runtime_task = state.runtime_task.lock().await;
@@ -116,7 +129,9 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
     };
     if let Some(handle) = previous_handle {
         handle.abort();
+        let _ = handle.await;
     }
+    super::journal::recover_interrupted(app_handle)?;
 
     let mut status = build_status(&config);
     if !config.butler_enabled {
@@ -135,6 +150,8 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
         replace_status(app_handle, status.clone()).await;
         return Ok(status);
     }
+
+    *state.relay_enabled.write().await = true;
 
     status.running = true;
     status.status_text = "正在连接飞书长连接".to_string();
@@ -167,6 +184,24 @@ pub(crate) async fn refresh_runtime(app_handle: &AppHandle) -> Result<FeishuRunt
         *runtime_task = Some(task);
     }
     Ok(status)
+}
+
+pub(crate) async fn stop_runtime(app_handle: &AppHandle) -> Result<FeishuRuntimeStatus, String> {
+    let state = app_handle.state::<FeishuButlerState>();
+    let _control = state.runtime_control.lock().await;
+    *state.relay_enabled.write().await = false;
+    if let Some(handle) = state.runtime_task.lock().await.take() {
+        handle.abort();
+        let _ = handle.await;
+    }
+    super::journal::recover_interrupted(app_handle)?;
+    mutate_status(app_handle, |status| {
+        status.running = false;
+        status.connected = false;
+        status.status_text = "本机飞书连接已停止".to_string();
+        status.status_detail = Some("仅停止当前进程连接，未修改同步配置；重新启动应用或重载配置后按配置连接".to_string());
+    }).await;
+    get_runtime_status(app_handle).await
 }
 
 async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
@@ -202,6 +237,7 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
         };
 
         let (payload_tx, payload_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let mut pending = PendingPayloads { app: app_handle.clone(), receiver: payload_rx };
         let event_handler = EventDispatcherHandler::builder().payload_sender(payload_tx).build();
 
         mutate_status(&app_handle, |status| {
@@ -212,19 +248,18 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
         })
         .await;
 
-        let processor_app = app_handle.clone();
-        let processor_task = tauri::async_runtime::spawn(async move {
-            process_payload_loop(processor_app, payload_rx).await;
-        });
-
-        set_feishu_runtime_ready_status(
-            &app_handle,
-            format!("WebSocket 已建立，正在等待飞书事件；{FEISHU_STATUS_READY_DETAIL}"),
-        )
-        .await;
-
-        let result = LarkWsClient::open(Arc::new(ws_config), event_handler).await;
-        processor_task.abort();
+        // Both futures belong to this connection; stopping it must not leave an event processor behind.
+        let result = tokio::select! {
+            result = LarkWsClient::open(Arc::new(ws_config), event_handler) => result,
+            _ = process_payload_loop(app_handle.clone(), &mut pending.receiver) => {
+                mutate_status(&app_handle, |status| {
+                    status.connected = false;
+                    status.last_error = Some("飞书事件处理通道已结束，等待重新连接".to_string());
+                }).await;
+                sleep(FEISHU_RUNTIME_RETRY_INTERVAL).await;
+                continue;
+            }
+        };
 
         match result {
             Ok(_) => {
@@ -256,11 +291,41 @@ async fn run_runtime_loop(app_handle: AppHandle, config: FeishuRuntimeConfig) {
     }
 }
 
+struct PendingPayloads {
+    app: AppHandle,
+    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+impl Drop for PendingPayloads {
+    fn drop(&mut self) {
+        self.receiver.close();
+        while let Ok(payload) = self.receiver.try_recv() {
+            match super::journal::start(&self.app, &payload) {
+                Ok(Some(guard)) => drop(guard),
+                Ok(None) => {},
+                Err(error) => tracing::error!(error = %error, "failed to persist queued Feishu event on shutdown"),
+            }
+        }
+    }
+}
+
 async fn process_payload_loop(
     app_handle: AppHandle,
-    mut payload_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    payload_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     while let Some(payload) = payload_rx.recv().await {
+        let mut event_guard = match super::journal::start(&app_handle, &payload) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => continue,
+            Err(error) => {
+                mutate_status(&app_handle, |status| {
+                    status.last_error = Some(format!("飞书事件 stage=journal_start: {error}"));
+                    status.status_text = "飞书事件记录失败，未执行".to_string();
+                }).await;
+                continue;
+            }
+        };
+        set_feishu_runtime_ready_status(&app_handle, format!("已收到本机飞书事件；{FEISHU_STATUS_READY_DETAIL}")).await;
         mutate_status(&app_handle, |status| {
             status.last_event_at = Some(now_string());
         })
@@ -270,8 +335,10 @@ async fn process_payload_loop(
             Ok(config) => config,
             Err(error) => {
                 warn!(error = %error, "failed to reload Feishu runtime config before handling payload");
+                let diagnostic = format!("stage=load_config: {error}");
+                let _ = event_guard.complete(Err(diagnostic.clone()));
                 mutate_status(&app_handle, |status| {
-                    status.last_error = Some(error);
+                    status.last_error = Some(diagnostic);
                     status.status_text = "飞书事件到达，但配置读取失败".to_string();
                 })
                 .await;
@@ -281,11 +348,24 @@ async fn process_payload_loop(
 
         if !config.butler_enabled || !config.enabled {
             debug!("ignore Feishu payload because runtime is disabled by latest config");
+            let _ = event_guard.complete(Err("stage=configuration: 飞书已停用，事件未处理".to_string()));
             continue;
         }
 
-        if let Err(error) = handle_payload(&app_handle, &config, &payload).await {
+        let result = handle_payload(&app_handle, &config, &payload).await;
+        if let Err(error) = event_guard.complete(result) {
             warn!(error = %error, "failed to handle feishu payload");
+            let current = format!("飞书事件 stage=handle_payload: {error}");
+            let journal = match super::journal::latest_problem(&app_handle) {
+                Ok(problem) => problem,
+                Err(read_error) => Some(format!("飞书事件 stage=journal_read: {read_error}")),
+            };
+            let diagnostic = merge_runtime_errors(Some(current), journal)
+                .expect("current error is always present");
+            mutate_status(&app_handle, |status| {
+                status.last_error = Some(diagnostic);
+                status.status_text = "处理飞书事件失败".to_string();
+            }).await;
         }
     }
 }

@@ -4,7 +4,7 @@ use std::time::Duration;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 // Constants
 pub(super) const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
@@ -28,6 +28,8 @@ pub(super) const FEISHU_MENU_NEW_CONVERSATION_EVENT_KEY: &str = "feishu::convers
 
 // State
 pub struct FeishuButlerState {
+    pub(super) runtime_control: Mutex<()>,
+    pub(super) relay_enabled: RwLock<bool>,
     pub(super) runtime_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub(super) http_client: reqwest::Client,
     pub(super) relay_workers: Mutex<HashSet<i64>>,
@@ -38,12 +40,21 @@ pub struct FeishuButlerState {
 impl Default for FeishuButlerState {
     fn default() -> Self {
         Self {
+            runtime_control: Mutex::new(()),
+            relay_enabled: RwLock::new(false),
             runtime_task: Mutex::new(None),
             http_client: super::api::build_feishu_http_client(),
             relay_workers: Mutex::new(HashSet::new()),
             ingress_lock: Mutex::new(()),
             status: Mutex::new(FeishuRuntimeStatus::default()),
         }
+    }
+}
+
+impl FeishuButlerState {
+    pub(super) async fn relay_permit(&self) -> Option<tokio::sync::RwLockReadGuard<'_, bool>> {
+        let permit = self.relay_enabled.read().await;
+        if *permit { Some(permit) } else { None }
     }
 }
 

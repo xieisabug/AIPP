@@ -39,8 +39,7 @@ pub(super) async fn handle_payload(
     let envelope: EventEnvelope = match serde_json::from_slice(payload) {
         Ok(value) => value,
         Err(error) => {
-            debug!(error = %error, "ignore unparsable feishu payload");
-            return Ok(());
+            return Err(format!("stage=parse_payload: {error}"));
         }
     };
     if envelope.header.event_type == "application.bot.menu_v6" {
@@ -73,10 +72,11 @@ pub(super) async fn handle_payload(
                     );
                 }
                 mutate_status(app_handle, |status| {
-                    status.last_error = Some(error);
+                    status.last_error = Some(error.clone());
                     status.status_text = "处理飞书消息时发生错误".to_string();
                 })
                 .await;
+                return Err(format!("message_id={}; stage=process_incoming_text: {}", event.message_id, error));
             }
         }
         "card.action.trigger" => {
@@ -158,7 +158,6 @@ async fn handle_bot_menu_event(
     mutate_status(app_handle, |status| {
         status.running = true;
         status.connected = true;
-        status.last_error = None;
         status.status_text = "正在处理飞书菜单事件".to_string();
         status.status_detail = Some("收到“新建会话”菜单点击，正在重置总管家上下文".to_string());
     })
@@ -690,7 +689,6 @@ async fn process_incoming_text_message(
     mutate_status(app_handle, |status| {
         status.running = true;
         status.connected = true;
-        status.last_error = None;
         status.status_text = "总管家正在处理飞书消息".to_string();
         status.status_detail =
             Some(format!("收到飞书消息，正在总管家主会话中处理（chat_type={}）", event.chat_type));
@@ -782,7 +780,6 @@ async fn process_incoming_text_message(
     mutate_status(app_handle, |status| {
         status.running = true;
         status.connected = true;
-        status.last_error = None;
         status.status_text = "飞书消息已受理，正在持续回发".to_string();
         status.status_detail =
             Some("总管家会继续处理本轮消息，并把后续输出持续回发到飞书".to_string());

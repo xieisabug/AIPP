@@ -14,7 +14,6 @@ use super::api::{
 };
 use super::config::{load_feishu_secret, load_runtime_config, load_runtime_config_inner};
 use super::events::count_pending_butler_tasks;
-use super::runtime::{mutate_status, set_feishu_runtime_ready_status};
 use super::types::*;
 
 pub(super) async fn mark_relay_scope_failed_with_log(
@@ -90,7 +89,15 @@ async fn run_feishu_relay_scope_worker(
             return Err("飞书回发已被停用，跳过当前回发任务".to_string());
         }
 
-        flush_feishu_relay_scope(app_handle, &fresh_config, scope_id).await?;
+        {
+            // Stop waits for an in-flight flush; once stopped no further relay sends start.
+            let state = app_handle.state::<FeishuButlerState>();
+            let Some(_permit) = state.relay_permit().await else {
+                sleep(FEISHU_SETTLE_CHECK_INTERVAL).await;
+                continue;
+            };
+            flush_feishu_relay_scope(app_handle, &fresh_config, scope_id, &_permit).await?;
+        }
 
         let scope = load_relay_scope(app_handle, scope_id)?;
         let runtime_state = activity_manager.get_runtime_state(conversation_id).await;
@@ -107,13 +114,6 @@ async fn run_feishu_relay_scope_worker(
                     scope.last_delivered_local_message_id,
                     "completed",
                 )?;
-                if scope.origin == RELAY_ORIGIN_FEISHU {
-                    set_feishu_runtime_ready_status(
-                        app_handle,
-                        format!("最近一条飞书消息处理链路已稳定结束；{FEISHU_STATUS_READY_DETAIL}"),
-                    )
-                    .await;
-                }
                 return Ok(());
             }
         } else {
@@ -129,21 +129,6 @@ async fn run_feishu_relay_scope_worker(
                 scope.last_delivered_local_message_id,
                 next_status,
             )?;
-            if scope.origin == RELAY_ORIGIN_FEISHU {
-                mutate_status(app_handle, |status| {
-                    status.running = true;
-                    status.connected = true;
-                    status.last_error = None;
-                    status.status_text = "总管家正在持续回发飞书消息".to_string();
-                    status.status_detail = Some(format!(
-                        "飞书消息已受理；会话运行中={}，待完成任务={}，已回发到消息 {}",
-                        runtime_state.is_running,
-                        pending_tasks,
-                        scope.last_delivered_local_message_id
-                    ));
-                })
-                .await;
-            }
         }
 
         sleep(FEISHU_SETTLE_CHECK_INTERVAL).await;
@@ -610,10 +595,11 @@ pub(super) fn is_message_ready_for_feishu_relay(
     }
 }
 
-pub(super) async fn flush_feishu_relay_scope(
+async fn flush_feishu_relay_scope(
     app_handle: &AppHandle,
     config: &FeishuRuntimeConfig,
     scope_id: i64,
+    _permit: &tokio::sync::RwLockReadGuard<'_, bool>,
 ) -> Result<(), String> {
     let scope = load_relay_scope(app_handle, scope_id)?;
     let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;

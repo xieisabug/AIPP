@@ -3,6 +3,7 @@ mod config;
 mod debug;
 mod events;
 mod interaction;
+mod journal;
 mod relay;
 mod runtime;
 mod types;
@@ -27,7 +28,7 @@ pub(crate) use relay::{
     conversation_has_feishu_target, inherit_latest_feishu_target,
     maybe_schedule_butler_feishu_relay_for_aipp_turn,
 };
-pub(crate) use runtime::{get_runtime_status, refresh_runtime, refresh_runtime_async};
+pub(crate) use runtime::{get_runtime_status, refresh_runtime, refresh_runtime_async, stop_runtime};
 
 // ── Tests ──────────────────────────────────────────────────────────
 
