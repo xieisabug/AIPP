@@ -74,4 +74,29 @@ describe("mobile task controls", () => {
         expect(screen.queryByText("stale-A")).toBeNull();
         expect(screen.getByText("run-B")).toBeTruthy();
     });
+    it("should expose stop while a manual run is pending without opening records first", async () => {
+        const original = vi.mocked(invoke).getMockImplementation()!;
+        let running = false;
+        let finish: (value: unknown) => void = () => {};
+        vi.mocked(invoke).mockImplementation((command, args) => {
+            if (command === "run_scheduled_task_now") {
+                running = true;
+                return new Promise(resolve => { finish = resolve; });
+            }
+            if (command === "list_scheduled_task_runs") return Promise.resolve({ runs: [{ runId: "local-run", status: running ? "running" : "cancelled", localRunning: running }] });
+            if (command === "stop_scheduled_task_run") {
+                running = false;
+                finish({ success: false, error: "cancelled by fixture" });
+                return Promise.resolve();
+            }
+            return original(command, args);
+        });
+        render(<MobileTasksConfig />);
+        fireEvent.click(await screen.findByText("在本机运行一次"));
+        const stop = await screen.findByText("停止本机运行");
+        expect(stop).not.toBeDisabled();
+        fireEvent.click(stop);
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("stop_scheduled_task_run", { taskId: 3, runId: "local-run" }));
+        await waitFor(() => expect(screen.queryByText("停止本机运行")).toBeNull());
+    });
 });
