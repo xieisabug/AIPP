@@ -114,5 +114,3 @@ export default function MobileTasksConfig() {
         <section className="space-y-3"><h2>飞书本机连接</h2>{feishu && <><p>{feishu.status_text}</p><p className="text-sm">{feishu.connected ? "本机已连接" : feishu.running ? "连接中，等待事件确认" : "本机未连接"} · 最后事件：{feishu.last_event_at ?? "暂无"}</p><p className="text-sm break-words">{feishu.last_error}</p><p className="text-sm">{feishu.status_detail}</p><Button className="min-h-11" disabled={busy || !feishu.configured} onClick={() => void act("启动本机飞书连接", () => invoke("refresh_butler_feishu_runtime_command"))}>按配置连接</Button><Button className="min-h-11" variant="outline" disabled={busy || !feishu.running} onClick={() => void act("停止本机飞书连接", () => invoke("stop_mobile_feishu_runtime"))}>停止本机连接</Button></>}</section>
     </div>;
 }
-
-
