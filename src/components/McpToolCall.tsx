@@ -548,14 +548,23 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     duration={DEFAULT_SHINE_BORDER_CONFIG.duration}
                 />
             )}
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-sm min-w-0 flex-1" title={headerTitle}>
-                    <Blocks className="h-4 w-4 flex-shrink-0" />
-                    <span className="truncate" title={displayServerName}>{displayServerName}</span>
-                    <span className="text-xs font-bold text-muted-foreground flex-shrink-0"> - </span>
-                    <span className="truncate" title={displayToolName}>{displayToolName}</span>
-                </div>
-                <div className="flex items-center gap-1 flex-shrink-0">
+            <div className="flex items-start justify-between gap-2">
+                <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-start gap-2 rounded-md p-1 text-left text-sm hover:bg-muted/60"
+                    title={isExpanded ? "收起完整工具名与参数" : "展开完整工具名与参数"}
+                    aria-expanded={isExpanded}
+                    data-aipp-slot="mcp-tool-call-header"
+                    onClick={handleToggleExpand}
+                >
+                    <Blocks className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                    <span className={`min-w-0 flex-1 ${isExpanded ? "break-words whitespace-normal" : "truncate"}`} title={headerTitle}>
+                        <span title={displayServerName}>{displayServerName}</span>
+                        <span className="text-xs font-bold text-muted-foreground"> - </span>
+                        <span title={displayToolName}>{displayToolName}</span>
+                    </span>
+                </button>
+                <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-1">
                     <MotionStatusSlot stateKey={executionState} present={executionState !== "idle"}>
                         <StatusIndicator state={executionState} />
                     </MotionStatusSlot>
@@ -564,10 +573,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             onClick={handleStop}
                             size="sm"
                             variant="ghost"
-                            className="h-7 w-7 p-0 flex-shrink-0 text-destructive"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0 text-destructive"
                             title="停止"
                         >
-                            <Square className="h-3 w-3 fill-current" />
+                            <Square className="h-4 w-4 fill-current" />
                         </Button>
                     )}
                     {!isExpanded && canShowExecutionActions && (
@@ -576,15 +585,15 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             disabled={isExecuting || isRejecting}
                             size="sm"
                             variant="ghost"
-                            className="h-7 w-7 p-0 flex-shrink-0"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                             title={isFailed ? "重新执行" : "执行"}
                         >
                             {isExecuting ? (
-                                <Loader2 className="h-3 w-3 animate-spin" />
+                                <Loader2 className="h-4 w-4 animate-spin" />
                             ) : isFailed ? (
-                                <RotateCcw className="h-3 w-3" />
+                                <RotateCcw className="h-4 w-4" />
                             ) : (
-                                <Play className="h-3 w-3" />
+                                <Play className="h-4 w-4" />
                             )}
                         </Button>
                     )}
@@ -593,10 +602,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             onClick={handleContinueWithError}
                             size="sm"
                             variant="ghost"
-                            className="h-7 w-7 p-0 flex-shrink-0"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                             title="以错误继续对话"
                         >
-                            <ArrowRight className="h-3 w-3" />
+                            <ArrowRight className="h-4 w-4" />
                         </Button>
                     )}
                     {!isExpanded && canReject && (
@@ -605,21 +614,22 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             disabled={isRejecting}
                             size="sm"
                             variant="ghost"
-                            className="h-7 w-7 p-0 flex-shrink-0"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                             title="拒绝执行"
                             aria-label="拒绝执行"
                         >
-                            <XCircle className="h-3 w-3" />
+                            <XCircle className="h-4 w-4" />
                         </Button>
                     )}
                     <Button
                         onClick={handleToggleExpand}
                         size="sm"
                         variant="ghost"
-                        className="h-7 w-7 p-0 flex-shrink-0"
+                        className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                         title={isExpanded ? "收起详情" : "展开详情"}
+                        aria-label={isExpanded ? "收起详情" : "展开详情"}
                     >
-                        {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                        {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                     </Button>
                 </div>
             </div>
@@ -648,7 +658,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                             onClick={handleStop}
                                             size="sm"
                                             variant="ghost"
-                                            className="flex items-center gap-1 h-7 text-xs text-destructive"
+                                            className="flex min-h-11 items-center gap-1 px-3 text-xs text-destructive"
                                             title="停止"
                                         >
                                             <Square className="h-3 w-3 fill-current" />
@@ -661,7 +671,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                             onClick={handleExecute}
                                             disabled={isRejecting}
                                             size="sm"
-                                            className="flex items-center gap-1 h-7 text-xs"
+                                            className="flex min-h-11 items-center gap-1 px-3 text-xs"
                                         >
                                             {isFailed ? (
                                                 <RotateCcw className="h-3 w-3" />
@@ -676,7 +686,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                                 disabled={isRejecting}
                                                 size="sm"
                                                 variant="outline"
-                                                className="flex items-center gap-1 h-7 text-xs"
+                                                className="flex min-h-11 items-center gap-1 px-3 text-xs"
                                             >
                                                 <XCircle className="h-3 w-3" />
                                                 拒绝
@@ -687,7 +697,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                                 onClick={handleContinueWithError}
                                                 size="sm"
                                                 variant="outline"
-                                                className="flex items-center gap-1 h-7 text-xs"
+                                                className="flex min-h-11 items-center gap-1 px-3 text-xs"
                                             >
                                                 <ArrowRight className="h-3 w-3" />
                                                 以错误继续
