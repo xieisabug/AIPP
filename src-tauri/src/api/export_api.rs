@@ -690,6 +690,11 @@ fn load_markdown_image_bytes(image_src: &str) -> Option<Vec<u8>> {
         return fetch_remote_image(trimmed);
     }
 
+    // Mobile exports only embed supplied image bytes or remote resources. Arbitrary
+    // local paths in Markdown must never become an unrestricted file-read API.
+    #[cfg(mobile)]
+    return None;
+
     let decoded = urlencoding::decode(trimmed).ok()?.into_owned();
     let path = normalize_image_path(&decoded);
     std::fs::read(path).ok()
