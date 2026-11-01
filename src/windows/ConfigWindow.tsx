@@ -20,6 +20,7 @@ import { Button } from "../components/ui/button";
 import { Home, Menu } from "lucide-react";
 import MCP from "../assets/mcp.svg?react";
 import { pluginRuntime } from "../services/PluginRuntime";
+import { navigateMobile } from "../mobile/navigation";
 
 interface MenuItem {
     id: string;
@@ -106,6 +107,10 @@ function ConfigWindow() {
     }, [skillsAvailable, pluginsAvailable, isMobilePlatform]);
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
+    const [visitedMenus, setVisitedMenus] = useState<string[]>(["llm-provider-config"]);
+    useEffect(() => {
+        if (isMobilePlatform) setVisitedMenus(previous => previous.includes(selectedMenu) ? previous : [...previous, selectedMenu]);
+    }, [selectedMenu, isMobilePlatform]);
     useEffect(() => {
         if (!menuList.some((item) => item.id === selectedMenu)) {
             setSelectedMenu(menuList[0]?.id ?? "llm-provider-config");
@@ -220,13 +225,10 @@ function ConfigWindow() {
     );
 
     const handleBackHome = async () => {
-        // 移动平台必须单 webview 内切换；窄屏桌面亦可用 in-app（与 ChatUIInfomation 一致）
-        if (isMobilePlatform || isMobile) {
-            const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
-            if (switchWindow) {
-                switchWindow("chat_ui");
-                return;
-            }
+        // 移动平台在单 WebView 内切换；桌面窄窗口仍走桌面导航。
+        if (isMobilePlatform) {
+            navigateMobile("chat_ui");
+            return;
         }
 
         // 桌面端保持原先多窗口逻辑
@@ -284,12 +286,18 @@ function ConfigWindow() {
 
                 <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-card" data-aipp-slot="config-content">
                     <Suspense fallback={configPageFallback}>
-                        <SelectedComponent
+                        {isMobilePlatform ? visitedMenus.map(menu => {
+                            const Page = contentMap[menu];
+                            return <div key={menu} hidden={menu !== selectedMenu} className="h-full min-h-0">
+                                <Page pluginList={stablePluginList} navigateTo={navigateTo} subNav={menu === selectedMenu ? subNav : undefined}
+                                    onSubNavConsumed={() => setSubNav(undefined)} />
+                            </div>;
+                        }) : <SelectedComponent
                             pluginList={stablePluginList}
                             navigateTo={navigateTo}
                             subNav={subNav}
                             onSubNavConsumed={() => setSubNav(undefined)}
-                        />
+                        />}
                     </Suspense>
                 </div>
             </div>
