@@ -6,7 +6,12 @@ use crate::FeatureConfigState;
 use genai::Modality;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+
+fn emit_llm_provider_changed(app: &tauri::AppHandle) {
+    let _ = app.emit("llm_provider_changed", ());
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct LlmProvider {
@@ -112,6 +117,7 @@ pub async fn add_llm_provider(
     let db = LLMDatabase::new(&app).map_err(|e| e.to_string())?;
     db.add_llm_provider(&*name, &*api_type, "", false, false).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app);
+    emit_llm_provider_changed(&app);
     Ok(())
 }
 
@@ -128,6 +134,7 @@ pub async fn update_llm_provider(
     db.update_llm_provider(id, &*name, &*api_type, &*description, is_enabled)
         .map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(())
 }
 
@@ -139,6 +146,7 @@ pub async fn delete_llm_provider(
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.delete_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(())
 }
 
@@ -173,6 +181,7 @@ pub async fn update_llm_provider_config(
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.update_llm_provider_config(llm_provider_id, &*name, &*value).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(())
 }
 
@@ -305,6 +314,7 @@ pub async fn fetch_model_list(
             db.replace_llm_models(llm_provider_id, &result.iter().map(persisted_model).collect::<Vec<_>>(), false)
                 .map_err(|e| e.to_string())?;
             crate::sync::schedule_sync_after_local_change(&app_handle);
+            emit_llm_provider_changed(&app_handle);
             Ok(result)
         }
         Err(e) => {
@@ -333,6 +343,7 @@ pub async fn add_llm_model(
         });
 
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(LlmModel {
         id: 0,
         name: code.clone(),
@@ -355,6 +366,7 @@ pub async fn delete_llm_model(
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.delete_llm_model(llm_provider_id, code).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(())
 }
 
@@ -551,6 +563,7 @@ pub async fn update_selected_models(
     db.replace_llm_models(llm_provider_id, &models, supports_request_mode).map_err(|e| e.to_string())?;
 
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(())
 }
 
@@ -579,6 +592,7 @@ pub async fn update_llm_model_request_mode(
     )
     .map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(())
 }
 
@@ -665,6 +679,7 @@ pub async fn import_llm_provider(
 
     // Return the created provider
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    emit_llm_provider_changed(&app_handle);
     Ok(LlmProvider {
         id: provider_id,
         name: provider_name,

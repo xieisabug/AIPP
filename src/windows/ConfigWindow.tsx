@@ -111,6 +111,10 @@ function ConfigWindow() {
     useEffect(() => {
         if (isMobilePlatform) setVisitedMenus(previous => previous.includes(selectedMenu) ? previous : [...previous, selectedMenu]);
     }, [selectedMenu, isMobilePlatform]);
+    // 移动端 keep-alive 页切回时广播激活，供目录订阅在无需重启下刷新。
+    useEffect(() => {
+        window.dispatchEvent(new CustomEvent("aipp:config-menu-activated", { detail: selectedMenu }));
+    }, [selectedMenu]);
     useEffect(() => {
         if (!menuList.some((item) => item.id === selectedMenu)) {
             setSelectedMenu(menuList[0]?.id ?? "llm-provider-config");
