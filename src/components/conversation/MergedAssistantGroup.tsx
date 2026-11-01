@@ -247,7 +247,9 @@ function MergedAssistantGroup(props: MergedAssistantGroupProps) {
     const { groupMessages, anyShining } = props;
     const lastMsg = groupMessages[groupMessages.length - 1];
     // 手机上 65% 太窄（宽表格/错误卡片被挤压）；仅移动平台放宽
-    const bubbleMaxWidthClass = useIsMobilePlatform() ? "max-w-[92%] min-w-0" : "max-w-[65%]";
+    const bubbleMaxWidthClass = useIsMobilePlatform()
+        ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3 py-2"
+        : "max-w-[65%] px-5 py-4";
 
     return (
         <div
@@ -256,7 +258,7 @@ function MergedAssistantGroup(props: MergedAssistantGroupProps) {
             data-message-id={lastMsg.id}
             data-message-type="merged"
         >
-            <div className={`group relative inline-block ${bubbleMaxWidthClass} self-start rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200`}>
+            <div className={`group relative inline-block ${bubbleMaxWidthClass} self-start rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}>
                 {anyShining && (
                     <ShineBorder
                         shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -294,16 +296,16 @@ function MergedAssistantGroupSegmentComponent(props: MergedAssistantGroupSegment
             const entry = entries[0];
             const width = entry?.borderBoxSize?.[0]?.inlineSize ?? entry?.contentRect.width ?? 0;
             if (width > 0) {
-                reportMergedGroupSegmentWidth(groupKey, width + SEGMENT_HORIZONTAL_CHROME_PX);
+                reportMergedGroupSegmentWidth(groupKey, width + (isMobilePlatform ? 26 : SEGMENT_HORIZONTAL_CHROME_PX));
             }
         });
         observer.observe(content);
         return () => observer.disconnect();
-    }, [groupKey]);
+    }, [groupKey, isMobilePlatform]);
 
     const chromeClassName = [
-        isFirstSegment ? "rounded-t-2xl border-t pt-4" : "",
-        isLastSegment ? "group rounded-b-2xl border-b pb-4" : "pb-2",
+        isFirstSegment ? `rounded-t-2xl border-t ${isMobilePlatform ? "pt-2" : "pt-4"}` : "",
+        isLastSegment ? `group rounded-b-2xl border-b ${isMobilePlatform ? "pb-2" : "pb-4"}` : "pb-2",
     ].join(" ");
 
     return (
@@ -315,7 +317,7 @@ function MergedAssistantGroupSegmentComponent(props: MergedAssistantGroupSegment
             data-merged-segment={isFirstSegment ? "first" : isLastSegment ? "last" : "middle"}
         >
             <div
-                className={`relative ${isMobilePlatform ? "max-w-[92%] min-w-0" : "max-w-[65%]"} self-start border-x border-border bg-background px-5 text-foreground ${chromeClassName}`}
+                className={`relative ${isMobilePlatform ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3" : "max-w-[65%] px-5"} self-start border-x border-border bg-background text-foreground ${chromeClassName}`}
                 style={groupWidth > 0 ? { minWidth: `min(${groupWidth}px, ${maxWidthPercent})` } : undefined}
             >
                 {anyShining && (

@@ -575,10 +575,26 @@ body {
 
 /* ===== 移动平台触控适配（仅 <html class="aipp-mobile-platform">，桌面不受影响） ===== */
 
-/* 消息操作栏（点击气泡切换显示）：按钮 ≥44×44 */
+/* 消息操作栏常驻气泡底部：按钮 ≥44×44，窄屏横向滚动时不压缩 */
 .aipp-mobile-action-bar button {
     min-width: 44px;
     min-height: 44px;
+    flex-shrink: 0;
+}
+
+/* 视觉轻量，触控范围仍为 44px；去掉正文首尾的段落外边距，避免与气泡留白叠加。 */
+.aipp-mobile-action-bar button svg {
+    width: 14px;
+    height: 14px;
+    color: hsl(var(--muted-foreground));
+}
+
+.aipp-mobile-message-bubble .prose > :first-child {
+    margin-top: 0;
+}
+
+.aipp-mobile-message-bubble .prose > :last-child {
+    margin-bottom: 0;
 }
 
 /* Markdown 宽表格：局部横向滚动，不挤压列宽 */
