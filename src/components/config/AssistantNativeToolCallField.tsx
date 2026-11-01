@@ -71,10 +71,10 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
     }
 
     return (
-        <div className="space-y-2">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">使用原生ToolCall</span>
+        <div className="space-y-2" data-aipp-slot="assistant-native-toolcall">
+            <div className="flex w-full min-w-0 items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="text-sm font-medium text-foreground break-words">使用原生ToolCall</span>
                     <TooltipProvider>
                         <Tooltip>
                             <TooltipTrigger asChild>
@@ -89,6 +89,7 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
                     </TooltipProvider>
                 </div>
                 <Switch
+                    className="shrink-0"
                     checked={useNativeToolCall}
                     onCheckedChange={handleToggle}
                 />
