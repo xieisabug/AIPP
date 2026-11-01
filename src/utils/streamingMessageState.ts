@@ -67,6 +67,7 @@ function mergeBaseAndLocalMessage(baseMessage: Message, localMessage: Message): 
         regenerate: baseMessage.regenerate ?? localMessage.regenerate ?? null,
         attachment_list: baseMessage.attachment_list ?? localMessage.attachment_list,
         tool_calls_json: baseMessage.tool_calls_json ?? localMessage.tool_calls_json ?? null,
+        metadata_json: baseMessage.metadata_json ?? localMessage.metadata_json ?? null,
         first_token_time:
             baseMessage.first_token_time ?? localMessage.first_token_time ?? null,
         ttft_ms: baseMessage.ttft_ms ?? localMessage.ttft_ms ?? null,

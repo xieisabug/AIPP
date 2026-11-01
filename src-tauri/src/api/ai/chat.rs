@@ -86,6 +86,116 @@ fn metadata_object_from_raw(existing_metadata_json: Option<&str>) -> serde_json:
     }
 }
 
+
+/// LeaderAI #159: tag partial stream messages from a failed/retry attempt so the UI
+/// can group by attempt index instead of listing interrupted partials flat.
+fn build_stream_retry_metadata_json(
+    existing_metadata_json: Option<&str>,
+    session_id: &str,
+    attempt: u32,
+    status: &str,
+    error_summary: Option<&str>,
+) -> String {
+    let mut map = metadata_object_from_raw(existing_metadata_json);
+    let mut retry_meta = serde_json::Map::new();
+    retry_meta.insert("session_id".to_string(), serde_json::json!(session_id));
+    retry_meta.insert("attempt".to_string(), serde_json::json!(attempt));
+    retry_meta.insert("status".to_string(), serde_json::json!(status));
+    if let Some(error) = error_summary.map(str::trim).filter(|value| !value.is_empty()) {
+        let truncated = if error.chars().count() > 500 {
+            format!("{}…", error.chars().take(500).collect::<String>())
+        } else {
+            error.to_string()
+        };
+        retry_meta.insert("error".to_string(), serde_json::json!(truncated));
+    }
+    map.insert(
+        "stream_retry".to_string(),
+        serde_json::Value::Object(retry_meta),
+    );
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| {
+        serde_json::json!({
+            "stream_retry": {
+                "session_id": session_id,
+                "attempt": attempt,
+                "status": status,
+            }
+        })
+        .to_string()
+    })
+}
+
+fn apply_stream_retry_metadata(
+    conversation_db: &ConversationDatabase,
+    window: &tauri::Window,
+    conversation_id: i64,
+    message_ids: &[i64],
+    session_id: &str,
+    attempt: u32,
+    status: &str,
+    error_summary: Option<&str>,
+) {
+    if message_ids.is_empty() {
+        return;
+    }
+    let Ok(repo) = conversation_db.message_repo() else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    for &msg_id in message_ids {
+        let Ok(Some(mut message)) = repo.read(msg_id) else {
+            continue;
+        };
+        message.metadata_json = Some(build_stream_retry_metadata_json(
+            message.metadata_json.as_deref(),
+            session_id,
+            attempt,
+            status,
+            error_summary,
+        ));
+        if status == "interrupted" && message.finish_time.is_none() {
+            message.finish_time = Some(now);
+        }
+        if let Err(error) = repo.update(&message) {
+            warn!(message_id = msg_id, error = %error, "failed to persist stream_retry metadata");
+            continue;
+        }
+
+        if status == "interrupted" {
+            let update_event = ConversationEvent {
+                r#type: "message_update".to_string(),
+                data: serde_json::to_value(MessageUpdateEvent {
+                    message_id: msg_id,
+                    message_type: message.message_type.clone(),
+                    content: message.content.clone(),
+                    is_done: true,
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
+                    ttft_ms: None,
+                    tps: None,
+                })
+                .unwrap_or(serde_json::json!({})),
+            };
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                update_event,
+            );
+        }
+
+        send_conversation_event_to_chat_windows(
+            window.app_handle(),
+            conversation_id,
+            ConversationEvent {
+                r#type: "message_metadata_update".to_string(),
+                data: serde_json::json!({ "message_id": msg_id }),
+            },
+        );
+    }
+}
+
+
 fn merge_chat_response_metadata(
     existing_metadata_json: Option<&str>,
     usage: Option<&Usage>,
@@ -2636,6 +2746,9 @@ pub async fn handle_stream_chat(
     // 从配置中获取最大重试次数
     let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
 
+    // 同一轮 ask 的多次流式重试共享 session_id，供前端按尝试分组（LeaderAI #159）
+    let retry_session_id = uuid::Uuid::new_v4().to_string();
+
     // 外层重试循环，处理整个流式会话
     loop {
         main_attempts += 1;
@@ -2660,6 +2773,8 @@ pub async fn handle_stream_chat(
             mcp_override_config.clone(),
             tool_name_mapping.clone(),
             cancel_token.clone(),
+            main_attempts,
+            &retry_session_id,
         )
         .await;
 
@@ -2777,6 +2892,8 @@ async fn attempt_stream_chat(
     mcp_override_config: Option<McpOverrideConfig>,
     tool_name_mapping: ToolNameMapping,
     cancel_token: Option<CancellationToken>,
+    attempt_index: u32,
+    retry_session_id: &str,
 ) -> Result<(), anyhow::Error> {
     if let Some(token) = cancel_token.as_ref() {
         if token.is_cancelled() {
@@ -3878,6 +3995,24 @@ async fn attempt_stream_chat(
                             );
                         }
 
+                        // 仅在发生过重试时标记最终成功尝试，便于 UI 与中断的部分输出分组
+                        if attempt_index > 1 {
+                            let completed_ids: Vec<i64> = [reasoning_message_id, response_message_id]
+                                .into_iter()
+                                .flatten()
+                                .collect();
+                            apply_stream_retry_metadata(
+                                conversation_db,
+                                window,
+                                conversation_id,
+                                &completed_ids,
+                                retry_session_id,
+                                attempt_index,
+                                "completed",
+                                None,
+                            );
+                        }
+
                         return Ok(());
                     }
                 }
@@ -3886,12 +4021,28 @@ async fn attempt_stream_chat(
                 let _user_friendly_error = enhanced_error_logging_v2(&e, "Stream Processing").await;
                 // genai's Display omits the transport source (for example a revoked
                 // TLS certificate). Preserve it in the persisted/UI error details.
-                if let genai::Error::WebStream { error, .. } = &e {
-                    return Err(anyhow::anyhow!(
+                let err = if let genai::Error::WebStream { error, .. } = &e {
+                    anyhow::anyhow!(
                         "Stream processing failed: {}; transport: {:?}", e, error
-                    ));
-                }
-                return Err(anyhow::anyhow!("Stream processing failed: {}", e));
+                    )
+                } else {
+                    anyhow::anyhow!("Stream processing failed: {}", e)
+                };
+                let partial_ids: Vec<i64> = [reasoning_message_id, response_message_id]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                apply_stream_retry_metadata(
+                    conversation_db,
+                    window,
+                    conversation_id,
+                    &partial_ids,
+                    retry_session_id,
+                    attempt_index,
+                    "interrupted",
+                    Some(&err.to_string()),
+                );
+                return Err(err);
             }
             None => {
                 error!(
@@ -3906,12 +4057,27 @@ async fn attempt_stream_chat(
                     has_reasoning_message = reasoning_message_id.is_some(),
                     "stream closed unexpectedly without End event"
                 );
-                return Err(anyhow::anyhow!(
+                let err = anyhow::anyhow!(
                     "Stream ended unexpectedly without End event (response_chunks={}, reasoning_chunks={}, captured_tool_calls={})",
                     response_chunk_count,
                     reasoning_chunk_count,
                     captured_tool_calls.len()
-                ));
+                );
+                let partial_ids: Vec<i64> = [reasoning_message_id, response_message_id]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                apply_stream_retry_metadata(
+                    conversation_db,
+                    window,
+                    conversation_id,
+                    &partial_ids,
+                    retry_session_id,
+                    attempt_index,
+                    "interrupted",
+                    Some(&err.to_string()),
+                );
+                return Err(err);
             }
         }
     }
@@ -4588,6 +4754,45 @@ pub async fn handle_non_stream_chat(
             error!(error = %e, "chat error");
             Err(anyhow::anyhow!("Chat error: {}", e))
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_retry_metadata_tests {
+    use super::build_stream_retry_metadata_json;
+
+    #[test]
+    fn builds_interrupted_stream_retry_metadata() {
+        let raw = build_stream_retry_metadata_json(
+            None,
+            "session-1",
+            2,
+            "interrupted",
+            Some("stream dropped"),
+        );
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let retry = value.get("stream_retry").unwrap();
+        assert_eq!(retry.get("session_id").and_then(|v| v.as_str()), Some("session-1"));
+        assert_eq!(retry.get("attempt").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(retry.get("status").and_then(|v| v.as_str()), Some("interrupted"));
+        assert_eq!(retry.get("error").and_then(|v| v.as_str()), Some("stream dropped"));
+    }
+
+    #[test]
+    fn preserves_existing_metadata_fields() {
+        let existing = r#"{"speakerLabel":"bot","usage_source":"reported"}"#;
+        let raw = build_stream_retry_metadata_json(
+            Some(existing),
+            "session-2",
+            1,
+            "completed",
+            None,
+        );
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value.get("speakerLabel").and_then(|v| v.as_str()), Some("bot"));
+        assert_eq!(value.get("usage_source").and_then(|v| v.as_str()), Some("reported"));
+        assert!(value.get("stream_retry").is_some());
+        assert!(value.pointer("/stream_retry/error").is_none());
     }
 }
 
