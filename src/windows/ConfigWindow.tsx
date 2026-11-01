@@ -21,6 +21,7 @@ import { Home, Menu } from "lucide-react";
 import MCP from "../assets/mcp.svg?react";
 import { pluginRuntime } from "../services/PluginRuntime";
 import { navigateMobile } from "../mobile/navigation";
+import { requestConfigLeave } from "@/lib/configLeaveGuard";
 
 interface MenuItem {
     id: string;
@@ -143,8 +144,10 @@ function ConfigWindow() {
         const unlistenNav = listen<{ menu: string; subNav?: string }>("config-navigate-to", (event) => {
             const { menu, subNav: sub } = event.payload;
             if (contentMap[menu]) {
-                setSubNav(sub);
-                setSelectedMenu(menu);
+                requestConfigLeave(() => {
+                    setSubNav(sub);
+                    setSelectedMenu(menu);
+                });
             }
         });
 
@@ -189,9 +192,8 @@ function ConfigWindow() {
 
     // 导航函数 - 使用 useCallback 稳定化引用
     const navigateTo = useCallback((menuKey: string) => {
-        if (contentMap[menuKey]) {
-            setSelectedMenu(menuKey);
-        }
+        if (!contentMap[menuKey]) return;
+        requestConfigLeave(() => setSelectedMenu(menuKey));
     }, []);
 
     // 稳定化 pluginList 引用
@@ -231,7 +233,7 @@ function ConfigWindow() {
     const handleBackHome = async () => {
         // 移动平台在单 WebView 内切换；桌面窄窗口仍走桌面导航。
         if (isMobilePlatform) {
-            navigateMobile("chat_ui");
+            requestConfigLeave(() => navigateMobile("chat_ui"));
             return;
         }
 
@@ -276,8 +278,10 @@ function ConfigWindow() {
                                 data-aipp-slot="config-menu"
                             >
                                 {renderMenuItems((id) => {
-                                    setSelectedMenu(id);
-                                    setSidebarOpen(false);
+                                    requestConfigLeave(() => {
+                                        setSelectedMenu(id);
+                                        setSidebarOpen(false);
+                                    });
                                 })}
                             </div>
                         </SheetContent>
@@ -321,7 +325,7 @@ function ConfigWindow() {
                     data-theme-slot="settings-menu-container"
                     data-aipp-slot="config-menu"
                 >
-                    {renderMenuItems(setSelectedMenu)}
+                    {renderMenuItems((id) => requestConfigLeave(() => setSelectedMenu(id)))}
                 </div>
 
                 {/* 内容区域 */}

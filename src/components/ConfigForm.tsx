@@ -599,7 +599,29 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         )}
                     </div>
                 </div>
-                <div className="flex items-center gap-2 ml-4">
+                <div className="flex items-center gap-2 ml-4 flex-shrink-0">
+                    {onSave && useFormReturn.formState.isDirty ? (
+                        <span
+                            className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300"
+                            data-aipp-slot="config-form-dirty-badge"
+                        >
+                            未保存
+                        </span>
+                    ) : null}
+                    {onSave && (
+                        <Button
+                            type="button"
+                            size="sm"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                void onSave(useFormReturn.getValues());
+                            }}
+                            className="bg-primary hover:bg-primary/90 text-primary-foreground min-h-9"
+                            data-aipp-slot="config-form-save-header"
+                        >
+                            保存配置
+                        </Button>
+                    )}
                     {onCopy && (
                         <Button
                             variant="ghost"
@@ -642,10 +664,23 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                 <Form {...useFormReturn}>
                     {renderContent()}
                     {onSave && (
-                        <div className="mt-8 pt-4 border-t border-border">
-                            <Button onClick={onSave} className="bg-primary hover:bg-primary/90 text-primary-foreground">
-                                保存配置
-                            </Button>
+                        <div
+                            className="sticky bottom-0 z-20 mt-8 border-t border-border bg-card/95 pt-4 pb-[max(1rem,env(safe-area-inset-bottom,0px))] backdrop-blur supports-[backdrop-filter]:bg-card/80"
+                            style={{ bottom: "var(--aipp-keyboard-inset, 0px)" }}
+                            data-aipp-slot="config-form-save-footer"
+                        >
+                            <div className="flex items-center gap-3">
+                                <Button
+                                    type="button"
+                                    onClick={() => void onSave(useFormReturn.getValues())}
+                                    className="bg-primary hover:bg-primary/90 text-primary-foreground min-h-11"
+                                >
+                                    保存配置
+                                </Button>
+                                {useFormReturn.formState.isDirty ? (
+                                    <span className="text-xs text-amber-700 dark:text-amber-300">有未保存的更改</span>
+                                ) : null}
+                            </div>
                         </div>
                     )}
                 </Form>

@@ -24,6 +24,15 @@ import { AssistantDialogs } from "./assistant/AssistantDialogs";
 import { AssistantConfigApi } from "@/types/forms";
 import type { LoadedPlugin, PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 import { getErrorMessage } from "@/utils/error";
+import { registerConfigBeforeLeave } from "@/lib/configLeaveGuard";
+import {
+    AlertDialog,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { resolveAgentDefaultSelection } from "@/utils/agentDefaults";
 import type { AgentModelOption } from "@/utils/agentDefaults";
 
@@ -68,6 +77,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const isDirty = form.formState.isDirty;
     const dirtyRef = useRef(isDirty);
     dirtyRef.current = isDirty;
+    const [leavePrompt, setLeavePrompt] = useState<null | { proceed: () => void }>(null);
     const [searchQuery, setSearchQuery] = useState('');
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
@@ -412,6 +422,17 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         ]
     );
 
+
+    useEffect(() => {
+        return registerConfigBeforeLeave((proceed) => {
+            if (!dirtyRef.current) {
+                proceed();
+                return;
+            }
+            setLeavePrompt({ proceed });
+        });
+    }, []);
+
     useDataRefresh({
         events: ["assistant_list_changed", "llm_provider_changed", "mcp_state_changed"],
         identity: selectionRevision,
@@ -700,6 +721,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 toast.success("保存成功");
                 await loadAssistantDetail(currentAssistant.assistant.id);
                 await loadPluginAssistantConfigValues(currentAssistant.assistant.id);
+                // 保存后以当前表单值作为干净基线，保证界面选择与持久化一致
+                form.reset(form.getValues());
             })
             .catch((error) => toast.error("保存失败: " + error));
     }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail, loadPluginAssistantConfigValues, pluginAssistantFormFields]);
@@ -787,12 +810,29 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const handleSelectFromDropdown = useCallback(
         (assistantId: string) => {
             const assistant = assistants.find((a) => a.id.toString() === assistantId);
-            if (assistant) {
-                handleChooseAssistant(assistant);
+            if (!assistant) return;
+            if (dirtyRef.current && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
+                setLeavePrompt({ proceed: () => { void handleChooseAssistant(assistant); } });
+                return;
             }
+            void handleChooseAssistant(assistant);
         },
-        [assistants, handleChooseAssistant]
+        [assistants, handleChooseAssistant, currentAssistant]
     );
+
+    const handleLeaveSave = useCallback(() => {
+        const proceed = leavePrompt?.proceed;
+        setLeavePrompt(null);
+        handleAssistantFormSave();
+        proceed?.();
+    }, [leavePrompt, handleAssistantFormSave]);
+
+    const handleLeaveDiscard = useCallback(() => {
+        const proceed = leavePrompt?.proceed;
+        setLeavePrompt(null);
+        form.reset();
+        proceed?.();
+    }, [leavePrompt, form]);
 
     // 新增按钮组件
     const addButton = useMemo(
@@ -839,7 +879,13 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 <ListItemButton
                     key={assistant.id}
                     isSelected={currentAssistant?.assistant.id === assistant.id}
-                    onClick={() => handleChooseAssistant(assistant)}
+                    onClick={() => {
+                        if (dirtyRef.current && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
+                            setLeavePrompt({ proceed: () => { void handleChooseAssistant(assistant); } });
+                            return;
+                        }
+                        void handleChooseAssistant(assistant);
+                    }}
                 >
                     <span className="font-medium truncate">{assistant.name}</span>
                 </ListItemButton>
@@ -918,6 +964,21 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     onCloseShare={closeShareDialog}
                     onCloseImport={closeImportDialog}
                 />
+                <AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>有未保存的助手配置</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            离开当前页或切换助手前，请选择保存或放弃更改。未保存时界面上的模型选择不会写入实际请求。
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <Button type="button" variant="outline" onClick={() => setLeavePrompt(null)}>取消</Button>
+                        <Button type="button" variant="secondary" onClick={handleLeaveDiscard}>放弃</Button>
+                        <Button type="button" onClick={handleLeaveSave}>保存</Button>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
             </>
         );
     }
@@ -947,6 +1008,23 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 onCloseShare={closeShareDialog}
                 onCloseImport={closeImportDialog}
             />
+
+            <AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>有未保存的助手配置</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            离开当前页或切换助手前，请选择保存或放弃更改。未保存时界面上的模型选择不会写入实际请求。
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <Button type="button" variant="outline" onClick={() => setLeavePrompt(null)}>取消</Button>
+                        <Button type="button" variant="secondary" onClick={handleLeaveDiscard}>放弃</Button>
+                        <Button type="button" onClick={handleLeaveSave}>保存</Button>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+
         </>
     );
 };
