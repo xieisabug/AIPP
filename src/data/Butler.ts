@@ -105,3 +105,24 @@ export interface ButlerNotificationEvent {
     body: string;
     importance: string;
 }
+
+/** Human-readable label for butler / 本机任务 terminal + runtime statuses. */
+export function butlerTaskStatusLabel(status: string): string {
+    switch (status) {
+        case "accepted":
+            return "已受理";
+        case "running":
+            return "执行中";
+        case "succeeded":
+        case "completed":
+            return "已完成";
+        case "failed":
+            return "失败";
+        case "cancelled":
+            return "已取消";
+        case "interrupted":
+            return "已中断";
+        default:
+            return status;
+    }
+}

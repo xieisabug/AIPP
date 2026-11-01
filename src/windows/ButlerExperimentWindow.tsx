@@ -180,10 +180,12 @@ function getStatusVariant(
 ): "default" | "destructive" | "secondary" | "outline" {
     switch (status) {
         case "succeeded":
+        case "completed":
             return "default";
         case "failed":
             return "destructive";
         case "cancelled":
+        case "interrupted":
             return "secondary";
         case "running":
             return "outline";
@@ -199,11 +201,14 @@ function getStatusLabel(status: string) {
         case "running":
             return "执行中";
         case "succeeded":
+        case "completed":
             return "已完成";
         case "failed":
             return "失败";
         case "cancelled":
             return "已取消";
+        case "interrupted":
+            return "已中断";
         default:
             return status;
     }

@@ -88,9 +88,10 @@ Butler（总管家）是 AIPP 的实验性任务编排能力。它不是普通�
 ### 状态流转
 - `accepted`
 - `running`
-- `succeeded`
+- `succeeded`（自然完成；`completed_at`）
 - `failed`
-- `cancelled`
+- `cancelled`（取消且无可用部分输出；`cancelled_at`）
+- `interrupted`（取消时保留部分输出，但不标成功；`interrupted_at` / `cancelled_at`）
 
 ### 任务台展示
 - 任务列表按最近更新时间排序
@@ -134,7 +135,7 @@ Butler（总管家）是 AIPP 的实验性任务编排能力。它不是普通�
 ### 结果摘要
 - Butler 对任务结果会优先提取最终 `response`
 - 如果出现错误，则优先记录错误结果
-- 如果用户在任务中途发起取消，但任务仍然产出了完成结果，系统会优先保留这份最终产物
+- 取消与自然完成竞态：仅当响应在取消盖戳前已自然 `finish`（无 `end_reason=cancelled`）时记为 `succeeded` 并保留 `cancel_requested`；取消路径写入的半截输出记为 `interrupted`，内容可见但不标成功；无可用输出记为 `cancelled`
 
 ---
 
