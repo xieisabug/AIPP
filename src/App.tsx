@@ -1,6 +1,9 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import "./App.css";
+import "./mobile/mobile.css";
+import { useIsMobilePlatform } from "./hooks/use-platform";
+import MobileShell from "./mobile/MobileShell";
 import { Toaster } from "./components/ui/sonner.tsx";
 
 // 按需加载各个窗口，避免一次性打包全部页面导致移动端首屏加载过慢
@@ -18,6 +21,7 @@ const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType
 };
 
 function App() {
+    const isMobilePlatform = useIsMobilePlatform();
     const [winLabel, setWinLabel] = useState<string>("chat_ui");
 
     useEffect(() => {
@@ -30,17 +34,6 @@ function App() {
             console.error("Failed to get current webview window label, fallback to chat_ui", err);
             setWinLabel("chat_ui");
         }
-
-        // 提供可切换窗口的全局方法，便于移动端在单 webview 内切换视图
-        (window as any).__setAppWindow = (label: string) => {
-            setWinLabel(label);
-        };
-
-        return () => {
-            if ((window as any).__setAppWindow) {
-                delete (window as any).__setAppWindow;
-            }
-        };
     }, []);
 
     const WindowComponent = useMemo(() => {
@@ -79,7 +72,7 @@ function App() {
 
     return (
         <>
-            <Suspense fallback={<LoadingScreen />}>{WindowComponent ? <WindowComponent /> : <div>未知窗口类型: {winLabel}</div>}</Suspense>
+            <Suspense fallback={<LoadingScreen />}>{isMobilePlatform ? <MobileShell /> : WindowComponent ? <WindowComponent /> : <div>未知窗口类型: {winLabel}</div>}</Suspense>
             <Toaster richColors />
         </>
     );

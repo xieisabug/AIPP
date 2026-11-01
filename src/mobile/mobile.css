@@ -1,0 +1,27 @@
+/* Platform-scoped: tablet landscape follows the same mobile form contract. */
+.aipp-mobile-platform [data-slot="dialog-content"] {
+    top: 0; left: 0;
+    /* Desktop centering / enter animations must not translate a fullscreen panel. */
+    --tw-translate-x: 0; --tw-translate-y: 0;
+    transform: none !important; translate: none !important; animation: none;
+    width: 100%; max-width: 100%; height: 100dvh; max-height: 100dvh;
+    border-radius: 0; overflow-y: auto;
+    padding-top: max(24px, env(safe-area-inset-top));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+.aipp-mobile-platform [data-slot="dialog-footer"] {
+    position: sticky; bottom: 0; background: var(--background); padding-top: .75rem;
+}
+.aipp-mobile-platform [data-aipp-window="config"] .grid {
+    grid-template-columns: minmax(0, 1fr);
+}
+.aipp-mobile-platform [data-slot="dialog-content"] button,
+.aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] button,
+.aipp-mobile-platform [data-aipp-slot="chat-info-actions"] button,
+.aipp-mobile-platform [data-aipp-window="config"] button,
+.aipp-mobile-platform [data-slot="dialog-content"] [role="combobox"],
+.aipp-mobile-platform .aipp-mobile-action-bar button { min-width: 44px; min-height: 44px; }
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-scroll"] table {
+    display: block; max-width: 100%; overflow-x: auto;
+}
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-scroll"] pre { max-width: 100%; overflow-x: auto; }
