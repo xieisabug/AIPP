@@ -24,3 +24,22 @@ describe("MCPToolItem mobile-unexecutable label", () => {
         expect(screen.queryByText(MOBILE_UNEXECUTABLE_LABEL)).toBeNull();
     });
 });
+
+describe("MCPToolItem narrow layout", () => {
+    it("keeps description full width in a vertical card header", () => {
+        const long = "这是一段很长的工具说明，用于验证窄屏下不会被挤成每行两三个字。";
+        render(
+            <MCPToolItem
+                tool={{ ...tool, tool_description: long }}
+                isExpanded={false}
+                onToggleExpansion={noop}
+                onUpdateTool={noop}
+                truncateText={(t) => t}
+            />,
+        );
+        const item = screen.getByText(long).closest("[data-aipp-slot=mcp-tool-item]");
+        expect(item).toBeTruthy();
+        expect(screen.getByText("启用")).toBeTruthy();
+        expect(screen.getByText("自动运行")).toBeTruthy();
+    });
+});
