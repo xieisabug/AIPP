@@ -21,6 +21,7 @@ interface ConversationExportDialogProps {
     conversationId: string;
     externalOpen?: boolean;
     onExternalOpenChange?: (open: boolean) => void;
+    hideTrigger?: boolean;
 }
 
 const defaultOptions: ConversationExportOptions = {
@@ -34,6 +35,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
     conversationId,
     externalOpen,
     onExternalOpenChange,
+    hideTrigger = false,
 }) => {
     const [internalOpen, setInternalOpen] = useState(false);
     const platform = usePlatform();
@@ -133,13 +135,15 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
 
     return (
         <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild>
-                <IconButton
-                    icon={<Download size={16} className="text-icon" />}
-                    onClick={() => {}}
-                    border
-                />
-            </DialogTrigger>
+            {!hideTrigger ? (
+                <DialogTrigger asChild>
+                    <IconButton
+                        icon={<Download size={16} className="text-icon" />}
+                        onClick={() => {}}
+                        border
+                    />
+                </DialogTrigger>
+            ) : null}
             <DialogContent className="max-w-md">
                 <DialogHeader>
                     <DialogTitle>导出对话</DialogTitle>

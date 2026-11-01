@@ -2,33 +2,132 @@ import { useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useIsMobilePlatform } from "./use-platform";
+import { AttachmentType, FileInfo } from "@/data/Conversation";
+
+export interface MobileDraftAttachmentDto {
+    id: number;
+    name: string;
+    path: string;
+    attachment_type: number;
+    thumbnail?: string | null;
+}
+
+export interface MobileDraftDto {
+    content: string;
+    attachments: MobileDraftAttachmentDto[];
+}
 
 const writes = new Map<string, Promise<unknown>>();
 
-export function useMobileDraftPersistence(key: string, restore: (content: string) => void) {
+function toFileInfo(attachment: MobileDraftAttachmentDto): FileInfo | null {
+    if (!Number.isFinite(attachment.id) || attachment.id <= 0) return null;
+    const type =
+        attachment.attachment_type === AttachmentType.Image
+            ? AttachmentType.Image
+            : AttachmentType.Text;
+    return {
+        id: attachment.id,
+        name: attachment.name || `attachment-${attachment.id}`,
+        path: attachment.path || attachment.name || `attachment-${attachment.id}`,
+        type,
+        thumbnail: attachment.thumbnail ?? undefined,
+    };
+}
+
+export function draftAttachmentsToFileInfo(attachments: MobileDraftAttachmentDto[]): FileInfo[] {
+    return attachments.flatMap((attachment) => {
+        const file = toFileInfo(attachment);
+        return file ? [file] : [];
+    });
+}
+
+export function useMobileDraftPersistence(
+    key: string,
+    restore: (draft: MobileDraftDto) => void,
+    onReady?: () => void,
+) {
     const mobile = useIsMobilePlatform();
     const revisions = useRef(new Map<string, number>());
     const latestRestore = useRef(restore);
     latestRestore.current = restore;
+    const latestReady = useRef(onReady);
+    latestReady.current = onReady;
+    const latestPayload = useRef(new Map<string, { content: string; attachmentIds: number[] }>());
+
     useEffect(() => {
-        if (!mobile) return;
+        if (!mobile) {
+            latestReady.current?.();
+            return;
+        }
         let disposed = false;
         const revision = revisions.current.get(key) ?? 0;
-        void Promise.resolve(writes.get(key)).then(() => invoke<string>("get_mobile_draft", { conversationKey: key }))
-            .then(content => {
-                if (!disposed && (revisions.current.get(key) ?? 0) === revision) latestRestore.current(content);
-            }).catch(error => {
+        void Promise.resolve(writes.get(key))
+            .then(() => invoke<MobileDraftDto>("get_mobile_draft", { conversationKey: key }))
+            .then((draft) => {
+                if (disposed) return;
+                if ((revisions.current.get(key) ?? 0) === revision) {
+                    const attachments = Array.isArray(draft?.attachments) ? draft.attachments : [];
+                    const content = typeof draft?.content === "string" ? draft.content : "";
+                    latestPayload.current.set(key, {
+                        content,
+                        attachmentIds: attachments.map((item) => item.id).filter((id) => id > 0),
+                    });
+                    latestRestore.current({ content, attachments });
+                }
+            })
+            .catch((error) => {
                 if (!disposed) toast.error(`恢复本机草稿失败: ${String(error)}`);
+            })
+            .finally(() => {
+                if (!disposed) latestReady.current?.();
             });
-        return () => { disposed = true; };
+        return () => {
+            disposed = true;
+        };
     }, [key, mobile]);
-    return useCallback((content: string) => {
-        if (!mobile) return;
-        revisions.current.set(key, (revisions.current.get(key) ?? 0) + 1);
-        // Serialize writes per conversation, including clearing after a successful send.
-        const next = Promise.resolve(writes.get(key)).then(() => invoke("save_mobile_draft", { conversationKey: key, content }))
-            .catch(error => toast.error(`保存本机草稿失败，当前输入仍保留: ${String(error)}`));
-        writes.set(key, next);
-        void next.finally(() => { if (writes.get(key) === next) writes.delete(key); });
-    }, [key, mobile]);
+
+    const save = useCallback(
+        (next: { content?: string; attachmentIds?: number[] }) => {
+            if (!mobile) return;
+            const previous = latestPayload.current.get(key) ?? { content: "", attachmentIds: [] as number[] };
+            const payload = {
+                content: next.content ?? previous.content,
+                attachmentIds: next.attachmentIds ?? previous.attachmentIds,
+            };
+            latestPayload.current.set(key, payload);
+            revisions.current.set(key, (revisions.current.get(key) ?? 0) + 1);
+            const request = Promise.resolve(writes.get(key))
+                .then(() =>
+                    invoke("save_mobile_draft", {
+                        conversationKey: key,
+                        content: payload.content,
+                        attachmentIds: payload.attachmentIds,
+                    }),
+                )
+                .catch((error) =>
+                    toast.error(`保存本机草稿失败，当前输入仍保留: ${String(error)}`),
+                );
+            writes.set(key, request);
+            void request.finally(() => {
+                if (writes.get(key) === request) writes.delete(key);
+            });
+        },
+        [key, mobile],
+    );
+
+    const saveContent = useCallback(
+        (content: string) => {
+            save({ content });
+        },
+        [save],
+    );
+
+    const saveAttachmentIds = useCallback(
+        (attachmentIds: number[]) => {
+            save({ attachmentIds });
+        },
+        [save],
+    );
+
+    return { saveContent, saveAttachmentIds };
 }

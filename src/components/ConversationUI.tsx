@@ -63,6 +63,7 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
+import ConversationExportDialog from "./conversation/ConversationExportDialog";
 import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail from "./conversation/ConversationTurnRail";
 import { ToolErrorContinueProvider } from "./McpToolCall";
@@ -374,8 +375,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // AI响应状态管理
         const [aiIsResponsing, setAiIsResponsing] = useState<boolean>(false);
 
-        // 输入相关状态
-        const [inputText, setInputText] = useConversationDraft(conversationId);
         const [showBackToBottom, setShowBackToBottom] = useState(false);
         const inputAreaRef = useRef<InputAreaRef>(null);
         // 加载请求标识，避免旧请求覆盖最新状态（StrictMode 双调用等场景）
@@ -389,12 +388,37 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 文本选择
         const { selectedText } = useTextSelection();
 
-        // 文件管理
-        const { fileInfoList, clearFileInfoList, handleChooseFile, handleDeleteFile, handlePaste, handleDropFiles } =
-            useFileManagement();
+        // 文件管理（需先于草稿，便于跨进程恢复附件引用）
+        const {
+            fileInfoList,
+            clearFileInfoList,
+            restoreFiles,
+            handleChooseFile,
+            handleDeleteFile,
+            handlePaste,
+            handleDropFiles,
+        } = useFileManagement();
+
+        const [draftReady, setDraftReady] = useState(false);
+        useEffect(() => {
+            setDraftReady(false);
+            restoreFiles([]);
+        }, [conversationId, restoreFiles]);
+
+        // 输入相关状态（移动端会把附件 ID 一并写入本机草稿）
+        const [inputText, setInputText, saveDraftAttachmentIds] = useConversationDraft(
+            conversationId,
+            restoreFiles,
+            () => setDraftReady(true),
+        );
 
         // 文件拖拽
         const { isDragging, setIsDragging, dropRef } = useFileDropHandler(handleDropFiles);
+
+        useEffect(() => {
+            if (!draftReady) return;
+            saveDraftAttachmentIds((fileInfoList ?? []).map((file) => file.id).filter((id) => id > 0));
+        }, [fileInfoList, draftReady, saveDraftAttachmentIds]);
 
         // Reasoning 展开状态
         const { reasoningExpandStates, toggleReasoningExpand } = useReasoningExpand();
@@ -1981,7 +2005,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     {/* Main content area：min-h-0 防止嵌套 flex（如总管家）把滚动区撑破导致占位过高 */}
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-aipp-slot="chat-conversation-main">
                         {isMobilePlatform && conversationId && <MobileRecoveryNotice conversationId={conversationId} />}
-                        {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
+                        {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏；整会话导出对话框仍需挂载供顶栏入口调用 */}
+                        {isMobile && conversationId ? (
+                            <ConversationExportDialog
+                                conversationId={conversationId}
+                                externalOpen={exportDialogOpen}
+                                onExternalOpenChange={setExportDialogOpen}
+                                hideTrigger
+                            />
+                        ) : null}
                         {!isMobile && !hideHeader && (
                             <ConversationHeader
                                 conversationId={conversationId}

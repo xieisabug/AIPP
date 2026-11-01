@@ -227,9 +227,14 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         [isSupportedFile, processFiles],
     );
 
+    const restoreFiles = useCallback((files: FileInfo[]) => {
+        setFileInfoList(files.length ? files : null);
+    }, []);
+
     return {
         fileInfoList,
         clearFileInfoList,
+        restoreFiles,
         handleChooseFile,
         handleDeleteFile,
         handlePaste,

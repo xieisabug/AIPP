@@ -33,7 +33,7 @@ import useConversationManager from "../hooks/useConversationManager";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { Menu, Plus } from "lucide-react";
+import { Download, Menu, Plus } from "lucide-react";
 import {
     runScrollPerformanceProbe,
     waitForAnimationFrames,
@@ -883,9 +883,22 @@ function ChatUIWindow() {
                         <span className="font-medium text-sm truncate flex-1 text-center mx-3" data-aipp-slot="chat-mobile-title">
                             {mobileTitle}
                         </span>
-                        <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
-                            <Plus className="h-5 w-5" />
-                        </Button>
+                        <div className="flex items-center gap-1">
+                            {selectedConversation ? (
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="min-h-11 min-w-11"
+                                    aria-label="导出对话"
+                                    onClick={() => conversationUIRef.current?.openExport()}
+                                >
+                                    <Download className="h-5 w-5" />
+                                </Button>
+                            ) : null}
+                            <Button variant="ghost" size="icon" className="min-h-11 min-w-11" onClick={handleNewConversation} aria-label="新建对话">
+                                <Plus className="h-5 w-5" />
+                            </Button>
+                        </div>
                     </div>
 
                     {/* 主内容区域 */}
