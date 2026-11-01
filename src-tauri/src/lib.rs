@@ -13,6 +13,7 @@ mod plugin;
 mod scheduler;
 mod skills;
 mod mobile_files;
+mod mobile_system_ui;
 mod slash;
 mod state;
 mod sync;
@@ -700,6 +701,7 @@ pub fn run() {
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
         .plugin(tauri_plugin_notification::init())
         .plugin(mobile_files::init())
+        .plugin(mobile_system_ui::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -1042,6 +1044,7 @@ pub fn run() {
             import_llm_provider,
             add_attachment,
             mobile_files::mobile_file_action,
+            mobile_system_ui::set_android_status_bar_appearance,
             api::skill_api::install_mobile_skill_archive,
             api::skill_api::get_mobile_skill_compatibility,
             open_attachment_with_default_app,

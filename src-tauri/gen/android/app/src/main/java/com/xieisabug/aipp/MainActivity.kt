@@ -59,6 +59,12 @@ class MainActivity : TauriActivity() {
       ipcExecutor.execute { Rust.ipc(id, url, body) }
     }
   }
+  override fun onResume() {
+    super.onResume()
+    // Re-sync icon contrast after rotation / process foreground (#151).
+    SystemUiPlugin.reapply(this)
+  }
+
   override fun onDestroy() {
     ipcExecutor.shutdown()
     appWebView = null
