@@ -299,3 +299,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 安装当前构建 APK 后，可通过可调试 WebView 的 CDP 调用 `window.__AIPP_CHAT_PERF__.runConversationScrollTest({ conversationId, includeReturnTrip: true })`；harness 在移动布局中会关闭导航抽屉，复用同一消息滚动容器与采样指标。不要把程序驱动的探针等同于真实触控验收。
 
 补充操作：流式回复中向上触摸滚动并等待新 token；打开设置再返回应恢复历史阅读位置；回到底部后重新跟随；输入中文组合文本、弹出/收起键盘；切换版本、编辑、复制和分叉；横竖屏及前后台切换。普通会话与跨虚拟化阈值的长会话分别记录。仅在本轮创建的测试会话内执行发送和编辑，保留已有用户内容。
+
+模拟器对比时使用当前构建的 APK，并记录设备、CSS 视口、总滚动距离、滚动时长和 `messageItemCount`。连续追加的助手消息可能全部属于最后回复，被保留在 live 区域；要测试历史虚拟列表，必须先结束该轮次，并确认实际挂载消息数远小于历史总数。不能直接比较全量挂载场景与历史虚拟化场景。
+
+CDP 的 CPU throttling 可用于定位较弱算力下的瓶颈，但不代表某款真机，也不模拟其 GPU、温度和内存条件。每次只运行一个滚动探针；CPU profiler 与正式基线分开运行，性能采样中的行高观测和布局读取也有开销。最后补充触控事件滑动验证，区分直接写入 `scrollTop` 的压力测试与日常触控。
