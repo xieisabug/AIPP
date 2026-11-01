@@ -19,6 +19,18 @@ function message(message_type: string, content: string, finish_time: Date | null
 }
 
 describe("estimateMessageHeight", () => {
+    it("should avoid desktop wrapping estimates when a narrow viewport is on mobile", () => {
+        const content = "### 验收消息 1\n\n" + "这是用于验证移动阅读位置与局部滚动的测试段落。".repeat(20)
+            + "\n\n|编号|内容|\n|---|---|\n|1|测试表格|\n\n```js\nconst index = 1;\n```";
+        const options = { mergedMode: true, listWidthPx: 360 };
+        const desktop = estimateMessageHeight(message("assistant", content), options);
+        const mobile = estimateMessageHeight(message("assistant", content), { ...options, isMobilePlatform: true });
+        // Device evidence: a 384px viewport has 360px content width and a
+        // 289px mobile bubble interior; rendered fixture height is about 819px.
+        expect(mobile).toBeGreaterThan(700);
+        expect(mobile).toBeLessThan(900);
+        expect(desktop).toBeGreaterThan(1000);
+    });
     it("should return 0 when a finished reasoning message is hidden by the display config", () => {
         expect(
             estimateMessageHeight(message("reasoning", "long thinking\n".repeat(200)), {

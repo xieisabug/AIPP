@@ -6,6 +6,7 @@ import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversatio
 import { isHiddenAgentActivity } from "./AgentActivityList";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { useFeishuDebugResend } from "@/hooks/useFeishuDebugResend";
 import MergedAssistantGroup, {
     MergedAssistantGroupSegment,
@@ -225,6 +226,7 @@ export function useMessageListElements({
     listWidthPx,
 }: UseMessageListElementsProps) {
     const { isMergeAssistantMessages, isShowThinking } = useDisplayConfig();
+    const isMobilePlatform = useIsMobilePlatform();
     const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
 
     const messageInlineInteractionMap = useMemo(() => {
@@ -341,7 +343,7 @@ export function useMessageListElements({
         }>;
     }>({ layoutKey: "", entries: new Map() });
     const estimatedHeightByMessageId = useMemo(() => {
-        const layoutKey = `${isMergeAssistantMessages}:${isShowThinking}:${estimateListWidthPx ?? ""}`;
+        const layoutKey = `${isMergeAssistantMessages}:${isShowThinking}:${isMobilePlatform}:${estimateListWidthPx ?? ""}`;
         const previousCache = estimatedHeightCacheRef.current.layoutKey === layoutKey
             ? estimatedHeightCacheRef.current.entries
             : new Map();
@@ -376,6 +378,7 @@ export function useMessageListElements({
                         && message.message_type !== "agent_plan",
                     isShowThinking,
                     listWidthPx: estimateListWidthPx,
+                    isMobilePlatform,
                 });
             }
 
@@ -401,6 +404,7 @@ export function useMessageListElements({
         isMergeAssistantMessages,
         isShowThinking,
         estimateListWidthPx,
+        isMobilePlatform,
     ]);
 
     const messageElements = useMemo(() => {

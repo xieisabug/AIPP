@@ -48,11 +48,14 @@ export interface MessageHeightEstimateOptions {
     mergedMode?: boolean;
     isShowThinking?: boolean;
     listWidthPx?: number;
+    isMobilePlatform?: boolean;
 }
 
-export function getBubbleContentWidthPx(listWidthPx?: number): number {
+export function getBubbleContentWidthPx(listWidthPx?: number, isMobilePlatform = false): number {
     const listWidth = listWidthPx && listWidthPx > 0 ? listWidthPx : DEFAULT_ESTIMATE_LIST_WIDTH_PX;
-    return Math.max(160, listWidth * BUBBLE_MAX_WIDTH_RATIO - BUBBLE_HORIZONTAL_PADDING_PX);
+    // Match MessageItem / MergedAssistantGroup: platform, not viewport width.
+    const ratio = isMobilePlatform ? 0.92 : BUBBLE_MAX_WIDTH_RATIO;
+    return Math.max(160, listWidth * ratio - BUBBLE_HORIZONTAL_PADDING_PX);
 }
 
 function measureTextWidthPx(line: string, glyphWidthLatin: number): number {
@@ -192,9 +195,10 @@ export function estimateMessageHeight(
         mergedMode = false,
         isShowThinking = true,
         listWidthPx,
+        isMobilePlatform = false,
     } = options;
     const rawContent = message.content ?? "";
-    const contentWidthPx = getBubbleContentWidthPx(listWidthPx);
+    const contentWidthPx = getBubbleContentWidthPx(listWidthPx, isMobilePlatform);
     const hasToolMarkup = rawContent.includes("MCP_TOOL_CALL") || /<mcp_tool_call/i.test(rawContent);
 
     if (message.message_type === "reasoning") {
