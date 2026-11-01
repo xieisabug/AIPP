@@ -17,31 +17,58 @@
     display: flex;
     flex-direction: row;
     justify-content: flex-start;
-    align-content: center;
+    align-items: stretch;
     flex-wrap: wrap;
+    gap: 8px;
+}
+
+.input-area-attachment-tray {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.input-area-attachment-tray-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2px;
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+}
+
+.input-area-attachment-preview {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    min-width: 0;
+    flex: 1;
+    gap: 4px;
+    height: 100%;
 }
 
 .input-area-img-wrapper {
     position: relative;
-    margin-left: 10px;
-    margin-top: 10px;
     border: 1px solid hsl(var(--border));
     border-radius: 10px;
     overflow: hidden;
     cursor: pointer;
-    height: 70px;
-    width: 70px;
+    height: 64px;
+    width: 64px;
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
 }
 
 .input-area-text-wrapper {
     position: relative;
-    margin-left: 10px;
-    margin-top: 10px;
-    width: 120px;
-    height: 30px;
+    min-width: 132px;
+    max-width: 200px;
+    min-height: 44px;
+    height: auto;
     font-size: 12px;
     background-color: hsl(var(--background));
     border: 1px solid hsl(var(--primary));
@@ -49,29 +76,66 @@
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    padding: 5px;
+    padding: 6px 36px 6px 8px;
     cursor: pointer;
+    box-sizing: border-box;
 }
 
-.input-area-text-wrapper span {
+.input-area-attachment-name {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 90px;
+    max-width: 96px;
     display: inline-block;
-    padding-left: 5px;
+    padding-left: 2px;
+    color: hsl(var(--foreground));
 }
 
+.input-area-attachment-type {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: hsl(var(--muted-foreground));
+    background: hsl(var(--muted));
+    border-radius: 999px;
+    padding: 1px 6px;
+}
+
+.input-area-attachment-icon {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    color: hsl(var(--foreground));
+}
+
+/* Desktop: remove stays hover-revealed. Touch/mobile: always visible (see .mobile / platform rules). */
 .input-area-img-delete-button {
     position: absolute;
     top: 0;
     right: 0;
     display: none;
+    z-index: 2;
 }
 
-.input-area-img-wrapper:hover>.input-area-img-delete-button,
-.input-area-text-wrapper:hover>.input-area-img-delete-button {
+.input-area-img-wrapper:hover > .input-area-img-delete-button,
+.input-area-text-wrapper:hover > .input-area-img-delete-button {
     display: flex;
+}
+
+.input-area.mobile .input-area-img-delete-button,
+.aipp-mobile-platform .input-area-img-delete-button {
+    display: flex !important;
+    min-width: 44px;
+    min-height: 44px;
+    width: 44px;
+    height: 44px;
+    top: -4px;
+    right: -4px;
+    align-items: center;
+    justify-content: center;
+    background: hsl(var(--background) / 0.92);
+    border-radius: 999px;
 }
 
 .input-area-img {
@@ -106,26 +170,48 @@
 .input-area.mobile.bottom {
     position: relative;
     bottom: auto;
-    /* 12 顶边距 + 48 胶囊 + 12 底边距 + safe-area，避免与消息区脱节的大块空白 */
+    /* 12 顶边距 + 48 胶囊 + 12 底边距 + safe-area；有附件时由 tray 撑开高度 */
     flex: 0 0 auto;
     width: 100%;
     height: calc(72px + env(safe-area-inset-bottom, 0px));
     min-height: calc(72px + env(safe-area-inset-bottom, 0px));
     box-sizing: border-box;
+    /* 键盘弹起时叠加 visualViewport 底部 inset（由 useVisualViewportInsets 写入） */
+    padding-bottom: var(--aipp-keyboard-inset-bottom, 0px);
+}
+
+.input-area.mobile.bottom.has-attachments {
+    height: auto;
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px));
+    /* 为绝对定位胶囊/按钮预留底部空间，托盘内容在其上方 */
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px));
+}
+
+.input-area.mobile.bottom .input-area-attachment-tray {
+    position: relative;
+    z-index: 11;
+    padding: 8px 12px 4px;
+    /* 独立托盘：不被 48px 胶囊 overflow 裁切 */
+    max-height: min(36vh, 220px);
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: hsl(var(--background) / 0.96);
+    border-top: 1px solid hsl(var(--border));
 }
 
 .input-area.mobile.bottom .input-area-textarea-container {
     left: 12px;
     /* 右侧留给 44px 发送钮 + 间距；!important 防止桌面 inline right 残留 */
     right: 64px !important;
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-    /* 锁定高度，避免 textarea/边框把胶囊撑破「+」 */
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px));
+    /* 锁定高度，避免 textarea/边框把胶囊撑破「+」；附件已移出胶囊 */
     height: 48px !important;
     min-height: 48px !important;
     max-height: 48px;
     border-radius: 24px;
-    /* 左侧给 32px「+」留白 */
-    padding: 0 12px 0 44px !important;
+    /* 左侧给 44px「+」留白 */
+    padding: 0 12px 0 56px !important;
     opacity: 1;
     display: flex;
     align-items: center;
@@ -149,7 +235,7 @@
  */
 .input-area.mobile.bottom .input-area-send-button {
     position: absolute !important;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px)) !important;
     right: 12px !important;
     left: auto !important;
     height: 44px !important;
@@ -160,19 +246,19 @@
 }
 
 /*
- * 「+」32×32 置于胶囊内侧左侧并垂直居中：
- * button bottom = 12+safe + (48-32)/2 = 20+safe
+ * 「+」≥44×44（AGENTS-mobile / LeaderAI #158），相对 48px 胶囊垂直居中：
+ * button bottom = 12+safe + (48-44)/2 = 14+safe
  */
 .input-area.mobile.bottom .input-area-add-button {
     position: absolute !important;
-    bottom: calc(20px + env(safe-area-inset-bottom, 0px)) !important;
-    left: 20px !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px)) !important;
+    left: 14px !important;
     right: auto !important;
-    height: 32px !important;
-    width: 32px !important;
-    min-height: 32px !important;
-    min-width: 32px !important;
-    border-radius: 16px !important;
+    height: 44px !important;
+    width: 44px !important;
+    min-height: 44px !important;
+    min-width: 44px !important;
+    border-radius: 22px !important;
 }
 
 .input-area-textarea {
@@ -225,7 +311,7 @@
 
 .input-area.mobile.bottom .input-area-plan-mode-button {
     position: absolute !important;
-    bottom: calc(20px + env(safe-area-inset-bottom, 0px)) !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px)) !important;
     left: 20px !important;
     right: auto !important;
     height: 32px;
@@ -238,11 +324,11 @@
 }
 
 .input-area.mobile.bottom.has-plan-mode .input-area-add-button {
-    left: 84px !important;
+    left: 96px !important;
 }
 
 .input-area.mobile.bottom.has-plan-mode .input-area-textarea-container {
-    padding-left: 108px;
+    padding-left: 148px !important;
 }
 
 .top .input-area-send-button {
