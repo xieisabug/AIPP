@@ -50,6 +50,18 @@ fn positive_token_count(value: i32) -> Option<i32> {
     (value > 0).then_some(value)
 }
 
+/// LeaderAI #161: normal stop/DONE with zero assistant body.
+pub(crate) const EMPTY_MODEL_REPLY_NOTICE: &str = "模型返回了空内容";
+
+pub(crate) fn should_announce_empty_model_reply(
+    response_content: &str,
+    tool_call_count: usize,
+    binary_count: usize,
+) -> bool {
+    response_content.trim().is_empty() && tool_call_count == 0 && binary_count == 0
+}
+
+
 fn cache_creation_tokens_from_usage(usage: &Usage) -> Option<i32> {
     let details = usage.prompt_tokens_details.as_ref()?;
     let explicit = details.cache_creation_tokens.unwrap_or(0);
@@ -3637,6 +3649,65 @@ async fn attempt_stream_chat(
                             }
                         }
 
+
+                        // 正常 stop/DONE 且零正文：展示明确说明；保留原问题；不伪造回答、不自动切模型。
+                        if should_announce_empty_model_reply(
+                            &response_content,
+                            captured_tool_calls.len(),
+                            captured_binary_count,
+                        ) {
+                            response_content = EMPTY_MODEL_REPLY_NOTICE.to_string();
+                            if response_message_id.is_none() {
+                                let now = chrono::Utc::now();
+                                response_start_time.get_or_insert(now);
+                                match ensure_stream_message(
+                                    &conversation_db,
+                                    &window,
+                                    conversation_id,
+                                    "response",
+                                    EMPTY_MODEL_REPLY_NOTICE,
+                                    llm_model_id,
+                                    &llm_model_name,
+                                    &generation_group_id,
+                                    parent_group_id_override.clone(),
+                                    response_start_time,
+                                    response_first_token_time.clone(),
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(new_id) => {
+                                        response_message_id = Some(new_id);
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            "failed to create empty-content notice message"
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(msg_id) = response_message_id {
+                                // 立刻落库并标记完成，覆盖仅有 reasoning / None 等收尾分支漏掉 response 的情况。
+                                let _ = persist_and_emit_update(
+                                    &conversation_db,
+                                    &window,
+                                    conversation_id,
+                                    msg_id,
+                                    "response",
+                                    &response_content,
+                                    true,
+                                );
+                                if let Ok(repo) = conversation_db.message_repo() {
+                                    let _ = repo.update_finish_time(msg_id);
+                                }
+                            }
+                            info!(
+                                conversation_id,
+                                "normal completion with empty model content; notice message prepared"
+                            );
+                        }
+
                         // 按当前输出类型收尾，确保 response 触发 MCP 检测与事件
                         match current_output_type {
                             OutputType::Reasoning => {
@@ -4540,5 +4611,21 @@ mod pr40_error_handling_tests {
             get_user_friendly_error_message(&"Cause: error sending request for url (http://10.0.2.2:18080/v1/chat/completions)"),
             "网络连接异常，请检查网络设置"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod empty_model_reply_tests {
+    use super::{should_announce_empty_model_reply, EMPTY_MODEL_REPLY_NOTICE};
+
+    #[test]
+    fn announces_only_when_body_tools_and_binaries_are_all_empty() {
+        assert!(should_announce_empty_model_reply("", 0, 0));
+        assert!(should_announce_empty_model_reply("   ", 0, 0));
+        assert!(!should_announce_empty_model_reply("hi", 0, 0));
+        assert!(!should_announce_empty_model_reply("", 1, 0));
+        assert!(!should_announce_empty_model_reply("", 0, 2));
+        assert_eq!(EMPTY_MODEL_REPLY_NOTICE, "模型返回了空内容");
     }
 }
