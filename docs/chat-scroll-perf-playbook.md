@@ -293,3 +293,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 
 **先把问题做成“能自动得到结果”，再开始优化。**  
 这比一开始就猜原因更重要。
+
+## Android 移动验收补充
+
+安装当前构建 APK 后，可通过可调试 WebView 的 CDP 调用 `window.__AIPP_CHAT_PERF__.runConversationScrollTest({ conversationId, includeReturnTrip: true })`；harness 在移动布局中会关闭导航抽屉，复用同一消息滚动容器与采样指标。不要把程序驱动的探针等同于真实触控验收。
+
+补充操作：流式回复中向上触摸滚动并等待新 token；打开设置再返回应恢复历史阅读位置；回到底部后重新跟随；输入中文组合文本、弹出/收起键盘；切换版本、编辑、复制和分叉；横竖屏及前后台切换。普通会话与跨虚拟化阈值的长会话分别记录。仅在本轮创建的测试会话内执行发送和编辑，保留已有用户内容。

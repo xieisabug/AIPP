@@ -5,11 +5,11 @@
 
 ## 当前状态定位
 
-移动端目前处于 **"能跑而非能用"** 的阶段：
+移动端正在按功能逐项适配：
 
-- 唯一可用的完整路径是：启动 → 单 `chat_ui` webview → `ChatUIWindow` 的窄屏分支布局（顶栏 + Sheet 抽屉会话列表 + 移动模式输入框）。
-- 其余窗口（Schedule / Butler / Artifact / Sidebar / Plugin 等）**没有移动端分支**，打开即为桌面布局。
-- 移动端导航依赖 `window.__setAppWindow` 全局函数 hack，属于过渡方案。
+- 启动进入单 `chat_ui` WebView，聊天使用顶栏、Sheet 会话抽屉和移动模式输入框。
+- 未接入 MobileShell 的独立窗口仍须逐项评估移动兼容性，不能直接开放桌面窗口入口。
+- 移动端使用 `src/mobile/MobileShell.tsx` 的单 WebView 导航，已接入聊天、设置、收藏与受限预览；页面保留挂载以保留聊天订阅和输入。
 - 移动端优化规划见 `docs/mobile-optimization-prd.md`。
 
 ## 平台与构建
@@ -32,17 +32,19 @@
   - 需要"是否移动平台"（禁用桌面功能、平台差异化行为）时，**不要**用宽度判断；用 `src/hooks/use-platform.ts` 的 `usePlatform()` / `useIsMobilePlatform()`（基于 Rust 命令 `get_platform`，P0-1 已落地）。
 - **功能降级清单**：移动端不支持的功能集中在 `src/lib/mobileUnsupported.ts`（`useFeatureAvailableOnPlatform`），新增移动端限制时在此登记并隐藏入口。后端统一错误前缀 `MOBILE_UNSUPPORTED`（`system_api::mobile_unsupported_error`），前端用 `isMobileUnsupportedError` 识别。
 
-### 2. 移动端导航（过渡方案）
+### 2. 移动端导航
 
-- `src/App.tsx` 暴露全局 `window.__setAppWindow(label)`，用于移动端在单 webview 内切换视图。当前仅 `ConfigWindow.tsx` 和 `ChatUIInfomation.tsx` 消费。
-- 长期方向是 `src/mobile/` 下的 `MobileShell` 单页导航架构（目前目录为空），见 PRD P1-4。**新功能不要再扩展 `__setAppWindow` 的使用面**。
+- 使用 `src/mobile/navigation.ts` 的 `navigateMobile` / `previewMobile`，仅注册已适配的页面；不要创建额外 WebView。
+- Android `MainActivity` 先收起 IME，再调用 `__aippMobileBack` 关闭面板或弹出返回栈，根页退后台。禁止调用 WebView.goBack。
+- `handleBackNavigation=false` 禁用 Wry 后注册的默认返回回调。原生 IPC 在 `setContentView` 边界替换为校验主框架与来源的 WebMessageListener：Wry 的 `onWebViewCreate` 早于旧 IPC 注册，不能在该早期回调中完成替换。
+- 受限预览契约见 `docs/product/20-移动导航与预览.md`。预览 runtime 以独立 bundle 运行在不含 allow-same-origin 的 iframe 中，不得添加 Tauri 或宿主凭据桥接。
 
 ### 3. 视口与触控（P0-2/P0-3 已落地基础设施，改动时注意）
 
 - `index.html` 已加 `viewport-fit=cover`；`src/App.css` 提供 safe-area 工具类（`.safe-top` / `.safe-bottom` / `.safe-x` / `.safe-bottom-bar`），并全局将 `.h-screen` 覆盖为 `100vh; 100dvh`（不支持 dvh 的环境自动回退）。
 - 已应用安全区的位置：`ChatUIWindow.tsx` 移动端顶栏（`safe-top`）、`src/styles/InputArea.css` 移动端输入框与按钮（bottom 偏移叠加 `env(safe-area-inset-bottom)`）。
-- 虚拟键盘：AndroidManifest 已配 `windowSoftInputMode="adjustResize"`；`ConversationUI.tsx` 移动端监听 `visualViewport`，键盘弹起时强制滚到底部。
-- 仍缺失：手势导航；触控目标尺寸只有 `src/styles/InputArea.css`（`.input-area.mobile`）做过系统适配。
+- 虚拟键盘：AndroidManifest 已配 `windowSoftInputMode="adjustResize"`；`ConversationUI.tsx` 移动端监听 `visualViewport`，仅跟随底部阅读状态，键盘弹起不抢占历史阅读位置。
+- 消息操作、编辑、版本选择和移动预览使用至少 44px 触控目标；新增页面仍需逐项检查。
 - **新写移动端 UI 时**：可点目标 ≥44px；全屏容器直接用 `h-screen`（已自动走 dvh）；顶部/底部固定栏必须加 `safe-top` / `safe-bottom` 类。
 
 ### 4. 桌面功能在移动端的行为
