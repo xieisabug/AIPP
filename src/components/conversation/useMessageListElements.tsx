@@ -25,6 +25,7 @@ import {
 } from "./messageHeightEstimate";
 
 export interface UseMessageListElementsProps {
+    isMobile?: boolean;
     allDisplayMessages: Message[];
     streamingMessages: Map<number, StreamEvent>;
     shiningMessageIds: Set<number>;
@@ -199,6 +200,7 @@ function reuseMcpSlice(
 }
 
 export function useMessageListElements({
+    isMobile = false,
     allDisplayMessages,
     agentActivities = new Map(),
     streamingMessages,
@@ -776,7 +778,7 @@ export function useMessageListElements({
                 }, 0)
                     + placeholderElements.length * 96
                     + fallbackInlineInteractionItems.length * 112
-                    + 120,
+                    + (isMobile ? 0 : LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX),
             );
 
             items.push({
@@ -812,13 +814,14 @@ export function useMessageListElements({
                                 ))}
                             </div>
                         )}
-                        <div
+                        {/* Mobile input occupies its own layout space; only desktop needs overlay clearance. */}
+                        {!isMobile && <div
                             className="flex-none"
                             style={{
                                 height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
                             }}
                             data-aipp-slot="chat-bottom-spacer"
-                        />
+                        />}
                     </div>
                 ),
             });
@@ -858,6 +861,7 @@ export function useMessageListElements({
         fallbackInlineInteractionItems,
         allDisplayMessages,
         estimatedHeightByMessageId,
+        isMobile,
         messageById,
     ]);
 

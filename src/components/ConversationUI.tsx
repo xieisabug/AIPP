@@ -2012,6 +2012,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             style={{ overflowAnchor: "none" }}
                         >
                             <ConversationContent
+                                isMobile={isMobile}
                                 conversationId={conversationId}
                                 // MessageList props
                                 allDisplayMessages={allDisplayMessages}

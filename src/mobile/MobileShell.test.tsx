@@ -98,3 +98,21 @@ describe("MobileShell navigation", () => {
         expect(screen.getByRole("button", { name: "preview count 1" })).toBeVisible();
     });
 });
+
+it("fits the mobile shell to the visual viewport and restores it when the keyboard closes", () => {
+    const original = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    const viewport = new EventTarget() as VisualViewport;
+    Object.defineProperties(viewport, { height: { value: 400, writable: true }, offsetTop: { value: 80, writable: true } });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+    const { container, unmount } = render(<MobileShell />);
+    const shell = container.querySelector<HTMLElement>("[data-aipp-mobile-shell]")!;
+    expect(shell.style.height).toBe("400px");
+    expect(shell.style.transform).toBe("translateY(80px)");
+    Object.defineProperty(viewport, "height", { value: window.innerHeight });
+    act(() => viewport.dispatchEvent(new Event("resize")));
+    expect(shell.style.height).toBe("");
+    expect(shell.style.transform).toBe("");
+    unmount();
+    if (original) Object.defineProperty(window, "visualViewport", original);
+    else Reflect.deleteProperty(window, "visualViewport");
+});

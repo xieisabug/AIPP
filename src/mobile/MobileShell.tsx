@@ -15,6 +15,7 @@ export default function MobileShell() {
     const [stack, setStack] = useState<MobileRoute[]>(["chat_ui"]);
     const [visited, setVisited] = useState<MobileRoute[]>(["chat_ui"]);
     const [preview, setPreview] = useState<MobilePreview | null>(null);
+    const shellRef = useRef<HTMLDivElement>(null);
     const stackRef = useRef(stack);
     const pageRefs = useRef(new Map<MobileRoute, HTMLDivElement>());
     const positions = useRef(new Map<MobileRoute, { element: HTMLElement; top: number; left: number }[]>());
@@ -68,6 +69,25 @@ export default function MobileShell() {
             delete window.__aippMobileBack;
         };
     }, []);
+    // Android WebView can pan the visual viewport instead of resizing the layout viewport
+    // when the IME opens. Keep the mobile shell inside the visible viewport in that case.
+    useEffect(() => {
+        const viewport = window.visualViewport;
+        const shell = shellRef.current;
+        if (!viewport || !shell) return;
+        const update = () => {
+            const keyboardOpen = window.innerHeight - viewport.height > 150;
+            shell.style.height = keyboardOpen ? `${viewport.height}px` : "";
+            shell.style.transform = keyboardOpen ? `translateY(${viewport.offsetTop}px)` : "";
+        };
+        viewport.addEventListener("resize", update);
+        viewport.addEventListener("scroll", update);
+        update();
+        return () => {
+            viewport.removeEventListener("resize", update);
+            viewport.removeEventListener("scroll", update);
+        };
+    }, []);
     const current = stack.at(-1);
     useLayoutEffect(() => {
         const restore = () => positions.current.get(current!)?.forEach(({ element, top, left }) => {
@@ -77,7 +97,7 @@ export default function MobileShell() {
         const frame = requestAnimationFrame(restore);
         return () => cancelAnimationFrame(frame);
     }, [current]);
-    return <div className="h-screen overflow-hidden" data-aipp-mobile-shell>
+    return <div ref={shellRef} className="h-screen overflow-hidden" data-aipp-mobile-shell>
         {visited.map(route => <div key={route} ref={element => { if (element) pageRefs.current.set(route, element); else pageRefs.current.delete(route); }} hidden={current !== route} className="h-full">
             <Suspense fallback={<div role="status">正在加载…</div>}>
                 {route === "chat_ui" ? <Chat /> : route === "config" ? <Config /> : route === "collections" ? <Collections /> : preview && <Preview preview={preview} />}

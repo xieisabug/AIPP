@@ -7,6 +7,7 @@ import type { InlineInteractionItem } from "../ConversationUI";
 
 export interface ConversationContentProps {
     conversationId: string;
+    isMobile?: boolean;
     // MessageList props
     allDisplayMessages: Message[];
     streamingMessages: Map<number, StreamEvent>;
@@ -52,6 +53,7 @@ export interface ConversationContentProps {
 
 const ConversationContent: React.FC<ConversationContentProps> = memo(({
     conversationId,
+    isMobile = false,
     // MessageList props
     allDisplayMessages,
     streamingMessages,
@@ -95,6 +97,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onAgentConfigChange = () => {},
 }) => {
     const sharedMessageListProps = {
+        isMobile,
         allDisplayMessages,
         streamingMessages,
         shiningMessageIds,

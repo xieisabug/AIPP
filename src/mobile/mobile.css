@@ -25,3 +25,6 @@
     display: block; max-width: 100%; overflow-x: auto;
 }
 .aipp-mobile-platform [data-aipp-slot="chat-conversation-scroll"] pre { max-width: 100%; overflow-x: auto; }
+
+/* The mobile chat fills the shell, including when the IME shrinks its visual viewport. */
+[data-aipp-mobile-shell] [data-aipp-window='chat_ui'] { height: 100%; }
