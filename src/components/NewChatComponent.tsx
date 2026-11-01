@@ -5,6 +5,8 @@ import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
+import { navigateMobile } from "@/mobile/navigation";
 import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -104,6 +106,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
     const [codexDefaults, setCodexDefaults] = useState<{ approval_policy: string; sandbox: string } | null>(null);
     const [loadingConfig, setLoadingConfig] = useState(false);
     const [configError, setConfigError] = useState<string | null>(null);
+    const [needsProviderSetup, setNeedsProviderSetup] = useState(false);
     const selectedAssistantInfo = assistants.find((assistant) => assistant.id === selectedAssistant);
 
     useEffect(() => {
@@ -155,6 +158,40 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
         return () => { cancelled = true; };
     }, [selectedAssistant, selectedAssistantInfo?.assistant_type]);
 
+    // 检测是否尚未配置可用模型提供商（首次使用引导）
+    useEffect(() => {
+        let cancelled = false;
+        invoke<Array<{ id: number; is_enabled?: boolean }>>("get_llm_providers")
+            .then((providers) => {
+                if (cancelled) return;
+                const enabled = providers.filter((p) => p.is_enabled !== false);
+                setNeedsProviderSetup(enabled.length === 0);
+            })
+            .catch(() => {
+                if (!cancelled) setNeedsProviderSetup(assistants.length === 0);
+            });
+        return () => { cancelled = true; };
+    }, [assistants.length]);
+
+    const openConfigMenu = async (menu: string) => {
+        if (isMobilePlatform) {
+            navigateMobile("config");
+            // 等设置壳挂载后再导航到具体菜单
+            window.setTimeout(() => {
+                void emit("config-navigate-to", { menu });
+            }, 50);
+            return;
+        }
+        try {
+            await invoke("open_config_window");
+            window.setTimeout(() => {
+                void emit("config-navigate-to", { menu });
+            }, 50);
+        } catch (error) {
+            console.error("open config failed", error);
+        }
+    };
+
     // 移动端不需要拖动区域
     const dragProps = isMobile ? {} : { "data-tauri-drag-region": true };
 
@@ -168,9 +205,22 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
         >
 
             <div className="text-sm text-gray-500 text-center mb-4" data-aipp-slot="chat-new-conversation-hint" {...dragProps}>
-                <AskWindowPrepare selectedText={selectedText} isMobile={isMobile} />
+                <AskWindowPrepare
+                    selectedText={selectedText}
+                    isMobile={isMobile || isMobilePlatform}
+                    showSetupGuides={needsProviderSetup || assistants.length === 0}
+                    onConfigureProviders={() => { void openConfigMenu("llm-provider-config"); }}
+                    onChooseAssistant={() => {
+                        if (needsProviderSetup || assistants.length === 0) {
+                            void openConfigMenu("assistant-config");
+                            return;
+                        }
+                        // 已有助手时聚焦下方选择器：滚动到选择器
+                        document.querySelector<HTMLElement>('[data-aipp-slot="chat-new-conversation-assistant-select"]')?.focus();
+                    }}
+                />
                 <p className="mt-4" {...dragProps}>
-                    请选择一个对话，或者选择一个助手开始新聊天
+                    请选择一个对话，或者在下方选择助手后点击发送开始新聊天
                 </p>
             </div>
             <Select
