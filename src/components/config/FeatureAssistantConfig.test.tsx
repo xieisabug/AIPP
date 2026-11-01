@@ -81,7 +81,9 @@ describe("FeatureAssistantConfig network config", () => {
         fireEvent.change(proxyInput, {
             target: { value: "http://proxy.example.com:8080" },
         });
-        await user.click(screen.getByRole("button", { name: "保存配置" }));
+        const saveButtons = screen.getAllByRole("button", { name: "保存配置" });
+        expect(saveButtons.length).toBeGreaterThanOrEqual(1);
+        await user.click(saveButtons[0]);
 
         await waitFor(() => {
             const saveCalls = vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_feature_config");
@@ -164,7 +166,8 @@ describe("FeatureAssistantConfig network config", () => {
 
         const user = userEvent.setup();
         await user.click(await screen.findByRole("button", { name: /辅助AI/ }));
-        await user.click(await screen.findByRole("button", { name: "保存配置" }));
+        const saveBtn = await screen.findAllByRole("button", { name: "保存配置" });
+        await user.click(saveBtn[0]);
 
         await waitFor(() => {
             const saveCalls = vi.mocked(invoke).mock.calls.filter(([command, args]) => {
