@@ -71,7 +71,8 @@ const CodeBlock = React.memo(
                 (entries) => {
                     const entry = entries[0];
                     // 当顶部 sentinel 不可见时，显示固定按钮
-                    setShouldShowFixed(!entry.isIntersecting);
+                    const bounds = containerRef.current?.getBoundingClientRect();
+                    setShouldShowFixed(!entry.isIntersecting && !!bounds && bounds.top < 8 && bounds.bottom > 60);
                 },
                 { root: null, rootMargin: '0px', threshold: [0, 1] }
             );

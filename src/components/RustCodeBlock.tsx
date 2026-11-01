@@ -6,6 +6,9 @@ import { buildHighlightCacheKey, getCachedRustHighlight, useRustHighlight } from
 import { useCodeTheme } from "@/hooks/useCodeTheme";
 import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { previewMobile } from "@/mobile/navigation";
+import { STATIC_PREVIEW_TYPES } from "@/mobile/previewDocument";
 
 interface RustCodeBlockProps {
     language: string;
@@ -67,6 +70,8 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const code = useMemo(() => (typeof children === "string" ? children : String(children)), [children]);
     // 脚本执行依赖 shell 环境，移动端不支持，隐藏"运行"按钮
     const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
+    const mobile = useIsMobilePlatform();
+    const mobilePreviewAvailable = mobile && (STATIC_PREVIEW_TYPES.has(language.toLowerCase()) || ["react", "jsx", "vue"].includes(language.toLowerCase()));
     const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null);
     const [copyState, setCopyState] = useState<"copy" | "ok">("copy");
     const [isSticky, setIsSticky] = useState(false);
@@ -225,7 +230,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 const entry = entries[0];
                 // 顶部 sentinel 滚出视口且代码块仍可见时，固定工具栏
                 const rect = container.getBoundingClientRect();
-                const stillVisible = rect.bottom > 60;
+                const stillVisible = rect.top < 80 && rect.bottom > 124;
                 updateStickyGeometry(!entry.isIntersecting && stillVisible);
             },
             { root: null, rootMargin: "0px", threshold: [0, 1] },
@@ -267,7 +272,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     bg-white/85 dark:bg-neutral-800/75 rounded-md p-1 backdrop-blur-sm shadow-sm
                     transition-opacity duration-150 ease-out
                     will-change-opacity
-                    ${isSticky ? 'fixed top-20 shadow-lg opacity-100' : 'absolute right-2 top-2 opacity-0 group-hover/codeblock:opacity-100'}
+                    ${isSticky ? 'fixed top-20 shadow-lg opacity-100' : `absolute right-2 top-2 ${mobile ? 'opacity-100' : 'opacity-0 group-hover/codeblock:opacity-100'}`}
                 `}
                 style={isSticky ? { right: `${toolbarRight}px` } : undefined}
                 onMouseDown={(event) => {
@@ -277,7 +282,10 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 <IconButton
                     icon={copyState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
+                    title="复制代码"
+                    className={mobile ? "min-h-11 min-w-11" : undefined}
                 />
+                {mobilePreviewAvailable && <IconButton title="预览制品" className="min-h-11 min-w-11" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => previewMobile({ language, code })} />}
                 {codeRunAvailable && (
                     <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
                 )}
@@ -322,7 +330,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 <div className="flex justify-center pt-2 pb-1 bg-muted">
                     <button
                         type="button"
-                        className="px-3 py-1 text-xs text-foreground/70 hover:text-foreground transition-colors cursor-pointer"
+                        className={`px-3 py-1 text-xs text-foreground/70 hover:text-foreground transition-colors cursor-pointer ${mobile ? "min-h-11 min-w-11" : ""}`}
                         onClick={toggleCollapse}
                         aria-label={isCollapsed ? '展开代码' : '收起代码'}
                     >

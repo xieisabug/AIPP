@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import RustCodeBlock from "./RustCodeBlock";
 
+const platform = vi.hoisted(() => ({ mobile: false }));
+vi.mock("@/hooks/use-platform", () => ({ useIsMobilePlatform: () => platform.mobile }));
+vi.mock("@/lib/mobileUnsupported", () => ({ useFeatureAvailableOnPlatform: () => !platform.mobile }));
+
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
     writeText: vi.fn(),
 }));
@@ -22,7 +26,9 @@ vi.mock("@/hooks/useCodeTheme", () => ({
 
 describe("RustCodeBlock", () => {
     let notifyResize: (height: number) => void;
+    let notifyIntersection: (intersecting: boolean) => void;
     beforeEach(() => {
+        platform.mobile = false;
         vi.stubGlobal("ResizeObserver", class {
             constructor(callback: ResizeObserverCallback) {
                 notifyResize = (height) => callback([
@@ -33,10 +39,46 @@ describe("RustCodeBlock", () => {
             disconnect() {}
         });
         vi.stubGlobal("IntersectionObserver", class {
+            constructor(callback: IntersectionObserverCallback) {
+                notifyIntersection = intersecting => callback([{ isIntersecting: intersecting } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+            }
             observe() {}
             disconnect() {}
             unobserve() {}
         });
+    });
+
+    it("should float controls only when the code block has scrolled past its toolbar", () => {
+        const { container } = render(<RustCodeBlock language="text">toolbar position</RustCodeBlock>);
+        const root = container.firstElementChild as HTMLElement;
+        let bounds = { top: 900, bottom: 1100 };
+        vi.spyOn(root, "getBoundingClientRect").mockImplementation(() => bounds as DOMRect);
+        const toolbar = screen.getByRole("button", { name: "复制代码" }).parentElement!;
+        act(() => notifyIntersection(false));
+        expect(toolbar).not.toHaveClass("fixed");
+        bounds = { top: -100, bottom: 400 };
+        act(() => notifyIntersection(false));
+        expect(toolbar).toHaveClass("fixed");
+        bounds = { top: -400, bottom: 0 };
+        act(() => notifyIntersection(false));
+        expect(toolbar).not.toHaveClass("fixed");
+    });
+
+    it("should open the in-app preview with full source when the platform is mobile", async () => {
+        platform.mobile = true;
+        const preview = vi.fn();
+        window.addEventListener("aipp:mobile-preview", preview);
+        try {
+            render(<RustCodeBlock language="text">mobile source</RustCodeBlock>);
+            const button = screen.getByRole("button", { name: "预览制品" });
+            expect(button).toHaveClass("min-h-11", "min-w-11");
+            expect(screen.getByRole("button", { name: "复制代码" })).toHaveClass("min-h-11");
+            await userEvent.click(button);
+            expect(preview).toHaveBeenCalledOnce();
+            expect((preview.mock.calls[0][0] as CustomEvent).detail).toEqual({ language: "text", code: "mobile source" });
+        } finally {
+            window.removeEventListener("aipp:mobile-preview", preview);
+        }
     });
     afterEach(() => {
         vi.unstubAllGlobals();
