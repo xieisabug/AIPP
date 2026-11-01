@@ -13,6 +13,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
     const [error, setError] = useState("");
     const [zoom, setZoom] = useState(1);
     const frame = useRef<HTMLIFrameElement>(null);
+    const initializedFrames = useRef(new WeakSet<HTMLIFrameElement>());
     const loadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const component = ["react", "jsx", "vue"].includes(preview.language.toLowerCase());
     useEffect(() => {
@@ -61,10 +62,16 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
         {error && <p role="alert" className="p-4">{error}</p>}
         <div className="flex-1 overflow-auto min-h-0">
             {document && <iframe key={JSON.stringify([preview.language, preview.code, preview.title])} ref={frame} title="隔离制品预览" sandbox={component ? "allow-scripts" : ""} referrerPolicy="no-referrer" srcDoc={document}
-                onLoad={() => { if (component) {
+                onLoad={event => { if (component) {
                     clearTimeout(loadTimer.current);
+                    const loadedFrame = event.currentTarget;
+                    if (initializedFrames.current.has(loadedFrame)) {
+                        setError("组件预览已停止：预览框发生了页面导航，请重新打开制品。");
+                        return;
+                    }
+                    initializedFrames.current.add(loadedFrame);
                     loadTimer.current = setTimeout(() => setError("组件运行时未响应：本地预览脚本加载或初始化失败，请重新打开制品。"), 10000);
-                    frame.current?.contentWindow?.postMessage({ type: "aipp-preview-component", language: preview.language.toLowerCase(), code: preview.code }, "*");
+                    loadedFrame.contentWindow?.postMessage({ type: "aipp-preview-component", language: preview.language.toLowerCase(), code: preview.code }, "*");
                 } }}
                 className="border-0 bg-white w-full h-full" style={{ zoom }} />}
         </div>

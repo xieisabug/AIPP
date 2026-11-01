@@ -5,6 +5,15 @@ import MobileArtifactPreview from "./MobileArtifactPreview";
 vi.mock("@/hooks/use-platform", () => ({ usePlatform: () => "android" }));
 
 describe("MobileArtifactPreview component changes", () => {
+    it("should not resend component source when an initialized frame loads again", async () => {
+        render(<MobileArtifactPreview preview={{ language: "react", code: "export default () => null" }} />);
+        const frame = await screen.findByTitle("隔离制品预览") as HTMLIFrameElement;
+        const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+        fireEvent.load(frame);
+        fireEvent.load(frame);
+        expect(postMessage).not.toHaveBeenCalled();
+        expect(screen.getByRole("alert")).toHaveTextContent("页面导航");
+    });
     it("replaces the iframe for different code or language while keeping identical preview state", async () => {
         const first = { language: "react", code: "export default () => null", title: "example" };
         const { rerender } = render(<MobileArtifactPreview preview={first} />);
