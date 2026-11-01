@@ -758,19 +758,30 @@ const InputArea = React.memo(
             const adjustTextareaHeight = () => {
                 const textarea = textareaRef.current;
                 if (textarea && initialHeight) {
+                    // Mobile locks capsule height in CSS and keeps attachments in a dedicated tray.
+                    if (isMobile) {
+                        textarea.style.height = "";
+                        return;
+                    }
                     textarea.style.height = `${initialHeight}px`;
                     const maxHeight = document.documentElement.clientHeight * 0.35;
                     const newHeight = Math.min(Math.max(textarea.scrollHeight, initialHeight), maxHeight);
                     textarea.style.height = `${newHeight}px`;
-                    textarea.parentElement!.style.height = `${newHeight + ((fileInfoList?.length && IMAGE_AREA_HEIGHT) || 0)}px`;
+                    const filePad = fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0;
+                    textarea.parentElement!.style.height = `${newHeight + filePad}px`;
                 }
             };
 
             const restoreInitialHeight = () => {
                 const textarea = textareaRef.current;
                 if (textarea && initialHeight) {
+                    if (isMobile) {
+                        textarea.style.height = "";
+                        return;
+                    }
                     textarea.style.height = `${initialHeight}px`;
-                    textarea.parentElement!.style.height = `${initialHeight + ((fileInfoList?.length && IMAGE_AREA_HEIGHT) || 0)}px`;
+                    const filePad = fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0;
+                    textarea.parentElement!.style.height = `${initialHeight + filePad}px`;
                 }
             };
 
@@ -1257,21 +1268,41 @@ const InputArea = React.memo(
                 <ArrowUp size={20} className="text-action-foreground" />
             );
 
+            const attachmentCount = fileInfoList?.length ?? 0;
+            const hasAttachments = attachmentCount > 0;
+
             return (
                 <div
-                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeButton ? 'has-plan-mode' : ''}`}
+                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeButton ? 'has-plan-mode' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
                     data-theme-slot="input-area"
                     data-aipp-slot="chat-input-area"
+                    data-attachment-count={attachmentCount}
                 >
+                    {isMobile && hasAttachments ? (
+                        <div
+                            className="input-area-attachment-tray"
+                            data-aipp-slot="chat-input-attachment-tray"
+                            onClick={handleImageContainerClick}
+                        >
+                            <div className="input-area-attachment-tray-header">
+                                <span data-aipp-slot="chat-input-attachment-count">附件 {attachmentCount}</span>
+                            </div>
+                            <div className="input-area-img-container" data-aipp-slot="chat-input-attachments">
+                                {renderFiles()}
+                            </div>
+                        </div>
+                    ) : null}
                     <div
                         className={`input-area-textarea-container ${showPlanModeButton ? 'has-plan-mode' : ''}`}
                         style={isMobile ? undefined : { right: baseRight }}
                         data-theme-slot="input-area-container"
                         data-aipp-slot="chat-input-area-container"
                     >
-                        <div className="input-area-img-container" onClick={handleImageContainerClick} data-aipp-slot="chat-input-attachments">
-                            {renderFiles()}
-                        </div>
+                        {!isMobile ? (
+                            <div className="input-area-img-container" onClick={handleImageContainerClick} data-aipp-slot="chat-input-attachments">
+                                {renderFiles()}
+                            </div>
+                        ) : null}
                         <textarea
                             ref={textareaRef}
                             className="input-area-textarea"

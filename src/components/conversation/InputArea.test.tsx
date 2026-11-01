@@ -21,6 +21,8 @@ function InputAreaHarness({
     isMobile = false,
     placement = "bottom",
     onSend = () => {},
+    fileInfoList = null,
+    onDeleteFile = () => {},
 }: {
     initialText?: string;
     planMode?: boolean;
@@ -29,6 +31,8 @@ function InputAreaHarness({
     isMobile?: boolean;
     placement?: "top" | "bottom";
     onSend?: () => void;
+    fileInfoList?: import("../../data/Conversation").FileInfo[] | null;
+    onDeleteFile?: (id: number) => void;
 }) {
     const [inputText, setInputText] = useState(initialText);
 
@@ -36,10 +40,10 @@ function InputAreaHarness({
         <InputArea
             inputText={inputText}
             setInputText={setInputText}
-            fileInfoList={null}
+            fileInfoList={fileInfoList}
             handleChooseFile={() => {}}
             handlePaste={() => {}}
-            handleDeleteFile={() => {}}
+            handleDeleteFile={onDeleteFile}
             handleSend={onSend}
             aiIsResponsing={false}
             placement={placement}
@@ -279,5 +283,41 @@ describe("InputArea mobile vs desktop layout", () => {
         ) as HTMLElement;
         expect(send.className).toMatch(/\bh-14\b/);
         expect(send.style.right).not.toBe("");
+    });
+});
+
+
+describe("InputArea mobile attachment tray", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_bang_list", () => []);
+        mockInvokeHandler("get_assistants", () => []);
+        mockInvokeHandler("get_artifacts_for_completion", () => []);
+        mockInvokeHandler("get_skills_for_slash_completion", () => []);
+    });
+
+    it("shows dedicated tray with count, text chip, and always-visible remove outside the capsule", () => {
+        const files = [
+            { id: 1, name: "shot.png", path: "/a.png", type: 1, thumbnail: "data:image/png;base64,aa" },
+            { id: 2, name: "notes.txt", path: "/a.txt", type: 2 },
+        ] as import("../../data/Conversation").FileInfo[];
+        const { container } = render(
+            <InputAreaHarness isMobile placement="bottom" fileInfoList={files} />,
+        );
+
+        const root = container.querySelector('[data-aipp-slot="chat-input-area"]');
+        expect(root).toHaveClass("has-attachments");
+        expect(root).toHaveAttribute("data-attachment-count", "2");
+
+        expect(container.querySelector('[data-aipp-slot="chat-input-attachment-tray"]')).toBeTruthy();
+        expect(screen.getByText("附件 2")).toBeTruthy();
+        expect(screen.getByText("notes.txt")).toBeTruthy();
+        expect(screen.getByText("TXT")).toBeTruthy();
+
+        const capsule = container.querySelector('[data-aipp-slot="chat-input-area-container"]');
+        expect(capsule?.querySelector('[data-aipp-slot="chat-input-attachments"]')).toBeNull();
+
+        const removes = container.querySelectorAll('[data-aipp-slot="chat-input-attachment-remove"]');
+        expect(removes.length).toBe(2);
     });
 });
