@@ -394,7 +394,7 @@ function ChatUIWindow() {
             try {
                 emitProgress("start");
                 if (isMobile) {
-                    throw new Error("Chat scroll perf test only supports desktop ChatUIWindow.");
+                    setSidebarOpen(false);
                 }
 
                 const conversations = await listConversations(1, 100);
@@ -869,10 +869,10 @@ function ChatUIWindow() {
                                 data-aipp-slot="chat-mobile-sidebar"
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
-                                <ChatUIInfomation showArtifacts={false} showSchedule={false} isMobile={true} preferInAppNavigation={isMobilePlatform} />
+                                <ChatUIInfomation showArtifacts={true} showSchedule={false} isMobile={true} preferInAppNavigation={isMobilePlatform} onNavigate={() => setSidebarOpen(false)} />
                                 <ChatUIToolbar
                                     onNewConversation={handleNewConversation}
-                                    onSearch={() => setSearchOpen(true)}
+                                    onSearch={() => { setSidebarOpen(false); setSearchOpen(true); }}
                                 />
                                 <ConversationList
                                     conversationId={selectedConversation}

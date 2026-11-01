@@ -5,10 +5,12 @@ import { useLogoState } from "../hooks/useLogoState";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { Button } from "./ui/button";
 import { memo } from "react";
+import { navigateMobile } from "../mobile/navigation";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 
 interface ChatUIInfomationProps {
+    onNavigate?: () => void;
     showArtifacts?: boolean;
     showSchedule?: boolean;
     /** 窄屏布局模式（来自宽度），用于样式；导航切换另看 preferInAppNavigation / 平台 */
@@ -23,17 +25,16 @@ interface ChatUIInfomationProps {
 const ChatUIInfomation = memo(function ChatUIInfomation({
     showArtifacts = true,
     showSchedule = true,
-    isMobile = false,
-    preferInAppNavigation,
+    onNavigate,
 }: ChatUIInfomationProps) {
     const { enabled: antiLeakageEnabled, isRevealed, toggleReveal } = useAntiLeakage();
     const isMobilePlatform = useIsMobilePlatform();
     const multiWindowAvailable = useFeatureAvailableOnPlatform("desktop_multi_window");
-    // 移动平台必须单 WebView 内切换；窄屏沿用既有 in-app 行为；显式 prefer 亦可强制开启
-    const useInAppNav = isMobilePlatform || isMobile || preferInAppNavigation === true;
+    // 导航取决于运行平台，桌面窄窗口仍使用桌面窗口。
+    const useInAppNav = isMobilePlatform;
 
     // 移动平台隐藏桌面多窗口入口（即使父组件误传 show*=true）
-    const canShowArtifacts = showArtifacts && multiWindowAvailable;
+    const canShowArtifacts = showArtifacts && (multiWindowAvailable || isMobilePlatform);
     const canShowSchedule = showSchedule && multiWindowAvailable;
 
     const {
@@ -50,12 +51,10 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     const openConfig = async () => {
         // 移动平台 / 单 WebView：内部视图切换，禁止尝试创建第二窗口
         if (useInAppNav) {
-            const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
-            if (switchWindow) {
-                switchWindow("config");
-                showHappy();
-                return;
-            }
+            onNavigate?.();
+            navigateMobile("config");
+            showHappy();
+            return;
         }
 
         // 桌面端使用多窗口
@@ -68,6 +67,7 @@ const ChatUIInfomation = memo(function ChatUIInfomation({
     };
 
     const openArtifactsCollections = async () => {
+        if (isMobilePlatform) { onNavigate?.(); navigateMobile("collections"); return; }
         try {
             await invoke("open_artifact_collections_window");
             showHappy();
