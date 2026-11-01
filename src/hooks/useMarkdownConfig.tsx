@@ -197,9 +197,9 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: 
         ];
     }, [disableMarkdownSyntax, registeredMarkdownTags]);
 
-    return {
+    return useMemo(() => ({
         remarkPlugins,
         rehypePlugins,
         markdownComponents,
-    };
+    }), [remarkPlugins, rehypePlugins, markdownComponents]);
 };

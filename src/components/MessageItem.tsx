@@ -146,6 +146,7 @@ const StableMarkdownChunk = React.memo(function StableMarkdownChunk({
             const element = (
                 <UnifiedMarkdown
                     noProseWrapper
+                    markdownConfig={markdownConfig}
                     onCodeRun={onCodeRun}
                     isStreaming={isStreaming}
                 >
@@ -165,6 +166,7 @@ const StableMarkdownChunk = React.memo(function StableMarkdownChunk({
             useRawTextRenderer,
             displayContent,
             markdownContent,
+            markdownConfig,
             onCodeRun,
             processContent,
             isStreaming,
