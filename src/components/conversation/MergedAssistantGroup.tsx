@@ -11,6 +11,8 @@ import {
     reportMergedGroupSegmentWidth,
     useMergedGroupWidth,
 } from "./mergedGroupWidthStore";
+import { StreamRetryAttemptSections } from "./StreamRetryAttemptSections";
+import { collectPreferredRetryCopyContent } from "@/utils/streamRetryAttempts";
 
 export interface MergedAssistantGroupProps {
     groupMessages: Message[];
@@ -157,9 +159,9 @@ function MergedGroupParts({
         onApproveAgentPlan,
     } = props;
 
-    return (
+    const renderMessageChunk = (chunk: Message[]) => (
         <div className="flex flex-col gap-2">
-            {messages.map((message) => {
+            {chunk.map((message) => {
                 const streamEvent = streamingMessages.get(message.id);
                 const isLast = keepExpanded || message.id === lastMessageId;
                 return (
@@ -193,6 +195,13 @@ function MergedGroupParts({
             })}
         </div>
     );
+
+    return (
+        <StreamRetryAttemptSections
+            messages={messages}
+            renderMessages={renderMessageChunk}
+        />
+    );
 }
 
 function MergedGroupToolbar({ props }: { props: MergedAssistantGroupProps }) {
@@ -221,12 +230,8 @@ function MergedGroupToolbar({ props }: { props: MergedAssistantGroupProps }) {
             isUserMessage={false}
             copyIconState="copy"
             onCopy={() => {
-                const responseContent = groupMessages
-                    .filter((message) => message.message_type === "response")
-                    .map((message) => message.content);
-                const content = responseContent.length > 0
-                    ? responseContent.join("\n")
-                    : toolbarMessage.content;
+                const preferred = collectPreferredRetryCopyContent(groupMessages);
+                const content = preferred || toolbarMessage.content;
                 navigator.clipboard.writeText(content);
             }}
             onRegenerate={lastResponse ? () => onMessageRegenerate(lastResponse.id) : undefined}
