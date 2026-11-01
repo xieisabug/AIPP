@@ -38,6 +38,7 @@ const STATUS_RUNNING: &str = "running";
 const STATUS_SUCCEEDED: &str = "succeeded";
 const STATUS_FAILED: &str = "failed";
 const STATUS_CANCELLED: &str = "cancelled";
+const STATUS_INTERRUPTED: &str = "interrupted";
 pub(crate) const BUTLER_SYSTEM_ASSISTANT_NAME: &str = "__aipp_internal_butler_system_assistant__";
 const BUTLER_SYSTEM_ASSISTANT_DESCRIPTION: &str = "AIPP 总管家系统保留助手，请勿展示给普通用户。";
 const TASK_RESULT_DETAIL_LIMIT: usize = 4000;
@@ -1030,8 +1031,36 @@ fn describe_task_terminal_status(status: &str) -> &'static str {
         STATUS_SUCCEEDED => "已完成",
         STATUS_FAILED => "失败",
         STATUS_CANCELLED => "已取消",
+        STATUS_INTERRUPTED => "已中断",
         _ => "已结束",
     }
+}
+
+fn is_cancel_requested_status(status: Option<&str>) -> bool {
+    matches!(status, Some(STATUS_CANCELLED) | Some(STATUS_INTERRUPTED))
+}
+
+fn message_end_reason(message: &Message) -> Option<String> {
+    let raw = message.metadata_json.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .get("end_reason")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn is_cancel_stamped_message(message: &Message) -> bool {
+    matches!(
+        message_end_reason(message).as_deref(),
+        Some("cancelled") | Some("interrupted")
+    )
+}
+
+fn is_naturally_completed_response(message: &Message) -> bool {
+    message.finish_time.is_some() && !is_cancel_stamped_message(message)
 }
 
 pub(crate) fn resolve_butler_execution_window(app_handle: &AppHandle) -> Result<Window, String> {
@@ -1346,7 +1375,13 @@ fn try_build_followup_batch_entry(
     else {
         return Ok(None);
     };
-    let cancel_requested = conversation.butler_task_status.as_deref() == Some(STATUS_CANCELLED);
+    let cancel_requested = is_cancel_requested_status(conversation.butler_task_status.as_deref())
+        || result
+            .payload_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.get("cancel_requested")?.as_bool())
+            .unwrap_or(false);
     let task_item = ButlerTaskListItem {
         butler_conversation_id: definition.butler_conversation_id,
         task_conversation_id,
@@ -1949,28 +1984,50 @@ async fn record_terminal_task_state(
     let existing_result =
         butler_repo.get_task_result(task_conversation_id).map_err(|e| e.to_string())?;
     let now = Utc::now();
+    let mut payload = json!({
+        "status": status,
+        "task_conversation_id": task_conversation_id,
+        "final_message_id": final_message_id,
+        "cancel_requested": cancel_requested,
+    });
+    // completed / cancelled / interrupted 分记时间戳，便于 UI 与回流区分终态来源。
+    match status {
+        STATUS_SUCCEEDED => {
+            payload["completed_at"] = json!(now);
+            if cancel_requested {
+                payload["cancelled_at"] = json!(now);
+            }
+        }
+        STATUS_CANCELLED => {
+            payload["cancelled_at"] = json!(now);
+        }
+        STATUS_INTERRUPTED => {
+            payload["interrupted_at"] = json!(now);
+            payload["cancelled_at"] = json!(now);
+        }
+        _ => {}
+    }
+    let mut structured = json!({
+        "status": status,
+        "content": detail_text,
+        "cancel_requested": cancel_requested,
+    });
+    if let Some(completed_at) = payload.get("completed_at") {
+        structured["completed_at"] = completed_at.clone();
+    }
+    if let Some(cancelled_at) = payload.get("cancelled_at") {
+        structured["cancelled_at"] = cancelled_at.clone();
+    }
+    if let Some(interrupted_at) = payload.get("interrupted_at") {
+        structured["interrupted_at"] = interrupted_at.clone();
+    }
     let result = ButlerTaskResult {
         id: existing_result.as_ref().map(|value| value.id).unwrap_or(0),
         task_conversation_id,
         handoff_mode: definition.result_handling_mode.clone(),
-        payload_json: Some(
-            json!({
-                "status": status,
-                "task_conversation_id": task_conversation_id,
-                "final_message_id": final_message_id,
-                "cancel_requested": cancel_requested,
-            })
-            .to_string(),
-        ),
+        payload_json: Some(payload.to_string()),
         summary: Some(summary.clone()),
-        structured_output_json: Some(
-            json!({
-                "status": status,
-                "content": detail_text,
-                "cancel_requested": cancel_requested,
-            })
-            .to_string(),
-        ),
+        structured_output_json: Some(structured.to_string()),
         evidence_json: Some("[]".to_string()),
         artifact_refs_json: Some("[]".to_string()),
         followup_suggestions_json: Some("[]".to_string()),
@@ -2015,11 +2072,13 @@ async fn record_terminal_task_state(
                 "完成"
             } else if status == STATUS_CANCELLED {
                 "取消"
+            } else if status == STATUS_INTERRUPTED {
+                "中断"
             } else {
                 "失败"
             },
             if cancel_requested && status == STATUS_SUCCEEDED {
-                "（取消请求后仍返回结果）"
+                "（取消请求后仍返回自然完成结果）"
             } else {
                 ""
             },
@@ -2080,12 +2139,38 @@ fn try_decide_butler_task_terminal_state(
     let latest_error = find_latest_task_message(messages, "error", false);
 
     if cancel_requested {
-        if let Some(response) = find_latest_terminal_response_message(messages, true) {
+        // Race strategy (#153):
+        // - Natural complete (finish_time set without cancel end_reason) wins → succeeded,
+        //   even if the user clicked cancel slightly later.
+        // - Cancel-stamped partial output (finish_pending_messages wrote end_reason=cancelled)
+        //   stays visible as detail but terminal status is interrupted, never succeeded.
+        // - No usable output → cancelled.
+        if let Some(response) = find_latest_terminal_response_message(messages, true)
+            .filter(|message| is_naturally_completed_response(message))
+        {
             return Some(ButlerTaskTerminalDecision {
                 status: STATUS_SUCCEEDED,
                 summary: normalize_summary(
                     Some(format!(
                         "任务在取消请求后仍返回最终结果：{}",
+                        summarize_text(&response.content)
+                    )),
+                    &response.content,
+                ),
+                detail_text: response.content.clone(),
+                final_message_id: Some(response.id),
+                cancel_requested: true,
+            });
+        }
+
+        if let Some(response) = find_latest_terminal_response_message(messages, true)
+            .filter(|message| is_cancel_stamped_message(message))
+        {
+            return Some(ButlerTaskTerminalDecision {
+                status: STATUS_INTERRUPTED,
+                summary: normalize_summary(
+                    Some(format!(
+                        "任务已中断，保留部分输出：{}",
                         summarize_text(&response.content)
                     )),
                     &response.content,
@@ -2197,7 +2282,7 @@ pub(crate) async fn finalize_butler_task_if_ready(
     let Some(decision) = try_decide_butler_task_terminal_state(
         &messages,
         conversation.butler_task_summary.clone(),
-        conversation.butler_task_status.as_deref() == Some(STATUS_CANCELLED),
+        is_cancel_requested_status(conversation.butler_task_status.as_deref()),
     ) else {
         return Ok(None);
     };
@@ -2560,7 +2645,7 @@ async fn ensure_butler_task_followup_if_needed(
         &task_item,
         &definition,
         &result,
-        task_item.status == STATUS_CANCELLED,
+        is_cancel_requested_status(Some(task_item.status.as_str())),
         inject_system_message,
     );
     Ok(true)
@@ -2668,12 +2753,13 @@ pub(crate) async fn mark_butler_task_cancelled(
     if conversation.conversation_kind != BUTLER_KIND_TASK {
         return Ok(None);
     }
+    // 只标记取消请求；finalized_at 留给终态决策写入，避免半截输出被盖戳后误标 succeeded。
     butler_repo
         .update_task_conversation_state(
             task_conversation_id,
             STATUS_CANCELLED,
-            Some("任务已取消"),
-            Some(Utc::now()),
+            Some("任务取消请求已受理"),
+            None,
         )
         .map_err(|e| e.to_string())?;
     finalize_butler_task_if_ready(app_handle, task_conversation_id).await
@@ -3034,11 +3120,22 @@ mod tests {
         parse_task_conversation_id_from_handoff_message, trim_chars, try_claim_attention_debounce,
         try_decide_butler_task_terminal_state, update_butler_task_watcher_state,
         ButlerTaskListItem, FollowupBatchEntry, Message, STATUS_CANCELLED, STATUS_FAILED,
-        STATUS_SUCCEEDED, TASK_RESULT_DETAIL_LIMIT, TASK_RESULT_STRUCTURED_OUTPUT_LIMIT,
+        STATUS_INTERRUPTED, STATUS_SUCCEEDED, TASK_RESULT_DETAIL_LIMIT,
+        TASK_RESULT_STRUCTURED_OUTPUT_LIMIT,
     };
     use crate::db::conversation_db::{ButlerTaskDefinition, ButlerTaskResult, Conversation};
 
     fn build_message(id: i64, message_type: &str, content: &str, finished: bool) -> Message {
+        build_message_with_metadata(id, message_type, content, finished, None)
+    }
+
+    fn build_message_with_metadata(
+        id: i64,
+        message_type: &str,
+        content: &str,
+        finished: bool,
+        metadata_json: Option<&str>,
+    ) -> Message {
         let now = Utc::now();
         Message {
             id,
@@ -3057,7 +3154,7 @@ mod tests {
             generation_group_id: None,
             parent_group_id: None,
             tool_calls_json: None,
-            metadata_json: None,
+            metadata_json: metadata_json.map(str::to_string),
             first_token_time: None,
             ttft_ms: None,
         }
@@ -3128,6 +3225,70 @@ mod tests {
         assert_eq!(decision.final_message_id, Some(2));
         assert!(decision.cancel_requested);
         assert!(decision.detail_text.contains("取消"));
+    }
+
+    #[test]
+    fn cancel_mid_run_with_cancel_stamped_partial_is_interrupted_not_succeeded() {
+        // Mirrors production: cancel_ai → finish_pending_messages stamps finish_time + end_reason.
+        let messages = vec![build_message_with_metadata(
+            1,
+            "response",
+            "中段部分输出，尚未自然收尾",
+            true,
+            Some(r#"{"end_reason":"cancelled"}"#),
+        )];
+
+        let decision = try_decide_butler_task_terminal_state(&messages, None, true).unwrap();
+
+        assert_eq!(decision.status, STATUS_INTERRUPTED);
+        assert_eq!(decision.final_message_id, Some(1));
+        assert!(decision.cancel_requested);
+        assert!(decision.detail_text.contains("中段部分输出"));
+        assert!(decision.summary.contains("中断"));
+    }
+
+    #[test]
+    fn cancel_early_with_empty_partial_stays_cancelled() {
+        let messages = vec![build_message_with_metadata(
+            1,
+            "response",
+            "   ",
+            true,
+            Some(r#"{"end_reason":"cancelled"}"#),
+        )];
+
+        let decision = try_decide_butler_task_terminal_state(&messages, None, true).unwrap();
+
+        assert_eq!(decision.status, STATUS_CANCELLED);
+        assert!(decision.cancel_requested);
+    }
+
+    #[test]
+    fn cancel_near_end_natural_finish_still_succeeds() {
+        // Near-end race: stream End finished the response first; cancel only requested later.
+        let messages = vec![build_message(
+            1,
+            "response",
+            "末块附近已写出完整交付物",
+            true,
+        )];
+
+        let decision = try_decide_butler_task_terminal_state(&messages, None, true).unwrap();
+
+        assert_eq!(decision.status, STATUS_SUCCEEDED);
+        assert!(decision.cancel_requested);
+        assert!(decision.summary.contains("取消请求后"));
+    }
+
+    #[test]
+    fn natural_complete_without_cancel_still_succeeds() {
+        let messages = vec![build_message(1, "response", "自然完成的最终结果", true)];
+
+        let decision = try_decide_butler_task_terminal_state(&messages, None, false).unwrap();
+
+        assert_eq!(decision.status, STATUS_SUCCEEDED);
+        assert!(!decision.cancel_requested);
+        assert_eq!(decision.detail_text, "自然完成的最终结果");
     }
 
     #[test]

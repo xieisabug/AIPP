@@ -872,18 +872,52 @@ impl MessageRepository {
     }
 
     /// 更新对话中所有正在进行的消息的 finish_time（用于取消操作）
-    /// 只更新 start_time IS NOT NULL 且 finish_time IS NULL 的消息
+    /// 只更新 start_time IS NOT NULL 且 finish_time IS NULL 的消息。
+    /// 同时写入 metadata.end_reason="cancelled"，供 Butler 终态判定区分
+    /// 「取消盖戳的半截输出」与「自然完成」——避免中途取消被误标 succeeded。
     #[instrument(level = "debug", skip(self), fields(conversation_id = conversation_id))]
     pub fn finish_pending_messages(&self, conversation_id: i64) -> Result<usize> {
         let now = chrono::Utc::now();
         self.with_serialized_write(|conn| {
-            let updated = conn.execute(
-                "UPDATE message SET finish_time = ?1 WHERE conversation_id = ?2 AND start_time IS NOT NULL AND finish_time IS NULL",
-                rusqlite::params![now, conversation_id],
+            let mut stmt = conn.prepare(
+                "SELECT id, metadata_json FROM message                  WHERE conversation_id = ?1 AND start_time IS NOT NULL AND finish_time IS NULL",
             )?;
+            let rows: Vec<(i64, Option<String>)> = stmt
+                .query_map(rusqlite::params![conversation_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            let mut updated = 0usize;
+            for (id, metadata_json) in rows {
+                let merged = merge_message_end_reason_metadata(metadata_json.as_deref(), "cancelled");
+                conn.execute(
+                    "UPDATE message SET finish_time = ?1, metadata_json = ?2 WHERE id = ?3",
+                    rusqlite::params![now, merged, id],
+                )?;
+                updated += 1;
+            }
             Ok(updated)
         })
     }
+}
+
+/// Merge `end_reason` into message metadata JSON without dropping other keys.
+pub(crate) fn merge_message_end_reason_metadata(
+    existing: Option<&str>,
+    end_reason: &str,
+) -> String {
+    let mut map = existing
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw).ok())
+        .unwrap_or_default();
+    map.insert(
+        "end_reason".to_string(),
+        serde_json::Value::String(end_reason.to_string()),
+    );
+    serde_json::Value::Object(map).to_string()
 }
 
 impl Repository<Message> for MessageRepository {

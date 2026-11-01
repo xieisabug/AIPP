@@ -353,6 +353,60 @@ fn test_message_update_finish_time() {
     // 注意：内存数据库中 CURRENT_TIMESTAMP 可能格式不同，此测试主要验证 SQL 执行成功
 }
 
+/// 取消路径 finish_pending_messages 须盖戳 end_reason=cancelled，且保留已有 metadata。
+#[test]
+fn test_finish_pending_messages_marks_cancel_end_reason() {
+    let (msg_repo, conversation_id) = create_message_test_db();
+
+    let mut pending = create_test_message(
+        conversation_id,
+        "response",
+        "partial mid-run output",
+        None,
+        Some(new_group_id()),
+    );
+    pending.start_time = Some(chrono::Utc::now());
+    pending.finish_time = None;
+    pending.metadata_json = Some(r#"{"usage":{"total_tokens":3}}"#.to_string());
+    let pending = msg_repo.create(&pending).unwrap();
+
+    let mut already_done = create_test_message(
+        conversation_id,
+        "response",
+        "already finished naturally",
+        None,
+        Some(new_group_id()),
+    );
+    already_done.start_time = Some(chrono::Utc::now());
+    already_done.finish_time = Some(chrono::Utc::now());
+    let already_done = msg_repo.create(&already_done).unwrap();
+
+    let updated = msg_repo.finish_pending_messages(conversation_id).unwrap();
+    assert_eq!(updated, 1);
+
+    let stamped = msg_repo.read(pending.id).unwrap().unwrap();
+    assert!(stamped.finish_time.is_some());
+    let meta: serde_json::Value =
+        serde_json::from_str(stamped.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(meta["end_reason"], "cancelled");
+    assert_eq!(meta["usage"]["total_tokens"], 3);
+
+    let untouched = msg_repo.read(already_done.id).unwrap().unwrap();
+    assert!(untouched.metadata_json.is_none() || !untouched.metadata_json.as_deref().unwrap_or("").contains("end_reason"));
+}
+
+#[test]
+fn test_merge_message_end_reason_metadata_preserves_keys() {
+    let merged = merge_message_end_reason_metadata(Some(r#"{"foo":1}"#), "cancelled");
+    let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(value["foo"], 1);
+    assert_eq!(value["end_reason"], "cancelled");
+
+    let fresh = merge_message_end_reason_metadata(None, "cancelled");
+    let value: serde_json::Value = serde_json::from_str(&fresh).unwrap();
+    assert_eq!(value["end_reason"], "cancelled");
+}
+
 // ============================================================================
 // 异常情况和边界测试
 // ============================================================================
