@@ -1,7 +1,6 @@
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useEffect, useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import debounce from "lodash/debounce";
 import TagInputContainer from "./TagInputContainer";
 import ReadOnlyModelList from "./ReadOnlyModelList";
 import ModelSelectionDialog from "./ModelSelectionDialog";
@@ -124,17 +123,16 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         llmProviderId: id,
         onAuthSuccess: () => {
             // 授权成功后刷新配置
+            const snapshot = saves.snapshot();
             invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id })
                 .then((configArray) => {
                     const newConfig: Record<string, string> = {};
                     configArray.forEach((item) => {
                         newConfig[item.name] = item.value;
                     });
-                    form.reset({
-                        ...defaultValues,
-                        ...newConfig,
-                    });
-                    setHasApiKey(!!newConfig.api_key);
+                    const merged = saves.merge(newConfig, snapshot);
+                    form.reset(merged);
+                    setHasApiKey(!!merged.api_key);
                 })
                 .catch((e) => {
                     console.error("[Copilot] refresh provider config failed", e);
@@ -184,28 +182,54 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const codexEnv = useAcpEnvironment(isCodexAppServerProvider ? "codex" : "");
     const claudeEnv = useAcpEnvironment(isClaudeSdkProvider ? "claude" : "");
 
-    // 更新字段
-    const updateField = useCallback(
-        debounce((key: string, value: string) => {
-            invoke("update_llm_provider_config", {
-                llmProviderId: id,
-                name: key,
-                value,
-            })
-                .then(() => console.log(`Field ${key} updated`))
-                .catch((error) =>
-                    console.error(`Error updating field ${key}:`, error),
-                );
-        }, 50),
-        [id],
-    );
-
-    // 当 id 变化时，取消之前的 debounce 操作
-    useEffect(() => {
-        return () => {
-            updateField.cancel();
+    const saves = useMemo(() => {
+        type Field = { value: string; revision: number; pending: boolean; timer?: ReturnType<typeof setTimeout>; running: boolean };
+        const fields = new Map<string, Field>();
+        const flush = (key: string) => {
+            const field = fields.get(key)!;
+            if (field.timer) clearTimeout(field.timer);
+            field.timer = undefined;
+            if (field.running || !field.pending) return;
+            const { value, revision } = field;
+            field.running = true;
+            void invoke("update_llm_provider_config", { llmProviderId: id, name: key, value })
+                .then(() => { if (field.revision === revision) field.pending = false; })
+                .catch((error) => {
+                    const detail = String(error);
+                    const safeDetail = value ? detail.split(value).join("[已隐藏]") : detail;
+                    toast.error(`保存提供商字段 ${key} 失败: ${safeDetail}`);
+                })
+                .finally(() => {
+                    field.running = false;
+                    if (field.revision !== revision && !field.timer) flush(key);
+                });
         };
-    }, [id, updateField]);
+        return {
+            update(key: string, value: string) {
+                const field: Field = fields.get(key) ?? { value, revision: 0, pending: false, running: false };
+                field.value = value;
+                field.revision++;
+                field.pending = true;
+                fields.set(key, field);
+                if (field.timer) clearTimeout(field.timer);
+                field.timer = setTimeout(() => flush(key), 50);
+            },
+            snapshot: () => new Map(Array.from(fields, ([key, field]) => [key, { revision: field.revision, pending: field.pending }])),
+            merge(config: Record<string, string>, snapshot?: Map<string, { revision: number; pending: boolean }>) {
+                const merged = { ...defaultValues, ...config };
+                for (const [key, field] of fields) {
+                    const previous = snapshot?.get(key);
+                    if (field.pending || previous?.pending || (snapshot && field.revision !== previous?.revision)) {
+                        Object.assign(merged, { [key]: field.value });
+                    }
+                }
+                return merged;
+            },
+            flushAll() { for (const [key, field] of fields) if (field.timer) flush(key); },
+        };
+    }, [id, defaultValues]);
+    const updateField = useCallback((key: string, value: string) => saves.update(key, value), [saves]);
+    useEffect(() => () => saves.flushAll(), [saves]);
 
     // 监听字段更新后自动保存
     useEffect(() => {
@@ -225,17 +249,17 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         events: ["llm_provider_changed"],
         identity: id,
         initial: true,
-        onInvalidate: () => updateField.cancel(),
         refresh: async (isCurrent) => {
+            const snapshot = saves.snapshot();
             const [configArray, modelList] = await Promise.all([
                 invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id }),
                 invoke<Array<LLMModel>>("get_llm_models", { llmProviderId: String(id) }),
             ]);
             if (!isCurrent()) return;
-            updateField.cancel();
             const config = Object.fromEntries(configArray.map((item) => [item.name, item.value]));
-            form.reset({ ...defaultValues, ...config });
-            setHasApiKey(!!config.api_key);
+            const merged = saves.merge(config, snapshot);
+            form.reset(merged);
+            setHasApiKey(!!merged.api_key);
             setTags(modelList.map(toModelTagItem));
         },
         onError: (error) => toast.error(`同步后刷新模型提供商失败（provider=${id}）: ${String(error)}`),
