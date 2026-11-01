@@ -22,6 +22,7 @@ import { useIsMobilePlatform } from "../hooks/use-platform";
 import { maskContent } from "../utils/antiLeakage";
 import { recordMessageItemRender } from "../utils/messageItemRenderStats";
 import { splitClosedMarkdownBlocks } from "../utils/streamingMarkdownBlocks";
+import { resolveMessageDisplayContent } from "../utils/streamingOverlayHandoff";
 import type { InlineInteractionItem } from "./ConversationUI";
 import { ChevronDown, ChevronUp, ListEnd, Loader2, Zap } from "lucide-react";
 import {
@@ -319,9 +320,9 @@ const MessageItem = React.memo<MessageItemProps>(
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
         // 防泄露模式：获取实际显示的内容
-        // 流式消息优先使用 streamEvent.content（包含 MCP_TOOL_CALL_STREAMING 标记）
+        // 流式中用 overlay；is_done 交接时取 overlay 与 message 的较长者，避免尾部字符丢失（LeaderAI #149）
         const displayContent = useMemo(() => {
-            const rawContent = (streamEvent && !streamEvent.is_done ? streamEvent.content : null) ?? message.content;
+            const rawContent = resolveMessageDisplayContent(message.content, streamEvent);
             return shouldMaskContent ? maskContent(rawContent) : rawContent;
         }, [shouldMaskContent, message.content, streamEvent, maskContent]);
 
