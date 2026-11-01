@@ -3,6 +3,7 @@ import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import "./App.css";
 import "./mobile/mobile.css";
 import { useIsMobilePlatform } from "./hooks/use-platform";
+import { useVisualViewportInsets } from "./hooks/useVisualViewportInsets";
 import MobileShell from "./mobile/MobileShell";
 import { Toaster } from "./components/ui/sonner.tsx";
 
@@ -22,6 +23,7 @@ const windowLoaders: Record<string, () => Promise<{ default: React.ComponentType
 
 function App() {
     const isMobilePlatform = useIsMobilePlatform();
+    useVisualViewportInsets(isMobilePlatform);
     const [winLabel, setWinLabel] = useState<string>("chat_ui");
 
     useEffect(() => {

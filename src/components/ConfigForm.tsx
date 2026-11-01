@@ -245,6 +245,7 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                         type={field.type === "password" ? "password" : "text"}
                         disabled={field.disabled}
                         placeholder={field.placeholder}
+                        enterKeyHint="done"
                         {...fieldRenderData}
                     />
                 );
