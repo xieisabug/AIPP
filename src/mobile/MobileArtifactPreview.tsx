@@ -6,12 +6,14 @@ import { MobilePreview } from "./navigation";
 import { staticPreviewDocument } from "./previewDocument";
 import runtimeUrl from "./previewRuntime.ts?worker&url";
 import { usePlatform } from "@/hooks/use-platform";
+import SaveArtifactDialog from "@/components/SaveArtifactDialog";
 
 export default function MobileArtifactPreview({ preview }: { preview: MobilePreview }) {
     const platform = usePlatform();
     const [document, setDocument] = useState("");
     const [error, setError] = useState("");
     const [zoom, setZoom] = useState(1);
+    const [saveOpen, setSaveOpen] = useState(false);
     const frame = useRef<HTMLIFrameElement>(null);
     const initializedFrames = useRef(new WeakSet<HTMLIFrameElement>());
     const loadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -55,6 +57,7 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
         <header className="flex flex-wrap gap-2 items-center p-2">
             <Button className="min-h-11" variant="ghost" onClick={() => window.__aippMobileBack?.()}>返回</Button>
             <h1 className="flex-1 truncate">{preview.title || "制品预览"}</h1>
+            <Button className="min-h-11" variant="outline" onClick={() => setSaveOpen(true)}>保存到收藏</Button>
             <Button className="min-h-11 min-w-11" variant="outline" aria-label="缩小" onClick={() => setZoom(value => Math.max(.5, value - .25))}>−</Button>
             <span>{Math.round(zoom * 100)}%</span>
             <Button className="min-h-11 min-w-11" variant="outline" aria-label="放大" onClick={() => setZoom(value => Math.min(3, value + .25))}>+</Button>
@@ -75,5 +78,11 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
                 } }}
                 className="border-0 bg-white w-full h-full" style={{ zoom }} />}
         </div>
+        <SaveArtifactDialog
+            isOpen={saveOpen}
+            onClose={() => setSaveOpen(false)}
+            artifactType={preview.language || "text"}
+            code={preview.code}
+        />
     </section>;
 }

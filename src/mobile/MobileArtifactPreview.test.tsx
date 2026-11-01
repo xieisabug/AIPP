@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import MobileArtifactPreview from "./MobileArtifactPreview";
 
 vi.mock("@/hooks/use-platform", () => ({ usePlatform: () => "android" }));
+vi.mock("@/components/SaveArtifactDialog", () => ({
+    default: ({ isOpen }: { isOpen: boolean }) => (isOpen ? <div role="dialog">保存对话框</div> : null),
+}));
 
 describe("MobileArtifactPreview component changes", () => {
     it("should not resend component source when an initialized frame loads again", async () => {
@@ -27,5 +30,10 @@ describe("MobileArtifactPreview component changes", () => {
         const second = screen.getByTitle("隔离制品预览");
         rerender(<MobileArtifactPreview preview={{ ...first, language: "vue", code: "<template>Vue</template>" }} />);
         await waitFor(() => expect(screen.getByTitle("隔离制品预览")).not.toBe(second));
+    });
+    it("opens the save-to-collection dialog", async () => {
+        render(<MobileArtifactPreview preview={{ language: "markdown", code: "# hi", title: "note" }} />);
+        fireEvent.click(await screen.findByRole("button", { name: "保存到收藏" }));
+        expect(await screen.findByRole("dialog")).toHaveTextContent("保存对话框");
     });
 });
