@@ -207,7 +207,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
             <div className="text-sm text-gray-500 text-center mb-4" data-aipp-slot="chat-new-conversation-hint" {...dragProps}>
                 <AskWindowPrepare
                     selectedText={selectedText}
-                    isMobile={isMobile || isMobilePlatform}
+                    isMobile={isMobilePlatform}
                     showSetupGuides={needsProviderSetup || assistants.length === 0}
                     onConfigureProviders={() => { void openConfigMenu("llm-provider-config"); }}
                     onChooseAssistant={() => {
@@ -220,7 +220,9 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                     }}
                 />
                 <p className="mt-4" {...dragProps}>
-                    请选择一个对话，或者在下方选择助手后点击发送开始新聊天
+                    {isMobilePlatform
+                        ? "请选择一个对话，或者在下方选择助手后点击发送开始新聊天"
+                        : "请选择一个对话，或者选择一个助手开始新聊天"}
                 </p>
             </div>
             <Select
