@@ -573,6 +573,18 @@ body {
     padding-bottom: calc(env(safe-area-inset-bottom) + 8px);
 }
 
+
+/* IME / visualViewport：顶栏贴齐可视区，避免正文顶到系统状态栏下（#148） */
+.aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] {
+    position: sticky;
+    top: var(--aipp-vv-offset-top, 0px);
+    z-index: 30;
+}
+
+html[data-aipp-keyboard-open="true"] .aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] {
+    box-shadow: 0 1px 0 hsl(var(--border));
+}
+
 /* ===== 移动平台触控适配（仅 <html class="aipp-mobile-platform">，桌面不受影响） ===== */
 
 /* 消息操作栏常驻气泡底部：按钮 ≥44×44，窄屏横向滚动时不压缩 */

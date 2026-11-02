@@ -816,13 +816,14 @@ pub(super) fn count_pending_butler_tasks(
            AND conversation_kind = 'butler_task'
            AND (
              butler_task_finalized_at IS NULL
-             OR COALESCE(butler_task_status, '') NOT IN (?2, ?3, ?4)
+             OR COALESCE(butler_task_status, '') NOT IN (?2, ?3, ?4, ?5)
            )",
         params![
             butler_conversation_id,
             TERMINAL_TASK_STATUSES[0],
             TERMINAL_TASK_STATUSES[1],
-            TERMINAL_TASK_STATUSES[2]
+            TERMINAL_TASK_STATUSES[2],
+            TERMINAL_TASK_STATUSES[3]
         ],
         |row| row.get::<_, i64>(0),
     )

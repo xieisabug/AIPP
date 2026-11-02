@@ -27,6 +27,7 @@ import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
 import { noteToolReview } from "@/hooks/toolReviewStore";
 import { invalidateMcpToolCall } from "@/services/conversationResourceCache";
 import { useMobileResume } from "./useMobileResume";
+import { finalizeStreamingEventWithPending } from "@/utils/streamingOverlayHandoff";
 
 export interface UseConversationEventsOptions {
     conversationId: string | number;
@@ -744,7 +745,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 const messageUpdateData =
                     conversationEvent.data as MessageUpdateEvent;
 
-                const streamEvent: StreamEvent = {
+                let streamEvent: StreamEvent = {
                     message_id: messageUpdateData.message_id,
                     message_type: messageUpdateData.message_type as any,
                     content: messageUpdateData.content,
@@ -758,8 +759,11 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     tps: messageUpdateData.tps,
                 };
 
+                // BUG-02 / LeaderAI #149: 完成时先消费节流队列中的最后一帧，避免短尾块被丢弃。
                 if (messageUpdateData.is_done) {
+                    const pending = pendingStreamingFramesRef.current.get(streamEvent.message_id);
                     pendingStreamingFramesRef.current.delete(streamEvent.message_id);
+                    streamEvent = finalizeStreamingEventWithPending(streamEvent, pending);
                 }
 
                 // 检查是否是错误消息
@@ -1034,6 +1038,34 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 处理流式完成事件（包括空响应场景）
                 const completionData = conversationEvent.data as StreamCompleteEvent;
                 console.log("Received stream_complete event:", completionData);
+
+                // Drain any unflushed throttle frames before tearing down the overlay so a
+                // short final chunk is materialized into messages (LeaderAI #149).
+                const pendingEvents = Array.from(pendingStreamingFramesRef.current.values());
+                if (pendingEvents.length > 0) {
+                    pendingStreamingFramesRef.current.clear();
+                    cancelScheduledStreamingFlush();
+                    for (const event of pendingEvents) {
+                        const current = streamingMessagesRef.current.get(event.message_id);
+                        if (current?.is_done) {
+                            continue;
+                        }
+                        const finalized = finalizeStreamingEventWithPending(
+                            {
+                                ...(current ?? event),
+                                is_done: true,
+                            },
+                            event,
+                        );
+                        updateStreamingMessagesState((prev) => {
+                            const next = new Map(prev);
+                            next.set(finalized.message_id, finalized);
+                            return next;
+                        });
+                        callbacksRef.current.onMessageUpdate?.(finalized);
+                    }
+                }
+
                 const hasActiveMcpCall = activeMcpCallIdsRef.current.size > 0;
                 if (!hasActiveMcpCall) {
                     stopMcpCompensationPolling("stream completed with no active MCP calls");
@@ -1082,6 +1114,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             syncRuntimeState,
             syncShineState,
             scheduleStreamingUpdate,
+            cancelScheduledStreamingFlush,
             updateStreamingMessagesState,
         ],
     );

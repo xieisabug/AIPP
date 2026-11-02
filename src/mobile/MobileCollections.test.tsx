@@ -5,6 +5,7 @@ import MobileCollections from "./MobileCollections";
 
 const preview = vi.hoisted(() => vi.fn());
 vi.mock("./navigation", () => ({ previewMobile: preview }));
+vi.mock("@/hooks/use-platform", () => ({ usePlatform: () => "android" }));
 const item = { id: 7, name: "Sample", artifact_type: "html", code: "<p>hello</p>" };
 
 describe("MobileCollections", () => {
@@ -31,5 +32,24 @@ describe("MobileCollections", () => {
         mockInvokeHandler("get_artifacts_collection", () => []);
         render(<MobileCollections />);
         expect(await screen.findByText("暂无收藏")).toBeTruthy();
+        expect(screen.getAllByRole("button", { name: "新建收藏" }).length).toBeGreaterThan(0);
+    });
+    it("creates a collection from the mobile entry", async () => {
+        mockInvokeHandler("get_artifacts_collection", () => []);
+        const saved: unknown[] = [];
+        mockInvokeHandler("save_artifact_to_collection", (args: any) => {
+            saved.push(args.request);
+            return 42;
+        });
+        render(<MobileCollections />);
+        fireEvent.click((await screen.findAllByRole("button", { name: "新建收藏" }))[0]);
+        fireEvent.change(screen.getByLabelText("收藏名称"), { target: { value: "笔记" } });
+        fireEvent.change(screen.getByLabelText("收藏内容"), { target: { value: "# hello" } });
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        await vi.waitFor(() => expect(saved[0]).toMatchObject({
+            name: "笔记",
+            artifact_type: "markdown",
+            code: "# hello",
+        }));
     });
 });

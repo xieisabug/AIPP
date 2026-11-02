@@ -1108,3 +1108,165 @@ describe("useConversationEvents preview_code flush policy", () => {
         expect(shouldFlushStreamingMessageImmediately("plain text")).toBe(false);
     });
 });
+
+describe("useConversationEvents streaming completion handoff (LeaderAI #149)", () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+        mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+    });
+
+    afterEach(() => {
+        clearAllMockHandlers();
+        vi.clearAllMocks();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+    });
+
+    it("consumes a short final pending throttle chunk when is_done arrives before rAF flush", async () => {
+        const conversationId = 14901;
+        const messageId = 149001;
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, { target_type: "none" }));
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "idle"));
+
+        const onMessageUpdate = vi.fn();
+        const { result } = renderHook(() =>
+            useConversationEvents({ conversationId, onMessageUpdate }),
+        );
+        await flushEffects();
+
+        // Pause rAF so the short final chunk stays queued in the throttle map.
+        vi.stubGlobal("requestAnimationFrame", () => 1);
+        vi.stubGlobal("cancelAnimationFrame", () => undefined);
+
+        try {
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "message_update",
+                    data: {
+                        message_id: messageId,
+                        message_type: "response",
+                        content: "Hello wor",
+                        is_done: false,
+                    },
+                });
+            });
+            // Let the 100ms fallback flush the first frame.
+            await advanceAndFlush(120);
+
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "message_update",
+                    data: {
+                        message_id: messageId,
+                        message_type: "response",
+                        content: "Hello world!",
+                        is_done: false,
+                    },
+                });
+            });
+            // Do NOT advance timers — leave the short final chunk pending.
+
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "message_update",
+                    data: {
+                        message_id: messageId,
+                        message_type: "response",
+                        // Simulate a completion payload that raced without the short tail.
+                        content: "Hello wor",
+                        is_done: true,
+                    },
+                });
+            });
+            await flushEffects();
+
+            expect(result.current.streamingMessages.get(messageId)?.content).toBe("Hello world!");
+            expect(result.current.streamingMessages.get(messageId)?.is_done).toBe(true);
+            expect(onMessageUpdate).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    message_id: messageId,
+                    content: "Hello world!",
+                    is_done: true,
+                }),
+            );
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it("flushes pending throttle frames into onMessageUpdate before stream_complete clears overlay", async () => {
+        const conversationId = 14902;
+        const messageId = 149002;
+        mockInvokeHandler("get_shine_state", () =>
+            createShineState(conversationId, 1, { target_type: "none" }));
+        mockInvokeHandler("get_conversation_runtime_state", () =>
+            createRuntimeState(conversationId, 1, "idle"));
+
+        const onMessageUpdate = vi.fn();
+        const { result } = renderHook(() =>
+            useConversationEvents({ conversationId, onMessageUpdate }),
+        );
+        await flushEffects();
+
+        vi.stubGlobal("requestAnimationFrame", () => 1);
+        vi.stubGlobal("cancelAnimationFrame", () => undefined);
+
+        try {
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "message_update",
+                    data: {
+                        message_id: messageId,
+                        message_type: "response",
+                        content: "partial answer",
+                        is_done: false,
+                    },
+                });
+            });
+            await advanceAndFlush(120);
+
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "message_update",
+                    data: {
+                        message_id: messageId,
+                        message_type: "response",
+                        content: "partial answer!",
+                        is_done: false,
+                    },
+                });
+            });
+
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "stream_complete",
+                    data: {
+                        conversation_id: conversationId,
+                        response_message_id: messageId,
+                        reasoning_message_id: null,
+                        has_response: true,
+                        has_reasoning: false,
+                        response_length: "partial answer!".length,
+                        reasoning_length: 0,
+                    },
+                });
+            });
+            await flushEffects();
+
+            expect(onMessageUpdate).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    message_id: messageId,
+                    content: "partial answer!",
+                    is_done: true,
+                }),
+            );
+            // Overlay is cleared after handoff when no MCP is active.
+            expect(result.current.streamingMessages.size).toBe(0);
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+});
+

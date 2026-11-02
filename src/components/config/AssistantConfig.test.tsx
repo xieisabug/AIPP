@@ -64,6 +64,9 @@ describe("AssistantConfig sync selection", () => {
         expect(screen.getByLabelText("prompt")).toHaveValue("unsaved");
         expect(screen.getByTestId("selected")).toHaveTextContent("1");
         fireEvent.click(screen.getByRole("button", { name: "assistant-3" }));
+        // #157: dirty leave prompts save/discard instead of silently dropping edits
+        await waitFor(() => expect(screen.getByText("有未保存的助手配置")).toBeInTheDocument());
+        fireEvent.click(screen.getByRole("button", { name: "放弃" }));
         await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-3"));
     });
 

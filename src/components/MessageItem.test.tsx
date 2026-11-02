@@ -287,6 +287,26 @@ describe('MessageItem user message folding', () => {
     });
 });
 
+describe('MessageItem streaming overlay handoff (LeaderAI #149)', () => {
+    it('keeps longer overlay content when is_done flips before messages[] catches up', () => {
+        const message = createMessage({ id: 149, content: 'Hello wor' });
+        render(
+            <MessageItem
+                message={message}
+                streamEvent={{
+                    message_id: 149,
+                    message_type: 'response',
+                    content: 'Hello world!',
+                    is_done: true,
+                }}
+            />,
+        );
+
+        expect(screen.getByText('Hello world!')).toBeInTheDocument();
+        expect(screen.queryByText('Hello wor')).not.toBeInTheDocument();
+    });
+});
+
 describe('MessageItem streaming markdown blocks', () => {
     it('should keep closed blocks mounted when the stream finishes', () => {
         markdownMountCounts.clear();

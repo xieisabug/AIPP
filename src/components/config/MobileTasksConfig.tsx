@@ -5,7 +5,11 @@ import { useMobileResume } from "@/hooks/useMobileResume";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import type { ButlerTaskListItem, ButlerTaskDetailResponse } from "@/data/Butler";
+import {
+    butlerTaskStatusLabel,
+    type ButlerTaskDetailResponse,
+    type ButlerTaskListItem,
+} from "@/data/Butler";
 import type { OperationPermissionRequest } from "@/components/OperationPermissionDialog";
 
 interface Overview {
@@ -96,7 +100,7 @@ export default function MobileTasksConfig() {
                 })}>在本机派发</Button>
             </>}
             {overview?.tasks.map(task => <article key={task.task_conversation_id} className="border rounded p-3 space-y-2">
-                <h3>{task.title}</h3><p className="text-sm">{task.is_running ? "本机执行中" : `历史记录：${task.status}；本机未运行`}</p>
+                <h3>{task.title}</h3><p className="text-sm">{task.is_running ? "本机执行中" : `历史记录：${butlerTaskStatusLabel(task.status)}；本机未运行`}</p>
                 <p className="whitespace-pre-wrap break-words">{task.last_summary}</p>
                 <Button className="min-h-11" variant="outline" disabled={busy} onClick={() => void act("读取任务", async () => setDetail(await invoke<ButlerTaskDetailResponse>("get_butler_task_detail", { taskConversationId: task.task_conversation_id })))}>查看详情</Button>
                 {task.is_running && <Button className="min-h-11" variant="outline" onClick={() => void act("取消本机任务", () => invoke("cancel_ai", { conversationId: task.task_conversation_id }), true)}>取消本机执行</Button>}
