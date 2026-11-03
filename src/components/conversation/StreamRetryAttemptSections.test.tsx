@@ -88,5 +88,11 @@ describe("StreamRetryAttemptSections", () => {
         // Expand interrupted attempt
         fireEvent.click(screen.getByText("尝试 1"));
         expect(screen.getByTestId("chunk-1")).toHaveTextContent("partial-one");
+
+        const copyButtons = screen.getAllByRole("button", { name: "复制此尝试内容" });
+        expect(copyButtons.length).toBeGreaterThan(0);
+        for (const button of copyButtons) {
+            expect(button).toHaveClass("min-h-11", "min-w-11", "h-11", "w-11");
+        }
     });
 });

@@ -26,14 +26,77 @@ describe("mobile local draft persistence", () => {
         await waitFor(() => expect(resolve).toBeDefined());
         await act(async () => {
             result.current.saveContent("new input");
+        });
+        // Gated: no disk write until hydrate finishes
+        expect(invoke).not.toHaveBeenCalledWith(
+            "save_mobile_draft",
+            expect.anything(),
+        );
+        await act(async () => {
             resolve({ content: "old input", attachments: [] });
         });
         expect(restore).not.toHaveBeenCalled();
-        expect(invoke).toHaveBeenCalledWith("save_mobile_draft", {
-            conversationKey: "late-read",
-            content: "new input",
-            attachmentIds: [],
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith("save_mobile_draft", {
+                conversationKey: "late-read",
+                content: "new input",
+                attachmentIds: [],
+            }),
+        );
+    });
+
+    it("should not persist empty attachmentIds before hydrate finishes", async () => {
+        let resolve!: (value: {
+            content: string;
+            attachments: Array<{
+                id: number;
+                name: string;
+                path: string;
+                attachment_type: number;
+            }>;
+        }) => void;
+        mockInvokeHandler(
+            "get_mobile_draft",
+            () => new Promise((done) => {
+                resolve = done;
+            }),
+        );
+        const saved: Array<{ content: string; attachmentIds: number[] }> = [];
+        mockInvokeHandler("save_mobile_draft", (args: any) => {
+            saved.push({ content: args.content, attachmentIds: args.attachmentIds ?? [] });
         });
+        const restore = vi.fn();
+        const { result } = renderHook(() => useMobileDraftPersistence("hydrate-gate", restore));
+        await waitFor(() => expect(resolve).toBeDefined());
+        await act(async () => {
+            result.current.saveContent("typed during hydrate");
+        });
+        expect(saved).toEqual([]);
+        await act(async () => {
+            resolve({
+                content: "old",
+                attachments: [
+                    { id: 7, name: "a.png", path: "a.png", attachment_type: 1 },
+                    { id: 8, name: "b.txt", path: "b.txt", attachment_type: 0 },
+                ],
+            });
+        });
+        // Restore attachments into UI without clobbering typed content
+        await waitFor(() => expect(restore).toHaveBeenCalled());
+        expect(restore).toHaveBeenCalledWith({
+            content: "typed during hydrate",
+            attachments: [
+                { id: 7, name: "a.png", path: "a.png", attachment_type: 1 },
+                { id: 8, name: "b.txt", path: "b.txt", attachment_type: 0 },
+            ],
+        });
+        await waitFor(() =>
+            expect(saved).toEqual([
+                { content: "typed during hydrate", attachmentIds: [7, 8] },
+            ]),
+        );
+        // Never wrote empty attachmentIds
+        expect(saved.some((row) => row.attachmentIds.length === 0)).toBe(false);
     });
 
     it("should write clear after content when earlier saves are still pending", async () => {
@@ -46,7 +109,11 @@ describe("mobile local draft persistence", () => {
                 first = done;
             });
         });
-        const { result } = renderHook(() => useMobileDraftPersistence("ordered", vi.fn()));
+        const onReady = vi.fn();
+        const { result } = renderHook(() =>
+            useMobileDraftPersistence("ordered", vi.fn(), onReady),
+        );
+        await waitFor(() => expect(onReady).toHaveBeenCalled());
         await act(async () => {
             result.current.saveContent("draft");
             result.current.saveContent("");
@@ -69,7 +136,11 @@ describe("mobile local draft persistence", () => {
         mockInvokeHandler("save_mobile_draft", (args: any) => {
             saved.push({ content: args.content, attachmentIds: args.attachmentIds ?? [] });
         });
-        const { result } = renderHook(() => useMobileDraftPersistence("with-files", vi.fn()));
+        const onReady = vi.fn();
+        const { result } = renderHook(() =>
+            useMobileDraftPersistence("with-files", vi.fn(), onReady),
+        );
+        await waitFor(() => expect(onReady).toHaveBeenCalled());
         await act(async () => {
             result.current.saveContent("caption");
             result.current.saveAttachmentIds([11, 12]);

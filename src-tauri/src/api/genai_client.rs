@@ -145,11 +145,16 @@ pub fn resolve_provider_endpoint(raw: Option<&str>) -> Result<ProviderEndpointRe
         return Err(invalid_endpoint_error(trimmed));
     }
 
-    let mut normalized = trimmed.to_string();
-    if !normalized.ends_with('/') {
-        normalized.push('/');
+    // Normalize via Url so a trailing slash lands on the *path*, not after query/fragment
+    // (Azure-style `...?api-version=` must not become `...01/`).
+    let mut normalized = parsed;
+    let path = normalized.path();
+    if !path.ends_with('/') {
+        let mut with_slash = path.to_string();
+        with_slash.push('/');
+        normalized.set_path(&with_slash);
     }
-    Ok(ProviderEndpointResolution::Custom(normalized))
+    Ok(ProviderEndpointResolution::Custom(normalized.to_string()))
 }
 
 fn invalid_endpoint_error(raw: &str) -> AppError {
@@ -398,6 +403,34 @@ mod tests {
         assert_eq!(
             r,
             ProviderEndpointResolution::Custom("https://example.com/v1/".into())
+        );
+    }
+
+    #[test]
+    fn endpoint_with_query_or_fragment_keeps_them_after_path_slash() {
+        let r = resolve_provider_endpoint(Some(
+            "https://my.openai.azure.com/openai/deployments/x/v1?api-version=2024-02-01",
+        ))
+        .unwrap();
+        assert_eq!(
+            r,
+            ProviderEndpointResolution::Custom(
+                "https://my.openai.azure.com/openai/deployments/x/v1/?api-version=2024-02-01"
+                    .into()
+            )
+        );
+
+        // Already has trailing slash before query — must not append after query
+        let r = resolve_provider_endpoint(Some("http://host/v1/?api-version=1")).unwrap();
+        assert_eq!(
+            r,
+            ProviderEndpointResolution::Custom("http://host/v1/?api-version=1".into())
+        );
+
+        let r = resolve_provider_endpoint(Some("https://example.com/v1#section")).unwrap();
+        assert_eq!(
+            r,
+            ProviderEndpointResolution::Custom("https://example.com/v1/#section".into())
         );
     }
 }
