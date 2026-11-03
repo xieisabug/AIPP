@@ -72,12 +72,20 @@ const normalizePluginAssistantFieldValue = (
 
     return rawValue;
 };
+
+/** Clone form values so later edits cannot mutate the discard snapshot. */
+const cloneFormSnapshot = (values: Record<string, unknown>): Record<string, unknown> => ({
+    ...values,
+});
+
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
     const isDirty = form.formState.isDirty;
     const dirtyRef = useRef(isDirty);
     dirtyRef.current = isDirty;
     const [leavePrompt, setLeavePrompt] = useState<null | { proceed: () => void }>(null);
+    /** Last loaded/saved form values — discard must restore this, not empty useForm defaults. */
+    const loadedFormSnapshotRef = useRef<Record<string, unknown>>({});
     const [searchQuery, setSearchQuery] = useState('');
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
@@ -379,6 +387,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         }, {} as Record<string, any>),
                         ...pluginConfigValues,
                     });
+                    loadedFormSnapshotRef.current = cloneFormSnapshot(form.getValues());
                     if (
                         assistantDetail.assistant.assistant_type === 4
                         && (assistantDetail.model[0]?.provider_id ?? 0) > 0
@@ -449,7 +458,8 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 selectionRequestRef.current += 1;
                 setCurrentAssistant(null);
                 setPluginAssistantConfigValues({});
-                form.reset();
+                form.reset({});
+                loadedFormSnapshotRef.current = {};
             }
         },
         onError: (error) => toast.error(`同步后刷新助手配置失败: ${getErrorMessage(error)}`),
@@ -551,13 +561,14 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         onAgentModelChange: applyAgentModelSelection,
     });
 
-    // 保存助手
-    const handleAssistantFormSave = useCallback(() => {
+    // 保存助手 — returns a Promise so leave-save can await before proceed
+    const handleAssistantFormSave = useCallback(async () => {
         if (!currentAssistant) return;
 
         const values = form.getValues();
 
-        saveAssistant({
+        try {
+            await saveAssistant({
             ...currentAssistant,
             assistant: {
                 ...currentAssistant.assistant,
@@ -701,30 +712,33 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     prompt: values.prompt,
                 },
             ],
-        })
-            .then(async () => {
-                await Promise.all(
-                    pluginAssistantFormFields.map((field) =>
-                        invoke("set_plugin_assistant_config", {
-                            pluginId: field.pluginId,
-                            assistantId: currentAssistant.assistant.id,
-                            key: field.key,
-                            value:
-                                values[field.formKey] == null
-                                    ? null
-                                    : typeof values[field.formKey] === "boolean"
-                                        ? String(values[field.formKey])
-                                        : String(values[field.formKey]),
-                        })
-                    )
-                );
-                toast.success("保存成功");
-                await loadAssistantDetail(currentAssistant.assistant.id);
-                await loadPluginAssistantConfigValues(currentAssistant.assistant.id);
-                // 保存后以当前表单值作为干净基线，保证界面选择与持久化一致
-                form.reset(form.getValues());
-            })
-            .catch((error) => toast.error("保存失败: " + error));
+        });
+            await Promise.all(
+                pluginAssistantFormFields.map((field) =>
+                    invoke("set_plugin_assistant_config", {
+                        pluginId: field.pluginId,
+                        assistantId: currentAssistant.assistant.id,
+                        key: field.key,
+                        value:
+                            values[field.formKey] == null
+                                ? null
+                                : typeof values[field.formKey] === "boolean"
+                                    ? String(values[field.formKey])
+                                    : String(values[field.formKey]),
+                    })
+                )
+            );
+            toast.success("保存成功");
+            await loadAssistantDetail(currentAssistant.assistant.id);
+            await loadPluginAssistantConfigValues(currentAssistant.assistant.id);
+            // 保存后以当前表单值作为干净基线，保证界面选择与持久化一致
+            const snapshot = form.getValues();
+            form.reset(snapshot);
+            loadedFormSnapshotRef.current = cloneFormSnapshot(snapshot);
+        } catch (error) {
+            toast.error("保存失败: " + error);
+            throw error;
+        }
     }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail, loadPluginAssistantConfigValues, pluginAssistantFormFields]);
 
     // 删除助手
@@ -781,6 +795,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 codex_sandbox: "default",
                 codex_approvals_reviewer: "default",
             });
+            loadedFormSnapshotRef.current = cloneFormSnapshot(form.getValues());
         },
         [addAssistant, form, invalidateSelection]
     );
@@ -820,17 +835,22 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [assistants, handleChooseAssistant, currentAssistant]
     );
 
-    const handleLeaveSave = useCallback(() => {
+    const handleLeaveSave = useCallback(async () => {
         const proceed = leavePrompt?.proceed;
-        setLeavePrompt(null);
-        handleAssistantFormSave();
-        proceed?.();
+        try {
+            await handleAssistantFormSave();
+            setLeavePrompt(null);
+            proceed?.();
+        } catch {
+            // Stay on the page with the dialog open; toast already shown by save.
+        }
     }, [leavePrompt, handleAssistantFormSave]);
 
     const handleLeaveDiscard = useCallback(() => {
         const proceed = leavePrompt?.proceed;
         setLeavePrompt(null);
-        form.reset();
+        // Fresh clone: RHF can mutate the values object passed into reset().
+        form.reset(cloneFormSnapshot(loadedFormSnapshotRef.current));
         proceed?.();
     }, [leavePrompt, form]);
 
@@ -914,6 +934,24 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         />
     ), [currentAssistant, formConfig, form, assistantConfigApi, handleAssistantFormSave, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
 
+    const leaveDialog = (
+        <AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
+            <AlertDialogContent data-aipp-slot="assistant-leave-dialog">
+                <AlertDialogHeader>
+                    <AlertDialogTitle>有未保存的助手配置</AlertDialogTitle>
+                    <AlertDialogDescription>
+                        离开当前页或切换助手前，请选择保存或放弃更改。未保存时界面上的模型选择不会写入实际请求。
+                    </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                    <Button type="button" variant="outline" onClick={() => setLeavePrompt(null)}>取消</Button>
+                    <Button type="button" variant="secondary" onClick={handleLeaveDiscard}>放弃</Button>
+                    <Button type="button" onClick={() => { void handleLeaveSave(); }}>保存</Button>
+                </AlertDialogFooter>
+            </AlertDialogContent>
+        </AlertDialog>
+    );
+
     // 空状态
     if (assistants.length === 0) {
         return (
@@ -964,21 +1002,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     onCloseShare={closeShareDialog}
                     onCloseImport={closeImportDialog}
                 />
-                <AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>有未保存的助手配置</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            离开当前页或切换助手前，请选择保存或放弃更改。未保存时界面上的模型选择不会写入实际请求。
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <Button type="button" variant="outline" onClick={() => setLeavePrompt(null)}>取消</Button>
-                        <Button type="button" variant="secondary" onClick={handleLeaveDiscard}>放弃</Button>
-                        <Button type="button" onClick={handleLeaveSave}>保存</Button>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+                {leaveDialog}
             </>
         );
     }
@@ -1009,22 +1033,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 onCloseImport={closeImportDialog}
             />
 
-            <AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>有未保存的助手配置</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            离开当前页或切换助手前，请选择保存或放弃更改。未保存时界面上的模型选择不会写入实际请求。
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <Button type="button" variant="outline" onClick={() => setLeavePrompt(null)}>取消</Button>
-                        <Button type="button" variant="secondary" onClick={handleLeaveDiscard}>放弃</Button>
-                        <Button type="button" onClick={handleLeaveSave}>保存</Button>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
-
+            {leaveDialog}
         </>
     );
 };
