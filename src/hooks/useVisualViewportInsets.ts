@@ -15,6 +15,11 @@ export const KEYBOARD_INSET_BOTTOM_VAR = "--aipp-keyboard-inset-bottom";
  *   1) drive CSS from visualViewport (offsetTop / height / keyboard inset),
  *   2) keep safe-area padding,
  *   3) leave device verification to Coding Bot.
+ *
+ * Ownership (2026-11-03): MobileShell owns viewport geometry via height + translateY.
+ * When the shell keyboard offset is active it forces --aipp-keyboard-inset-bottom: 0 on
+ * the shell so chat composer does not double-lift. This document-level var remains for
+ * sticky controls (e.g. ConfigForm) when the shell is not transforming.
  */
 export function applyVisualViewportInsets(root: HTMLElement = document.documentElement): () => void {
     const viewport = window.visualViewport;

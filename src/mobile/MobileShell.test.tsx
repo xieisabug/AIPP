@@ -108,10 +108,15 @@ it("fits the mobile shell to the visual viewport and restores it when the keyboa
     const shell = container.querySelector<HTMLElement>("[data-aipp-mobile-shell]")!;
     expect(shell.style.height).toBe("400px");
     expect(shell.style.transform).toBe("translateY(80px)");
+    // Shell owns geometry: zero keyboard inset on the shell to prevent chat double-lift
+    expect(shell.style.getPropertyValue("--aipp-keyboard-inset-bottom")).toBe("0px");
+    expect(shell.dataset.aippShellKeyboardOffset).toBe("true");
     Object.defineProperty(viewport, "height", { value: window.innerHeight });
     act(() => viewport.dispatchEvent(new Event("resize")));
     expect(shell.style.height).toBe("");
     expect(shell.style.transform).toBe("");
+    expect(shell.style.getPropertyValue("--aipp-keyboard-inset-bottom")).toBe("");
+    expect(shell.dataset.aippShellKeyboardOffset).toBeUndefined();
     unmount();
     if (original) Object.defineProperty(window, "visualViewport", original);
     else Reflect.deleteProperty(window, "visualViewport");

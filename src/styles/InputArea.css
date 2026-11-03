@@ -176,7 +176,8 @@
     height: calc(72px + env(safe-area-inset-bottom, 0px));
     min-height: calc(72px + env(safe-area-inset-bottom, 0px));
     box-sizing: border-box;
-    /* 键盘弹起时叠加 visualViewport 底部 inset（由 useVisualViewportInsets 写入） */
+    /* Keyboard inset CSS var (document-level). Under MobileShell keyboard offset the shell
+       forces --aipp-keyboard-inset-bottom: 0 so composer does not double-lift. */
     padding-bottom: var(--aipp-keyboard-inset-bottom, 0px);
 }
 

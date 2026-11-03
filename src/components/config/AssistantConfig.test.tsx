@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { UseFormReturn } from "react-hook-form";
+import { Controller, type UseFormReturn } from "react-hook-form";
 import { emit } from "@tauri-apps/api/event";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import AssistantConfig from "./AssistantConfig";
 import type { AssistantDetail } from "@/data/Assistant";
 import type { LoadedPlugin } from "@/services/PluginRuntime";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
+import { requestConfigLeave } from "@/lib/configLeaveGuard";
 
 vi.mock("@/components/common", () => ({
     ConfigPageLayout: ({ sidebar, content }: { sidebar: ReactNode; content: ReactNode }) => <>{sidebar}{content}</>,
@@ -20,14 +21,24 @@ vi.mock("@/hooks/assistant/useAssistantFormConfig", () => ({
     useAssistantFormConfig: ({ pluginAssistantConfigValues }: { pluginAssistantConfigValues: Record<string, unknown> }) => ({ formConfig: pluginAssistantConfigValues }),
 }));
 vi.mock("./assistant/AssistantFormRenderer", () => ({
-    AssistantFormRenderer: ({ currentAssistant, form, formConfig, onCopy }: {
-        currentAssistant: AssistantDetail; form: UseFormReturn; formConfig: Record<string, unknown>; onCopy?: () => void;
+    // Mirror production Controller-driven inputs so reset()/setValue re-render the DOM.
+    AssistantFormRenderer: ({ currentAssistant, form, formConfig, onCopy, onSave }: {
+        currentAssistant: AssistantDetail; form: UseFormReturn; formConfig: Record<string, unknown>; onCopy?: () => void; onSave?: () => void;
     }) => <>
         <div data-testid="selected">{currentAssistant.assistant.id}</div>
-        <input aria-label="prompt" {...form.register("prompt")} />
-        <input aria-label="plugin" {...form.register("plugin::8::note")} />
+        <Controller
+            control={form.control}
+            name="prompt"
+            render={({ field }) => <input aria-label="prompt" {...field} value={field.value ?? ""} />}
+        />
+        <Controller
+            control={form.control}
+            name="plugin::8::note"
+            render={({ field }) => <input aria-label="plugin" {...field} value={field.value ?? ""} />}
+        />
         <div data-testid="plugin-state">{String(formConfig["plugin::8::note"] ?? "")}</div>
         <button onClick={onCopy}>copy</button>
+        <button type="button" onClick={() => { void onSave?.(); }}>保存配置</button>
     </>,
 }));
 
@@ -110,5 +121,72 @@ describe("AssistantConfig sync selection", () => {
         expect(screen.getByLabelText("prompt")).toHaveValue("prompt-3");
         expect(screen.getByLabelText("plugin")).toHaveValue("plugin-3");
         expect(screen.getByTestId("plugin-state")).toHaveTextContent("plugin-3");
+    });
+});
+
+describe("AssistantConfig leave guard", () => {
+    afterEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
+
+    it("awaits async save before proceeding to another assistant", async () => {
+        // Avoid setup()'s forever-pending plugin configs for id=2 so choose can finish.
+        let ids = [1, 2, 3];
+        mockInvokeHandler("get_assistants", () => ids.map((id) => detail(id).assistant));
+        mockInvokeHandler("get_assistant", (args) => detail(Number(args?.assistantId)));
+        mockInvokeHandler("get_plugin_assistant_configs", (args) => config(Number(args?.assistantId)));
+        render(<AssistantConfig pluginList={plugins} navigateTo={() => undefined} />);
+        let resolveSave!: () => void;
+        const saveGate = new Promise<void>((done) => { resolveSave = done; });
+        const saveCalls: unknown[] = [];
+        mockInvokeHandler("save_assistant", async (args) => {
+            saveCalls.push(args);
+            await saveGate;
+        });
+        mockInvokeHandler("set_plugin_assistant_config", () => undefined);
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "edited-before-leave" } });
+        fireEvent.click(screen.getByRole("button", { name: "assistant-2" }));
+        await waitFor(() => expect(screen.getByText("有未保存的助手配置")).toBeInTheDocument());
+        expect(screen.getAllByText("有未保存的助手配置")).toHaveLength(1);
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        // Save kicked off but proceed must wait — still on assistant 1
+        await waitFor(() => expect(saveCalls.length).toBe(1));
+        expect(screen.getByTestId("selected")).toHaveTextContent("1");
+        expect(screen.getByLabelText("prompt")).toHaveValue("edited-before-leave");
+        await act(async () => { resolveSave(); });
+        await waitFor(() => expect(screen.getByTestId("selected")).toHaveTextContent("2"));
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-2"));
+    });
+
+    it("resets dirty fields to the loaded snapshot on discard (keep-alive safe)", async () => {
+        setup();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "unsaved-edit" } });
+        expect(screen.getByLabelText("prompt")).toHaveValue("unsaved-edit");
+        let left = false;
+        act(() => {
+            requestConfigLeave(() => { left = true; });
+        });
+        await waitFor(() => expect(screen.getByText("有未保存的助手配置")).toBeInTheDocument());
+        expect(screen.getAllByRole("alertdialog")).toHaveLength(1);
+        fireEvent.click(screen.getByRole("button", { name: "放弃" }));
+        await waitFor(() => expect(left).toBe(true));
+        // Snapshot restore — not empty useForm defaults
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        expect(screen.getByTestId("selected")).toHaveTextContent("1");
+    });
+
+    it("does not proceed when leave-save fails", async () => {
+        setup();
+        mockInvokeHandler("save_assistant", async () => {
+            throw new Error("boom");
+        });
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "will-fail-save" } });
+        fireEvent.click(screen.getByRole("button", { name: "assistant-3" }));
+        await waitFor(() => expect(screen.getByText("有未保存的助手配置")).toBeInTheDocument());
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(screen.getByText("有未保存的助手配置")).toBeInTheDocument());
+        expect(screen.getByTestId("selected")).toHaveTextContent("1");
+        expect(screen.getByLabelText("prompt")).toHaveValue("will-fail-save");
     });
 });

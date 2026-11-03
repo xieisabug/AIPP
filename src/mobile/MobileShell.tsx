@@ -71,6 +71,10 @@ export default function MobileShell() {
     }, []);
     // Android WebView can pan the visual viewport instead of resizing the layout viewport
     // when the IME opens. Keep the mobile shell inside the visible viewport in that case.
+    // Owner decision: MobileShell owns viewport geometry (height + translateY). While the
+    // shell transform is active, force --aipp-keyboard-inset-bottom to 0 on the shell so
+    // chat composer / sticky footers do not double-lift. Document-level CSS var remains
+    // for pages that are not under an active shell keyboard offset.
     useEffect(() => {
         const viewport = window.visualViewport;
         const shell = shellRef.current;
@@ -79,6 +83,13 @@ export default function MobileShell() {
             const keyboardOpen = window.innerHeight - viewport.height > 150;
             shell.style.height = keyboardOpen ? `${viewport.height}px` : "";
             shell.style.transform = keyboardOpen ? `translateY(${viewport.offsetTop}px)` : "";
+            if (keyboardOpen) {
+                shell.style.setProperty("--aipp-keyboard-inset-bottom", "0px");
+                shell.dataset.aippShellKeyboardOffset = "true";
+            } else {
+                shell.style.removeProperty("--aipp-keyboard-inset-bottom");
+                delete shell.dataset.aippShellKeyboardOffset;
+            }
         };
         viewport.addEventListener("resize", update);
         viewport.addEventListener("scroll", update);
@@ -86,6 +97,8 @@ export default function MobileShell() {
         return () => {
             viewport.removeEventListener("resize", update);
             viewport.removeEventListener("scroll", update);
+            shell.style.removeProperty("--aipp-keyboard-inset-bottom");
+            delete shell.dataset.aippShellKeyboardOffset;
         };
     }, []);
     const current = stack.at(-1);
