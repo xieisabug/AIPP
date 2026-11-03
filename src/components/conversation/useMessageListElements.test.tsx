@@ -45,6 +45,7 @@ vi.mock("../MessageItem", () => ({
         <div
             data-testid={`message-${message.id}`}
             data-last-message={isLastMessage ? "true" : "false"}
+            data-error-superseded={message.isSupersededError ? "true" : "false"}
             data-merged-mode={mergedMode ? "true" : "false"}
         >
             {message.content}
@@ -340,4 +341,13 @@ describe("readMcpCallRefs", () => {
             needsFullMap: false,
         });
     });
+});
+
+it("should refresh a merged error when its folded state changes", () => {
+    const error = makeMessage({ id: 2, message_type: "error", content: "未配置模型" });
+    const reply = makeMessage({ id: 3, message_type: "response", content: "新的回复" });
+    const { rerender } = render(<Harness messages={[error, reply]} />);
+    expect(screen.getByTestId("message-2")).toHaveAttribute("data-error-superseded", "false");
+    rerender(<Harness messages={[{ ...error, isSupersededError: true }, reply]} />);
+    expect(screen.getByTestId("message-2")).toHaveAttribute("data-error-superseded", "true");
 });

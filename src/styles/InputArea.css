@@ -262,6 +262,20 @@
     border-radius: 22px !important;
 }
 
+/* 视觉圆环从 44px 缩为 40px，外层保留 44px 点击范围。 */
+.input-area.mobile.bottom .input-area-add-button {
+    border-color: transparent;
+    background: transparent;
+}
+.input-area.mobile.bottom .input-area-add-button::before {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    border: 1px solid hsl(var(--primary));
+    border-radius: 50%;
+    pointer-events: none;
+}
+
 .input-area-textarea {
     padding: 15px 5px 10px 5px;
     border: 0;

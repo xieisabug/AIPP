@@ -498,7 +498,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 早期返回：错误类型消息
         if (message.message_type === "error") {
-            return <ErrorMessage content={message.content} messageId={message.id} />;
+            return <ErrorMessage content={message.content} messageId={message.id} superseded={message.isSupersededError} />;
         }
 
         if (message.message_type === "agent_plan") {
@@ -625,6 +625,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
 // 自定义比较函数，只在关键属性变化时才重新渲染
 const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
+    if (prevProps.message.isSupersededError !== nextProps.message.isSupersededError) return false;
     // 基本消息属性比较
     if (prevProps.message.id !== nextProps.message.id) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;

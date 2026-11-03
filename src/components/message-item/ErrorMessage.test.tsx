@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import ErrorMessage, { extractRootCause } from "./ErrorMessage";
 
@@ -74,3 +74,14 @@ describe("ErrorMessage", () => {
         }
     });
 });
+
+ it("should fold the previous error when a new reply supersedes it and allow inspection", () => {
+    const { rerender } = render(<ErrorMessage content="助手尚未配置模型" messageId={9} />);
+    expect(screen.getByText("助手尚未配置模型")).toBeVisible();
+    rerender(<ErrorMessage content="助手尚未配置模型" messageId={9} superseded />);
+    expect(screen.queryByText("助手尚未配置模型")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "此前请求失败 · 查看错误" }));
+    expect(screen.getByText("助手尚未配置模型")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "收起此前错误" }));
+    expect(screen.queryByText("助手尚未配置模型")).not.toBeInTheDocument();
+ });

@@ -118,7 +118,24 @@ export function useMessageProcessing({
         });
 
         // 排序不依赖分组映射，直接按时间/ID稳定排序即可
-        return visibleMessages.sort((a, b) => compareMessagesChronologically(a, b));
+        // Preparation errors have no generation group, so version switching cannot hide them.
+        // Fold only earlier ungrouped errors in this user turn once a new reply has content.
+        // Use persisted IDs: provisional streaming timestamps can precede a persisted error.
+        const supersededErrors = new Set<number>();
+        let hasLaterReply = false;
+        for (const message of [...visibleMessages].sort((a, b) => b.id - a.id)) {
+            if (message.message_type === "user") hasLaterReply = false;
+            else if (["response", "assistant", "reasoning"].includes(message.message_type) && message.content.trim()) {
+                hasLaterReply = true;
+            } else if (message.message_type === "error" && !message.generation_group_id && hasLaterReply) {
+                supersededErrors.add(message.id);
+            }
+        }
+        return visibleMessages
+            .map(message => message.message_type === "error"
+                ? { ...message, isSupersededError: supersededErrors.has(message.id) }
+                : message)
+            .sort((a, b) => compareMessagesChronologically(a, b));
     }, [combinedMessagesForGrouping, generationGroups, groupRootMessageIds, getMessageVersionInfo]);
 
     return {

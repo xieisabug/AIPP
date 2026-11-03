@@ -65,6 +65,7 @@ function sameMessageList(previous: Message[], next: Message[]): boolean {
                     message.id === other.id
                     && message.content === other.content
                     && message.message_type === other.message_type
+                    && message.isSupersededError === other.isSupersededError
                     && message.metadata_json === other.metadata_json
                     && message.finish_time === other.finish_time
                     && message.attachment_list === other.attachment_list

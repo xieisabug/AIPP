@@ -45,6 +45,8 @@ export interface Message {
     ttft_ms?: number | null;
     tps?: number | null;
     large_message_preview?: LargeMessagePreviewMetadata | null;
+    /** Display-only: an ungrouped error followed by a new reply in the same turn. */
+    isSupersededError?: boolean;
 }
 
 export interface LargeMessagePreviewMetadata {

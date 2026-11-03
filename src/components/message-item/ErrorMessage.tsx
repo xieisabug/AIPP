@@ -8,6 +8,7 @@ import { useIsMobilePlatform } from "@/hooks/use-platform";
 interface ErrorMessageProps {
     content: string;
     messageId?: number;
+    superseded?: boolean;
 }
 
 interface ParsedErrorContent {
@@ -51,7 +52,8 @@ export function extractRootCause(originalError: string): string {
     return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
 }
 
-const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
+const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId, superseded = false }) => {
+    const [showPreviousError, setShowPreviousError] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const { copyIconState, handleCopy } = useCopyHandler(content);
 
@@ -156,6 +158,16 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
         }
     };
 
+    if (superseded && !showPreviousError) {
+        return (
+            <button type="button" className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground"
+                aria-expanded={false} onClick={() => setShowPreviousError(true)}
+                data-message-id={messageId} data-message-type="error">
+                <ChevronRight className="h-4 w-4" />此前请求失败 · 查看错误
+            </button>
+        );
+    }
+
     return (
         <div
             data-message-item
@@ -163,6 +175,12 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
             data-message-type="error"
             className={`group relative ${isMobilePlatform ? "w-full max-w-full" : "w-fit max-w-[min(65%,56rem)]"} overflow-hidden rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-800 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-200 transition-all duration-200 self-start`}
         >
+            {superseded && (
+                <button type="button" className="mb-2 flex min-h-11 items-center gap-2 text-sm"
+                    aria-expanded={true} onClick={() => setShowPreviousError(false)}>
+                    <ChevronDown className="h-4 w-4" />收起此前错误
+                </button>
+            )}
             <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 w-5 h-5 mt-0.5">
                     <svg

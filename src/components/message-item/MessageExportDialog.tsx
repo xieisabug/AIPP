@@ -17,14 +17,21 @@ interface MessageExportDialogProps {
     messageContent: string;
     messageType: string;
     onOpenChange?: (open: boolean) => void;
+    /** 受控打开状态（移动端由操作面板打开时使用） */
+    open?: boolean;
+    /** 隐藏内置图标触发器（由外部入口控制打开） */
+    hideTrigger?: boolean;
 }
 
 const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
     messageContent,
     messageType,
     onOpenChange,
+    open: controlledOpen,
+    hideTrigger = false,
 }) => {
-    const [open, setOpen] = useState(false);
+    const [uncontrolledOpen, setOpen] = useState(false);
+    const open = controlledOpen ?? uncontrolledOpen;
     const platform = usePlatform();
     const [exporting, setExporting] = useState<string | null>(null);
 
@@ -87,12 +94,15 @@ const MessageExportDialog: React.FC<MessageExportDialogProps> = ({
 
     return (
         <Dialog open={open} onOpenChange={handleOpenChange}>
-            <DialogTrigger asChild>
-                <IconButton
-                    icon={<Download size={16} className="text-icon" />}
-                    onClick={() => {}}
-                />
-            </DialogTrigger>
+            {hideTrigger ? null : (
+                <DialogTrigger asChild>
+                    <IconButton
+                        icon={<Download size={16} className="text-icon" />}
+                        onClick={() => {}}
+                        title="导出消息"
+                    />
+                </DialogTrigger>
+            )}
             <DialogContent className="max-w-xs">
                 <DialogHeader>
                     <DialogTitle>导出消息</DialogTitle>
