@@ -84,7 +84,7 @@ function AttemptCopyButton({ messages }: { messages: Message[] }) {
     return (
         <button
             type="button"
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="inline-flex h-11 w-11 min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label="复制此尝试内容"
             onClick={(event) => {
                 event.preventDefault();
