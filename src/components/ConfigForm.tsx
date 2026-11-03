@@ -666,7 +666,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                     {onSave && (
                         <div
                             className="sticky bottom-0 z-20 mt-8 border-t border-border bg-card/95 pt-4 pb-[max(1rem,env(safe-area-inset-bottom,0px))] backdrop-blur supports-[backdrop-filter]:bg-card/80"
-                            style={{ bottom: "var(--aipp-keyboard-inset, 0px)" }}
+                            style={{ bottom: "var(--aipp-keyboard-inset-bottom, 0px)" }}
                             data-aipp-slot="config-form-save-footer"
                         >
                             <div className="flex items-center gap-3">
