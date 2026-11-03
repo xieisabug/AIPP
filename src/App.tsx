@@ -5,6 +5,7 @@ import "./mobile/mobile.css";
 import { useIsMobilePlatform } from "./hooks/use-platform";
 import { useVisualViewportInsets } from "./hooks/useVisualViewportInsets";
 import MobileShell from "./mobile/MobileShell";
+import LoadingScreen from "./components/LoadingScreen";
 import { Toaster } from "./components/ui/sonner.tsx";
 
 // 按需加载各个窗口，避免一次性打包全部页面导致移动端首屏加载过慢
@@ -42,35 +43,6 @@ function App() {
         const loader = windowLoaders[winLabel];
         return loader ? lazy(loader) : null;
     }, [winLabel]);
-
-    const LoadingScreen = () => (
-        <div
-            style={{
-                width: "100vw",
-                height: "100vh",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "var(--loading-bg)",
-                color: "var(--loading-text)",
-                transition: "background-color 0.2s ease, color 0.2s ease",
-            }}
-        >
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px" }}>
-                <div
-                    style={{
-                        width: "42px",
-                        height: "42px",
-                        border: "4px solid var(--loading-spinner-bg)",
-                        borderTop: "4px solid var(--loading-spinner-accent)",
-                        borderRadius: "50%",
-                        animation: "spin 1s linear infinite",
-                    }}
-                />
-                <div style={{ fontSize: "14px" }}>正在加载...</div>
-            </div>
-        </div>
-    );
 
     return (
         <>

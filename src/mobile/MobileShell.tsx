@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import LoadingScreen from "../components/LoadingScreen";
 import { isMobileRoute, MobileRoute, MobilePreview } from "./navigation";
 
 const Chat = lazy(() => import("../windows/ChatUIWindow"));
@@ -112,7 +113,7 @@ export default function MobileShell() {
     }, [current]);
     return <div ref={shellRef} className="h-screen overflow-hidden" data-aipp-mobile-shell>
         {visited.map(route => <div key={route} ref={element => { if (element) pageRefs.current.set(route, element); else pageRefs.current.delete(route); }} hidden={current !== route} className="h-full">
-            <Suspense fallback={<div role="status">正在加载…</div>}>
+            <Suspense fallback={<LoadingScreen title={route === "chat_ui" ? "正在准备你的 AI 助手" : "正在打开页面"} />}>
                 {route === "chat_ui" ? <Chat /> : route === "config" ? <Config /> : route === "collections" ? <Collections /> : preview && <Preview preview={preview} />}
             </Suspense>
         </div>)}
