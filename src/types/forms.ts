@@ -12,6 +12,7 @@ export interface FieldConfig {
     placeholder?: string;
     description?: string;
     tooltip?: string;
+    hint?: React.ReactNode;
     className?: string;
     disabled?: boolean;
     hidden?: boolean;

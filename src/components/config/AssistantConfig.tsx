@@ -552,6 +552,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     const handlePromptChange = useCallback(
         (value: string) => {
             if (!currentAssistant?.prompts.length) return;
+            form.setValue("prompt", value, { shouldDirty: true });
 
             setCurrentAssistant((prev) => {
                 if (!prev) return prev;
@@ -566,7 +567,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 };
             });
         },
-        [currentAssistant, setCurrentAssistant]
+        [currentAssistant, form, setCurrentAssistant]
     );
 
     const handlePluginConfigChange = useCallback(

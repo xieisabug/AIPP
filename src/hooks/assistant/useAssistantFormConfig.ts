@@ -2,6 +2,7 @@ import { useMemo, useCallback } from "react";
 import React from "react";
 import { emit } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
+import quickAssistantPrompt from "@/data/quick-assistant-prompt.txt?raw";
 import { AssistantDetail } from "@/data/Assistant";
 import { AssistantFormConfig } from "@/types/forms";
 import { validateConfig } from "@/utils/validate";
@@ -614,6 +615,13 @@ export const useAssistantFormConfig = ({
                     className: "h-64",
                     value: currentAssistant?.prompts[0]?.prompt ?? "",
                     onChange: (value: string | boolean) => onPromptChange(value as string),
+                    hint: currentAssistant.assistant.id === 1 && React.createElement(Button, {
+                        type: "button",
+                        variant: "outline",
+                        size: "sm",
+                        className: "min-h-11",
+                        onClick: () => onPromptChange(quickAssistantPrompt.trimEnd()),
+                    }, "重置为默认提示词"),
                 },
             });
         }

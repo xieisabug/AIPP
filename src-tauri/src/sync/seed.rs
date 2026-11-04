@@ -7,7 +7,7 @@
 //! and counts as real data again.
 use super::*;
 use std::borrow::Borrow;
-use crate::db::assistant_db::{DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS, DEFAULT_QUICK_ASSISTANT_PROMPT};
+use crate::db::assistant_db::{DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS, QUICK_ASSISTANT_PROMPT_SEED};
 use crate::db::system_db::{DEFAULT_SUMMARY_LENGTH, DEFAULT_SUMMARY_PROMPT};
 
 fn lit(value: &str) -> String {
@@ -19,7 +19,7 @@ fn lit(value: &str) -> String {
 /// `seed_official_ids`; these are the seeded rows without such a flag.
 pub(super) fn pristine_condition(table: &str) -> Option<String> {
     match table {
-        "assistant_prompt" => Some(format!("assistant_id = 1 AND prompt = {}", lit(DEFAULT_QUICK_ASSISTANT_PROMPT))),
+        "assistant_prompt" => Some(format!("assistant_id = 1 AND prompt = {}", lit(QUICK_ASSISTANT_PROMPT_SEED))),
         "assistant_model" => Some("assistant_id = 1 AND provider_id = 0 AND model_code = '' AND COALESCE(alias, '') = ''".into()),
         "assistant_model_config" => {
             let pairs = DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS

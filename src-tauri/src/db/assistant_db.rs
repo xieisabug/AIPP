@@ -90,7 +90,11 @@ pub struct AssistantSummary {
 
 /// Seed values written by `init_assistant` for the quick assistant (id 1).
 /// Sync uses them to recognise a device that only has defaults.
-pub const DEFAULT_QUICK_ASSISTANT_PROMPT: &str = "You are a helpful assistant.";
+// The original seed doubles as a stable "follow default" value, including on older sync peers.
+pub const QUICK_ASSISTANT_PROMPT_SEED: &str = "You are a helpful assistant.";
+pub fn default_quick_assistant_prompt() -> &'static str {
+    include_str!("../../../src/data/quick-assistant-prompt.txt").trim_end()
+}
 pub const DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS: [(&str, &str, &str); 4] = [
     ("max_tokens", "1000", "number"),
     ("temperature", "0.75", "float"),
@@ -288,6 +292,11 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn add_assistant_prompt(&self, assistant_id: i64, prompt: &str) -> Result<i64> {
+        let prompt = if assistant_id == 1 && prompt == default_quick_assistant_prompt() {
+            QUICK_ASSISTANT_PROMPT_SEED
+        } else {
+            prompt
+        };
         self.conn.execute(
             "INSERT INTO assistant_prompt (assistant_id, prompt) VALUES (?, ?)",
             params![assistant_id, prompt],
@@ -299,6 +308,21 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn update_assistant_prompt(&self, id: i64, prompt: &str) -> Result<()> {
+        if prompt == default_quick_assistant_prompt() {
+            // Reset every quick-assistant row together, including custom rows from other
+            // devices. Keep their identities so the reset can be replayed through sync.
+            // Saving an already-default row must not overwrite a new custom row synced
+            // since the settings form was opened.
+            self.conn.execute(
+                "UPDATE assistant_prompt SET prompt = CASE WHEN assistant_id = 1 THEN ?1 ELSE ?3 END
+                 WHERE id IN (SELECT ?2 UNION ALL
+                     SELECT id FROM assistant_prompt WHERE assistant_id = 1 AND EXISTS (
+                         SELECT 1 FROM assistant_prompt WHERE id = ?2 AND assistant_id = 1 AND prompt != ?1
+                     ))",
+                params![QUICK_ASSISTANT_PROMPT_SEED, id, prompt],
+            )?;
+            return Ok(());
+        }
         self.conn
             .execute("UPDATE assistant_prompt SET prompt = ? WHERE id = ?", params![prompt, id])?;
         debug!("assistant prompt updated");
@@ -535,10 +559,13 @@ impl AssistantDatabase {
         // Other devices' initialization prompts have independent sync UUIDs.
         // Keep those rows for replay/deletion, but do not let a seed mask the
         // user's prompt in callers that use prompts[0]. Preserve custom order.
-        if assistant_id == 1
-            && assistant_prompts.iter().any(|p| p.prompt != "You are a helpful assistant.")
-        {
-            assistant_prompts.retain(|p| p.prompt != "You are a helpful assistant.");
+        if assistant_id == 1 {
+            if assistant_prompts.iter().any(|p| p.prompt != QUICK_ASSISTANT_PROMPT_SEED) {
+                assistant_prompts.retain(|p| p.prompt != QUICK_ASSISTANT_PROMPT_SEED);
+            } else if !assistant_prompts.is_empty() {
+                assistant_prompts.truncate(1);
+                assistant_prompts[0].prompt = default_quick_assistant_prompt().to_owned();
+            }
         }
         Ok(assistant_prompts)
     }
@@ -628,7 +655,7 @@ impl AssistantDatabase {
         // 2) 默认 prompt：仅当该助手没有任何 prompt 时再插入
         let prompts = self.get_assistant_prompt(1)?;
         if prompts.is_empty() {
-            self.add_assistant_prompt(1, DEFAULT_QUICK_ASSISTANT_PROMPT)?;
+            self.add_assistant_prompt(1, QUICK_ASSISTANT_PROMPT_SEED)?;
         }
 
         // 3) 确保存在一个默认 model

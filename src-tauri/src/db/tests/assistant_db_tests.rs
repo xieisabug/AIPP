@@ -19,10 +19,12 @@ fn test_quick_assistant_synced_prompts_do_not_get_masked_by_initialization() {
         mcp_conn: Connection::open_in_memory().unwrap(),
     };
     db.create_tables().unwrap();
-    assert_eq!(db.get_assistant_prompt(1).unwrap()[0].prompt, "You are a helpful assistant.");
+    assert_eq!(db.get_assistant_prompt(1).unwrap()[0].prompt, default_quick_assistant_prompt());
     let first = db.add_assistant_prompt(1, "custom from first device").unwrap();
     db.add_assistant_prompt(1, "You are a helpful assistant.").unwrap();
     let second = db.add_assistant_prompt(1, "custom from second device").unwrap();
+    let seed_id = db.conn.query_row("SELECT MIN(id) FROM assistant_prompt WHERE assistant_id=1", [], |r| r.get::<_, i64>(0)).unwrap();
+    db.update_assistant_prompt(seed_id, default_quick_assistant_prompt()).unwrap();
     for _ in 0..2 {
         db.init_assistant().unwrap();
         assert_eq!(db.get_assistant_prompt(1).unwrap().iter().map(|p| p.id).collect::<Vec<_>>(), vec![first, second]);
@@ -35,6 +37,14 @@ fn test_quick_assistant_synced_prompts_do_not_get_masked_by_initialization() {
     // Clearing the user's prompt is an explicit value, not a reason to reseed.
     db.update_assistant_prompt(first, "").unwrap();
     assert_eq!(db.get_assistant_prompt(1).unwrap()[0].prompt, "");
+    db.update_assistant_prompt(first, default_quick_assistant_prompt()).unwrap();
+    db.init_assistant().unwrap();
+    let reset = db.get_assistant_prompt(1).unwrap();
+    assert_eq!(reset.len(), 1);
+    assert_eq!(reset[0].prompt, default_quick_assistant_prompt());
+    assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM assistant_prompt WHERE assistant_id=1 AND prompt=?1",
+        [QUICK_ASSISTANT_PROMPT_SEED], |r| r.get::<_, i64>(0)).unwrap(), 4);
+    assert_eq!(db.get_assistant_prompt(other).unwrap()[0].prompt, "You are a helpful assistant.");
 }
 
 #[test]

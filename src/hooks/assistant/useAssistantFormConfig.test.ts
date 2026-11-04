@@ -152,6 +152,25 @@ describe("useAssistantFormConfig plugin field visibility", () => {
     });
 });
 
+it("should offer the shared default prompt only when editing the quick assistant", async () => {
+    const onPromptChange = vi.fn();
+    const { result, rerender } = renderHook(({ id }) => useAssistantFormConfig({
+        currentAssistant: { ...baseAssistantDetail, assistant: { ...baseAssistantDetail.assistant, id } },
+        assistantTypeNameMap: new Map(), assistantTypeCustomField: [], assistantTypeCustomLabel: new Map(),
+        assistantTypeCustomTips: new Map(), assistantTypeHideField: [], navigateTo: vi.fn(),
+        onConfigChange: vi.fn(), onPromptChange, pluginAssistantFormFields: [], pluginAssistantConfigValues: {},
+        onPluginConfigChange: vi.fn(), agentModelOptions: [], agentModelLoading: false, agentModelError: null,
+        onAgentProviderChange: vi.fn(), onAgentModelChange: vi.fn(),
+    }), { initialProps: { id: 1 } });
+    const promptHint = () => result.current.formConfig.find(item => item.key === "prompt")?.config.hint;
+    const view = render(React.createElement(React.Fragment, null, promptHint()));
+    await userEvent.click(screen.getByRole("button", { name: "重置为默认提示词" }));
+    expect(onPromptChange).toHaveBeenCalledWith(expect.stringContaining("今天是 !cd"));
+    rerender({ id: 2 });
+    view.rerender(React.createElement(React.Fragment, null, promptHint()));
+    expect(screen.queryByRole("button", { name: "重置为默认提示词" })).toBeNull();
+});
+
 describe("useAssistantFormConfig ACP MCP option", () => {
     beforeEach(() => {
         clearAllMockHandlers();
