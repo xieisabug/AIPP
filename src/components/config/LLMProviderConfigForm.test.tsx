@@ -11,7 +11,7 @@ vi.mock("@/hooks/feature/useAcpEnvironment", () => ({ useAcpEnvironment: () => (
 vi.mock("./TagInputContainer", () => ({ default: () => null }));
 vi.mock("./ModelSelectionDialog", () => ({ default: () => null }));
 vi.mock("./ReadOnlyModelList", () => ({ default: () => null }));
-vi.mock("../ConfigForm", () => ({ default: ({ useFormReturn }: { useFormReturn: any }) => <div><input aria-label="endpoint" {...useFormReturn.register("endpoint")} /><input aria-label="api key" {...useFormReturn.register("api_key")} /></div> }));
+vi.mock("../ConfigForm", () => ({ default: ({ useFormReturn, config }: { useFormReturn: any; config: any[] }) => <div><input aria-label="endpoint" {...useFormReturn.register("endpoint")} /><input aria-label="api key" {...useFormReturn.register("api_key")} /><span>{useFormReturn.formState.errors.endpoint?.message}</span><span>{config.find(item => item.key === "endpoint")?.config.hint}</span></div> }));
 
 const refresh = async () => { await act(async () => { await mocks.refresh!(() => true); }); };
 const waitDebounce = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 80)); }); };
@@ -28,6 +28,18 @@ describe("LLM provider field autosave", () => {
     function mount() {
         render(<LLMProviderConfigForm id="1" index={0} apiType="openai_api" name="test" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
     }
+    it("should show field errors and destination hints when the endpoint changes", async () => {
+        mount();
+        expect(screen.getByText("Endpoint 未填写，将使用该提供商的默认端点。")).toBeInTheDocument();
+        const input = screen.getByLabelText("endpoint");
+        fireEvent.change(input, { target: { value: "bad" } });
+        expect(await screen.findByText(/Endpoint 无效/)).toBeInTheDocument();
+        expect(screen.queryByText(/api.openai.com/)).not.toBeInTheDocument();
+        fireEvent.change(input, { target: { value: "http://127.0.0.1:8080/v1" } });
+        expect(await screen.findByText("请求基址：http://127.0.0.1:8080/v1/")).toBeInTheDocument();
+        expect(screen.queryByText(/Endpoint 无效/)).not.toBeInTheDocument();
+        await waitDebounce();
+    });
     it("saves the latest value for each field edited inside the debounce window", async () => {
         mount(); await refresh();
         fireEvent.change(screen.getByLabelText("endpoint"), { target: { value: "first" } });

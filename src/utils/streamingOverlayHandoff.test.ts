@@ -33,6 +33,18 @@ describe("finalizeStreamingEventWithPending", () => {
         const pending = streamEvent({ content: "Hello wor", is_done: false });
         expect(finalizeStreamingEventWithPending(done, pending).content).toBe("Hello world!");
     });
+
+    it("should keep the final replacement when an older frame has unrelated longer content", () => {
+        const done = streamEvent({ content: "corrected", is_done: true });
+        const pending = streamEvent({ content: "older unrelated output is longer", is_done: false });
+        expect(finalizeStreamingEventWithPending(done, pending).content).toBe("corrected");
+    });
+
+    it("should keep an error when the pending frame contains a longer response", () => {
+        const done = streamEvent({ content: "error", is_done: true, message_type: "error" });
+        const pending = streamEvent({ content: "error-free earlier response", is_done: false });
+        expect(finalizeStreamingEventWithPending(done, pending).content).toBe("error");
+    });
 });
 
 describe("resolveMessageDisplayContent", () => {

@@ -1113,6 +1113,9 @@ describe("useConversationEvents streaming completion handoff (LeaderAI #149)", (
     beforeEach(() => {
         vi.useFakeTimers();
         mockInvokeHandler("get_mcp_tool_calls_by_conversation", () => []);
+        mockInvokeHandler("get_conversation_runtime_state", (args) => createRuntimeState(Number(args?.conversationId), 1, "idle"));
+        mockInvokeHandler("get_shine_state", (args) => createShineState(Number(args?.conversationId), 1, { target_type: "none" }));
+        mockInvokeHandler("get_acp_session_state", () => null);
     });
 
     afterEach(() => {
@@ -1120,6 +1123,92 @@ describe("useConversationEvents streaming completion handoff (LeaderAI #149)", (
         vi.clearAllMocks();
         vi.clearAllTimers();
         vi.useRealTimers();
+    });
+
+    it.each([false, true])("should hand off displayed response and reasoning when stream completes (same batch: %s)", async (sameBatch) => {
+        const conversationId = 14903;
+        const onMessageUpdate = vi.fn();
+        const { result } = renderHook(() => useConversationEvents({ conversationId, onMessageUpdate }));
+        await flushEffects();
+        const complete = () => emit(`conversation_event_${conversationId}`, {
+            type: "stream_complete",
+            data: { conversation_id: conversationId, response_message_id: 31, reasoning_message_id: 32 },
+        });
+        for (const [messageId, messageType, content] of [[31, "response", "完整回复。"], [32, "reasoning", "完整思考。"]] as const) {
+            await act(async () => {
+                await emit(`conversation_event_${conversationId}`, {
+                    type: "message_update",
+                    data: { message_id: messageId, message_type: messageType, content, is_done: false },
+                });
+            });
+        }
+        await act(async () => {
+            vi.advanceTimersByTime(120);
+            if (sameBatch) await complete();
+        });
+        if (!sameBatch) {
+            expect(result.current.streamingMessages.get(31)?.content).toBe("完整回复。");
+            await act(async () => { await complete(); });
+        }
+        for (const [messageId, content] of [[31, "完整回复。"], [32, "完整思考。"]] as const) {
+            expect(onMessageUpdate).toHaveBeenCalledWith(expect.objectContaining({ message_id: messageId, content, is_done: true }));
+        }
+        expect(result.current.streamingMessages.size).toBe(0);
+    });
+
+    it("should preserve a displayed short tail when the done event carries an older prefix", async () => {
+        const conversationId = 14906;
+        const onMessageUpdate = vi.fn();
+        const { result } = renderHook(() => useConversationEvents({ conversationId, onMessageUpdate }));
+        await flushEffects();
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_update", data: { message_id: 61, message_type: "response", content: "Hello world!", is_done: false },
+            });
+        });
+        await advanceAndFlush(120);
+        await act(async () => {
+            await emit(`conversation_event_${conversationId}`, {
+                type: "message_update", data: { message_id: 61, message_type: "response", content: "Hello wor", is_done: true },
+            });
+        });
+        expect(result.current.streamingMessages.get(61)?.content).toBe("Hello world!");
+        expect(onMessageUpdate).toHaveBeenLastCalledWith(expect.objectContaining({ content: "Hello world!", is_done: true }));
+    });
+
+    it("should isolate consecutive replies and navigation when completion occurs around a conversation switch", async () => {
+        const onMessageUpdate = vi.fn();
+        const { result, rerender } = renderHook(({ conversationId }) => useConversationEvents({ conversationId, onMessageUpdate }), {
+            initialProps: { conversationId: 14904 },
+        });
+        await flushEffects();
+        for (const id of [41, 42]) {
+            await act(async () => {
+                await emit("conversation_event_14904", {
+                    type: "message_update", data: { message_id: id, message_type: "response", content: `reply ${id}!`, is_done: false },
+                });
+            });
+            await advanceAndFlush(120);
+            await act(async () => {
+                await emit("conversation_event_14904", { type: "stream_complete", data: { conversation_id: 14904, response_message_id: id } });
+            });
+            expect(onMessageUpdate).toHaveBeenCalledWith(expect.objectContaining({ message_id: id, content: `reply ${id}!`, is_done: true }));
+        }
+        await act(async () => {
+            await emit("conversation_event_14904", {
+                type: "message_update", data: { message_id: 43, message_type: "response", content: "old pending", is_done: false },
+            });
+        });
+        rerender({ conversationId: 14905 });
+        await flushEffects();
+        onMessageUpdate.mockClear();
+        await advanceAndFlush(120);
+        await act(async () => {
+            await emit("conversation_event_14904", { type: "stream_complete", data: { conversation_id: 14904 } });
+            await emit("conversation_event_14905", { type: "stream_complete", data: { conversation_id: 14905 } });
+        });
+        expect(onMessageUpdate).not.toHaveBeenCalled();
+        expect(result.current.streamingMessages.size).toBe(0);
     });
 
     it("consumes a short final pending throttle chunk when is_done arrives before rAF flush", async () => {

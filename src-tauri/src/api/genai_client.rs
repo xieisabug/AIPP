@@ -135,33 +135,44 @@ pub fn resolve_provider_endpoint(raw: Option<&str>) -> Result<ProviderEndpointRe
         return Ok(ProviderEndpointResolution::Unset);
     }
 
-    let parsed = reqwest::Url::parse(trimmed).map_err(|_| invalid_endpoint_error(trimmed))?;
+    // URL parsers repair inputs such as `http:///host` or `https:host`.
+    // Reject those locally instead of silently choosing a repaired destination.
+    let (_, authority_and_path) = trimmed
+        .split_once("://")
+        .ok_or_else(|| invalid_endpoint_error(trimmed))?;
+    if authority_and_path.is_empty()
+        || authority_and_path.starts_with('/')
+        || trimmed.contains('\\')
+        || trimmed.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(invalid_endpoint_error(trimmed));
+    }
+    let mut parsed = reqwest::Url::parse(trimmed).map_err(|_| invalid_endpoint_error(trimmed))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(invalid_endpoint_error(trimmed));
     }
     // 必须有主机名，拒绝 `http://`、`http:///path`、相对片段等
     let host = parsed.host_str().unwrap_or("").trim();
-    if host.is_empty() {
+    if host.is_empty()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
         return Err(invalid_endpoint_error(trimmed));
     }
 
-    // Normalize via Url so a trailing slash lands on the *path*, not after query/fragment
-    // (Azure-style `...?api-version=` must not become `...01/`).
-    let mut normalized = parsed;
-    let path = normalized.path();
-    if !path.ends_with('/') {
-        let mut with_slash = path.to_string();
-        with_slash.push('/');
-        normalized.set_path(&with_slash);
+    if !parsed.path().ends_with('/') {
+        parsed.set_path(&format!("{}/", parsed.path()));
     }
-    Ok(ProviderEndpointResolution::Custom(normalized.to_string()))
+    Ok(ProviderEndpointResolution::Custom(parsed.to_string()))
 }
 
-fn invalid_endpoint_error(raw: &str) -> AppError {
+fn invalid_endpoint_error(_raw: &str) -> AppError {
     // 错误文案不得包含默认外网 URL（验收：错误中不出现默认 OpenAI URL）
-    AppError::ProviderError(format!(
-        "Endpoint 无效：「{raw}」。请填写以 http:// 或 https:// 开头且包含主机名的完整地址；若要使用提供商默认端点，请将 Endpoint 留空。"
-    ))
+    AppError::ProviderError(
+        "Endpoint 无效：请填写以 http:// 或 https:// 开头且包含主机名的完整基址，不含空白、反斜杠、账号密码、查询参数或片段；若要使用提供商默认端点，请将 Endpoint 留空。".to_string()
+    )
 }
 
 /// 空值提示（与无效值错误文案可区分；产品上允许留空走默认端点）。
@@ -319,118 +330,5 @@ pub fn create_client_with_config(
 
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        effective_endpoint_url, get_default_endpoint, infer_adapter_kind_simple,
-        resolve_provider_endpoint, unset_endpoint_hint, ProviderEndpointResolution,
-    };
-    use genai::adapter::AdapterKind;
-
-    #[test]
-    fn empty_endpoint_is_unset_for_product_default() {
-        assert_eq!(
-            resolve_provider_endpoint(None).unwrap(),
-            ProviderEndpointResolution::Unset
-        );
-        assert_eq!(
-            resolve_provider_endpoint(Some("")).unwrap(),
-            ProviderEndpointResolution::Unset
-        );
-        assert_eq!(
-            resolve_provider_endpoint(Some("   ")).unwrap(),
-            ProviderEndpointResolution::Unset
-        );
-
-        let openai = AdapterKind::OpenAI;
-        let url = effective_endpoint_url(&ProviderEndpointResolution::Unset, openai);
-        assert_eq!(url, get_default_endpoint(openai));
-        // 空值提示与无效值错误必须可区分
-        assert!(unset_endpoint_hint().contains("未填写"));
-        assert!(!unset_endpoint_hint().contains("无效"));
-    }
-
-    #[test]
-    fn invalid_endpoint_rejected_without_default_fallback_or_openai_url_leak() {
-        let err = resolve_provider_endpoint(Some("bad")).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Endpoint 无效"),
-            "expected field-level Chinese error, got: {msg}"
-        );
-        assert!(msg.contains("bad"), "error should echo the invalid value: {msg}");
-        assert!(
-            !msg.contains("api.openai.com"),
-            "invalid-endpoint error must not leak default OpenAI URL: {msg}"
-        );
-        assert!(
-            !msg.contains(unset_endpoint_hint()),
-            "invalid error must be distinguishable from empty hint"
-        );
-        assert!(msg.contains("无效"));
-        assert!(!msg.contains("未填写"));
-
-        // 常见「半截 http」也不应静默放行 / 不触发外网默认
-        for bad in ["http", "http://", "ftp://example.com", "not a url", "openai.com/v1"] {
-            let e = resolve_provider_endpoint(Some(bad)).unwrap_err().to_string();
-            assert!(e.contains("Endpoint 无效"), "expected reject for {bad}: {e}");
-            assert!(!e.contains("api.openai.com"), "no OpenAI URL leak for {bad}: {e}");
-        }
-    }
-
-    #[test]
-    fn valid_http_https_loopback_kept_as_final_destination() {
-        let r = resolve_provider_endpoint(Some("http://127.0.0.1:8080/v1")).unwrap();
-        assert_eq!(
-            r,
-            ProviderEndpointResolution::Custom("http://127.0.0.1:8080/v1/".into())
-        );
-        assert_eq!(
-            effective_endpoint_url(&r, AdapterKind::OpenAI),
-            "http://127.0.0.1:8080/v1/"
-        );
-
-        let r = resolve_provider_endpoint(Some("https://localhost:8443/v1/")).unwrap();
-        assert_eq!(
-            r,
-            ProviderEndpointResolution::Custom("https://localhost:8443/v1/".into())
-        );
-        assert_eq!(
-            effective_endpoint_url(&r, infer_adapter_kind_simple("openai")),
-            "https://localhost:8443/v1/"
-        );
-
-        let r = resolve_provider_endpoint(Some("  https://example.com/v1  ")).unwrap();
-        assert_eq!(
-            r,
-            ProviderEndpointResolution::Custom("https://example.com/v1/".into())
-        );
-    }
-
-    #[test]
-    fn endpoint_with_query_or_fragment_keeps_them_after_path_slash() {
-        let r = resolve_provider_endpoint(Some(
-            "https://my.openai.azure.com/openai/deployments/x/v1?api-version=2024-02-01",
-        ))
-        .unwrap();
-        assert_eq!(
-            r,
-            ProviderEndpointResolution::Custom(
-                "https://my.openai.azure.com/openai/deployments/x/v1/?api-version=2024-02-01"
-                    .into()
-            )
-        );
-
-        // Already has trailing slash before query — must not append after query
-        let r = resolve_provider_endpoint(Some("http://host/v1/?api-version=1")).unwrap();
-        assert_eq!(
-            r,
-            ProviderEndpointResolution::Custom("http://host/v1/?api-version=1".into())
-        );
-
-        let r = resolve_provider_endpoint(Some("https://example.com/v1#section")).unwrap();
-        assert_eq!(
-            r,
-            ProviderEndpointResolution::Custom("https://example.com/v1/#section".into())
-        );
-    }
-}
+#[path = "genai_client_tests.rs"]
+mod tests;

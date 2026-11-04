@@ -28,6 +28,7 @@ import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, AlertTriangle
 import { useCopilot, type CopilotTokenScanResult } from "@/hooks/useCopilot";
 import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
 import CliEnvironmentStatus from "./CliEnvironmentStatus";
+import { getProviderEndpointStatus } from "@/utils/providerEndpoint";
 import {
     LLMModel,
     ModelForSelection,
@@ -171,6 +172,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 监听 proxy_enabled 字段变化
     const proxyEnabled = form.watch("proxy_enabled");
+    const endpoint = form.watch("endpoint");
+    const endpointStatus = useMemo(() => getProviderEndpointStatus(endpoint), [endpoint]);
 
     // 监听 ACP CLI 命令变化
     const acpCliCommand = form.watch("acp_cli_command");
@@ -304,13 +307,17 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 onTagsChange={onTagsChange}
                 isExpanded={isModelListExpanded}
                 onExpandedChange={setIsModelListExpanded}
+                beforeFetchModels={() => {
+                    const status = getProviderEndpointStatus(form.getValues("endpoint"));
+                    if (status.kind === "invalid") throw new Error(status.message);
+                }}
                 onFetchModels={(modelData) => {
                     setModelSelectionData(modelData);
                     setModelSelectionDialogOpen(true);
                 }}
             />
         ),
-        [apiType, id, tags, onTagsChange, isModelListExpanded],
+        [apiType, id, tags, onTagsChange, isModelListExpanded, form],
     );
 
     const renderProxyAdvancedConfig = useCallback(
@@ -834,6 +841,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     label: "Endpoint",
                     value: "",
                     inputMode: "url" as const,
+                    hint: endpointStatus.kind === "invalid"
+                        ? <span role="alert" className="text-destructive">{endpointStatus.message}</span>
+                        : endpointStatus.message,
                 },
             },
             {
@@ -864,7 +874,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

@@ -206,14 +206,13 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 | Map<number, StreamEvent>
                 | ((prev: Map<number, StreamEvent>) => Map<number, StreamEvent>)
         ) => {
-            setStreamingMessages((prev) => {
-                const resolvedState =
-                    typeof nextState === "function"
-                        ? nextState(prev)
-                        : nextState;
-                streamingMessagesRef.current = resolvedState;
-                return resolvedState;
-            });
+            // Event handlers must see the latest frame even before React commits a
+            // transition. stream_complete can arrive in the same event batch.
+            const resolvedState = typeof nextState === "function"
+                ? nextState(streamingMessagesRef.current)
+                : nextState;
+            streamingMessagesRef.current = resolvedState;
+            setStreamingMessages(resolvedState);
         },
         []
     );
@@ -764,6 +763,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     const pending = pendingStreamingFramesRef.current.get(streamEvent.message_id);
                     pendingStreamingFramesRef.current.delete(streamEvent.message_id);
                     streamEvent = finalizeStreamingEventWithPending(streamEvent, pending);
+                    streamEvent = finalizeStreamingEventWithPending(
+                        streamEvent,
+                        streamingMessagesRef.current.get(streamEvent.message_id),
+                    );
                 }
 
                 // 检查是否是错误消息
@@ -1039,13 +1042,16 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 const completionData = conversationEvent.data as StreamCompleteEvent;
                 console.log("Received stream_complete event:", completionData);
 
-                // Drain any unflushed throttle frames before tearing down the overlay so a
-                // short final chunk is materialized into messages (LeaderAI #149).
-                const pendingEvents = Array.from(pendingStreamingFramesRef.current.values());
-                if (pendingEvents.length > 0) {
-                    pendingStreamingFramesRef.current.clear();
-                    cancelScheduledStreamingFlush();
-                    for (const event of pendingEvents) {
+                // Both displayed and queued frames need a final handoff. A frame
+                // already consumed by rAF is no longer in the pending queue.
+                const finalEvents = new Map(streamingMessagesRef.current);
+                pendingStreamingFramesRef.current.forEach((event, messageId) => {
+                    finalEvents.set(messageId, event);
+                });
+                pendingStreamingFramesRef.current.clear();
+                cancelScheduledStreamingFlush();
+                if (finalEvents.size > 0) {
+                    for (const event of finalEvents.values()) {
                         const current = streamingMessagesRef.current.get(event.message_id);
                         if (current?.is_done) {
                             continue;
@@ -1123,6 +1129,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     useEffect(() => {
         invalidateMcpCompensationPolling("conversation changed");
         cancelIdleTransientReset();
+        discardPendingStreamingUpdates();
+        updateStreamingMessagesState(new Map());
+        setStreamingAssistantMessageIds(new Set());
+        setPendingUserMessageId(null);
 
         if (!options.conversationId) {
             // 清理状态
@@ -1203,9 +1213,12 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 设置新的事件监听
         hasUnsubscribedRef.current = false;
         console.log(`[ACP DEBUG] Listening to event: ${eventName}`);
+        let subscriptionActive = true;
         unsubscribeRef.current = listen(
             eventName,
-            handleConversationEvent,
+            (event) => {
+                if (subscriptionActive) handleConversationEvent(event);
+            },
         );
 
         // 主动同步一次当前闪亮状态，避免在订阅前发生的事件导致闪烁状态缺失
@@ -1214,6 +1227,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         syncAcpSessionState(conversationIdNum);
 
         return () => {
+            subscriptionActive = false;
             if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
                 console.log("[ACP DEBUG] Unsubscribing from events");
                 const p = unsubscribeRef.current;
@@ -1226,7 +1240,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             stopMcpCompensationPolling("conversation listener cleanup");
             stopMcpCompletionSync("conversation listener cleanup");
         };
-    }, [options.conversationId, syncRuntimeState, syncShineState, syncAcpSessionState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState]); // 只依赖 conversationId
+    }, [options.conversationId, syncRuntimeState, syncShineState, syncAcpSessionState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState, discardPendingStreamingUpdates]); // 只依赖 conversationId
 
     // 初始化获取已存在的 MCP 调用状态
     useMobileResume(() => {

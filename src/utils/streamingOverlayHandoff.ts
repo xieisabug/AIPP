@@ -13,7 +13,10 @@ export function finalizeStreamingEventWithPending(
     }
 
     const content =
-        pending.content.length > doneEvent.content.length
+        pending.message_id === doneEvent.message_id
+            && pending.message_type === doneEvent.message_type
+            && pending.content.length > doneEvent.content.length
+            && pending.content.startsWith(doneEvent.content)
             ? pending.content
             : doneEvent.content;
 
