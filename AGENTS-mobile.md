@@ -15,10 +15,10 @@
 ## 平台与构建
 
 - **目标平台**：Android（`src-tauri/gen/android`），applicationId `com.xieisabug.aipp`，minSdk 24 / targetSdk 36。
-- **开发命令**：`npm run android`（即 `scripts/android-dev.ps1`，自动选局域网 IP 设 `TAURI_DEV_HOST` 后执行 `tauri android dev`，支持 HMR）。
+- **开发命令**：`pnpm run android`（即 `scripts/android-dev.ps1`，自动选局域网 IP 并通过 `--host` 显式传给 `tauri android dev`，支持 HMR；可追加 CLI 列出的设备名称）。直接运行 `pnpm run tauri android dev` 时，多网卡环境应显式传 `--host <局域网 IP>`，避免选到 VPN/TUN 网卡。启动前关闭同项目旧 dev 进程以释放 3000 端口。
 - **启动差异**：移动端启动时 Rust 侧只创建 `chat_ui` 一个窗口（`src-tauri/src/lib.rs` 中移动端分支），桌面端会预创建多个隐藏窗口。
 - **能力配置**：移动端权限在 `src-tauri/capabilities/mobile.json`（与桌面端 `migrated.json` 分离）。修改移动端可用的 Tauri API 时必须更新此文件，且注意 fs scope 不要无限制放开。
-- **Android 原生配置**：`src-tauri/gen/android/app/src/main/AndroidManifest.xml` 当前声明 `INTERNET` 权限，Activity 已配置 `windowSoftInputMode="adjustResize"`；尚无 deep link 和系统分享接收 intent。修改原生权限与入口时需同步检查 Manifest、Tauri capability 和 Android 生命周期行为。
+- **Android 原生配置**：`src-tauri/gen/android/app/src/main/AndroidManifest.xml` 当前声明 `INTERNET` 权限，Activity 已配置 `windowSoftInputMode="adjustResize"`；尚无 deep link、系统分享接收（ACTION_SEND）和拍照（ACTION_IMAGE_CAPTURE）intent-filter。`POST_NOTIFICATIONS` 由 `tauri-plugin-notification` 自带 Manifest 合并进入最终清单（见 `app/build/intermediates/merged_manifest/**/AndroidManifest.xml`），但仓库内没有运行时请求权限的代码。应用为 `singleTask`，任何新增原生入口都必须同时处理冷启动 intent 与 `MainActivity.onNewIntent`，不能只接一头。修改原生权限与入口时需同步检查 Manifest、Tauri capability 和 Android 生命周期行为。
 - **HTTPS 初始化**：reqwest 0.13 的 Android 系统证书校验依赖 `MainActivity.onWebViewCreate` 调用 JNI 初始化，以及 Gradle 引入 Cargo 锁定版本附带的 `rustls-platform-verifier-android` AAR；缺少初始化会使请求线程 panic。更新依赖时须同步检查这条链路及 ProGuard 保留规则。
 
 ## 核心机制与已知坑
@@ -36,6 +36,7 @@
 
 - 使用 `src/mobile/navigation.ts` 的 `navigateMobile` / `previewMobile`，仅注册已适配的页面；不要创建额外 WebView。
 - Android `MainActivity` 先收起 IME，再调用 `__aippMobileBack` 关闭面板或弹出返回栈，根页退后台。禁止调用 WebView.goBack。
+- 返回顺序（`window.__aippMobileBack`）：先对最上层打开的面板（`role=dialog/alertdialog/menu/listbox` 且 `data-state=open`，或 `[data-mobile-panel]`）派发 Escape；再调用当前页通过 `registerMobileBackHandler(route, fn)` 注册的处理器（返回 true 即消费）；最后弹出页面栈。设置页用它先回到上一个设置分区，并在离开前经过 `configLeaveGuard`（确认后用 `popMobile()` 出栈）。
 - `handleBackNavigation=false` 禁用 Wry 后注册的默认返回回调。原生 IPC 在 `setContentView` 边界替换为校验主框架与来源的 WebMessageListener：Wry 的 `onWebViewCreate` 早于旧 IPC 注册，不能在该早期回调中完成替换。
 - 受限预览契约见 `docs/product/20-移动导航与预览.md`。预览 runtime 以独立 bundle 运行在不含 allow-same-origin 的 iframe 中，不得添加 Tauri 或宿主凭据桥接。
 
@@ -56,12 +57,12 @@ Rust 侧对桌面功能做了编译期/运行期分支；移动端不支持的�
 | 全局快捷键 / 系统托盘 | `#[cfg(desktop)]` 不编译；前端设置页已隐藏全局快捷键区块 | `lib.rs` / `ShortcutsConfigForm.tsx` |
 | 开机自启 | 返回 `MOBILE_UNSUPPORTED` 错误；前端已隐藏设置项 | `system_api.rs` / `OtherConfigForm.tsx` |
 | 自动更新 | 返回 `MOBILE_UNSUPPORTED` 错误；前端已隐藏更新 UI | `updater_api.rs` / `AboutConfigForm.tsx` |
-| PDF 导出 | 返回 `MOBILE_UNSUPPORTED` 错误（AppError 包装） | `export_api.rs` |
-| 剪贴板复制图片 | 返回 `MOBILE_UNSUPPORTED` 错误 | `system_api.rs` |
+| PDF 导出 | Rust `export_api` 仍返回 `MOBILE_UNSUPPORTED`；Android 前端改走系统打印（`printMobilePdf` → `mobileFileAction("print")`，返回 `print_launched` 不代表已生成 PDF） | `export_api.rs` / `conversationExportService.ts` |
+| 剪贴板复制图片 | Rust `copy_image_to_clipboard` 返回 `MOBILE_UNSUPPORTED`；Android 前端走 `mobileFileAction("copyImage")` 原生 ClipData | `system_api.rs` / `LazyImage.tsx` |
 | 获取选中文本 | 返回空字符串 | `lib.rs` |
 | 脚本/Shell 执行 | **无任何 guard，运行期必失败**；前端已隐藏代码块"运行"按钮 | `mcp/builtin_mcp/operation/bash_ops.rs` / `CodeBlock.tsx` |
 | 浏览器模式搜索（chromiumoxide） | 仅桌面依赖；前端已隐藏浏览器专属配置字段 | `Cargo.toml` / `BuiltinToolDialog.tsx` |
-| 文件对话框 | 前端无平台判断，直接调用 | `conversationExportService.ts` 等 |
+| 文件对话框 | Android 走 `mobileFileService.ts`（SAF 导入/保存、分享、打开）；桌面保留原对话框路径 | `mobileFileService.ts` / `conversationExportService.ts` |
 
 - 前端功能降级清单集中在 `src/lib/mobileUnsupported.ts`（`useFeatureAvailableOnPlatform`），新增移动端限制时在此登记。
 - **原则**：移动端不支持的功能，前端应根据平台隐藏入口，而不是点了才报错；Rust 侧错误用 `mobile_unsupported_error` 保持统一（禁止静默降级，也不要新增 fallback）。
@@ -87,6 +88,23 @@ cargo check --manifest-path src-tauri/Cargo.toml
 # Android 开发调试（需设备/模拟器）
 npm run android
 ```
+
+## 能力缺口与需求编号（2026-11-02）
+
+移动端「应该有但目前没有」的功能已登记为 leaderai AIPP 需求 #250–#258，对应 PRD `docs/mobile-optimization-prd.md` 的 MOB-14 至 MOB-19：
+
+| 条目 | leaderai | 落地时的主要触点 |
+|---|---|---|
+| MOB-14 离线与网络失败可解释 | #250 | `useMobileResume.ts`、`ChatUIWindow.tsx`、输入区 |
+| MOB-15 回复期保活与通知闭环 | #251 | `agent_completion.rs`、`MainActivity.onNewIntent`、通知权限请求 |
+| MOB-16 会话详情面板 | #252 | `ConversationUI.tsx:2126`、`ChatSidebarContent.tsx`、移动路由 |
+| MOB-17.1 接收系统分享 | #253 | Manifest ACTION_SEND、`MobileFileCopy`、草稿态 |
+| MOB-17.2 拍照添加附件 | #254 | ACTION_IMAGE_CAPTURE、`file_paths.xml`、`mobileFileService.ts` |
+| MOB-17.3 交互打磨 | #257 | `MainActivity` 返回回调、`Theme.aipp`、shortcuts |
+| MOB-18 任务创建与编辑 | #255 | `mobile/navigation.ts`、`MobileShell.tsx`、定时任务表单 |
+| MOB-19 会话手势与轮次跳转 | #256 #258 | 会话抽屉、`ConversationTurnRail` 数据 |
+
+新增移动端原生入口时遵守：不创建额外 WebView；intent 只能进入草稿，不能直接执行工具或跳过审批；手势不得与系统返回手势（屏幕边缘约 20dp）冲突。
 
 ## B 类文件服务接入（2026-10-31）
 
