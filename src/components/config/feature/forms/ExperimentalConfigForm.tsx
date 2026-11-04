@@ -600,6 +600,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     return (
         <Form {...form}>
             <Card
+                data-aipp-config-section
                 className={
                     showSummarySection
                         ? "bottom-space border-l-4 border-l-primary shadow-none"

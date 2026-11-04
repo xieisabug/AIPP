@@ -1,4 +1,4 @@
-import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo, useRef } from "react";
+import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 // 各设置页体积较大，按需动态加载，避免打开设置窗口时一次性解析全部页面代码
 const LLMProviderConfig = React.lazy(() => import("../components/config/LLMProviderConfig"));
@@ -108,12 +108,8 @@ function ConfigWindow() {
     }, [skillsAvailable, pluginsAvailable, isMobilePlatform]);
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
-    // 移动端系统返回键按访问顺序回到上一个设置分区
-    const sectionHistory = useRef<string[]>([]);
-    const selectedMenuRef = useRef(selectedMenu);
-    selectedMenuRef.current = selectedMenu;
+    // 设置分区是平级切换，不记录历史：返回直接退出设置页
     const goToSection = useCallback((menu: string) => {
-        if (menu !== selectedMenuRef.current) sectionHistory.current.push(selectedMenuRef.current);
         setSelectedMenu(menu);
     }, []);
     const [visitedMenus, setVisitedMenus] = useState<string[]>(["llm-provider-config"]);
@@ -139,7 +135,6 @@ function ConfigWindow() {
             console.log("ConfigWindow hidden, resetting state");
             // 重置到默认菜单
             setSelectedMenu("llm-provider-config");
-            sectionHistory.current = [];
             setSidebarOpen(false);
         });
 
@@ -165,20 +160,10 @@ function ConfigWindow() {
         };
     }, [goToSection]);
 
-    // Android 返回：先回到上一个设置分区，离开设置页前经过未保存保护
+    // Android 返回：直接退出设置页，离开前经过未保存保护
     useEffect(() => {
         if (!isMobilePlatform) return;
-        return registerMobileBackHandler("config", () => {
-            const previous = sectionHistory.current.at(-1);
-            if (previous) {
-                requestConfigLeave(() => {
-                    sectionHistory.current = sectionHistory.current.slice(0, -1);
-                    setSelectedMenu(previous);
-                });
-                return true;
-            }
-            return !canLeaveConfigNow(popMobile);
-        });
+        return registerMobileBackHandler("config", () => !canLeaveConfigNow(popMobile));
     }, [isMobilePlatform]);
 
     useEffect(() => {
@@ -260,10 +245,7 @@ function ConfigWindow() {
     const handleBackHome = async () => {
         // 移动平台在单 WebView 内切换；桌面窄窗口仍走桌面导航。
         if (isMobilePlatform) {
-            requestConfigLeave(() => {
-                sectionHistory.current = [];
-                navigateMobile("chat_ui");
-            });
+            requestConfigLeave(() => navigateMobile("chat_ui"));
             return;
         }
 
@@ -280,9 +262,9 @@ function ConfigWindow() {
     };
 
     const currentSectionName = menuList.find((item) => item.id === selectedMenu)?.name ?? "设置";
-    // 与系统返回一致：先回上一个分区，再经未保存保护离开设置页
+    // 与系统返回一致：经未保存保护后退出设置页，回到进入设置前的页面
     const handleHeaderBack = () => {
-        if (!window.__aippMobileBack?.()) void handleBackHome();
+        requestConfigLeave(popMobile);
     };
 
     // 移动端布局：顶部栏 + 侧滑菜单
@@ -297,9 +279,9 @@ function ConfigWindow() {
                     <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                         {isMobilePlatform ? (
                             <>
-                                <Button variant="ghost" className="min-h-11 gap-1 px-2" onClick={handleHeaderBack}>
+                                <Button variant="ghost" size="icon" onClick={handleHeaderBack} aria-label="退出设置"
+                                    data-aipp-slot="config-mobile-back">
                                     <ChevronLeft className="h-5 w-5" />
-                                    返回
                                 </Button>
                                 <button
                                     type="button"

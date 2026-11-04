@@ -33,7 +33,7 @@ import useConversationManager from "../hooks/useConversationManager";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { ListOrdered, Menu, PanelRight, Plus } from "lucide-react";
+import { Menu, PanelRight, Plus } from "lucide-react";
 import {
     runScrollPerformanceProbe,
     waitForAnimationFrames,
@@ -900,28 +900,16 @@ function ChatUIWindow() {
                         </button>
                         <div className="flex items-center">
                             {selectedConversation ? (
-                                <>
-                                    <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="min-h-11 min-w-11"
-                                        aria-label="对话轮次导航"
-                                        data-aipp-slot="chat-mobile-turn-nav"
-                                        onClick={() => conversationUIRef.current?.openTurnNavigator()}
-                                    >
-                                        <ListOrdered className="h-5 w-5" />
-                                    </Button>
-                                    <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="min-h-11 min-w-11"
-                                        aria-label="会话详情"
-                                        data-aipp-slot="chat-mobile-details"
-                                        onClick={() => conversationUIRef.current?.openDetails()}
-                                    >
-                                        <PanelRight className="h-5 w-5" />
-                                    </Button>
-                                </>
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="min-h-11 min-w-11"
+                                    aria-label="会话详情"
+                                    data-aipp-slot="chat-mobile-details"
+                                    onClick={() => conversationUIRef.current?.openDetails()}
+                                >
+                                    <PanelRight className="h-5 w-5" />
+                                </Button>
                             ) : null}
                             <Button variant="ghost" size="icon" className="min-h-11 min-w-11" onClick={handleNewConversation} aria-label="新建对话">
                                 <Plus className="h-5 w-5" />

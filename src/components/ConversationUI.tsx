@@ -66,6 +66,8 @@ import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationExportDialog from "./conversation/ConversationExportDialog";
 import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail from "./conversation/ConversationTurnRail";
+import MobileTurnScrubber from "./conversation/MobileTurnScrubber";
+import type { MessageScrollAlign } from "./conversation/scrollHighlight";
 import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
 import { Button } from "./ui/button";
@@ -102,8 +104,6 @@ export interface ConversationUIRef {
     openSettings: () => void;
     /** 打开当前会话重命名对话框（移动端顶栏点标题） */
     openTitleEdit: () => void;
-    /** 移动端：打开对话轮次导航面板 */
-    openTurnNavigator: () => void;
     /** 移动端：打开会话详情面板（待办/上下文/制品/插件面板） */
     openDetails: () => void;
 }
@@ -934,6 +934,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         });
         smartScrollRef.current = smartScroll;
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
+        const [pendingScrollAlign, setPendingScrollAlign] = useState<MessageScrollAlign>("center");
 
         // ============= Chat Sidebar 数据提取 =============
 
@@ -1128,8 +1129,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // ============= 初始化和生命周期逻辑 =============
 
-        // 移动端：轮次导航 / 会话详情面板（桌面分别由左侧 ConversationTurnRail 与右侧 ChatSidebar 承担）
-        const [mobileTurnSheetOpen, setMobileTurnSheetOpen] = useState(false);
+        // 移动端：会话详情面板（桌面由右侧 ChatSidebar 承担；轮次导航由 MobileTurnScrubber 承担）
         const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
 
         // 暴露给外部的方法
@@ -1140,6 +1140,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     inputAreaRef.current?.focus();
                 },
                 scrollToMessage: (messageId: number) => {
+                    setPendingScrollAlign("center");
                     setPendingScrollMessageId(messageId);
                 },
                 openStats: () => {
@@ -1165,9 +1166,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 },
                 openTitleEdit: () => {
                     if (conversationId && allowRename) openTitleEditDialog();
-                },
-                openTurnNavigator: () => {
-                    if (conversationId) setMobileTurnSheetOpen(true);
                 },
                 openDetails: () => {
                     if (conversationId) setMobileDetailsOpen(true);
@@ -2003,6 +2001,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const handleSelectTurn = useCallback((messageId: number) => {
             // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
             handleUserScrollIntent();
+            // 轮次导航把提问顶到视口顶部，便于从这一轮开始往下读
+            setPendingScrollAlign("start");
             setPendingScrollMessageId(messageId);
         }, [handleUserScrollIntent]);
 
@@ -2017,6 +2017,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 >
                     {!isMobile && conversationId && (
                         <ConversationTurnRail
+                            turns={userTurns}
+                            scrollContainerRef={scrollContainerRef}
+                            onSelect={handleSelectTurn}
+                        />
+                    )}
+                    {isMobile && conversationId && (
+                        <MobileTurnScrubber
                             turns={userTurns}
                             scrollContainerRef={scrollContainerRef}
                             onSelect={handleSelectTurn}
@@ -2093,6 +2100,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 onApproveAgentPlan={handleApproveAgentPlan}
                                 scrollContainerRef={scrollContainerRef}
                                 pendingScrollMessageId={pendingScrollMessageId}
+                                pendingScrollAlign={pendingScrollAlign}
                                 clearPendingScrollMessageId={setPendingScrollMessageId}
                                 setShiningMessageIds={setShiningMessageIds}
                                 onScrollStateChange={syncScrollState}
@@ -2158,40 +2166,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onPreviewFileClick={handlePreviewFileContextClick}
                         />
                     )}
-
-                    {isMobile && conversationId ? (
-                        <Sheet open={mobileTurnSheetOpen} onOpenChange={setMobileTurnSheetOpen}>
-                            <SheetContent
-                                side="bottom"
-                                className="max-h-[70dvh] gap-0 rounded-t-2xl p-0 safe-bottom-bar"
-                                aria-describedby={undefined}
-                                data-aipp-slot="chat-mobile-turn-sheet"
-                            >
-                                <SheetTitle className="px-4 py-3 text-sm font-medium">对话轮次</SheetTitle>
-                                <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-                                    {userTurns.length === 0 ? (
-                                        <div className="px-2 py-4 text-sm text-muted-foreground">暂无提问</div>
-                                    ) : (
-                                        userTurns.map((turn, index) => (
-                                            <button
-                                                key={turn.id}
-                                                type="button"
-                                                className="flex min-h-11 w-full items-center gap-3 rounded-md px-2 py-2 text-left text-sm hover:bg-muted"
-                                                data-aipp-slot="chat-mobile-turn-item"
-                                                onClick={() => {
-                                                    setMobileTurnSheetOpen(false);
-                                                    handleSelectTurn(turn.id);
-                                                }}
-                                            >
-                                                <span className="w-6 flex-shrink-0 text-right text-xs text-muted-foreground">{index + 1}</span>
-                                                <span className="min-w-0 flex-1 truncate">{turn.preview}</span>
-                                            </button>
-                                        ))
-                                    )}
-                                </div>
-                            </SheetContent>
-                        </Sheet>
-                    ) : null}
 
                     {isMobile && conversationId ? (
                         <Sheet open={mobileDetailsOpen} onOpenChange={setMobileDetailsOpen}>

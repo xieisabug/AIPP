@@ -54,3 +54,17 @@
 
 /* The mobile chat fills the shell, including when the IME shrinks its visual viewport. */
 [data-aipp-mobile-shell] [data-aipp-window='chat_ui'] { height: 100%; }
+
+/* Settings forms on phones: drop the desktop card chrome so fields use the full width. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] {
+    border: 0; border-radius: 0; box-shadow: none; background: transparent;
+    padding-top: 0; padding-bottom: 0; gap: 1rem;
+}
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] > [data-slot="card-header"],
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] > [data-slot="card-content"] {
+    padding-left: 0; padding-right: 0; border-radius: 0;
+}
+/* Consecutive sections are separated by a hairline instead of card borders. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] ~ [data-aipp-config-section] {
+    border-top: 1px solid var(--border); padding-top: 1.5rem;
+}

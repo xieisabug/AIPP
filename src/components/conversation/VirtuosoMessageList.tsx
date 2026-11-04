@@ -12,7 +12,12 @@ import {
     type VirtuosoHandle,
 } from "react-virtuoso";
 
-import { applyScrollHighlight } from "./scrollHighlight";
+import {
+    applyScrollHighlight,
+    MESSAGE_SCROLL_START_GAP_PX,
+    scrollMessageIntoView,
+    type MessageScrollAlign,
+} from "./scrollHighlight";
 import {
     VIRTUAL_OVERSCAN_PX,
     VIRTUAL_ROW_GAP_PX,
@@ -32,6 +37,8 @@ interface VirtuosoMessageListProps extends UseMessageListElementsProps {
     conversationId: string;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId: number | null;
+    /** 跳转对齐方式，默认居中；轮次导航使用 start。 */
+    pendingScrollAlign?: MessageScrollAlign;
     clearPendingScrollMessageId: (messageId: number | null) => void;
     setShiningMessageIds: React.Dispatch<React.SetStateAction<Set<number>>>;
     onScrollStateChange?: (container?: HTMLDivElement | null) => void;
@@ -202,11 +209,13 @@ const virtuosoComponents: Components<
 function scheduleHighlightAttempt({
     container,
     messageId,
+    align,
     setShiningMessageIds,
     clearPendingScrollMessageId,
 }: {
     container: HTMLElement;
     messageId: number;
+    align: MessageScrollAlign;
     setShiningMessageIds: React.Dispatch<React.SetStateAction<Set<number>>>;
     clearPendingScrollMessageId: (messageId: number | null) => void;
 }) {
@@ -219,6 +228,8 @@ function scheduleHighlightAttempt({
             applyScrollHighlight({
                 target,
                 messageId,
+                align,
+                container,
                 setShiningMessageIds,
                 clearPendingScrollMessageId,
             });
@@ -241,6 +252,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     conversationId,
     scrollContainerRef,
     pendingScrollMessageId,
+    pendingScrollAlign = "center",
     clearPendingScrollMessageId,
     setShiningMessageIds,
     onScrollStateChange,
@@ -686,10 +698,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 `[data-message-id='${pendingScrollMessageId}']`,
             ) as HTMLElement | null;
             if (existingTarget) {
-                existingTarget.scrollIntoView({
-                    block: "center",
-                    behavior: "smooth",
-                });
+                scrollMessageIntoView(existingTarget, pendingScrollAlign, container);
             } else {
                 container.scrollTo({
                     top: Math.max(0, container.scrollHeight - container.clientHeight),
@@ -700,6 +709,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             scheduleHighlightAttempt({
                 container,
                 messageId: pendingScrollMessageId,
+                align: pendingScrollAlign,
                 setShiningMessageIds,
                 clearPendingScrollMessageId,
             });
@@ -716,12 +726,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
         virtuosoRef.current?.scrollToIndex({
             index: targetIndex,
-            align: "center",
+            align: pendingScrollAlign,
+            // start 对齐时预留顶部空隙；渲染后高亮阶段会按实测位置再精确校正一次
+            offset: pendingScrollAlign === "start" ? -MESSAGE_SCROLL_START_GAP_PX : 0,
             behavior: "auto",
         });
         scheduleHighlightAttempt({
             container,
             messageId: pendingScrollMessageId,
+            align: pendingScrollAlign,
             setShiningMessageIds,
             clearPendingScrollMessageId,
         });
@@ -730,6 +743,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         historyItems,
         liveItems,
         pendingScrollMessageId,
+        pendingScrollAlign,
         effectiveScrollParent,
         setShiningMessageIds,
         retainHistory,

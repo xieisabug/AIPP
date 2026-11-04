@@ -1,4 +1,5 @@
 import React, { memo } from "react";
+import type { MessageScrollAlign } from "./scrollHighlight";
 import VirtuosoMessageList from "./VirtuosoMessageList";
 import NewChatComponent from "../NewChatComponent";
 import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
@@ -35,6 +36,7 @@ export interface ConversationContentProps {
     onApproveAgentPlan?: () => void;
     scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId?: number | null;
+    pendingScrollAlign?: MessageScrollAlign;
     clearPendingScrollMessageId?: (messageId: number | null) => void;
     setShiningMessageIds?: React.Dispatch<React.SetStateAction<Set<number>>>;
     onScrollStateChange?: (container?: HTMLDivElement | null) => void;
@@ -81,6 +83,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onApproveAgentPlan,
     scrollContainerRef,
     pendingScrollMessageId = null,
+    pendingScrollAlign,
     clearPendingScrollMessageId,
     setShiningMessageIds,
     onScrollStateChange,
@@ -136,6 +139,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
                         conversationId={conversationId}
                         scrollContainerRef={scrollContainerRef}
                         pendingScrollMessageId={pendingScrollMessageId}
+                        pendingScrollAlign={pendingScrollAlign}
                         clearPendingScrollMessageId={
                             clearPendingScrollMessageId
                         }

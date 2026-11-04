@@ -595,7 +595,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     };
 
     return (
-        <Card className={`shadow-none border-l-4 border-l-primary ${classNames || ""}`}>
+        <Card className={`shadow-none border-l-4 border-l-primary ${classNames || ""}`} data-aipp-config-section>
             <CardHeader
                 onClick={toggleExpand}
                 className={`flex flex-row items-center ${enableExpand ? "cursor-pointer hover:bg-muted" : ""

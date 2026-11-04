@@ -54,17 +54,12 @@ export function findActiveTurnId(
 }
 
 /**
- * 左侧对话轮次导航条。
- *
- * 渲染一列垂直居中的小横杠，每根横杠代表一次用户提问；
- * 点击触发 onSelect 跳转到该消息；悬浮显示该轮内容片段。
- * 横杠数量很多时会自动收缩间距以始终全部可见。
+ * 跟踪滚动容器高度与当前阅读位置所在的轮次，供桌面导航条与移动端轮次滑轨共用。
  */
-export default function ConversationTurnRail({
-    turns,
-    scrollContainerRef,
-    onSelect,
-}: ConversationTurnRailProps) {
+export function useTurnRailTracking(
+    turns: TurnRailItem[],
+    scrollContainerRef: RefObject<HTMLDivElement | null>,
+) {
     const [containerHeight, setContainerHeight] = useState(0);
     const [activeTurnId, setActiveTurnId] = useState<number | null>(null);
     const syncFrameRef = useRef<number | null>(null);
@@ -201,6 +196,23 @@ export default function ConversationTurnRail({
             contentResizeObserver.disconnect();
         };
     }, [scrollContainerRef, turnsKey]);
+
+    return { containerHeight, activeTurnId, setActiveTurnId };
+}
+
+/**
+ * 左侧对话轮次导航条。
+ *
+ * 渲染一列垂直居中的小横杠，每根横杠代表一次用户提问；
+ * 点击触发 onSelect 跳转到该消息；悬浮显示该轮内容片段。
+ * 横杠数量很多时会自动收缩间距以始终全部可见。
+ */
+export default function ConversationTurnRail({
+    turns,
+    scrollContainerRef,
+    onSelect,
+}: ConversationTurnRailProps) {
+    const { containerHeight, activeTurnId, setActiveTurnId } = useTurnRailTracking(turns, scrollContainerRef);
 
     const gap = useMemo(() => {
         const count = turns.length;

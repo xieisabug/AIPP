@@ -36,7 +36,7 @@
 
 - 使用 `src/mobile/navigation.ts` 的 `navigateMobile` / `previewMobile`，仅注册已适配的页面；不要创建额外 WebView。
 - Android `MainActivity` 先收起 IME，再调用 `__aippMobileBack` 关闭面板或弹出返回栈，根页退后台。禁止调用 WebView.goBack。
-- 返回顺序（`window.__aippMobileBack`）：先对最上层打开的面板（`role=dialog/alertdialog/menu/listbox` 且 `data-state=open`，或 `[data-mobile-panel]`）派发 Escape；再调用当前页通过 `registerMobileBackHandler(route, fn)` 注册的处理器（返回 true 即消费）；最后弹出页面栈。设置页用它先回到上一个设置分区，并在离开前经过 `configLeaveGuard`（确认后用 `popMobile()` 出栈）。
+- 返回顺序（`window.__aippMobileBack`）：先对最上层打开的面板（`role=dialog/alertdialog/menu/listbox` 且 `data-state=open`，或 `[data-mobile-panel]`）派发 Escape；再调用当前页通过 `registerMobileBackHandler(route, fn)` 注册的处理器（返回 true 即消费）；最后弹出页面栈。设置页不记录分区历史，返回（系统返回与顶栏图标一致）直接退出设置页，离开前经过 `configLeaveGuard`（确认后用 `popMobile()` 出栈）。
 - `handleBackNavigation=false` 禁用 Wry 后注册的默认返回回调。原生 IPC 在 `setContentView` 边界替换为校验主框架与来源的 WebMessageListener：Wry 的 `onWebViewCreate` 早于旧 IPC 注册，不能在该早期回调中完成替换。
 - 受限预览契约见 `docs/product/20-移动导航与预览.md`。预览 runtime 以独立 bundle 运行在不含 allow-same-origin 的 iframe 中，不得添加 Tauri 或宿主凭据桥接。
 
@@ -46,6 +46,7 @@
 - 已应用安全区的位置：`ChatUIWindow.tsx` 移动端顶栏（`safe-top`）、`src/styles/InputArea.css` 移动端输入框与按钮（bottom 偏移叠加 `env(safe-area-inset-bottom)`）。
 - 虚拟键盘：AndroidManifest 已配 `windowSoftInputMode="adjustResize"`；`ConversationUI.tsx` 移动端监听 `visualViewport`，仅跟随底部阅读状态，键盘弹起不抢占历史阅读位置。
 - 消息操作、编辑、版本选择和移动预览使用至少 44px 触控目标；新增页面仍需逐项检查。
+- 设置表单分组卡片带 `data-aipp-config-section`，移动端由 `src/mobile/mobile.css` 去掉卡片外框；列表项卡片（插件、技能）不加该属性，保留卡片。
 - **新写移动端 UI 时**：可点目标 ≥44px；全屏容器直接用 `h-screen`（已自动走 dvh）；顶部/底部固定栏必须加 `safe-top` / `safe-bottom` 类。
 
 ### 4. 桌面功能在移动端的行为
@@ -102,7 +103,7 @@ npm run android
 | MOB-17.2 拍照添加附件 | #254 | ACTION_IMAGE_CAPTURE、`file_paths.xml`、`mobileFileService.ts` |
 | MOB-17.3 交互打磨 | #257 | `MainActivity` 返回回调、`Theme.aipp`、shortcuts |
 | MOB-18 任务创建与编辑 | #255 | `mobile/navigation.ts`、`MobileShell.tsx`、定时任务表单 |
-| MOB-19 会话手势与轮次跳转 | #256 #258 | 会话抽屉、`ConversationTurnRail` 数据 |
+| MOB-19 会话手势与轮次跳转 | #256 #258 | 会话抽屉；轮次跳转已由 `MobileTurnScrubber`（复用 `useTurnRailTracking`）承担 |
 
 新增移动端原生入口时遵守：不创建额外 WebView；intent 只能进入草稿，不能直接执行工具或跳过审批；手势不得与系统返回手势（屏幕边缘约 20dp）冲突。
 
