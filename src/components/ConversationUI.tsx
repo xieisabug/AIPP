@@ -56,6 +56,7 @@ import { useConversationDraft } from "@/hooks/useConversationDraft";
 import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
+import { butlerTranscript } from "@/components/butler/butlerTranscript";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
 import { useConversationOperations } from "@/hooks/useConversationOperations";
@@ -229,6 +230,8 @@ function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
     );
 }
 
+const EMPTY_STREAMS = new Map();
+
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
@@ -244,6 +247,7 @@ interface ConversationUIProps {
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
     windowLabel?: string;
+    showExecutionDetails?: boolean;
     busySendBehavior?: "queue" | "interrupt";
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
 }
@@ -309,6 +313,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             headerExtraActions,
             allowFeishuDebugResend = false,
             windowLabel = "chat_ui",
+            showExecutionDetails = false,
             busySendBehavior = "queue",
             onPreviewFileContextClick,
         },
@@ -903,6 +908,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
         });
+        const resultOnly = windowLabel === "butler_experiment" && !showExecutionDetails;
         const displayAgentActivities = useMemo(() => {
             const combined = new Map<string, AgentActivityEvent>();
             for (const message of allDisplayMessages) {
@@ -922,6 +928,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
             return combined;
         }, [agentActivities, allDisplayMessages]);
+        const transcriptActivities = useMemo(() => resultOnly
+            ? new Map([...displayAgentActivities].filter(([, activity]) => activity.status === "failed"
+                || (activity.kind === "approval" && activity.status === "pending")))
+            : displayAgentActivities, [resultOnly, displayAgentActivities]);
+        const transcript = useMemo(() => {
+            if (!resultOnly) return allDisplayMessages;
+            const needsAttention = new Set([...transcriptActivities.values()].map(item => item.response_message_id));
+            for (const call of mcpToolCallStates.values()) {
+                if (call.message_id && (call.status === "failed" || call.status === "pending")) needsAttention.add(call.message_id);
+            }
+            return butlerTranscript(allDisplayMessages, needsAttention);
+        }, [resultOnly, allDisplayMessages, transcriptActivities, mcpToolCallStates]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -2074,13 +2092,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 isMobile={isMobile}
                                 conversationId={conversationId}
                                 // MessageList props
-                                allDisplayMessages={allDisplayMessages}
-                                streamingMessages={streamingMessages}
+                                allDisplayMessages={transcript}
+                                streamingMessages={resultOnly ? EMPTY_STREAMS : streamingMessages}
                                 shiningMessageIds={shiningMessageIds}
                                 shiningMcpCallId={shiningMcpCallId}
                                 reasoningExpandStates={reasoningExpandStates}
                                 mcpToolCallStates={mcpToolCallStates}
-                                agentActivities={displayAgentActivities}
+                                agentActivities={transcriptActivities}
                                 generationGroups={messageGroupsData.generationGroups}
                                 selectedVersions={messageGroupsData.selectedVersions}
                                 getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
@@ -2119,6 +2137,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>
 
+                        {resultOnly && effectiveAiIsResponsing && (
+                            <div role="status" className="px-6 py-1 text-xs text-muted-foreground">正在处理…</div>
+                        )}
                         {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
                         {isMobile && showBackToBottom && <Button variant="secondary" className="self-center min-h-11 shrink-0"

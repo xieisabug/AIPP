@@ -371,6 +371,11 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
         Some("agent") => vec![
             BuiltinToolInfo {
+                name: "search_own_history".into(),
+                description: "Find a literal phrase in the original user messages and answers of this conversation, including history covered by a context checkpoint.".into(),
+                input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+            },
+            BuiltinToolInfo {
                 name: "load_skill".into(),
                 description: "Load a skill's detailed instructions (SKILL.md). Use this tool when you need to execute a user-defined skill. The skill's prompt will provide detailed instructions on how to complete the task.".into(),
                 input_schema: serde_json::json!({

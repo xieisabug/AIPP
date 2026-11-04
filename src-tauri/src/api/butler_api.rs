@@ -128,6 +128,8 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 
 10. 修改了文件后，如果不是代码类的超大文件，尽量使用 preview_file 工具来展示修改的文件的全量内容。
 
 ## 沟通风格
+- 工具成功后直接交付结论、产物和必要来源。后台执行过程收在执行记录里；需要用户决策、授权或处理阻塞时才打断对话。
+- 长对话中遇到需要核对的旧约定时，如果当前工具目录有 `search_own_history`，用原话关键词找回当前会话的原始消息。
 - 直接、有判断、不说空话。
 - 先给结论，再给结构化说明。
 - 面向负责人视角表达：关注进度、风险、依赖、备选方案和下一步。
@@ -2942,6 +2944,31 @@ pub(crate) async fn spawn_butler_task_with_window(
         executor_assistant_id,
         executor_assistant_name,
     })
+}
+
+#[tauri::command]
+pub async fn get_butler_cache_activity(app_handle: AppHandle, conversation_id: i64) -> Result<Vec<serde_json::Value>, String> {
+    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    db.message_repo().map_err(|e| e.to_string())?.recent_cache_activity(conversation_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_butler_contact_previews(app_handle: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    db.conversation_repo().map_err(|e| e.to_string())?.butler_contact_previews().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_butler_contact(app_handle: AppHandle, assistant_id: i64) -> Result<i64, String> {
+    ensure_butler_enabled(&app_handle).await?;
+    let assistant = AssistantDatabase::new(&app_handle)
+        .and_then(|db| db.get_assistant(assistant_id)).map_err(|e| e.to_string())?;
+    if is_butler_system_assistant(&assistant) {
+        return Err("请通过总管家入口打开主会话".into());
+    }
+    let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    db.conversation_repo().map_err(|e| e.to_string())?
+        .open_butler_contact(assistant_id, &assistant.name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -301,6 +301,21 @@ async fn report_pre_request_error_in_conversation(
     );
 }
 
+async fn fit_chat_context(
+    app_handle: &tauri::AppHandle,
+    messages: Vec<context_manager::MessageTuple>,
+    budget: &ContextBudget,
+    token_counts: &[i32],
+    context: CompactionContext<'_>,
+) -> Result<context_manager::FitResult, AppError> {
+    let conversation_id = context.conversation_id;
+    let result = context_manager::fit_to_budget_with_compaction(messages, budget, token_counts, context).await;
+    if let Err(error) = &result {
+        report_pre_request_error_in_conversation(app_handle, conversation_id, &error.to_string()).await;
+    }
+    result
+}
+
 #[cfg(test)]
 mod ask_model_resolution_tests {
     use super::{
@@ -500,6 +515,11 @@ fn maybe_select_openai_responses_stateful_messages(
             "OpenAI Responses stateful continuation disabled because prompt cache key is enabled; using full history for prompt cache"
         );
         return (init_message_list.to_vec(), None, false, None);
+    }
+
+    // A checkpoint starts a new provider-side history prefix.
+    if init_message_list.iter().any(|(kind, text, _)| kind == "system" && text.starts_with("<context_summary>")) {
+        return (init_message_list.to_vec(), None, true, None);
     }
 
     if has_native_tools {
@@ -1032,6 +1052,7 @@ pub fn build_tools_with_mapping(
         }
     }
 
+    tools.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
     (tools, mapping)
 }
 
@@ -1051,17 +1072,14 @@ fn build_tool_config(
     }
 
     // Determine if this is a butler conversation for tool filtering
-    let is_butler = conversation_id
-        .and_then(|cid| {
-            ConversationDatabase::new(app_handle)
-                .ok()
-                .and_then(|db| db.conversation_repo().ok())
-                .and_then(|repo| repo.read(cid).ok().flatten())
-                .map(|c| is_butler_conversation_kind(&c.conversation_kind))
-        })
-        .unwrap_or(false);
+    let kind = conversation_id.and_then(|id| {
+        ConversationDatabase::new(app_handle).ok()?.conversation_repo().ok()?.read(id).ok()?
+            .map(|conversation| conversation.conversation_kind)
+    });
+    let is_butler = kind.as_deref().is_some_and(is_butler_conversation_kind);
+    let has_contact_history = matches!(kind.as_deref(), Some("butler_main" | "butler_contact"));
 
-    let servers_for_injection = if mcp_info.dynamic_loading_enabled {
+    let mut servers_for_injection = if mcp_info.dynamic_loading_enabled {
         // Keep the tools array stable: always-available tools, loaders, and call_mcp_tool.
         // Loaded MCP tools stay out of tools; their descriptions come back from load_mcp_tool.
         let mut filtered = Vec::new();
@@ -1113,6 +1131,13 @@ fn build_tool_config(
         filtered
     };
 
+    if !has_contact_history {
+        for server in &mut servers_for_injection {
+            if server.command.as_deref() == Some("aipp:agent") {
+                server.tools.retain(|tool| tool.name != "search_own_history");
+            }
+        }
+    }
     let (tools, tool_name_mapping) = build_tools_with_mapping(&servers_for_injection);
     debug!(tools = ?tools, "injected MCP tools");
     Some(ToolConfig { tools, tool_name_mapping })
@@ -1372,6 +1397,7 @@ pub async fn ask_ai(
         runtime_prompt_result.clone(),
         override_prompt.clone(),
         active_skill_attachments,
+        relay_origin.as_deref() == Some("internal"),
     )
     .await?;
     let initial_message_ids_for_after_response = init_message_ids.clone();
@@ -2076,7 +2102,7 @@ pub async fn ask_ai(
             client: &chat_config.client,
             model_name: &chat_config.model_name,
             conversation_id,
-            conversation_db: &conversation_db,
+            checkpoint_store: &conversation_db,
             is_butler,
             message_ids: init_message_ids,
         };
@@ -2088,13 +2114,14 @@ pub async fn ask_ai(
             &init_message_list,
         )
         .await;
-        let fit_result = context_manager::fit_to_budget_with_compaction(
+        let fit_result = fit_chat_context(
+            &app_handle_clone,
             init_message_list,
             &budget,
             &init_db_token_counts,
             compaction_ctx,
         )
-        .await;
+        .await?;
         emit_chat_context_event(
             &app_handle_clone,
             "chat.afterBuildContext",
@@ -2606,7 +2633,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         client: &chat_config.client,
         model_name: &chat_config.model_name,
         conversation_id: conversation_id_i64,
-        conversation_db: &conversation_db,
+        checkpoint_store: &conversation_db,
         is_butler: is_butler_cont,
         message_ids: init_metadata.message_ids,
     };
@@ -2618,13 +2645,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         &init_message_list,
     )
     .await;
-    let fit_result = context_manager::fit_to_budget_with_compaction(
+    let fit_result = fit_chat_context(
+        &app_handle,
         init_message_list,
         &budget,
         &init_metadata.db_token_counts,
         compaction_ctx,
     )
-    .await;
+    .await?;
     emit_chat_context_event(
         &app_handle,
         "chat.afterBuildContext",
@@ -3013,7 +3041,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         client: &chat_config.client,
         model_name: &chat_config.model_name,
         conversation_id,
-        conversation_db: &conversation_db,
+        checkpoint_store: &conversation_db,
         is_butler: is_butler_batch,
         message_ids: init_metadata.message_ids,
     };
@@ -3025,13 +3053,14 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         &init_message_list,
     )
     .await;
-    let fit_result = context_manager::fit_to_budget_with_compaction(
+    let fit_result = fit_chat_context(
+        &app_handle,
         init_message_list,
         &budget,
         &init_metadata.db_token_counts,
         compaction_ctx,
     )
-    .await;
+    .await?;
     emit_chat_context_event(
         &app_handle,
         "chat.afterBuildContext",
@@ -3550,7 +3579,7 @@ pub async fn regenerate_ai(
             client: &chat_config.client,
             model_name: &chat_config.model_name,
             conversation_id,
-            conversation_db: &conversation_db,
+            checkpoint_store: &conversation_db,
             is_butler: is_butler_regen,
             message_ids: init_metadata.message_ids,
         };
@@ -3568,7 +3597,7 @@ pub async fn regenerate_ai(
             &init_metadata.db_token_counts,
             compaction_ctx,
         )
-        .await;
+        .await?;
         emit_chat_context_event(
             &app_handle_clone,
             "chat.afterBuildContext",
@@ -3781,6 +3810,7 @@ async fn initialize_conversation(
     runtime_user_prompt: String,
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
+    internal_turn: bool,
 ) -> Result<
     (
         i64,
@@ -3958,6 +3988,10 @@ async fn initialize_conversation(
             None, // 用户消息不需要 generation_group_id
             None, // 用户消息不需要 parent_group_id
         )?;
+
+        if internal_turn {
+            db.message_repo()?.update_metadata(user_message.id, Some(r#"{"origin":"internal"}"#))?;
+        }
 
         // 更新 attachment 的 message_id，关联到新创建的用户消息
         // 这确保后续查询时能正确获取 attachment（通过 LEFT JOIN message.id = ma.message_id）

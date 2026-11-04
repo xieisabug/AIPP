@@ -144,6 +144,6 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 12. GitHub Copilot Integration（device flow + 可选 LSP）
 13. Token Statistics & Export（Markdown / PNG / PDF / DOCX）
 14. Assistant Types（自定义表单）
-15. Butler Orchestration（主会话、任务会话、结果回流、审批）
+15. Butler Orchestration（桌面联系人、独立私聊、主会话、任务会话、结果回流、审批）
 16. Feishu Integration（实验性）
 17. Self-Hosted Data Sync（server-wins 冲突、删除传播、死信重放）

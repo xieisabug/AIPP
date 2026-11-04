@@ -293,6 +293,41 @@ impl ConversationRepository {
         ConversationRepository { conn, write_lock }
     }
 
+    pub fn butler_contact_previews(&self) -> Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.assistant_id, c.id, m.id, substr(m.content,1,140)
+             FROM conversation c LEFT JOIN message m ON m.id=(
+                 SELECT id FROM message WHERE conversation_id=c.id
+                   AND message_type IN ('user','assistant','response','error') AND trim(content)!=''
+                   AND (message_type='user' OR (content NOT LIKE '%MCP_TOOL_CALL%' AND content NOT LIKE '%<mcp_tool_call%'
+                       AND COALESCE(tool_calls_json,'') IN ('','[]','null')))
+                   AND CASE WHEN json_valid(metadata_json) THEN COALESCE(json_extract(metadata_json,'$.origin'),'')!='internal' ELSE 1 END
+                 ORDER BY id DESC LIMIT 1)
+             WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id")?;
+        let rows = stmt.query_map([], |row| Ok(serde_json::json!({
+            "assistantId":row.get::<_,i64>(0)?, "conversationId":row.get::<_,i64>(1)?,
+            "messageId":row.get::<_,Option<i64>>(2)?, "preview":row.get::<_,Option<String>>(3)?,
+        })))?;
+        rows.collect()
+    }
+
+    pub fn open_butler_contact(&self, assistant_id: i64, name: &str) -> Result<i64> {
+        self.with_serialized_write(|conn| {
+            // The guarded INSERT is one SQLite write statement even across connections.
+            conn.execute(
+                "INSERT INTO conversation (name, assistant_id, created_time, updated_time,
+                     conversation_kind, is_hidden_from_normal_chat_list)
+                 SELECT ?1, ?2, ?3, ?3, 'butler_contact', 1 WHERE NOT EXISTS
+                 (SELECT 1 FROM conversation WHERE assistant_id=?2 AND conversation_kind='butler_contact')",
+                rusqlite::params![name, assistant_id, Utc::now()],
+            )?;
+            conn.query_row(
+                "SELECT id FROM conversation WHERE assistant_id=?1 AND conversation_kind='butler_contact'
+                 ORDER BY id LIMIT 1", [assistant_id], |row| row.get(0),
+            )
+        })
+    }
+
     fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T>,
@@ -858,6 +893,54 @@ impl MessageRepository {
             conn.execute("UPDATE message SET content = ?1 WHERE id = ?2", (content, id))?;
             Ok(())
         })
+    }
+
+    pub fn get_or_create_checkpoint(&self, conversation_id: i64, header: &str, content: &str) -> Result<String> {
+        self.with_serialized_write(|conn| {
+            // Concurrent continuations must use the same persisted summary, including the winning writer.
+            conn.execute(
+                "INSERT INTO message(conversation_id,message_type,content,created_time,token_count,input_token_count,output_token_count)
+                 SELECT ?1,'system',?2,?3,0,0,0 WHERE NOT EXISTS (
+                     SELECT 1 FROM message WHERE conversation_id=?1 AND message_type='system'
+                         AND substr(content,1,length(?4))=?4)",
+                rusqlite::params![conversation_id, content, Utc::now(), header],
+            )?;
+            conn.query_row(
+                "SELECT content FROM message WHERE conversation_id=?1 AND message_type='system'
+                    AND substr(content,1,length(?2))=?2 ORDER BY id LIMIT 1",
+                rusqlite::params![conversation_id, header], |row| row.get(0),
+            )
+        })
+    }
+
+    pub fn recent_cache_activity(&self, conversation_id: i64) -> Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, message_type, input_token_count,
+                    CASE WHEN json_valid(metadata_json) THEN
+                        COALESCE(json_extract(metadata_json,'$.cached_input_tokens'), json_extract(metadata_json,'$.cached_read_tokens'))
+                    END
+             FROM message WHERE conversation_id=?1 AND (
+                 (message_type IN ('response','assistant') AND input_token_count>0)
+                 OR (message_type='system' AND (content LIKE '<!-- compacted_ids:%' OR content LIKE '<!-- compacted_range:%')))
+             ORDER BY id DESC LIMIT 24")?;
+        let rows = stmt.query_map([conversation_id], |row| Ok(serde_json::json!({
+            "id": row.get::<_,i64>(0)?,
+            "checkpoint": row.get::<_,String>(1)? == "system",
+            "input": row.get::<_,i64>(2)?,
+            "cached": row.get::<_,Option<i64>>(3)?,
+        })))?;
+        rows.collect()
+    }
+
+    pub fn search_own_history(&self, conversation_id: i64, query: &str) -> Result<Vec<serde_json::Value>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, message_type, substr(content, max(1, instr(content, ?2)-200), 1100)
+             FROM message WHERE conversation_id=?1 AND message_type IN ('user','assistant','response')
+                 AND instr(content, ?2)>0 ORDER BY id DESC LIMIT 6")?;
+        let rows = stmt.query_map(rusqlite::params![conversation_id, query], |row| Ok(serde_json::json!({
+            "message_id": row.get::<_,i64>(0)?, "role": row.get::<_,String>(1)?, "excerpt": row.get::<_,String>(2)?,
+        })))?;
+        rows.collect()
     }
 
     #[instrument(level = "debug", skip(self, metadata_json), fields(id = id))]

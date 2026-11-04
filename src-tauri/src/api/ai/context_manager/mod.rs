@@ -3,9 +3,10 @@ pub mod persistence;
 pub mod summarizer;
 pub mod token_estimator;
 
-use std::collections::HashSet;
+#[cfg(test)]
+mod live_cache_tests;
 
-use crate::db::conversation_db::{ConversationDatabase, MessageAttachment};
+use crate::db::conversation_db::MessageAttachment;
 use budget::ContextBudget;
 use genai::Client;
 use token_estimator::{estimate_by_content, estimate_message_tokens};
@@ -33,18 +34,12 @@ pub struct CompactionContext<'a> {
     pub client: &'a Client,
     pub model_name: &'a str,
     pub conversation_id: i64,
-    pub conversation_db: &'a ConversationDatabase,
+    pub checkpoint_store: &'a dyn persistence::CheckpointStore,
     pub is_butler: bool,
     /// DB message IDs aligned by index with the message list.
     /// Used for persistence (recording which messages were compacted).
     pub message_ids: Vec<i64>,
 }
-
-/// Marker text replacing truncated old tool results (microcompact).
-const TOOL_RESULT_CLEARED: &str = "[旧工具结果已清除]";
-
-/// Maximum number of tool results to keep (counted from newest).
-const MICROCOMPACT_KEEP_RECENT: usize = 6;
 
 /// Fit a message list into the given context budget (synchronous, estimation only).
 ///
@@ -97,8 +92,7 @@ pub fn fit_to_budget(
 /// compaction when the threshold is exceeded.
 ///
 /// Strategy (inspired by Claude Code's multi-level approach):
-/// 1. **Microcompact** — truncate old tool results (cheap, no LLM call)
-/// 2. **Full compact** — summarize body messages via LLM
+/// Summarize a fixed prefix once and restore it at the same position after reload.
 ///
 /// The algorithm splits messages into three segments:
 /// - **Head**: the system prompt (first message)
@@ -113,9 +107,9 @@ pub async fn fit_to_budget_with_compaction(
     budget: &ContextBudget,
     db_token_counts: &[i32],
     ctx: CompactionContext<'_>,
-) -> FitResult {
+) -> Result<FitResult, crate::errors::AppError> {
     if !budget.enabled {
-        return FitResult { estimated_tokens: 0, compacted: false, messages };
+        return Ok(FitResult { estimated_tokens: 0, compacted: false, messages });
     }
 
     let estimated_tokens = estimate_total(messages.as_slice(), db_token_counts);
@@ -133,31 +127,13 @@ pub async fn fit_to_budget_with_compaction(
 
     // Not over threshold — pass through
     if estimated_tokens <= trigger {
-        return FitResult { estimated_tokens, compacted: false, messages };
+        return Ok(FitResult { estimated_tokens, compacted: false, messages });
     }
 
     info!(estimated_tokens, trigger, "context over threshold, attempting compaction");
 
-    // --- Level 1: Microcompact (truncate old tool results) ---
-    let (messages, db_token_counts_vec) = microcompact_tool_results(messages, db_token_counts);
-    let db_token_counts = &db_token_counts_vec;
-    let post_mc_tokens = estimate_total(&messages, db_token_counts);
-
-    if post_mc_tokens <= trigger {
-        info!(
-            original_tokens = estimated_tokens,
-            post_microcompact_tokens = post_mc_tokens,
-            "microcompact sufficient, skipping full LLM compaction"
-        );
-        return FitResult { estimated_tokens: post_mc_tokens, compacted: true, messages };
-    }
-
-    info!(
-        post_microcompact_tokens = post_mc_tokens,
-        trigger, "microcompact not sufficient, proceeding with LLM compaction"
-    );
-
-    // --- Level 2: Full LLM compaction ---
+    // Leave the live tail byte-stable. Trimming a moving set of tool results
+    // changes the prefix on every continuation and drops the call IDs.
     // Compute tail by walking backwards with a token budget, respecting tool pair atomicity
     let tail_budget = budget.tail_token_budget();
     let head_count =
@@ -168,16 +144,19 @@ pub async fn fit_to_budget_with_compaction(
 
     if body_end <= head_count {
         info!(
-            estimated_tokens = post_mc_tokens,
+            estimated_tokens,
             trigger,
             message_count = messages.len(),
             "over threshold but not enough messages to compact"
         );
-        return FitResult { estimated_tokens: post_mc_tokens, compacted: false, messages };
+        if estimated_tokens > budget.effective_input_limit() {
+            return Err(crate::errors::AppError::UnknownError(format!("会话 {} 无可压缩的完整消息段，预计输入 {} tokens，预算 {}", ctx.conversation_id, estimated_tokens, budget.effective_input_limit())));
+        }
+        return Ok(FitResult { estimated_tokens, compacted: false, messages });
     }
 
     info!(
-        estimated_tokens = post_mc_tokens,
+        estimated_tokens,
         trigger,
         head_count,
         body_range = format!("{}..{}", head_count, body_end),
@@ -188,47 +167,11 @@ pub async fn fit_to_budget_with_compaction(
     let body_messages = &messages[head_count..body_end];
 
     // Generate summary via LLM
-    let summary = match summarizer::generate_summary(
-        ctx.client,
-        ctx.model_name,
-        body_messages,
-        ctx.is_butler,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "LLM summary generation failed, passing through uncompacted");
-            return FitResult { estimated_tokens: post_mc_tokens, compacted: false, messages };
-        }
-    };
-
-    // Persist the compaction summary to DB
-    let first_id = ctx.message_ids.get(head_count).copied().unwrap_or(0);
-    let last_id = ctx.message_ids.get(body_end.saturating_sub(1)).copied().unwrap_or(0);
-    if first_id > 0 && last_id > 0 {
-        if let Err(e) = persistence::store_compaction_summary(
-            ctx.conversation_db,
-            ctx.conversation_id,
-            &summary,
-            first_id,
-            last_id,
-        ) {
-            warn!(error = %e, "failed to persist compaction summary, continuing with in-memory compaction");
-        } else {
-            info!(
-                conversation_id = ctx.conversation_id,
-                first_id, last_id, "compaction summary persisted to DB"
-            );
-        }
-    } else {
-        warn!(
-            head_count,
-            body_end,
-            message_ids_len = ctx.message_ids.len(),
-            "no valid message IDs for compaction persistence — summary will be in-memory only"
-        );
-    }
+    let source_ids = ctx.message_ids.get(head_count..body_end)
+        .filter(|ids| ids.iter().all(|id| *id > 0))
+        .ok_or_else(|| crate::errors::AppError::UnknownError(format!("会话 {} 无法定位完整的压缩来源", ctx.conversation_id)))?;
+    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, body_messages, ctx.is_butler)
+        .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
 
     // Assemble compacted message list: Head + Summary + Tail
     let mut compacted = Vec::with_capacity(head_count + 1 + tail_count);
@@ -237,7 +180,7 @@ pub async fn fit_to_budget_with_compaction(
         compacted.push(msg.clone());
     }
     // Summary as system message
-    compacted.push(("system".to_string(), summary, vec![]));
+    compacted.push(("system".to_string(), summary.clone(), vec![]));
     // Tail
     for msg in messages.iter().skip(body_end) {
         compacted.push(msg.clone());
@@ -246,82 +189,25 @@ pub async fn fit_to_budget_with_compaction(
     let compacted_tokens = estimate_total(&compacted, &[]);
     info!(
         original_tokens = estimated_tokens,
-        post_microcompact_tokens = post_mc_tokens,
         compacted_tokens,
         original_messages = messages.len(),
         compacted_messages = compacted.len(),
         "context compaction complete"
     );
 
-    FitResult { estimated_tokens: compacted_tokens, compacted: true, messages: compacted }
+    if compacted_tokens >= estimated_tokens || compacted_tokens > budget.effective_input_limit() {
+        return Err(crate::errors::AppError::UnknownError(format!("会话 {} 压缩后预计 {} tokens（原 {}，输入预算 {}）", ctx.conversation_id, compacted_tokens, estimated_tokens, budget.effective_input_limit())));
+    }
+    let persisted = persistence::store_compaction_summary(ctx.checkpoint_store, ctx.conversation_id, &summary, source_ids, body_messages)
+        .map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 保存上下文检查点失败：{}", ctx.conversation_id, e)))?;
+    compacted[head_count].1 = persisted;
+    let estimated_tokens = estimate_total(&compacted, &[]);
+    if estimated_tokens > budget.effective_input_limit() {
+        return Err(crate::errors::AppError::UnknownError(format!("会话 {} 恢复检查点后仍超过输入预算：{} tokens", ctx.conversation_id, estimated_tokens)));
+    }
+    Ok(FitResult { estimated_tokens, compacted: true, messages: compacted })
 }
 
-/// Microcompact: truncate old tool_result contents to save tokens cheaply.
-///
-/// Keeps the most recent `MICROCOMPACT_KEEP_RECENT` tool results intact and
-/// replaces the content of older ones with a placeholder. This is similar to
-/// Claude Code's microcompact strategy.
-fn microcompact_tool_results(
-    messages: Vec<MessageTuple>,
-    db_token_counts: &[i32],
-) -> (Vec<MessageTuple>, Vec<i32>) {
-    // Collect indices of tool_result messages
-    let tool_result_indices: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, (msg_type, content, _))| {
-            msg_type == "tool_result" && content != TOOL_RESULT_CLEARED
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    if tool_result_indices.len() <= MICROCOMPACT_KEEP_RECENT {
-        return (messages, db_token_counts.to_vec());
-    }
-
-    let truncate_count = tool_result_indices.len() - MICROCOMPACT_KEEP_RECENT;
-    let indices_to_truncate: HashSet<usize> =
-        tool_result_indices[..truncate_count].iter().copied().collect();
-
-    let mut tokens_saved: usize = 0;
-    let mut new_db_tokens = db_token_counts.to_vec();
-    // Ensure new_db_tokens covers all messages
-    new_db_tokens.resize(messages.len(), 0);
-
-    let new_messages: Vec<MessageTuple> = messages
-        .into_iter()
-        .enumerate()
-        .map(|(i, (msg_type, content, attachments))| {
-            if indices_to_truncate.contains(&i) {
-                let old_tokens =
-                    estimate_message_tokens(&content, new_db_tokens.get(i).copied().unwrap_or(0));
-                let new_tokens = estimate_message_tokens(TOOL_RESULT_CLEARED, 0);
-                tokens_saved += old_tokens.saturating_sub(new_tokens);
-                new_db_tokens[i] = 0; // reset DB token count for truncated message
-                (msg_type, TOOL_RESULT_CLEARED.to_string(), attachments)
-            } else {
-                (msg_type, content, attachments)
-            }
-        })
-        .collect();
-
-    if tokens_saved > 0 {
-        info!(
-            truncated_results = truncate_count,
-            kept_results = MICROCOMPACT_KEEP_RECENT,
-            estimated_tokens_saved = tokens_saved,
-            "microcompact: truncated old tool results"
-        );
-    }
-
-    (new_messages, new_db_tokens)
-}
-
-/// Walk backwards from the end of the message list, accumulating estimated tokens,
-/// until `tail_budget` is exhausted. Returns the number of tail messages to keep.
-///
-/// Ensures tool_use/tool_result pairs are not split: if including a tool_result
-/// message, also include the preceding response that contains the tool_use.
 fn compute_tail_count(
     messages: &[MessageTuple],
     db_token_counts: &[i32],
@@ -576,37 +462,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn microcompact_truncates_old_tool_results() {
-        let mut messages = vec![msg("system", "sys")];
-        // Add 10 tool results
-        for _ in 0..10 {
-            messages.push(msg("tool_result", &format!("tool output {}", "x".repeat(1000))));
-        }
-        messages.push(msg("user", "latest"));
 
-        let (result, _) = microcompact_tool_results(messages, &[]);
-        let cleared_count = result.iter().filter(|(_, c, _)| c == TOOL_RESULT_CLEARED).count();
-        let kept_count = result
-            .iter()
-            .filter(|(t, c, _)| t == "tool_result" && c != TOOL_RESULT_CLEARED)
-            .count();
-        assert_eq!(kept_count, MICROCOMPACT_KEEP_RECENT);
-        assert_eq!(cleared_count, 10 - MICROCOMPACT_KEEP_RECENT);
-    }
-
-    #[test]
-    fn microcompact_noop_when_few_results() {
-        let messages = vec![
-            msg("system", "sys"),
-            msg("tool_result", "output 1"),
-            msg("tool_result", "output 2"),
-            msg("user", "hi"),
-        ];
-        let (result, _) = microcompact_tool_results(messages.clone(), &[]);
-        assert_eq!(result.len(), messages.len());
-        assert!(result.iter().all(|(_, c, _)| c != TOOL_RESULT_CLEARED));
-    }
 
     #[test]
     fn compute_tail_atomicity_with_multiple_tool_results() {

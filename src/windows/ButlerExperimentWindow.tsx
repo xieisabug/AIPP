@@ -301,6 +301,76 @@ function ButlerExperimentWindow() {
     const [mainConversationId, setMainConversationId] = useState<string>("");
     const [mainModelDisplayName, setMainModelDisplayName] = useState<string>("");
     const [tasks, setTasks] = useState<ButlerTaskListItem[]>([]);
+    const [contact, setContact] = useState<{ assistantId: number; conversationId: number } | null>(null);
+    const contactRequest = useRef(0);
+    const [detailsConversation, setDetailsConversation] = useState<string | null>(null);
+    const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
+    const activeConversationId = contact ? String(contact.conversationId) : mainConversationId;
+    const activeAssistant = assistants.find(assistant => assistant.id === contact?.assistantId);
+    type ContactPreview = { assistantId: number; conversationId: number; messageId: number | null; preview: string | null };
+    const [previews, setPreviews] = useState<ContactPreview[]>([]);
+    const restoreContact = useRef(true);
+    const previewRequest = useRef(0);
+    const loadPreviews = useCallback(async () => {
+        const request = ++previewRequest.current;
+        try {
+            const rows = await invoke<ContactPreview[]>("list_butler_contact_previews");
+            if (request === previewRequest.current) setPreviews(rows);
+        } catch (error) {
+            console.warn("读取联系人摘要失败", error);
+        }
+    }, []);
+    useEffect(() => {
+        if (!mainConversationId) return;
+        void loadPreviews();
+        window.addEventListener("focus", loadPreviews);
+        return () => window.removeEventListener("focus", loadPreviews);
+    }, [mainConversationId, loadPreviews]);
+    useEffect(() => {
+        let timer: ReturnType<typeof setTimeout>;
+        let disposed = false;
+        const listener = listen<{ kind: string }>("conversation_list_activity", ({ payload }) => {
+            if (!disposed && payload.kind === "stream_complete") {
+                clearTimeout(timer);
+                timer = setTimeout(loadPreviews, 200);
+            }
+        });
+        return () => {
+            disposed = true;
+            clearTimeout(timer);
+            void listener.then(stop => stop()).catch(console.warn);
+        };
+    }, [loadPreviews]);
+    const activePreview = previews.find(row => row.assistantId === contact?.assistantId);
+    useEffect(() => {
+        if (activePreview?.messageId) localStorage.setItem(`butler-read-${activePreview.conversationId}`, String(activePreview.messageId));
+    }, [activePreview]);
+    const selectContact = useCallback(async (assistant?: AssistantListItem) => {
+        restoreContact.current = false;
+        const request = ++contactRequest.current;
+        if (!assistant) {
+            localStorage.removeItem("butler-last-contact");
+            setContact(null);
+            return;
+        }
+        try {
+            const conversationId = await invoke<number>("open_butler_contact", { assistantId: assistant.id });
+            if (request === contactRequest.current) {
+                localStorage.setItem("butler-last-contact", String(assistant.id));
+                setContact({ assistantId: assistant.id, conversationId });
+                void loadPreviews();
+            }
+        } catch (error) {
+            if (request === contactRequest.current) toast.error(`无法打开${assistant.name}的私聊：${error}`);
+        }
+    }, [loadPreviews]);
+    useEffect(() => {
+        if (!restoreContact.current || !mainConversationId || !assistants.length) return;
+        restoreContact.current = false;
+        const lastId = Number(localStorage.getItem("butler-last-contact"));
+        const last = assistants.find(assistant => assistant.id === lastId);
+        if (last) void selectContact(last);
+    }, [assistants, mainConversationId, selectContact]);
     const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
     const [selectedTaskDetail, setSelectedTaskDetail] =
         useState<ButlerTaskDetailResponse | null>(null);
@@ -343,11 +413,13 @@ function ButlerExperimentWindow() {
         if (conversationIdNumber !== undefined) {
             ids.add(conversationIdNumber);
         }
+        if (contact) ids.add(contact.conversationId);
+        previews.forEach(row => ids.add(row.conversationId));
         tasks.forEach((task) => {
             ids.add(task.task_conversation_id);
         });
         return Array.from(ids);
-    }, [conversationIdNumber, tasks]);
+    }, [conversationIdNumber, contact, previews, tasks]);
 
     const filteredAvailableSkills = useMemo(() => {
         const query = taskSkillQuery.trim().toLowerCase();
@@ -376,7 +448,7 @@ function ButlerExperimentWindow() {
         isSubmitting,
         handleDecision,
     } = useOperationPermission({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
         conversationIds: permissionConversationIds,
     });
     const {
@@ -386,7 +458,7 @@ function ButlerExperimentWindow() {
         isSubmitting: isAcpSubmitting,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
         conversationIds: permissionConversationIds,
     });
     const {
@@ -395,7 +467,7 @@ function ButlerExperimentWindow() {
         handleSubmit: handleElicitationSubmit,
         handleCancel: handleElicitationCancel,
     } = useAcpElicitation({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
         conversationIds: permissionConversationIds,
     });
     const {
@@ -409,7 +481,7 @@ function ButlerExperimentWindow() {
         handleSubmit: handleAskUserSubmit,
         handleCancel: handleAskUserCancel,
     } = useAskUserQuestion({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
     });
     const {
         pendingRequest: pendingPreviewFileRequest,
@@ -419,7 +491,7 @@ function ButlerExperimentWindow() {
         handleOpenChange: handlePreviewFileOpenChange,
         reopenPersistedPreview: reopenPersistedPreviewFile,
     } = usePreviewFile({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
     });
 
     const handlePreviewFileContextSelection = useCallback((selection: PreviewFileContextSelection) => {
@@ -577,7 +649,7 @@ function ButlerExperimentWindow() {
                 return;
             }
             const message =
-                error instanceof Error ? error.message : "无法加载总管家实验窗口";
+                error instanceof Error ? error.message : String(error);
             console.error("[ButlerExperimentWindow] Failed to load main conversation:", error);
             if (!silentError) {
                 setLoadError(message);
@@ -1220,7 +1292,7 @@ function ButlerExperimentWindow() {
 
     useAppShortcuts("butler", {
         new: () => {
-            if (!mainConversationId || resettingMainConversation) {
+            if (contact || !mainConversationId || resettingMainConversation) {
                 return;
             }
             void handleResetMainConversation();
@@ -1265,54 +1337,53 @@ function ButlerExperimentWindow() {
                         <div className="min-w-0">
                             <div className="flex items-center gap-2 text-sm font-semibold">
                                 <Bot className="h-4 w-4" />
-                                任务台
+                                联系人
                             </div>
-                            {mainConversationId || showFeishuStatus ? (
-                                <div className="mt-2 flex flex-wrap items-center gap-2">
-                                    {mainModelDisplayName ? (
-                                        <Badge variant="outline" className="max-w-full">
-                                            <span className="truncate">
-                                                模型：{mainModelDisplayName}
-                                            </span>
-                                        </Badge>
-                                    ) : null}
-                                    {showFeishuStatus ? (
-                                        <Badge
-                                            variant={getFeishuStatusVariant(feishuStatus)}
-                                            className="gap-1"
-                                            title={feishuStatus?.status_text || "正在读取飞书连接状态"}
-                                        >
-                                            {getFeishuStatusIcon(
-                                                feishuStatus,
-                                                loadingFeishuStatus
-                                            )}
-                                            飞书
-                                        </Badge>
-                                    ) : null}
-                                    {!mainModelDisplayName && !showFeishuStatus ? (
-                                        <span className="text-xs text-muted-foreground">
-                                            总管家主会话已就绪
-                                        </span>
-                                    ) : null}
-                                </div>
-                            ) : (
-                                <p className="mt-1 text-xs text-muted-foreground">
-                                    {loadingMain
-                                        ? "正在准备总管家主会话..."
-                                        : "总管家主会话尚未初始化"}
-                                </p>
-                            )}
                         </div>
-                        <Badge variant="secondary">{totalTasks}</Badge>
+                        {showFeishuStatus && <Badge variant={getFeishuStatusVariant(feishuStatus)}>
+                            {getFeishuStatusIcon(feishuStatus, loadingFeishuStatus)} 飞书
+                        </Badge>}
+                    </div>
+                    <div className="flex min-h-0 flex-1 flex-col gap-1 p-3">
+                        <Button variant={!contact ? "secondary" : "ghost"} className="shrink-0 justify-start"
+                            aria-pressed={!contact} onClick={() => void selectContact()}>
+                            <Bot /> {butlerDisplayName}
+                        </Button>
+                        <div className="min-h-0 overflow-y-auto">
+                            {assistants.map(assistant => {
+                                const preview = previews.find(row => row.assistantId === assistant.id);
+                                const unread = preview?.messageId && contact?.assistantId !== assistant.id
+                                    && preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
+                                return (
+                                    <Button key={assistant.id} variant={contact?.assistantId === assistant.id ? "secondary" : "ghost"}
+                                        disabled={!mainConversationId} aria-pressed={contact?.assistantId === assistant.id}
+                                        className="h-auto min-h-11 w-full justify-start" onClick={() => void selectContact(assistant)}>
+                                        <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                                            {Array.from(assistant.name)[0]}
+                                        </span>
+                                        <span className="min-w-0 flex-1 text-left">
+                                            <span className="block truncate">{assistant.name}</span>
+                                            {preview?.preview && <span className="block truncate text-xs font-normal text-muted-foreground">{preview.preview}</span>}
+                                        </span>
+                                        {unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary" /> : null}
+                                        {tasks.some(task => task.executor_assistant_id === assistant.id && task.has_pending_permission)
+                                            && <Badge variant="outline">待审批</Badge>}
+                                    </Button>
+                                );
+                            })}
+                        </div>
                     </div>
 
                     <div
                         className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border"
                         data-aipp-slot="butler-task-rail-actions"
                     >
+                        <Button variant="outline" size="sm" onClick={() => setTaskDrawerOpen(true)}>
+                            任务 · {totalTasks}
+                        </Button>
                         <IconButton
                             icon={<Plus className="h-4 w-4 text-icon" />}
-                            onClick={() => setIsTaskDialogOpen(true)}
+                            onClick={() => { if (contact) setTaskAssistantId(String(contact.assistantId)); setIsTaskDialogOpen(true); }}
                             disabled={!mainConversationId}
                             border
                             title="派发任务"
@@ -1327,84 +1398,91 @@ function ButlerExperimentWindow() {
                         />
                     </div>
 
-                    <div className="min-h-0 flex-1 overflow-y-auto" data-aipp-slot="butler-task-list-scroll" onScroll={handleTaskListScroll}>
-                        <div className="space-y-2 p-3">
-                            {tasks.length === 0 ? (
-                                <div className="space-y-3 rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
-                                    <div>
-                                        {mainConversationId ? (
-                                            <>
-                                                暂无任务。你可以在主会话中调用
-                                                <code className="mx-1">
-                                                    spawn_task_conversation
-                                                </code>
-                                                ，或点击上方按钮手动派发。
-                                            </>
-                                        ) : (
-                                            "正在准备总管家任务台..."
-                                        )}
-                                    </div>
-                                    <Button
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={() => setIsTaskDialogOpen(true)}
-                                        disabled={!mainConversationId}
-                                    >
-                                        <Plus className="mr-2 h-4 w-4" />
-                                        新建第一个任务
-                                    </Button>
-                                </div>
-                            ) : null}
-                            {tasks.map((task) => (
-                                <button
-                                    key={task.task_conversation_id}
-                                    type="button"
-                                    className={`w-full rounded-xl p-3 text-left transition-colors ${isTaskDetailDialogOpen &&
-                                        selectedTaskId === task.task_conversation_id
-                                        ? "bg-primary/8 ring-1 ring-primary"
-                                        : "hover:bg-muted/40"
-                                        }`}
-                                    onClick={() =>
-                                        handleOpenTaskDetail(task.task_conversation_id)
-                                    }
-                                >
-                                    <div className="flex items-start justify-between gap-2">
-                                        <div className="min-w-0">
-                                            <div className="font-medium truncate">
-                                                {task.title}
+                    <Dialog open={taskDrawerOpen} onOpenChange={setTaskDrawerOpen}>
+                        <DialogContent className="flex max-h-[80vh] flex-col">
+                            <DialogHeader><DialogTitle>{activeAssistant ? activeAssistant.name + "的任务" : "全部任务"}</DialogTitle></DialogHeader>
+                            <div className="min-h-0 flex-1 overflow-y-auto" data-aipp-slot="butler-task-list-scroll" onScroll={handleTaskListScroll}>
+                                <div className="space-y-2 p-3">
+                                    {!tasks.some(task => !contact || task.executor_assistant_id === contact.assistantId) ? (
+                                        <div className="space-y-3 rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
+                                            <div>
+                                                {mainConversationId ? (
+                                                    <>
+                                                        暂无任务。你可以在主会话中调用
+                                                        <code className="mx-1">
+                                                            spawn_task_conversation
+                                                        </code>
+                                                        ，或点击上方按钮手动派发。
+                                                    </>
+                                                ) : (
+                                                    "正在准备总管家任务台..."
+                                                )}
                                             </div>
-                                            <div className="text-xs text-muted-foreground mt-1 truncate">
-                                                {task.executor_assistant_name}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => { if (contact) setTaskAssistantId(String(contact.assistantId)); setIsTaskDialogOpen(true); }}
+                                                disabled={!mainConversationId}
+                                            >
+                                                <Plus className="mr-2 h-4 w-4" />
+                                                新建第一个任务
+                                            </Button>
+                                        </div>
+                                    ) : null}
+                                    {tasks.filter(task => !contact || task.executor_assistant_id === contact.assistantId).map((task) => (
+                                        <button
+                                            key={task.task_conversation_id}
+                                            type="button"
+                                            className={`w-full rounded-xl p-3 text-left transition-colors ${isTaskDetailDialogOpen &&
+                                                selectedTaskId === task.task_conversation_id
+                                                ? "bg-primary/8 ring-1 ring-primary"
+                                                : "hover:bg-muted/40"
+                                                }`}
+                                            onClick={() =>
+                                                handleOpenTaskDetail(task.task_conversation_id)
+                                            }
+                                        >
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div className="min-w-0">
+                                                    <div className="font-medium truncate">
+                                                        {task.title}
+                                                    </div>
+                                                    <div className="text-xs text-muted-foreground mt-1 truncate">
+                                                        {task.executor_assistant_name}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    {task.has_pending_permission ? (
+                                                        <Badge variant="secondary">待审批</Badge>
+                                                    ) : null}
+                                                    <Badge variant={getStatusVariant(task.status)}>
+                                                        {getStatusLabel(task.status)}
+                                                    </Badge>
+                                                </div>
                                             </div>
+                                            <div className="mt-2 text-xs text-muted-foreground line-clamp-2">
+                                                {task.last_summary || task.goal}
+                                            </div>
+                                            <div className="mt-2 text-[11px] text-muted-foreground">
+                                                {task.is_finalized
+                                                    ? `完成于 ${formatTime(task.finalized_at)}`
+                                                    : "进行中"}
+                                            </div>
+                                        </button>
+                                    ))}
+                                    {loadingMoreTasks && (
+                                        <div className="flex items-center justify-center py-3">
+                                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                            <span className="ml-2 text-xs text-muted-foreground">加载更多…</span>
                                         </div>
-                                        <div className="flex items-center gap-2">
-                                            {task.has_pending_permission ? (
-                                                <Badge variant="secondary">待审批</Badge>
-                                            ) : null}
-                                            <Badge variant={getStatusVariant(task.status)}>
-                                                {getStatusLabel(task.status)}
-                                            </Badge>
-                                        </div>
-                                    </div>
-                                    <div className="mt-2 text-xs text-muted-foreground line-clamp-2">
-                                        {task.last_summary || task.goal}
-                                    </div>
-                                    <div className="mt-2 text-[11px] text-muted-foreground">
-                                        {task.is_finalized
-                                            ? `完成于 ${formatTime(task.finalized_at)}`
-                                            : "进行中"}
-                                    </div>
-                                </button>
-                            ))}
-                            {loadingMoreTasks && (
-                                <div className="flex items-center justify-center py-3">
-                                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                                    <span className="ml-2 text-xs text-muted-foreground">加载更多…</span>
+                                    )}
                                 </div>
-                            )}
-                        </div>
-                    </div>
+                            </div>
+
+                            {hasMoreTasks && <Button variant="ghost" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()}>加载更早任务</Button>}
+                        </DialogContent>
+                    </Dialog>
 
                     {scheduledTasks.length > 0 && (
                         <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
@@ -1488,12 +1566,18 @@ function ButlerExperimentWindow() {
                             >
                                 <div className="min-w-0">
                                     <div className="text-base font-semibold">
-                                        {butlerDisplayName}
+                                        {activeAssistant?.name ?? butlerDisplayName}
+                                        {!contact && mainModelDisplayName && <span className="ml-2 text-xs font-normal text-muted-foreground">{mainModelDisplayName}</span>}
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-2">
+                                    <Button size="sm" variant="ghost" aria-pressed={detailsConversation === activeConversationId}
+                                        onClick={() => setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId)}>
+                                        {detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
+                                    </Button>
                                     <ConversationStatsDialog
-                                        conversationId={mainConversationId}
+                                        showCacheActivity
+                                        conversationId={activeConversationId}
                                         externalOpen={isStatsDialogOpen}
                                         onExternalOpenChange={setIsStatsDialogOpen}
                                     />
@@ -1513,7 +1597,7 @@ function ButlerExperimentWindow() {
                                             )
                                         }
                                         onClick={() => void handleResetMainConversation()}
-                                        disabled={!mainConversationId || resettingMainConversation}
+                                        disabled={!!contact || !mainConversationId || resettingMainConversation}
                                         border
                                         title="重开新会话"
                                         dataAippSlot="butler-main-reset-conversation"
@@ -1522,9 +1606,9 @@ function ButlerExperimentWindow() {
                             </div>
                             <div className="min-h-0 flex-1">
                                 <ConversationUI
-                                    key={mainConversationId}
+                                    key={activeConversationId}
                                     ref={conversationUIRef}
-                                    conversationId={mainConversationId}
+                                    conversationId={activeConversationId}
                                     onChangeConversationId={() => undefined}
                                     pluginList={pluginList}
                                     hideHeader
@@ -1533,8 +1617,9 @@ function ButlerExperimentWindow() {
                                     inlineInteractionItems={inlineInteractionItems}
                                     inlineInteractionVisible={hasInlineInteraction}
                                     allowFeishuDebugResend={
-                                        showFeishuStatus && isMainConversationFeishuBound
+                                        !contact && showFeishuStatus && isMainConversationFeishuBound
                                     }
+                                    showExecutionDetails={detailsConversation === activeConversationId}
                                     windowLabel="butler_experiment"
                                     busySendBehavior="interrupt"
                                     onPreviewFileContextClick={handlePreviewFileContextSelection}

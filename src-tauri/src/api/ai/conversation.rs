@@ -845,7 +845,8 @@ pub fn build_message_list_with_metadata_from_db(
             log_selected_messages(conversation_id, "latest_branch", &latest_branch);
             let metadata = MessageListMetadata {
                 message_ids: latest_branch.iter().map(|m| m.id).collect(),
-                db_token_counts: latest_branch.iter().map(|m| m.input_token_count).collect(),
+                // input_token_count measures the entire request, not this message.
+                db_token_counts: vec![0; latest_branch.len()],
             };
             let messages = build_message_list_from_selected_messages(&latest_branch, all_messages);
 
@@ -867,7 +868,14 @@ pub fn build_message_list_with_metadata_from_db(
                     kept = kept_indices.len(),
                     "compaction filter removed previously compacted messages"
                 );
-                let messages: Vec<_> = kept_indices.iter().map(|&i| messages[i].clone()).collect();
+                let messages: Vec<_> = kept_indices.iter().map(|&i| {
+                    let (kind, content, attachments) = &messages[i];
+                    if kind == "system" && crate::api::ai::context_manager::persistence::is_compaction_summary(content) {
+                        let summary = crate::api::ai::context_manager::persistence::checkpoint_text(content);
+                        return (kind.clone(), summary.to_owned(), attachments.clone());
+                    }
+                    messages[i].clone()
+                }).collect();
                 let metadata = MessageListMetadata {
                     message_ids: kept_indices.iter().map(|&i| metadata.message_ids[i]).collect(),
                     db_token_counts: kept_indices

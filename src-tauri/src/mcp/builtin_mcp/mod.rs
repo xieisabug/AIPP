@@ -1637,6 +1637,18 @@ pub async fn execute_aipp_builtin_tool(
             let handler = AgentHandler::new(app_handle.clone());
 
             match tool_name.as_str() {
+                "search_own_history" => {
+                    let id = conversation_id.ok_or("search_own_history requires a current conversation")?;
+                    if !matches!(get_conversation_kind(&app_handle, id).as_deref(), Some("butler_main" | "butler_contact")) {
+                        return Err(format!("search_own_history is limited to a Butler contact conversation (conversation={id})"));
+                    }
+                    let query = args.get("query").and_then(|v| v.as_str()).map(str::trim)
+                        .filter(|q| !q.is_empty()).ok_or("search_own_history requires a non-empty query")?;
+                    let db = crate::db::conversation_db::ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+                    let hits = db.message_repo().map_err(|e| e.to_string())?.search_own_history(id, query)
+                        .map_err(|e| format!("search_own_history conversation={id}: {e}"))?;
+                    serde_json::json!({"content":[{"type":"text","text":serde_json::to_string(&hits).map_err(|e| e.to_string())?}],"isError":false})
+                }
                 "load_skill" => {
                     let command = args
                         .get("command")

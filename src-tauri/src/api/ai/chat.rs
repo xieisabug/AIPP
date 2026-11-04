@@ -225,7 +225,7 @@ fn merge_chat_response_metadata(
         .prompt_tokens_details
         .as_ref()
         .and_then(|details| details.cached_tokens)
-        .and_then(positive_token_count);
+        .filter(|value| *value >= 0);
     let cached_write_tokens = cache_creation_tokens_from_usage(usage);
 
     if thought_tokens.is_none() && cached_input_tokens.is_none() && cached_write_tokens.is_none() {
