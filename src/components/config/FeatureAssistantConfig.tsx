@@ -8,7 +8,8 @@ import { ConfigPageLayout, SidebarList, ListItemButton, ConfigPageLoading, Selec
 // 导入新的 hooks 和组件
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useVersionManager } from "@/hooks/feature/useVersionManager";
-import { usePlatform } from "@/hooks/use-platform";
+import { useIsMobilePlatform, usePlatform } from "@/hooks/use-platform";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { FeatureFormRenderer } from "./feature/FeatureFormRenderer";
 import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "@/data/Shortcuts";
 import {
@@ -30,16 +31,12 @@ interface FeatureItem {
     code: string;
 }
 
-interface FeatureItem {
-    id: string;
-    name: string;
-    description: string;
-    icon: React.ReactNode;
-    code: string;
-}
-
 const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () => void }> = ({ subNav, onSubNavConsumed }) => {
     const platform = usePlatform();
+    // 移动端列表行展示功能说明；桌面下拉保持只有名称
+    const isMobilePlatform = useIsMobilePlatform();
+    const isNarrow = useIsMobile();
+    const isMobileList = isMobilePlatform || isNarrow;
 
     // 功能列表定义
     const featureList = useMemo<FeatureItem[]>(() => [
@@ -114,6 +111,8 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
     const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+    // 跨页跳转到某个功能时，移动端直接打开该功能详情
+    const [mobileDetailRequest, setMobileDetailRequest] = useState(0);
 
     useEffect(() => {
         const mobileHidden = platform === "android" || platform === "ios"
@@ -132,6 +131,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             if (target) {
                 setSelectedFeature(target);
                 setPendingAnchor(anchor || null);
+                setMobileDetailRequest(request => request + 1);
             }
             onSubNavConsumed?.();
         }
@@ -572,9 +572,10 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             featureList.map((feature) => ({
                 id: feature.id,
                 label: feature.name,
+                description: isMobileList ? feature.description : undefined,
                 icon: feature.icon,
             })),
-        [featureList]
+        [featureList, isMobileList]
     );
 
     // 下拉菜单选择回调
@@ -648,6 +649,8 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             selectedOptionId={selectedFeature.id}
             onSelectOption={handleSelectFromDropdown}
             selectPlaceholder="选择功能"
+            listSearchable={false}
+            mobileDetailRequest={mobileDetailRequest}
         />
     );
 };

@@ -48,6 +48,8 @@
 - 消息操作、编辑、版本选择和移动预览使用至少 44px 触控目标；新增页面仍需逐项检查。
 - 设置表单分组卡片带 `data-aipp-config-section`，移动端由 `src/mobile/mobile.css` 去掉卡片外框；列表项卡片（插件、技能）不加该属性，保留卡片。
 - 设置页窄屏滚动容器由 `ConfigPageLayout` 提供（全宽、内边距在内部，滚动条贴边），页面内容不要再自建带外边距的滚动容器。
+- 设置页二级导航：`ConfigPageLayout` 在移动端（移动平台或 <768px）把 `selectOptions` 渲染为「列表 → 详情」，不再用 Select 切换；`SelectOption.trailing` 放列表行内独立操作（如 MCP 启停开关），`listSearchable={false}` 关闭固定条目的搜索，`mobileDetailRequest` 递增可直接打开当前项详情（subNav 跳转用）。打开的详情经 `src/lib/configSectionNav.ts` 按设置菜单 id 发布：`ConfigWindow` 顶栏显示详情标题，顶栏返回与系统返回先 `backConfigSection` 回列表，再走 `configLeaveGuard` 退出。
+- 助手配置的未保存判断用 `assistant/assistantFormDirty.ts` 比较当前值与已加载基线，不用 RHF `formState.isDirty`（未在 reset 中出现的 Controller 注册时会多出 undefined 键，导致误报）；加载时自动解析的 Agent 默认模型/推理强度写入基线。
 - 设置页首次读取完成前统一渲染 `ConfigPageLoading`（`@/components/common`），不要先渲染空状态；新增设置页沿用此约定。
 - 移动平台对话框由 `mobile.css` 全屏化并收窄左右内边距、DialogHeader 右侧预留关闭按钮位置；对话框内的行布局用 `flex-wrap` + `min-w-0`，不要依赖固定宽度或单行并排多个开关。
 - **新写移动端 UI 时**：可点目标 ≥44px；全屏容器直接用 `h-screen`（已自动走 dvh）；顶部/底部固定栏必须加 `safe-top` / `safe-bottom` 类。

@@ -76,3 +76,16 @@
 .aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] ~ [data-aipp-config-section] {
     border-top: 1px solid var(--border); padding-top: 1.5rem;
 }
+
+/* Sticky save bar sits flush with the screen bottom: no trailing scroll padding or card margin below it. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-page-scroll"]:has([data-aipp-slot="config-form-save-footer"]) {
+    padding-bottom: 0;
+}
+.aipp-mobile-platform [data-aipp-window="config"] .bottom-space { margin-bottom: 0; }
+/* Full-bleed bar across the 1rem scroll gutters; the save button stretches for an easy thumb target. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-form-save-footer"] {
+    margin-left: -1rem; margin-right: -1rem; padding-left: 1rem; padding-right: 1rem;
+    padding-top: .75rem; background: var(--card);
+}
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-form-save-footer"] > div { flex-direction: row-reverse; }
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-form-save-footer"] button { flex: 1 1 auto; }

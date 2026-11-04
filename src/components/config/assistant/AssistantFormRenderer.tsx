@@ -12,6 +12,8 @@ interface AssistantFormRendererProps {
     currentAssistant: AssistantDetail | null;
     formConfig: AssistantFormConfig[];
     form: UseFormReturn<any>;
+    /** Value-based dirty state from AssistantConfig (overrides RHF formState.isDirty). */
+    isDirty?: boolean;
     assistantConfigApi: AssistantConfigApi;
     onSave: () => void;
     onCopy?: () => void;
@@ -24,6 +26,7 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
     currentAssistant,
     formConfig,
     form,
+    isDirty,
     assistantConfigApi,
     onSave,
     onCopy,
@@ -70,6 +73,7 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
             onDelete={currentAssistant.assistant.id === 1 ? undefined : onDelete}
             onEdit={onEdit}
             useFormReturn={form}
+            isDirty={isDirty}
             extraButtons={
                 onShare ? (
                     <div className="flex gap-2">

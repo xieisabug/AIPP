@@ -71,6 +71,8 @@ interface ConfigFormProps {
     enableExpand?: boolean;
     defaultExpanded?: boolean;
     useFormReturn: UseFormReturn<any, any, any>;
+    /** Caller-computed dirty state; when omitted falls back to RHF formState.isDirty. */
+    isDirty?: boolean;
     assistantConfigApi?: AssistantConfigApi;
     layout?: "default" | "prompt" | "provider";
     assistantType?: number | null;  // 用于过滤模型（ACP 助手 vs 普通助手）
@@ -454,6 +456,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     defaultExpanded = true,
     layout = "default",
     useFormReturn,
+    isDirty: isDirtyProp,
     assistantConfigApi,
     assistantType,
     onSave,
@@ -466,6 +469,8 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     const [isExpanded, setIsExpanded] = useState<boolean>(defaultExpanded);
     const isMobilePlatform = useIsMobilePlatform();
     const contentRef = useRef<HTMLDivElement>(null);
+    // Only read RHF's proxy when no explicit value is given (reading it subscribes).
+    const isDirty = isDirtyProp ?? useFormReturn.formState.isDirty;
 
     // 检查是否需要获取模型数据
     const hasModelSelect = useMemo(() => {
@@ -627,7 +632,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                     </div>
                 </div>
                 <div className="flex items-center gap-2 ml-4 flex-shrink-0">
-                    {onSave && useFormReturn.formState.isDirty ? (
+                    {onSave && isDirty ? (
                         <span
                             className="rounded-full border border-foreground/30 bg-muted px-2 py-0.5 text-xs font-medium text-foreground"
                             data-aipp-slot="config-form-dirty-badge"
@@ -740,7 +745,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                 >
                                     保存配置
                                 </Button>
-                                {useFormReturn.formState.isDirty ? (
+                                {isDirty ? (
                                     <span className="text-xs font-medium text-foreground">有未保存的更改</span>
                                 ) : null}
                             </div>

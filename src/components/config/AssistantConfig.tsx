@@ -25,6 +25,7 @@ import { AssistantConfigApi } from "@/types/forms";
 import type { LoadedPlugin, PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 import { getErrorMessage } from "@/utils/error";
 import { registerConfigBeforeLeave } from "@/lib/configLeaveGuard";
+import { isAssistantFormDirty } from "./assistant/assistantFormDirty";
 import {
     AlertDialog,
     AlertDialogContent,
@@ -80,12 +81,35 @@ const cloneFormSnapshot = (values: Record<string, unknown>): Record<string, unkn
 
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
-    const isDirty = form.formState.isDirty;
-    const dirtyRef = useRef(isDirty);
-    dirtyRef.current = isDirty;
     const [leavePrompt, setLeavePrompt] = useState<null | { proceed: () => void }>(null);
     /** Last loaded/saved form values — discard must restore this, not empty useForm defaults. */
     const loadedFormSnapshotRef = useRef<Record<string, unknown>>({});
+    // Dirty = current values differ from the loaded/saved baseline (not RHF isDirty, see assistantFormDirty).
+    // Guards evaluate it on demand; the badge state follows value changes asynchronously.
+    const isFormDirtyNow = useCallback(
+        () => isAssistantFormDirty(form.getValues(), loadedFormSnapshotRef.current),
+        [form]
+    );
+    const [isDirty, setIsDirty] = useState(false);
+    const dirtyCheckQueuedRef = useRef(false);
+    const scheduleDirtyCheck = useCallback(() => {
+        if (dirtyCheckQueuedRef.current) return;
+        dirtyCheckQueuedRef.current = true;
+        // Field registration can emit during render; never setState synchronously from it.
+        queueMicrotask(() => {
+            dirtyCheckQueuedRef.current = false;
+            setIsDirty(isFormDirtyNow());
+        });
+    }, [isFormDirtyNow]);
+    useEffect(
+        () => form.subscribe({ formState: { values: true }, callback: scheduleDirtyCheck }),
+        [form, scheduleDirtyCheck]
+    );
+    /** Values just loaded or saved become the clean baseline. */
+    const commitFormBaseline = useCallback((values: Record<string, unknown>) => {
+        loadedFormSnapshotRef.current = cloneFormSnapshot(values);
+        scheduleDirtyCheck();
+    }, [scheduleDirtyCheck]);
     const [searchQuery, setSearchQuery] = useState('');
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
@@ -264,6 +288,14 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 setAgentModelOptions(options);
                 if (selection.model) {
                     applyAgentModelSelection(selection.model.code, selection.effort);
+                    // 加载时自动解析的默认模型/推理强度属于已加载状态，不是用户编辑
+                    if (providerId == null) {
+                        commitFormBaseline({
+                            ...loadedFormSnapshotRef.current,
+                            agent_model: selection.model.code,
+                            reasoning_effort: selection.effort,
+                        });
+                    }
                 }
             } catch (error) {
                 if (!isCurrent()) return;
@@ -275,7 +307,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 if (isCurrent()) setAgentModelLoading(false);
             }
         },
-        [applyAgentModelSelection]
+        [applyAgentModelSelection, commitFormBaseline]
     );
 
     const handleAgentProviderChange = useCallback(
@@ -394,7 +426,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         }, {} as Record<string, any>),
                         ...pluginConfigValues,
                     });
-                    loadedFormSnapshotRef.current = cloneFormSnapshot(form.getValues());
+                    commitFormBaseline(form.getValues());
                     if (
                         assistantDetail.assistant.assistant_type === 4
                         && (assistantDetail.model[0]?.provider_id ?? 0) > 0
@@ -435,19 +467,20 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             loadAssistantDetail,
             loadPluginAssistantConfigValues,
             loadAgentModelOptions,
+            commitFormBaseline,
         ]
     );
 
 
     useEffect(() => {
         return registerConfigBeforeLeave((proceed) => {
-            if (!dirtyRef.current) {
+            if (!isFormDirtyNow()) {
                 proceed();
                 return;
             }
             setLeavePrompt({ proceed });
         });
-    }, []);
+    }, [isFormDirtyNow]);
 
     useDataRefresh({
         events: ["assistant_list_changed", "llm_provider_changed", "mcp_state_changed"],
@@ -455,18 +488,18 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         refresh: async (isCurrent) => {
             const list = await loadAssistants(isCurrent);
             if (!isCurrent()) return;
-            if (dirtyRef.current && currentAssistant) {
+            if (isFormDirtyNow() && currentAssistant) {
                 toast.warning("助手配置已更新，未保存的编辑已保留；保存或切换助手后可重新加载。");
                 return;
             }
             const selected = list.find((a) => a.id === currentAssistant?.assistant.id) ?? list[0];
-            if (selected) await handleChooseAssistant(selected, true, () => isCurrent() && !dirtyRef.current);
+            if (selected) await handleChooseAssistant(selected, true, () => isCurrent() && !isFormDirtyNow());
             else {
                 selectionRequestRef.current += 1;
                 setCurrentAssistant(null);
                 setPluginAssistantConfigValues({});
                 form.reset({});
-                loadedFormSnapshotRef.current = {};
+                commitFormBaseline({});
             }
         },
         onError: (error) => toast.error(`同步后刷新助手配置失败: ${getErrorMessage(error)}`),
@@ -741,12 +774,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             // 保存后以当前表单值作为干净基线，保证界面选择与持久化一致
             const snapshot = form.getValues();
             form.reset(snapshot);
-            loadedFormSnapshotRef.current = cloneFormSnapshot(snapshot);
+            commitFormBaseline(snapshot);
         } catch (error) {
             toast.error("保存失败: " + error);
             throw error;
         }
-    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail, loadPluginAssistantConfigValues, pluginAssistantFormFields]);
+    }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail, loadPluginAssistantConfigValues, pluginAssistantFormFields, commitFormBaseline]);
 
     // 删除助手
     const handleDelete = useCallback(() => {
@@ -802,9 +835,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 codex_sandbox: "default",
                 codex_approvals_reviewer: "default",
             });
-            loadedFormSnapshotRef.current = cloneFormSnapshot(form.getValues());
+            commitFormBaseline(form.getValues());
         },
-        [addAssistant, form, invalidateSelection]
+        [addAssistant, form, invalidateSelection, commitFormBaseline]
     );
 
     // 分享助手
@@ -833,13 +866,13 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         (assistantId: string) => {
             const assistant = assistants.find((a) => a.id.toString() === assistantId);
             if (!assistant) return;
-            if (dirtyRef.current && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
+            if (isFormDirtyNow() && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
                 setLeavePrompt({ proceed: () => { void handleChooseAssistant(assistant); } });
                 return;
             }
             void handleChooseAssistant(assistant);
         },
-        [assistants, handleChooseAssistant, currentAssistant]
+        [assistants, handleChooseAssistant, currentAssistant, isFormDirtyNow]
     );
 
     const handleLeaveSave = useCallback(async () => {
@@ -858,8 +891,9 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         setLeavePrompt(null);
         // Fresh clone: RHF can mutate the values object passed into reset().
         form.reset(cloneFormSnapshot(loadedFormSnapshotRef.current));
+        scheduleDirtyCheck();
         proceed?.();
-    }, [leavePrompt, form]);
+    }, [leavePrompt, form, scheduleDirtyCheck]);
 
     // 新增按钮组件
     const addButton = useMemo(
@@ -907,7 +941,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                     key={assistant.id}
                     isSelected={currentAssistant?.assistant.id === assistant.id}
                     onClick={() => {
-                        if (dirtyRef.current && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
+                        if (isFormDirtyNow() && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
                             setLeavePrompt({ proceed: () => { void handleChooseAssistant(assistant); } });
                             return;
                         }
@@ -918,7 +952,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [filteredAssistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton, searchQuery]);
+    ), [filteredAssistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton, searchQuery, isFormDirtyNow]);
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => currentAssistant ? (
@@ -926,6 +960,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             currentAssistant={currentAssistant}
             formConfig={formConfig}
             form={form}
+            isDirty={isDirty}
             assistantConfigApi={assistantConfigApi}
             onSave={handleAssistantFormSave}
             onCopy={currentAssistant.assistant.id === 1 ? undefined : handleCopyAssistant}
@@ -939,7 +974,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             title="选择一个助手"
             description="从左侧列表中选择一个助手开始配置"
         />
-    ), [currentAssistant, formConfig, form, assistantConfigApi, handleAssistantFormSave, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
+    ), [currentAssistant, formConfig, form, isDirty, assistantConfigApi, handleAssistantFormSave, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
 
     const leaveDialog = (
         <AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>

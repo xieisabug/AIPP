@@ -1,4 +1,4 @@
-import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo } from "react";
+import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 // 各设置页体积较大，按需动态加载，避免打开设置窗口时一次性解析全部页面代码
 const LLMProviderConfig = React.lazy(() => import("../components/config/LLMProviderConfig"));
@@ -23,6 +23,7 @@ import { pluginRuntime } from "../services/PluginRuntime";
 import { navigateMobile, popMobile, registerMobileBackHandler } from "../mobile/navigation";
 import { canLeaveConfigNow, requestConfigLeave } from "@/lib/configLeaveGuard";
 import ConfigPageLoading from "../components/common/ConfigPageLoading";
+import { backConfigSection, ConfigSectionContext, useConfigSectionDetailTitle } from "@/lib/configSectionNav";
 
 interface MenuItem {
     id: string;
@@ -105,6 +106,10 @@ function ConfigWindow() {
     }, [skillsAvailable, pluginsAvailable, isMobilePlatform]);
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
+    const selectedMenuRef = useRef(selectedMenu);
+    selectedMenuRef.current = selectedMenu;
+    // 页面内打开了二级详情（列表 → 详情）时，顶栏显示详情标题，返回先回到列表
+    const sectionDetailTitle = useConfigSectionDetailTitle(selectedMenu);
     // 设置分区是平级切换，不记录历史：返回直接退出设置页
     const goToSection = useCallback((menu: string) => {
         setSelectedMenu(menu);
@@ -160,7 +165,8 @@ function ConfigWindow() {
     // Android 返回：直接退出设置页，离开前经过未保存保护
     useEffect(() => {
         if (!isMobilePlatform) return;
-        return registerMobileBackHandler("config", () => !canLeaveConfigNow(popMobile));
+        return registerMobileBackHandler("config", () =>
+            backConfigSection(selectedMenuRef.current) || !canLeaveConfigNow(popMobile));
     }, [isMobilePlatform]);
 
     useEffect(() => {
@@ -261,6 +267,7 @@ function ConfigWindow() {
     const currentSectionName = menuList.find((item) => item.id === selectedMenu)?.name ?? "设置";
     // 与系统返回一致：经未保存保护后退出设置页，回到进入设置前的页面
     const handleHeaderBack = () => {
+        if (backConfigSection(selectedMenu)) return;
         requestConfigLeave(popMobile);
     };
 
@@ -276,7 +283,7 @@ function ConfigWindow() {
                     <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                         {isMobilePlatform ? (
                             <>
-                                <Button variant="ghost" size="icon" onClick={handleHeaderBack} aria-label="退出设置"
+                                <Button variant="ghost" size="icon" onClick={handleHeaderBack} aria-label={sectionDetailTitle !== null ? "返回列表" : "退出设置"}
                                     data-aipp-slot="config-mobile-back">
                                     <ChevronLeft className="h-5 w-5" />
                                 </Button>
@@ -284,9 +291,14 @@ function ConfigWindow() {
                                     type="button"
                                     className="min-h-11 min-w-0 flex-1 truncate px-2 text-center text-sm font-medium"
                                     onClick={() => setSidebarOpen(true)}
-                                    aria-label={`${currentSectionName}，打开设置菜单`}
+                                    aria-label={`${sectionDetailTitle || currentSectionName}，打开设置菜单`}
                                 >
-                                    {currentSectionName}
+                                    {sectionDetailTitle ? (
+                                        <span className="flex min-w-0 flex-col items-center leading-tight">
+                                            <span className="max-w-full truncate">{sectionDetailTitle}</span>
+                                            <span className="max-w-full truncate text-[11px] font-normal text-muted-foreground">{currentSectionName}</span>
+                                        </span>
+                                    ) : currentSectionName}
                                 </button>
                                 <SheetTrigger asChild>
                                     <Button variant="ghost" size="icon" aria-label="设置菜单">
@@ -338,15 +350,19 @@ function ConfigWindow() {
                         {isMobilePlatform ? visitedMenus.map(menu => {
                             const Page = contentMap[menu];
                             return <div key={menu} hidden={menu !== selectedMenu} className="h-full min-h-0">
-                                <Page pluginList={stablePluginList} navigateTo={navigateTo} subNav={menu === selectedMenu ? subNav : undefined}
-                                    onSubNavConsumed={() => setSubNav(undefined)} />
+                                <ConfigSectionContext.Provider value={menu}>
+                                    <Page pluginList={stablePluginList} navigateTo={navigateTo} subNav={menu === selectedMenu ? subNav : undefined}
+                                        onSubNavConsumed={() => setSubNav(undefined)} />
+                                </ConfigSectionContext.Provider>
                             </div>;
-                        }) : <SelectedComponent
-                            pluginList={stablePluginList}
-                            navigateTo={navigateTo}
-                            subNav={subNav}
-                            onSubNavConsumed={() => setSubNav(undefined)}
-                        />}
+                        }) : <ConfigSectionContext.Provider value={selectedMenu}>
+                            <SelectedComponent
+                                pluginList={stablePluginList}
+                                navigateTo={navigateTo}
+                                subNav={subNav}
+                                onSubNavConsumed={() => setSubNav(undefined)}
+                            />
+                        </ConfigSectionContext.Provider>}
                     </Suspense>
                 </div>
             </div>

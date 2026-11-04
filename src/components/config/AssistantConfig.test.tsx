@@ -37,6 +37,12 @@ vi.mock("./assistant/AssistantFormRenderer", () => ({
             name="plugin::8::note"
             render={({ field }) => <input aria-label="plugin" {...field} value={field.value ?? ""} />}
         />
+        {/* Like production mcp_config/skills_config: registered but absent from reset() values. */}
+        <Controller
+            control={form.control}
+            name="mcp_config"
+            render={() => <span />}
+        />
         <div data-testid="plugin-state">{String(formConfig["plugin::8::note"] ?? "")}</div>
         <button onClick={onCopy}>copy</button>
         <button type="button" onClick={() => { void onSave?.(); }}>保存配置</button>
@@ -174,6 +180,19 @@ describe("AssistantConfig leave guard", () => {
         // Snapshot restore — not empty useForm defaults
         await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
         expect(screen.getByTestId("selected")).toHaveTextContent("1");
+    });
+
+    it("should leave without prompting when an edit was reverted and an unreset field is registered", async () => {
+        setup();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "temp" } });
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "prompt-1" } });
+        let left = false;
+        act(() => {
+            requestConfigLeave(() => { left = true; });
+        });
+        expect(left).toBe(true);
+        expect(screen.queryByText("有未保存的助手配置")).toBeNull();
     });
 
     it("does not proceed when leave-save fails", async () => {
