@@ -2365,6 +2365,12 @@ fn read_local_snapshots_from_db(
             let id = natural_object_id(spec, &raw_values)?;
             remember_natural_key(sync_conn, spec, &id, &raw_values)?;
             id
+        } else if is_official_row && spec.object_type == "llm.provider"
+            && raw_values.get("api_type").and_then(JsonValue::as_str) == Some("opencode_go")
+        {
+            let identity = crate::api::opencode_go::BUILTIN_SYNC_ID;
+            remap_sync_object_map(sync_conn, spec.object_type, spec.table, local_id, identity)?;
+            identity.to_owned()
         } else if is_official_row {
             // 官方/内置种子行：确定性 object_id，各设备对同一内置行生成相同标识
             if !spec.seed_official_ids.contains(&local_id) {
@@ -3109,6 +3115,14 @@ fn apply_change_to_db_inner(
     // A device ID identifies the author, not whether this local DB has applied
     // the event (restored databases may predate that device's own writes).
     // Only the confirmed version/sequence above is an application receipt.
+
+    // Link the built-in provider even when the first pull precedes the first local scan.
+    if spec.object_type == "llm.provider" && change.object_id == crate::api::opencode_go::BUILTIN_SYNC_ID {
+        if let Some(id) = conn.query_row("SELECT id FROM llm_provider WHERE api_type='opencode_go' AND is_official=1 LIMIT 1",
+            [], |row| row.get::<_, i64>(0)).optional().map_err(|e| e.to_string())? {
+            remap_sync_object_map(sync_conn, spec.object_type, spec.table, id, &change.object_id)?;
+        }
+    }
 
     if change.operation == "delete" {
         if quick_assistant::apply_delete(sync_conn, conn, change)? { return Ok(()); }
@@ -5178,6 +5192,18 @@ fn set_cursor(app_handle: &AppHandle, cursor: i64) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn conversation_sync_id(app: &AppHandle, id: i64) -> Result<String, String> {
+    let conn = open_data_db(&get_db_path(app, "sync.db")?)?;
+    // A send only needs the identity map. Do not reconfigure the running
+    // sync connection's journal or run schema migrations on every request.
+    let initialized: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_object_map')",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !initialized { ensure_sync_db(app)?; }
+    ensure_object_id(&conn, "conversation", "conversation", id)
+}
+
 fn ensure_object_id(
     conn: &Connection,
     object_type: &str,
@@ -5196,13 +5222,15 @@ fn ensure_object_id(
         return Ok(existing);
     }
     let sync_id = Uuid::new_v4().to_string();
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT INTO sync_object_map (object_type, local_table, local_id, sync_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(object_type, local_id) DO NOTHING",
         params![object_type, local_table, local_id, sync_id, now_string()],
     )
     .map_err(|e| e.to_string())?;
-    Ok(sync_id)
+    if inserted == 1 { return Ok(sync_id); }
+    conn.query_row("SELECT sync_id FROM sync_object_map WHERE object_type=?1 AND local_id=?2",
+        params![object_type, local_id], |row| row.get(0)).map_err(|e| e.to_string())
 }
 
 /// 官方/内置种子行的确定性 object_id：`official:{object_type}:{local_id}`。

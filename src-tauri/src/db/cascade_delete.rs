@@ -443,6 +443,21 @@ pub(crate) fn delete_model_preferences(conn: &Connection, provider: i64, code: O
     Ok(())
 }
 
+/// Attach before taking the write locks used to check for historical references.
+pub(crate) fn attach_model_history(conn: &Connection) -> Result<()> {
+    attach_related(conn, "llm_model")
+}
+
+pub(crate) fn model_history_needs_cleanup(conn: &Connection, removed: &[i64]) -> Result<bool> {
+    let tables = Tables::new(conn)?;
+    if !tables.has("message", "llm_model_id") { return Ok(false); }
+    // Historical messages can number in the thousands. Scan the table once
+    // even when the user deselects many models in one operation.
+    let ids = serde_json::to_string(removed).map_err(|e| diagnostic(e.to_string()))?;
+    conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {} WHERE llm_model_id IN
+        (SELECT value FROM json_each(?1)))", tables.names["message"]), [ids], |row| row.get(0))
+}
+
 /// A model-list replacement must retain preferences for the surviving codes.
 pub(crate) fn prune_model_preferences(conn: &Connection, provider: i64) -> Result<()> {
     conn.execute("DELETE FROM llm_model_request_mode_preference WHERE llm_provider_id=?1 AND NOT EXISTS

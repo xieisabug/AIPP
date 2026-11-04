@@ -102,6 +102,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'anthropic': 'Anthropic API',
         'cohere': 'Cohere API',
         'deepseek': 'DeepSeek API',
+        'opencode_go': 'OpenCode Go',
         'github_copilot': 'GitHub Copilot',
         'acp': 'ACP(Agent Client Protocol)',
         'codex_app_server': 'Codex',
@@ -295,6 +296,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     .filter((model) => model.is_selected)
                     .map(toModelTagItem);
                 setTags(selectedModelTags);
+                setModelSelectionDialogOpen(false);
 
                 toast.success("模型列表更新成功");
             } catch (e) {
@@ -846,7 +848,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     value: apiTypeLabel,
                 },
             },
-            {
+            ...(apiType === "opencode_go" ? [] : [{
                 key: "endpoint",
                 config: {
                     type: "input" as const,
@@ -857,12 +859,13 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         ? <span role="alert" className="text-destructive">{endpointStatus.message}</span>
                         : endpointStatus.message,
                 },
-            },
+            }]),
             {
                 key: "api_key",
                 config: {
                     type: "password" as const,
                     label: "API Key",
+                    hint: apiType === "opencode_go" ? <a href="https://opencode.ai/auth" target="_blank" rel="noreferrer">从 OpenCode Console 获取订阅 API Key</a> : undefined,
                     value: "",
                 },
             },
@@ -961,7 +964,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 open={modelSelectionDialogOpen}
                 onOpenChange={setModelSelectionDialogOpen}
                 modelData={modelSelectionData}
-                apiType={apiType}
                 onConfirm={handleModelSelectionConfirm}
                 loading={isUpdatingModels}
             />

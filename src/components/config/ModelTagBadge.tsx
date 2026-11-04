@@ -8,7 +8,7 @@ import { ModelTagItem } from "./llmModelTypes";
 interface ModelTagBadgeProps {
     model: ModelTagItem;
     onRemove?: () => void;
-    onToggleRequestMode?: () => void;
+    onToggleRequestMode?: (mode: string) => void;
     showRequestModeToggle?: boolean;
 }
 
@@ -26,6 +26,7 @@ const ModelTagBadge: React.FC<ModelTagBadgeProps> = ({
         {showRequestModeToggle && onToggleRequestMode && (
             <ModelRequestModeToggle
                 requestMode={model.request_mode}
+                availableModes={model.available_modes}
                 onToggle={onToggleRequestMode}
             />
         )}

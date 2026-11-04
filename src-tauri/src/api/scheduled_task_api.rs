@@ -1881,6 +1881,7 @@ async fn execute_scheduled_task_inner(
         .unwrap_or(false);
 
     let client = create_client_with_config(
+        None,
         &crate::api::copilot_token_manager::prepare_provider_configs(
             app_handle,
             &model_detail.provider.api_type,

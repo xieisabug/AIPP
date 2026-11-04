@@ -1,6 +1,6 @@
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::genai_client;
-use crate::db::llm_db::{resolve_request_mode_or_default, LLMDatabase, DEFAULT_MODEL_REQUEST_MODE};
+use crate::db::llm_db::{resolve_request_mode_or_default, LLMDatabase};
 use crate::utils::share_utils::{decrypt_provider_data, encrypt_provider_data, ProviderShareData};
 use crate::FeatureConfigState;
 use genai::Modality;
@@ -34,6 +34,8 @@ pub struct LlmModel {
     pub audio_support: bool,
     pub video_support: bool,
     pub request_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_modes: Option<Vec<String>>,
 }
 
 fn persisted_model(model: &LlmModel) -> crate::db::llm_db::LLMModel {
@@ -55,14 +57,13 @@ pub struct LlmProviderConfig {
     pub is_addition: Option<bool>,
 }
 
-fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
-    match request_mode {
-        Some("responses") => "responses",
-        _ => DEFAULT_MODEL_REQUEST_MODE,
+pub(crate) fn validate_request_mode(db: &LLMDatabase, provider: &crate::db::llm_db::LLMProvider, code: &str, request_mode: &str) -> Result<(), String> {
+    if provider.api_type == "opencode_go" {
+        let saved = db.get_model_request_mode(provider.id, code).map_err(|e| e.to_string())?;
+        let modes = crate::api::opencode_go::available_modes(db, code, saved.as_deref()).map_err(|e| e.to_string())?;
+        if modes.contains(&request_mode.to_owned()) { return Ok(()); }
+        return Err(format!("OpenCode Go 模型 {code} 不支持协议 {request_mode}，请刷新模型目录"));
     }
-}
-
-fn validate_request_mode(request_mode: &str) -> Result<(), String> {
     match request_mode {
         "chat_completions" | "responses" => Ok(()),
         _ => Err(format!("Unsupported request_mode: {request_mode}")),
@@ -216,11 +217,18 @@ pub async fn get_llm_models(
         video_support,
     ) in models
     {
-        let request_mode = request_mode_map.get(&code).cloned().unwrap_or_else(|| {
-            resolve_request_mode_or_default(provider_api_type.as_deref().unwrap_or(""), &code, None)
-                .to_string()
-        });
+        let saved = request_mode_map.get(&code);
+        let api_type = provider_api_type.as_deref().unwrap_or("");
+        let available_modes = if api_type == "opencode_go" {
+            Some(crate::api::opencode_go::available_modes(&db, &code, saved.map(String::as_str))
+                .map_err(|e| e.to_string())?)
+        } else { None };
+        let request_mode = match &available_modes {
+            Some(modes) => crate::api::opencode_go::selected_mode(modes, saved),
+            None => resolve_request_mode_or_default(api_type, &code, saved.map(String::as_str)).into(),
+        };
         result.push(LlmModel {
+            available_modes,
             id,
             name,
             llm_provider_id,
@@ -257,6 +265,15 @@ pub async fn fetch_model_list(
         .unwrap_or(false);
     let effective_network_proxy = proxy_enabled.then_some(network_proxy).flatten();
 
+    if llm_provider.api_type == "opencode_go" {
+        drop(config_feature_map);
+        let models = crate::api::opencode_go::catalog(&app_handle, llm_provider_id, effective_network_proxy.as_deref()).await?;
+        db.replace_llm_models(llm_provider_id, &models.iter().map(persisted_model).collect::<Vec<_>>(), true).map_err(|e| e.to_string())?;
+        crate::sync::schedule_sync_after_local_change(&app_handle);
+        emit_llm_provider_changed(&app_handle);
+        return Ok(models);
+    }
+
     // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
     let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
         &app_handle,
@@ -268,6 +285,7 @@ pub async fn fetch_model_list(
 
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
+        None,
         &effective_configs,
         "",
         &llm_provider.api_type,
@@ -287,6 +305,7 @@ pub async fn fetch_model_list(
             let mut result = Vec::new();
             for model in &models {
                 let model = LlmModel {
+                    available_modes: None,
                     id: 0,
                     name: model.name.to_string(),
                     llm_provider_id,
@@ -333,18 +352,25 @@ pub async fn add_llm_model(
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     let code_str = code.clone();
+    let saved = db.get_model_request_mode(llm_provider_id, &code).map_err(|e| e.to_string())?;
+    let available_modes = if llm_provider.api_type == "opencode_go" {
+        Some(crate::api::opencode_go::available_modes(&db, &code, saved.as_deref()).map_err(|e| e.to_string())?)
+    } else { None };
+    let request_mode = match &available_modes {
+        Some(modes) => crate::api::opencode_go::selected_mode(modes, saved.as_ref()),
+        None => resolve_request_mode_or_default(&llm_provider.api_type, &code, saved.as_deref()).into(),
+    };
+    let tx = db.conn.unchecked_transaction().map_err(|e| e.to_string())?;
     db.add_llm_model(&code_str, llm_provider_id, &code_str, &code_str, false, false, false)
         .map_err(|e| e.to_string())?;
-    let request_mode = db
-        .get_model_request_mode(llm_provider_id, &code_str)
-        .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| {
-            resolve_request_mode_or_default(&llm_provider.api_type, &code_str, None).to_string()
-        });
-
+    if available_modes.is_some() && request_mode != "unsupported" {
+        db.upsert_model_request_mode(llm_provider_id, &code, &request_mode).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
     emit_llm_provider_changed(&app_handle);
     Ok(LlmModel {
+        available_modes,
         id: 0,
         name: code.clone(),
         llm_provider_id,
@@ -387,6 +413,8 @@ pub struct ModelForSelection {
     pub audio_support: bool,
     pub video_support: bool,
     pub request_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_modes: Option<Vec<String>>,
     pub is_selected: bool, // 是否已在数据库中存在
 }
 
@@ -430,6 +458,19 @@ pub async fn preview_model_list(
         "preview_model_list proxy config"
     );
 
+    if llm_provider.api_type == "opencode_go" {
+        drop(config_feature_map);
+        let models = crate::api::opencode_go::catalog(&app_handle, llm_provider_id, effective_network_proxy.as_deref()).await?;
+        let mut missing = existing_model_codes.clone();
+        let available_models = models.into_iter().map(|m| {
+            let is_selected = missing.remove(&m.code);
+            ModelForSelection { code: m.code, name: m.name, description: m.description,
+                vision_support: m.vision_support, audio_support: m.audio_support, video_support: m.video_support,
+                request_mode: m.request_mode, available_modes: m.available_modes, is_selected }
+        }).collect();
+        return Ok(ModelSelectionResponse { available_models, missing_models: missing.into_iter().collect() });
+    }
+
     // 对 Copilot 类型进行 token exchange，替换 api_key/endpoint
     let effective_configs = crate::api::copilot_token_manager::prepare_provider_configs(
         &app_handle,
@@ -441,6 +482,7 @@ pub async fn preview_model_list(
 
     // 使用共用的客户端创建函数
     let client = genai_client::create_client_with_config(
+        None,
         &effective_configs,
         "",
         &llm_provider.api_type,
@@ -474,6 +516,7 @@ pub async fn preview_model_list(
                     });
 
                 available_models.push(ModelForSelection {
+                    available_modes: None,
                     name: model.name.to_string(),
                     code: model_code,
                     description: format!("Model: {}", model.name),
@@ -548,8 +591,8 @@ pub async fn update_selected_models(
     let supports_request_mode = genai_client::supports_model_request_mode(&llm_provider.api_type);
 
     if supports_request_mode {
-        for model in &selected_models {
-            validate_request_mode(&model.request_mode)?;
+        for model in selected_models.iter().filter(|m| m.is_selected) {
+            validate_request_mode(&db, &llm_provider, &model.code, &model.request_mode)?;
         }
     }
 
@@ -558,7 +601,7 @@ pub async fn update_selected_models(
         code: model.code.clone(), description: model.description.clone(),
         vision_support: model.vision_support, audio_support: model.audio_support,
         video_support: model.video_support,
-        request_mode: normalize_request_mode(Some(&model.request_mode)).to_string(),
+        request_mode: model.request_mode.clone(),
     }).collect::<Vec<_>>();
     db.replace_llm_models(llm_provider_id, &models, supports_request_mode).map_err(|e| e.to_string())?;
 
@@ -574,7 +617,6 @@ pub async fn update_llm_model_request_mode(
     model_code: String,
     request_mode: String,
 ) -> Result<(), String> {
-    validate_request_mode(&request_mode)?;
 
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
@@ -585,10 +627,11 @@ pub async fn update_llm_model_request_mode(
         ));
     }
 
+    validate_request_mode(&db, &llm_provider, &model_code, &request_mode)?;
     db.upsert_model_request_mode(
         llm_provider_id,
         &model_code,
-        normalize_request_mode(Some(&request_mode)),
+        &request_mode,
     )
     .map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);

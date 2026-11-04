@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
+import { formatUsageDollars } from "./formatUsageDollars";
 import IconButton from "../IconButton";
 import { Info } from "lucide-react";
 import { tokenStatisticsService } from "@/services/tokenStatisticsService";
@@ -72,7 +73,9 @@ function MessageTokenStatsBody({
     loading: boolean;
     error: string | null;
 }) {
-    const usageSourceLabel = stats?.usage_source === "estimated" ? "估算" : "精确";
+    const hasUsage = stats && (stats.usage_source === "reported" || stats.usage_source === "estimated" ||
+        stats.total_tokens > 0 || stats.input_tokens > 0 || stats.output_tokens > 0);
+    const usageSourceLabel = hasUsage ? (stats?.usage_source === "estimated" ? "估算" : "精确") : "未记录";
     const cachedInputTokens = stats ? (stats.cached_input_tokens ?? stats.cached_read_tokens) : 0;
     const regularInputTokens = stats ? Math.max(stats.input_tokens - cachedInputTokens, 0) : 0;
 
@@ -92,19 +95,19 @@ function MessageTokenStatsBody({
                 <div className="space-y-1 text-sm">
                     <div className="flex justify-between gap-4">
                         <span className="text-muted-foreground">总 Token</span>
-                        <span className="font-medium">{formatNumber(stats.total_tokens)}</span>
+                        <span className="font-medium">{hasUsage ? formatNumber(stats.total_tokens) : "—"}</span>
                     </div>
                     <div className="flex justify-between gap-4">
                         <span className="text-muted-foreground">输入</span>
-                        <span className="font-medium">{formatNumber(regularInputTokens)}</span>
+                        <span className="font-medium">{hasUsage ? formatNumber(regularInputTokens) : "—"}</span>
                     </div>
                     <div className="flex justify-between gap-4">
                         <span className="text-muted-foreground">Cached input</span>
-                        <span className="font-medium">{formatNumber(cachedInputTokens)}</span>
+                        <span className="font-medium">{hasUsage ? formatNumber(cachedInputTokens) : "—"}</span>
                     </div>
                     <div className="flex justify-between gap-4">
                         <span className="text-muted-foreground">输出</span>
-                        <span className="font-medium">{formatNumber(stats.output_tokens)}</span>
+                        <span className="font-medium">{hasUsage ? formatNumber(stats.output_tokens) : "—"}</span>
                     </div>
                     {stats.thought_tokens > 0 && (
                         <div className="flex justify-between gap-4">
@@ -120,7 +123,17 @@ function MessageTokenStatsBody({
                     )}
                 </div>
 
-                {(stats.ttft_ms !== null && stats.ttft_ms !== undefined) || stats.tps ? (
+                {stats.opencode_go && (
+                    <div className="space-y-1 border-t pt-2 text-sm">
+                        <div className="text-xs font-medium text-muted-foreground">OpenCode Go · 美元</div>
+                        {stats.opencode_go.billing_source && <div className="flex justify-between"><span>计费来源</span><span>{stats.opencode_go.billing_source}</span></div>}
+                        {stats.opencode_go.allowance != null && <div className="flex justify-between"><span>订阅额度扣减</span><span>{formatUsageDollars(stats.opencode_go.allowance)}</span></div>}
+                        {stats.opencode_go.cost != null && <div className="flex justify-between"><span>{stats.opencode_go.estimated ? "估算费用" : "余额扣费"}</span><span>{formatUsageDollars(stats.opencode_go.cost)}</span></div>}
+                        {stats.opencode_go.list_cost != null && <div className="flex justify-between"><span>目录价</span><span>{formatUsageDollars(stats.opencode_go.list_cost)}</span></div>}
+                    </div>
+                )}
+
+                {stats.ttft_ms != null || stats.tps != null ? (
                     <div className="space-y-1 border-t pt-2 text-sm">
                         <div className="text-xs font-medium text-muted-foreground">性能指标</div>
                         {stats.ttft_ms !== null && stats.ttft_ms !== undefined && (

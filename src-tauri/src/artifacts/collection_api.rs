@@ -485,6 +485,7 @@ pub async fn generate_artifact_metadata(
         let proxy_enabled = false;
 
         let client = genai_client::create_client_with_config(
+            None,
             &model_detail.configs,
             &model_detail.model.code,
             &model_detail.provider.api_type,

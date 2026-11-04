@@ -29,6 +29,9 @@ pub fn resolve_request_mode_or_default(
     model_code: &str,
     request_mode: Option<&str>,
 ) -> &'static str {
+    if api_type == "opencode_go" {
+        return crate::api::opencode_go::mode(request_mode).unwrap_or("unsupported");
+    }
     match request_mode {
         Some("responses") => "responses",
         Some("chat_completions") => "chat_completions",
@@ -88,6 +91,15 @@ impl LLMDatabase {
         Ok(LLMDatabase { conn })
     }
 
+    pub fn effective_model_mode(&self, api_type: &str, provider_id: i64, code: &str) -> rusqlite::Result<String> {
+        let saved = self.get_model_request_mode(provider_id, code)?;
+        if api_type == "opencode_go" {
+            let modes = crate::api::opencode_go::available_modes(self, code, saved.as_deref())?;
+            return Ok(crate::api::opencode_go::selected_mode(&modes, saved.as_ref()));
+        }
+        Ok(resolve_request_mode_or_default(api_type, code, saved.as_deref()).into())
+    }
+
     #[instrument(level = "debug", skip(self), err)]
     pub fn create_tables(&self) -> rusqlite::Result<()> {
         self.conn.execute(
@@ -136,9 +148,18 @@ impl LLMDatabase {
             [],
         )?;
 
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS builtin_provider_migrations (name TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS opencode_go_protocols (model TEXT NOT NULL, mode TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(model, mode));")?;
         if let Err(err) = self.init_llm_provider() {
             warn!(error = ?err, "init_llm_provider failed (may already be initialized)");
         }
+        let tx = self.conn.unchecked_transaction()?;
+        if tx.execute("INSERT OR IGNORE INTO builtin_provider_migrations VALUES ('opencode_go')", [])? == 1 {
+            tx.execute("INSERT INTO llm_provider (name,api_type,description,is_official)
+                SELECT 'OpenCode Go','opencode_go','OpenCode Go API',1
+                WHERE NOT EXISTS (SELECT 1 FROM llm_provider WHERE api_type='opencode_go' AND is_official=1)", [])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -278,7 +299,7 @@ impl LLMDatabase {
         Ok(result)
     }
 
-    #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id, name = name))]
+    #[instrument(level = "debug", skip(self, value), fields(llm_provider_id = llm_provider_id, name = name))]
     pub fn update_llm_provider_config(
         &self,
         llm_provider_id: i64,
@@ -292,7 +313,7 @@ impl LLMDatabase {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self), fields(llm_provider_id = llm_provider_id, name = name, is_addition = is_addition))]
+    #[instrument(level = "debug", skip(self, value), fields(llm_provider_id = llm_provider_id, name = name, is_addition = is_addition))]
     pub fn add_llm_provider_config(
         &self,
         llm_provider_id: i64,
@@ -480,12 +501,7 @@ impl LLMDatabase {
 
         let provider_id = model.llm_provider_id;
         let provider = self.get_llm_provider(provider_id)?;
-        model.request_mode = resolve_request_mode_or_default(
-            &provider.api_type,
-            &model.code,
-            self.get_model_request_mode(provider_id, &model.code)?.as_deref(),
-        )
-        .to_string();
+        model.request_mode = self.effective_model_mode(&provider.api_type, provider_id, &model.code)?;
         let configs = self.get_llm_provider_config(provider_id)?;
 
         Ok(ModelDetail { model, provider, configs })
@@ -518,12 +534,7 @@ impl LLMDatabase {
 
         let provider_id = model.llm_provider_id;
         let provider = self.get_llm_provider(provider_id)?;
-        model.request_mode = resolve_request_mode_or_default(
-            &provider.api_type,
-            &model.code,
-            self.get_model_request_mode(provider_id, &model.code)?.as_deref(),
-        )
-        .to_string();
+        model.request_mode = self.effective_model_mode(&provider.api_type, provider_id, &model.code)?;
         let configs = self.get_llm_provider_config(provider_id)?;
 
         Ok(ModelDetail { model, provider, configs })
@@ -556,17 +567,22 @@ impl LLMDatabase {
     /// Replace a provider's selection atomically, retaining IDs and preferences
     /// for surviving codes. Removed codes use the ordinary cascade path.
     pub fn replace_llm_models(&self, provider_id: i64, models: &[LLMModel], save_request_modes: bool) -> rusqlite::Result<()> {
-        super::cascade_delete::with_transaction(&self.conn, "llm_model", || {
-            let existing = self.get_llm_models(provider_id.to_string())?;
-            for row in &existing {
-                if !models.iter().any(|model| model.code == row.3) {
-                    super::cascade_delete::delete(&self.conn, "llm_model", row.0)?;
-                }
-            }
+        use rusqlite::{Transaction, TransactionBehavior};
+        use std::collections::{HashMap, HashSet};
+        use super::cascade_delete;
+        let selected: HashSet<&str> = models.iter().map(|model| model.code.as_str()).collect();
+        let current_selection = || -> rusqlite::Result<(HashMap<String, i64>, Vec<i64>)> {
+            let rows = self.get_llm_models(provider_id.to_string())?;
+            let removed = rows.iter().filter(|row| !selected.contains(row.3.as_str())).map(|row| row.0).collect();
+            let mut ids = HashMap::new();
+            for row in rows { ids.entry(row.3).or_insert(row.0); }
+            Ok((ids, removed))
+        };
+        let save = |existing: &HashMap<String, i64>| {
             for model in models {
-                if let Some(row) = existing.iter().find(|row| row.3 == model.code) {
+                if let Some(id) = existing.get(&model.code) {
                     self.conn.execute("UPDATE llm_model SET name=?1, description=?2, vision_support=?3, audio_support=?4, video_support=?5 WHERE id=?6",
-                        params![model.name, model.description, model.vision_support, model.audio_support, model.video_support, row.0])?;
+                        params![model.name, model.description, model.vision_support, model.audio_support, model.video_support, id])?;
                 } else {
                     self.add_llm_model(&model.name, provider_id, &model.code, &model.description, model.vision_support, model.audio_support, model.video_support)?;
                 }
@@ -575,6 +591,31 @@ impl LLMDatabase {
                 }
             }
             super::cascade_delete::prune_model_preferences(&self.conn, provider_id)
+        };
+
+        // Additions and preference edits only write llm.db. Check again under
+        // the transaction lock so concurrent changes cannot skip a real removal.
+        for with_history in [false, true] {
+            // Callers that already own a transaction use the nested savepoint path below.
+            if !self.conn.is_autocommit() { break; }
+            if with_history { cascade_delete::attach_model_history(&self.conn)?; }
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            let (existing, removed) = current_selection()?;
+            if removed.is_empty() || (with_history && !cascade_delete::model_history_needs_cleanup(&self.conn, &removed)?) {
+                for id in removed {
+                    self.conn.execute("DELETE FROM llm_model WHERE id=?1", [id])?;
+                }
+                save(&existing)?;
+                return tx.commit();
+            }
+            tx.rollback()?;
+        }
+        // Historical messages actually reference a removed model. Both files
+        // must commit together, using the existing crash-safe cascade path.
+        cascade_delete::with_transaction(&self.conn, "llm_model", || {
+            let (existing, removed) = current_selection()?;
+            for id in removed { cascade_delete::delete(&self.conn, "llm_model", id)?; }
+            save(&existing)
         })
     }
 
