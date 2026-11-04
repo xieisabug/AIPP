@@ -574,18 +574,33 @@ body {
 }
 
 
-/* IME / visualViewport：顶栏贴齐可视区，避免正文顶到系统状态栏下（#148） */
+/*
+ * IME / visualViewport：顶栏贴齐可视区，避免正文顶到系统状态栏下（#148）。
+ * MobileShell 在键盘弹起时已把整个壳体收缩到 visualViewport 并 translateY(offsetTop)，
+ * 顶栏位于壳体内，这里不能再叠加 --aipp-vv-offset-top，否则会二次下移。
+ */
 .aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] {
     position: sticky;
-    top: var(--aipp-vv-offset-top, 0px);
+    top: 0;
     z-index: 30;
 }
 
-html[data-aipp-keyboard-open="true"] .aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] {
+/* class 与 data 属性都挂在 <html> 上，必须写成同一元素的复合选择器 */
+html.aipp-mobile-platform[data-aipp-keyboard-open="true"] [data-aipp-slot="chat-mobile-header"] {
     box-shadow: 0 1px 0 hsl(var(--border));
 }
 
 /* ===== 移动平台触控适配（仅 <html class="aipp-mobile-platform">，桌面不受影响） ===== */
+
+/*
+ * 代码块滚动时的固定工具栏：移动端放到 sticky 顶栏下方，避免压住顶栏按钮。
+ * 顶栏高度 = safe-top-android 的 max(inset,24px) + 44px 按钮 + 12px 底内边距，再留 8px 间距；
+ * z-index 低于顶栏（30）。
+ */
+.aipp-mobile-platform .aipp-sticky-code-toolbar {
+    top: calc(max(env(safe-area-inset-top, 0px), 24px) + 64px) !important;
+    z-index: 20 !important;
+}
 
 /* 消息操作栏常驻气泡底部：按钮 ≥44×44，窄屏横向滚动时不压缩 */
 .aipp-mobile-action-bar button {
@@ -650,6 +665,15 @@ html[data-aipp-keyboard-open="true"] .aipp-mobile-platform [data-aipp-slot="chat
 }
 .aipp-mobile-platform [data-aipp-slot^="chat-conversation-item-status"] {
     transform: translateX(-40px);
+}
+/* 标题/副标题为右侧常驻图标让位，先截断再碰到图标：菜单 44px（占右侧约 52px），状态图标再左移 40px */
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"] {
+    padding-right: 56px;
+    -webkit-touch-callout: none;
+}
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="responding"],
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="completed_unread"] {
+    padding-right: 92px;
 }
 /* 表单控件高度 ≥44px */
 .aipp-mobile-platform [data-slot="input"],

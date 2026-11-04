@@ -13,6 +13,8 @@ import { previewMobile } from "@/mobile/navigation";
 import { STATIC_PREVIEW_TYPES } from "@/mobile/previewDocument";
 
 // 固定工具栏位置由 IntersectionObserver 控制，无需动态计算偏移
+// 移动端固定工具栏下移到顶栏之下（App.css .aipp-sticky-code-toolbar），判定阈值同步放宽
+const MOBILE_STICKY_TOP_THRESHOLD = 96;
 
 const CodeBlock = React.memo(
     ({
@@ -72,13 +74,15 @@ const CodeBlock = React.memo(
                     const entry = entries[0];
                     // 当顶部 sentinel 不可见时，显示固定按钮
                     const bounds = containerRef.current?.getBoundingClientRect();
-                    setShouldShowFixed(!entry.isIntersecting && !!bounds && bounds.top < 8 && bounds.bottom > 60);
+                    // 移动端顶部有 sticky 顶栏（约 80px），代码块滚到顶栏下方即视为已离开原位
+                    const topThreshold = mobile ? MOBILE_STICKY_TOP_THRESHOLD : 8;
+                    setShouldShowFixed(!entry.isIntersecting && !!bounds && bounds.top < topThreshold && bounds.bottom > topThreshold + 52);
                 },
                 { root: null, rootMargin: '0px', threshold: [0, 1] }
             );
             observer.observe(sentinel);
             return () => observer.disconnect();
-        }, []);
+        }, [mobile]);
 
         // 监听主题变化事件
         useEffect(() => {
@@ -132,7 +136,7 @@ const CodeBlock = React.memo(
 
                 {/* 滚动时的固定按钮 */}
                 {shouldShowFixed && (
-                    <div className="fixed z-50 right-2 top-2">
+                    <div className="aipp-sticky-code-toolbar fixed z-50 right-2 top-2">
                         <ButtonGroup />
                     </div>
                 )}
@@ -155,7 +159,8 @@ const CodeBlock = React.memo(
                 {isLongCode && (
                     <div className="absolute bottom-2 right-2 z-10">
                         <button
-                            className="pointer-events-auto text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80 text-foreground"
+                            type="button"
+                            className={`pointer-events-auto text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80 text-foreground ${mobile ? "min-h-11 min-w-11 px-3 text-sm" : ""}`}
                             onClick={() => setCollapsed((v) => !v)}
                             title={collapsed ? '展开全部' : '收起'}
                         >

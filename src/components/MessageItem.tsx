@@ -230,10 +230,12 @@ function QueuedMessageIndicator({
     meta: QueueMessageMeta;
     onPromote?: (queueId: number) => void;
 }) {
+    // 移动端触控目标 ≥44px，桌面保持 28px
+    const sizeClass = useIsMobilePlatform() ? "h-11 w-11" : "h-7 w-7";
     if (meta.queueKind === "interrupt") {
         return (
             <div
-                className="mt-3 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground"
+                className={`mt-3 flex ${sizeClass} shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground`}
                 title="打断消息"
                 aria-label="打断消息"
             >
@@ -247,7 +249,7 @@ function QueuedMessageIndicator({
             <DropdownMenuTrigger asChild>
                 <button
                     type="button"
-                    className="mt-3 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                    className={`mt-3 flex ${sizeClass} shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground`}
                     title="排队消息"
                     aria-label="排队消息"
                 >
@@ -559,7 +561,7 @@ const MessageItem = React.memo<MessageItemProps>(
                 {shouldCollapseUserMessage && (
                     <button
                         type="button"
-                        className="mt-2 ml-auto flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                        className={`mt-2 ml-auto flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground ${isMobilePlatform ? "min-h-11 px-3 text-sm" : "text-xs"}`}
                         aria-expanded={isUserMessageExpanded}
                         onClick={() => setExpandedUserMessage(
                             isUserMessageExpanded

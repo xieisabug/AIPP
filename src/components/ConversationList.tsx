@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, memo } from "react";
+import { useCallback, useEffect, useRef, useState, memo, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
@@ -18,6 +18,72 @@ import {
 } from "./ui/dropdown-menu";
 import { Button } from "./ui/button";
 import ConfirmDialog from "./ConfirmDialog";
+import { useIsMobilePlatform } from "../hooks/use-platform";
+
+const LONG_PRESS_DELAY_MS = 500;
+const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
+
+/**
+ * 触屏长按（≈500ms）打开会话菜单；手指移动超过 10px、抬起或系统接管滚动（pointercancel）即取消。
+ * 长按触发后吞掉随后的 click，避免同时切换会话。
+ */
+function useLongPress(enabled: boolean, onLongPress: () => void) {
+    const timerRef = useRef<number | null>(null);
+    const startRef = useRef<{ x: number; y: number } | null>(null);
+    const firedRef = useRef(false);
+
+    const cancel = useCallback(() => {
+        if (timerRef.current !== null) {
+            window.clearTimeout(timerRef.current);
+            timerRef.current = null;
+        }
+        startRef.current = null;
+    }, []);
+
+    useEffect(() => cancel, [cancel]);
+
+    const onPointerDown = useCallback((event: ReactPointerEvent) => {
+        firedRef.current = false;
+        if (!enabled || event.pointerType === "mouse") return;
+        cancel();
+        startRef.current = { x: event.clientX, y: event.clientY };
+        timerRef.current = window.setTimeout(() => {
+            timerRef.current = null;
+            startRef.current = null;
+            firedRef.current = true;
+            onLongPress();
+        }, LONG_PRESS_DELAY_MS);
+    }, [cancel, enabled, onLongPress]);
+
+    const onPointerMove = useCallback((event: ReactPointerEvent) => {
+        const start = startRef.current;
+        if (!start) return;
+        if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > LONG_PRESS_MOVE_TOLERANCE_PX) {
+            cancel();
+        }
+    }, [cancel]);
+
+    /** 返回 true 表示本次 click 来自长按，调用方应忽略。 */
+    const consumeClick = useCallback(() => {
+        const fired = firedRef.current;
+        firedRef.current = false;
+        return fired;
+    }, []);
+
+    return {
+        handlers: enabled
+            ? {
+                onPointerDown,
+                onPointerMove,
+                onPointerUp: cancel,
+                onPointerCancel: cancel,
+                onPointerLeave: cancel,
+                onContextMenu: (event: ReactMouseEvent) => event.preventDefault(),
+            }
+            : { onPointerDown },
+        consumeClick,
+    };
+}
 
 interface ConversationItemProps {
     conversation: Conversation;
@@ -37,6 +103,10 @@ const ConversationItem = memo(function ConversationItem({
     onOpenDelete,
 }: ConversationItemProps) {
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+    const isMobilePlatform = useIsMobilePlatform();
+    const [menuOpen, setMenuOpen] = useState(false);
+    const openMenu = useCallback(() => setMenuOpen(true), []);
+    const longPress = useLongPress(isMobilePlatform, openMenu);
 
     // 判断是否需要脱敏
     const shouldMask = antiLeakageEnabled && !isRevealed;
@@ -47,7 +117,10 @@ const ConversationItem = memo(function ConversationItem({
         <li
             className={`group h-16 w-full mx-0 mb-2 text-sm border-0 rounded-xl cursor-pointer select-none flex flex-col justify-center p-3 box-border relative transition-all duration-200 ${isSelected ? "font-bold text-primary bg-primary-foreground" : "bg-transparent hover:bg-muted hover:translate-x-0.5"}`}
             data-aipp-slot="chat-conversation-list-item"
+            data-status={status}
+            {...longPress.handlers}
             onClick={() => {
+                if (longPress.consumeClick()) return;
                 onSelect(conversation.id.toString());
             }}
         >
@@ -76,12 +149,13 @@ const ConversationItem = memo(function ConversationItem({
                     </div>
                 )}
 
-                <DropdownMenu>
+                <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
                     <DropdownMenuTrigger asChild>
                         <Button
                             variant="link"
                             size="icon"
                             className="invisible absolute inset-0 h-9 w-9 p-0 group-hover:visible transition-opacity duration-200"
+                            aria-label="会话操作"
                             data-aipp-slot="chat-conversation-item-menu-trigger"
                             onClick={(e) => {
                                 // 避免点击菜单按钮时触发列表项选择

@@ -33,7 +33,7 @@ import useConversationManager from "../hooks/useConversationManager";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { Download, Menu, Plus } from "lucide-react";
+import { ListOrdered, Menu, PanelRight, Plus } from "lucide-react";
 import {
     runScrollPerformanceProbe,
     waitForAnimationFrames,
@@ -196,6 +196,7 @@ function ChatUIWindow() {
     const platform = usePlatform();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [conversationTitle, setConversationTitle] = useState("");
+    const [conversationAssistantName, setConversationAssistantName] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
     const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
     const [pendingPreviewFileSelection, setPendingPreviewFileSelection] =
@@ -364,6 +365,7 @@ function ChatUIWindow() {
 
     const handleConversationChange = useCallback((conv?: Conversation) => {
         setConversationTitle(conv?.name || "");
+        setConversationAssistantName(conv?.assistant_name || "");
     }, []);
 
     useEffect(() => {
@@ -852,12 +854,12 @@ function ChatUIWindow() {
                 <div className="flex flex-col h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                     {/* 移动端顶部栏 */}
                     <div
-                        className={`flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
+                        className={`flex-none flex items-center justify-between px-2 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
                         data-aipp-slot="chat-mobile-header"
                     >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                             <SheetTrigger asChild>
-                                <Button variant="ghost" size="icon">
+                                <Button variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="打开会话列表">
                                     <Menu className="h-5 w-5" />
                                 </Button>
                             </SheetTrigger>
@@ -880,20 +882,46 @@ function ChatUIWindow() {
                                 />
                             </SheetContent>
                         </Sheet>
-                        <span className="font-medium text-sm truncate flex-1 text-center mx-3" data-aipp-slot="chat-mobile-title">
-                            {mobileTitle}
-                        </span>
-                        <div className="flex items-center gap-1">
+                        {/* 标题 + 助手名副标题；有会话时点击标题重命名（复用 ConversationUI 的标题编辑对话框） */}
+                        <button
+                            type="button"
+                            className="mx-1 flex min-h-11 min-w-0 flex-1 flex-col items-center justify-center rounded-md px-1 leading-tight disabled:cursor-default"
+                            data-aipp-slot="chat-mobile-title"
+                            disabled={!selectedConversation}
+                            aria-label={selectedConversation ? `重命名会话：${mobileTitle}` : mobileTitle}
+                            onClick={() => conversationUIRef.current?.openTitleEdit()}
+                        >
+                            <span className="max-w-full truncate text-sm font-medium">{mobileTitle}</span>
+                            {selectedConversation && conversationAssistantName ? (
+                                <span className="max-w-full truncate text-xs text-muted-foreground" data-aipp-slot="chat-mobile-subtitle">
+                                    {conversationAssistantName}
+                                </span>
+                            ) : null}
+                        </button>
+                        <div className="flex items-center">
                             {selectedConversation ? (
-                                <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="min-h-11 min-w-11"
-                                    aria-label="导出对话"
-                                    onClick={() => conversationUIRef.current?.openExport()}
-                                >
-                                    <Download className="h-5 w-5" />
-                                </Button>
+                                <>
+                                    <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="min-h-11 min-w-11"
+                                        aria-label="对话轮次导航"
+                                        data-aipp-slot="chat-mobile-turn-nav"
+                                        onClick={() => conversationUIRef.current?.openTurnNavigator()}
+                                    >
+                                        <ListOrdered className="h-5 w-5" />
+                                    </Button>
+                                    <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="min-h-11 min-w-11"
+                                        aria-label="会话详情"
+                                        data-aipp-slot="chat-mobile-details"
+                                        onClick={() => conversationUIRef.current?.openDetails()}
+                                    >
+                                        <PanelRight className="h-5 w-5" />
+                                    </Button>
+                                </>
                             ) : null}
                             <Button variant="ghost" size="icon" className="min-h-11 min-w-11" onClick={handleNewConversation} aria-label="新建对话">
                                 <Plus className="h-5 w-5" />

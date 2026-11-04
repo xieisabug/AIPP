@@ -215,9 +215,31 @@ describe("InputArea mobile vs desktop layout", () => {
         mockInvokeHandler("get_skills_for_slash_completion", () => []);
     });
 
-    it("does not send when Enter confirms Chinese composition, then sends after the debounce", async () => {
+    it("should insert newline instead of sending when Enter is pressed on mobile", () => {
         const onSend = vi.fn();
         render(<InputAreaHarness isMobile initialText="你好" onSend={onSend} />);
+        const textarea = screen.getByRole("textbox");
+
+        expect(textarea).toHaveAttribute("enterkeyhint", "enter");
+        const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+        textarea.dispatchEvent(event);
+
+        // 未 preventDefault：浏览器默认行为（插入换行）得以保留
+        expect(event.defaultPrevented).toBe(false);
+        expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it("should send only via the send button on mobile", () => {
+        const onSend = vi.fn();
+        const { container } = render(<InputAreaHarness isMobile initialText="你好" onSend={onSend} />);
+        const send = container.querySelector('[data-aipp-slot="chat-input-send-button"]') as HTMLElement;
+        fireEvent.click(send);
+        expect(onSend).toHaveBeenCalledOnce();
+    });
+
+    it("does not send when Enter confirms Chinese composition, then sends after the debounce", async () => {
+        const onSend = vi.fn();
+        render(<InputAreaHarness initialText="你好" onSend={onSend} />);
         const textarea = screen.getByRole("textbox");
 
         fireEvent.compositionStart(textarea);

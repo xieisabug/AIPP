@@ -57,6 +57,9 @@ import { Plus, Square, ArrowUp, Loader2 } from "lucide-react";
 import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { previewMobile } from "@/mobile/navigation";
 import { getCaretCoordinates } from "../../utils/caretCoordinates";
 import BangCompletionList, { type BangCompletionItem } from "./BangCompletionList";
 import AssistantCompletionList from "./AssistantCompletionList";
@@ -104,6 +107,10 @@ interface InputAreaProps {
     onPlanModeToggle?: () => void;
 }
 const IMAGE_AREA_HEIGHT = 80;
+// 移动端胶囊：48px border-box - 2*2 边框 = 44px 单行内容高度；多行最多约 30vh（≈6 行）后内部滚动
+const MOBILE_TEXTAREA_MIN_HEIGHT = 44;
+const MOBILE_TEXTAREA_MAX_VIEWPORT_RATIO = 0.3;
+export const COMPOSER_GROW_VAR = "--aipp-composer-grow";
 // 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
 const EMPTY_ACP_COMMANDS: AcpAvailableCommand[] = [];
 
@@ -134,6 +141,7 @@ const InputArea = React.memo(
         ) => {
             // 图片区域的高度
             const textareaRef = useRef<HTMLTextAreaElement>(null);
+            const rootRef = useRef<HTMLDivElement>(null);
 
             // 暴露给外部的方法
             useImperativeHandle(
@@ -185,6 +193,37 @@ const InputArea = React.memo(
             // 补全弹窗出现时才动态加载 pinyin-pro，加载完成后触发重新过滤
             const pinyinReady = usePinyinReady(
                 slashListVisible || artifactListVisible || assistantListVisible,
+            );
+
+            const isMobilePlatform = useIsMobilePlatform();
+
+            // 移动端没有独立 artifact 窗口：读取收藏内容后走单 WebView 受限预览
+            const openArtifact = useCallback(
+                async (artifactId: number) => {
+                    try {
+                        if (isMobilePlatform) {
+                            const item = await invoke<{
+                                name: string;
+                                artifact_type: string;
+                                code: string;
+                            } | null>("get_artifact_by_id", { id: artifactId });
+                            if (!item) {
+                                throw new Error(`收藏 ${artifactId} 已不存在`);
+                            }
+                            previewMobile({
+                                language: item.artifact_type,
+                                code: item.code,
+                                title: item.name,
+                            });
+                            return;
+                        }
+                        await invoke("open_artifact_window", { artifactId });
+                    } catch (error) {
+                        console.error("Failed to open artifact:", error);
+                        toast.error(`打开收藏 ${artifactId} 失败：${String(error)}`);
+                    }
+                },
+                [isMobilePlatform],
             );
 
             const handleOpenFile = (fileId: number) => {
@@ -427,10 +466,11 @@ const InputArea = React.memo(
                     setInitialHeight(textareaRef.current.scrollHeight);
                 }
                 // Only adjust height when focused or when content changes
-                if (isFocused) {
+                // 移动端失焦（点发送钮）后内容被清空也需要回缩，因此始终按内容调整
+                if (isFocused || isMobile) {
                     adjustTextareaHeight();
                 }
-            }, [inputText, initialHeight, fileInfoList, isFocused]);
+            }, [inputText, initialHeight, fileInfoList, isFocused, isMobile]);
 
             useEffect(() => {
                 if (!slashListVisible || !slashContext) {
@@ -755,14 +795,35 @@ const InputArea = React.memo(
                 showSlashCompletion,
             ]);
 
+            // 移动端：textarea 随内容增高（44px 起，约 30vh 封顶），胶囊由 CSS 底边锚定向上生长；
+            // 把增量写到根节点 CSS 变量，底部栏同步撑高，消息列表（flex 兄弟）随之收缩而非被遮挡。
+            const adjustMobileTextareaHeight = () => {
+                const textarea = textareaRef.current;
+                if (!textarea) return;
+                textarea.style.height = "auto";
+                const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+                const maxHeight = Math.max(
+                    MOBILE_TEXTAREA_MIN_HEIGHT,
+                    Math.round(viewportHeight * MOBILE_TEXTAREA_MAX_VIEWPORT_RATIO),
+                );
+                const newHeight = Math.min(
+                    Math.max(textarea.scrollHeight, MOBILE_TEXTAREA_MIN_HEIGHT),
+                    maxHeight,
+                );
+                textarea.style.height = `${newHeight}px`;
+                rootRef.current?.style.setProperty(
+                    COMPOSER_GROW_VAR,
+                    `${newHeight - MOBILE_TEXTAREA_MIN_HEIGHT}px`,
+                );
+            };
+
             const adjustTextareaHeight = () => {
+                if (isMobile) {
+                    adjustMobileTextareaHeight();
+                    return;
+                }
                 const textarea = textareaRef.current;
                 if (textarea && initialHeight) {
-                    // Mobile locks capsule height in CSS and keeps attachments in a dedicated tray.
-                    if (isMobile) {
-                        textarea.style.height = "";
-                        return;
-                    }
                     textarea.style.height = `${initialHeight}px`;
                     const maxHeight = document.documentElement.clientHeight * 0.35;
                     const newHeight = Math.min(Math.max(textarea.scrollHeight, initialHeight), maxHeight);
@@ -773,12 +834,13 @@ const InputArea = React.memo(
             };
 
             const restoreInitialHeight = () => {
+                if (isMobile) {
+                    // 移动端失焦保留内容高度，避免已输入的多行内容被压回一行
+                    adjustMobileTextareaHeight();
+                    return;
+                }
                 const textarea = textareaRef.current;
                 if (textarea && initialHeight) {
-                    if (isMobile) {
-                        textarea.style.height = "";
-                        return;
-                    }
                     textarea.style.height = `${initialHeight}px`;
                     const filePad = fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0;
                     textarea.parentElement!.style.height = `${initialHeight + filePad}px`;
@@ -1023,9 +1085,7 @@ const InputArea = React.memo(
                         setArtifactListVisible(false);
 
                         // Open the artifact
-                        invoke("open_artifact_window", { artifactId: selectedArtifact.id }).catch((error) => {
-                            console.error("Failed to open artifact:", error);
-                        });
+                        void openArtifact(selectedArtifact.id);
                     } else if (assistantListVisible) {
                         // Select assistant - 阻止表单提交
                         e.preventDefault();
@@ -1078,6 +1138,9 @@ const InputArea = React.memo(
                             }, 0);
                         }
                         setBangListVisible(false);
+                    } else if (isMobile) {
+                        // 移动端：软键盘回车只换行，发送统一走发送按钮
+                        return;
                     } else {
                         // Enter for submit (only if not in IME composition)
                         e.preventDefault();
@@ -1273,6 +1336,7 @@ const InputArea = React.memo(
 
             return (
                 <div
+                    ref={rootRef}
                     className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeButton ? 'has-plan-mode' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
                     data-theme-slot="input-area"
                     data-aipp-slot="chat-input-area"
@@ -1310,6 +1374,7 @@ const InputArea = React.memo(
                             data-aipp-slot="chat-input-textarea"
                             rows={1}
                             autoCapitalize="none"
+                            enterKeyHint={isMobile ? "enter" : undefined}
                             value={inputText}
                             onChange={handleTextareaChange}
                             onKeyDown={handleKeyDownWithBang}
@@ -1368,6 +1433,7 @@ const InputArea = React.memo(
                         className={`input-area-add-button ${placement}`}
                         dataThemeSlot="input-area-add-button"
                         dataAippSlot="chat-input-add-button"
+                        aria-label="添加附件"
                         style={
                             placement === "bottom" && !isMobile
                                 ? { right: addButtonRight }
@@ -1382,6 +1448,7 @@ const InputArea = React.memo(
                         className={`input-area-send-button ${placement} ${sendButtonVisual ? "has-custom-visual" : ""}`}
                         dataThemeSlot="input-area-send-button"
                         dataAippSlot="chat-input-send-button"
+                        aria-label={aiIsResponsing && !inputText.trim() ? "停止" : "发送"}
                         dataState={aiIsResponsing ? "responding" : "idle"}
                         customVisual={Boolean(sendButtonVisual)}
                         style={
@@ -1437,9 +1504,7 @@ const InputArea = React.memo(
                         onArtifactSelect={(artifact, action) => {
                             if (action === "open") {
                                 // Open artifact when Enter is pressed
-                                invoke("open_artifact_window", { artifactId: artifact.id }).catch((error) => {
-                                    console.error("Failed to open artifact:", error);
-                                });
+                                void openArtifact(artifact.id);
                             } else {
                                 // Tab key completion - just log for now
                                 console.log("Artifact completed:", artifact.name);

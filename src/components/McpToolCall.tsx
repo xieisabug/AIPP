@@ -14,6 +14,7 @@ import { maskToolCall } from "@/utils/antiLeakage";
 import { getErrorMessage } from "@/utils/error";
 import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
 import { noteToolReview, useToolReview } from "@/hooks/toolReviewStore";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -267,6 +268,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const shouldHideFailedActions = isFailed && continueOnToolErrorEnabled;
     const canShowExecutionActions = canExecute && !shouldHideFailedActions && !isProtocolFailureWithoutCall;
     const canReject = executionState === "pending" && Boolean(effectiveCallId);
+    const canContinueWithError = isFailed && !shouldHideFailedActions;
+    // 移动端：执行/继续/拒绝不挤在头部图标里，而是在头部下方常驻一行带文字的 44px 按钮（展开/收起都可用）
+    const isMobilePlatform = useIsMobilePlatform();
+    const showMobileActionRow = isMobilePlatform && !isExecuting && (canShowExecutionActions || canContinueWithError);
     const isRunning = effectiveCallId !== null && shiningMcpCallId === effectiveCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
@@ -575,11 +580,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             variant="ghost"
                             className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0 text-destructive"
                             title="停止"
+                            aria-label="停止"
                         >
                             <Square className="h-4 w-4 fill-current" />
                         </Button>
                     )}
-                    {!isExpanded && canShowExecutionActions && (
+                    {!isMobilePlatform && !isExpanded && canShowExecutionActions && (
                         <Button
                             onClick={handleExecute}
                             disabled={isExecuting || isRejecting}
@@ -587,6 +593,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             variant="ghost"
                             className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                             title={isFailed ? "重新执行" : "执行"}
+                            aria-label={isFailed ? "重新执行" : "执行"}
                         >
                             {isExecuting ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -597,18 +604,19 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             )}
                         </Button>
                     )}
-                    {!isExpanded && isFailed && !shouldHideFailedActions && (
+                    {!isMobilePlatform && !isExpanded && canContinueWithError && (
                         <Button
                             onClick={handleContinueWithError}
                             size="sm"
                             variant="ghost"
                             className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                             title="以错误继续对话"
+                            aria-label="以错误继续对话"
                         >
                             <ArrowRight className="h-4 w-4" />
                         </Button>
                     )}
-                    {!isExpanded && canReject && (
+                    {!isMobilePlatform && !isExpanded && canReject && (
                         <Button
                             onClick={handleReject}
                             disabled={isRejecting}
@@ -634,6 +642,48 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                 </div>
             </div>
 
+            {showMobileActionRow && (
+                <div className="mt-1 flex flex-wrap items-center gap-2" data-aipp-slot="mcp-tool-call-mobile-actions">
+                    {canShowExecutionActions && (
+                        <Button
+                            onClick={handleExecute}
+                            disabled={isRejecting}
+                            size="sm"
+                            className="flex min-h-11 items-center gap-1 px-4"
+                            aria-label={isFailed ? "重新执行" : reviewNeedsConfirmation ? "确认执行" : "执行"}
+                        >
+                            {isFailed ? <RotateCcw className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                            {isFailed ? "重新执行" : reviewNeedsConfirmation ? "确认执行" : "执行"}
+                        </Button>
+                    )}
+                    {canContinueWithError && (
+                        <Button
+                            onClick={handleContinueWithError}
+                            size="sm"
+                            variant="outline"
+                            className="flex min-h-11 items-center gap-1 px-4"
+                            aria-label="以错误继续对话"
+                        >
+                            <ArrowRight className="h-4 w-4" />
+                            继续
+                        </Button>
+                    )}
+                    {canReject && (
+                        <Button
+                            onClick={handleReject}
+                            disabled={isRejecting}
+                            size="sm"
+                            variant="outline"
+                            className="flex min-h-11 items-center gap-1 px-4"
+                            aria-label="拒绝执行"
+                        >
+                            <XCircle className="h-4 w-4" />
+                            拒绝
+                        </Button>
+                    )}
+                </div>
+            )}
+
             {/* 带动画的可折叠内容区域 */}
             <div
                 ref={contentRef}
@@ -650,7 +700,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
                             <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
                         </div>
-                        {canShowExecutionActions && (
+                        {canShowExecutionActions && !showMobileActionRow && (
                             <div className="flex items-center gap-2">
                                 {isExecuting ? (
                                     <>

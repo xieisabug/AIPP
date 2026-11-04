@@ -272,7 +272,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     bg-white/85 dark:bg-neutral-800/75 rounded-md p-1 backdrop-blur-sm shadow-sm
                     transition-opacity duration-150 ease-out
                     will-change-opacity
-                    ${isSticky ? 'fixed top-20 shadow-lg opacity-100' : `absolute right-2 top-2 ${mobile ? 'opacity-100' : 'opacity-0 group-hover/codeblock:opacity-100'}`}
+                    ${isSticky ? 'aipp-sticky-code-toolbar fixed top-20 shadow-lg opacity-100' : `absolute right-2 top-2 ${mobile ? 'opacity-100' : 'opacity-0 group-hover/codeblock:opacity-100'}`}
                 `}
                 style={isSticky ? { right: `${toolbarRight}px` } : undefined}
                 onMouseDown={(event) => {

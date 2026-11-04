@@ -1,6 +1,16 @@
 import React, { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ExternalLink } from 'lucide-react';
+import { toast } from 'sonner';
+import { useIsMobilePlatform } from '@/hooks/use-platform';
+import { fileErrorMessage, outputMobileFile } from '@/services/mobileFileService';
+
+const MOBILE_IMAGE_EXTENSIONS: Record<string, string> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+};
 
 interface Attachment {
     id?: number;
@@ -20,6 +30,46 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
     conversationId,
     messageId,
 }) => {
+    const isMobilePlatform = useIsMobilePlatform();
+
+    const handleOpenImage = useCallback(
+        async (attachment: Attachment) => {
+            const imageData = attachment.attachment_content || attachment.attachment_url;
+            if (!imageData) {
+                return;
+            }
+
+            try {
+                if (isMobilePlatform) {
+                    // 移动端 open_image（open::that）不可用：读出图片字节，走 FileProvider 交给系统应用打开
+                    const response = await fetch(imageData);
+                    if (!response.ok) {
+                        throw new Error(`读取图片失败：HTTP ${response.status}`);
+                    }
+                    const blob = await response.blob();
+                    const ext = MOBILE_IMAGE_EXTENSIONS[blob.type];
+                    if (!ext) {
+                        throw new Error(`不支持打开图片格式：${blob.type || '未知'}`);
+                    }
+                    await outputMobileFile('open', new Uint8Array(await blob.arrayBuffer()), `image.${ext}`);
+                    return;
+                }
+                await invoke('open_image', {
+                    imageData,
+                    conversationId:
+                        conversationId !== undefined && conversationId !== null
+                            ? String(conversationId)
+                            : undefined,
+                    messageId: String(attachment.id ?? messageId ?? ''),
+                });
+            } catch (error) {
+                console.error('Open image failed', error);
+                toast.error(`图片打开失败：${fileErrorMessage(error)}`);
+            }
+        },
+        [conversationId, messageId, isMobilePlatform]
+    );
+
     if (!attachments?.length) {
         return null;
     }
@@ -35,36 +85,15 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
     }
 
     const useGridLayout = imageAttachments.length > 1;
-
-    const handleOpenImage = useCallback(
-        async (attachment: Attachment) => {
-            const imageData = attachment.attachment_content || attachment.attachment_url;
-            if (!imageData) {
-                return;
-            }
-
-            try {
-                await invoke('open_image', {
-                    imageData,
-                    conversationId:
-                        conversationId !== undefined && conversationId !== null
-                            ? String(conversationId)
-                            : undefined,
-                    messageId: String(attachment.id ?? messageId ?? ''),
-                });
-            } catch (error) {
-                console.error('Open image failed', error);
-            }
-        },
-        [conversationId, messageId]
-    );
+    // 移动端气泡可能窄于 300px，避免撑破气泡
+    const widthClass = isMobilePlatform ? 'w-full max-w-[300px]' : 'w-[300px]';
 
     return (
         <div
             className={
                 useGridLayout
-                    ? "mt-3 grid w-[300px] grid-cols-2 gap-2"
-                    : "mt-3 flex w-[300px] flex-col gap-2"
+                    ? `mt-3 grid ${widthClass} grid-cols-2 gap-2`
+                    : `mt-3 flex ${widthClass} flex-col gap-2`
             }
         >
             {imageAttachments.map((attachment, index) => {
@@ -106,7 +135,7 @@ const ImageAttachments: React.FC<ImageAttachmentsProps> = ({
                             alt={attachment.attachment_url || 'Message attachment'}
                             decoding="async"
                         />
-                        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/70 via-black/30 to-transparent px-3 py-2 text-white opacity-0 transition-opacity group-hover:opacity-100">
+                        <div className={`pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/70 via-black/30 to-transparent px-3 py-2 text-white transition-opacity ${isMobilePlatform ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                             <span className="truncate text-xs">
                                 {attachment.attachment_url || '打开图片'}
                             </span>

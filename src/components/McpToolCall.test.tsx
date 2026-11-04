@@ -13,6 +13,12 @@ vi.mock("@/contexts/AntiLeakageContext", () => ({
     }),
 }));
 
+const platformState = vi.hoisted(() => ({ mobile: false }));
+vi.mock("@/hooks/use-platform", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("@/hooks/use-platform")>()),
+    useIsMobilePlatform: () => platformState.mobile,
+}));
+
 vi.mock("@/components/magicui/shine-border", () => ({
     ShineBorder: () => <div data-testid="shine-border" />,
 }));
@@ -749,6 +755,22 @@ describe("McpToolCall call_id binding", () => {
         expect(screen.getByText(/模型返回无效 JSON/)).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "确认执行" })).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    });
+
+    it("should keep text-labelled actions below the header when expanded on mobile", async () => {
+        platformState.mobile = true;
+        try {
+            mockInvokeHandler("get_tool_review", () => null);
+            render(<McpToolCall callId={59} conversationId={8} status="pending" />);
+            const row = await screen.findByText("拒绝");
+            expect(row.closest('[data-aipp-slot="mcp-tool-call-mobile-actions"]')).not.toBeNull();
+            expect(screen.getByRole("button", { name: "执行" })).toBeInTheDocument();
+            await userEvent.setup().click(screen.getByTitle("展开详情"));
+            expect(screen.getByRole("button", { name: "执行" })).toBeInTheDocument();
+            expect(screen.getAllByRole("button", { name: "拒绝执行" })).toHaveLength(1);
+        } finally {
+            platformState.mobile = false;
+        }
     });
 
     it("should allow rejection when a pending manual call has no review record", async () => {

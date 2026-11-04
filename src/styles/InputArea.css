@@ -166,26 +166,28 @@
     transition: height 0.2s;
 }
 
-/* 移动端输入框：底部栏占位 + 胶囊固定高度，按钮相对胶囊垂直居中 */
+/*
+ * 移动端输入框：底部栏占位 + 胶囊自适应高度（48px 起，约 30vh 封顶），按钮贴胶囊底边。
+ * --aipp-composer-grow 由 InputArea 写入（胶囊超出 48px 的增量），用来同步撑高底部栏，
+ * 让消息列表（flex 兄弟节点）随之收缩，不被多行输入遮挡。
+ * 键盘避让由 MobileShell 把整个壳体收缩到 visualViewport 完成，这里不再叠加键盘 inset，避免双重偏移。
+ */
 .input-area.mobile.bottom {
     position: relative;
     bottom: auto;
     /* 12 顶边距 + 48 胶囊 + 12 底边距 + safe-area；有附件时由 tray 撑开高度 */
     flex: 0 0 auto;
     width: 100%;
-    height: calc(72px + env(safe-area-inset-bottom, 0px));
-    min-height: calc(72px + env(safe-area-inset-bottom, 0px));
+    height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
     box-sizing: border-box;
-    /* Keyboard inset CSS var (document-level). Under MobileShell keyboard offset the shell
-       forces --aipp-keyboard-inset-bottom: 0 so composer does not double-lift. */
-    padding-bottom: var(--aipp-keyboard-inset-bottom, 0px);
 }
 
 .input-area.mobile.bottom.has-attachments {
     height: auto;
-    min-height: calc(72px + env(safe-area-inset-bottom, 0px));
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
     /* 为绝对定位胶囊/按钮预留底部空间，托盘内容在其上方 */
-    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px));
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
 }
 
 .input-area.mobile.bottom .input-area-attachment-tray {
@@ -205,38 +207,40 @@
     left: 12px;
     /* 右侧留给 44px 发送钮 + 间距；!important 防止桌面 inline right 残留 */
     right: 64px !important;
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px));
-    /* 锁定高度，避免 textarea/边框把胶囊撑破「+」；附件已移出胶囊 */
-    height: 48px !important;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    /* 底边锚定、向上生长：高度由 textarea 内容决定（JS 写入 textarea 高度），附件已移出胶囊 */
+    height: auto !important;
     min-height: 48px !important;
-    max-height: 48px;
+    max-height: none;
     border-radius: 24px;
     /* 左侧给 44px「+」留白 */
     padding: 0 12px 0 56px !important;
     opacity: 1;
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     overflow: hidden;
 }
 
 .input-area.mobile .input-area-textarea {
-    padding: 0 4px;
+    /* 单行：10 + 24 + 10 = 44 = 48 - 2*2 边框；多行时由 JS 增高，超过 30vh 内部滚动 */
+    padding: 10px 4px;
     /* 16px 避免部分 WebView 聚焦时强制缩放 */
     font-size: 16px;
-    height: 100% !important;
-    min-height: 0 !important;
-    max-height: 100%;
-    line-height: 44px; /* 贴合 border-box 48 - 2*2 边框后的内容区 */
+    height: 44px;
+    min-height: 44px !important;
+    max-height: 30vh;
+    line-height: 24px;
+    overflow-y: auto;
     margin: 0;
 }
 
 /*
- * 发送钮 44×44，相对 48px 胶囊垂直居中：
+ * 发送钮 44×44，贴胶囊底边（胶囊向上生长时按钮保持在底部）：
  * capsule bottom = 12+safe → button bottom = 12+safe + (48-44)/2 = 14+safe
  */
 .input-area.mobile.bottom .input-area-send-button {
     position: absolute !important;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px)) !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
     right: 12px !important;
     left: auto !important;
     height: 44px !important;
@@ -247,12 +251,12 @@
 }
 
 /*
- * 「+」≥44×44（AGENTS-mobile / LeaderAI #158），相对 48px 胶囊垂直居中：
+ * 「+」≥44×44（AGENTS-mobile / LeaderAI #158），贴胶囊底边：
  * button bottom = 12+safe + (48-44)/2 = 14+safe
  */
 .input-area.mobile.bottom .input-area-add-button {
     position: absolute !important;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px)) !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
     left: 14px !important;
     right: auto !important;
     height: 44px !important;
@@ -326,11 +330,13 @@
 
 .input-area.mobile.bottom .input-area-plan-mode-button {
     position: absolute !important;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-keyboard-inset-bottom, 0px)) !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
     left: 20px !important;
     right: auto !important;
-    height: 32px;
-    min-height: 32px;
+    /* 触控目标 ≥44px，与「+」/发送钮同高、同底边 */
+    height: 44px;
+    min-height: 44px;
+    border-radius: 22px;
     width: auto;
     padding-left: 8px;
     padding-right: 8px;
@@ -724,4 +730,38 @@
     overflow: hidden;
     text-overflow: ellipsis;
     text-align: right;
+}
+
+/*
+ * 移动端补全弹窗：不跟随光标 x（360px 屏会溢出），改为横向铺满、紧贴输入栏上方，
+ * 高度受可视区限制并内部滚动；条目 ≥44px 触控高度。!important 覆盖组件的 inline left/bottom。
+ */
+.input-area.mobile .completion-bang-list,
+.input-area.mobile .assistant-completion-list,
+.input-area.mobile .artifact-completion-list,
+.input-area.mobile .slash-completion-list {
+    left: 12px !important;
+    right: 12px !important;
+    top: auto !important;
+    bottom: calc(100% + 4px) !important;
+    min-width: 0;
+    max-width: none;
+    max-height: min(320px, calc(var(--aipp-vv-height, 100dvh) * 0.4));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+.input-area.mobile .completion-bang-container,
+.input-area.mobile .assistant-completion-item,
+.input-area.mobile .completion-artifact-container,
+.input-area.mobile .slash-completion-item {
+    min-height: 44px;
+}
+
+.input-area.mobile .assistant-completion-item,
+.input-area.mobile .completion-artifact-container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }
