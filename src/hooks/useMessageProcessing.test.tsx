@@ -145,3 +145,27 @@ describe("useMessageProcessing ordering", () => {
         ]);
     });
 });
+
+ describe("previous preparation errors", () => {
+    it("should fold only ungrouped errors followed by reply content in the same turn", () => {
+        const messages = [
+            makeMessage(1, "user", "2024-01-01"),
+            makeMessage(2, "error", "2024-01-01"),
+            makeMessage(3, "user", "2024-01-02"),
+            makeMessage(4, "error", "2024-01-02"),
+            makeMessage(5, "error", "2024-01-02", "failed-version"),
+            makeMessage(7, "error", "2024-01-02"),
+        ];
+        const props = {
+            messages, streamingMessages: new Map(), generationGroups: new Map(),
+            groupRootMessageIds: new Map(), getMessageVersionInfo: () => ({ shouldShow: true }),
+        };
+        const { result, rerender } = renderHook((input) => useMessageProcessing(input), { initialProps: props });
+        expect(result.current.allDisplayMessages.find(m => m.id === 4)?.isSupersededError).toBe(false);
+        rerender({ ...props, streamingMessages: new Map([[6, {
+            message_id: 6, message_type: "response", content: "新的回复", is_done: false,
+        }]]) });
+        const errors = result.current.allDisplayMessages.filter(m => m.message_type === "error");
+        expect(errors.map(m => [m.id, m.isSupersededError])).toEqual([[2, false], [4, true], [5, false], [7, false]]);
+    });
+ });

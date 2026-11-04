@@ -42,6 +42,7 @@ pub fn parse_server_headers(
 }
 
 /// Replace ${VAR} placeholders with environment variables if present; keep placeholder if missing
+#[allow(dead_code)] // 目前仅被本文件的单元测试使用
 pub fn replace_env_placeholders(input: &str) -> String {
     let mut out = String::new();
     let chars: Vec<char> = input.chars().collect();

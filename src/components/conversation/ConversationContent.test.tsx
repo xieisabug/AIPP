@@ -7,14 +7,6 @@ import type { Message, StreamEvent } from "@/data/Conversation";
 import type { InlineInteractionItem } from "../ConversationUI";
 import ConversationContent from "./ConversationContent";
 
-vi.mock("./MessageList", () => ({
-    default: () => <div data-testid="legacy-message-list" />,
-}));
-
-vi.mock("./VirtualizedMessageList", () => ({
-    default: () => <div data-testid="legacy-virtualized-list" />,
-}));
-
 vi.mock("./VirtuosoMessageList", () => ({
     default: () => <div data-testid="virtuoso-message-list" />,
 }));
@@ -76,7 +68,6 @@ function makeProps(
         onToggleReasoningExpand: () => undefined,
         inlineInteractionItems,
         allowFeishuDebugResend: false,
-        virtualizeMessages: true,
         scrollContainerRef: {
             current: document.createElement("div"),
         } as React.RefObject<HTMLDivElement | null>,
@@ -94,21 +85,9 @@ function makeProps(
 }
 
 describe("ConversationContent virtualization engine", () => {
-    it("keeps the legacy virtualized list as the default engine", () => {
+    it("renders the Virtuoso list for an open conversation", () => {
         render(<ConversationContent {...makeProps()} />);
 
-        expect(screen.getByTestId("legacy-virtualized-list")).toBeInTheDocument();
-        expect(screen.queryByTestId("virtuoso-message-list")).not.toBeInTheDocument();
-    });
-
-    it("switches to the Virtuoso core list when requested", () => {
-        render(
-            <ConversationContent
-                {...makeProps({ virtualizedListEngine: "virtuoso" })}
-            />,
-        );
-
         expect(screen.getByTestId("virtuoso-message-list")).toBeInTheDocument();
-        expect(screen.queryByTestId("legacy-virtualized-list")).not.toBeInTheDocument();
     });
 });

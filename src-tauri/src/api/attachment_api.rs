@@ -13,7 +13,7 @@ use crate::{
     db::conversation_db::{ConversationDatabase, MessageAttachment},
     errors::AppError,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Serialize)]
 pub struct AttachmentResult {
@@ -31,6 +31,17 @@ pub async fn add_attachment(
     info!(?file_url, ?file_name, "add_attachment called");
     // 如果有 URL，使用 add_attachment_by_url
     if let Some(url) = file_url {
+        #[cfg(mobile)]
+        {
+            crate::mobile_files::require_attachment_path(&app_handle, Path::new(&url)).map_err(AppError::Anyhow)?;
+            let result = add_attachment_by_url(app_handle, url.clone()).await;
+            if result.is_err() {
+                let _ = std::fs::remove_file(&url);
+                let _ = std::fs::remove_file(format!("{url}.metadata.json"));
+                if let Some(parent) = Path::new(&url).parent() { let _ = std::fs::remove_dir(parent); }
+            }
+            return result;
+        }
         return add_attachment_by_url(app_handle, url).await;
     }
 
@@ -50,8 +61,19 @@ pub async fn add_attachment_by_url(
     app_handle: tauri::AppHandle,
     file_url: String,
 ) -> Result<AttachmentResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || add_attachment_by_path(app_handle, file_url))
+        .await.map_err(|e| AppError::Anyhow(format!("Attachment import worker: {e}")))?
+}
+
+fn add_attachment_by_path(
+    app_handle: tauri::AppHandle,
+    file_url: String,
+) -> Result<AttachmentResult, AppError> {
     // 1. 解析文件路径
     let file_path = Path::new(&file_url).to_path_buf();
+    #[cfg(mobile)]
+    crate::mobile_files::require_attachment_path(&app_handle, &file_path)
+        .map_err(AppError::Anyhow)?;
 
     // 2. 检查文件是否存在
     if !file_path.exists() {
@@ -64,7 +86,7 @@ pub async fn add_attachment_by_url(
 
     debug!(file_type, "detected file type");
 
-    if file_type.starts_with("text/") {
+    if file_type.starts_with("text/") || file_type == "application/json" {
         file_type_classify = "text".to_string();
     } else if file_type.starts_with("image/") {
         file_type_classify = "image".to_string();
@@ -109,6 +131,15 @@ pub async fn add_attachment_by_url(
     match option_attachment {
         Some(attachment) => {
             info!(attachment_id = attachment.id, "attachment already exists with same hash");
+            #[cfg(mobile)]
+            if attachment.attachment_url.as_deref() != Some(file_url.as_str()) {
+                // The existing row owns its original file; discard only this new picker copy.
+                let _ = std::fs::remove_file(&file_url);
+                let _ = std::fs::remove_file(format!("{file_url}.metadata.json"));
+                if let Some(parent) = Path::new(&file_url).parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
             return Ok(AttachmentResult { attachment_id: attachment.id });
         }
         None => {
@@ -161,6 +192,10 @@ pub async fn add_attachment_content(
     attachment_type: i64,
 ) -> Result<AttachmentResult, AppError> {
     info!(file_name, "add_attachment_content called");
+    #[cfg(mobile)]
+    if file_content.len() > 28 * 1024 * 1024 {
+        return Err(AppError::Anyhow("MOBILE_FILE attachment-content: exceeds 20 MiB binary/28 MiB encoded limit".into()));
+    }
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
 
     let mut hasher = Sha256::new();
@@ -185,7 +220,8 @@ pub async fn add_attachment_content(
             let message_attachment = db.attachment_repo().unwrap().create(&MessageAttachment {
                 id: 0,
                 message_id: -1,
-                attachment_type: AttachmentType::try_from(attachment_type).unwrap(),
+                attachment_type: AttachmentType::try_from(attachment_type)
+                    .map_err(|_| AppError::Anyhow("Invalid attachment type".into()))?,
                 attachment_url: Some(file_name),
                 attachment_content: Some(file_content),
                 attachment_hash: Some(hash_str),
@@ -207,10 +243,27 @@ pub async fn open_attachment_with_default_app(
     app_handle: tauri::AppHandle,
 ) -> Result<(), AppError> {
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
-    let attachment = db.attachment_repo().unwrap().read(id)?;
+    let attachment = db.attachment_repo().unwrap().read(id)?
+        .ok_or_else(|| AppError::Anyhow(format!("Attachment {id} not found")))?;
+
+    #[cfg(target_os = "android")]
+    {
+        let content = attachment.attachment_content.as_deref()
+            .ok_or_else(|| AppError::Anyhow(format!("Attachment {id}: local content missing; restore attachment before opening")))?;
+        let (data, mime, name) = if content.starts_with("data:image/") {
+            let (header, data) = content.split_once(',').ok_or_else(|| AppError::Anyhow("Invalid image data URI".into()))?;
+            let mime = header.trim_start_matches("data:").trim_end_matches(";base64");
+            let ext = match mime { "image/jpeg" => "jpg", "image/png" => "png", "image/gif" => "gif", "image/webp" => "webp", _ => return Err(AppError::Anyhow("Unsupported image MIME".into())) };
+            (data.to_string(), mime.to_string(), format!("attachment-{id}.{ext}"))
+        } else {
+            (STANDARD.encode(content.as_bytes()), "text/plain".into(), format!("attachment-{id}.txt"))
+        };
+        crate::mobile_files::mobile_file_action(app_handle, "open".into(), serde_json::json!({"name": name, "mime": mime, "data": data})).await.map_err(AppError::Anyhow)?;
+        return Ok(());
+    }
 
     let file_path =
-        Path::new("attachments").join(attachment.unwrap().attachment_url.as_ref().unwrap());
+        Path::new("attachments").join(attachment.attachment_url.as_ref().ok_or_else(|| AppError::Anyhow(format!("Attachment {id}: path missing")))?);
     let file_path = file_path.to_str().unwrap();
     debug!(file_path, "opening attachment with default app");
 

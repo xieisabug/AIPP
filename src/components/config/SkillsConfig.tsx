@@ -7,13 +7,14 @@ import { Folder, Sparkles, RefreshCw, FolderOpen, FileText, Trash2 } from "lucid
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
 import ConfirmDialog from "../ConfirmDialog";
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 
 import {
     ConfigPageLayout,
     SidebarList,
     ListItemButton,
     EmptyState,
+    ConfigPageLoading,
     SelectOption
 } from "../common";
 
@@ -27,6 +28,8 @@ import {
 import SkillActionDropdown from "./SkillActionDropdown";
 import SkillInstallGuideDialog from "./SkillInstallGuideDialog";
 import { useSkillsMcpValidation } from "../../hooks/useSkillsMcpValidation";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import MobileSkillsManager from "./MobileSkillsManager";
 
 interface SkillsManagerProps {
     /** Optional: if provided, shows skills config for an assistant */
@@ -39,7 +42,11 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const [skillContent, setSkillContent] = useState<string>('');
     const [isLoading, setIsLoading] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
+    // 首次扫描完成前不渲染「暂无Skills」空状态
+    const [hasScanned, setHasScanned] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
     // Assistant skill configs (only used when assistantId is provided)
     const [assistantSkills, setAssistantSkills] = useState<SkillWithConfig[]>([]);
@@ -71,6 +78,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             toast.error('扫描Skills失败: ' + e);
         } finally {
             setIsRefreshing(false);
+            setHasScanned(true);
         }
     }, [selectedSkill]);
 
@@ -272,7 +280,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             }
         }
         return filtered;
-    }, [groupedSkills, searchQuery]);
+    }, [groupedSkills, searchQuery, pinyinReady]);
 
     // Source order for display
     const sourceOrder: SkillSourceType[] = ['agents', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];
@@ -505,6 +513,10 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
         />
     ), [selectedSkill, skillContent, isLoading, assistantId, isSkillEnabled, handleToggleSkill, handleOpenSkillFolder]);
 
+    if (!hasScanned) {
+        return <ConfigPageLoading />;
+    }
+
     // Empty state when no skills found
     if (skills.length === 0 && !isRefreshing) {
         return (
@@ -592,4 +604,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     );
 };
 
-export default SkillsManager;
+export default function PlatformSkillsManager(props: SkillsManagerProps) {
+    const mobile = useIsMobilePlatform();
+    return mobile ? <MobileSkillsManager {...props} /> : <SkillsManager {...props} />;
+}

@@ -16,7 +16,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({ title, confirmText, onCon
 
     return (
         <AlertDialog open={isOpen} onOpenChange={onCancel}>
-            <AlertDialogContent>
+            <AlertDialogContent data-aipp-slot="confirm-dialog">
                 <AlertDialogHeader>
                     <AlertDialogTitle>{title}</AlertDialogTitle>
                     <AlertDialogDescription>
@@ -24,8 +24,8 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({ title, confirmText, onCon
                     </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                    <Button onClick={onCancel} variant="outline">取消</Button>
-                    <Button onClick={onConfirm} variant="destructive">确认</Button>
+                    <Button onClick={onCancel} variant="outline" className="min-h-11 min-w-11" data-aipp-slot="confirm-dialog-cancel">取消</Button>
+                    <Button onClick={onConfirm} variant="destructive" className="min-h-11 min-w-11" data-aipp-slot="confirm-dialog-confirm">确认</Button>
                 </AlertDialogFooter>
             </AlertDialogContent>
         </AlertDialog>

@@ -1,7 +1,15 @@
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
-    refresh_acp_config_signature, refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path,
-    spawn_acp_idle_reaper_once, spawn_acp_session_task, AcpSessionEntry,
+    probe_acp_session_config_options, refresh_acp_config_signature,
+    refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path, spawn_agent_idle_reaper_once,
+    spawn_acp_session_task, AcpSessionConfigOptionPayload, AcpSessionEntry,
+};
+use crate::api::ai::codex_app_server::{
+    extract_codex_app_server_config, probe_codex_model_options, CODEX_APP_SERVER_API_TYPE,
+};
+use crate::api::ai::claude_sdk::{
+    claude_model_choices, extract_claude_sdk_config, is_claude_code_provider,
+    CLAUDE_SDK_API_TYPE,
 };
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::{
@@ -11,7 +19,6 @@ use crate::{
             Assistant, AssistantDatabase, AssistantMCPConfig, AssistantMCPToolConfig,
             AssistantModel, AssistantModelConfig, AssistantPrompt, AssistantPromptParam,
         },
-        conversation_db::ConversationDatabase,
         llm_db::LLMDatabase,
     },
     utils::share_utils::{
@@ -23,6 +30,281 @@ use crate::{
 use std::collections::HashMap;
 use tauri::{Emitter, Manager};
 use tracing::{debug, info, instrument, warn};
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct AgentModelOption {
+    pub code: String,
+    pub name: String,
+    pub provider_id: i64,
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct AgentRuntimeInfo {
+    pub agent_kind: String,
+    pub working_directory: String,
+}
+
+pub const CLAUDE_CODE_DEFAULT_MODEL: &str = "__claude_code_default__";
+
+fn add_agent_model_option(options: &mut Vec<AgentModelOption>, option: AgentModelOption) {
+    if !options.iter().any(|existing| existing.code == option.code) {
+        options.push(option);
+    }
+}
+
+fn add_acp_protocol_model_options(
+    options: &mut Vec<AgentModelOption>,
+    config_options: &[AcpSessionConfigOptionPayload],
+    provider_id: i64,
+    current_model: Option<&str>,
+    configured_effort: Option<&str>,
+) {
+    let model_option =
+        config_options.iter().find(|option| option.category.as_deref() == Some("model"));
+    let thought_option = config_options
+        .iter()
+        .find(|option| option.category.as_deref() == Some("thought_level"));
+    let efforts = thought_option
+        .map(|option| {
+            option
+                .options
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let effective_default_model =
+        current_model.or_else(|| model_option.map(|option| option.current_value.as_str()));
+    let effective_default_effort = configured_effort
+        .filter(|effort| efforts.iter().any(|candidate| candidate == effort))
+        .map(str::to_string)
+        .or_else(|| {
+            thought_option
+                .map(|option| option.current_value.clone())
+                .filter(|effort| efforts.contains(effort))
+        });
+    if let Some(model_option) = model_option {
+        for choice in &model_option.options {
+            let is_default = effective_default_model == Some(choice.value.as_str());
+            add_agent_model_option(
+                options,
+                AgentModelOption {
+                    code: format!("{}%%{}", choice.value, provider_id),
+                    name: choice.name.clone(),
+                    provider_id,
+                    efforts: efforts.clone(),
+                    default_effort: is_default
+                        .then(|| effective_default_effort.clone())
+                        .flatten(),
+                    is_default,
+                },
+            );
+        }
+    }
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub async fn get_agent_model_options(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+    provider_id: Option<i64>,
+) -> Result<Vec<AgentModelOption>, String> {
+    let detail = get_assistant(app_handle.clone(), assistant_id)?;
+    if detail.assistant.assistant_type != Some(4) {
+        return Ok(Vec::new());
+    }
+    let model = detail.model.first().ok_or("Agent 助手尚未配置提供商")?;
+    let persisted_provider_id = model.provider_id;
+    let provider_id = provider_id.filter(|value| *value > 0).unwrap_or(persisted_provider_id);
+    if provider_id <= 0 {
+        return Err("Agent 助手尚未配置提供商".into());
+    }
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+    let provider_configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    let current_model = (provider_id == persisted_provider_id && !model.model_code.trim().is_empty())
+        .then(|| model.model_code.trim().to_string());
+    let configured_effort = (provider_id == persisted_provider_id && current_model.is_some())
+        .then(|| {
+            detail
+                .model_configs
+                .iter()
+                .find(|config| config.name == "reasoning_effort")
+                .and_then(|config| config.value.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .flatten();
+    let db_models = llm_db.get_llm_models(provider_id.to_string()).map_err(|e| e.to_string())?;
+    let mut options = Vec::new();
+    let mut discovery_error = None;
+
+    match provider.api_type.as_str() {
+        CODEX_APP_SERVER_API_TYPE => {
+            let config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, current_model.clone())
+                .map_err(|e| e.to_string())?;
+            let probe = probe_codex_model_options(&app_handle, &config).await?;
+            let effective_default_model = current_model.clone().or_else(|| probe.default_model.clone());
+            for entry in probe.models {
+                let is_default = effective_default_model.as_deref() == Some(entry.id.as_str())
+                    || (effective_default_model.is_none() && entry.is_default);
+                let default_effort = if is_default {
+                    configured_effort
+                        .as_ref()
+                        .filter(|effort| entry.supported_efforts.contains(effort))
+                        .cloned()
+                        .or_else(|| {
+                            (probe.default_model.as_deref() == Some(entry.id.as_str()))
+                                .then(|| probe.default_effort.clone())
+                                .flatten()
+                                .filter(|effort| entry.supported_efforts.contains(effort))
+                        })
+                        .or(entry.default_effort)
+                } else {
+                    entry.default_effort
+                };
+                add_agent_model_option(&mut options, AgentModelOption {
+                    code: format!("{}%%{}", entry.id, provider_id),
+                    name: entry.name,
+                    provider_id,
+                    efforts: entry.supported_efforts,
+                    default_effort,
+                    is_default,
+                });
+            }
+        }
+        api_type
+            if api_type == CLAUDE_SDK_API_TYPE
+                || (api_type == "acp"
+                    && is_claude_code_provider(api_type, &provider_configs)) =>
+        {
+            let efforts = ["default", "low", "medium", "high", "max"].into_iter().map(str::to_string).collect::<Vec<_>>();
+            for (code, name) in [
+                ("sonnet", "Claude Sonnet"),
+                ("opus", "Claude Opus"),
+                ("haiku", "Claude Haiku"),
+            ] {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · {name}"), provider_id, efforts: efforts.clone(), default_effort: None, is_default: current_model.as_deref() == Some(code) });
+            }
+            add_agent_model_option(&mut options, AgentModelOption { code: format!("{CLAUDE_CODE_DEFAULT_MODEL}%%{provider_id}"), name: "Claude Code 默认配置 · 使用 CLI 默认模型".into(), provider_id, efforts: efforts.clone(), default_effort: None, is_default: current_model.is_none() });
+            for (other_id, other_name, other_api_type, _, _, _) in llm_db.get_llm_providers().map_err(|e| e.to_string())? {
+                if other_api_type != "anthropic" { continue; }
+                for (_, model_name, _, code, _, _, _, _) in llm_db.get_llm_models(other_id.to_string()).map_err(|e| e.to_string())? {
+                    add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{other_id}"), name: format!("{other_name} / {model_name}"), provider_id: other_id, efforts: efforts.clone(), default_effort: None, is_default: false });
+                }
+            }
+            if let Some(code) = current_model {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("Claude Code 默认配置 · 当前模型 {code}"), provider_id, efforts, default_effort: None, is_default: true });
+            }
+        }
+        "acp" => {
+            let mut config = extract_acp_config(&detail.model_configs, &provider_configs)
+                .map_err(|error| error.to_string())?;
+            config.model = current_model.clone();
+            config.thought_level = configured_effort.clone();
+            let proxy_enabled = provider_configs
+                .iter()
+                .find(|config| config.name == "proxy_enabled")
+                .and_then(|config| config.value.parse::<bool>().ok())
+                .unwrap_or(false);
+            if proxy_enabled {
+                let feature_config_state = app_handle.state::<FeatureConfigState>();
+                let config_feature_map =
+                    feature_config_state.config_feature_map.lock().await.clone();
+                if let Some(proxy_url) = get_network_proxy_from_config(&config_feature_map) {
+                    apply_network_proxy_to_env_vars(&mut config.env_vars, &proxy_url);
+                }
+            }
+
+            match probe_acp_session_config_options(&config).await {
+                Ok(config_options) => {
+                    add_acp_protocol_model_options(
+                        &mut options,
+                        &config_options,
+                        provider_id,
+                        current_model.as_deref(),
+                        configured_effort.as_deref(),
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        provider_id,
+                        provider_name = %provider.name,
+                        error = %error,
+                        "ACP protocol model discovery failed; checking configured models"
+                    );
+                    discovery_error = Some(error);
+                }
+            }
+            let discovered_efforts =
+                options.first().map(|option| option.efforts.clone()).unwrap_or_default();
+            for (_, name, _, code, _, _, _, _) in db_models {
+                let is_default = current_model.as_deref() == Some(code.as_str());
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id, efforts: discovered_efforts.clone(), default_effort: None, is_default });
+            }
+            if let Some(code) = current_model {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: discovered_efforts, default_effort: configured_effort, is_default: true });
+            }
+        }
+        other => return Err(format!("不支持的 Agent 提供商类型：{other}")),
+    }
+    if options.is_empty() {
+        if let Some(error) = discovery_error {
+            return Err(format!(
+                "提供商 {} 无法通过 ACP 读取可用模型，且没有配置数据库模型：{error}",
+                provider.name
+            ));
+        }
+        return Err(format!("提供商 {} 没有可用模型", provider.name));
+    }
+    Ok(options)
+}
+
+/// Codex 通道生效的审批策略/沙箱（新对话界面用于初始化选择）
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct CodexAgentDefaults {
+    pub approval_policy: String,
+    pub sandbox: String,
+}
+
+/// 返回 Codex 助手生效的审批策略/沙箱默认值（含助手/provider 覆盖与内置默认值）；
+/// 非 Codex 通道返回 None，前端据此决定是否展示对应选择项
+#[tauri::command]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub async fn get_codex_agent_defaults(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<Option<CodexAgentDefaults>, String> {
+    let detail = get_assistant(app_handle.clone(), assistant_id)?;
+    if detail.assistant.assistant_type != Some(4) {
+        return Ok(None);
+    }
+    let Some(provider_id) = resolve_acp_provider_id(&detail.model, &detail.model_configs) else {
+        return Ok(None);
+    };
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let provider = llm_db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+    if provider.api_type != CODEX_APP_SERVER_API_TYPE {
+        return Ok(None);
+    }
+    let provider_configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+    let model_code = detail
+        .model
+        .first()
+        .map(|model| model.model_code.clone())
+        .filter(|value| !value.trim().is_empty());
+    let config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, model_code)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(CodexAgentDefaults {
+        approval_policy: config.approval_policy.unwrap_or_else(|| "on-request".to_string()),
+        sandbox: config.sandbox.unwrap_or_else(|| "workspace-write".to_string()),
+    }))
+}
 
 fn reject_reserved_butler_assistant_name(name: &str) -> Result<(), String> {
     if is_butler_system_assistant_name(name) {
@@ -53,6 +335,7 @@ pub(crate) fn resolve_acp_provider_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::ai::acp::AcpSessionConfigChoicePayload;
 
     fn assistant_model(provider_id: i64) -> AssistantModel {
         AssistantModel {
@@ -90,6 +373,60 @@ mod tests {
 
         assert_eq!(resolve_acp_provider_id(&models, &model_configs), Some(9));
     }
+
+    #[test]
+    fn add_acp_protocol_model_options_uses_agent_models_and_thought_levels() {
+        let config_options = vec![
+            AcpSessionConfigOptionPayload {
+                id: "model".to_string(),
+                name: "Model".to_string(),
+                category: Some("model".to_string()),
+                current_value: "kimi-code/k3-256k".to_string(),
+                options: vec![
+                    AcpSessionConfigChoicePayload {
+                        value: "kimi-code/k3".to_string(),
+                        name: "K3".to_string(),
+                        ..Default::default()
+                    },
+                    AcpSessionConfigChoicePayload {
+                        value: "kimi-code/k3-256k".to_string(),
+                        name: "K3-256k".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            AcpSessionConfigOptionPayload {
+                id: "thinking".to_string(),
+                name: "Thinking".to_string(),
+                category: Some("thought_level".to_string()),
+                current_value: "high".to_string(),
+                options: vec![
+                    AcpSessionConfigChoicePayload {
+                        value: "low".to_string(),
+                        name: "Thinking Low".to_string(),
+                        ..Default::default()
+                    },
+                    AcpSessionConfigChoicePayload {
+                        value: "high".to_string(),
+                        name: "Thinking High".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ];
+        let mut options = Vec::new();
+
+        add_acp_protocol_model_options(&mut options, &config_options, 55, None, None);
+
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].code, "kimi-code/k3%%55");
+        assert_eq!(options[0].efforts, vec!["low", "high"]);
+        assert!(options[1].is_default);
+        assert_eq!(options[1].default_effort.as_deref(), Some("high"));
+    }
+
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -103,12 +440,6 @@ pub struct AssistantDetail {
     pub mcp_tool_configs: Vec<AssistantMCPToolConfig>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
-pub struct MCPServerInfo {
-    pub id: i64,
-    pub name: String,
-    pub is_enabled: bool,
-}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct MCPToolInfo {
@@ -260,6 +591,25 @@ pub async fn save_assistant(
     info!("save assistant start");
     debug!(?assistant_detail, "assistant detail incoming");
     reject_reserved_butler_assistant_name(&assistant_detail.assistant.name)?;
+    let assistant_id = assistant_detail.assistant.id;
+    let selected_agent_provider_id = if assistant_detail.assistant.assistant_type == Some(4) {
+        let provider_id = assistant_detail
+            .model
+            .first()
+            .map(|model| model.provider_id)
+            .filter(|provider_id| *provider_id > 0)
+            .ok_or_else(|| "Agent 助手尚未选择提供商，请先选择后再保存".to_string())?;
+        let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+        llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!(
+                "Agent 助手引用的提供商 ID {provider_id} 不存在，请重新选择提供商后再保存"
+            ),
+            other => other.to_string(),
+        })?;
+        Some(provider_id)
+    } else {
+        None
+    };
     if assistant_detail.assistant.id != 0 {
         let existing_assistant =
             assistant_db.get_assistant(assistant_detail.assistant.id).map_err(|e| e.to_string())?;
@@ -324,6 +674,25 @@ pub async fn save_assistant(
                     model.provider_id,
                     &model.model_code,
                     &model.alias,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 旧版本把 Agent provider 同时存进 acp_provider。若该字段仍存在，
+    // 保存时同步为权威的 assistant_model.provider_id，避免旧值再次污染表单。
+    if let Some(provider_id) = selected_agent_provider_id {
+        if let Some(legacy_config) = assistant_db
+            .get_assistant_model_configs(assistant_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|config| config.name == "acp_provider")
+        {
+            assistant_db
+                .update_assistant_model_config(
+                    legacy_config.id,
+                    "acp_provider",
+                    &provider_id.to_string(),
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -629,23 +998,6 @@ pub fn delete_assistant(app_handle: tauri::AppHandle, assistant_id: i64) -> Resu
         return Err("系统保留的总管家助手不能删除".to_string());
     }
 
-    let _ = assistant_db
-        .delete_assistant_model_config_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string());
-    let _ = assistant_db
-        .delete_assistant_prompt_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string());
-    let _ = assistant_db
-        .delete_assistant_prompt_param_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string());
-
-    let conversation_db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let _ = conversation_db
-        .conversation_repo()
-        .unwrap()
-        .update_assistant_id(assistant_id, Some(1))
-        .map_err(|e| e.to_string())?;
-
     assistant_db.delete_assistant(assistant_id).map_err(|e| e.to_string())?;
 
     // 广播助手列表更新事件
@@ -708,14 +1060,51 @@ pub fn get_acp_working_directory(
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
     let assistant_models =
         assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-    let provider_configs = if let Some(provider_id) =
+    let (provider_api_type, provider_configs) = if let Some(provider_id) =
         resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?
+        let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!(
+                "Agent 助手 {assistant_id} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商"
+            ),
+            other => other.to_string(),
+        })?;
+        let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+        (provider.api_type, configs)
     } else {
-        Vec::new()
+        return Err("Agent 助手尚未配置模型提供商".to_string());
     };
+
+    // Codex app-server 通道：使用 Codex 配置提取，不能走 ACP 的 acp_cli_command 配置
+    if provider_api_type == CODEX_APP_SERVER_API_TYPE {
+        let model_code = assistant_models
+            .first()
+            .map(|model| model.model_code.clone())
+            .filter(|value| !value.trim().is_empty());
+        let codex_config =
+            extract_codex_app_server_config(&model_configs, &provider_configs, model_code)
+                .map_err(|e| e.to_string())?;
+        return Ok(codex_config.working_directory.display().to_string());
+    }
+
+    if is_claude_code_provider(&provider_api_type, &provider_configs) {
+        let model_code = assistant_models
+            .first()
+            .map(|model| model.model_code.clone())
+            .filter(|value| !value.trim().is_empty());
+        let model_provider_id = resolve_acp_provider_id(&assistant_models, &model_configs)
+            .ok_or_else(|| "Claude Code 助手没有配置模型提供商".to_string())?;
+        let model_choices = claude_model_choices(
+            &LLMDatabase::new(&app_handle)
+                .map_err(|e| e.to_string())?
+                .get_llm_models(model_provider_id.to_string())
+                .map_err(|e| e.to_string())?,
+        );
+        let claude_config = extract_claude_sdk_config(&model_configs, &provider_configs, model_code, model_choices)
+            .map_err(|e| e.to_string())?;
+        return Ok(claude_config.working_directory.display().to_string());
+    }
 
     let acp_config = crate::api::ai::acp::extract_acp_config(&model_configs, &provider_configs)
         .map_err(|e| e.to_string())?;
@@ -724,15 +1113,58 @@ pub fn get_acp_working_directory(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, window, acp_session_state), fields(conversation_id, assistant_id))]
+#[instrument(skip(app_handle), fields(assistant_id))]
+pub fn get_agent_runtime_info(
+    app_handle: tauri::AppHandle,
+    assistant_id: i64,
+) -> Result<AgentRuntimeInfo, String> {
+    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
+    if assistant.assistant_type != Some(4) {
+        return Err("Assistant is not Agent type".to_string());
+    }
+    let model_configs = assistant_db
+        .get_assistant_model_configs(assistant_id)
+        .map_err(|e| e.to_string())?;
+    let assistant_models = assistant_db
+        .get_assistant_model(assistant_id)
+        .map_err(|e| e.to_string())?;
+    let provider_id = resolve_acp_provider_id(&assistant_models, &model_configs)
+        .ok_or_else(|| "Agent 助手尚未配置提供商".to_string())?;
+    let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => format!(
+            "Agent 助手 {assistant_id} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商"
+        ),
+        other => other.to_string(),
+    })?;
+    let provider_configs = llm_db
+        .get_llm_provider_config(provider_id)
+        .map_err(|e| e.to_string())?;
+    let agent_kind = if is_claude_code_provider(&provider.api_type, &provider_configs) {
+        CLAUDE_SDK_API_TYPE.to_string()
+    } else {
+        provider.api_type
+    };
+    let working_directory = get_acp_working_directory(app_handle, assistant_id)?;
+    Ok(AgentRuntimeInfo {
+        agent_kind,
+        working_directory,
+    })
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, window, acp_session_state, codex_session_state, claude_session_state), fields(conversation_id, assistant_id))]
 pub async fn ensure_acp_session_connected(
     window: tauri::Window,
     app_handle: tauri::AppHandle,
     acp_session_state: tauri::State<'_, crate::AcpSessionState>,
+    codex_session_state: tauri::State<'_, crate::CodexSessionState>,
+    claude_session_state: tauri::State<'_, crate::ClaudeSessionState>,
     conversation_id: i64,
     assistant_id: i64,
-) -> Result<Option<crate::api::ai::acp::AcpConversationSessionState>, String> {
-    spawn_acp_idle_reaper_once(app_handle.clone());
+) -> Result<Option<serde_json::Value>, String> {
+    spawn_agent_idle_reaper_once(app_handle.clone());
 
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
@@ -741,18 +1173,53 @@ pub async fn ensure_acp_session_connected(
         return Ok(None);
     }
 
+    // 移动端不能启动本机 CLI Agent 进程（MOB-02）
+    if cfg!(mobile) {
+        return Err(crate::api::system_api::mobile_unsupported_error("本地 CLI Agent（Codex/Claude/ACP）"));
+    }
+
+    // ask_ai may have just created the authoritative Claude session using a
+    // per-message provider/model override. Never auto-connect a second session
+    // for the same conversation and replace its state.
+    if let Some(entry) = claude_session_state.sessions.lock().await.get(&conversation_id) {
+        return Ok(Some(serde_json::to_value(entry.snapshot.clone()).unwrap_or(serde_json::Value::Null)));
+    }
+
     let model_configs =
         assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
     let assistant_models =
         assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-    let provider_configs = if let Some(provider_id) =
+    let (provider_api_type, provider_configs) = if let Some(provider_id) =
         resolve_acp_provider_id(&assistant_models, &model_configs)
     {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?
+        let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => format!(
+                "Agent 助手 {assistant_id} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商"
+            ),
+            other => other.to_string(),
+        })?;
+        let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
+        (provider.api_type, configs)
     } else {
-        Vec::new()
+        return Err("Agent 助手尚未配置模型提供商".to_string());
     };
+
+    // Claude Code's stream-json process is demand-driven by ask_ai because the
+    // selected provider/model can be overridden per message. Auto-connect must
+    // not start a default process that can race with and replace that session.
+    if is_claude_code_provider(&provider_api_type, &provider_configs) {
+        return Ok(None);
+    }
+
+    // 自动连接只负责填补空会话。ask_ai 可能已按本次消息的模型覆盖创建了权威会话，
+    // 此处绝不能用助手默认配置替换它，否则会中断正在执行的 Codex turn。
+    if provider_api_type == CODEX_APP_SERVER_API_TYPE {
+        let sessions = codex_session_state.sessions.lock().await;
+        return Ok(sessions.get(&conversation_id).map(|entry| {
+            serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)
+        }));
+    }
 
     let proxy_enabled = provider_configs
         .iter()
@@ -767,6 +1234,11 @@ pub async fn ensure_acp_session_connected(
 
     let mut acp_config = extract_acp_config(&model_configs, &provider_configs)
         .map_err(|e| e.to_string())?;
+    acp_config.model = assistant_models
+        .first()
+        .map(|model| model.model_code.trim())
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
     if let Some(proxy_url) = network_proxy.as_deref() {
         apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
     }
@@ -809,7 +1281,9 @@ pub async fn ensure_acp_session_connected(
     handle.start(window).await.map_err(|error| error.to_string())?;
 
     let sessions = acp_session_state.sessions.lock().await;
-    Ok(sessions.get(&conversation_id).map(|entry| entry.snapshot.clone()))
+    Ok(sessions
+        .get(&conversation_id)
+        .map(|entry| serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)))
 }
 
 #[tauri::command]
@@ -823,6 +1297,11 @@ pub async fn get_acp_launch_diagnostics(
 
     if assistant.assistant_type != Some(4) {
         return Err("Assistant is not ACP type".to_string());
+    }
+
+    // 移动端不探测/启动本机 CLI（MOB-02）
+    if cfg!(mobile) {
+        return Err(crate::api::system_api::mobile_unsupported_error("本地 CLI Agent 启动诊断"));
     }
 
     let assistant_model_configs =

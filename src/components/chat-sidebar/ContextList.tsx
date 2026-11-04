@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { File, FileText, Search, FolderOpen, FileInput, FileQuestion, ExternalLink, ChevronDown, Image, Sparkles } from 'lucide-react';
+import { File, FileText, Search, FolderOpen, FileInput, ExternalLink, ChevronDown, Image, Sparkles, Code2, Wrench, Inbox } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { invoke } from '@tauri-apps/api/core';
 import { ContextItem } from './types';
@@ -32,29 +32,33 @@ const getDisplayName = (item: ContextItem): string => {
     return item.name;
 };
 
+const CONTEXT_ICON_CLASS = 'h-4 w-4 text-muted-foreground flex-shrink-0';
+
 const getContextIcon = (type: ContextItem['type'], attachmentType?: string) => {
     if ((type === 'user_file' || type === 'generated_image') && attachmentType === 'Image') {
-        return <Image className="h-4 w-4 text-blue-500 flex-shrink-0" />;
+        return <Image className={CONTEXT_ICON_CLASS} />;
     }
     switch (type) {
         case 'user_file':
-            return <FileInput className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <FileInput className={CONTEXT_ICON_CLASS} />;
         case 'generated_image':
-            return <Image className="h-4 w-4 text-blue-500 flex-shrink-0" />;
+            return <Image className={CONTEXT_ICON_CLASS} />;
         case 'skill':
-            return <Sparkles className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <Sparkles className={CONTEXT_ICON_CLASS} />;
         case 'read_file':
-            return <File className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <File className={CONTEXT_ICON_CLASS} />;
         case 'preview_file':
-            return <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <FileText className={CONTEXT_ICON_CLASS} />;
+        case 'preview_code':
+            return <Code2 className={CONTEXT_ICON_CLASS} />;
         case 'search':
-            return <Search className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <Search className={CONTEXT_ICON_CLASS} />;
         case 'list_directory':
-            return <FolderOpen className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <FolderOpen className={CONTEXT_ICON_CLASS} />;
         case 'loaded_mcp_tool':
-            return <MCP className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <MCP className={CONTEXT_ICON_CLASS} />;
         default:
-            return <FileQuestion className="h-4 w-4 text-muted-foreground flex-shrink-0" />;
+            return <Wrench className={CONTEXT_ICON_CLASS} />;
     }
 };
 
@@ -70,6 +74,8 @@ const getContextLabel = (type: ContextItem['type']): string => {
             return '读取文件';
         case 'preview_file':
             return '预览文件';
+        case 'preview_code':
+            return '代码预览';
         case 'search':
             return '搜索';
         case 'list_directory':
@@ -77,8 +83,20 @@ const getContextLabel = (type: ContextItem['type']): string => {
         case 'loaded_mcp_tool':
             return '已加载工具';
         default:
-            return '其他';
+            return '其他工具';
     }
+};
+
+const isContextItemActionable = (
+    item: ContextItem,
+    onItemClick?: (item: ContextItem) => void,
+    onPreviewFileClick?: (item: ContextItem) => void,
+): boolean => {
+    if (onItemClick) return true;
+    if (item.type === 'preview_file' && onPreviewFileClick) return true;
+    if (item.type === 'search' && item.searchMarkdown) return true;
+    if (item.attachmentData) return true;
+    return false;
 };
 
 const getItemTimestamp = (timestamp?: Date): number | null => {
@@ -305,7 +323,7 @@ const ContextList: React.FC<ContextListProps> = ({
     if (items.length === 0) {
         return (
             <div className={cn("p-4 text-sm text-muted-foreground text-center", className)}>
-                <FileQuestion className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                <Inbox className="h-8 w-8 mx-auto mb-2 opacity-50" />
                 暂无上下文
             </div>
         );
@@ -349,11 +367,22 @@ const ContextList: React.FC<ContextListProps> = ({
                                 <div
                                     className={cn(
                                         "flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border bg-background transition-colors",
-                                        "hover:bg-muted/40 cursor-pointer",
+                                        isContextItemActionable(item, onItemClick, onPreviewFileClick)
+                                            ? "hover:bg-muted/40 cursor-pointer"
+                                            : "cursor-default",
                                         item.id === selectedItemId && "bg-muted/50 border-primary/30",
                                         item.id === focusedItemId && "ring-2 ring-primary/60 bg-muted/60 border-primary/40",
                                     )}
                                     onClick={() => handleItemClick(item)}
+                                    role={isContextItemActionable(item, onItemClick, onPreviewFileClick) ? "button" : undefined}
+                                    tabIndex={isContextItemActionable(item, onItemClick, onPreviewFileClick) ? 0 : undefined}
+                                    onKeyDown={(event) => {
+                                        if (!isContextItemActionable(item, onItemClick, onPreviewFileClick)) return;
+                                        if (event.key === 'Enter' || event.key === ' ') {
+                                            event.preventDefault();
+                                            handleItemClick(item);
+                                        }
+                                    }}
                                 >
                                     {getContextIcon(item.type, item.attachmentData?.type)}
                                     <div className="flex-1 min-w-0">

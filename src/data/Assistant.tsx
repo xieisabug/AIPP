@@ -8,7 +8,7 @@ export interface Assistant {
     id: number;
     name: string;
     description: string | null;
-    assistant_type: number; // 0: 普通对话助手, 1: 多模型对比助手，2: 工作流助手，3: 展示助手，4: ACP 助手
+    assistant_type: number; // 0: 普通对话助手, 1: 多模型对比助手，2: 工作流助手，3: 展示助手，4: Agent 助手（ACP / Codex app-server 等外部 agent 通道）
     is_addition: boolean;
     created_time: string;
 }

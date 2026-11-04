@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -51,13 +51,20 @@ export default function ArtifactCollectionsWindow() {
     const { toast } = useToast();
 
     // 加载所有 artifacts
-    const loadArtifacts = async () => {
+    const loadArtifacts = async (isCurrent: () => boolean = () => true) => {
         try {
             setIsLoading(true);
             const result = await invoke<ArtifactCollection[]>("get_artifacts_collection", {
                 artifactType: null,
             });
+            if (!isCurrent()) return;
             setArtifacts(result);
+            setEditingArtifact((current) => current ? result.find((item) => item.id === current.id) ?? null : null);
+            if (editingArtifact && !result.some((item) => item.id === editingArtifact.id)) setShowEditDialog(false);
+            if (deletingArtifact && !result.some((item) => item.id === deletingArtifact.id)) {
+                setShowDeleteDialog(false);
+                setDeletingArtifact(null);
+            }
             setFilteredArtifacts(result);
         } catch (error) {
             console.error("加载 artifacts 失败:", error);
@@ -67,7 +74,7 @@ export default function ArtifactCollectionsWindow() {
                 variant: "destructive",
             });
         } finally {
-            setIsLoading(false);
+            if (isCurrent()) setIsLoading(false);
         }
     };
 
@@ -89,25 +96,11 @@ export default function ArtifactCollectionsWindow() {
         setFilteredArtifacts(filtered);
     }, [artifacts, searchQuery]);
 
-    // 监听事件
-    useEffect(() => {
-        const unlisteners: (() => void)[] = [];
-
-        const setupListeners = async () => {
-            const artifactDeletedUnlisten = await listen("artifact-collection-updated", () => {
-                loadArtifacts();
-            });
-
-            unlisteners.push(artifactDeletedUnlisten);
-        };
-
-        setupListeners();
-        loadArtifacts();
-
-        return () => {
-            unlisteners.forEach((unlisten) => unlisten());
-        };
-    }, []);
+    useDataRefresh({
+        events: ["artifact-collection-updated", "artifacts_collection_changed"],
+        initial: true,
+        refresh: async (isCurrent) => { await loadArtifacts(isCurrent); },
+    });
 
     // 打开 artifact
     const openArtifact = async (artifact: ArtifactCollection) => {

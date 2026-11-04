@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { useTheme } from "@/hooks/useTheme";
 import IconButton from "./IconButton";
 import { Copy, Check, SquareTerminal } from "lucide-react";
-import { useRustHighlight } from "@/hooks/highlight/useRustHighlight";
+import { buildHighlightCacheKey, getCachedRustHighlight, useRustHighlight } from "@/hooks/highlight/useRustHighlight";
 import { useCodeTheme } from "@/hooks/useCodeTheme";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 import type { CodeBlockMetaInfo } from "@/react-markdown/remarkCodeBlockMeta";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { previewMobile } from "@/mobile/navigation";
+import { STATIC_PREVIEW_TYPES } from "@/mobile/previewDocument";
 
 interface RustCodeBlockProps {
     language: string;
@@ -65,16 +68,18 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     disableCollapse = false,
 }) => {
     const code = useMemo(() => (typeof children === "string" ? children : String(children)), [children]);
-    const { resolvedTheme } = useTheme();
-    const [html, setHtml] = useState<string>("");
+    // 脚本执行依赖 shell 环境，移动端不支持，隐藏"运行"按钮
+    const codeRunAvailable = useFeatureAvailableOnPlatform("script_execution");
+    const mobile = useIsMobilePlatform();
+    const mobilePreviewAvailable = mobile && (STATIC_PREVIEW_TYPES.has(language.toLowerCase()) || ["react", "jsx", "vue"].includes(language.toLowerCase()));
+    const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null);
     const [copyState, setCopyState] = useState<"copy" | "ok">("copy");
-    const [isHovered, setIsHovered] = useState(false);
     const [isSticky, setIsSticky] = useState(false);
     const [toolbarRight, setToolbarRight] = useState<number>(8);
     const containerRef = useRef<HTMLDivElement | null>(null);
     const codeRef = useRef<HTMLDivElement | null>(null);
-    const rafRef = useRef<number | null>(null);
-    const { currentTheme } = useCodeTheme();
+    const headerSentinelRef = useRef<HTMLDivElement | null>(null);
+    const { currentTheme, resolvedTheme } = useCodeTheme();
     const rustHighlight = useRustHighlight();
     const shouldUsePlainText = isPlainTextLanguage(language);
 
@@ -89,6 +94,16 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     const hasInitialDecisionRef = useRef(false); // 非流式时仅在首次渲染做一次自动判断
     const collapsedPreview = useMemo(() => getCollapsedPreviewCode(code), [code]);
     const renderCode = !disableCollapse && isCollapsed ? collapsedPreview.code : code;
+    const highlightKey = useMemo(
+        () => buildHighlightCacheKey(language, renderCode, resolvedTheme === "dark", currentTheme),
+        [language, renderCode, resolvedTheme, currentTheme],
+    );
+    const cachedHtml = useMemo(
+        () => shouldUsePlainText ? undefined : getCachedRustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme),
+        [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText],
+    );
+    const html = shouldUsePlainText ? "" : cachedHtml
+        ?? (highlighted?.key === highlightKey ? highlighted.html : "");
     const isPreviewTruncated = !disableCollapse && isCollapsed && collapsedPreview.truncated;
     const canCollapse = !disableCollapse && (isOverflow || isPreviewTruncated || shouldCollapseInitially);
     const metaLabel = useMemo(() => {
@@ -103,25 +118,38 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
 
     useEffect(() => {
         if (shouldUsePlainText) {
-            setHtml("");
             return;
         }
 
+        if (cachedHtml !== undefined) return;
+
         let cancelled = false;
-        setHtml("");
-        (async () => {
-            try {
-                const result = await rustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme);
-                if (!cancelled) setHtml(result);
-            } catch (e) {
-                console.warn("[RustCodeBlock] highlight failed, fallback to plain text", e);
-                if (!cancelled) setHtml("");
-            }
-        })();
+        const runHighlight = () => {
+            void (async () => {
+                try {
+                    const result = await rustHighlight(language, renderCode, resolvedTheme === "dark", currentTheme);
+                    if (!cancelled) setHighlighted({ key: highlightKey, html: result });
+                } catch (e) {
+                    console.warn("[RustCodeBlock] highlight failed, fallback to plain text", e);
+                    if (!cancelled) setHighlighted(null);
+                }
+            })();
+        };
+
+        if (!isStreaming) {
+            runHighlight();
+            return () => {
+                cancelled = true;
+            };
+        }
+
+        // 结果只在 key 完全一致时展示，流式中途的高亮会被下一个 token 作废，所以等输出停顿再高亮。
+        const timer = window.setTimeout(runHighlight, 150);
         return () => {
             cancelled = true;
+            window.clearTimeout(timer);
         };
-    }, [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText, rustHighlight]);
+    }, [language, renderCode, resolvedTheme, currentTheme, shouldUsePlainText, rustHighlight, cachedHtml, highlightKey, isStreaming]);
 
     // 计算是否超出折叠阈值，并在需要时进行自动折叠
     useEffect(() => {
@@ -134,8 +162,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
         const el = codeRef.current;
         if (!el) return;
 
-        const measure = () => {
-            const contentHeight = el.scrollHeight; // 实际内容高度
+        const measure = (contentHeight: number) => {
             const overflow = contentHeight > COLLAPSED_MAX_HEIGHT + 4 || shouldCollapseInitially; // 允许少量误差
             setIsOverflow(overflow);
 
@@ -163,70 +190,54 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
             }
         };
 
-        // 首次测量
-        measure();
-
-        // 监听窗口大小变化，重新测量（避免布局变化导致判断不准）
-        const onResize = () => {
-            // 使用 RAF，避免高频触发
-            if (rafRef.current) cancelAnimationFrame(rafRef.current);
-            rafRef.current = requestAnimationFrame(measure);
-        };
-        window.addEventListener('resize', onResize);
+        // The inner code element is not height-clamped (its parent is). Observe
+        // its laid-out border box instead of forcing layout with scrollHeight in
+        // every code block's passive effect after each highlight result.
+        const observer = new ResizeObserver((entries) => {
+            const entry = entries[0];
+            if (entry) {
+                measure(entry.borderBoxSize[0]?.blockSize ?? entry.contentRect.height);
+            }
+        });
+        observer.observe(el, { box: "border-box" });
         return () => {
-            window.removeEventListener('resize', onResize);
+            observer.disconnect();
         };
         // 依赖 html 与 code，在代码或高亮结果变化时重新测量
     }, [html, code, renderCode, isStreaming, disableCollapse, shouldCollapseInitially]);
 
-    // 监听滚动判断是否需要 sticky - 使用 RAF 节流
+    // 用 IntersectionObserver 判断是否需要 sticky 工具栏，避免 mouseenter/leave 改 state 触发重渲染清掉选区
     useEffect(() => {
-        if (!isHovered) {
-            setIsSticky(false);
-            return;
-        }
+        const sentinel = headerSentinelRef.current;
+        const container = containerRef.current;
+        if (!sentinel || !container) return;
 
-        const handleScroll = () => {
-            // 取消之前的 RAF
-            if (rafRef.current) {
-                cancelAnimationFrame(rafRef.current);
-            }
-
-            // 使用 RAF 节流，确保在下一帧才更新
-            rafRef.current = requestAnimationFrame(() => {
-                if (!containerRef.current) return;
-
-                const rect = containerRef.current.getBoundingClientRect();
-                const shouldStick = rect.top < 8 && rect.bottom > 60;
-                
-                // 只在状态真正变化时才更新
-                setIsSticky(prev => {
-                    if (prev !== shouldStick) {
-                        // 同时更新 right 位置，避免额外渲染
-                        if (shouldStick) {
-                            setToolbarRight(window.innerWidth - rect.right + 8);
-                        }
-                        return shouldStick;
-                    }
+        const updateStickyGeometry = (shouldStick: boolean) => {
+            setIsSticky((prev) => {
+                if (prev === shouldStick) {
                     return prev;
-                });
+                }
+                if (shouldStick) {
+                    const rect = container.getBoundingClientRect();
+                    setToolbarRight(window.innerWidth - rect.right + 8);
+                }
+                return shouldStick;
             });
         };
 
-        window.addEventListener("scroll", handleScroll, { passive: true });
-        const scrollParent = containerRef.current?.closest('.overflow-auto, .overflow-y-auto');
-        scrollParent?.addEventListener("scroll", handleScroll, { passive: true } as any);
-        
-        handleScroll(); // 初始检查
-
-        return () => {
-            if (rafRef.current) {
-                cancelAnimationFrame(rafRef.current);
-            }
-            window.removeEventListener("scroll", handleScroll);
-            scrollParent?.removeEventListener("scroll", handleScroll as any);
-        };
-    }, [isHovered]);
+        const observer = new IntersectionObserver(
+            (entries) => {
+                const entry = entries[0];
+                // 顶部 sentinel 滚出视口且代码块仍可见时，固定工具栏
+                const rect = container.getBoundingClientRect();
+                const stillVisible = rect.top < 80 && rect.bottom > 124;
+                updateStickyGeometry(!entry.isIntersecting && stillVisible);
+            },
+            { root: null, rootMargin: "0px", threshold: [0, 1] },
+        );
+        observer.observe(sentinel);
+        return () => observer.disconnect();
+    }, []);
 
     const handleCopy = useCallback(() => {
         writeText(code);
@@ -243,16 +254,17 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
     return (
         <div 
             ref={containerRef}
-            className={`relative overflow-hidden bg-transparent ${className}`}
+            className={`group/codeblock relative overflow-hidden bg-transparent ${className}`}
             data-meta={meta?.meta}
             data-title={meta?.title}
             data-filename={meta?.filename}
             data-line={meta?.line}
             data-highlight={meta?.highlight}
-            onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
         >
-            {/* Toolbar - 根据 isSticky 切换定位方式 */}
+            {/* 顶部 sentinel：滚出视口后启用 sticky 工具栏；不参与布局 */}
+            <div ref={headerSentinelRef} className="h-0 w-full" aria-hidden />
+            {/* Toolbar：CSS :hover 显隐，避免 mouseleave setState 重渲染清掉代码选区。
+                mousedown preventDefault 避免点复制时抢走选区。 */}
             <div 
                 className={`
                     z-10
@@ -260,16 +272,23 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                     bg-white/85 dark:bg-neutral-800/75 rounded-md p-1 backdrop-blur-sm shadow-sm
                     transition-opacity duration-150 ease-out
                     will-change-opacity
-                    ${isSticky ? 'fixed top-20 shadow-lg' : 'absolute right-2 top-2'}
-                    ${isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}
+                    ${isSticky ? 'aipp-sticky-code-toolbar fixed top-20 shadow-lg opacity-100' : `absolute right-2 top-2 ${mobile ? 'opacity-100' : 'opacity-0 group-hover/codeblock:opacity-100'}`}
                 `}
                 style={isSticky ? { right: `${toolbarRight}px` } : undefined}
+                onMouseDown={(event) => {
+                    event.preventDefault();
+                }}
             >
                 <IconButton
                     icon={copyState === "copy" ? <Copy size={16} className="text-icon" /> : <Check size={16} className="text-icon" />}
                     onClick={handleCopy}
+                    title="复制代码"
+                    className={mobile ? "min-h-11 min-w-11" : undefined}
                 />
-                <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
+                {mobilePreviewAvailable && <IconButton title="预览制品" className="min-h-11 min-w-11" icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => previewMobile({ language, code })} />}
+                {codeRunAvailable && (
+                    <IconButton icon={<SquareTerminal size={16} className="text-icon" />} onClick={() => onCodeRun?.(language, code)} />
+                )}
             </div>
 
             {metaLabel && (
@@ -292,13 +311,13 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 {html ? (
                     <div
                         ref={codeRef}
-                        className="text-sm font-mono"
+                        className="aipp-code-content text-sm font-mono leading-5"
                         dangerouslySetInnerHTML={{ __html: html }}
                     />
                 ) : (
-                    <pre ref={codeRef as any} className="text-sm font-mono p-3 bg-transparent">
-                        <code>{renderCode}</code>
-                    </pre>
+                    <div ref={codeRef} className="aipp-code-content text-sm font-mono leading-5">
+                        <pre><code>{renderCode}</code></pre>
+                    </div>
                 )}
                 {/* Gradient overlay when collapsed */}
                 {!disableCollapse && isCollapsed && canCollapse && (
@@ -311,7 +330,7 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
                 <div className="flex justify-center pt-2 pb-1 bg-muted">
                     <button
                         type="button"
-                        className="px-3 py-1 text-xs text-foreground/70 hover:text-foreground transition-colors cursor-pointer"
+                        className={`px-3 py-1 text-xs text-foreground/70 hover:text-foreground transition-colors cursor-pointer ${mobile ? "min-h-11 min-w-11" : ""}`}
                         onClick={toggleCollapse}
                         aria-label={isCollapsed ? '展开代码' : '收起代码'}
                     >

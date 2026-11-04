@@ -99,9 +99,9 @@ pub async fn collect_skills_info_for_assistant_with_additions(
 
 /// Format skills into the assistant prompt
 /// This appends skill information to the existing prompt
-#[instrument(level = "debug", skip(assistant_prompt_result, skills_info, app_handle), fields(skills_count = skills_info.enabled_skills.len()))]
+#[instrument(level = "debug", skip(assistant_prompt_result, skills_info, _app_handle), fields(skills_count = skills_info.enabled_skills.len()))]
 pub async fn format_skills_prompt(
-    app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle,
     assistant_prompt_result: String,
     skills_info: &SkillsInfoForAssistant,
 ) -> String {

@@ -9,6 +9,9 @@ import {
     TooltipProvider,
     TooltipTrigger,
 } from "../ui/tooltip";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+
+const NATIVE_TOOLCALL_HINT = "如果模型支持并且模型能力够强，推荐使用原生Toolcall调用工具更加准确";
 
 interface AssistantNativeToolCallFieldProps {
     assistantId: number;
@@ -21,6 +24,7 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
 }) => {
     const [useNativeToolCall, setUseNativeToolCall] = useState<boolean>(false);
     const [loading, setLoading] = useState(true);
+    const isMobilePlatform = useIsMobilePlatform();
 
     const fetchConfig = useCallback(async () => {
         try {
@@ -71,24 +75,25 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
     }
 
     return (
-        <div className="space-y-2">
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">使用原生ToolCall</span>
-                    <TooltipProvider>
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Info className="h-4 w-4 text-muted-foreground cursor-help" />
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                <p className="max-w-xs text-xs">
-                                    如果模型支持并且模型能力够强，推荐使用原生Toolcall调用工具更加准确
-                                </p>
-                            </TooltipContent>
-                        </Tooltip>
-                    </TooltipProvider>
+        <div className="space-y-2" data-aipp-slot="assistant-native-toolcall">
+            <div className="flex w-full min-w-0 items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="text-sm font-medium text-foreground break-words">使用原生ToolCall</span>
+                    {!isMobilePlatform && (
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Info className="h-4 w-4 text-muted-foreground cursor-help" />
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    <p className="max-w-xs text-xs">{NATIVE_TOOLCALL_HINT}</p>
+                                </TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
+                    )}
                 </div>
                 <Switch
+                    className="shrink-0"
                     checked={useNativeToolCall}
                     onCheckedChange={handleToggle}
                 />
@@ -96,6 +101,7 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
             <p className="text-xs text-muted-foreground">
                 {useNativeToolCall ? '已启用原生ToolCall调用' : '使用prompt方式调用工具'}
             </p>
+            {isMobilePlatform && <p className="text-xs text-muted-foreground">{NATIVE_TOOLCALL_HINT}</p>}
         </div>
     );
 };

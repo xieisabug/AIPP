@@ -727,8 +727,7 @@ impl ActionHandler for LlmGetModelsHandler {
             .ok_or("Missing models in snapshot")?;
 
         let db = LLMDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        db.delete_llm_model_by_provider(provider_id).map_err(|e| e.to_string())?;
-
+        let mut restored_models = Vec::new();
         for model in models {
             let name = model
                 .get("name")
@@ -751,19 +750,14 @@ impl ActionHandler for LlmGetModelsHandler {
                 .and_then(|value| value.as_str())
                 .unwrap_or(DEFAULT_MODEL_REQUEST_MODE);
 
-            db.add_llm_model(
-                name,
-                provider_id,
-                code,
-                description,
-                vision_support,
-                audio_support,
-                video_support,
-            )
-            .map_err(|e| e.to_string())?;
-            db.upsert_model_request_mode(provider_id, code, request_mode)
-                .map_err(|e| e.to_string())?;
+            restored_models.push(crate::db::llm_db::LLMModel {
+                id: 0, name: name.to_string(), llm_provider_id: provider_id,
+                code: code.to_string(), description: description.to_string(),
+                vision_support, audio_support, video_support,
+                request_mode: request_mode.to_string(),
+            });
         }
+        db.replace_llm_models(provider_id, &restored_models, true).map_err(|e| e.to_string())?;
 
         Ok(json!({
             "undone": true,

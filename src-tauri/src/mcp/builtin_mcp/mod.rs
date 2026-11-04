@@ -3,7 +3,7 @@ use crate::api::ai::acp::{
 };
 use crate::db::mcp_db::{MCPDatabase, MCPToolCall};
 use crate::mcp::builtin_mcp::operation::state::PermissionRequestSnapshot;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 use tracing::{debug, error, instrument};
 
@@ -15,7 +15,7 @@ pub mod search;
 pub mod superadmin;
 pub mod templates;
 
-pub use agent::{AgentHandler, TodoHandler, TodoState};
+pub use agent::{AgentHandler, TodoState};
 pub use interaction::{
     handle_preview_file_relay_request, list_preview_code_requests_for_conversation,
     prepare_preview_file_request_for_ui, submit_ask_user_question_response,
@@ -50,12 +50,6 @@ pub fn builtin_command_id(command: &str) -> Option<String> {
 // Legacy function alias for backward compatibility
 pub fn is_builtin_mcp_call(command: &str) -> bool {
     is_builtin_command(command)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuiltinExecutionResult {
-    pub content: Vec<serde_json::Value>,
-    pub is_error: bool,
 }
 
 /// Look up conversation_kind for a given conversation_id.
@@ -351,6 +345,7 @@ fn build_pending_mcp_tool_calls_payload(tool_calls: &[MCPToolCall]) -> Vec<serde
     tool_calls.iter().map(build_pending_mcp_tool_call_payload).collect()
 }
 
+#[allow(dead_code)]
 fn has_active_anchor_group_calls(tool_calls: &[MCPToolCall], target_call: &MCPToolCall) -> bool {
     let anchor_message_id = tool_call_anchor_message_id(target_call);
     tool_calls.iter().any(|tool_call| {
@@ -1059,6 +1054,12 @@ pub async fn execute_aipp_builtin_tool(
     conversation_id: Option<i64>,
 ) -> Result<String, String> {
     use search::types::{SearchRequest, SearchResponse, SearchResultType};
+
+    if cfg!(mobile) {
+        if let Some(issue) = crate::api::mobile_capability::tool_issue("builtin", Some(&server_command), Some(&tool_name)) {
+            return Err(issue.error("builtin_dispatch", &format!("tool={}; conversation_id={:?}", tool_name, conversation_id)));
+        }
+    }
 
     let args = parse_builtin_parameters(&parameters)?;
 
@@ -1770,6 +1771,20 @@ pub async fn execute_aipp_builtin_tool(
                 }
                 "load_mcp_server" | "load_mcp_tool" => {
                     execute_dynamic_mcp_tool(&app_handle, &tool_name, &args, conversation_id)?
+                }
+                "call_mcp_tool" => {
+                    let server_name = args.get("server_name").and_then(|v| v.as_str()).unwrap_or("");
+                    let target_tool = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                    serde_json::json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "无法调用 {}::{}。call_mcp_tool 需要 server_name、tool_name 和 parameters；目标工具必须先通过 load_mcp_tool 加载。",
+                                server_name, target_tool
+                            )
+                        }],
+                        "isError": true
+                    })
                 }
                 "spawn_task_conversation" => {
                     let butler_conversation_id = args
@@ -2851,6 +2866,7 @@ mod tests {
             event: AcpPermissionRequestEvent {
                 request_id: "req-2".to_string(),
                 conversation_id: Some(1),
+                agent_kind: Some("acp".to_string()),
                 tool_call_id: "tool-1".to_string(),
                 title: Some("Run shell command".to_string()),
                 kind: Some("bash".to_string()),
@@ -2878,6 +2894,7 @@ mod tests {
             event: AcpPermissionRequestEvent {
                 request_id: "req-3".to_string(),
                 conversation_id: Some(1),
+                agent_kind: Some("acp".to_string()),
                 tool_call_id: "tool-2".to_string(),
                 title: Some("Tool permission".to_string()),
                 kind: Some("tool".to_string()),

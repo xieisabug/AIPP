@@ -116,7 +116,9 @@ MCP 卡片组件位于：
   - 从消息内容中的 `MCP_TOOL_CALL` 注释渲染组件
 - `src/components/ConversationUI.tsx`
   - 手动搜索定位高亮
-- `src/components/conversation/MessageList.tsx`
+- `src/components/conversation/VirtuosoMessageList.tsx`
+  - 消息列表渲染
+- `src/components/MessageItem.tsx`
   - 消息边框渲染
 
 ### 测试

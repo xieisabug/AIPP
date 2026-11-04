@@ -9,12 +9,20 @@ import {
 } from "@/components/conversation/layoutConstants";
 
 class ResizeObserverMock {
+    static instances: ResizeObserverMock[] = [];
+    callback: ResizeObserverCallback;
     observe = vi.fn();
     disconnect = vi.fn();
+
+    constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        ResizeObserverMock.instances.push(this);
+    }
 }
 
 describe("useScrollManagement", () => {
     beforeEach(() => {
+        ResizeObserverMock.instances = [];
         vi.useFakeTimers();
         vi.stubGlobal(
             "requestAnimationFrame",
@@ -32,6 +40,40 @@ describe("useScrollManagement", () => {
         vi.unstubAllGlobals();
     });
 
+    it("does not execute queued scrolling after the mobile page becomes hidden", () => {
+        const frames: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+            frames.push(callback);
+            return frames.length;
+        }));
+        const shell = document.createElement("div");
+        shell.setAttribute("data-aipp-mobile-shell", "");
+        const page = document.createElement("div");
+        const container = document.createElement("div");
+        const tail = document.createElement("div");
+        container.append(tail);
+        page.append(container);
+        shell.append(page);
+        document.body.append(shell);
+        Object.defineProperty(container, "scrollHeight", { value: 1000 });
+        Object.defineProperty(container, "clientHeight", { value: 400 });
+        container.scrollTo = vi.fn();
+        const { result } = renderHook(() => useScrollManagement());
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.smartScroll(true, "auto");
+        });
+        expect(frames.length).toBeGreaterThan(0);
+        page.hidden = true;
+        act(() => {
+            frames.splice(0).forEach(callback => callback(0));
+            const observer = ResizeObserverMock.instances.at(-1);
+            observer?.callback([], observer as unknown as ResizeObserver);
+        });
+        expect(container.scrollTo).not.toHaveBeenCalled();
+        shell.remove();
+    });
+
     it("replays smartScroll after scrollToUserMessage releases its smooth-scroll lock", () => {
         const container = {
             scrollTop: 120,
@@ -42,6 +84,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -134,6 +177,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -172,6 +216,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -209,6 +254,7 @@ describe("useScrollManagement", () => {
                     container.scrollTop = options.top;
                 }
             }),
+            closest: vi.fn(() => null),
             querySelector: vi.fn(() => null),
             querySelectorAll: vi.fn(() => []),
             lastElementChild: null,
@@ -230,4 +276,338 @@ describe("useScrollManagement", () => {
 
         expect(container.scrollTo).not.toHaveBeenCalled();
     });
+
+    it("does not jump back to the bottom when the tail resizes after the user leaves", () => {
+        const tail = document.createElement("div");
+        const container = {
+            scrollTop: 600,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: tail,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.smartScroll(true, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledTimes(1);
+
+        act(() => {
+            vi.advanceTimersByTime(100);
+        });
+
+        act(() => {
+            container.scrollTop = 80;
+            result.current.syncScrollState(container);
+        });
+
+        act(() => {
+            ResizeObserverMock.instances.at(-1)?.callback([], ResizeObserverMock.instances.at(-1) as unknown as ResizeObserver);
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledTimes(1);
+        expect(container.scrollTop).toBe(80);
+    });
+
+    it("follows tail growth while the user remains at the bottom", () => {
+        const tail = document.createElement("div");
+        const container = {
+            scrollTop: 600,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: tail,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.smartScroll();
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(100);
+        });
+
+        act(() => {
+            ResizeObserverMock.instances.at(-1)?.callback([], ResizeObserverMock.instances.at(-1) as unknown as ResizeObserver);
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledTimes(2);
+        expect(container.scrollTop).toBe(1000);
+    });
+
+    it("keeps following stream growth after mid-auto-scroll syncScrollState", () => {
+        let scrollHeight = 1000;
+        const container = {
+            scrollTop: 600,
+            get scrollHeight() {
+                return scrollHeight;
+            },
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+        });
+
+        act(() => {
+            // 距离 > 120 → smooth，进入 auto-scroll 锁
+            result.current.smartScroll();
+        });
+
+        expect(container.scrollTo).toHaveBeenCalled();
+
+        act(() => {
+            // 模拟 smooth 中途：尚未贴底时 Virtuoso onScrollStateChange 回调
+            container.scrollTop = 650;
+            scrollHeight = 1400;
+            result.current.syncScrollState(container as HTMLDivElement);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(400);
+            // 流式继续增高，再次 smartScroll（与 ConversationUI 流式 auto 路径一致）
+            scrollHeight = 1800;
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenLastCalledWith({
+            top: 1800,
+            behavior: "auto",
+        });
+    });
+
+    it("resumes smartScroll after user scrolls back to bottom", () => {
+        const container = {
+            scrollTop: 600,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.handleUserScrollIntent({
+                deltaY: -80,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll(false, "auto");
+        });
+        expect(container.scrollTo).not.toHaveBeenCalled();
+
+        // 用户滚回底部：syncScrollState 清除 isUserScrolledUp
+        act(() => {
+            container.scrollTop = 600; // 1000-400
+            result.current.syncScrollState(container);
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledWith({
+            top: 1000,
+            behavior: "auto",
+        });
+    });
+
+    it("marks scrolled-up on touch intent when away from bottom", () => {
+        const container = {
+            scrollTop: 100,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement;
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            // TouchEvent-like：无 deltaY，靠 distanceToBottom >= 10
+            result.current.handleUserScrollIntent({} as any);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll();
+        });
+
+        expect(container.scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("keeps following under fast burst smartScroll auto updates", () => {
+        let scrollHeight = 1000;
+        const container = {
+            scrollTop: 600,
+            get scrollHeight() {
+                return scrollHeight;
+            },
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+        });
+
+        for (const height of [1200, 1500, 2000, 2800, 3600]) {
+            act(() => {
+                // 释放上一轮 auto 锁
+                vi.advanceTimersByTime(120);
+                scrollHeight = height;
+                result.current.smartScroll(false, "auto");
+            });
+            expect(container.scrollTo).toHaveBeenLastCalledWith({
+                top: height,
+                behavior: "auto",
+            });
+        }
+    });
+
+    it("does not resume follow on mid-history wheel-down after scrolling up", () => {
+        const container = {
+            scrollTop: 80,
+            scrollHeight: 2000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.handleUserScrollIntent({
+                deltaY: -80,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        // 中段继续下滚一点：不得清掉上滑标记
+        act(() => {
+            container.scrollTop = 160;
+            result.current.handleUserScrollIntent({
+                deltaY: 40,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("resumes follow when wheel-down happens near the bottom", () => {
+        const container = {
+            scrollTop: 550,
+            scrollHeight: 1000,
+            clientHeight: 400,
+            scrollTo: vi.fn((options: ScrollToOptions) => {
+                if (typeof options.top === "number") {
+                    container.scrollTop = options.top;
+                }
+            }),
+            closest: vi.fn(() => null),
+            querySelector: vi.fn(() => null),
+            querySelectorAll: vi.fn(() => []),
+            lastElementChild: null,
+        } as unknown as HTMLDivElement & { scrollTop: number };
+
+        const { result } = renderHook(() => useScrollManagement());
+
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            // 先上滑离开底部
+            result.current.handleUserScrollIntent({
+                deltaY: -40,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            // 距底 50px：下滚应恢复跟滚
+            container.scrollTop = 550;
+            result.current.handleUserScrollIntent({
+                deltaY: 30,
+            } as WheelEvent<HTMLDivElement>);
+        });
+
+        act(() => {
+            vi.advanceTimersByTime(251);
+            result.current.smartScroll(false, "auto");
+        });
+
+        expect(container.scrollTo).toHaveBeenCalledWith({
+            top: 1000,
+            behavior: "auto",
+        });
+    });
+
 });
+

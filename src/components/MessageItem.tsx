@@ -7,15 +7,22 @@ import ImageAttachments from "./message-item/ImageAttachments";
 import RawTextRenderer from "./RawTextRenderer";
 import { ShineBorder } from "./magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
-import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversation";
+import { Message, StreamEvent, MCPToolCallUpdateEvent, AgentActivityEvent } from "../data/Conversation";
+import { AgentActivityList } from "./conversation/AgentActivityList";
+import { AgentPlanCard } from "./conversation/AgentPlanCard";
+import { buildActivitySegments } from "./conversation/agent-activity/activitySegments";
 import { useCopyHandler } from "../hooks/useCopyHandler";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
-import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
+import { MarkdownStreamingContext, useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
 import { useDisplayConfig } from "../hooks/useDisplayConfig";
 import { useFeishuDebugResend } from "../hooks/useFeishuDebugResend";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
+import { useIsMobilePlatform } from "../hooks/use-platform";
 import { maskContent } from "../utils/antiLeakage";
+import { recordMessageItemRender } from "../utils/messageItemRenderStats";
+import { splitClosedMarkdownBlocks } from "../utils/streamingMarkdownBlocks";
+import { resolveMessageDisplayContent } from "../utils/streamingOverlayHandoff";
 import type { InlineInteractionItem } from "./ConversationUI";
 import { ChevronDown, ChevronUp, ListEnd, Loader2, Zap } from "lucide-react";
 import {
@@ -44,6 +51,11 @@ interface MessageItemProps {
     allowFeishuDebugResend?: boolean;
     mergedMode?: boolean; // 合并模式：不渲染外层气泡包装
     messageActions?: React.ReactNode;
+    agentActivities?: AgentActivityEvent[]; // Codex 等 Agent 的活动事件（收进气泡内展示）
+    canActOnAgentPlan?: boolean;
+    agentPlanModeSwitching?: boolean;
+    onContinueAgentPlan?: () => void;
+    onApproveAgentPlan?: () => void;
 }
 
 interface QueueMessageMeta {
@@ -68,8 +80,30 @@ interface RichMessageContentProps {
     inlineInteractionItems?: InlineInteractionItem[];
 }
 
-const RichMessageContent = React.memo(function RichMessageContent({
-    displayContent,
+interface StableMarkdownChunkProps extends Omit<RichMessageContentProps, "displayContent"> {
+    chunk: string;
+}
+
+function stableMarkdownChunkPropsEqual(
+    prev: StableMarkdownChunkProps,
+    next: StableMarkdownChunkProps,
+): boolean {
+    return prev.chunk === next.chunk
+        && prev.isStreaming === next.isStreaming
+        && prev.isUserMessage === next.isUserMessage
+        && prev.isUserMessageMarkdownEnabled === next.isUserMessageMarkdownEnabled
+        && prev.isLastMessage === next.isLastMessage
+        && prev.useRawTextRenderer === next.useRawTextRenderer
+        && prev.conversationId === next.conversationId
+        && prev.messageId === next.messageId
+        && prev.mcpToolCallStates === next.mcpToolCallStates
+        && prev.shiningMcpCallId === next.shiningMcpCallId
+        && prev.inlineInteractionItems === next.inlineInteractionItems
+        && prev.onCodeRun === next.onCodeRun;
+}
+
+const StableMarkdownChunk = React.memo(function StableMarkdownChunk({
+    chunk: displayContent,
     onCodeRun,
     isUserMessage,
     isUserMessageMarkdownEnabled,
@@ -81,7 +115,7 @@ const RichMessageContent = React.memo(function RichMessageContent({
     mcpToolCallStates,
     shiningMcpCallId,
     inlineInteractionItems,
-}: RichMessageContentProps) {
+}: StableMarkdownChunkProps) {
     const { parseCustomTags } = useCustomTagParser();
     const markdownContent = useMemo(
         () => useRawTextRenderer ? displayContent : parseCustomTags(displayContent),
@@ -90,7 +124,6 @@ const RichMessageContent = React.memo(function RichMessageContent({
     const markdownConfig = useMarkdownConfig({
         onCodeRun,
         disableMarkdownSyntax: isUserMessage && !isUserMessageMarkdownEnabled,
-        isStreaming,
     });
     const { processContent } = useMcpToolCallProcessor(markdownConfig, {
         conversationId,
@@ -114,6 +147,7 @@ const RichMessageContent = React.memo(function RichMessageContent({
             const element = (
                 <UnifiedMarkdown
                     noProseWrapper
+                    markdownConfig={markdownConfig}
                     onCodeRun={onCodeRun}
                     isStreaming={isStreaming}
                 >
@@ -121,7 +155,11 @@ const RichMessageContent = React.memo(function RichMessageContent({
                 </UnifiedMarkdown>
             );
 
-            return processContent(markdownContent, element);
+            return (
+                <MarkdownStreamingContext.Provider value={isStreaming}>
+                    {processContent(markdownContent, element)}
+                </MarkdownStreamingContext.Provider>
+            );
         },
         [
             isUserMessage,
@@ -129,10 +167,59 @@ const RichMessageContent = React.memo(function RichMessageContent({
             useRawTextRenderer,
             displayContent,
             markdownContent,
+            markdownConfig,
             onCodeRun,
             processContent,
             isStreaming,
         ],
+    );
+}, stableMarkdownChunkPropsEqual);
+
+const RichMessageContent = React.memo(function RichMessageContent(props: RichMessageContentProps) {
+    // 在本次挂载期间流式输出过的消息，结束后保持同一套切块结构，
+    // 否则流结束时整条消息会从切块切回整体渲染，所有块重新挂载。
+    const [streamedWhileMounted, setStreamedWhileMounted] = useState(props.isStreaming);
+    if (props.isStreaming && !streamedWhileMounted) {
+        setStreamedWhileMounted(true);
+    }
+
+    const blocks = useMemo(() => {
+        if (!streamedWhileMounted || props.useRawTextRenderer || props.isUserMessage) {
+            return null;
+        }
+        if (
+            props.displayContent.includes("MCP_TOOL_CALL")
+            || props.displayContent.includes("<mcp_tool_call")
+        ) {
+            return null;
+        }
+        return splitClosedMarkdownBlocks(props.displayContent);
+    }, [
+        props.displayContent,
+        props.isUserMessage,
+        props.useRawTextRenderer,
+        streamedWhileMounted,
+    ]);
+
+    // 两条路径都以 key="tail" 结尾，切换时尾块不会被重新挂载。
+    return (
+        <>
+            {blocks?.closed.map((chunk, index) => (
+                <StableMarkdownChunk
+                    key={`closed-${index}`}
+                    {...props}
+                    chunk={chunk}
+                    isStreaming={false}
+                />
+            ))}
+            {!blocks || blocks.open ? (
+                <StableMarkdownChunk
+                    key="tail"
+                    {...props}
+                    chunk={blocks ? blocks.open : props.displayContent}
+                />
+            ) : null}
+        </>
     );
 });
 
@@ -143,10 +230,12 @@ function QueuedMessageIndicator({
     meta: QueueMessageMeta;
     onPromote?: (queueId: number) => void;
 }) {
+    // 移动端触控目标 ≥44px，桌面保持 28px
+    const sizeClass = useIsMobilePlatform() ? "h-11 w-11" : "h-7 w-7";
     if (meta.queueKind === "interrupt") {
         return (
             <div
-                className="mt-3 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground"
+                className={`mt-3 flex ${sizeClass} shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground`}
                 title="打断消息"
                 aria-label="打断消息"
             >
@@ -160,7 +249,7 @@ function QueuedMessageIndicator({
             <DropdownMenuTrigger asChild>
                 <button
                     type="button"
-                    className="mt-3 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                    className={`mt-3 flex ${sizeClass} shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground`}
                     title="排队消息"
                     aria-label="排队消息"
                 >
@@ -222,14 +311,20 @@ const MessageItem = React.memo<MessageItemProps>(
         allowFeishuDebugResend = false,
         mergedMode = false,
         messageActions,
+        agentActivities,
+        canActOnAgentPlan = false,
+        agentPlanModeSwitching = false,
+        onContinueAgentPlan,
+        onApproveAgentPlan,
     }) => {
+        recordMessageItemRender(message.id);
         // 防泄露模式
         const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
         // 防泄露模式：获取实际显示的内容
-        // 流式消息优先使用 streamEvent.content（包含 MCP_TOOL_CALL_STREAMING 标记）
+        // 流式中用 overlay；is_done 交接时取 overlay 与 message 的较长者，避免尾部字符丢失（LeaderAI #149）
         const displayContent = useMemo(() => {
-            const rawContent = (streamEvent && !streamEvent.is_done ? streamEvent.content : null) ?? message.content;
+            const rawContent = resolveMessageDisplayContent(message.content, streamEvent);
             return shouldMaskContent ? maskContent(rawContent) : rawContent;
         }, [shouldMaskContent, message.content, streamEvent, maskContent]);
 
@@ -244,6 +339,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const isUserMessage = message.message_type === "user";
         const isStreaming = !!streamEvent && !streamEvent.is_done;
+        const isMobilePlatform = useIsMobilePlatform();
         const userMessageCharacters = useMemo(
             () => isUserMessage ? Array.from(displayContent) : [],
             [displayContent, isUserMessage],
@@ -317,6 +413,54 @@ const MessageItem = React.memo<MessageItemProps>(
             />
         );
 
+        // 将活动卡片按 content_offset 穿插到正文对应位置（offset 按 Unicode 字符计）；
+        // 无有效偏移的活动（旧数据）退化为统一列在正文之后
+        const renderSegmentContent = (text: string, isFinalSegment: boolean) => (
+            <div className="prose prose-sm max-w-none text-foreground break-all">
+                <RichMessageContent
+                    displayContent={text}
+                    onCodeRun={onCodeRun}
+                    isUserMessage={isUserMessage}
+                    isUserMessageMarkdownEnabled={isUserMessageMarkdownEnabled}
+                    isStreaming={isStreaming && isFinalSegment}
+                    isLastMessage={isLastMessage}
+                    useRawTextRenderer={shouldMaskContent}
+                    conversationId={conversationId}
+                    messageId={message.id}
+                    mcpToolCallStates={mcpToolCallStates}
+                    shiningMcpCallId={shiningMcpCallId}
+                    inlineInteractionItems={inlineInteractionItems}
+                />
+            </div>
+        );
+
+        const activitySegments = agentActivities && agentActivities.length > 0
+            ? buildActivitySegments(renderedDisplayContent, agentActivities)
+            : null;
+
+        const messageBodyContent = activitySegments ? (
+            <>
+                {activitySegments.map((segment, segmentIndex) => (
+                    <React.Fragment key={`activity-segment-${segmentIndex}`}>
+                        {segment.text.length > 0
+                            && renderSegmentContent(segment.text, segmentIndex === activitySegments.length - 1)}
+                        {segment.activities.length > 0 && (
+                            <AgentActivityList activities={segment.activities} />
+                        )}
+                    </React.Fragment>
+                ))}
+            </>
+        ) : (
+            <>
+                <div className="prose prose-sm max-w-none text-foreground break-all">
+                    {richMessageContent}
+                </div>
+                {agentActivities && agentActivities.length > 0 && (
+                    <AgentActivityList activities={agentActivities} />
+                )}
+            </>
+        );
+
         // 早期返回：reasoning 类型消息
         if (message.message_type === "reasoning") {
             // 不展示思考过程：思考中时显示加载指示器，思考完成后不渲染
@@ -356,7 +500,27 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 早期返回：错误类型消息
         if (message.message_type === "error") {
-            return <ErrorMessage content={message.content} messageId={message.id} />;
+            return <ErrorMessage content={message.content} messageId={message.id} superseded={message.isSupersededError} />;
+        }
+
+        if (message.message_type === "agent_plan") {
+            return (
+                <div
+                    className="flex justify-start"
+                    data-message-item
+                    data-message-id={message.id}
+                    data-message-type="agent_plan"
+                >
+                    <AgentPlanCard
+                        content={displayContent}
+                        isStreaming={isStreaming}
+                        canAct={canActOnAgentPlan && !isStreaming}
+                        modeSwitching={agentPlanModeSwitching}
+                        onContinuePlanning={onContinueAgentPlan}
+                        onApprove={onApproveAgentPlan}
+                    />
+                </div>
+            );
         }
 
         // 常规消息渲染
@@ -364,9 +528,7 @@ const MessageItem = React.memo<MessageItemProps>(
         if (mergedMode && !isUserMessage) {
             return (
                 <div data-message-item data-message-id={message.id} data-message-type={message.message_type}>
-                    <div className="prose prose-sm max-w-none text-foreground break-all">
-                        {richMessageContent}
-                    </div>
+                    {messageBodyContent}
                     <ImageAttachments
                         attachments={message.attachment_list}
                         conversationId={message.conversation_id}
@@ -378,7 +540,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
         const bubbleElement = (
             <div
-                className="group relative inline-block max-w-[65%] rounded-2xl border border-border bg-background px-5 py-4 text-foreground transition-all duration-200"
+                className={`group relative inline-block ${isMobilePlatform ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3 py-2" : "max-w-[65%] px-5 py-4"} rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}
             >
                 {shouldShowShineBorder && (
                     <ShineBorder
@@ -394,14 +556,12 @@ const MessageItem = React.memo<MessageItemProps>(
                     </div>
                 )}
 
-                <div className="prose prose-sm max-w-none text-foreground break-all">
-                    {richMessageContent}
-                </div>
+                {messageBodyContent}
 
                 {shouldCollapseUserMessage && (
                     <button
                         type="button"
-                        className="mt-2 ml-auto flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                        className={`mt-2 ml-auto flex items-center gap-1 text-muted-foreground transition-colors hover:text-foreground ${isMobilePlatform ? "min-h-11 px-3 text-sm" : "text-xs"}`}
                         aria-expanded={isUserMessageExpanded}
                         onClick={() => setExpandedUserMessage(
                             isUserMessageExpanded
@@ -467,6 +627,7 @@ const MessageItem = React.memo<MessageItemProps>(
 
 // 自定义比较函数，只在关键属性变化时才重新渲染
 const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
+    if (prevProps.message.isSupersededError !== nextProps.message.isSupersededError) return false;
     // 基本消息属性比较
     if (prevProps.message.id !== nextProps.message.id) return false;
     if (prevProps.message.content !== nextProps.message.content) return false;
@@ -513,6 +674,14 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.mergedMode !== nextProps.mergedMode) return false;
     if (prevProps.allowFeishuDebugResend !== nextProps.allowFeishuDebugResend) return false;
     if (prevProps.messageActions !== nextProps.messageActions) return false;
+
+    // Agent 活动数组引用比较：无活动的消息传 undefined 保持稳定，
+    // 有活动的消息随流式更新重建数组引用，需要重新渲染
+    if (prevProps.agentActivities !== nextProps.agentActivities) return false;
+    if (prevProps.canActOnAgentPlan !== nextProps.canActOnAgentPlan) return false;
+    if (prevProps.agentPlanModeSwitching !== nextProps.agentPlanModeSwitching) return false;
+    if (prevProps.onContinueAgentPlan !== nextProps.onContinueAgentPlan) return false;
+    if (prevProps.onApproveAgentPlan !== nextProps.onApproveAgentPlan) return false;
 
     return true;
 };

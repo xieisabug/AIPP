@@ -269,15 +269,20 @@ export function useAcpPermission(options: UseAcpPermissionOptions = {}) {
             setIsSubmitting(true);
             try {
                 console.log("Sending ACP permission decision:", { requestId, optionId, cancelled });
-                await invoke("confirm_acp_permission", {
+                await invoke(
+                    pendingRequest.agent_kind === "codex_app_server"
+                        ? "confirm_codex_permission"
+                        : "confirm_acp_permission",
+                    {
                     requestId,
                     optionId: optionId ?? null,
                     cancelled: cancelled ?? false,
-                });
+                    }
+                );
                 setDecisionError(null);
                 removeRequestById(requestId);
             } catch (error) {
-                const message = getErrorMessage(error) || "提交 ACP 权限决策失败";
+                const message = getErrorMessage(error) || "提交 Agent 权限决策失败";
                 console.error("Failed to send ACP permission decision:", message);
                 if (isStaleAcpPermissionError(message)) {
                     removeRequestById(requestId);

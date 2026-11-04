@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -39,9 +40,10 @@ export function useTodoList({ conversationId }: UseTodoListOptions): UseTodoList
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const refresh = useCallback(async () => {
+    const refresh = useCallback(async (isCurrent: () => boolean = () => true) => {
         if (conversationId === null || conversationId <= 0) {
             setTodos([]);
+            setLoading(false);
             return;
         }
 
@@ -52,19 +54,22 @@ export function useTodoList({ conversationId }: UseTodoListOptions): UseTodoList
             const result = await invoke<BackendTodoItem[]>('get_todos', {
                 conversationId,
             });
-            setTodos(result.map(mapBackendTodo));
+            if (isCurrent()) setTodos(result.map(mapBackendTodo));
         } catch (err) {
+            if (!isCurrent()) return;
             console.error('Failed to fetch todos:', err);
             setError(err instanceof Error ? err.message : String(err));
         } finally {
-            setLoading(false);
+            if (isCurrent()) setLoading(false);
         }
     }, [conversationId]);
 
-    // Initial fetch
-    useEffect(() => {
-        refresh();
-    }, [refresh]);
+    useDataRefresh({
+        events: ["conversation_data_changed"],
+        identity: conversationId ?? "",
+        initial: true,
+        refresh: async (isCurrent) => { await refresh(isCurrent); },
+    });
 
     // Listen for todo_update events
     useEffect(() => {

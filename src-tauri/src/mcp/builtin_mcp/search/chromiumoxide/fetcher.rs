@@ -3,6 +3,7 @@ use super::super::engine_manager::SearchEngine;
 use super::super::engines::base::SearchEngineBase;
 use super::super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
 use super::browser_pool::BrowserPool;
+use super::launch_browser_recovering_stale_locks;
 use chromiumoxide_cdp::cdp::browser_protocol::{emulation, network, page as cdp_page};
 use futures::StreamExt;
 use serde::Serialize;
@@ -716,80 +717,6 @@ impl ContentFetcher {
         })
     }
 
-    /// WebView兜底导航（不提取内容）
-    async fn fallback_webview_navigation(&self, url: &str) -> Result<String, String> {
-        if let Err(e) = crate::window::ensure_hidden_search_window(self.app_handle.clone()).await {
-            warn!(error = %e, "Failed to create hidden search window");
-        } else if let Some(window) = self.app_handle.get_webview_window("hidden_search") {
-            let _ = window.navigate(url.parse().map_err(|e| format!("Invalid URL: {}", e))?);
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-
-        Err("All fetch strategies failed; WebView navigation attempted but no content extracted"
-            .to_string())
-    }
-
-    /// 主要的内容抓取方法，按优先级尝试不同策略
-    pub async fn fetch_content(
-        &mut self,
-        url: &str,
-        browser_manager: &BrowserManager,
-        browser_pool: Option<&BrowserPool>,
-    ) -> Result<String, String> {
-        info!(%url, "Starting content fetch");
-
-        // 策略1: Chromiumoxide（最优，支持复杂动态内容）
-        match self.fetch_with_chromiumoxide(url, browser_manager, browser_pool).await {
-            Ok(html) => {
-                info!(strategy = "chromiumoxide", bytes = html.len(), "Fetched content");
-                return Ok(html);
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
-                    strategy = "chromiumoxide",
-                    "Fetch attempt failed"
-                );
-            }
-        }
-
-        // 策略2: Headless Browser（次优，轻量级）
-        match self.fetch_with_headless_browser(url, browser_manager).await {
-            Ok(html) => {
-                info!(strategy = "headless", bytes = html.len(), "Fetched content");
-                return Ok(html);
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
-                    strategy = "headless",
-                    "Fetch attempt failed"
-                );
-            }
-        }
-
-        // 策略3: HTTP直接请求（兜底，适合静态内容）
-        match self.fetch_with_http(url).await {
-            Ok(http_result) => {
-                info!(strategy = "http", bytes = http_result.body.len(), "Fetched content");
-                return Ok(http_result.body);
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
-                    strategy = "http",
-                    "Fetch attempt failed"
-                );
-            }
-        }
-
-        // 策略4: WebView兜底（不提取内容，仅导航）
-        self.fallback_webview_navigation(url).await
-    }
-
     pub async fn fetch_content_http_first(
         &mut self,
         url: &str,
@@ -798,7 +725,7 @@ impl ContentFetcher {
     ) -> Result<String, String> {
         info!(%url, "Starting content fetch with HTTP-first strategy");
 
-        match self.fetch_with_http(url).await {
+        let http_failure = match self.fetch_with_http(url).await {
             Ok(http_result) => {
                 let assessment = Self::assess_http_content(&http_result.body);
                 if !assessment.should_fallback_to_browser {
@@ -837,6 +764,7 @@ impl ContentFetcher {
                         ("visible_text.txt", SearchEngineBase::visible_text(&http_result.body)),
                     ]),
                 );
+                format!("incomplete content ({})", assessment.reasons.join("; "))
             }
             Err(e) => {
                 warn!(
@@ -845,8 +773,9 @@ impl ContentFetcher {
                     strategy = "http",
                     "HTTP-first fetch failed, falling back to browser"
                 );
+                e
             }
-        }
+        };
 
         match self.fetch_with_chromiumoxide(url, browser_manager, browser_pool).await {
             Ok(html) => {
@@ -857,10 +786,10 @@ impl ContentFetcher {
                 );
                 Ok(html)
             }
-            Err(e) => {
+            Err(chromium_error) => {
                 warn!(
-                    error = %e,
-                    timeout_like = Self::is_timeout_like(&e),
+                    error = %chromium_error,
+                    timeout_like = Self::is_timeout_like(&chromium_error),
                     strategy = "chromiumoxide",
                     "Browser fallback failed"
                 );
@@ -880,7 +809,9 @@ impl ContentFetcher {
                             strategy = "headless",
                             "Headless fallback failed"
                         );
-                        self.fallback_webview_navigation(url).await
+                        Err(format!(
+                            "http: {http_failure}; chromiumoxide: {chromium_error}; headless: {headless_error}"
+                        ))
                     }
                 }
             }
@@ -958,21 +889,31 @@ impl ContentFetcher {
             "Launching Chromiumoxide for fetch"
         );
 
-        let config =
-            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
-
-        let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}): {}",
-                    browser_path.display(),
-                    browser_path_exists,
-                    self.config.headless,
-                    user_data_dir.display(),
-                    e
-                )
-            })?;
+        let headless = self.config.headless;
+        let (browser, mut handler) = launch_browser_recovering_stale_locks(
+            &user_data_dir,
+            "fetch_chromiumoxide",
+            || {
+                let config = builder.clone().build();
+                let browser_path = browser_path.clone();
+                let user_data_dir = user_data_dir.clone();
+                async move {
+                    let config =
+                        config.map_err(|e| format!("Failed to build browser config: {}", e))?;
+                    chromiumoxide::browser::Browser::launch(config).await.map_err(|e| {
+                        format!(
+                            "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}): {}",
+                            browser_path.display(),
+                            browser_path_exists,
+                            headless,
+                            user_data_dir.display(),
+                            e
+                        )
+                    })
+                }
+            },
+        )
+        .await?;
 
         // 启动事件处理器
         tokio::spawn(async move {
@@ -1606,7 +1547,7 @@ impl ContentFetcher {
         if DEBUG_SAVE_HTML {
             if let Ok(val) = page.evaluate("() => document.documentElement.outerHTML").await {
                 if let Some(Value::String(html)) = val.value() {
-                    Self::save_debug_html(html, "before_consent");
+                    Self::save_debug_html(&html, "before_consent");
                 }
             }
         }
@@ -1805,7 +1746,7 @@ impl ContentFetcher {
 
         if let Ok(val) = page.evaluate("() => document.documentElement.outerHTML").await {
             if let Some(Value::String(html)) = val.value() {
-                Self::save_debug_html(html, "input_failed");
+                Self::save_debug_html(&html, "input_failed");
             }
         }
 
@@ -2017,12 +1958,18 @@ impl ContentFetcher {
             }
         }
 
-        let config =
-            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
-
-        let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
-            .await
-            .map_err(|e| format!("Failed to launch browser: {}", e))?;
+        let (browser, mut handler) =
+            launch_browser_recovering_stale_locks(&user_data_dir, "search_chromiumoxide", || {
+                let config = builder.clone().build();
+                async move {
+                    let config =
+                        config.map_err(|e| format!("Failed to build browser config: {}", e))?;
+                    chromiumoxide::browser::Browser::launch(config)
+                        .await
+                        .map_err(|e| format!("Failed to launch browser: {}", e))
+                }
+            })
+            .await?;
 
         // 启动事件处理器
         tokio::spawn(async move {
@@ -2251,12 +2198,18 @@ impl ContentFetcher {
             }
         }
 
-        let config =
-            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
-
-        let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
-            .await
-            .map_err(|e| format!("Failed to launch browser: {}", e))?;
+        let (browser, mut handler) =
+            launch_browser_recovering_stale_locks(&user_data_dir, "kagi_session_search", || {
+                let config = builder.clone().build();
+                async move {
+                    let config =
+                        config.map_err(|e| format!("Failed to build browser config: {}", e))?;
+                    chromiumoxide::browser::Browser::launch(config)
+                        .await
+                        .map_err(|e| format!("Failed to launch browser: {}", e))
+                }
+            })
+            .await?;
 
         // 启动事件处理器
         tokio::spawn(async move {

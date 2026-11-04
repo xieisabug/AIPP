@@ -20,11 +20,6 @@ impl MessageTokenManager {
         }
     }
 
-    pub async fn exist(&self, conversation_id: i64) -> bool {
-        let map = self.task_handles.lock().await;
-        map.contains_key(&conversation_id)
-    }
-
     pub async fn store_task_handle(
         &self,
         conversation_id: i64,
@@ -88,22 +83,8 @@ impl MessageTokenManager {
         token.cancel();
     }
 
-    pub async fn remove_task_handle(&self, conversation_id: i64) {
-        let mut task_handles = self.task_handles.lock().await;
-        task_handles.remove(&conversation_id);
-    }
-
-    pub async fn is_cancelled(&self, conversation_id: i64) -> bool {
-        let cancelled = self.cancelled_conversations.lock().await;
-        cancelled.contains(&conversation_id)
-    }
-
     pub async fn get_cancel_token(&self, conversation_id: i64) -> Option<CancellationToken> {
         let tokens = self.cancel_tokens.lock().await;
         tokens.get(&conversation_id).cloned()
-    }
-
-    pub fn get_task_handles(&self) -> Arc<Mutex<HashMap<i64, AbortHandle>>> {
-        Arc::clone(&self.task_handles)
     }
 }

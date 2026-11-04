@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { AlertTriangle, Eye, Mic, Video, Search } from 'lucide-react';
-import { PinyinFilter } from '../../utils/pinyinFilter';
+import { PinyinFilter, usePinyinReady } from '../../utils/pinyinFilter';
 import ModelRequestModeToggle from './ModelRequestModeToggle';
 import {
     ModelForSelection,
@@ -36,6 +36,8 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 }) => {
     const [selectedModels, setSelectedModels] = useState<ModelForSelection[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
     React.useEffect(() => {
         if (modelData) {
@@ -55,7 +57,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
             PinyinFilter.matches(model.name, searchQuery) ||
             PinyinFilter.matches(model.code, searchQuery)
         );
-    }, [selectedModels, searchQuery]);
+    }, [selectedModels, searchQuery, pinyinReady]);
 
     const handleModelToggle = (modelCode: string, checked: boolean) => {
         setSelectedModels(prev => 
@@ -108,7 +110,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                 
                 <div className="space-y-4">
                     {/* 操作按钮 */}
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex gap-2">
                             <Button 
                                 variant="outline" 
@@ -162,7 +164,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 
                     {/* 模型列表 */}
                     <ScrollArea className="h-96">
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             {filteredModels.map((model) => (
                                 <div 
                                     key={model.code} 

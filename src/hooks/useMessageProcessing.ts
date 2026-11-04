@@ -87,10 +87,22 @@ export function useMessageProcessing({
 
     // 智能排序逻辑：先过滤可见消息，再基于分组基准时间排序
     const allDisplayMessages = useMemo(() => {
+        const planParentMessageIds = new Set(
+            combinedMessagesForGrouping
+                .filter((message) => message.message_type === "agent_plan" && message.parent_id)
+                .map((message) => message.parent_id as number),
+        );
         // 首先过滤出可见的消息
         const visibleMessages = combinedMessagesForGrouping.filter((message) => {
             // 跳过系统消息和工具结果
             if (message.message_type === "system" || message.message_type === "tool_result") {
+                return false;
+            }
+            if (
+                message.message_type === "response"
+                && !message.content.trim()
+                && planParentMessageIds.has(message.id)
+            ) {
                 return false;
             }
             
@@ -106,7 +118,24 @@ export function useMessageProcessing({
         });
 
         // 排序不依赖分组映射，直接按时间/ID稳定排序即可
-        return visibleMessages.sort((a, b) => compareMessagesChronologically(a, b));
+        // Preparation errors have no generation group, so version switching cannot hide them.
+        // Fold only earlier ungrouped errors in this user turn once a new reply has content.
+        // Use persisted IDs: provisional streaming timestamps can precede a persisted error.
+        const supersededErrors = new Set<number>();
+        let hasLaterReply = false;
+        for (const message of [...visibleMessages].sort((a, b) => b.id - a.id)) {
+            if (message.message_type === "user") hasLaterReply = false;
+            else if (["response", "assistant", "reasoning"].includes(message.message_type) && message.content.trim()) {
+                hasLaterReply = true;
+            } else if (message.message_type === "error" && !message.generation_group_id && hasLaterReply) {
+                supersededErrors.add(message.id);
+            }
+        }
+        return visibleMessages
+            .map(message => message.message_type === "error"
+                ? { ...message, isSupersededError: supersededErrors.has(message.id) }
+                : message)
+            .sort((a, b) => compareMessagesChronologically(a, b));
     }, [combinedMessagesForGrouping, generationGroups, groupRootMessageIds, getMessageVersionInfo]);
 
     return {

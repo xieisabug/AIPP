@@ -8,6 +8,8 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig(async () => ({
 	plugins: [react(), svgr(), tailwindcss()],
 	optimizeDeps: {
+		// Only scan the app entry; artifact templates and tmp backups are separate apps.
+		entries: ["index.html"],
 		include: [
 			"mermaid",
 			"react-syntax-highlighter",

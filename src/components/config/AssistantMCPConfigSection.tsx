@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui/button";
@@ -43,13 +44,14 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
     const [loading, setLoading] = useState(false);
 
     // 获取可用的MCP服务器列表
-    const fetchAvailableServers = useCallback(async () => {
+    const fetchAvailableServers = useCallback(async (isCurrent: () => boolean = () => true) => {
         try {
             const serversWithTools = await invoke<(MCPServerInfo & { tools: MCPToolInfo[] })[]>(
                 'get_assistant_mcp_servers_with_tools',
                 { assistantId }
             );
 
+            if (!isCurrent()) return;
             // 提取服务器信息
             const servers = serversWithTools.map(server => ({
                 id: server.id,
@@ -66,9 +68,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
             setAllServerTools(toolsMap);
 
             // 如果没有选中的服务器且有可用服务器，选择第一个
-            if (!selectedServerId && servers.length > 0) {
-                setSelectedServerId(servers[0].id);
-            }
+            setSelectedServerId((current) => servers.some((server) => server.id === current) ? current : servers[0]?.id ?? null);
         } catch (error) {
             console.error('Failed to fetch available servers:', error);
             toast.error('获取MCP服务器列表失败: ' + error);
@@ -196,14 +196,16 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
         }
     }, [assistantId, fetchAvailableTools, onConfigChange]);
 
-    useEffect(() => {
-        fetchAvailableServers();
-    }, [fetchAvailableServers]);
+    useDataRefresh({
+        events: ["assistant_list_changed", "mcp_state_changed"],
+        identity: assistantId,
+        initial: true,
+        refresh: async (isCurrent) => { await fetchAvailableServers(isCurrent); },
+    });
 
     useEffect(() => {
-        if (selectedServerId) {
-            fetchAvailableTools(selectedServerId);
-        }
+        if (selectedServerId) fetchAvailableTools(selectedServerId);
+        else setAvailableTools([]);
     }, [selectedServerId, fetchAvailableTools]);
 
     const enabledServers = availableServers.filter(server => server.is_enabled);
@@ -277,32 +279,34 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                         {availableServers.map(server => (
                             <div
                                 key={server.id}
-                                className={`flex items-center justify-between p-4 rounded-lg border transition-colors cursor-pointer ${selectedServerId === server.id
+                                className={`flex flex-col gap-3 p-4 rounded-lg border transition-colors cursor-pointer ${selectedServerId === server.id
                                         ? 'border-blue-200 bg-blue-50'
                                         : server.is_enabled
                                             ? 'border-gray-300 bg-white'
                                             : 'border-gray-200 bg-gray-50'
                                     }`}
                                 onClick={() => setSelectedServerId(server.id)}
+                                data-aipp-slot="assistant-mcp-server-row"
                             >
-                                <div className="flex items-center gap-3">
+                                <div className="flex min-w-0 items-start gap-3">
                                     {server.is_enabled ? (
-                                        <CheckCircle2 className="h-5 w-5 text-foreground" />
+                                        <CheckCircle2 className="h-5 w-5 shrink-0 text-foreground" />
                                     ) : (
-                                        <Circle className="h-5 w-5 text-muted-foreground" />
+                                        <Circle className="h-5 w-5 shrink-0 text-muted-foreground" />
                                     )}
-                                    <div>
-                                        <div className="font-medium text-gray-900">{server.name}</div>
-                                        <div className="text-sm text-gray-500">
+                                    <div className="min-w-0 flex-1">
+                                        <div className="font-medium text-gray-900 truncate" title={server.name}>{server.name}</div>
+                                        <div className="text-sm text-gray-500 break-words">
                                             {server.is_enabled ? '已启用' : '已禁用'}
                                         </div>
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                    {selectedServerId === server.id && (
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    {selectedServerId === server.id ? (
                                         <Badge variant="secondary">当前选中</Badge>
-                                    )}
+                                    ) : <span />}
                                     <Switch
+                                        className="shrink-0"
                                         checked={server.is_enabled}
                                         onCheckedChange={(checked) => handleServerToggle(server.id, checked)}
                                         onClick={(e) => e.stopPropagation()}
@@ -335,30 +339,32 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                             ) : (
                                 <div className="space-y-3">
                                     {availableTools.map(tool => (
-                                        <div key={tool.id} className="flex items-center justify-between p-3 border rounded-lg">
-                                            <div className="flex items-center gap-3">
-                                                <Wrench className="h-4 w-4 text-muted-foreground" />
-                                                <div>
-                                                    <div className="font-medium text-gray-900">{tool.name}</div>
-                                                    <div className="text-sm text-gray-500">
+                                        <div key={tool.id} className="flex flex-col gap-3 p-3 border rounded-lg" data-aipp-slot="assistant-mcp-tool-row">
+                                            <div className="flex min-w-0 items-start gap-3">
+                                                <Wrench className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5" />
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="font-medium text-gray-900 truncate" title={tool.name}>{tool.name}</div>
+                                                    <div className="text-sm text-gray-500 break-words">
                                                         状态: {tool.is_enabled ? '启用' : '禁用'} |
                                                         自动运行: {tool.is_auto_run ? '是' : '否'}
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-4">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-sm text-gray-700">启用</span>
+                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                                                <div className="flex min-w-0 flex-1 items-center justify-between gap-2 sm:flex-initial">
+                                                    <span className="text-sm text-gray-700 whitespace-nowrap">启用</span>
                                                     <Switch
+                                                        className="shrink-0"
                                                         checked={tool.is_enabled}
                                                         onCheckedChange={(checked) =>
                                                             handleToolConfigChange(tool.id, checked, tool.is_auto_run)
                                                         }
                                                     />
                                                 </div>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-sm text-gray-700">自动运行</span>
+                                                <div className="flex min-w-0 flex-1 items-center justify-between gap-2 sm:flex-initial">
+                                                    <span className="text-sm text-gray-700 whitespace-nowrap">自动运行</span>
                                                     <Switch
+                                                        className="shrink-0"
                                                         checked={tool.is_auto_run}
                                                         disabled={!tool.is_enabled}
                                                         onCheckedChange={(checked) =>

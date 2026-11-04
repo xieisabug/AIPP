@@ -1,7 +1,9 @@
 # 自动获取本机局域网 IP 并启动 Android 开发环境
 # 获取非虚拟网卡的 IPv4 地址（排除 WSL、Docker、VPN 等虚拟网卡）
 
+$physicalInterfaceIndexes = @(Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Select-Object -ExpandProperty ifIndex)
 $networkAdapters = Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+    $_.InterfaceIndex -in $physicalInterfaceIndexes -and
     $_.IPAddress -notlike '127.*' -and 
     $_.IPAddress -notlike '169.254.*' -and
     $_.InterfaceAlias -notmatch 'vEthernet|WSL|Docker|VPN|Loopback'
@@ -29,7 +31,8 @@ if ($preferredAdapter) {
     Write-Host ""
     
     # 启动 Tauri Android 开发
-    pnpm run tauri android dev
+    pnpm run tauri android dev --host $localIP @args
+    exit $LASTEXITCODE
 } else {
     Write-Host "Not detected IP address" -ForegroundColor Red
     Write-Host "Please set manually: `$env:TAURI_DEV_HOST = 'your IP'" -ForegroundColor Yellow

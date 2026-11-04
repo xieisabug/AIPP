@@ -4,7 +4,7 @@ use std::time::Duration;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 // Constants
 pub(super) const EXPERIMENTAL_FEATURE_CODE: &str = "experimental";
@@ -14,15 +14,13 @@ pub(super) const SECURE_MASTER_KEY: &str = "secure_config_master_key";
 pub(super) const SECURE_MASTER_KEY_FILE: &str = "secure-config-master-key.bin";
 pub(super) const CHANNEL_FEISHU: &str = "feishu";
 pub(super) const BOTLER_SOURCE: &str = "feishu_butler";
-pub(super) const TERMINAL_TASK_STATUSES: [&str; 3] = ["succeeded", "failed", "cancelled"];
+pub(super) const TERMINAL_TASK_STATUSES: [&str; 4] = ["succeeded", "failed", "cancelled", "interrupted"];
 pub(super) const RELAY_ORIGIN_AIPP: &str = "aipp";
 pub(super) const RELAY_ORIGIN_FEISHU: &str = "feishu";
 pub(super) const RELAY_ORIGIN_INTERNAL: &str = "internal";
 pub(super) const FEISHU_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const FEISHU_RUNTIME_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) const FEISHU_SETTLE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-pub(super) const FEISHU_SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
-pub(super) const FEISHU_SETTLE_STATUS_INTERVAL_STEPS: usize = 10;
 pub(super) const FEISHU_RELAY_IDLE_STABLE_CHECKS: usize = 2;
 pub(super) const FEISHU_STATUS_READY_DETAIL: &str =
     "飞书 SDK 已启用心跳与内部重连；若长连接退出，AIPP 还会在 5 秒后自动重试";
@@ -30,6 +28,8 @@ pub(super) const FEISHU_MENU_NEW_CONVERSATION_EVENT_KEY: &str = "feishu::convers
 
 // State
 pub struct FeishuButlerState {
+    pub(super) runtime_control: Mutex<()>,
+    pub(super) relay_enabled: RwLock<bool>,
     pub(super) runtime_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub(super) http_client: reqwest::Client,
     pub(super) relay_workers: Mutex<HashSet<i64>>,
@@ -40,12 +40,21 @@ pub struct FeishuButlerState {
 impl Default for FeishuButlerState {
     fn default() -> Self {
         Self {
+            runtime_control: Mutex::new(()),
+            relay_enabled: RwLock::new(false),
             runtime_task: Mutex::new(None),
             http_client: super::api::build_feishu_http_client(),
             relay_workers: Mutex::new(HashSet::new()),
             ingress_lock: Mutex::new(()),
             status: Mutex::new(FeishuRuntimeStatus::default()),
         }
+    }
+}
+
+impl FeishuButlerState {
+    pub(super) async fn relay_permit(&self) -> Option<tokio::sync::RwLockReadGuard<'_, bool>> {
+        let permit = self.relay_enabled.read().await;
+        if *permit { Some(permit) } else { None }
     }
 }
 
@@ -278,7 +287,6 @@ pub(super) struct FeishuReplyOutcome {
     pub(super) message_id: String,
     pub(super) payload_type: &'static str,
     pub(super) interactive_error: Option<String>,
-    pub(super) interactive_card: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -473,14 +481,4 @@ pub(super) fn build_acp_permission_fallback_text(
     }
     lines.push(format!("- 取消 {}", request.review_code));
     lines.join("\n")
-}
-
-pub(super) fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic payload".to_string()
-    }
 }

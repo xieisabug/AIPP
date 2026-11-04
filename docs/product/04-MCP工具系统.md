@@ -20,7 +20,8 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - `add_mcp_server` - 添加新服务器
 - `get_mcp_servers` - 获取服务器列表
 - `update_mcp_server` - 更新服务器配置
-- `delete_mcp_server` - 删除服务器
+- `delete_mcp_server` - 删除服务器，同时清理工具、资源、提示词、调用及审查日志、能力目录、加载记录和助手授权关联。
+- 工具刷新时移除的工具会清理目录与助手配置，已加载快照保留为“工具已删除”，用于说明能力失效原因。
 - `test_mcp_server` - 测试服务器连接
 
 ### 服务器启动与停止
@@ -47,6 +48,7 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - `detect_and_process_mcp_calls` 自动检测工具调用
 - 支持原生工具调用和提示词格式化两种模式
 - 工具调用结果格式化
+- 同一轮混合自动执行与手动确认时，自动工具可先执行，但必须等所有工具完成后才向模型续写；手动执行顺序不受卡片位置限制。开启失败后继续也不会跳过尚未确认或执行中的工具。
 
 ---
 
@@ -63,6 +65,7 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 调用 MCP 服务器的 `tools/call` 方法
 - 处理调用结果
 - 超时与错误处理
+- Codex app-server 和 Claude Code 通过 AIPP stdio MCP bridge 使用助手绑定的工具，实际执行仍由 AIPP 的统一传输与权限链路处理
 
 ### 工具结果返回
 - 工具执行结果作为助手消息返回
@@ -91,6 +94,23 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 ---
 
 ## 工具调用 UI
+
+### 工具调用自动审核
+- 已开启自动运行的工具不进入审核，直接执行
+- 未开启自动运行且助手审核方式为「模型自动审核」时，原生 ToolCall 与提示词模式在执行前由审核模型判断
+- `call_mcp_tool` 先投影成真实工具，再把目标工具名和参数交给审核模型
+- 审核模型会把该工具的描述和字段说明写成普通文本放进 prompt（schema 展开成字段列表，不走 tools API），用来理解字段含义；prompt 仍要求只审这次调用本身，不判断工具是否存在，也不尝试执行、调用或回答该调用
+- 在「设置 → 程序功能 → 辅助AI」选择审核输出方式：自动（默认）、强制 Format（JSON Schema）、仅 Prompt（JSON）。只使用所选模型和服务商。
+- 自动模式优先使用 JSON Schema；仅当接口明确返回不支持 `response_format` / `json_schema` 的能力错误时，移除 Format 参数，用同一模型以 Prompt JSON 重试一次。鉴权失败、限流、网络失败、一般参数错误与输出解析错误不触发重试。两次请求共用 20 秒审核时限。
+- Prompt 返回合法审核结论（安全或有风险）后，才记住该接口使用 Prompt；按服务商、模型、请求协议和接口地址隔离本地检测结果。配置页显示检测状态，点击「重新检测」后下次审核重新尝试 Format。强制 Format 失败直接报错；仅 Prompt 不发送 Format 参数。Prompt 输出失败不会反向自动开启 Format。
+- 所有模式均严格解析整个 JSON 对象，必须包含布尔值 `safe` 和非空字符串 `reason`，不允许额外字段。完整校验失败、拒答、输出截断或调用参数超过 8000 字符时转人工确认，不从自由文本提取放行结论。当前依赖会忽略 schema 的适配器在自动模式下直接使用 Prompt，强制 Format 时明确报错。
+- 判定安全则直接执行；有风险或审核失败则保持 pending
+- 人工审核时，未开启自动运行的工具仍等待用户确认
+- 审核进行时卡片显示「自动审核中」。结束后无论通过、有风险还是失败，都在展开的详情里展示审核意见；工具卡片收起时，审核信息一并收起。确认执行走 `execute_mcp_tool_call`，拒绝走 `reject_mcp_tool_call`：调用记为 failed，理由写入 `tool_review_log.user_decision`，并回写工具结果后续写
+- 审核期间隐藏人工执行操作，审核结束且仍待执行时提供执行与拒绝入口，展开和收起状态均可操作。审核提示与按钮共用实时状态；专用工具卡片在待审核/待确认时显示完整审核操作卡片，执行结束后恢复专用展示。普通人工待执行调用也可拒绝
+- 留痕表 `tool_review_log` 可按 `conversation_id` 或 `mcp_tool_call_id` 查询，记录模型、结论、理由、耗时和用户决定
+- 是否自动运行仍看工具的 `is_auto_run` 和会话覆盖；自动运行优先于审核方式
+- 文件路径信任确认仍在工具执行内部生效，审核放行不会跳过工作区检查
 
 ### 工具调用状态展示
 - 工具调用卡片 UI
@@ -145,8 +165,10 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 支持重试机制和 JSON 解析回退
 
 ### 动态 MCP 加载（实验性）
-- 功能开关：`dynamic_mcp_loading_enabled` 特性标志控制
-- 减少 prompt 中注入的工具 schema 量，降低上下文浪费
+- 功能开关：`dynamic_mcp_loading_enabled` 特性标志控制，可在助手上覆盖。关闭时仍把该助手选中的工具 schema 直接注入
+- 开启后，模型 `tools` 只保留始终可用工具（Agent 工具、提问和预览）、`load_mcp_server`、`load_mcp_tool` 和 `call_mcp_tool`。会话过程中不因加载而追加 schema，系统提示词也不随加载改写
+- 加载结果里的描述和参数定义只出现在 `load_mcp_tool` 的工具返回中。之后用 `call_mcp_tool` 调用已加载工具
+- 聊天里按目标工具展示这次调用，权限、失败态和审计也落在目标工具上
 - 仅暴露已生成摘要的工具目录条目
 - 未生成摘要的服务器/工具自动隐藏
 - 能力纪元（capability epoch）变更时自动重置摘要
@@ -161,6 +183,7 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 聊天界面的 MCP 工具调用统一通过前端组件注册表解析
 - 默认回退组件是通用工具调用卡片，内置组件也通过同一注册表注册
 - 特定工具可注册专属组件，例如 `preview_code` 使用内联代码预览卡片，`load_mcp_server` / `load_mcp_tool` 使用轻量加载卡片
+- 内置 `preview_code` 和 `preview_file` 只要已启用，就会自动执行并返回预览结果，不受自动执行开关影响。发送新消息或重新生成时，请求历史中尚未开始的工具调用会记录为未执行并跳过，避免未配对的工具调用阻断对话。重新生成在准备请求阶段失败时，会显示具体错误并结束运行状态。
 - 插件注册的工具调用组件由「显示」设置控制，不写入 MCP 服务器或工具配置
 - 组件匹配支持 `serverName`、`toolName`，自动匹配时按 `priority` 选择优先级更高的匹配组件
 - 渲染前会为组件 props 注入 `currentToolCall`，优先来自全局 MCP 工具调用状态；如果状态尚未同步，则根据当前注释中的 `callId`、`conversationId`、工具名和参数构造一个 partial 记录

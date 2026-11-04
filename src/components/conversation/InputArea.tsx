@@ -52,10 +52,14 @@
 import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
-import { Plus, Square, ArrowUp } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Plus, Square, ArrowUp, Loader2 } from "lucide-react";
 import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { previewMobile } from "@/mobile/navigation";
 import { getCaretCoordinates } from "../../utils/caretCoordinates";
 import BangCompletionList, { type BangCompletionItem } from "./BangCompletionList";
 import AssistantCompletionList from "./AssistantCompletionList";
@@ -63,7 +67,7 @@ import ArtifactCompletionList from "./ArtifactCompletionList";
 import SlashCompletionList from "./SlashCompletionList";
 import { useFileList } from "../../hooks/useFileList";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
-import PinyinFilter, { AssistantItem, FilteredAssistant } from "../../utils/pinyinFilter";
+import PinyinFilter, { AssistantItem, FilteredAssistant, usePinyinReady } from "../../utils/pinyinFilter";
 import { ArtifactCollectionItem, FilteredArtifact } from "../../data/ArtifactCollection";
 import {
     DEFAULT_SLASH_NAMESPACES,
@@ -98,8 +102,15 @@ interface InputAreaProps {
     sendButtonIcon?: ReactNode;
     sendButtonVisual?: ReactNode;
     acpAvailableCommands?: AcpAvailableCommand[];
+    planMode?: boolean;
+    planModeSwitching?: boolean;
+    onPlanModeToggle?: () => void;
 }
 const IMAGE_AREA_HEIGHT = 80;
+// 移动端胶囊：48px border-box - 2*2 边框 = 44px 单行内容高度；多行最多约 30vh（≈6 行）后内部滚动
+const MOBILE_TEXTAREA_MIN_HEIGHT = 44;
+const MOBILE_TEXTAREA_MAX_VIEWPORT_RATIO = 0.3;
+export const COMPOSER_GROW_VAR = "--aipp-composer-grow";
 // 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
 const EMPTY_ACP_COMMANDS: AcpAvailableCommand[] = [];
 
@@ -122,11 +133,15 @@ const InputArea = React.memo(
                 sendButtonIcon,
                 sendButtonVisual,
                 acpAvailableCommands = EMPTY_ACP_COMMANDS,
+                planMode = false,
+                planModeSwitching = false,
+                onPlanModeToggle,
             },
             ref
         ) => {
             // 图片区域的高度
             const textareaRef = useRef<HTMLTextAreaElement>(null);
+            const rootRef = useRef<HTMLDivElement>(null);
 
             // 暴露给外部的方法
             useImperativeHandle(
@@ -174,6 +189,42 @@ const InputArea = React.memo(
             const [filteredSlashNamespaces, setFilteredSlashNamespaces] =
                 useState<SlashNamespaceItem[]>(DEFAULT_SLASH_NAMESPACES);
             const [selectedSlashIndex, setSelectedSlashIndex] = useState<number>(0);
+
+            // 补全弹窗出现时才动态加载 pinyin-pro，加载完成后触发重新过滤
+            const pinyinReady = usePinyinReady(
+                slashListVisible || artifactListVisible || assistantListVisible,
+            );
+
+            const isMobilePlatform = useIsMobilePlatform();
+
+            // 移动端没有独立 artifact 窗口：读取收藏内容后走单 WebView 受限预览
+            const openArtifact = useCallback(
+                async (artifactId: number) => {
+                    try {
+                        if (isMobilePlatform) {
+                            const item = await invoke<{
+                                name: string;
+                                artifact_type: string;
+                                code: string;
+                            } | null>("get_artifact_by_id", { id: artifactId });
+                            if (!item) {
+                                throw new Error(`收藏 ${artifactId} 已不存在`);
+                            }
+                            previewMobile({
+                                language: item.artifact_type,
+                                code: item.code,
+                                title: item.name,
+                            });
+                            return;
+                        }
+                        await invoke("open_artifact_window", { artifactId });
+                    } catch (error) {
+                        console.error("Failed to open artifact:", error);
+                        toast.error(`打开收藏 ${artifactId} 失败：${String(error)}`);
+                    }
+                },
+                [isMobilePlatform],
+            );
 
             const handleOpenFile = (fileId: number) => {
                 invoke("open_attachment_with_default_app", { id: fileId });
@@ -415,10 +466,11 @@ const InputArea = React.memo(
                     setInitialHeight(textareaRef.current.scrollHeight);
                 }
                 // Only adjust height when focused or when content changes
-                if (isFocused) {
+                // 移动端失焦（点发送钮）后内容被清空也需要回缩，因此始终按内容调整
+                if (isFocused || isMobile) {
                     adjustTextareaHeight();
                 }
-            }, [inputText, initialHeight, fileInfoList, isFocused]);
+            }, [inputText, initialHeight, fileInfoList, isFocused, isMobile]);
 
             useEffect(() => {
                 if (!slashListVisible || !slashContext) {
@@ -443,6 +495,7 @@ const InputArea = React.memo(
                 slashContext,
                 slashListVisible,
                 slashSkills,
+                pinyinReady,
             ]);
 
             useEffect(() => {
@@ -479,10 +532,11 @@ const InputArea = React.memo(
 
                 // Listen for artifact collection updates
                 const setupArtifactListener = async () => {
-                    const unlisten = await listen("artifact-collection-updated", () => {
-                        loadArtifacts();
-                    });
-                    return unlisten;
+                    const unlisteners = await Promise.all([
+                        listen("artifact-collection-updated", loadArtifacts),
+                        listen("artifacts_collection_changed", loadArtifacts),
+                    ]);
+                    return () => unlisteners.forEach((unlisten) => unlisten());
                 };
 
                 const setupSlashListener = async () => {
@@ -741,22 +795,55 @@ const InputArea = React.memo(
                 showSlashCompletion,
             ]);
 
+            // 移动端：textarea 随内容增高（44px 起，约 30vh 封顶），胶囊由 CSS 底边锚定向上生长；
+            // 把增量写到根节点 CSS 变量，底部栏同步撑高，消息列表（flex 兄弟）随之收缩而非被遮挡。
+            const adjustMobileTextareaHeight = () => {
+                const textarea = textareaRef.current;
+                if (!textarea) return;
+                textarea.style.height = "auto";
+                const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+                const maxHeight = Math.max(
+                    MOBILE_TEXTAREA_MIN_HEIGHT,
+                    Math.round(viewportHeight * MOBILE_TEXTAREA_MAX_VIEWPORT_RATIO),
+                );
+                const newHeight = Math.min(
+                    Math.max(textarea.scrollHeight, MOBILE_TEXTAREA_MIN_HEIGHT),
+                    maxHeight,
+                );
+                textarea.style.height = `${newHeight}px`;
+                rootRef.current?.style.setProperty(
+                    COMPOSER_GROW_VAR,
+                    `${newHeight - MOBILE_TEXTAREA_MIN_HEIGHT}px`,
+                );
+            };
+
             const adjustTextareaHeight = () => {
+                if (isMobile) {
+                    adjustMobileTextareaHeight();
+                    return;
+                }
                 const textarea = textareaRef.current;
                 if (textarea && initialHeight) {
                     textarea.style.height = `${initialHeight}px`;
                     const maxHeight = document.documentElement.clientHeight * 0.35;
                     const newHeight = Math.min(Math.max(textarea.scrollHeight, initialHeight), maxHeight);
                     textarea.style.height = `${newHeight}px`;
-                    textarea.parentElement!.style.height = `${newHeight + ((fileInfoList?.length && IMAGE_AREA_HEIGHT) || 0)}px`;
+                    const filePad = fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0;
+                    textarea.parentElement!.style.height = `${newHeight + filePad}px`;
                 }
             };
 
             const restoreInitialHeight = () => {
+                if (isMobile) {
+                    // 移动端失焦保留内容高度，避免已输入的多行内容被压回一行
+                    adjustMobileTextareaHeight();
+                    return;
+                }
                 const textarea = textareaRef.current;
                 if (textarea && initialHeight) {
                     textarea.style.height = `${initialHeight}px`;
-                    textarea.parentElement!.style.height = `${initialHeight + ((fileInfoList?.length && IMAGE_AREA_HEIGHT) || 0)}px`;
+                    const filePad = fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0;
+                    textarea.parentElement!.style.height = `${initialHeight + filePad}px`;
                 }
             };
 
@@ -998,9 +1085,7 @@ const InputArea = React.memo(
                         setArtifactListVisible(false);
 
                         // Open the artifact
-                        invoke("open_artifact_window", { artifactId: selectedArtifact.id }).catch((error) => {
-                            console.error("Failed to open artifact:", error);
-                        });
+                        void openArtifact(selectedArtifact.id);
                     } else if (assistantListVisible) {
                         // Select assistant - 阻止表单提交
                         e.preventDefault();
@@ -1053,6 +1138,9 @@ const InputArea = React.memo(
                             }, 0);
                         }
                         setBangListVisible(false);
+                    } else if (isMobile) {
+                        // 移动端：软键盘回车只换行，发送统一走发送按钮
+                        return;
                     } else {
                         // Enter for submit (only if not in IME composition)
                         e.preventDefault();
@@ -1233,6 +1321,9 @@ const InputArea = React.memo(
                 textareaRef.current?.focus();
             }, [textareaRef]);
 
+            const showPlanModeButton = Boolean(onPlanModeToggle);
+            const addButtonRight = (sidebarVisible ? 150 : 190) + sidebarWidth;
+            const planButtonRight = addButtonRight + 40;
             const baseRight = sidebarVisible ? 130 : 170;
             const defaultSendButtonIcon = aiIsResponsing && !inputText.trim() ? (
                 <Square size={20} className="text-action-foreground" />
@@ -1240,21 +1331,42 @@ const InputArea = React.memo(
                 <ArrowUp size={20} className="text-action-foreground" />
             );
 
+            const attachmentCount = fileInfoList?.length ?? 0;
+            const hasAttachments = attachmentCount > 0;
+
             return (
                 <div
-                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''}`}
+                    ref={rootRef}
+                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeButton ? 'has-plan-mode' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
                     data-theme-slot="input-area"
                     data-aipp-slot="chat-input-area"
+                    data-attachment-count={attachmentCount}
                 >
+                    {isMobile && hasAttachments ? (
+                        <div
+                            className="input-area-attachment-tray"
+                            data-aipp-slot="chat-input-attachment-tray"
+                            onClick={handleImageContainerClick}
+                        >
+                            <div className="input-area-attachment-tray-header">
+                                <span data-aipp-slot="chat-input-attachment-count">附件 {attachmentCount}</span>
+                            </div>
+                            <div className="input-area-img-container" data-aipp-slot="chat-input-attachments">
+                                {renderFiles()}
+                            </div>
+                        </div>
+                    ) : null}
                     <div
-                        className="input-area-textarea-container"
-                        style={{ right: baseRight}}
+                        className={`input-area-textarea-container ${showPlanModeButton ? 'has-plan-mode' : ''}`}
+                        style={isMobile ? undefined : { right: baseRight }}
                         data-theme-slot="input-area-container"
                         data-aipp-slot="chat-input-area-container"
                     >
-                        <div className="input-area-img-container" onClick={handleImageContainerClick} data-aipp-slot="chat-input-attachments">
-                            {renderFiles()}
-                        </div>
+                        {!isMobile ? (
+                            <div className="input-area-img-container" onClick={handleImageContainerClick} data-aipp-slot="chat-input-attachments">
+                                {renderFiles()}
+                            </div>
+                        ) : null}
                         <textarea
                             ref={textareaRef}
                             className="input-area-textarea"
@@ -1262,6 +1374,7 @@ const InputArea = React.memo(
                             data-aipp-slot="chat-input-textarea"
                             rows={1}
                             autoCapitalize="none"
+                            enterKeyHint={isMobile ? "enter" : undefined}
                             value={inputText}
                             onChange={handleTextareaChange}
                             onKeyDown={handleKeyDownWithBang}
@@ -1289,26 +1402,53 @@ const InputArea = React.memo(
                         />
                     </div>
 
+                    {showPlanModeButton ? (
+                        <Button
+                            type="button"
+                            size="sm"
+                            variant={planMode ? "default" : "outline"}
+                            onClick={() => onPlanModeToggle?.()}
+                            className={`input-area-plan-mode-button ${placement}${planMode ? " active" : " text-muted-foreground"}`}
+                            disabled={planModeSwitching || aiIsResponsing}
+                            aria-label="Plan"
+                            aria-pressed={planMode}
+                            title={planMode ? "切换到执行模式" : "切换到 Plan 模式"}
+                            data-theme-slot="input-area-plan-mode-button"
+                            data-aipp-slot="chat-input-plan-mode"
+                            data-state={planMode ? "active" : "idle"}
+                            style={
+                                placement === "bottom" && !isMobile
+                                    ? { right: planButtonRight }
+                                    : undefined
+                            }
+                        >
+                            {planModeSwitching ? <Loader2 className="animate-spin" /> : null}
+                            Plan
+                        </Button>
+                    ) : null}
+
                     <CircleButton
                         onClick={handleChooseFile}
                         icon={<Plus size={16} className="text-icon" />}
                         className={`input-area-add-button ${placement}`}
                         dataThemeSlot="input-area-add-button"
                         dataAippSlot="chat-input-add-button"
+                        aria-label="添加附件"
                         style={
                             placement === "bottom" && !isMobile
-                                ? { right: (sidebarVisible ? 150 : 190) + sidebarWidth }
+                                ? { right: addButtonRight }
                                 : undefined
                         }
                     />
                     <CircleButton
-                        size={placement === "bottom" ? "large" : "medium"}
+                        size={isMobile ? "medium" : placement === "bottom" ? "large" : "medium"}
                         onClick={handleSend}
                         icon={sendButtonVisual ?? sendButtonIcon ?? defaultSendButtonIcon}
                         primary
                         className={`input-area-send-button ${placement} ${sendButtonVisual ? "has-custom-visual" : ""}`}
                         dataThemeSlot="input-area-send-button"
                         dataAippSlot="chat-input-send-button"
+                        aria-label={aiIsResponsing && !inputText.trim() ? "停止" : "发送"}
                         dataState={aiIsResponsing ? "responding" : "idle"}
                         customVisual={Boolean(sendButtonVisual)}
                         style={
@@ -1364,9 +1504,7 @@ const InputArea = React.memo(
                         onArtifactSelect={(artifact, action) => {
                             if (action === "open") {
                                 // Open artifact when Enter is pressed
-                                invoke("open_artifact_window", { artifactId: artifact.id }).catch((error) => {
-                                    console.error("Failed to open artifact:", error);
-                                });
+                                void openArtifact(artifact.id);
                             } else {
                                 // Tab key completion - just log for now
                                 console.log("Artifact completed:", artifact.name);

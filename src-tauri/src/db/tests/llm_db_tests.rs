@@ -76,7 +76,9 @@ fn create_llm_test_db() -> Connection {
 /// 创建 LLMDatabase 实例用于测试
 fn create_llm_db() -> LLMDatabase {
     let conn = create_llm_test_db();
-    LLMDatabase { conn }
+    let db = LLMDatabase { conn };
+    db.create_model_request_mode_preference_table().unwrap();
+    db
 }
 
 // ============================================================================
@@ -536,4 +538,18 @@ fn test_llm_model_media_support_flags() {
 
     let all_model = models.iter().find(|m| m.3 == "all").unwrap();
     assert!(all_model.5 && all_model.6 && all_model.7);
+}
+
+
+/// Legacy profiles have no request-mode preference table yet.
+#[test]
+fn test_cascade_delete_legacy_llm_schema_without_preferences() {
+    let db=LLMDatabase { conn: create_llm_test_db() };
+    db.add_llm_provider("legacy", "openai_api", "", false, true).unwrap();
+    let provider=db.conn.last_insert_rowid();
+    db.add_llm_model("model",provider,"model","",false,false,false).unwrap();
+    db.delete_llm_model(provider,"model".into()).unwrap();
+    db.delete_llm_model(provider,"missing".into()).unwrap();
+    db.delete_llm_model_by_provider(provider).unwrap();
+    db.delete_llm_provider(provider).unwrap();
 }

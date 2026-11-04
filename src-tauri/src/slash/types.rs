@@ -5,14 +5,6 @@ use std::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SlashNamespaceItem {
-    pub name: String,
-    pub description: String,
-    pub is_enabled: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct SlashSkillCompletionItem {
     pub identifier: String,
     pub display_name: String,

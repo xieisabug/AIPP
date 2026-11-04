@@ -8,7 +8,7 @@ use crate::db::{
 };
 use crate::utils::path_utils::is_path_under_trusted;
 use std::path::{Component, Path, PathBuf};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tracing::{debug, info, warn};
 
 use super::state::OperationState;

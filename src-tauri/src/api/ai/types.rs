@@ -32,4 +32,8 @@ pub struct AiRequest {
 pub struct AiResponse {
     pub conversation_id: i64,
     pub request_prompt_result_with_context: String,
+    /// 对话已创建（用户消息已落库），但请求在调用模型前就失败（如助手未配置模型）。
+    /// 错误同时已作为 error 消息写入对话；前端据此立即切到该对话并结束「响应中」状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }

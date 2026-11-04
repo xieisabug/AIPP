@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CommandDialog, CommandInput } from "./ui/command";
 import { searchConversations } from "../services/conversationSearchService";
@@ -5,6 +6,9 @@ import { ConversationSearchHit } from "../data/Conversation";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent, maskTitle } from "../utils/antiLeakage";
 import { getErrorMessage } from "../utils/error";
+import { ChevronLeft } from "lucide-react";
+import { Button } from "./ui/button";
+import { useIsMobilePlatform } from "../hooks/use-platform";
 
 interface ConversationSearchDialogProps {
     open: boolean;
@@ -37,6 +41,8 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
     const debounceRef = useRef<number | null>(null);
     const requestIdRef = useRef(0);
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+    // 移动平台对话框被全屏化：需要显式返回入口，结果区占满剩余高度
+    const isMobilePlatform = useIsMobilePlatform();
 
     const shouldMask = antiLeakageEnabled && !isRevealed;
     const highlightTerm = query.trim();
@@ -148,6 +154,14 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
         }
     }, []);
 
+    useDataRefresh({
+        events: ["conversation_data_changed"],
+        identity: `${open}:${query}`,
+        paused: !open,
+        onInvalidate: () => { requestIdRef.current += 1; },
+        refresh: async () => { if (open) await runSearch(query); },
+    });
+
     const loadMore = useCallback(async () => {
         if (isLoadingMore || isLoading || !hasMore) {
             return;
@@ -157,8 +171,10 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
             return;
         }
         setIsLoadingMore(true);
+        const requestId = requestIdRef.current;
         try {
             const results = await searchConversations(trimmed, 50, hits.length);
+            if (requestId !== requestIdRef.current) return;
             if (results.length > 0) {
                 setHits((prev) => [...prev, ...results]);
             }
@@ -214,18 +230,44 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
             onOpenChange={onOpenChange}
             title="搜索"
             description="搜索对话标题、摘要和消息内容"
-            className="sm:max-w-3xl"
+            className={isMobilePlatform ? "flex flex-col gap-0" : "sm:max-w-3xl"}
             showCloseButton={false}
         >
-            <CommandInput
-                placeholder="搜索对话内容、标题、总结..."
-                value={query}
-                onValueChange={setQuery}
-                autoFocus
-            />
+            {isMobilePlatform ? (
+                <div
+                    className="flex shrink-0 items-center gap-1 border-b pr-1 [&_[data-slot=command-input-wrapper]]:flex-1 [&_[data-slot=command-input-wrapper]]:border-b-0 [&_[data-slot=command-input-wrapper]]:px-1"
+                    data-aipp-slot="search-mobile-header"
+                >
+                    <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label="返回"
+                        onClick={() => onOpenChange(false)}
+                    >
+                        <ChevronLeft className="h-5 w-5" />
+                    </Button>
+                    <CommandInput
+                        placeholder="搜索对话内容、标题、总结..."
+                        value={query}
+                        onValueChange={setQuery}
+                        enterKeyHint="search"
+                        autoFocus
+                    />
+                </div>
+            ) : (
+                <CommandInput
+                    placeholder="搜索对话内容、标题、总结..."
+                    value={query}
+                    onValueChange={setQuery}
+                    autoFocus
+                />
+            )}
             <div
                 ref={listRef}
-                className="max-h-[420px] overflow-y-auto overflow-x-hidden"
+                className={isMobilePlatform
+                    ? "min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
+                    : "max-h-[420px] overflow-y-auto overflow-x-hidden"}
                 onScroll={(event) => {
                     const target = event.currentTarget;
                     if (target.scrollTop + target.clientHeight >= target.scrollHeight - 24) {
@@ -258,7 +300,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                         {group.hits.map((hit, index) => (
                             <button
                                 key={`${hit.conversation_id}-${hit.message_id ?? "summary"}-${index}`}
-                                className="w-full text-left px-2 py-2 rounded-md hover:bg-muted/60 transition-colors"
+                                className={`w-full text-left px-2 py-2 rounded-md hover:bg-muted/60 transition-colors${isMobilePlatform ? " min-h-11 active:bg-muted/60" : ""}`}
                                 onClick={() => handleSelect(hit)}
                                 type="button"
                             >

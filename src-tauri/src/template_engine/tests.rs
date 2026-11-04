@@ -94,8 +94,10 @@ async fn test_web_command() {
     let engine = TemplateEngine::new();
     let context = HashMap::new();
 
+    // !web 会经过 extract_main_content 清理，只保留 body 内的主要内容
+    let cleaned_content = "<h1>Hello, World!</h1><p>This is a test.</p>";
     let except_result =
-        format!("<bangweb url=\"{}\">\n{}\n</bangweb>", &mockito::server_url(), html_content);
+        format!("<bangweb url=\"{}\">\n{}\n</bangweb>", &mockito::server_url(), cleaned_content);
 
     let result = engine.parse(&format!("!web({})", mockito::server_url()), &context).await;
     assert_eq!(result, except_result);

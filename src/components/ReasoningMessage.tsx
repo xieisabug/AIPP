@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Message, StreamEvent, MCPToolCallUpdateEvent } from "../data/Conversation";
 import { useMcpToolCallProcessor } from "../hooks/useMcpToolCallProcessor";
-import { useMarkdownConfig } from "../hooks/useMarkdownConfig";
+import { MarkdownStreamingContext, useMarkdownConfig } from "../hooks/useMarkdownConfig";
 import { useCustomTagParser } from "../hooks/useCustomTagParser";
 import type { InlineInteractionItem } from "./ConversationUI";
+import { useIsMobilePlatform } from "../hooks/use-platform";
 
 interface ReasoningMessageProps {
     message: Message;
@@ -33,6 +34,11 @@ const ReasoningMessage = React.memo(
         useRawTextRenderer = false,
     }: ReasoningMessageProps) => {
         const [currentTime, setCurrentTime] = useState(new Date());
+        const isMobilePlatform = useIsMobilePlatform();
+        // 移动端：展开/收起触控区 ≥44px
+        const toggleButtonClass = isMobilePlatform
+            ? "mt-1 -ml-2 min-h-11 px-2 text-sm text-gray-600 hover:text-gray-800 underline cursor-pointer"
+            : "mt-2 text-xs text-gray-600 hover:text-gray-800 underline cursor-pointer";
 
         // 使用 start_time 和 finish_time 来判断思考状态，也考虑 streamEvent 的状态
         const isComplete =
@@ -40,9 +46,16 @@ const ReasoningMessage = React.memo(
         const isThinking = message.start_time !== null && !isComplete;
 
         const { parseCustomTags } = useCustomTagParser();
+        // 折叠完成的 reasoning 只需要状态行；MCP 标记仍需保留预览。
+        const mayContainMcpToolCall = useMemo(
+            () => /<!--\s*MCP_TOOL_CALL:|<mcp_tool_call\b/.test(displayedContent),
+            [displayedContent],
+        );
+        const shouldParseContent =
+            !isComplete || isReasoningExpanded || mayContainMcpToolCall;
         const parsedContent = useMemo(
-            () => parseCustomTags(displayedContent),
-            [displayedContent, parseCustomTags],
+            () => shouldParseContent ? parseCustomTags(displayedContent) : "",
+            [displayedContent, parseCustomTags, shouldParseContent],
         );
         const hasMcpToolCall = useMemo(
             () => /<!--\s*MCP_TOOL_CALL:/.test(parsedContent),
@@ -50,7 +63,7 @@ const ReasoningMessage = React.memo(
         );
 
         // Markdown 配置与 MCP 处理（保持与普通消息一致的处理方式）
-        const markdownConfig = useMarkdownConfig({ isStreaming: isThinking });
+        const markdownConfig = useMarkdownConfig();
         const { processContent } = useMcpToolCallProcessor(markdownConfig, {
             conversationId,
             messageId: message.id,
@@ -147,17 +160,27 @@ const ReasoningMessage = React.memo(
 
         // 缓存内容分割结果
         const contentLines = useMemo(() => {
+            if (!shouldParseContent) {
+                return {
+                    lines: [],
+                    previewLines: [],
+                    hasMoreThanThreeLines: false,
+                };
+            }
             const lines = parsedContent.split("\n");
             return {
                 lines,
                 previewLines: lines.slice(-3), // 思考中时显示最后3行
                 hasMoreThanThreeLines: lines.length > 3,
             };
-        }, [parsedContent]);
+        }, [parsedContent, shouldParseContent]);
 
         // 渲染内容（统一使用 useMcpToolCallProcessor，避免重复实现）
         const renderedContent = useMemo(
             () => {
+                if (!shouldParseContent) {
+                    return null;
+                }
                 // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
                 if (useRawTextRenderer) {
                     return <span className="whitespace-pre-wrap break-words">{parsedContent}</span>;
@@ -175,11 +198,14 @@ const ReasoningMessage = React.memo(
                     ),
                 );
             },
-            [useRawTextRenderer, processContent, parsedContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]
+            [useRawTextRenderer, processContent, parsedContent, shouldParseContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]
         );
 
         // 渲染预览内容（思考中显示最后 3 行，同样支持 MCP）
         const renderedPreviewContent = useMemo(() => {
+            if (!shouldParseContent) {
+                return null;
+            }
             const previewText = contentLines.previewLines.join("\n");
             // 脱敏内容使用纯文本渲染
             if (useRawTextRenderer) {
@@ -197,7 +223,7 @@ const ReasoningMessage = React.memo(
                     </ReactMarkdown>
                 ),
             );
-        }, [useRawTextRenderer, contentLines.previewLines, processContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]);
+        }, [useRawTextRenderer, contentLines.previewLines, processContent, shouldParseContent, markdownConfig.remarkPlugins, markdownConfig.rehypePlugins, markdownConfig.markdownComponents]);
 
         // 思考完成时的小模块展示
         if (isComplete && !isReasoningExpanded) {
@@ -206,7 +232,7 @@ const ReasoningMessage = React.memo(
                     data-message-item
                     data-message-id={message.id}
                     data-message-type="reasoning"
-                    className="my-2 p-2 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg w-80 max-w-[60%] cursor-pointer hover:bg-gray-100 transition-colors"
+                    className={`my-2 p-2 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg ${isMobilePlatform ? "w-full min-h-11" : "w-80 max-w-[60%]"} cursor-pointer hover:bg-gray-100 transition-colors`}
                     onClick={() => onToggleReasoningExpand?.()}
                 >
                     <div className="flex items-center gap-2 overflow-hidden">
@@ -246,26 +272,29 @@ const ReasoningMessage = React.memo(
                     </span>
                 </div>
                 <div className="text-sm text-gray-600 whitespace-pre-wrap break-words font-mono overflow-hidden">
-                    {isThinking &&
-                        contentLines.hasMoreThanThreeLines &&
-                        !isReasoningExpanded ? (
-                        <>
-                            <div className="text-gray-400 text-xs mb-1">
-                                ...
-                            </div>
-                            {renderedPreviewContent}
-                        </>
-                    ) : (
-                        renderedContent
-                    )}
+                    <MarkdownStreamingContext.Provider value={isThinking}>
+                        {isThinking &&
+                            contentLines.hasMoreThanThreeLines &&
+                            !isReasoningExpanded ? (
+                            <>
+                                <div className="text-gray-400 text-xs mb-1">
+                                    ...
+                                </div>
+                                {renderedPreviewContent}
+                            </>
+                        ) : (
+                            renderedContent
+                        )}
+                    </MarkdownStreamingContext.Provider>
                 </div>
                 {/* 思考中时的展开按钮 */}
                 {isThinking &&
                     contentLines.hasMoreThanThreeLines &&
                     !isReasoningExpanded && (
                         <button
+                            type="button"
                             onClick={() => onToggleReasoningExpand?.()}
-                            className="mt-2 text-xs text-gray-600 hover:text-gray-800 underline cursor-pointer"
+                            className={toggleButtonClass}
                         >
                             展开思考
                         </button>
@@ -273,8 +302,9 @@ const ReasoningMessage = React.memo(
                 {/* 思考完成时的收起按钮或思考中展开状态的收起按钮 */}
                 {(isComplete || (isThinking && isReasoningExpanded)) && (
                     <button
+                        type="button"
                         onClick={() => onToggleReasoningExpand?.()}
-                        className="mt-2 text-xs text-gray-600 hover:text-gray-800 underline cursor-pointer"
+                        className={toggleButtonClass}
                     >
                         收起
                     </button>

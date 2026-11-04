@@ -17,10 +17,8 @@ static GLOBAL_VUE_SERVERS: LazyLock<Arc<Mutex<HashMap<String, VuePreviewServer>>
 
 #[derive(Debug, Clone)]
 pub struct VuePreviewServer {
-    pub id: String,
     pub port: u16,
     pub process: Option<u32>, // PID
-    pub template_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -117,12 +115,7 @@ impl VuePreviewManager {
             );
         }
 
-        let server = VuePreviewServer {
-            id: preview_id.clone(),
-            port,
-            process: Some(process_id),
-            template_path,
-        };
+        let server = VuePreviewServer { port, process: Some(process_id) };
 
         println!(
             "🔧 [VuePreview] 创建服务器对象: ID={}, Port={}, PID={:?}",

@@ -17,10 +17,8 @@ static GLOBAL_SERVERS: LazyLock<Arc<Mutex<HashMap<String, PreviewServer>>>> =
 
 #[derive(Debug, Clone)]
 pub struct PreviewServer {
-    pub id: String,
     pub port: u16,
     pub process: Option<u32>, // PID
-    pub template_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -120,12 +118,7 @@ impl ReactPreviewManager {
             );
         }
 
-        let server = PreviewServer {
-            id: preview_id.clone(),
-            port,
-            process: Some(process_id),
-            template_path,
-        };
+        let server = PreviewServer { port, process: Some(process_id) };
 
         println!(
             "🔧 [ReactPreview] 创建服务器对象: ID={}, Port={}, PID={:?}",

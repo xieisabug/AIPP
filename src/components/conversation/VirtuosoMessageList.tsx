@@ -12,12 +12,20 @@ import {
     type VirtuosoHandle,
 } from "react-virtuoso";
 
-import { applyScrollHighlight } from "./scrollHighlight";
+import {
+    applyScrollHighlight,
+    MESSAGE_SCROLL_START_GAP_PX,
+    scrollMessageIntoView,
+    type MessageScrollAlign,
+} from "./scrollHighlight";
 import {
     VIRTUAL_OVERSCAN_PX,
     VIRTUAL_ROW_GAP_PX,
 } from "./virtualizedMessageListLayout";
-import { pinScrollContainerToBottom } from "./pinScrollToBottom";
+import {
+    followScrollContainerBottom,
+    pinScrollContainerToBottom,
+} from "./pinScrollToBottom";
 import {
     findFirstLiveSuffixIndex,
     useMessageListElements,
@@ -29,6 +37,8 @@ interface VirtuosoMessageListProps extends UseMessageListElementsProps {
     conversationId: string;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId: number | null;
+    /** 跳转对齐方式，默认居中；轮次导航使用 start。 */
+    pendingScrollAlign?: MessageScrollAlign;
     clearPendingScrollMessageId: (messageId: number | null) => void;
     setShiningMessageIds: React.Dispatch<React.SetStateAction<Set<number>>>;
     onScrollStateChange?: (container?: HTMLDivElement | null) => void;
@@ -40,12 +50,25 @@ interface VirtuosoMessageListContext {
 }
 
 const MAX_SCROLL_HIGHLIGHT_ATTEMPTS = 180;
-const DEFAULT_ITEM_HEIGHT = 160;
 const INITIAL_BOTTOM_PIN_MIN_FRAME_COUNT = 10;
-const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 30;
+const INITIAL_BOTTOM_PIN_MAX_FRAME_COUNT = 90;
 const INITIAL_BOTTOM_PIN_STABLE_FRAME_COUNT = 4;
-/** 硬超时：pin 被打断时也不能永久 visibility:hidden */
-const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 500;
+/** 硬超时：pin 被打断时也不能永久 visibility:hidden；长对话布局常超过 500ms */
+const INITIAL_BOTTOM_PIN_FAILSAFE_MS = 2500;
+/** 打开后继续跟随晚到布局（代码高亮 / 图片 / Virtuoso 估高校正） */
+const INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS = 15_000;
+/** 流式输出期间持续贴底；实际结束由 streamingMessages 清空时的 effect cleanup 负责 */
+const STREAM_FOLLOW_MAX_DURATION_MS = 10 * 60_000;
+
+function readContentWidth(element: HTMLElement): number {
+    const style = getComputedStyle(element);
+    return Math.max(
+        0,
+        element.clientWidth
+            - (parseFloat(style.paddingLeft) || 0)
+            - (parseFloat(style.paddingRight) || 0),
+    );
+}
 
 function itemMatchesMessageId(
     item: RenderableConversationItem,
@@ -58,33 +81,36 @@ function itemMatchesMessageId(
     );
 }
 
-function recordVirtualRowHeight(key: string, element: HTMLElement | null) {
-    if (!element) {
-        return;
-    }
-
-    const height = element.offsetHeight;
-    if (height > 0) {
-        window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight?.(key, height);
-    }
-}
-
 function useRecordedHeight(
     key: string,
     elementRef: React.RefObject<HTMLDivElement | null>,
+    estimatedHeight?: number,
 ) {
+    const estimatedHeightRef = useRef(estimatedHeight);
+    estimatedHeightRef.current = estimatedHeight;
     useEffect(() => {
         const element = elementRef.current;
-        if (!element) {
+        const recordHeight = window.__AIPP_CHAT_PERF_CAPTURE__?.recordVirtualRowHeight;
+        if (!element || !recordHeight) {
             return;
         }
 
-        recordVirtualRowHeight(key, element);
-
-        const observer = new ResizeObserver(() => {
-            recordVirtualRowHeight(key, element);
+        const observer = new ResizeObserver((entries) => {
+            const entry = entries[0];
+            if (!entry) return;
+            const height = entry.borderBoxSize[0]?.blockSize ?? entry.contentRect.height;
+            if (height <= 0) return;
+            const parts = Array.from(
+                element.querySelectorAll<HTMLElement>("[data-message-id][data-message-type]"),
+                (part) => ({
+                    id: part.dataset.messageId ?? "",
+                    type: part.dataset.messageType ?? "",
+                    height: Math.round(part.getBoundingClientRect().height),
+                }),
+            );
+            recordHeight(key, height, estimatedHeightRef.current, parts);
         });
-        observer.observe(element);
+        observer.observe(element, { box: "border-box" });
 
         return () => {
             observer.disconnect();
@@ -98,6 +124,15 @@ interface MeasuredVirtuosoItemProps {
     minHeight?: number;
 }
 
+function historyRowHasGapAfter(
+    item: Pick<RenderableConversationItem, "joinsNext">,
+    index: number,
+    historyCount: number,
+    liveCount: number,
+): boolean {
+    return !item.joinsNext && (index < historyCount - 1 || liveCount > 0);
+}
+
 export function getVirtuosoRowMinHeight(
     index: number,
     item: Pick<RenderableConversationItem, "estimatedHeight">,
@@ -108,7 +143,11 @@ export function getVirtuosoRowMinHeight(
 const MeasuredVirtuosoItem = React.memo(
     ({ item, hasGapAfter, minHeight }: MeasuredVirtuosoItemProps) => {
         const rowRef = useRef<HTMLDivElement | null>(null);
-        useRecordedHeight(item.key, rowRef);
+        useRecordedHeight(
+            item.key,
+            rowRef,
+            item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0),
+        );
 
         return (
             <div
@@ -144,9 +183,14 @@ const VirtuosoLiveFooter = React.memo(
 
         // last-reply 的 min-height 直接读 live-only CSS 变量，无需再在 footer 上覆盖
         return (
-            <div ref={footerRef} className="flex flex-col gap-4">
-                {liveItems.map((item) => (
-                    <React.Fragment key={item.key}>{item.element}</React.Fragment>
+            <div ref={footerRef} className="flex flex-col">
+                {liveItems.map((item, index) => (
+                    <React.Fragment key={item.key}>
+                        {item.element}
+                        {index < liveItems.length - 1 && !item.joinsNext && (
+                            <div aria-hidden className="flex-none" style={{ height: VIRTUAL_ROW_GAP_PX }} />
+                        )}
+                    </React.Fragment>
                 ))}
             </div>
         );
@@ -165,11 +209,13 @@ const virtuosoComponents: Components<
 function scheduleHighlightAttempt({
     container,
     messageId,
+    align,
     setShiningMessageIds,
     clearPendingScrollMessageId,
 }: {
     container: HTMLElement;
     messageId: number;
+    align: MessageScrollAlign;
     setShiningMessageIds: React.Dispatch<React.SetStateAction<Set<number>>>;
     clearPendingScrollMessageId: (messageId: number | null) => void;
 }) {
@@ -182,6 +228,8 @@ function scheduleHighlightAttempt({
             applyScrollHighlight({
                 target,
                 messageId,
+                align,
+                container,
                 setShiningMessageIds,
                 clearPendingScrollMessageId,
             });
@@ -204,18 +252,33 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     conversationId,
     scrollContainerRef,
     pendingScrollMessageId,
+    pendingScrollAlign = "center",
     clearPendingScrollMessageId,
     setShiningMessageIds,
     onScrollStateChange,
     ...messageListProps
 }) => {
-    const { renderItems } = useMessageListElements(messageListProps);
+    const [listWidth, setListWidth] = useState<number | null>(null);
+    const { renderItems } = useMessageListElements({
+        ...messageListProps,
+        listWidthPx: listWidth || undefined,
+    });
+    // Keep bounded rich transcripts mounted: viewport crossings must not
+    // repeatedly recreate code blocks and change the reader's scroll anchor.
+    const retainHistory = messageListProps.allDisplayMessages.length <= 80
+        && messageListProps.allDisplayMessages.reduce(
+            (total, message) => total + (message.content?.length ?? 0), 0,
+        ) <= 500_000;
     const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+    const listWrapperRef = useRef<HTMLDivElement | null>(null);
     const scrollSyncFrameRef = useRef<number | null>(null);
     const initialBottomConversationRef = useRef<string | null>(null);
     const initialBottomPinConversationRef = useRef<string | null>(null);
+    /** 打开后用户已用滚轮或滚动条上翻；效果重跑时不再钉底或跟滚。 */
+    const userReleasedInitialScrollRef = useRef<string | null>(null);
     const lastPinnedUserMessageIdRef = useRef<number | null>(null);
     const tailUserMessageIdRef = useRef<number | null>(null);
+    const streamingActiveRef = useRef(false);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
     const [viewportHeight, setViewportHeight] = useState(0);
     const [
@@ -241,26 +304,14 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     );
     const heightEstimates = useMemo(
         () =>
-            historyItems.map((item, index) => {
-                const hasGapAfter =
-                    index < historyItems.length - 1 || liveItems.length > 0;
-                return item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0);
-            }),
+            historyItems.map((item, index) =>
+                item.estimatedHeight
+                + (historyRowHasGapAfter(item, index, historyItems.length, liveItems.length)
+                    ? VIRTUAL_ROW_GAP_PX
+                    : 0),
+            ),
         [historyItems, liveItems.length],
     );
-    const defaultItemHeight = useMemo(() => {
-        if (heightEstimates.length === 0) {
-            return DEFAULT_ITEM_HEIGHT;
-        }
-
-        const sample = heightEstimates.slice(0, 12);
-        return Math.max(
-            1,
-            Math.round(
-                sample.reduce((sum, height) => sum + height, 0) / sample.length,
-            ),
-        );
-    }, [heightEstimates]);
     const context = useMemo<VirtuosoMessageListContext>(
         () => ({ liveItems }),
         [liveItems],
@@ -278,6 +329,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         () => liveItems.map((item) => item.key).join("|"),
         [liveItems],
     );
+    const streamingMessageCount = messageListProps.streamingMessages.size;
+    streamingActiveRef.current = streamingMessageCount > 0;
     const hasCurrentConversationMessages = useMemo(() => {
         if (!conversationId || messageListProps.allDisplayMessages.length === 0) {
             return false;
@@ -287,6 +340,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             (message) => String(message.conversation_id) === conversationId,
         );
     }, [conversationId, messageListProps.allDisplayMessages]);
+    // 按数据实际所属会话重建 Virtuoso，保证新会话从空 sizeTree 开始并采纳本会话的 heightEstimates。
+    const dataConversationKey = String(
+        messageListProps.allDisplayMessages[0]?.conversation_id ?? conversationId,
+    );
 
     // scrollParent 解析不能只依赖 ref 对象 identity：Butler 等场景下首帧
     // ref.current 偶发仍为 null，若不再重试会永久停在 minHeight:1 占位，气泡全无。
@@ -298,6 +355,8 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 setViewportHeight((prev) =>
                     prev === el.clientHeight ? prev : el.clientHeight,
                 );
+                const width = readContentWidth(el);
+                setListWidth((prev) => (prev === width ? prev : width));
             }
             return el;
         };
@@ -320,6 +379,10 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
     useLayoutEffect(() => {
         lastPinnedUserMessageIdRef.current = null;
+        initialBottomConversationRef.current = null;
+        initialBottomPinConversationRef.current = null;
+        userReleasedInitialScrollRef.current = null;
+        setInitialBottomVisibleConversationId(null);
     }, [conversationId]);
 
     const effectiveScrollParent = scrollParent ?? scrollContainerRef.current;
@@ -344,7 +407,11 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
         syncScrollState();
         container.addEventListener("scroll", syncScrollState, { passive: true });
-        const resizeObserver = new ResizeObserver(syncScrollState);
+        const resizeObserver = new ResizeObserver(() => {
+            const width = readContentWidth(container);
+            setListWidth((prev) => (prev === width ? prev : width));
+            syncScrollState();
+        });
         resizeObserver.observe(container);
 
         return () => {
@@ -359,6 +426,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
     useLayoutEffect(() => {
         const container = effectiveScrollParent;
+        if (userReleasedInitialScrollRef.current === conversationId) {
+            return;
+        }
         if (pendingScrollMessageId !== null && hasCurrentConversationMessages) {
             initialBottomConversationRef.current = conversationId;
             setInitialBottomVisibleConversationId((currentConversationId) =>
@@ -369,42 +439,95 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return;
         }
 
-        // live-only 无 Virtuoso 贴底闪动：不 pin、不 hide，仅做一次滚动贴底
-        // 同时标记 visible，避免之后长出 history 时因 ref 已写入却未 unhide 而永久隐藏
+        const markInitialScrollReleased = () => {
+            userReleasedInitialScrollRef.current = conversationId;
+        };
+        const markInitialScrollResumed = () => {
+            if (userReleasedInitialScrollRef.current === conversationId) {
+                userReleasedInitialScrollRef.current = null;
+            }
+        };
+        const startFollow = (target: HTMLDivElement) =>
+            followScrollContainerBottom({
+                container: target,
+                contentElements: [listWrapperRef.current],
+                onScrollStateChange,
+                shouldContinue: () =>
+                    initialBottomConversationRef.current === conversationId,
+                maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
+                onUserPause: markInitialScrollReleased,
+                onUserResume: markInitialScrollResumed,
+            });
+
+        // live-only 无 Virtuoso 贴底闪动：不 pin、不 hide，一次滚动贴底后继续跟随晚到增高。
+        // 不写入 initialBottomConversationRef：若随后长出 history，仍走完整 pin 路径。
         if (historyItems.length === 0) {
             if (
-                container
-                && hasCurrentConversationMessages
-                && initialBottomConversationRef.current !== conversationId
+                !container
+                || !hasCurrentConversationMessages
             ) {
-                initialBottomConversationRef.current = conversationId;
-                setInitialBottomVisibleConversationId(conversationId);
+                return;
+            }
+
+            setInitialBottomVisibleConversationId(conversationId);
+            if (!container.closest('[data-aipp-mobile-shell] [hidden]')) {
                 container.scrollTop = Math.max(
                     0,
                     container.scrollHeight - container.clientHeight,
                 );
                 onScrollStateChange?.(container);
             }
-            return;
+            // live-only follow：cleanup 时 stop；shouldContinue 不依赖 pin-done ref
+            const stopFollow = followScrollContainerBottom({
+                container,
+                contentElements: [listWrapperRef.current],
+                onScrollStateChange,
+                shouldContinue: () => true,
+                maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
+                onUserPause: markInitialScrollReleased,
+                onUserResume: markInitialScrollResumed,
+            });
+            return () => {
+                stopFollow();
+            };
         }
 
         if (
             !container
             || !hasCurrentConversationMessages
-            || initialBottomConversationRef.current === conversationId
             || initialBottomPinConversationRef.current === conversationId
         ) {
             return;
         }
 
+        // 初始 pin 已完成：effect 因依赖变化 cleanup 后必须重新挂上 follow，
+        // 否则晚到的布局增高会把视口留在半截（长对话打开常见）。
+        if (initialBottomConversationRef.current === conversationId) {
+            const stopFollow = startFollow(container);
+            return () => {
+                stopFollow();
+            };
+        }
+
         initialBottomPinConversationRef.current = conversationId;
 
+        let stopFollow: (() => void) | null = null;
         const stopPin = pinScrollContainerToBottom({
             container,
             onScrollStateChange,
             shouldContinue: () =>
                 initialBottomPinConversationRef.current === conversationId,
             onComplete: () => {
+                initialBottomConversationRef.current = conversationId;
+                initialBottomPinConversationRef.current = null;
+                if (tailUserMessageIdRef.current !== null) {
+                    lastPinnedUserMessageIdRef.current = tailUserMessageIdRef.current;
+                }
+                setInitialBottomVisibleConversationId(conversationId);
+                stopFollow = startFollow(container);
+            },
+            onUserRelease: () => {
+                userReleasedInitialScrollRef.current = conversationId;
                 initialBottomConversationRef.current = conversationId;
                 initialBottomPinConversationRef.current = null;
                 if (tailUserMessageIdRef.current !== null) {
@@ -424,6 +547,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 initialBottomPinConversationRef.current = null;
             }
             stopPin();
+            stopFollow?.();
         };
     }, [
         conversationId,
@@ -464,6 +588,9 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             onComplete: () => {
                 lastPinnedUserMessageIdRef.current = pinningMessageId;
             },
+            onUserRelease: () => {
+                lastPinnedUserMessageIdRef.current = pinningMessageId;
+            },
             observeMode: "tail",
         });
     }, [
@@ -476,8 +603,41 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         tailUserMessageId,
     ]);
 
+    // 流式回复持续长高：follow 贴底；用户上滑暂停、滚回底部恢复（见 followScrollContainerBottom）。
+    useLayoutEffect(() => {
+        const container = effectiveScrollParent;
+        if (
+            !container
+            || streamingMessageCount === 0
+            || !hasCurrentConversationMessages
+            || pendingScrollMessageId !== null
+        ) {
+            return;
+        }
+
+        // 打开会话的初始 pin 进行中时不要抢 follow；pin onComplete 会接上打开 follow
+        if (initialBottomPinConversationRef.current === conversationId) {
+            return;
+        }
+
+        return followScrollContainerBottom({
+            container,
+            contentElements: [listWrapperRef.current],
+            onScrollStateChange,
+            shouldContinue: () => streamingActiveRef.current,
+            maxDurationMs: STREAM_FOLLOW_MAX_DURATION_MS,
+        });
+    }, [
+        conversationId,
+        hasCurrentConversationMessages,
+        onScrollStateChange,
+        pendingScrollMessageId,
+        effectiveScrollParent,
+        streamingMessageCount,
+    ]);
+
     const overscanPx = useMemo(
-        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 3),
+        () => Math.max(VIRTUAL_OVERSCAN_PX, viewportHeight * 1.5),
         [viewportHeight],
     );
     const initialBottomOffsetPx = useMemo(() => {
@@ -486,14 +646,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         }
 
         return -liveItems.reduce((sum, item, index) => {
-            const hasGapAfter = index < liveItems.length - 1;
+            const hasGapAfter = index < liveItems.length - 1 && !item.joinsNext;
             return sum + item.estimatedHeight + (hasGapAfter ? VIRTUAL_ROW_GAP_PX : 0);
         }, 0);
     }, [liveItems]);
-    // 仅 Virtuoso history 路径需要 hide 掩盖 initialTopMostItemIndex 闪动；
+    // history 在初始贴底时暂时隐藏；无滚动容器时不会启动 pin，不能隐藏消息。
     // live-only（短会话 / 总管家常见）没有 Virtuoso 定位，绝不能藏气泡。
     const shouldHideInitialBottomPositioning =
         historyItems.length > 0
+        && !!effectiveScrollParent
         && pendingScrollMessageId === null
         && hasCurrentConversationMessages
         && initialBottomVisibleConversationId !== conversationId;
@@ -507,7 +668,12 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         (index: number, item: RenderableConversationItem) => (
             <MeasuredVirtuosoItem
                 item={item}
-                hasGapAfter={index < historyItems.length - 1 || liveItems.length > 0}
+                hasGapAfter={historyRowHasGapAfter(
+                    item,
+                    index,
+                    historyItems.length,
+                    liveItems.length,
+                )}
                 minHeight={getVirtuosoRowMinHeight(index, item)}
             />
         ),
@@ -527,15 +693,12 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         const targetIsLive = liveItems.some((item) =>
             itemMatchesMessageId(item, pendingScrollMessageId),
         );
-        if (targetIsLive) {
+        if (targetIsLive || retainHistory) {
             const existingTarget = container.querySelector(
                 `[data-message-id='${pendingScrollMessageId}']`,
             ) as HTMLElement | null;
             if (existingTarget) {
-                existingTarget.scrollIntoView({
-                    block: "center",
-                    behavior: "smooth",
-                });
+                scrollMessageIntoView(existingTarget, pendingScrollAlign, container);
             } else {
                 container.scrollTo({
                     top: Math.max(0, container.scrollHeight - container.clientHeight),
@@ -546,6 +709,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             scheduleHighlightAttempt({
                 container,
                 messageId: pendingScrollMessageId,
+                align: pendingScrollAlign,
                 setShiningMessageIds,
                 clearPendingScrollMessageId,
             });
@@ -562,12 +726,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
 
         virtuosoRef.current?.scrollToIndex({
             index: targetIndex,
-            align: "center",
+            align: pendingScrollAlign,
+            // start 对齐时预留顶部空隙；渲染后高亮阶段会按实测位置再精确校正一次
+            offset: pendingScrollAlign === "start" ? -MESSAGE_SCROLL_START_GAP_PX : 0,
             behavior: "auto",
         });
         scheduleHighlightAttempt({
             container,
             messageId: pendingScrollMessageId,
+            align: pendingScrollAlign,
             setShiningMessageIds,
             clearPendingScrollMessageId,
         });
@@ -576,13 +743,27 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         historyItems,
         liveItems,
         pendingScrollMessageId,
+        pendingScrollAlign,
         effectiveScrollParent,
         setShiningMessageIds,
+        retainHistory,
     ]);
 
     // live-only：不依赖 scrollParent，直接渲染（总管家短会话常见路径）
     if (historyItems.length === 0) {
         return <VirtuosoLiveFooter context={{ liveItems }} />;
+    }
+
+    if (retainHistory) {
+        return (
+            <div
+                ref={listWrapperRef}
+                data-aipp-initial-bottom-positioning={shouldHideInitialBottomPositioning ? "true" : undefined}
+                style={initialBottomPositioningStyle}
+            >
+                <VirtuosoLiveFooter context={{ liveItems: renderItems }} />
+            </div>
+        );
     }
 
     // history 路径需要 customScrollParent；ref 尚未就绪时：
@@ -594,14 +775,22 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         return <VirtuosoLiveFooter context={{ liveItems: fallbackItems }} />;
     }
 
+    // Virtuoso 只在 sizeTree 为空时采纳第一份非空 heightEstimates，之后的更新全部忽略；
+    // 必须等拿到真实列表宽度再挂载，否则按默认宽度估算的高度会被永久固化。
+    if (listWidth === null) {
+        return <div ref={listWrapperRef} style={initialBottomPositioningStyle} />;
+    }
+
     return (
         <div
+            ref={listWrapperRef}
             data-aipp-initial-bottom-positioning={
                 shouldHideInitialBottomPositioning ? "true" : undefined
             }
             style={initialBottomPositioningStyle}
         >
             <Virtuoso
+                key={dataConversationKey}
                 ref={virtuosoRef}
                 customScrollParent={effectiveScrollParent}
                 data={historyItems}
@@ -609,7 +798,6 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 itemContent={itemContent}
                 components={virtuosoComponents}
                 context={context}
-                defaultItemHeight={defaultItemHeight}
                 heightEstimates={heightEstimates}
                 initialTopMostItemIndex={{
                     index: "LAST",
@@ -620,7 +808,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                     top: overscanPx,
                     bottom: overscanPx,
                 }}
-                minOverscanItemCount={{ top: 8, bottom: 8 }}
+                minOverscanItemCount={{ top: 4, bottom: 4 }}
                 alignToBottom
                 style={{ width: "100%" }}
             />

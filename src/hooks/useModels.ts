@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
@@ -15,14 +16,18 @@ export const useModels = (shouldFetch: boolean = true) => {
     const [loading, setLoading] = useState(shouldFetch);
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
+    useDataRefresh({
+        events: ["llm_provider_changed"],
+        identity: String(shouldFetch),
+        initial: true,
+        refresh: async (isCurrent) => {
         if (!shouldFetch) {
             setLoading(false);
             return;
         }
 
         setLoading(true);
-        invoke<Array<ModelForSelect>>("get_models_for_select")
+        await invoke<Array<ModelForSelect>>("get_models_for_select")
             .then((modelList) => {
                 const uniqueModels = new Map<string, ModelForSelect>();
                 for (const model of modelList) {
@@ -31,18 +36,21 @@ export const useModels = (shouldFetch: boolean = true) => {
                         uniqueModels.set(key, model);
                     }
                 }
+                if (!isCurrent()) return;
                 setModels(Array.from(uniqueModels.values()));
                 setError(null);
             })
             .catch((err) => {
+                if (!isCurrent()) return;
                 const errorMsg = "获取模型列表失败: " + getErrorMessage(err);
                 setError(errorMsg);
                 toast.error(errorMsg);
             })
             .finally(() => {
-                setLoading(false);
+                if (isCurrent()) setLoading(false);
             });
-    }, [shouldFetch]);
+        },
+    });
 
     return { models, loading, error };
 };

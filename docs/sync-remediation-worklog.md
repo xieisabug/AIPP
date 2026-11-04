@@ -15,8 +15,8 @@
 
 ### P4-13（C13）：llm_provider_config 敏感过滤黑名单→白名单 —— 完成
 
-- `src-tauri/src/sync.rs` specs：`llm.provider_config` 的 where_clause 由"排除 name 含 key/secret/token/password"改为显式白名单：`endpoint`、`base_url`、`acp_cli_command`、`acp_working_directory`、`acp_additional_args`、`acp_claude_auth_mode`、`acp_codex_auth_mode`。
-- 枚举依据：后端写入点（llm_api / copilot_token_manager / acp.rs）与 genai_client 消费点；`api_key` 及 env 类配置（`acp_env_vars`/`acp_claude_env_vars`/`acp_codex_env_vars`/动态 `acp_env_*`）的值可能内嵌密钥，刻意排除——这是对旧行为的收紧：旧黑名单会把内嵌 API key 的 env 配置同步上服务器。
+- `src-tauri/src/sync.rs` specs：`llm.provider_config` 的 where_clause 由"排除 name 含 key/secret/token/password"改为显式白名单：`endpoint`、`base_url`、`acp_cli_command`、`acp_working_directory`、`acp_additional_args`、`acp_claude_auth_mode`。
+- 枚举依据：后端写入点（llm_api / copilot_token_manager / acp.rs）与 genai_client 消费点；`api_key` 及 env 类配置（`acp_env_vars`/`acp_claude_env_vars`/动态 `acp_env_*`）的值可能内嵌密钥，刻意排除。
 - 安全性说明：被 where_clause 过滤的行不会被 C1 删除检测误判为删除（`local_row_exists` 忽略 where_clause 直接查行）；远端历史遗留的 env 类对象不会自动清理，保留在服务器上（一次性残留，如需清理可用管理 API 或重置同步状态）。
 - 验证：见收尾统一 `cargo test sync::tests`。
 

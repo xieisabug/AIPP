@@ -1,16 +1,14 @@
 import React, { memo } from "react";
-import MessageList from "./MessageList";
-import VirtualizedMessageList from "./VirtualizedMessageList";
+import type { MessageScrollAlign } from "./scrollHighlight";
 import VirtuosoMessageList from "./VirtuosoMessageList";
 import NewChatComponent from "../NewChatComponent";
-import { Message, StreamEvent } from "../../data/Conversation";
+import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
 import { AssistantListItem } from "../../data/Assistant";
 import type { InlineInteractionItem } from "../ConversationUI";
 
-export type VirtualizedListEngine = "legacy" | "virtuoso";
-
 export interface ConversationContentProps {
     conversationId: string;
+    isMobile?: boolean;
     // MessageList props
     allDisplayMessages: Message[];
     streamingMessages: Map<number, StreamEvent>;
@@ -18,6 +16,7 @@ export interface ConversationContentProps {
     shiningMcpCallId: number | null;
     reasoningExpandStates: Map<number, boolean>;
     mcpToolCallStates: Map<number, any>;
+    agentActivities?: Map<string, AgentActivityEvent>;
     generationGroups: Map<string, any>;
     selectedVersions: Map<string, number>;
     getGenerationGroupControl: (message: Message) => any;
@@ -31,10 +30,13 @@ export interface ConversationContentProps {
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
     renderMessageActions?: (message: Message) => React.ReactNode;
-    virtualizeMessages?: boolean;
-    virtualizedListEngine?: VirtualizedListEngine;
+    actionableAgentPlanMessageId?: number | null;
+    agentPlanModeSwitching?: boolean;
+    onContinueAgentPlan?: () => void;
+    onApproveAgentPlan?: () => void;
     scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId?: number | null;
+    pendingScrollAlign?: MessageScrollAlign;
     clearPendingScrollMessageId?: (messageId: number | null) => void;
     setShiningMessageIds?: React.Dispatch<React.SetStateAction<Set<number>>>;
     onScrollStateChange?: (container?: HTMLDivElement | null) => void;
@@ -44,10 +46,16 @@ export interface ConversationContentProps {
     selectedAssistant: number;
     assistants: AssistantListItem[];
     setSelectedAssistant: (assistantId: number) => void;
+    selectedModel?: string;
+    selectedEffort?: string;
+    selectedApprovalPolicy?: string;
+    selectedSandbox?: string;
+    onAgentConfigChange?: (model: string, effort: string, approvalPolicy: string, sandbox: string) => void;
 }
 
 const ConversationContent: React.FC<ConversationContentProps> = memo(({
     conversationId,
+    isMobile = false,
     // MessageList props
     allDisplayMessages,
     streamingMessages,
@@ -55,6 +63,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     shiningMcpCallId,
     reasoningExpandStates,
     mcpToolCallStates,
+    agentActivities = new Map(),
     generationGroups,
     selectedVersions,
     getGenerationGroupControl,
@@ -68,10 +77,13 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     inlineInteractionItems,
     allowFeishuDebugResend = false,
     renderMessageActions,
-    virtualizeMessages = false,
-    virtualizedListEngine = "legacy",
+    actionableAgentPlanMessageId = null,
+    agentPlanModeSwitching = false,
+    onContinueAgentPlan,
+    onApproveAgentPlan,
     scrollContainerRef,
     pendingScrollMessageId = null,
+    pendingScrollAlign,
     clearPendingScrollMessageId,
     setShiningMessageIds,
     onScrollStateChange,
@@ -81,14 +93,21 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     selectedAssistant,
     assistants,
     setSelectedAssistant,
+    selectedModel = "",
+    selectedEffort = "",
+    selectedApprovalPolicy = "",
+    selectedSandbox = "",
+    onAgentConfigChange = () => {},
 }) => {
     const sharedMessageListProps = {
+        isMobile,
         allDisplayMessages,
         streamingMessages,
         shiningMessageIds,
         shiningMcpCallId,
         reasoningExpandStates,
         mcpToolCallStates,
+        agentActivities,
         generationGroups,
         selectedVersions,
         getGenerationGroupControl,
@@ -102,47 +121,33 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
         inlineInteractionItems,
         allowFeishuDebugResend,
         renderMessageActions,
+        actionableAgentPlanMessageId,
+        agentPlanModeSwitching,
+        onContinueAgentPlan,
+        onApproveAgentPlan,
     };
 
     if (conversationId) {
         return (
             <>
-                <>
-                    {virtualizeMessages
-                        && scrollContainerRef
-                        && clearPendingScrollMessageId
-                        && setShiningMessageIds
-                        && smartScroll ? (
-                        virtualizedListEngine === "virtuoso" ? (
-                            <VirtuosoMessageList
-                                {...sharedMessageListProps}
-                                conversationId={conversationId}
-                                scrollContainerRef={scrollContainerRef}
-                                pendingScrollMessageId={pendingScrollMessageId}
-                                clearPendingScrollMessageId={
-                                    clearPendingScrollMessageId
-                                }
-                                setShiningMessageIds={setShiningMessageIds}
-                                onScrollStateChange={onScrollStateChange}
-                                smartScroll={smartScroll}
-                            />
-                        ) : (
-                            <VirtualizedMessageList
-                                {...sharedMessageListProps}
-                                scrollContainerRef={scrollContainerRef}
-                                pendingScrollMessageId={pendingScrollMessageId}
-                                clearPendingScrollMessageId={
-                                    clearPendingScrollMessageId
-                                }
-                                setShiningMessageIds={setShiningMessageIds}
-                                onScrollStateChange={onScrollStateChange}
-                                smartScroll={smartScroll}
-                            />
-                        )
-                    ) : (
-                        <MessageList {...sharedMessageListProps} />
-                    )}
-                </>
+                {scrollContainerRef
+                    && clearPendingScrollMessageId
+                    && setShiningMessageIds
+                    && smartScroll ? (
+                    <VirtuosoMessageList
+                        {...sharedMessageListProps}
+                        conversationId={conversationId}
+                        scrollContainerRef={scrollContainerRef}
+                        pendingScrollMessageId={pendingScrollMessageId}
+                        pendingScrollAlign={pendingScrollAlign}
+                        clearPendingScrollMessageId={
+                            clearPendingScrollMessageId
+                        }
+                        setShiningMessageIds={setShiningMessageIds}
+                        onScrollStateChange={onScrollStateChange}
+                        smartScroll={smartScroll}
+                    />
+                ) : null}
             </>
         );
     }
@@ -153,6 +158,11 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
             selectedAssistant={selectedAssistant}
             assistants={assistants}
             setSelectedAssistant={setSelectedAssistant}
+            selectedModel={selectedModel}
+            selectedEffort={selectedEffort}
+            selectedApprovalPolicy={selectedApprovalPolicy}
+            selectedSandbox={selectedSandbox}
+            onAgentConfigChange={onAgentConfigChange}
         />
     );
 });

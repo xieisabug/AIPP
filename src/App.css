@@ -404,6 +404,17 @@ body {
     @apply p-0 bg-transparent;
 }
 
+/* Plain and highlighted code must occupy the same box. Otherwise every
+   virtual-list remount changes row height when async highlighting resolves. */
+.aipp-code-content pre,
+.prose .aipp-code-content pre {
+    margin: 0;
+    padding: 0.5rem;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+}
+
 .prose a {
     @apply text-primary hover:text-primary/80 underline;
 }
@@ -524,4 +535,148 @@ body {
 .webkit-scroll-fix code {
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+}
+
+/* ==================== 移动端适配基础设施 ==================== */
+
+/*
+ * 动态视口高度：移动端浏览器/WebView 的工具栏与虚拟键盘会改变可视高度，
+ * 100dvh 跟随实际可视区域，不支持 dvh 的环境回退到 100vh。
+ * 全局覆盖 Tailwind 的 h-screen，使所有全屏窗口容器自动受益（桌面端 dvh 与 vh 等价，无副作用）。
+ */
+.h-screen {
+    height: 100vh;
+    height: 100dvh;
+}
+
+/* 安全区适配（需 index.html 的 viewport-fit=cover 配合生效） */
+.safe-top {
+    padding-top: env(safe-area-inset-top);
+}
+
+/* Android WebView 在 edge-to-edge 模式下可能不暴露顶部 safe-area，保留状态栏最小高度。 */
+.safe-top-android {
+    padding-top: max(env(safe-area-inset-top), 24px);
+}
+
+.safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+}
+
+.safe-x {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+}
+
+/* 组合：底部固定栏（如输入区）在移动端不被手势条遮挡 */
+.safe-bottom-bar {
+    padding-bottom: calc(env(safe-area-inset-bottom) + 8px);
+}
+
+
+/*
+ * IME / visualViewport：顶栏贴齐可视区，避免正文顶到系统状态栏下（#148）。
+ * MobileShell 在键盘弹起时已把整个壳体收缩到 visualViewport 并 translateY(offsetTop)，
+ * 顶栏位于壳体内，这里不能再叠加 --aipp-vv-offset-top，否则会二次下移。
+ */
+.aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+}
+
+/* class 与 data 属性都挂在 <html> 上，必须写成同一元素的复合选择器 */
+html.aipp-mobile-platform[data-aipp-keyboard-open="true"] [data-aipp-slot="chat-mobile-header"] {
+    box-shadow: 0 1px 0 hsl(var(--border));
+}
+
+/* ===== 移动平台触控适配（仅 <html class="aipp-mobile-platform">，桌面不受影响） ===== */
+
+/*
+ * 代码块滚动时的固定工具栏：移动端放到 sticky 顶栏下方，避免压住顶栏按钮。
+ * 顶栏高度 = safe-top-android 的 max(inset,24px) + 44px 按钮 + 12px 底内边距，再留 8px 间距；
+ * z-index 低于顶栏（30）。
+ */
+.aipp-mobile-platform .aipp-sticky-code-toolbar {
+    top: calc(max(env(safe-area-inset-top, 0px), 24px) + 64px) !important;
+    z-index: 20 !important;
+}
+
+/* 消息操作栏常驻气泡底部：按钮 ≥44×44，窄屏横向滚动时不压缩 */
+.aipp-mobile-action-bar button {
+    min-width: 44px;
+    min-height: 44px;
+    flex-shrink: 0;
+}
+
+/* 视觉轻量，触控范围仍为 44px；去掉正文首尾的段落外边距，避免与气泡留白叠加。 */
+.aipp-mobile-action-bar button svg {
+    width: 14px;
+    height: 14px;
+    color: hsl(var(--muted-foreground));
+}
+
+.aipp-mobile-message-bubble .prose > :first-child {
+    margin-top: 0;
+}
+
+.aipp-mobile-message-bubble .prose > :last-child {
+    margin-bottom: 0;
+}
+
+/* Markdown 宽表格：局部横向滚动，不挤压列宽 */
+.aipp-mobile-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 1em 0;
+}
+.aipp-mobile-table-scroll > table {
+    width: max-content;
+    min-width: 100%;
+    margin: 0;
+}
+.aipp-mobile-table-scroll th,
+.aipp-mobile-table-scroll td {
+    min-width: 6rem;
+    max-width: 18rem;
+}
+
+/* 抽屉 / 设置等常用入口：触控目标 ≥44px */
+.aipp-mobile-platform [data-aipp-slot="chat-info-open-config"],
+.aipp-mobile-platform [data-aipp-slot="chat-info-open-artifacts"],
+.aipp-mobile-platform [data-aipp-slot="chat-info-open-schedule"] {
+    min-width: 44px;
+    min-height: 44px;
+}
+.aipp-mobile-platform [data-aipp-slot="chat-toolbar-search"],
+.aipp-mobile-platform [data-aipp-slot="chat-toolbar-new-conversation"] {
+    min-height: 44px;
+}
+/* 会话行菜单：移动端无 hover，常驻可见并放大到 44px；状态图标让到左侧 */
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-item-menu-trigger"] {
+    visibility: visible;
+    width: 44px;
+    height: 44px;
+    inset: auto;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+.aipp-mobile-platform [data-aipp-slot^="chat-conversation-item-status"] {
+    transform: translateX(-40px);
+}
+/* 标题/副标题为右侧常驻图标让位，先截断再碰到图标：菜单 44px（占右侧约 52px），状态图标再左移 40px */
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"] {
+    padding-right: 56px;
+    -webkit-touch-callout: none;
+}
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="responding"],
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="completed_unread"] {
+    padding-right: 92px;
+}
+/* 表单控件高度 ≥44px */
+.aipp-mobile-platform [data-slot="input"],
+.aipp-mobile-platform [data-slot="select-trigger"] {
+    min-height: 44px;
 }

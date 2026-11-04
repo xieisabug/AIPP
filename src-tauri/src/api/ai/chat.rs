@@ -7,8 +7,7 @@ use crate::api::ai::title::{
 };
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::{
-    resolve_tool_name, sanitize_tool_name, try_dispatch_queued_message_after_completion,
-    ToolNameMapping,
+    resolve_tool_name, try_dispatch_queued_message_after_completion, ToolNameMapping,
 };
 use crate::db::assistant_db::Assistant;
 use crate::db::conversation_db::{
@@ -51,6 +50,18 @@ fn positive_token_count(value: i32) -> Option<i32> {
     (value > 0).then_some(value)
 }
 
+/// LeaderAI #161: normal stop/DONE with zero assistant body.
+pub(crate) const EMPTY_MODEL_REPLY_NOTICE: &str = "模型返回了空内容";
+
+pub(crate) fn should_announce_empty_model_reply(
+    response_content: &str,
+    tool_call_count: usize,
+    binary_count: usize,
+) -> bool {
+    response_content.trim().is_empty() && tool_call_count == 0 && binary_count == 0
+}
+
+
 fn cache_creation_tokens_from_usage(usage: &Usage) -> Option<i32> {
     let details = usage.prompt_tokens_details.as_ref()?;
     let explicit = details.cache_creation_tokens.unwrap_or(0);
@@ -74,6 +85,116 @@ fn metadata_object_from_raw(existing_metadata_json: Option<&str>) -> serde_json:
         _ => serde_json::Map::new(),
     }
 }
+
+
+/// LeaderAI #159: tag partial stream messages from a failed/retry attempt so the UI
+/// can group by attempt index instead of listing interrupted partials flat.
+fn build_stream_retry_metadata_json(
+    existing_metadata_json: Option<&str>,
+    session_id: &str,
+    attempt: u32,
+    status: &str,
+    error_summary: Option<&str>,
+) -> String {
+    let mut map = metadata_object_from_raw(existing_metadata_json);
+    let mut retry_meta = serde_json::Map::new();
+    retry_meta.insert("session_id".to_string(), serde_json::json!(session_id));
+    retry_meta.insert("attempt".to_string(), serde_json::json!(attempt));
+    retry_meta.insert("status".to_string(), serde_json::json!(status));
+    if let Some(error) = error_summary.map(str::trim).filter(|value| !value.is_empty()) {
+        let truncated = if error.chars().count() > 500 {
+            format!("{}…", error.chars().take(500).collect::<String>())
+        } else {
+            error.to_string()
+        };
+        retry_meta.insert("error".to_string(), serde_json::json!(truncated));
+    }
+    map.insert(
+        "stream_retry".to_string(),
+        serde_json::Value::Object(retry_meta),
+    );
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| {
+        serde_json::json!({
+            "stream_retry": {
+                "session_id": session_id,
+                "attempt": attempt,
+                "status": status,
+            }
+        })
+        .to_string()
+    })
+}
+
+fn apply_stream_retry_metadata(
+    conversation_db: &ConversationDatabase,
+    window: &tauri::Window,
+    conversation_id: i64,
+    message_ids: &[i64],
+    session_id: &str,
+    attempt: u32,
+    status: &str,
+    error_summary: Option<&str>,
+) {
+    if message_ids.is_empty() {
+        return;
+    }
+    let Ok(repo) = conversation_db.message_repo() else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    for &msg_id in message_ids {
+        let Ok(Some(mut message)) = repo.read(msg_id) else {
+            continue;
+        };
+        message.metadata_json = Some(build_stream_retry_metadata_json(
+            message.metadata_json.as_deref(),
+            session_id,
+            attempt,
+            status,
+            error_summary,
+        ));
+        if status == "interrupted" && message.finish_time.is_none() {
+            message.finish_time = Some(now);
+        }
+        if let Err(error) = repo.update(&message) {
+            warn!(message_id = msg_id, error = %error, "failed to persist stream_retry metadata");
+            continue;
+        }
+
+        if status == "interrupted" {
+            let update_event = ConversationEvent {
+                r#type: "message_update".to_string(),
+                data: serde_json::to_value(MessageUpdateEvent {
+                    message_id: msg_id,
+                    message_type: message.message_type.clone(),
+                    content: message.content.clone(),
+                    is_done: true,
+                    token_count: None,
+                    input_token_count: None,
+                    output_token_count: None,
+                    ttft_ms: None,
+                    tps: None,
+                })
+                .unwrap_or(serde_json::json!({})),
+            };
+            send_conversation_event_to_chat_windows(
+                window.app_handle(),
+                conversation_id,
+                update_event,
+            );
+        }
+
+        send_conversation_event_to_chat_windows(
+            window.app_handle(),
+            conversation_id,
+            ConversationEvent {
+                r#type: "message_metadata_update".to_string(),
+                data: serde_json::json!({ "message_id": msg_id }),
+            },
+        );
+    }
+}
+
 
 fn merge_chat_response_metadata(
     existing_metadata_json: Option<&str>,
@@ -397,15 +518,6 @@ enum OutputType {
 impl Default for OutputType {
     fn default() -> Self {
         OutputType::None
-    }
-}
-
-/// 工具名分割助手
-fn split_tool_name(fn_name: &str) -> (String, String) {
-    if let Some((s, t)) = fn_name.split_once("__") {
-        (s.to_string(), t.to_string())
-    } else {
-        (String::from("default"), fn_name.to_string())
     }
 }
 
@@ -1007,14 +1119,31 @@ fn build_streaming_tool_call_display(
     for tc in sorted_calls {
         let (server_name, tool_name) = resolve_tool_name(&tc.fn_name, tool_name_mapping);
         let params_str = serialize_streaming_tool_arguments(&tc.fn_arguments);
+        let projected = crate::mcp::execution_api::project_call_mcp_tool(&tool_name, &params_str);
         let mut marker_payload = serde_json::json!({
             "server_name": server_name,
             "tool_name": tool_name,
             "fn_arguments": params_str,
             "llm_call_id": tc.call_id,
         });
-        if server_name == "ui_interaction" && tool_name == "preview_code" {
-            if let Some(preview_state) = extract_preview_code_streaming_state(&tc.fn_arguments) {
+        if let Some((display_server, display_tool, display_parameters)) = &projected {
+            if let Some(marker_object) = marker_payload.as_object_mut() {
+                marker_object.insert("display_server_name".to_string(), serde_json::json!(display_server));
+                marker_object.insert("display_tool_name".to_string(), serde_json::json!(display_tool));
+                marker_object.insert(
+                    "display_parameters".to_string(),
+                    serde_json::json!(display_parameters),
+                );
+            }
+        }
+        let (preview_server, preview_tool, preview_arguments) = projected
+            .as_ref()
+            .map(|(server, tool, parameters)| (server.as_str(), tool.as_str(), parameters.as_str()))
+            .unwrap_or((server_name.as_str(), tool_name.as_str(), params_str.as_str()));
+        if preview_server == "ui_interaction" && preview_tool == "preview_code" {
+            let preview_value = serde_json::from_str::<serde_json::Value>(preview_arguments)
+                .unwrap_or(serde_json::Value::Null);
+            if let Some(preview_state) = extract_preview_code_streaming_state(&preview_value) {
                 if let Some(marker_object) = marker_payload.as_object_mut() {
                     marker_object.insert(
                         "preview_state".to_string(),
@@ -1029,22 +1158,9 @@ fn build_streaming_tool_call_display(
     display
 }
 
-/// 用于测试的公共模块
-#[cfg(test)]
-pub(crate) use self::tests::build_streaming_tool_call_display_pub;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 公开 build_streaming_tool_call_display 给测试模块使用
-    pub(crate) fn build_streaming_tool_call_display_pub(
-        response_content: &str,
-        streaming_tool_calls: &HashMap<String, ToolCall>,
-        tool_name_mapping: &ToolNameMapping,
-    ) -> String {
-        build_streaming_tool_call_display(response_content, streaming_tool_calls, tool_name_mapping)
-    }
 
     #[test]
     fn test_merge_chat_usage_metadata_records_cache_and_reasoning() {
@@ -1183,6 +1299,7 @@ mod tests {
             None,
             "call_setup_failed",
             Some("服务器 'default' 未找到或已禁用"),
+            None,
         );
 
         assert!(hint.contains("\"status\":\"failed\""));
@@ -1196,6 +1313,29 @@ mod tests {
         assert_eq!(tool_calls[0].call_id, "call_setup_failed");
         assert_eq!(tool_calls[0].fn_name, "default__todo_write");
         assert_eq!(tool_calls[0].fn_arguments, serde_json::json!({"todos": []}));
+    }
+
+    #[test]
+    fn test_call_mcp_tool_hint_keeps_protocol_name_and_exposes_display_target() {
+        let hint = build_native_tool_call_hint(
+            "Agent 工具",
+            "call_mcp_tool",
+            r#"{"server_name":"Search","tool_name":"search_web","parameters":{"query":"aipp"}}"#,
+            Some(9),
+            "call_projected",
+            None,
+            Some(("Search", "search_web", r#"{"query":"aipp"}"#)),
+        );
+
+        assert!(hint.contains("\"tool_name\":\"call_mcp_tool\""));
+        assert!(hint.contains("\"display_tool_name\":\"search_web\""));
+        assert!(hint.contains("\"display_server_name\":\"Search\""));
+        let message =
+            crate::api::ai::conversation::reconstruct_assistant_with_tool_calls_from_content(&hint)
+                .unwrap();
+        let tool_calls = message.content.tool_calls();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].fn_name, "Agent__call_mcp_tool");
     }
 
     #[test]
@@ -1408,216 +1548,6 @@ mod tests {
     }
 }
 
-/// 统一处理捕获到的工具调用：创建DB记录、插入UI注释、更新消息、可选自动执行、可选向UI发事件
-async fn handle_captured_tool_calls_common(
-    app_handle: &tauri::AppHandle,
-    conversation_db: &ConversationDatabase,
-    window: &tauri::Window,
-    conversation_id: i64,
-    response_message_id: i64,
-    captured_tool_calls: &[ToolCall],
-    response_content: &mut String,
-    emit_tool_call_events: bool,
-    mcp_override_config: Option<&McpOverrideConfig>,
-    tool_name_mapping: &ToolNameMapping,
-) -> anyhow::Result<()> {
-    // 先将完整的 tool_calls JSON 覆盖保存到消息，保证数据源一致
-    if let Ok(Some(mut msg)) = conversation_db
-        .message_repo()
-        .context("failed to get message_repo")?
-        .read(response_message_id)
-    {
-        msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
-        let _ = conversation_db
-            .message_repo()
-            .context("failed to get message_repo for update")?
-            .update(&msg);
-    }
-
-    for tool_call in captured_tool_calls {
-        // 使用映射表还原原始名称，用于 UI 显示和数据库记录
-        let (server_name, tool_name) = resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
-        let raw_params_str = tool_call.fn_arguments.to_string();
-        let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
-        info!(
-            conversation_id,
-            response_message_id,
-            llm_call_id = %tool_call.call_id,
-            fn_name = %tool_call.fn_name,
-            server_name = %server_name,
-            tool_name = %tool_name,
-            raw_arguments = %raw_params_str,
-            normalized_arguments = %params_str,
-            "captured native tool call"
-        );
-
-        // 创建工具调用记录（使用原始名称）
-        match crate::mcp::execution_api::create_mcp_tool_call_with_llm_id(
-            app_handle.clone(),
-            conversation_id,
-            Some(response_message_id),
-            server_name.clone(),
-            tool_name.clone(),
-            params_str.clone(),
-            Some(&tool_call.call_id),
-            Some(response_message_id),
-        )
-        .await
-        {
-            Ok(tool_call_record) => {
-                // 追加 UI hint（使用原始名称）
-                let ui_hint = format!(
-                    "\n\n<!-- MCP_TOOL_CALL:{} -->\n",
-                    serde_json::json!({
-                        "server_name": server_name,
-                        "tool_name": tool_name,
-                        "parameters": params_str,
-                        "call_id": tool_call_record.id,
-                        "llm_call_id": tool_call.call_id.clone(),
-                    })
-                );
-                response_content.push_str(&ui_hint);
-
-                // 持久化内容并发出更新
-                if let Ok(Some(mut msg)) = conversation_db
-                    .message_repo()
-                    .context("failed to get message_repo for read")?
-                    .read(response_message_id)
-                {
-                    msg.content = response_content.clone();
-                    // 覆盖保存 tool_calls JSON（再次确保一致）
-                    msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
-                    let _ = conversation_db
-                        .message_repo()
-                        .context("failed to get message_repo for update")?
-                        .update(&msg);
-
-                    let update_event = ConversationEvent {
-                        r#type: "message_update".to_string(),
-                        data: serde_json::to_value(MessageUpdateEvent {
-                            message_id: response_message_id,
-                            message_type: "response".to_string(),
-                            content: response_content.clone(),
-                            is_done: false,
-                            token_count: None,
-                            input_token_count: None,
-                            output_token_count: None,
-                            ttft_ms: None,
-                            tps: None,
-                        })
-                        .unwrap(),
-                    };
-                    send_conversation_event_to_chat_windows(
-                        window.app_handle(),
-                        conversation_id,
-                        update_event,
-                    );
-                }
-
-                // 自动执行（若配置）
-                if let Ok(conv) = conversation_db
-                    .conversation_repo()
-                    .context("failed to get conversation_repo")?
-                    .read(conversation_id)
-                {
-                    if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-                        if let Ok(mcp_info) = crate::mcp::collect_mcp_info_for_assistant(
-                            app_handle,
-                            assistant_id,
-                            None,
-                            None,
-                        )
-                        .await
-                        {
-                            let servers = mcp_info.enabled_servers;
-                            let mut should_auto_run = false;
-                            for s in servers.iter() {
-                                // 支持精确匹配和清理后名称匹配
-                                let name_matches = s.name == server_name
-                                    || sanitize_tool_name(&s.name) == server_name;
-                                if name_matches && s.is_enabled {
-                                    if let Some(t) =
-                                        s.tools.iter().find(|t| t.name == tool_name && t.is_enabled)
-                                    {
-                                        // Check for override auto-run setting
-                                        // Priority: all_tool_auto_run > tool_auto_run > default
-                                        let tool_key = format!("{}/{}", server_name, tool_name);
-                                        let auto_run = if let Some(all_auto_run) =
-                                            mcp_override_config
-                                                .and_then(|config| config.all_tool_auto_run)
-                                        {
-                                            // all_tool_auto_run has highest priority
-                                            all_auto_run
-                                        } else {
-                                            // Check individual tool override
-                                            *mcp_override_config
-                                                .and_then(|config| config.tool_auto_run.as_ref())
-                                                .and_then(|auto_run_map| {
-                                                    auto_run_map.get(&tool_key)
-                                                })
-                                                .unwrap_or(&t.is_auto_run)
-                                        };
-
-                                        if auto_run {
-                                            should_auto_run = true;
-                                        }
-                                    }
-                                }
-                            }
-                            if should_auto_run {
-                                let state = app_handle.state::<crate::AppState>();
-                                let feature_config_state =
-                                    app_handle.state::<crate::FeatureConfigState>();
-                                if let Err(e) = crate::mcp::execution_api::execute_mcp_tool_call(
-                                    app_handle.clone(),
-                                    state,
-                                    feature_config_state,
-                                    window.clone(),
-                                    tool_call_record.id,
-                                    true, // trigger_continuation
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "Auto-execute MCP tool failed (call_id={}): {}",
-                                        tool_call_record.id, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if emit_tool_call_events {
-                    let tool_call_event = serde_json::json!({
-                        "type": "tool_call",
-                        "data": {
-                            "conversation_id": conversation_id,
-                            "call_id": tool_call.call_id,
-                            "function_name": tool_call.fn_name,
-                            "arguments": tool_call.fn_arguments,
-                            "response_message_id": response_message_id
-                        }
-                    });
-                    send_conversation_event_to_chat_windows(
-                        window.app_handle(),
-                        conversation_id,
-                        ConversationEvent {
-                            r#type: "tool_call".to_string(),
-                            data: tool_call_event["data"].clone(),
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to create MCP tool call record");
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn build_native_tool_call_hint(
     server_name: &str,
     tool_name: &str,
@@ -1625,6 +1555,7 @@ fn build_native_tool_call_hint(
     call_id: Option<i64>,
     llm_call_id: &str,
     error: Option<&str>,
+    display: Option<(&str, &str, &str)>,
 ) -> String {
     let mut payload = serde_json::json!({
         "server_name": server_name,
@@ -1632,6 +1563,11 @@ fn build_native_tool_call_hint(
         "parameters": parameters,
         "llm_call_id": llm_call_id,
     });
+    if let Some((display_server, display_tool, display_parameters)) = display {
+        payload["display_server_name"] = serde_json::json!(display_server);
+        payload["display_tool_name"] = serde_json::json!(display_tool);
+        payload["display_parameters"] = serde_json::json!(display_parameters);
+    }
     if let Some(call_id) = call_id {
         payload["call_id"] = serde_json::json!(call_id);
     }
@@ -1804,7 +1740,7 @@ async fn setup_captured_tool_calls(
 ) -> anyhow::Result<(Vec<i64>, Vec<i64>, usize)> {
     // 第一步：为所有工具调用创建 DB 记录和 UI hints（保持原有顺序）
     let mut all_tool_call_ids = Vec::new();
-    let mut tool_call_records: Vec<(i64, String, String)> = Vec::new(); // (id, server_name, tool_name)
+    let mut tool_call_records: Vec<(i64, String, String, String)> = Vec::new(); // (id, server, tool, parameters)
     let mut setup_error_result_count = 0usize;
 
     for tool_call in captured_tool_calls {
@@ -1813,6 +1749,14 @@ async fn setup_captured_tool_calls(
             crate::api::ai_api::resolve_tool_name(&tool_call.fn_name, tool_name_mapping);
         let raw_params_str = tool_call.fn_arguments.to_string();
         let params_str = normalize_tool_arguments_json(&tool_call.fn_arguments);
+        let projected =
+            crate::mcp::execution_api::project_call_mcp_tool(&tool_name, &params_str);
+        let (record_server, record_tool, record_params) = projected.clone().unwrap_or_else(|| {
+            (server_name.clone(), tool_name.clone(), params_str.clone())
+        });
+        let display = projected
+            .as_ref()
+            .map(|(server, tool, parameters)| (server.as_str(), tool.as_str(), parameters.as_str()));
         info!(
             conversation_id,
             response_message_id,
@@ -1830,9 +1774,9 @@ async fn setup_captured_tool_calls(
             app_handle.clone(),
             conversation_id,
             Some(response_message_id),
-            server_name.clone(),
-            tool_name.clone(),
-            params_str.clone(),
+            record_server.clone(),
+            record_tool.clone(),
+            record_params.clone(),
             Some(&tool_call.call_id),
             Some(response_message_id),
         )
@@ -1841,12 +1785,13 @@ async fn setup_captured_tool_calls(
             Ok(tool_call_record) => {
                 tool_call_records.push((
                     tool_call_record.id,
-                    server_name.clone(),
-                    tool_name.clone(),
+                    record_server.clone(),
+                    record_tool.clone(),
+                    record_params.clone(),
                 ));
                 all_tool_call_ids.push(tool_call_record.id);
 
-                // 追加 UI hint（使用原始名称）
+                // 协议层保留 call_mcp_tool，展示层使用目标工具。
                 let ui_hint = build_native_tool_call_hint(
                     &server_name,
                     &tool_name,
@@ -1854,6 +1799,7 @@ async fn setup_captured_tool_calls(
                     Some(tool_call_record.id),
                     &tool_call.call_id,
                     None,
+                    display,
                 );
                 response_content.push_str(&ui_hint);
 
@@ -1874,6 +1820,7 @@ async fn setup_captured_tool_calls(
                     None,
                     &tool_call.call_id,
                     Some(&e),
+                    display,
                 );
                 response_content.push_str(&ui_hint);
                 persist_captured_tool_call_response(
@@ -1908,42 +1855,48 @@ async fn setup_captured_tool_calls(
         .read(conversation_id)
     {
         if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
-            if let Ok(mcp_info) =
+            let mcp_info =
                 crate::mcp::collect_mcp_info_for_assistant(app_handle, assistant_id, None, None)
                     .await
-            {
-                let servers = mcp_info.enabled_servers;
-                for (call_id, server_name, tool_name) in &tool_call_records {
-                    let mut should_auto_run = false;
-                    for s in servers.iter() {
+                    .ok();
+            let servers = mcp_info.as_ref().map(|info| info.enabled_servers.as_slice());
+            for (call_id, server_name, tool_name, parameters) in &tool_call_records {
+                let mut legacy_auto_run = false;
+                if let Some(servers) = servers {
+                    for s in servers {
                         let name_matches = s.name == *server_name
                             || crate::api::ai_api::sanitize_tool_name(&s.name) == *server_name;
                         if name_matches && s.is_enabled {
                             if let Some(t) =
                                 s.tools.iter().find(|t| t.name == *tool_name && t.is_enabled)
                             {
-                                let tool_key = format!("{}/{}", server_name, tool_name);
-                                let auto_run = if let Some(all_auto_run) =
-                                    mcp_override_config.and_then(|config| config.all_tool_auto_run)
-                                {
-                                    all_auto_run
-                                } else {
-                                    *mcp_override_config
-                                        .and_then(|config| config.tool_auto_run.as_ref())
-                                        .and_then(|auto_run_map| auto_run_map.get(&tool_key))
-                                        .unwrap_or(&t.is_auto_run)
-                                };
-
-                                if auto_run {
-                                    should_auto_run = true;
+                                if crate::mcp::detection::should_auto_run_tool(
+                                    mcp_override_config,
+                                    server_name,
+                                    tool_name,
+                                    t.is_auto_run,
+                                    s.command.as_deref(),
+                                ) {
+                                    legacy_auto_run = true;
                                 }
                             }
                         }
                     }
+                }
 
-                    if should_auto_run {
-                        auto_run_ids.push(*call_id);
-                    }
+                if crate::mcp::tool_review::should_auto_execute_after_review(
+                    app_handle,
+                    assistant_id,
+                    conversation_id,
+                    *call_id,
+                    server_name,
+                    tool_name,
+                    parameters,
+                    legacy_auto_run,
+                )
+                .await
+                {
+                    auto_run_ids.push(*call_id);
                 }
             }
         }
@@ -2480,6 +2433,15 @@ fn create_structured_error_message<E: std::fmt::Display>(
     }
 }
 
+/// 401/403 等认证、权限错误：重试不会改变结果，不应重复请求
+pub(crate) fn is_non_retryable_auth_error<E: std::fmt::Display + ?Sized>(error: &E) -> bool {
+    let error_str = error.to_string().to_lowercase();
+    error_str.contains("401 unauthorized")
+        || error_str.contains("403 forbidden")
+        || error_str.contains("status: 401")
+        || error_str.contains("status: 403")
+}
+
 // 将错误信息转换为用户友好的中文提示
 fn get_user_friendly_error_message<E: std::fmt::Display>(error: &E) -> String {
     let error_str = error.to_string().to_lowercase();
@@ -2487,6 +2449,9 @@ fn get_user_friendly_error_message<E: std::fmt::Display>(error: &E) -> String {
     if error_str.contains("network")
         || error_str.contains("connection")
         || error_str.contains("timeout")
+        || error_str.contains("error sending request")
+        || error_str.contains("unreachable")
+        || error_str.contains("dns error")
     {
         "网络连接异常，请检查网络设置".to_string()
     } else if error_str.contains("unauthorized") || error_str.contains("401") {
@@ -2781,6 +2746,9 @@ pub async fn handle_stream_chat(
     // 从配置中获取最大重试次数
     let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
 
+    // 同一轮 ask 的多次流式重试共享 session_id，供前端按尝试分组（LeaderAI #159）
+    let retry_session_id = uuid::Uuid::new_v4().to_string();
+
     // 外层重试循环，处理整个流式会话
     loop {
         main_attempts += 1;
@@ -2805,6 +2773,8 @@ pub async fn handle_stream_chat(
             mcp_override_config.clone(),
             tool_name_mapping.clone(),
             cancel_token.clone(),
+            main_attempts,
+            &retry_session_id,
         )
         .await;
 
@@ -2816,7 +2786,8 @@ pub async fn handle_stream_chat(
             Err(e) => {
                 warn!(attempt = main_attempts, error = %e, "stream chat failed attempt");
 
-                if main_attempts >= max_retry_attempts {
+                // 认证/权限错误重试不会成功，直接按最终失败处理
+                if main_attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) {
                     // 最终失败，提取 HTTP 错误详情并构建结构化错误
                     let http_details = extract_http_details_from_anyhow(&e);
                     let user_friendly = get_user_friendly_error_message(&e);
@@ -2921,6 +2892,8 @@ async fn attempt_stream_chat(
     mcp_override_config: Option<McpOverrideConfig>,
     tool_name_mapping: ToolNameMapping,
     cancel_token: Option<CancellationToken>,
+    attempt_index: u32,
+    retry_session_id: &str,
 ) -> Result<(), anyhow::Error> {
     if let Some(token) = cancel_token.as_ref() {
         if token.is_cancelled() {
@@ -3274,7 +3247,7 @@ async fn attempt_stream_chat(
 
                         // 累积流式工具调用数据
                         let tc = &tool_call_chunk.tool_call;
-                        let (stream_server_name, stream_tool_name) =
+                        let (_stream_server_name, _stream_tool_name) =
                             resolve_tool_name(&tc.fn_name, &tool_name_mapping);
                         debug!(
                             llm_call_id = %tc.call_id,
@@ -3461,7 +3434,6 @@ async fn attempt_stream_chat(
                                                 data: group_merge_event["data"].clone(),
                                             },
                                         );
-                                        group_merge_event_emitted = true;
                                     }
                                 }
                             }
@@ -3771,7 +3743,7 @@ async fn attempt_stream_chat(
                                                 .await;
                                             });
                                         });
-                                    } else if setup_error_result_count > 0 {
+                                    } else if setup_error_result_count > 0 && _all_ids.is_empty() {
                                         debug!(
                                             setup_error_result_count,
                                             "triggering continuation after native tool setup errors"
@@ -3794,17 +3766,71 @@ async fn attempt_stream_chat(
                             }
                         }
 
+
+                        // 正常 stop/DONE 且零正文：展示明确说明；保留原问题；不伪造回答、不自动切模型。
+                        if should_announce_empty_model_reply(
+                            &response_content,
+                            captured_tool_calls.len(),
+                            captured_binary_count,
+                        ) {
+                            response_content = EMPTY_MODEL_REPLY_NOTICE.to_string();
+                            if response_message_id.is_none() {
+                                let now = chrono::Utc::now();
+                                response_start_time.get_or_insert(now);
+                                match ensure_stream_message(
+                                    &conversation_db,
+                                    &window,
+                                    conversation_id,
+                                    "response",
+                                    EMPTY_MODEL_REPLY_NOTICE,
+                                    llm_model_id,
+                                    &llm_model_name,
+                                    &generation_group_id,
+                                    parent_group_id_override.clone(),
+                                    response_start_time,
+                                    response_first_token_time.clone(),
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(new_id) => {
+                                        response_message_id = Some(new_id);
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            "failed to create empty-content notice message"
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(msg_id) = response_message_id {
+                                // 立刻落库并标记完成，覆盖仅有 reasoning / None 等收尾分支漏掉 response 的情况。
+                                let _ = persist_and_emit_update(
+                                    &conversation_db,
+                                    &window,
+                                    conversation_id,
+                                    msg_id,
+                                    "response",
+                                    &response_content,
+                                    true,
+                                );
+                                if let Ok(repo) = conversation_db.message_repo() {
+                                    let _ = repo.update_finish_time(msg_id);
+                                }
+                            }
+                            info!(
+                                conversation_id,
+                                "normal completion with empty model content; notice message prepared"
+                            );
+                        }
+
                         // 按当前输出类型收尾，确保 response 触发 MCP 检测与事件
                         match current_output_type {
                             OutputType::Reasoning => {
                                 if let (Some(msg_id), Some(start_time)) =
                                     (reasoning_message_id, reasoning_start_time)
                                 {
-                                    // 记录 reasoning 结束时间
-                                    if reasoning_end_time.is_none() {
-                                        reasoning_end_time = Some(chrono::Utc::now());
-                                    }
-
                                     if let Err(e) = super::conversation::handle_message_type_end(
                                         msg_id,
                                         "reasoning",
@@ -3875,8 +3901,6 @@ async fn attempt_stream_chat(
                                 }
                             }
                         }
-
-                        // 工具调用事件已在 handle_captured_tool_calls_common 中按需发出
 
                         if need_generate_title && !response_content.is_empty() {
                             spawn_title_generation(
@@ -3971,13 +3995,54 @@ async fn attempt_stream_chat(
                             );
                         }
 
+                        // 仅在发生过重试时标记最终成功尝试，便于 UI 与中断的部分输出分组
+                        if attempt_index > 1 {
+                            let completed_ids: Vec<i64> = [reasoning_message_id, response_message_id]
+                                .into_iter()
+                                .flatten()
+                                .collect();
+                            apply_stream_retry_metadata(
+                                conversation_db,
+                                window,
+                                conversation_id,
+                                &completed_ids,
+                                retry_session_id,
+                                attempt_index,
+                                "completed",
+                                None,
+                            );
+                        }
+
                         return Ok(());
                     }
                 }
             }
             Some(Err(e)) => {
                 let _user_friendly_error = enhanced_error_logging_v2(&e, "Stream Processing").await;
-                return Err(anyhow::anyhow!("Stream processing failed: {}", e));
+                // genai's Display omits the transport source (for example a revoked
+                // TLS certificate). Preserve it in the persisted/UI error details.
+                let err = if let genai::Error::WebStream { error, .. } = &e {
+                    anyhow::anyhow!(
+                        "Stream processing failed: {}; transport: {:?}", e, error
+                    )
+                } else {
+                    anyhow::anyhow!("Stream processing failed: {}", e)
+                };
+                let partial_ids: Vec<i64> = [reasoning_message_id, response_message_id]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                apply_stream_retry_metadata(
+                    conversation_db,
+                    window,
+                    conversation_id,
+                    &partial_ids,
+                    retry_session_id,
+                    attempt_index,
+                    "interrupted",
+                    Some(&err.to_string()),
+                );
+                return Err(err);
             }
             None => {
                 error!(
@@ -3992,17 +4057,30 @@ async fn attempt_stream_chat(
                     has_reasoning_message = reasoning_message_id.is_some(),
                     "stream closed unexpectedly without End event"
                 );
-                return Err(anyhow::anyhow!(
+                let err = anyhow::anyhow!(
                     "Stream ended unexpectedly without End event (response_chunks={}, reasoning_chunks={}, captured_tool_calls={})",
                     response_chunk_count,
                     reasoning_chunk_count,
                     captured_tool_calls.len()
-                ));
+                );
+                let partial_ids: Vec<i64> = [reasoning_message_id, response_message_id]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                apply_stream_retry_metadata(
+                    conversation_db,
+                    window,
+                    conversation_id,
+                    &partial_ids,
+                    retry_session_id,
+                    attempt_index,
+                    "interrupted",
+                    Some(&err.to_string()),
+                );
+                return Err(err);
             }
         }
     }
-
-    Ok(())
 }
 
 // 辅助函数：创建错误消息
@@ -4203,7 +4281,7 @@ pub async fn handle_non_stream_chat(
                         &format!("Non-Stream Chat (attempt {}/{})", attempts, max_retry_attempts),
                     )
                     .await;
-                    if attempts >= max_retry_attempts {
+                    if attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) {
                         let http_details = extract_http_error_details(&e);
                         let raw_error = e.to_string();
                         let final_error =
@@ -4432,7 +4510,7 @@ pub async fn handle_non_stream_chat(
                         {
                             warn!(error = %e, "batch continuation failed after non-stream concurrent tool execution");
                         }
-                    } else if setup_error_result_count > 0 {
+                    } else if setup_error_result_count > 0 && _all_ids.is_empty() {
                         debug!(
                             setup_error_result_count,
                             "triggering batch continuation after non-stream native tool setup errors"
@@ -4676,5 +4754,83 @@ pub async fn handle_non_stream_chat(
             error!(error = %e, "chat error");
             Err(anyhow::anyhow!("Chat error: {}", e))
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_retry_metadata_tests {
+    use super::build_stream_retry_metadata_json;
+
+    #[test]
+    fn builds_interrupted_stream_retry_metadata() {
+        let raw = build_stream_retry_metadata_json(
+            None,
+            "session-1",
+            2,
+            "interrupted",
+            Some("stream dropped"),
+        );
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let retry = value.get("stream_retry").unwrap();
+        assert_eq!(retry.get("session_id").and_then(|v| v.as_str()), Some("session-1"));
+        assert_eq!(retry.get("attempt").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(retry.get("status").and_then(|v| v.as_str()), Some("interrupted"));
+        assert_eq!(retry.get("error").and_then(|v| v.as_str()), Some("stream dropped"));
+    }
+
+    #[test]
+    fn preserves_existing_metadata_fields() {
+        let existing = r#"{"speakerLabel":"bot","usage_source":"reported"}"#;
+        let raw = build_stream_retry_metadata_json(
+            Some(existing),
+            "session-2",
+            1,
+            "completed",
+            None,
+        );
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value.get("speakerLabel").and_then(|v| v.as_str()), Some("bot"));
+        assert_eq!(value.get("usage_source").and_then(|v| v.as_str()), Some("reported"));
+        assert!(value.get("stream_retry").is_some());
+        assert!(value.pointer("/stream_retry/error").is_none());
+    }
+}
+
+#[cfg(test)]
+mod pr40_error_handling_tests {
+    use super::{get_user_friendly_error_message, is_non_retryable_auth_error};
+
+    #[test]
+    fn auth_errors_are_not_retried() {
+        assert!(is_non_retryable_auth_error(
+            "Web stream error.\nCause: HTTP error.\nStatus: 401 Unauthorized"
+        ));
+        assert!(is_non_retryable_auth_error("Status: 403 Forbidden"));
+        assert!(!is_non_retryable_auth_error("Status: 429 Too Many Requests"));
+        assert!(!is_non_retryable_auth_error("error sending request for url (http://x)"));
+    }
+
+    #[test]
+    fn send_failures_are_classified_as_network() {
+        assert_eq!(
+            get_user_friendly_error_message(&"Cause: error sending request for url (http://10.0.2.2:18080/v1/chat/completions)"),
+            "网络连接异常，请检查网络设置"
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod empty_model_reply_tests {
+    use super::{should_announce_empty_model_reply, EMPTY_MODEL_REPLY_NOTICE};
+
+    #[test]
+    fn announces_only_when_body_tools_and_binaries_are_all_empty() {
+        assert!(should_announce_empty_model_reply("", 0, 0));
+        assert!(should_announce_empty_model_reply("   ", 0, 0));
+        assert!(!should_announce_empty_model_reply("hi", 0, 0));
+        assert!(!should_announce_empty_model_reply("", 1, 0));
+        assert!(!should_announce_empty_model_reply("", 0, 2));
+        assert_eq!(EMPTY_MODEL_REPLY_NOTICE, "模型返回了空内容");
     }
 }

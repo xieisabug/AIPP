@@ -34,7 +34,7 @@ const VersionPagination: React.FC<VersionPaginationProps> = ({
         <div className={`flex justify-center my-3 ${className}`}>
             <div className="flex items-center bg-muted hover:bg-muted/80 transition-colors duration-200 rounded-lg px-3 py-2 shadow-sm border border-border">
                 <button
-                    className="flex items-center justify-center w-8 h-8 hover:bg-muted-foreground/20 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150"
+                    className="flex items-center justify-center w-11 h-11 hover:bg-muted-foreground/20 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150"
                     disabled={currentVersion <= 1}
                     onClick={handlePrevious}
                     title="上一个版本"
@@ -49,7 +49,7 @@ const VersionPagination: React.FC<VersionPaginationProps> = ({
                 </div>
                 
                 <button
-                    className="flex items-center justify-center w-8 h-8 hover:bg-muted-foreground/20 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150"
+                    className="flex items-center justify-center w-11 h-11 hover:bg-muted-foreground/20 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150"
                     disabled={currentVersion >= totalVersions}
                     onClick={handleNext}
                     title="下一个版本"

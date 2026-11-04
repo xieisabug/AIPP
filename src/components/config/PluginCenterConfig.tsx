@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 import {
     CheckCircle2,
     ChevronDown,
@@ -50,7 +51,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { ConfigPageLayout, ListItemButton, SidebarList, type SelectOption } from "../common";
+import { ConfigPageLayout, ConfigPageLoading, ListItemButton, SidebarList, type SelectOption } from "../common";
 import { pluginRuntime } from "../../services/PluginRuntime";
 import PluginViewHost from "../plugin/PluginViewHost";
 import type { LoadedPlugin } from "../../services/PluginRuntime";
@@ -63,6 +64,7 @@ interface PluginCenterConfigProps {
 }
 
 interface PluginRegistryItem {
+    mobileUnavailableReason?: string | null;
     pluginId: number;
     name: string;
     version: string;
@@ -297,12 +299,15 @@ function parsePluginSourceInput(input: string): {
 }
 
 const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) => {
+    const isMobilePlatform = useIsMobilePlatform();
     const [plugins, setPlugins] = useState<PluginRegistryItem[]>([]);
     const [runtimePlugins, setRuntimePlugins] = useState<LoadedPlugin[]>(pluginList);
     const [runtimeRefreshing, setRuntimeRefreshing] = useState(false);
     const [selectedPluginId, setSelectedPluginId] = useState<number | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [loading, setLoading] = useState(false);
+    // 首次读取插件列表完成前不渲染列表与「插件商店」占位
+    const [pluginsLoaded, setPluginsLoaded] = useState(false);
     const [configs, setConfigs] = useState<PluginConfigItem[]>([]);
     const [configLoading, setConfigLoading] = useState(false);
     const [newConfigKey, setNewConfigKey] = useState("");
@@ -390,9 +395,10 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             await syncRuntimePlugins(true);
         } catch (error) {
             console.error("[PluginCenterConfig] Failed to load plugins:", error);
-            toast.error("加载插件列表失败");
+            toast.error(`加载插件列表失败: ${String(error)}`);
         } finally {
             setLoading(false);
+            setPluginsLoaded(true);
         }
     }, [syncRuntimePlugins]);
 
@@ -757,6 +763,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
         if (!currentLoadedPlugin) {
             return "插件运行时未加载该插件，请刷新插件运行时。";
         }
+        if (currentLoadedPlugin.loadError) {
+            return currentLoadedPlugin.loadError;
+        }
         if (!currentLoadedPlugin.instance) {
             return "插件加载失败（实例为空），请检查插件脚本导出。";
         }
@@ -783,7 +792,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             await loadPlugins();
         } catch (error) {
             console.error("[PluginCenterConfig] Failed to toggle plugin status:", error);
-            toast.error("插件启停失败");
+            toast.error(`插件启停失败：${String(error)}`);
         } finally {
             setActionBusy(false);
         }
@@ -1077,7 +1086,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 <Button variant="outline" onClick={() => handleInstallCustomSource(true)} disabled={isInstallingArchive}>
                     使用代理安装
                 </Button>
-                <Button variant="outline" onClick={handleSelectLocalZip} disabled={isInstallingArchive}>
+                <Button className={isMobilePlatform ? "hidden" : undefined} variant="outline" onClick={handleSelectLocalZip} disabled={isInstallingArchive}>
                     选择 ZIP 文件
                 </Button>
             </div>
@@ -1122,7 +1131,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     <ChevronDown className="h-4 w-4" />
                 </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuContent align="end" className={isMobilePlatform ? "w-56 [&_[role=menuitem]]:min-h-11" : "w-56"}>
                 <DropdownMenuItem
                     onClick={loadPlugins}
                     disabled={loading}
@@ -1145,7 +1154,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                 </DropdownMenuItem>
                 <DropdownMenuItem
                     onClick={handleOpenPluginFolder}
-                    className="flex items-center gap-2 cursor-pointer"
+                    className={isMobilePlatform ? "hidden" : "flex items-center gap-2 cursor-pointer"}
                 >
                     <div className="flex flex-col">
                         <span className="font-medium">打开插件文件夹</span>
@@ -1203,7 +1212,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     <RefreshCcw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
                     <span className="ml-2">扫描插件</span>
                 </Button>
-                <Button variant="outline" onClick={handleOpenPluginFolder}>
+                <Button className={isMobilePlatform ? "hidden" : undefined} variant="outline" onClick={handleOpenPluginFolder}>
                     <FolderOpen className="h-4 w-4" />
                     <span className="ml-2">打开插件文件夹</span>
                 </Button>
@@ -1218,6 +1227,9 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                         <CardDescription className="mt-1">
                             {selectedPlugin.description || "暂无描述"}
                         </CardDescription>
+                        {isMobilePlatform && selectedPlugin.mobileUnavailableReason && (
+                            <p role="status" className="mt-2 text-sm text-muted-foreground">此设备不可运行：{selectedPlugin.mobileUnavailableReason}。配置仍保留。</p>
+                        )}
                         <div className="mt-2 flex flex-wrap gap-2">
                             <Badge variant={selectedPlugin.isActive ? "default" : "secondary"}>
                                 {selectedPlugin.isActive ? "已启用" : "已禁用"}
@@ -1254,7 +1266,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                             size="icon"
                             className="text-muted-foreground"
                             onClick={handleTogglePlugin}
-                            disabled={actionBusy || !selectedPlugin.isInstalled}
+                            disabled={actionBusy || !selectedPlugin.isInstalled || (isMobilePlatform && !selectedPlugin.isActive && !!selectedPlugin.mobileUnavailableReason)}
                             title={selectedPlugin.isActive ? "禁用插件" : "启用插件"}
                             aria-label={selectedPlugin.isActive ? "禁用插件" : "启用插件"}
                         >
@@ -1442,18 +1454,22 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     );
 
     return (
-        <>
-            <ConfigPageLayout
-                sidebar={sidebar}
-                content={content}
-                showEmptyState={false}
-                selectOptions={selectOptions}
-                selectedOptionId={selectedPluginId ? String(selectedPluginId) : undefined}
-                onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
-                selectPlaceholder="选择插件"
-            />
+        <div className={isMobilePlatform ? "h-full [&_button]:min-h-11 [&_button]:min-w-11" : "h-full"}>
+            {pluginsLoaded ? (
+                <ConfigPageLayout
+                    sidebar={sidebar}
+                    content={content}
+                    showEmptyState={false}
+                    selectOptions={selectOptions}
+                    selectedOptionId={selectedPluginId ? String(selectedPluginId) : undefined}
+                    onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
+                    selectPlaceholder="选择插件"
+                />
+            ) : (
+                <ConfigPageLoading />
+            )}
             <Dialog open={installDialogOpen} onOpenChange={handleCloseInstallDialog}>
-                <DialogContent className="flex h-[85vh] max-h-[85vh] flex-col overflow-hidden sm:max-w-5xl">
+                <DialogContent className={`flex h-[85vh] max-h-[85vh] flex-col overflow-hidden sm:max-w-5xl ${isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}>
                     <DialogHeader>
                         <DialogTitle>安装插件</DialogTitle>
                         <DialogDescription>
@@ -1486,7 +1502,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     }
                 }}
             >
-                <AlertDialogContent>
+                <AlertDialogContent className={isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : undefined}>
                     <AlertDialogHeader>
                         <AlertDialogTitle>确认卸载插件</AlertDialogTitle>
                         <AlertDialogDescription>
@@ -1507,7 +1523,7 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
-        </>
+        </div>
     );
 };
 

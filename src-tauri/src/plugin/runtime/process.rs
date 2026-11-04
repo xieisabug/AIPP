@@ -51,6 +51,9 @@ pub(crate) async fn execute_process_hook(
     hook_name: &str,
     context: &Value,
 ) -> Result<HookRuntimeResult, String> {
+    if cfg!(mobile) {
+        return Err(format!("MOBILE_UNSUPPORTED: capability=process_plugin; stage=plugin_hook; plugin={}; hook={}; Android 不启动桌面插件进程", manifest.code, hook_name));
+    }
     let protocol = manifest
         .runtime
         .protocol

@@ -98,7 +98,6 @@ fn timestamp_to_datetime(timestamp: i64) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use rusqlite::{Connection, Result};
 
     #[test]

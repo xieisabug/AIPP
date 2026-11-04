@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
@@ -17,7 +18,7 @@ export const useFeatureConfig = () => {
     const [loading, setLoading] = useState(true);
 
     // 加载功能配置
-    const loadFeatureConfig = useCallback(() => {
+    const loadFeatureConfig = useCallback((isCurrent: () => boolean = () => true) => {
         setLoading(true);
         return invoke<Array<FeatureConfigListItem>>("get_all_feature_config")
             .then((feature_config_list) => {
@@ -31,15 +32,15 @@ export const useFeatureConfig = () => {
                     }
                     newFeatureConfig.get(feature_code)?.set(key, value);
                 }
-                setFeatureConfig(newFeatureConfig);
+                if (isCurrent()) setFeatureConfig(newFeatureConfig);
                 return newFeatureConfig;
             })
             .catch((e) => {
-                toast.error("获取配置失败: " + getErrorMessage(e));
+                if (isCurrent()) toast.error("获取配置失败: " + getErrorMessage(e));
                 throw e;
             })
             .finally(() => {
-                setLoading(false);
+                if (isCurrent()) setLoading(false);
             });
     }, []);
 
@@ -66,10 +67,11 @@ export const useFeatureConfig = () => {
         return featureConfig.get(featureCode)?.get(key) || defaultValue;
     }, [featureConfig]);
 
-    // 初始化加载
-    useEffect(() => {
-        loadFeatureConfig();
-    }, [loadFeatureConfig]);
+    useDataRefresh({
+        events: ["feature_config_changed"],
+        initial: true,
+        refresh: async (isCurrent) => { await loadFeatureConfig(isCurrent); },
+    });
 
     return {
         featureConfig,

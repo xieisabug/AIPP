@@ -11,14 +11,57 @@ var COMFYUI_IMAGE_WORKFLOW: Record<string, any> = {
   "57:3": { "inputs": { "seed": 1047870638845959, "steps": 8, "cfg": 1, "sampler_name": "res_multistep", "scheduler": "simple", "denoise": 1, "model": ["57:11", 0], "positive": ["57:27", 0], "negative": ["57:33", 0], "latent_image": ["57:13", 0] }, "class_type": "KSampler", "_meta": { "title": "K采样器" } }
 };
 
-function comfyUiBuildWorkflow(prompt: string, promptNodeId = "57:27", promptInputName = "text"): Record<string, any> {
-  var workflow = JSON.parse(JSON.stringify(COMFYUI_IMAGE_WORKFLOW));
+type ComfyPromptNode = { id: string; title: string; inputs: string[] };
+
+function comfyUiDefaultWorkflowJson(): string {
+  return JSON.stringify(COMFYUI_IMAGE_WORKFLOW);
+}
+
+function comfyUiParseWorkflow(raw: string): { workflow: Record<string, any>; nodes: ComfyPromptNode[] } {
+  var text = String(raw || "").trim();
+  if (!text) {
+    throw new Error("请上传 ComfyUI API JSON");
+  }
+  var parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error("ComfyUI API JSON 无法解析");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("ComfyUI API JSON 必须是节点对象");
+  }
+  if (Array.isArray(parsed.nodes) || Array.isArray(parsed.links)) {
+    throw new Error("这是 ComfyUI 界面工作流，请改用 Export (API) 导出的 JSON");
+  }
+  var nodes: ComfyPromptNode[] = [];
+  Object.keys(parsed).forEach(function (id) {
+    var node = parsed[id];
+    if (!node || typeof node !== "object" || Array.isArray(node) || !node.inputs || typeof node.inputs !== "object" || Array.isArray(node.inputs)) {
+      return;
+    }
+    var inputs: string[] = [];
+    Object.keys(node.inputs).forEach(function (name) {
+      if (typeof node.inputs[name] === "string") inputs.push(name);
+    });
+    if (!inputs.length) return;
+    var title = node._meta && node._meta.title ? String(node._meta.title) : String(node.class_type || id);
+    nodes.push({ id: id, title: title, inputs: inputs });
+  });
+  if (!nodes.length) {
+    throw new Error("这份 JSON 里没有可写入提示词的字符串参数");
+  }
+  return { workflow: parsed, nodes: nodes };
+}
+
+function comfyUiBuildWorkflow(prompt: string, promptNodeId = "57:27", promptInputName = "text", workflowSource?: Record<string, any>): Record<string, any> {
+  var workflow = JSON.parse(JSON.stringify(workflowSource || COMFYUI_IMAGE_WORKFLOW));
   var node = workflow[promptNodeId];
   if (!node || !node.inputs) {
-    throw new Error("固定 workflow 缺少节点 " + promptNodeId);
+    throw new Error("工作流缺少节点 " + promptNodeId);
   }
   if (typeof node.inputs[promptInputName] !== "string") {
-    throw new Error("固定 workflow 节点 " + promptNodeId + " 缺少字符串参数 " + promptInputName);
+    throw new Error("工作流节点 " + promptNodeId + " 缺少字符串参数 " + promptInputName);
   }
   node.inputs[promptInputName] = prompt;
   return workflow;

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { useMarkdownConfig } from '../hooks/useMarkdownConfig';
+import { MarkdownStreamingContext, useMarkdownConfig } from '../hooks/useMarkdownConfig';
 import { customUrlTransform } from '@/constants/markdown';
 import { transformInlineImages, releaseInlineImages } from '@/lib/inlineImageStore';
 
@@ -13,27 +13,23 @@ interface UnifiedMarkdownProps {
     noProseWrapper?: boolean;
     // 是否处于流式输出中，用于代码块自动折叠的首次触发
     isStreaming?: boolean;
+    /** Reuse the caller's configuration when it also renders MCP segments. */
+    markdownConfig?: ReturnType<typeof useMarkdownConfig>;
 }
 
 /**
  * 统一的ReactMarkdown组件，确保在AskWindow和ConversationUI中的展示逻辑一致
  * 同时正确处理暗色模式下的文字颜色
  */
-const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
+const ConfiguredMarkdown: React.FC<UnifiedMarkdownProps & {
+    markdownConfig: ReturnType<typeof useMarkdownConfig>;
+}> = ({
     children,
-    onCodeRun,
     className = '',
-    disableMarkdownSyntax = false,
     noProseWrapper = false,
     isStreaming = false,
+    markdownConfig,
 }) => {
-    // 使用统一的markdown配置
-    const markdownConfig = useMarkdownConfig({
-        onCodeRun,
-        disableMarkdownSyntax,
-        isStreaming,
-    });
-
     const { content: optimizedContent, inlineImageIds } = useMemo(() => transformInlineImages(children), [children]);
 
     useEffect(() => {
@@ -45,14 +41,16 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     }, [inlineImageIds]);
 
     const markdownNode = (
-        <ReactMarkdown
-            children={optimizedContent}
-            // 交由 useMarkdownConfig 统一管理插件，避免重复添加
-            remarkPlugins={[...markdownConfig.remarkPlugins] as any}
-            rehypePlugins={[...markdownConfig.rehypePlugins] as any}
-            components={markdownConfig.markdownComponents}
-            urlTransform={customUrlTransform}
-        />
+        <MarkdownStreamingContext.Provider value={isStreaming}>
+            <ReactMarkdown
+                children={optimizedContent}
+                // 交由 useMarkdownConfig 统一管理插件，避免重复添加
+                remarkPlugins={[...markdownConfig.remarkPlugins] as any}
+                rehypePlugins={[...markdownConfig.rehypePlugins] as any}
+                components={markdownConfig.markdownComponents}
+                urlTransform={customUrlTransform}
+            />
+        </MarkdownStreamingContext.Provider>
     );
 
     if (noProseWrapper) {
@@ -66,6 +64,18 @@ const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = ({
     );
 };
 
+const StandaloneMarkdown: React.FC<UnifiedMarkdownProps> = (props) => {
+    const markdownConfig = useMarkdownConfig({
+        onCodeRun: props.onCodeRun,
+        disableMarkdownSyntax: props.disableMarkdownSyntax,
+    });
+    return <ConfiguredMarkdown {...props} markdownConfig={markdownConfig} />;
+};
+
+const UnifiedMarkdown: React.FC<UnifiedMarkdownProps> = (props) => props.markdownConfig
+    ? <ConfiguredMarkdown {...props} markdownConfig={props.markdownConfig} />
+    : <StandaloneMarkdown {...props} />;
+
 // 避免不必要的重渲染：仅在核心 props/children 变更时更新
 export default React.memo(UnifiedMarkdown, (prev, next) => {
     return (
@@ -74,6 +84,7 @@ export default React.memo(UnifiedMarkdown, (prev, next) => {
         prev.disableMarkdownSyntax === next.disableMarkdownSyntax &&
         prev.noProseWrapper === next.noProseWrapper &&
         prev.isStreaming === next.isStreaming &&
+        prev.markdownConfig === next.markdownConfig &&
         prev.onCodeRun === next.onCodeRun
     );
 });

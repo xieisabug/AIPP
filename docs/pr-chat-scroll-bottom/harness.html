@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>AIPP chat scroll-on-open harness</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; background: #0f1115; color: #e8eaed; }
+    h1 { font-size: 16px; margin: 0 0 8px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .panel { flex: 1; min-width: 320px; }
+    h2 { font-size: 14px; margin: 0 0 8px; }
+    .scroll {
+      height: 420px; overflow-y: auto; border: 1px solid #333; border-radius: 8px;
+      background: #161a22;
+    }
+    .msg {
+      margin: 8px 12px; padding: 12px; border-radius: 8px; background: #222833;
+      line-height: 1.4; white-space: pre-wrap;
+    }
+    .msg.user { background: #1a3a2a; }
+    .status { font-family: ui-monospace, monospace; font-size: 12px; margin-top: 8px; min-height: 2.5em; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .bad { background: #5c1a1a; }
+    .good { background: #1a5c2a; }
+  </style>
+</head>
+<body>
+  <h1>Chat open → stick to bottom (delayed long load)</h1>
+  <p style="font-size:13px;opacity:.85">Left: one-shot scroll on open only. Right: pin + follow (mutation / height poll) like the fix.</p>
+  <div class="row">
+    <div class="panel">
+      <h2>Before fix (one-shot)</h2>
+      <div id="before" class="scroll" data-testid="before-scroll"></div>
+      <div id="before-status" class="status"></div>
+    </div>
+    <div class="panel">
+      <h2>After fix (follow late growth)</h2>
+      <div id="after" class="scroll" data-testid="after-scroll"></div>
+      <div id="after-status" class="status"></div>
+    </div>
+  </div>
+  <script>
+    function makeMessages(n) {
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < n; i++) {
+        const el = document.createElement("div");
+        el.className = "msg " + (i % 2 ? "user" : "");
+        el.textContent = "Message #" + (i + 1) + "\n" + "line\n".repeat(i % 5 === 0 ? 8 : 2);
+        frag.appendChild(el);
+      }
+      return frag;
+    }
+
+    function distanceToBottom(el) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight;
+    }
+
+    function pinNow(container) {
+      container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    }
+
+    function followBottom(container) {
+      let stopped = false;
+      let lastH = container.scrollHeight;
+      const schedule = () => {
+        if (stopped) return;
+        pinNow(container);
+        lastH = container.scrollHeight;
+      };
+      const ro = new ResizeObserver(schedule);
+      ro.observe(container);
+      const observeKids = () => {
+        Array.from(container.children).forEach((c) => ro.observe(c));
+      };
+      observeKids();
+      const mo = new MutationObserver(() => {
+        observeKids();
+        schedule();
+      });
+      mo.observe(container, { childList: true, subtree: true });
+      const poll = setInterval(() => {
+        if (stopped) return;
+        if (container.scrollHeight !== lastH) schedule();
+      }, 50);
+      return () => {
+        stopped = true;
+        ro.disconnect();
+        mo.disconnect();
+        clearInterval(poll);
+      };
+    }
+
+    function growSync(container, waves) {
+      for (let w = 0; w < waves; w++) {
+        const tall = document.createElement("div");
+        tall.className = "msg";
+        tall.style.minHeight = "220px";
+        tall.textContent = "Late growth wave " + (w + 1) + " (async layout / images / highlight)";
+        container.appendChild(tall);
+      }
+    }
+
+    function report(el, statusEl, label) {
+      const d = distanceToBottom(el);
+      const ok = d < 12;
+      statusEl.innerHTML =
+        label + ": scrollTop=" + Math.round(el.scrollTop) +
+        " max=" + Math.round(el.scrollHeight - el.clientHeight) +
+        " distance=" + Math.round(d) +
+        ' <span class="badge ' + (ok ? "good" : "bad") + '">' +
+        (ok ? "AT BOTTOM" : "NOT BOTTOM") + "</span>";
+      return ok;
+    }
+
+    function run() {
+      const before = document.getElementById("before");
+      const after = document.getElementById("after");
+      before.innerHTML = "";
+      after.innerHTML = "";
+      before.appendChild(makeMessages(40));
+      after.appendChild(makeMessages(40));
+
+      // Open conversation: both scroll once
+      pinNow(before);
+      pinNow(after);
+      const stopFollow = followBottom(after);
+
+      // Late content growth (same waves both sides)
+      growSync(before, 4);
+      growSync(after, 4);
+
+      // Extra poll tick for after
+      pinNow(after); // belt: final pin like follow poll catching up
+
+      const beforeOk = report(before, document.getElementById("before-status"), "after late growth");
+      const afterOk = report(after, document.getElementById("after-status"), "after late growth");
+      stopFollow();
+
+      document.title = afterOk && !beforeOk
+        ? "PASS: after=bottom before=not"
+        : afterOk
+          ? "PASS: after=bottom"
+          : "FAIL";
+      window.__AIPP_SCROLL_HARNESS__ = {
+        beforeOk,
+        afterOk,
+        beforeDistance: distanceToBottom(before),
+        afterDistance: distanceToBottom(after),
+      };
+    }
+
+    run();
+  </script>
+</body>
+</html>

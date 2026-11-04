@@ -50,6 +50,8 @@ base64 = "0.22"
 mime_guess = "2.0"
 open = "3.0"
 aes-gcm = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 keyring = "3"
 flate2 = "1.0"
 rand = "0.8"
@@ -79,10 +81,18 @@ syntect = { version = "5.3.0", features = ["dump-load"] }
 pulldown-cmark = { version = "0.12", features = ["html"] }
 docx-rs = "0.4"
 # ACP (Agent Client Protocol) SDK
-agent-client-protocol = { version = "0.10.2", git = "https://github.com/agentclientprotocol/rust-sdk", rev = "a0917aafe98c95d8e3654d5c441e0cd347df654f", features = ["unstable_session_model", "unstable_session_resume", "unstable_session_usage"] }
+# 回退参考：旧版为 git pin rev a0917aafe98c95d8e3654d5c441e0cd347df654f（v0.10.2 时代 API）
+agent-client-protocol = { version = "2.0.0", features = ["unstable_end_turn_token_usage", "unstable_elicitation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-accessibility-client = "0.0.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+rustls-platform-verifier = "0.6.2"
+
+[target.'cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))'.dependencies]
+libc = "0.2"
 
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-global-shortcut =  { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2" }

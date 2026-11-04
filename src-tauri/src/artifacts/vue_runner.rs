@@ -17,10 +17,8 @@ static GLOBAL_VUE_ARTIFACT_SERVERS: LazyLock<Arc<Mutex<HashMap<String, VueArtifa
 
 #[derive(Debug, Clone)]
 pub struct VueArtifactServer {
-    pub id: String,
     pub port: u16,
     pub process: Option<u32>, // PID
-    pub template_path: PathBuf,
 }
 
 pub struct VueArtifactRunner {
@@ -66,12 +64,7 @@ impl VueArtifactRunner {
             let _ = window.emit("artifact-log", "Vue 组件服务启动完成");
         }
 
-        let server = VueArtifactServer {
-            id: server_id.clone(),
-            port,
-            process: Some(process_id),
-            template_path,
-        };
+        let server = VueArtifactServer { port, process: Some(process_id) };
 
         println!(
             "🔧 [VueRunner] 创建服务器对象: ID={}, Port={}, PID={:?}",

@@ -166,16 +166,6 @@ impl SkillDatabase {
         Ok(())
     }
 
-    /// Update skill config priority
-    #[instrument(level = "trace", skip(self), fields(id, priority))]
-    pub fn update_skill_config_priority(&self, id: i64, priority: i32) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE assistant_skill_config SET priority = ? WHERE id = ?",
-            params![priority, id],
-        )?;
-        Ok(())
-    }
-
     /// Delete a skill config
     #[instrument(level = "trace", skip(self), fields(id))]
     pub fn delete_skill_config(&self, id: i64) -> rusqlite::Result<()> {

@@ -25,8 +25,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rmcp::{
     model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation},
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
-        StreamableHttpClientTransport, TokioChildProcess,
+        ConfigureCommandExt, TokioChildProcess,
     },
     ServiceExt,
 };
@@ -56,6 +55,38 @@ static PENDING_BATCH_CONTINUATIONS: OnceLock<PendingBatchContinuationRegistry> =
 
 fn tool_cancel_registry() -> &'static ToolCancelRegistry {
     TOOL_CANCEL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+pub(crate) fn with_local_tool_activity<T>(read: impl FnOnce(&HashSet<i64>) -> T) -> T {
+    let activity = local_tool_activity().lock().unwrap_or_else(|error| error.into_inner());
+    let ids = activity.keys().copied().collect();
+    read(&ids)
+}
+
+// Covers state transition, execution and final persistence, including cancellation/future drop.
+fn local_tool_activity() -> &'static std::sync::Mutex<HashMap<i64, usize>> {
+    static ACTIVITY: OnceLock<std::sync::Mutex<HashMap<i64, usize>>> = OnceLock::new();
+    ACTIVITY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+struct LocalToolActivity(i64);
+#[cfg(test)]
+#[path = "mobile_activity_tests.rs"]
+mod mobile_activity_tests;
+impl LocalToolActivity {
+    fn enter(id: i64) -> Self {
+        *local_tool_activity().lock().unwrap_or_else(|error| error.into_inner()).entry(id).or_default() += 1;
+        Self(id)
+    }
+}
+impl Drop for LocalToolActivity {
+    fn drop(&mut self) {
+        let mut activity = local_tool_activity().lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(count) = activity.get_mut(&self.0) {
+            *count -= 1;
+            if *count == 0 { activity.remove(&self.0); }
+        }
+    }
 }
 
 fn continuation_lock_registry() -> &'static ContinuationLockRegistry {
@@ -144,6 +175,31 @@ async fn take_pending_batch_continuation(conversation_id: i64) -> Option<Pending
 
 fn is_dynamic_mode_agent_tool(server_command: Option<&str>) -> bool {
     server_command == Some("aipp:agent")
+}
+
+fn is_dynamic_mode_direct_tool(server_command: Option<&str>) -> bool {
+    matches!(server_command, Some("aipp:agent") | Some("aipp:ui_interaction"))
+}
+
+/// When the model calls `call_mcp_tool`, project the inner target so execution,
+/// audit, and the chat card use the real tool. Returns None when the arguments
+/// do not name a target.
+pub fn project_call_mcp_tool(tool_name: &str, parameters: &str) -> Option<(String, String, String)> {
+    if tool_name != "call_mcp_tool" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(parameters).ok()?;
+    let server_name = value.get("server_name").and_then(|item| item.as_str())?.trim();
+    let target_tool = value.get("tool_name").and_then(|item| item.as_str())?.trim();
+    if server_name.is_empty() || target_tool.is_empty() {
+        return None;
+    }
+    let inner = match value.get("parameters") {
+        Some(inner) if inner.is_string() => inner.as_str().unwrap_or("{}").to_string(),
+        Some(inner) => inner.to_string(),
+        None => "{}".to_string(),
+    };
+    Some((server_name.to_string(), target_tool.to_string(), inner))
 }
 
 async fn drain_pending_batch_continuations<F, Fut>(
@@ -423,6 +479,26 @@ mod continuation_queue_tests {
         assert!(is_dynamic_mode_agent_tool(Some("aipp:agent")));
         assert!(!is_dynamic_mode_agent_tool(Some("other")));
         assert!(!is_dynamic_mode_agent_tool(None));
+        assert!(is_dynamic_mode_direct_tool(Some("aipp:ui_interaction")));
+        assert!(!is_dynamic_mode_direct_tool(Some("aipp:search")));
+    }
+
+    #[test]
+    fn project_call_mcp_tool_extracts_target_identity() {
+        let projected = project_call_mcp_tool(
+            "call_mcp_tool",
+            r#"{"server_name":"Search","tool_name":"search_web","parameters":{"query":"aipp"}}"#,
+        );
+        assert_eq!(
+            projected,
+            Some((
+                "Search".to_string(),
+                "search_web".to_string(),
+                r#"{"query":"aipp"}"#.to_string()
+            ))
+        );
+        assert!(project_call_mcp_tool("search_web", r#"{"query":"aipp"}"#).is_none());
+        assert!(project_call_mcp_tool("call_mcp_tool", r#"{"tool_name":"search_web"}"#).is_none());
     }
 
     #[test]
@@ -780,8 +856,9 @@ pub async fn persist_terminal_tool_result_message(
         collect_existing_tool_result_messages(&existing_messages);
     let tool_result_group_id = existing_messages
         .iter()
-        .filter(|(message, _)| message.message_type == "response")
-        .max_by_key(|(message, _)| message.id)
+        .find(|(message, _)| {
+            Some(message.id) == tool_call.assistant_message_id.or(tool_call.message_id)
+        })
         .and_then(|(message, _)| message.generation_group_id.clone());
 
     let _ = persist_single_tool_result_message(
@@ -805,8 +882,8 @@ pub fn collect_required_tool_call_ids_from_message_list(
 ) -> HashSet<String> {
     let mut ids = HashSet::new();
     for (message_type, content, _) in message_list {
-        if message_type == "response" {
-            ids.extend(crate::api::ai::conversation::extract_tool_call_ids_from_mcp_comments(
+        if message_type == "response" || message_type == "assistant" {
+            ids.extend(crate::api::ai::conversation::extract_request_tool_call_ids(
                 content,
             ));
         }
@@ -820,8 +897,35 @@ pub fn collect_tool_result_ids_from_message_list(
     message_list
         .iter()
         .filter(|(message_type, _, _)| message_type == "tool_result")
-        .filter_map(|(_, content, _)| crate::api::ai::conversation::extract_tool_call_id(content))
+        .filter_map(|(_, content, _)| {
+            crate::api::ai::conversation::extract_tool_result(content)?;
+            crate::api::ai::conversation::extract_tool_call_id(content)
+        })
+        .flat_map(|id| {
+            let mut ids = vec![id.clone()];
+            if id.parse::<u64>().is_ok() { ids.push(format!("mcp_tool_call_{}", id)); }
+            ids
+        })
         .collect()
+}
+
+fn validate_tool_result_pairing(
+    conversation_id: i64,
+    message_list: &[(String, String, Vec<crate::db::conversation_db::MessageAttachment>)],
+) -> Result<()> {
+    let mut unresolved = collect_required_tool_call_ids_from_message_list(message_list)
+        .difference(&collect_tool_result_ids_from_message_list(message_list))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+        unresolved.sort();
+        bail!(
+            "对话 {} 的工具结果配对校验失败，缺少结果的调用 ID：{}。调用可能仍在执行，或缺少对应记录。",
+            conversation_id,
+            unresolved.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn find_tool_result_insert_index(
@@ -830,9 +934,9 @@ fn find_tool_result_insert_index(
 ) -> Option<usize> {
     let mut response_idx = None;
     for (idx, (message_type, content, _)) in message_list.iter().enumerate() {
-        if message_type == "response" {
+        if message_type == "response" || message_type == "assistant" {
             let ids =
-                crate::api::ai::conversation::extract_tool_call_ids_from_mcp_comments(content);
+                crate::api::ai::conversation::extract_request_tool_call_ids(content);
             if ids.contains(tool_call_id) {
                 response_idx = Some(idx);
             }
@@ -851,6 +955,7 @@ pub async fn backfill_missing_tool_results(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     message_list: &mut Vec<(String, String, Vec<crate::db::conversation_db::MessageAttachment>)>,
+    resolve_pending: bool,
 ) -> Result<usize> {
     let required = collect_required_tool_call_ids_from_message_list(message_list);
     let existing = collect_tool_result_ids_from_message_list(message_list);
@@ -865,12 +970,24 @@ pub async fn backfill_missing_tool_results(
         .map_err(|e| anyhow!("获取工具调用列表失败: {}", e))?;
 
     let mut backfilled = 0usize;
-    for call in calls {
-        if call.status != "success" && call.status != "failed" {
-            continue;
-        }
+    for mut call in calls {
         let history_id = tool_call_history_id(&call);
         if !missing.contains(&history_id) {
+            continue;
+        }
+        if resolve_pending && call.status == "pending" {
+            if mcp_db.skip_unstarted_mcp_tool_call(
+                call.id,
+                crate::db::mcp_db::UNSTARTED_TOOL_CALL_SKIP_REASON,
+            )? {
+                call = mcp_db.get_mcp_tool_call(call.id)?;
+                warn!(conversation_id, call_id = call.id, llm_call_id = ?call.llm_call_id, "skipped unstarted MCP call before new user request");
+                broadcast_mcp_tool_call_update(app_handle, &call);
+            } else {
+                call = mcp_db.get_mcp_tool_call(call.id)?;
+            }
+        }
+        if call.status != "success" && call.status != "failed" {
             continue;
         }
         let Some(content) = persist_terminal_tool_result_message(app_handle, &call).await? else {
@@ -886,6 +1003,8 @@ pub async fn backfill_missing_tool_results(
         }
         backfilled += 1;
     }
+
+    validate_tool_result_pairing(conversation_id, message_list)?;
 
     Ok(backfilled)
 }
@@ -1150,6 +1269,62 @@ fn newest_continuation_anchor_message_id(tool_calls: &[MCPToolCall]) -> Option<i
     tool_calls.iter().rev().find_map(continuation_anchor_message_id)
 }
 
+fn expand_tool_call_round(db: &MCPDatabase, calls: &mut Vec<MCPToolCall>) -> Result<()> {
+    let message_ids: HashSet<_> = calls.iter().filter_map(|call| call.message_id).collect();
+    for message_id in message_ids {
+        for sibling in db.get_mcp_tool_calls_by_message(message_id)? {
+            if !calls.iter().any(|call| call.id == sibling.id) {
+                calls.push(sibling);
+            }
+        }
+    }
+    calls.sort_by_key(|call| call.id);
+    Ok(())
+}
+
+fn tool_round_ready(calls: &[MCPToolCall], continue_on_error: bool) -> bool {
+    !calls.is_empty() && calls.iter().all(|call| {
+        call.status == "success" || (continue_on_error && call.status == "failed")
+    })
+}
+
+// Manual completion can happen in any order; multi-call rounds use the same barrier as auto-run.
+async fn dispatch_multi_tool_round(
+    app_handle: &tauri::AppHandle,
+    window: &tauri::Window,
+    tool_call: &MCPToolCall,
+    allow_error: bool,
+) -> Result<bool> {
+    let db = MCPDatabase::new(app_handle)?;
+    let mut calls = vec![tool_call.clone()];
+    expand_tool_call_round(&db, &mut calls)?;
+    if calls.len() < 2 {
+        return Ok(false);
+    }
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager.finish_mcp_call(app_handle, tool_call.conversation_id, tool_call.id).await;
+    }
+    let app = app_handle.clone();
+    let window = window.clone();
+    let conversation_id = tool_call.conversation_id;
+    let ids = calls.iter().map(|call| call.id).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move {
+            if let Err(error) = continue_tool_round(
+                &app, app.state::<crate::FeatureConfigState>(), window,
+                conversation_id, ids, allow_error,
+            ).await {
+                warn!(conversation_id, error = %error, "manual tool round continuation failed");
+            }
+        });
+    });
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "execution_api_tests.rs"]
+mod execution_api_tests;
+
 fn validate_continue_with_error_request(
     tool_call: &MCPToolCall,
 ) -> std::result::Result<(), String> {
@@ -1217,6 +1392,11 @@ fn validate_tool_call_execution(tool_call: &MCPToolCall) -> Result<bool> {
     let is_retry = tool_call.status == "failed";
     if tool_call.status != "pending" && tool_call.status != "failed" {
         bail!("工具调用状态为 {} 时无法重新执行", tool_call.status);
+    }
+    if tool_call.error.as_deref()
+        == Some(crate::db::mcp_db::UNSTARTED_TOOL_CALL_SKIP_REASON)
+    {
+        bail!("工具调用 {} 已因用户发送后续消息而跳过，不能重新执行", tool_call.id);
     }
     Ok(is_retry)
 }
@@ -1338,7 +1518,6 @@ async fn handle_tool_execution_result(
 
             // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
             if trigger_continuation {
-                handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
                 info!("准备触发工具成功续写，call_id={}, is_retry={}", call_id, is_retry);
                 if let Err(e) = handle_tool_success_continuation(
                     app_handle,
@@ -1421,7 +1600,6 @@ async fn handle_tool_execution_result(
                         "Skip continuation for user-cancelled tool error"
                     );
                 } else {
-                    handoff_mcp_focus_to_origin_message(app_handle, &tool_call).await;
                     info!("准备触发工具失败续写，call_id={}", call_id);
                     if let Err(e) = trigger_conversation_continuation_with_error(
                         app_handle,
@@ -1844,6 +2022,7 @@ pub async fn execute_mcp_tool_call(
     call_id: i64,
     trigger_continuation: bool,
 ) -> std::result::Result<MCPToolCall, String> {
+    let _local_activity = LocalToolActivity::enter(call_id);
     let db = MCPDatabase::new(&app_handle).map_err(|e| format!("初始化数据库失败: {}", e))?;
 
     // 获取工具调用信息
@@ -1860,6 +2039,25 @@ pub async fn execute_mcp_tool_call(
     // 验证工具调用状态
     let is_retry = validate_tool_call_execution(&tool_call).map_err(|e| e.to_string())?;
     debug!(retry=?is_retry, status=%tool_call.status, "validated tool call status");
+
+    if !db
+        .mark_mcp_tool_call_executing_if_pending(call_id)
+        .map_err(|e| format!("更新工具调用状态失败: {}", e))?
+    {
+        return db
+            .get_mcp_tool_call(call_id)
+            .map_err(|e| format!("获取当前工具调用状态失败: {}", e));
+    }
+    // 用户手动确认执行时，停止进行中的自动审核请求。
+    let _ = crate::mcp::tool_review::cancel_tool_review(call_id).await;
+    crate::mcp::tool_review::record_user_allow_if_review_held(&app_handle, call_id);
+    tool_call = db
+        .get_mcp_tool_call(call_id)
+        .map_err(|e| format!("重新加载工具调用信息失败: {}", e))?;
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager.set_mcp_executing(&app_handle, tool_call.conversation_id, call_id).await;
+    }
+    broadcast_mcp_tool_call_update(&app_handle, &tool_call);
 
     // 获取并验证服务器状态；前置校验失败也写入 failed/error，便于 UI 展示和错误续写
     let server = match db.get_mcp_server(tool_call.server_id) {
@@ -1979,7 +2177,7 @@ pub async fn execute_mcp_tool_call(
                 .await;
             };
             let resolved_tool_name = resolved_tool.tool_name.clone();
-            let is_agent_loader_tool = is_dynamic_mode_agent_tool(server.command.as_deref());
+            let is_agent_loader_tool = is_dynamic_mode_direct_tool(server.command.as_deref());
             let is_loaded = match db.is_tool_loaded_for_conversation(
                 tool_call.conversation_id,
                 tool_call.server_id,
@@ -2003,7 +2201,7 @@ pub async fn execute_mcp_tool_call(
             };
             if !is_loaded && !is_agent_loader_tool {
                 let not_loaded_error = format!(
-                    "工具 {}::{} 尚未加载。请先调用 Agent::load_mcp_tool。",
+                    "工具 {}::{} 尚未加载。请先调用 load_mcp_tool 获取描述，再通过 call_mcp_tool 调用。",
                     tool_call.server_name, resolved_tool_name
                 );
                 return handle_tool_execution_result(
@@ -2069,28 +2267,6 @@ pub async fn execute_mcp_tool_call(
             .await;
         }
     }
-
-    // 原子性地将状态转为执行中，避免并发重复执行
-    if !db
-        .mark_mcp_tool_call_executing_if_pending(call_id)
-        .map_err(|e| format!("更新工具调用状态失败: {}", e))?
-    {
-        let current = db
-            .get_mcp_tool_call(call_id)
-            .map_err(|e| format!("获取当前工具调用状态失败: {}", e))?;
-        return Ok(current);
-    }
-
-    // 重新加载工具调用以获取更新后的状态并同步活动状态
-    tool_call =
-        db.get_mcp_tool_call(call_id).map_err(|e| format!("重新加载工具调用信息失败: {}", e))?;
-    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-        activity_manager.set_mcp_executing(&app_handle, tool_call.conversation_id, call_id).await;
-    }
-
-    // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
-    broadcast_mcp_tool_call_update(&app_handle, &tool_call);
-    debug!(call_id=call_id, status=%tool_call.status, "broadcasted executing status event");
 
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;
@@ -2225,9 +2401,6 @@ pub async fn continue_with_error(
     // 获取错误信息，优先使用前端传入的错误文本（用于兜底保留细节）
     let error_message = resolve_continue_with_error_message(&tool_call, error_message.as_deref());
 
-    // 让续写的流式响应接管；若首 token 启动较慢，先切回工具所属的消息边框。
-    handoff_mcp_focus_to_origin_message(&app_handle, &tool_call).await;
-
     // 触发续写
     if let Err(error) = trigger_conversation_continuation_with_error(
         &app_handle,
@@ -2246,6 +2419,71 @@ pub async fn continue_with_error(
     }
 
     info!(call_id = call_id, "continued conversation with tool error");
+    Ok(())
+}
+
+#[tauri::command]
+#[instrument(skip(app_handle, state, feature_config_state, window), fields(call_id))]
+pub async fn reject_mcp_tool_call(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    window: tauri::Window,
+    call_id: i64,
+) -> std::result::Result<(), String> {
+    let db = MCPDatabase::new(&app_handle).map_err(|error| error.to_string())?;
+    let tool_call = db.get_mcp_tool_call(call_id).map_err(|error| error.to_string())?;
+    if tool_call.status != "pending" {
+        return Err(format!("工具调用状态为 {} 时不能拒绝", tool_call.status));
+    }
+
+    // 用户手动拒绝时，停止进行中的自动审核请求。
+    let _ = crate::mcp::tool_review::cancel_tool_review(call_id).await;
+
+    let review_reason = db
+        .get_tool_review_by_call_id(call_id)
+        .ok()
+        .flatten()
+        .map(|review| review.reason)
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| "用户拒绝执行".to_string());
+    let error_message = format!("用户拒绝执行：{review_reason}");
+    db.update_mcp_tool_call_status(call_id, "failed", None, Some(&error_message))
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = db.set_tool_review_user_decision(call_id, "deny") {
+        warn!(call_id, error = %error, "failed to record tool review deny");
+    }
+
+    let updated = db.get_mcp_tool_call(call_id).map_err(|error| error.to_string())?;
+    broadcast_mcp_tool_call_update(&app_handle, &updated);
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .finish_mcp_call(&app_handle, updated.conversation_id, call_id)
+            .await;
+    }
+
+    if let Err(error) = trigger_conversation_continuation_with_error(
+        &app_handle,
+        &state,
+        &feature_config_state,
+        &window,
+        &updated,
+        &error_message,
+    )
+    .await
+    {
+        if let Err(persist_error) = persist_terminal_tool_result_message(&app_handle, &updated).await
+        {
+            warn!(
+                call_id,
+                error = %persist_error,
+                "failed to persist tool result after rejected tool call continuation failed"
+            );
+        }
+        return Err(format!("拒绝已记录，但续写失败: {error}"));
+    }
+
+    info!(call_id, "rejected MCP tool call after review");
     Ok(())
 }
 
@@ -2301,11 +2539,11 @@ pub async fn stop_mcp_tool_call(
 /// - 只在最后一个工具结果处理后触发 AI 续写
 /// - 使用 llm_call_id 作为工具调用标识（用于原生 toolcall 模式匹配）
 #[tauri::command]
-#[instrument(skip(app_handle, _state, feature_config_state, window), fields(message_id))]
+#[instrument(skip(app_handle, _state, _feature_config_state, window), fields(message_id))]
 pub async fn send_mcp_tool_results(
     app_handle: tauri::AppHandle,
     _state: tauri::State<'_, crate::AppState>,
-    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    _feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
     window: tauri::Window,
     message_id: i64,
 ) -> std::result::Result<(), String> {
@@ -2483,6 +2721,11 @@ async fn trigger_conversation_continuation(
         return Ok(());
     }
 
+    if dispatch_multi_tool_round(app_handle, window, tool_call, false).await? {
+        return Ok(());
+    }
+    handoff_mcp_focus_to_origin_message(app_handle, tool_call).await;
+
     // 使用数据库中保存的 llm_call_id（若存在），否则退回到兼容格式
     let tool_call_id =
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
@@ -2599,6 +2842,11 @@ async fn trigger_conversation_continuation_with_error(
     let tool_call_id =
         tool_call.llm_call_id.clone().unwrap_or_else(|| format!("mcp_tool_call_{}", tool_call.id));
 
+    if dispatch_multi_tool_round(app_handle, window, tool_call, true).await? {
+        return Ok(());
+    }
+    handoff_mcp_focus_to_origin_message(app_handle, tool_call).await;
+
     // 格式化错误消息作为 tool_result，与成功结果的格式保持一致但标识为错误
     // 限制错误消息长度，避免请求过大导致 400 错误
     let error_preview = if error_message.chars().count() > 5000 {
@@ -2710,6 +2958,24 @@ async fn run_batch_continuation_once(
         return Ok(());
     }
 
+    // Recheck under the conversation lock: another completion may already have continued this round.
+    if let Some(message_id) = anchor_message_id {
+        let db = MCPDatabase::new(&app_handle)?;
+        let calls = db.get_mcp_tool_calls_by_message(message_id)?;
+        if !calls.is_empty() {
+            if !tool_round_ready(&calls, true) {
+                return Ok(());
+            }
+            let conversation_db = ConversationDatabase::new(&app_handle)?;
+            let messages = conversation_db.message_repo()?.list_by_conversation_id(conversation_id)?;
+            let branch = crate::api::ai::summary::get_latest_branch_messages(&messages);
+            let result_ids = calls.iter().map(tool_call_history_id).collect();
+            if has_followup_response_after_tool_results(&branch, &result_ids) {
+                return Ok(());
+            }
+        }
+    }
+
     mark_continuation_running_on_message(&app_handle, conversation_id, anchor_message_id).await;
     match batch_tool_result_continue_ask_ai_impl(
         app_handle.clone(),
@@ -2747,6 +3013,17 @@ pub async fn trigger_conversation_continuation_batch(
     conversation_id: i64,
     tool_call_ids: Vec<i64>,
 ) -> Result<()> {
+    continue_tool_round(app_handle, feature_config_state, window, conversation_id, tool_call_ids, false).await
+}
+
+async fn continue_tool_round(
+    app_handle: &tauri::AppHandle,
+    feature_config_state: tauri::State<'_, crate::FeatureConfigState>,
+    window: tauri::Window,
+    conversation_id: i64,
+    tool_call_ids: Vec<i64>,
+    allow_error: bool,
+) -> Result<()> {
     use crate::db::conversation_db::Repository;
 
     if tool_call_ids.is_empty() {
@@ -2756,7 +3033,7 @@ pub async fn trigger_conversation_continuation_batch(
 
     let continue_on_error = {
         let config_map = feature_config_state.config_feature_map.lock().await;
-        get_continue_on_tool_error_from_config(&config_map)
+        allow_error || get_continue_on_tool_error_from_config(&config_map)
     };
 
     info!(
@@ -2783,8 +3060,14 @@ pub async fn trigger_conversation_continuation_batch(
         }
     }
 
-    // 按 tool_call_id 升序排序，确保与 AI 返回顺序一致
-    tool_calls.sort_by_key(|tc| tc.id);
+    expand_tool_call_round(&db, &mut tool_calls)?;
+
+    if tool_calls.iter().any(|call| {
+        call.error.as_deref() == Some(crate::db::mcp_db::UNSTARTED_TOOL_CALL_SKIP_REASON)
+    }) {
+        info!(conversation_id, "Skipping continuation for a tool round superseded by a user message");
+        return Ok(());
+    }
 
     // 检查是否所有工具都执行成功（有任何失败则默认不续写）
     let all_success = tool_calls.iter().all(|tc| tc.status == "success");
@@ -2793,7 +3076,7 @@ pub async fn trigger_conversation_continuation_batch(
         tool_statuses = ?tool_calls.iter().map(|tc| (&tc.id, &tc.status)).collect::<Vec<_>>(),
         "checking tool call statuses for batch continuation"
     );
-    if !all_success && !continue_on_error {
+    if !tool_round_ready(&tool_calls, continue_on_error) {
         let failed_calls: Vec<_> = tool_calls
             .iter()
             .filter(|tc| tc.status != "success")
@@ -2915,6 +3198,13 @@ pub async fn execute_tool_by_transport(
     cancel_token: Option<CancellationToken>,
 ) -> std::result::Result<String, String> {
     // 如果没有提供 cancel_token，创建一个永远不会取消的令牌
+    if cfg!(mobile) {
+        if let Some(issue) = crate::api::mobile_capability::tool_issue(
+            &server.transport_type, server.command.as_deref(), Some(tool_name),
+        ) {
+            return Err(issue.error("tool_dispatch", &format!("server_id={}; tool={}; conversation_id={:?}", server.id, tool_name, conversation_id)));
+        }
+    }
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
 
     match server.transport_type.as_str() {
@@ -2992,18 +3282,23 @@ pub async fn execute_tool_by_transport(
         }
     }
 }
-// Reuse shared MCP header parsing utilities
-use crate::mcp::util::{parse_server_headers, sanitize_headers_for_log};
 /// 通过 stdio 传输执行工具（外部进程）。
 /// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
-#[instrument(skip(app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
+#[instrument(skip(_app_handle,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_stdio_tool(
-    app_handle: &tauri::AppHandle,
+    _app_handle: &tauri::AppHandle,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
     cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
+    // 外部 stdio 在移动端不可执行。aipp:* 已在 execute_tool_by_transport 分流到 builtin，不会进入此函数。
+    if cfg!(mobile) {
+        return Err(anyhow!(crate::api::system_api::mobile_unsupported_error(
+            "外部 stdio MCP",
+        )));
+    }
+
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.as_ref().ok_or_else(|| anyhow!("未为 stdio 传输指定命令"))?;
     let parts = split_command_line(command);
@@ -3204,7 +3499,6 @@ async fn execute_http_tool(
     cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
-    let url = server.url.as_ref().ok_or_else(|| anyhow!("No URL specified for HTTP transport"))?;
 
     // 获取代理配置
     let network_proxy = if server.proxy_enabled {
@@ -3214,29 +3508,8 @@ async fn execute_http_tool(
         None
     };
 
-    // 解析自定义头，仅支持将 Authorization 传入 auth_header（其余头部未来可通过自定义 client 实现）
-    let (auth_header, _all) = parse_server_headers(server);
-    let mut config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-    if let Some(auth) = auth_header.clone() {
-        config = config.auth_header(auth);
-    }
-    // 使用新版 rmcp 提供的便捷方法（reqwest feature 已启用）
     let transport = {
-        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-        let (_auth_header, all_headers) = parse_server_headers(server);
-        let mut header_map = HeaderMap::new();
-        if let Some(hdrs) = all_headers.as_ref() {
-            let to_log = sanitize_headers_for_log(hdrs);
-            info!(server_id = server.id, headers = ?to_log, "Using HTTP headers");
-            for (k, v) in hdrs.iter() {
-                if let (Ok(name), Ok(value)) =
-                    (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                {
-                    header_map.insert(name, value);
-                }
-            }
-        }
-        let mut client_builder = reqwest::Client::builder().default_headers(header_map);
+        let mut client_builder = reqwest::Client::builder();
 
         // 配置代理
         if let Some(ref proxy_url) = network_proxy {
@@ -3253,8 +3526,8 @@ async fn execute_http_tool(
             }
         }
 
-        let client = client_builder.build().context("Failed to build reqwest client for HTTP")?;
-        StreamableHttpClientTransport::with_client(client, config)
+        crate::mcp::http_transport::create_http_transport(server, client_builder)
+            .map_err(anyhow::Error::msg)?
     };
     let client_info = ClientInfo {
         meta: None,

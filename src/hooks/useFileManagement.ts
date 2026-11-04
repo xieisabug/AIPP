@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { toast } from "sonner";
+import { isAndroid, mobileFileAction, fileErrorMessage } from "@/services/mobileFileService";
 import {
     AddAttachmentResponse,
     AttachmentType,
@@ -36,6 +37,11 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
 
     const processFiles = useCallback(
         async (files: File[]) => {
+            if (await isAndroid() && (files.length > 10 || files.some(file => file.size > 20 * 1024 * 1024)
+                || files.reduce((total, file) => total + file.size, 0) > 50 * 1024 * 1024)) {
+                toast.error("附件超过移动端限制：最多 10 个、单文件 20 MiB、总计 50 MiB");
+                return;
+            }
             const filePromises = files.map(
                 (file) =>
                     new Promise<FileInfo>((resolve, reject) => {
@@ -66,8 +72,10 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                                     },
                                 );
                                 newFile.id = res.attachment_id;
+                                if (newFile.id <= 0) throw new Error("附件登记未返回有效 ID");
                             } catch (error) {
-                                toast.error("文件上传失败: " + error);
+                                reject(error);
+                                return;
                             }
 
                             resolve(newFile);
@@ -83,13 +91,15 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
             );
 
             try {
-                const newFiles = await Promise.all(filePromises);
+                const results = await Promise.allSettled(filePromises);
+                const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+                results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + fileErrorMessage(result.reason)); });
                 setFileInfoList((prev) => [...(prev || []), ...newFiles]);
                 if (onFileSelect) {
                     onFileSelect(newFiles);
                 }
             } catch (error) {
-                toast.error("文件处理失败: " + error);
+                toast.error("文件处理失败: " + fileErrorMessage(error));
             }
         },
         [getAttachmentType, onFileSelect],
@@ -99,6 +109,26 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         console.log("trigger handleChooseFile");
 
         try {
+            if (await isAndroid()) {
+                const result = await mobileFileAction("pick");
+                if (result.status === "cancelled") return;
+                result.errors?.forEach((error) => toast.error(`文件导入失败: ${error}`));
+                const newFiles: FileInfo[] = [];
+                for (const file of result.files ?? []) {
+                    try {
+                        const res = await invoke<AddAttachmentResponse>("add_attachment", { fileUrl: file.path });
+                        if (res.attachment_id <= 0) throw new Error("附件登记未返回有效 ID");
+                        newFiles.push({ id: res.attachment_id, name: file.name, path: file.path,
+                            type: file.mime.startsWith("image/") ? AttachmentType.Image : AttachmentType.Text,
+                            thumbnail: file.thumbnail });
+                    } catch (error) {
+                        toast.error(`附件 ${file.name} 登记失败: ${fileErrorMessage(error)}`);
+                    }
+                }
+                setFileInfoList((prev) => [...(prev ?? []), ...newFiles]);
+                if (newFiles.length) onFileSelect?.(newFiles);
+                return;
+            }
             const selected = await open({
                 multiple: true,
             });
@@ -135,21 +165,25 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                             },
                         );
                         newFile.id = res.attachment_id;
+                        if (newFile.id <= 0) throw new Error("附件登记未返回有效 ID");
                     } catch (error) {
-                        toast.error("文件上传失败: " + JSON.stringify(error));
+                        if (thumbnail) URL.revokeObjectURL(thumbnail);
+                        throw error;
                     }
 
                     return newFile;
                 });
 
-                const newFiles = await Promise.all(filePromises);
+                const results = await Promise.allSettled(filePromises);
+                const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+                results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + fileErrorMessage(result.reason)); });
                 setFileInfoList((prev) => [...(prev || []), ...newFiles]);
                 if (onFileSelect) {
                     onFileSelect(newFiles);
                 }
             }
         } catch (error) {
-            toast.error("文件选择失败: " + error);
+            toast.error("文件选择失败: " + fileErrorMessage(error));
         }
     }, [onFileSelect]);
 
@@ -193,9 +227,14 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         [isSupportedFile, processFiles],
     );
 
+    const restoreFiles = useCallback((files: FileInfo[]) => {
+        setFileInfoList(files.length ? files : null);
+    }, []);
+
     return {
         fileInfoList,
         clearFileInfoList,
+        restoreFiles,
         handleChooseFile,
         handleDeleteFile,
         handlePaste,

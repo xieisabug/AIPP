@@ -280,7 +280,6 @@ struct RewriteContext<'a> {
     app_handle: &'a AppHandle,
     relay_state: &'a PreviewFileRelayState,
     policy: &'a PreviewExternalResourcePolicy,
-    request_id: &'a str,
     source: &'a str,
     user_allowed: &'a HashSet<String>,
     user_allowed_urls: &'a HashSet<String>,
@@ -1219,7 +1218,7 @@ async fn rewrite_preview_file(
 
 async fn build_context<'a>(
     app_handle: &'a AppHandle,
-    request_id: &'a str,
+    _request_id: &'a str,
     source: &'a str,
     user_allowed: &'a HashSet<String>,
     user_allowed_urls: &'a HashSet<String>,
@@ -1234,7 +1233,6 @@ async fn build_context<'a>(
         app_handle,
         relay_state: relay_state.inner(),
         policy,
-        request_id,
         source,
         user_allowed,
         user_allowed_urls,

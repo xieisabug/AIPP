@@ -17,6 +17,19 @@ interface RenderableView {
     description?: string | null;
 }
 
+class PluginViewBoundary extends React.Component<{ children: React.ReactNode; pluginCode: string; instance: unknown }, { error: string | null }> {
+    state: { error: string | null } = { error: null };
+    static getDerivedStateFromError(error: unknown) {
+        return { error: error instanceof Error ? error.message : String(error) };
+    }
+    componentDidUpdate(previous: Readonly<{ children: React.ReactNode; pluginCode: string; instance: unknown }>) {
+        if (previous.instance !== this.props.instance && this.state.error) this.setState({ error: null });
+    }
+    render() {
+        return this.state.error ? <p role="alert" className="break-words text-sm text-destructive">插件 {this.props.pluginCode} 界面执行失败：{this.state.error}</p> : this.props.children;
+    }
+}
+
 const PluginViewHost: React.FC<PluginViewHostProps> = ({
     pluginList,
     location,
@@ -58,7 +71,9 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                 let errorText: string | null = null;
 
                 try {
-                    if (typeof instance?.renderView === "function") {
+                    if (plugin.loadError) {
+                        errorText = plugin.loadError;
+                    } else if (typeof instance?.renderView === "function") {
                         content = instance.renderView(viewId, context);
                     } else {
                         errorText = "插件未实现 renderView()。";
@@ -77,12 +92,12 @@ const PluginViewHost: React.FC<PluginViewHostProps> = ({
                         </CardHeader>
                         <CardContent>
                             {errorText ? (
-                                <div className="flex items-start gap-2 rounded-md border border-dashed border-destructive/40 p-3 text-sm text-destructive">
+                                <div role="alert" className="flex items-start gap-2 rounded-md border border-dashed border-destructive/40 p-3 text-sm text-destructive">
                                     <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
-                                    <span>{errorText}</span>
+                                    <span className="min-w-0 break-words">{errorText}</span>
                                 </div>
                             ) : (
-                                content
+                                <PluginViewBoundary pluginCode={plugin.code} instance={instance}>{content}</PluginViewBoundary>
                             )}
                         </CardContent>
                     </Card>

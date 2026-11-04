@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -11,8 +12,9 @@ from app.auth import AuthContext, ensure_device, require_auth
 from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import SyncChange, SyncObject
-from app.schemas import AcceptedEvent, ConflictEvent, PushRequest, PushResponse, RejectedEvent
-from app.services.merge import process_push_event
+from app.schemas import AcceptedEvent, ConflictEvent, PushEvent, PushRequest, PushResponse, RejectedEvent
+from app.services.merge import process_push_event, replay_existing_change
+from app.services.notify import NotifyHub
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +37,7 @@ def recover_from_integrity_error(
         )
     )
     if existing_change is not None:
-        return AcceptedEvent(
-            event_id=event.event_id,
-            object_type=existing_change.object_type,
-            object_id=existing_change.object_id,
-            server_version=existing_change.version,
-            server_seq=existing_change.seq,
-        )
+        return replay_existing_change(existing_change, event)
     current = db.get(SyncObject, (account_id, event.object_type, event.object_id))
     if current is not None:
         return ConflictEvent(
@@ -58,6 +54,7 @@ def recover_from_integrity_error(
 @router.post("/push", response_model=PushResponse)
 def push_events(
     request: PushRequest,
+    http_request: Request,
     auth: AuthContext = Depends(require_auth),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -71,7 +68,14 @@ def push_events(
     conflicts: list[ConflictEvent] = []
     rejected: list[RejectedEvent] = []
 
-    for event in request.events:
+    for raw_event in request.events:
+        try:
+            event = PushEvent.model_validate(raw_event)
+        except ValidationError as error:
+            raw_id = raw_event.get("event_id") if isinstance(raw_event, dict) else None
+            event_id = raw_id if isinstance(raw_id, str) else ""
+            rejected.append(RejectedEvent(event_id=event_id, reason=f"invalid_event: {error}"))
+            continue
         # Each event runs in a savepoint: a single bad event (or a concurrent
         # duplicate push) must not roll back the whole batch with a 500.
         try:
@@ -90,5 +94,13 @@ def push_events(
             rejected.append(result)
 
     db.commit()
+    if accepted:
+        # Notify other devices subscribed via SSE so they pull without waiting for poll.
+        hub: NotifyHub = http_request.app.state.notify_hub
+        hub.publish_threadsafe(
+            auth.account_id,
+            max(item.server_seq for item in accepted),
+            request.device_id,
+        )
     return PushResponse(accepted=accepted, conflicts=conflicts, rejected=rejected)
 

@@ -17,10 +17,8 @@ static GLOBAL_ARTIFACT_SERVERS: LazyLock<Arc<Mutex<HashMap<String, ArtifactServe
 
 #[derive(Debug, Clone)]
 pub struct ArtifactServer {
-    pub id: String,
     pub port: u16,
     pub process: Option<u32>, // PID
-    pub template_path: PathBuf,
 }
 
 pub struct ReactArtifactRunner {
@@ -66,12 +64,7 @@ impl ReactArtifactRunner {
             let _ = window.emit("artifact-log", "React 组件服务启动完成");
         }
 
-        let server = ArtifactServer {
-            id: server_id.clone(),
-            port,
-            process: Some(process_id),
-            template_path,
-        };
+        let server = ArtifactServer { port, process: Some(process_id) };
 
         println!(
             "🔧 [ReactRunner] 创建服务器对象: ID={}, Port={}, PID={:?}",

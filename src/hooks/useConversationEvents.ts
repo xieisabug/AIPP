@@ -9,6 +9,7 @@ import {
     MessageTypeEndEvent,
     GroupMergeEvent,
     MCPToolCallUpdateEvent,
+    AgentActivityEvent,
     ConversationCancelEvent,
     StreamCompleteEvent,
     ActivityFocusChangeEvent,
@@ -23,6 +24,10 @@ import {
 } from "../data/Conversation";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { messageContainsPreviewCode } from "@/utils/previewCodeDetection";
+import { noteToolReview } from "@/hooks/toolReviewStore";
+import { invalidateMcpToolCall } from "@/services/conversationResourceCache";
+import { useMobileResume } from "./useMobileResume";
+import { finalizeStreamingEventWithPending } from "@/utils/streamingOverlayHandoff";
 
 export interface UseConversationEventsOptions {
     conversationId: string | number;
@@ -65,11 +70,15 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
     return {
         ...state,
         conversation_id: state.conversation_id ?? state.conversationId,
+        agent_kind: state.agent_kind ?? state.agentKind ?? "acp",
         session_id: state.session_id ?? state.sessionId ?? null,
         updated_at: state.updated_at ?? state.updatedAt ?? null,
         load_session_supported: state.load_session_supported ?? state.loadSessionSupported ?? false,
         session_resume_supported: state.session_resume_supported ?? state.sessionResumeSupported ?? false,
         restored_session_method: state.restored_session_method ?? state.restoredSessionMethod ?? null,
+        connection_event_id: state.connection_event_id ?? state.connectionEventId ?? null,
+        permission_mode: state.permission_mode ?? state.permissionMode ?? null,
+        collaboration_mode: state.collaboration_mode ?? state.collaborationMode ?? null,
         prompt_capabilities: {
             image: Boolean(promptCapabilities.image),
             audio: Boolean(promptCapabilities.audio),
@@ -88,6 +97,7 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
             })),
         })),
         plan: state.plan ?? [],
+        plan_explanation: state.plan_explanation ?? state.planExplanation ?? null,
         available_commands: availableCommands.map((command: any) => ({
             ...command,
             input_hint: command.input_hint ?? command.inputHint ?? null,
@@ -118,6 +128,11 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     const [mcpToolCallStates, setMCPToolCallStates] = useState<
         Map<number, MCPToolCallUpdateEvent>
     >(new Map());
+    const [agentActivities, setAgentActivities] = useState<Map<string, AgentActivityEvent>>(new Map());
+
+    useEffect(() => {
+        setAgentActivities(new Map());
+    }, [options.conversationId]);
 
     // 活跃的 MCP 工具调用 ID 集合（正在执行的）
     const [activeMcpCallIds, setActiveMcpCallIds] = useState<Set<number>>(
@@ -191,17 +206,79 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 | Map<number, StreamEvent>
                 | ((prev: Map<number, StreamEvent>) => Map<number, StreamEvent>)
         ) => {
-            setStreamingMessages((prev) => {
-                const resolvedState =
-                    typeof nextState === "function"
-                        ? nextState(prev)
-                        : nextState;
-                streamingMessagesRef.current = resolvedState;
-                return resolvedState;
-            });
+            // Event handlers must see the latest frame even before React commits a
+            // transition. stream_complete can arrive in the same event batch.
+            const resolvedState = typeof nextState === "function"
+                ? nextState(streamingMessagesRef.current)
+                : nextState;
+            streamingMessagesRef.current = resolvedState;
+            setStreamingMessages(resolvedState);
         },
         []
     );
+    const pendingStreamingFramesRef = useRef<Map<number, StreamEvent>>(new Map());
+    const streamingFrameRef = useRef<number | null>(null);
+    const streamingFallbackTimerRef = useRef<number | null>(null);
+    const streamingEpochRef = useRef(0);
+
+    const cancelScheduledStreamingFlush = useCallback(() => {
+        if (streamingFrameRef.current !== null) {
+            cancelAnimationFrame(streamingFrameRef.current);
+            streamingFrameRef.current = null;
+        }
+        if (streamingFallbackTimerRef.current !== null) {
+            window.clearTimeout(streamingFallbackTimerRef.current);
+            streamingFallbackTimerRef.current = null;
+        }
+    }, []);
+
+    const discardPendingStreamingUpdates = useCallback(() => {
+        streamingEpochRef.current += 1;
+        pendingStreamingFramesRef.current.clear();
+        cancelScheduledStreamingFlush();
+    }, [cancelScheduledStreamingFlush]);
+
+    useEffect(() => discardPendingStreamingUpdates, [discardPendingStreamingUpdates]);
+
+    const scheduleStreamingUpdate = useCallback((streamEvent: StreamEvent) => {
+        pendingStreamingFramesRef.current.set(streamEvent.message_id, streamEvent);
+        if (streamingFrameRef.current !== null || streamingFallbackTimerRef.current !== null) {
+            return;
+        }
+        const epoch = streamingEpochRef.current;
+        const flush = () => {
+            cancelScheduledStreamingFlush();
+            if (epoch !== streamingEpochRef.current) {
+                return;
+            }
+            const events = Array.from(pendingStreamingFramesRef.current.values());
+            pendingStreamingFramesRef.current.clear();
+            if (events.length === 0) {
+                return;
+            }
+            startTransition(() => {
+                updateStreamingMessagesState((prev) => {
+                    let changed = false;
+                    const next = new Map(prev);
+                    for (const event of events) {
+                        const current = next.get(event.message_id);
+                        if (current?.is_done) {
+                            continue;
+                        }
+                        if (current?.content === event.content && current.is_done === event.is_done && current.message_type === event.message_type) {
+                            continue;
+                        }
+                        next.set(event.message_id, event);
+                        changed = true;
+                    }
+                    return changed ? next : prev;
+                });
+            });
+        };
+        streamingFrameRef.current = requestAnimationFrame(flush);
+        // 窗口隐藏时 rAF 会暂停，定时器兜底，避免后台窗口的流式内容冻结。
+        streamingFallbackTimerRef.current = window.setTimeout(flush, 100);
+    }, [cancelScheduledStreamingFlush, updateStreamingMessagesState]);
 
     const stopMcpCompensationPolling = useCallback((reason: string) => {
         if (mcpPollTimerRef.current) {
@@ -311,16 +388,21 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             switch (state.primary_target.target_type) {
                 case "message":
                     cancelIdleTransientReset();
+                    // Backend activity took over — drop optimistic regenerate / scroll manual shine.
+                    setManualShiningMessageIds(new Set());
                     setActivityShiningMessageIds(new Set([state.primary_target.message_id]));
                     setShiningMcpCallId(null);
                     break;
                 case "mcp_call":
                     cancelIdleTransientReset();
+                    setManualShiningMessageIds(new Set());
                     setActivityShiningMessageIds(new Set());
                     setShiningMcpCallId(state.primary_target.call_id);
                     break;
                 case "none":
                 default:
+                    // Generation stopped: never leave optimistic manual shine behind.
+                    setManualShiningMessageIds(new Set());
                     setActivityShiningMessageIds(new Set());
                     setShiningMcpCallId(null);
                     resetIdleTransientState("shine state is none", {
@@ -332,9 +414,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         },
         [deriveActivityFocusFromShine, resetIdleTransientState, cancelIdleTransientReset]
     );
-
-    // 兼容保留：边框由 shine_state_snapshot 驱动，此方法保持为无副作用接口
-    const updateShiningMessages = useCallback(() => { }, []);
 
     const setShiningMessageIds = useCallback<Dispatch<SetStateAction<Set<number>>>>(
         (nextState) => {
@@ -623,13 +702,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         (event: any) => {
             const conversationEvent = event.payload as ConversationEvent;
 
-            // ACP DEBUG: 记录所有接收到的事件
-            console.log("[ACP DEBUG] Received event:", conversationEvent.type, conversationEvent.data);
-
             if (conversationEvent.type === "message_add") {
                 // 处理消息添加事件
                 const messageAddData = conversationEvent.data as any;
-                console.log("Received message_add event:", messageAddData);
 
                 // 如果是用户消息，设置为等待回复的消息，而不是直接设置边框
                 if (messageAddData.message_type === "user") {
@@ -669,7 +744,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 const messageUpdateData =
                     conversationEvent.data as MessageUpdateEvent;
 
-                const streamEvent: StreamEvent = {
+                let streamEvent: StreamEvent = {
                     message_id: messageUpdateData.message_id,
                     message_type: messageUpdateData.message_type as any,
                     content: messageUpdateData.content,
@@ -682,6 +757,17 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     ttft_ms: messageUpdateData.ttft_ms,
                     tps: messageUpdateData.tps,
                 };
+
+                // BUG-02 / LeaderAI #149: 完成时先消费节流队列中的最后一帧，避免短尾块被丢弃。
+                if (messageUpdateData.is_done) {
+                    const pending = pendingStreamingFramesRef.current.get(streamEvent.message_id);
+                    pendingStreamingFramesRef.current.delete(streamEvent.message_id);
+                    streamEvent = finalizeStreamingEventWithPending(streamEvent, pending);
+                    streamEvent = finalizeStreamingEventWithPending(
+                        streamEvent,
+                        streamingMessagesRef.current.get(streamEvent.message_id),
+                    );
+                }
 
                 // 检查是否是错误消息
                 if (messageUpdateData.message_type === "error") {
@@ -722,18 +808,20 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     // 处理 assistant 消息的流式输出边框
                     if (messageUpdateData.message_type === "response" || messageUpdateData.message_type === "assistant") {
                         if (messageUpdateData.is_done) {
-                            // Assistant 消息完成，从流式消息集合中移除
-                            console.log("✅ [DEBUG] Assistant message COMPLETED:", messageUpdateData.message_id);
                             setStreamingAssistantMessageIds((prev) => {
+                                if (!prev.has(messageUpdateData.message_id)) {
+                                    return prev;
+                                }
                                 const newSet = new Set(prev);
                                 newSet.delete(messageUpdateData.message_id);
                                 return newSet;
                             });
                         } else if (messageUpdateData.content) {
-                            // Assistant 消息开始输出，清除等待回复的用户消息，添加到流式消息集合
-                            console.log("🚀 [DEBUG] Assistant message STARTING:", messageUpdateData.message_id);
-                            setPendingUserMessageId(null); // 清除等待回复的用户消息
+                            setPendingUserMessageId(null);
                             setStreamingAssistantMessageIds((prev) => {
+                                if (prev.has(messageUpdateData.message_id)) {
+                                    return prev;
+                                }
                                 const newSet = new Set(prev);
                                 newSet.add(messageUpdateData.message_id);
                                 return newSet;
@@ -778,6 +866,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                         }, 1000); // 1秒后清理
                     } else {
                         const applyStreamingUpdate = () => {
+                            // 排队中的旧帧不能在之后覆盖这次立即写入的新内容
+                            pendingStreamingFramesRef.current.delete(streamEvent.message_id);
                             updateStreamingMessagesState((prev) => {
                                 const newMap = new Map(prev);
                                 newMap.set(streamEvent.message_id, streamEvent);
@@ -787,10 +877,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                         if (shouldFlushStreamingMessageImmediately(messageUpdateData.content)) {
                             applyStreamingUpdate();
                         } else {
-                            // 使用 startTransition 将普通流式消息更新标记为低优先级，保持界面响应性
-                            startTransition(() => {
-                                applyStreamingUpdate();
-                            });
+                            scheduleStreamingUpdate(streamEvent);
                         }
                     }
                 }
@@ -814,8 +901,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 处理组合并事件
                 const groupMergeData =
                     conversationEvent.data as GroupMergeEvent;
-                console.log("Received group merge event:", groupMergeData);
-
                 // 调用外部的组合并处理函数
                 callbacksRef.current.onGroupMerge?.(groupMergeData);
             } else if (conversationEvent.type === "message_type_end") {
@@ -826,6 +911,28 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 ) {
                     void refreshMcpToolCalls();
                 }
+            } else if (conversationEvent.type === "tool_review_update") {
+                const reviewUpdate = conversationEvent.data as {
+                    call_id?: number;
+                    phase?: string;
+                    verdict?: string;
+                    reason?: string;
+                };
+                if (typeof reviewUpdate?.call_id === "number") {
+                    if (reviewUpdate.phase === "reviewing") {
+                        noteToolReview(reviewUpdate.call_id, {
+                            phase: "reviewing",
+                            callId: reviewUpdate.call_id,
+                        });
+                    } else if (reviewUpdate.phase === "done" && reviewUpdate.verdict) {
+                        noteToolReview(reviewUpdate.call_id, {
+                            phase: "done",
+                            callId: reviewUpdate.call_id,
+                            verdict: reviewUpdate.verdict,
+                            reason: reviewUpdate.reason?.trim() || "",
+                        });
+                    }
+                }
             } else if (conversationEvent.type === "mcp_tool_call_update") {
                 // 处理MCP工具调用状态更新事件
                 const mcpUpdateData = conversationEvent.data as MCPToolCallUpdateEvent;
@@ -833,6 +940,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 console.log(
                     `[MCP] current map size=${mcpToolCallStates.size}, active=${activeMcpCallIds.size}`,
                 );
+
+                invalidateMcpToolCall(mcpUpdateData.call_id);
 
                 // 更新MCP工具调用状态
                 setMCPToolCallStates((prev) => {
@@ -883,10 +992,19 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
                 // 调用外部的MCP状态更新处理函数
                 callbacksRef.current.onMCPToolCallUpdate?.(mcpUpdateData);
+            } else if (conversationEvent.type === "agent_activity") {
+                const activity = conversationEvent.data as AgentActivityEvent;
+                const key = `${activity.agent_kind}:${activity.session_id ?? ""}:${activity.item_id}`;
+                setAgentActivities((previous) => {
+                    const existing = previous.get(key);
+                    if (existing && existing.sequence >= activity.sequence) return previous;
+                    const next = new Map(previous);
+                    next.set(key, { ...existing, ...activity });
+                    return next;
+                });
             } else if (conversationEvent.type === "conversation_cancel") {
                 // 处理对话取消事件
                 const cancelData = conversationEvent.data as ConversationCancelEvent;
-                console.log("Received conversation_cancel event:", cancelData);
                 invalidateMcpCompensationPolling("conversation cancelled");
                 const streamingSnapshot = new Map(streamingMessagesRef.current);
 
@@ -894,6 +1012,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 callbacksRef.current.onConversationCancel?.(cancelData, streamingSnapshot);
 
                 // 立即清理所有流式状态，停止显示闪亮边框和思考计时器
+                discardPendingStreamingUpdates();
                 updateStreamingMessagesState(new Map());
                 setPendingUserMessageId(null);
                 setStreamingAssistantMessageIds(new Set());
@@ -922,6 +1041,37 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                 // 处理流式完成事件（包括空响应场景）
                 const completionData = conversationEvent.data as StreamCompleteEvent;
                 console.log("Received stream_complete event:", completionData);
+
+                // Both displayed and queued frames need a final handoff. A frame
+                // already consumed by rAF is no longer in the pending queue.
+                const finalEvents = new Map(streamingMessagesRef.current);
+                pendingStreamingFramesRef.current.forEach((event, messageId) => {
+                    finalEvents.set(messageId, event);
+                });
+                pendingStreamingFramesRef.current.clear();
+                cancelScheduledStreamingFlush();
+                if (finalEvents.size > 0) {
+                    for (const event of finalEvents.values()) {
+                        const current = streamingMessagesRef.current.get(event.message_id);
+                        if (current?.is_done) {
+                            continue;
+                        }
+                        const finalized = finalizeStreamingEventWithPending(
+                            {
+                                ...(current ?? event),
+                                is_done: true,
+                            },
+                            event,
+                        );
+                        updateStreamingMessagesState((prev) => {
+                            const next = new Map(prev);
+                            next.set(finalized.message_id, finalized);
+                            return next;
+                        });
+                        callbacksRef.current.onMessageUpdate?.(finalized);
+                    }
+                }
+
                 const hasActiveMcpCall = activeMcpCallIdsRef.current.size > 0;
                 if (!hasActiveMcpCall) {
                     stopMcpCompensationPolling("stream completed with no active MCP calls");
@@ -956,7 +1106,6 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             } else if (conversationEvent.type === "activity_focus_change") {
                 // 处理活动焦点变化事件 - 由后端统一管理闪亮边框状态
                 const focusEvent = conversationEvent.data as ActivityFocusChangeEvent;
-                console.log("[ActivityFocus] Received focus change:", focusEvent.focus);
                 setActivityFocus(focusEvent.focus);
             }
         },
@@ -970,6 +1119,8 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             scheduleMcpCompletionSync,
             syncRuntimeState,
             syncShineState,
+            scheduleStreamingUpdate,
+            cancelScheduledStreamingFlush,
             updateStreamingMessagesState,
         ],
     );
@@ -978,17 +1129,23 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
     useEffect(() => {
         invalidateMcpCompensationPolling("conversation changed");
         cancelIdleTransientReset();
+        discardPendingStreamingUpdates();
+        updateStreamingMessagesState(new Map());
+        setStreamingAssistantMessageIds(new Set());
+        setPendingUserMessageId(null);
 
         if (!options.conversationId) {
             // 清理状态
             runtimeSyncRequestIdRef.current += 1;
             shineSyncRequestIdRef.current += 1; // 使之前的同步请求失效
             acpSessionSyncRequestIdRef.current += 1;
+            discardPendingStreamingUpdates();
             updateStreamingMessagesState(new Map());
             setActivityShiningMessageIds(new Set());
             setManualShiningMessageIds(new Set());
             setShiningMcpCallId(null);
             setMCPToolCallStates(new Map());
+            setAgentActivities(new Map());
             const clearedActiveSet = new Set<number>();
             activeMcpCallIdsRef.current = clearedActiveSet;
             setActiveMcpCallIds(clearedActiveSet);
@@ -1056,9 +1213,12 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 设置新的事件监听
         hasUnsubscribedRef.current = false;
         console.log(`[ACP DEBUG] Listening to event: ${eventName}`);
+        let subscriptionActive = true;
         unsubscribeRef.current = listen(
             eventName,
-            handleConversationEvent,
+            (event) => {
+                if (subscriptionActive) handleConversationEvent(event);
+            },
         );
 
         // 主动同步一次当前闪亮状态，避免在订阅前发生的事件导致闪烁状态缺失
@@ -1067,6 +1227,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         syncAcpSessionState(conversationIdNum);
 
         return () => {
+            subscriptionActive = false;
             if (unsubscribeRef.current && !hasUnsubscribedRef.current) {
                 console.log("[ACP DEBUG] Unsubscribing from events");
                 const p = unsubscribeRef.current;
@@ -1079,9 +1240,17 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
             stopMcpCompensationPolling("conversation listener cleanup");
             stopMcpCompletionSync("conversation listener cleanup");
         };
-    }, [options.conversationId, syncRuntimeState, syncShineState, syncAcpSessionState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState]); // 只依赖 conversationId
+    }, [options.conversationId, syncRuntimeState, syncShineState, syncAcpSessionState, handleConversationEvent, stopMcpCompensationPolling, stopMcpCompletionSync, updateStreamingMessagesState, discardPendingStreamingUpdates]); // 只依赖 conversationId
 
     // 初始化获取已存在的 MCP 调用状态
+    useMobileResume(() => {
+        const id = Number(options.conversationId);
+        if (!id) return;
+        syncRuntimeState(id);
+        syncShineState(id);
+        void refreshMcpToolCalls();
+    }, options.conversationId);
+
     useEffect(() => {
         if (!options.conversationId) {
             return;
@@ -1108,8 +1277,9 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
 
     // 清理函数
     const clearStreamingMessages = useCallback(() => {
+        discardPendingStreamingUpdates();
         updateStreamingMessagesState(new Map());
-    }, [updateStreamingMessagesState]);
+    }, [discardPendingStreamingUpdates, updateStreamingMessagesState]);
 
     const clearShiningMessages = useCallback(() => {
         console.log("[DEBUG] Clearing shining/MCP state (manual reset)");
@@ -1138,6 +1308,10 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         shineVersionRef.current = { epoch: -1, revision: -1 };
     }, [cancelIdleTransientReset, invalidateMcpCompensationPolling]);
 
+    // Legacy alias used by regenerate / send / error-notification catch paths.
+    // After shine v2 these must clear local shine; a no-op left borders stuck forever.
+    const updateShiningMessages = clearShiningMessages;
+
     const setPendingUserMessage = useCallback((messageId: number | null) => {
         setPendingUserMessageId(messageId);
     }, []);
@@ -1156,6 +1330,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         const currentShineVersion = shineVersionRef.current;
 
         // 清理所有流式消息状态
+        discardPendingStreamingUpdates();
         updateStreamingMessagesState(new Map());
         setActivityShiningMessageIds(new Set());
         setManualShiningMessageIds(new Set());
@@ -1201,7 +1376,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         // 调用外部错误处理，确保状态重置
         callbacksRef.current.onError?.(errorMessage);
         callbacksRef.current.onAiResponseComplete?.();
-    }, [cancelIdleTransientReset, invalidateMcpCompensationPolling, updateStreamingMessagesState]);
+    }, [cancelIdleTransientReset, discardPendingStreamingUpdates, invalidateMcpCompensationPolling, updateStreamingMessagesState]);
 
     // 提供稳定的 functionMap 更新接口
     const updateFunctionMap = useCallback((functionMap: Map<number, any>) => {
@@ -1219,6 +1394,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
         setShiningMessageIds,
         setManualShineMessage,
         mcpToolCallStates,
+        agentActivities,
         activeMcpCallIds, // 导出活跃的 MCP 调用状态
         shiningMcpCallId,
         shineState,

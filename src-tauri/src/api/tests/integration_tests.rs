@@ -1,4 +1,4 @@
-use crate::db::conversation_db::{Conversation, Message, Repository};
+use crate::db::conversation_db::Message;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -77,7 +77,7 @@ async fn test_parent_id_logic() {
     // 测试parent_id逻辑
     println!("开始parent_id逻辑验证...");
 
-    let user_msg_id = 2i64;
+    let _user_msg_id = 2i64;
     let ai_msg_id = 3i64;
 
     // 用户消息重发：新消息应该没有parent_id（新一轮对话）

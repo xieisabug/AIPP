@@ -150,10 +150,10 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     return (
         <SectionsContext.Provider value={contextValue}>
             <div className={cn("flex flex-col gap-1 h-full", className)}>
-                {/* Todo/Plan Section */}
-                <CollapsibleSection 
-                    title="计划" 
-                    count={todos.length} 
+                {/* Planning Section */}
+                <CollapsibleSection
+                    title="规划"
+                    count={todos.length}
                     isOpen={todoOpen}
                     onOpenChange={setTodoOpen}
                 >

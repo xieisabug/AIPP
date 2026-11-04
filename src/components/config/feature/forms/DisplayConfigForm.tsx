@@ -5,9 +5,9 @@ import { emit, listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import { toast } from "sonner";
 import { AVAILABLE_CODE_THEMES } from "@/hooks/useCodeTheme";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { useSyntectThemes } from "@/hooks/highlight/useSyntectThemes";
 import { pluginRuntime } from "@/services/PluginRuntime";
-import { ensureBuiltinMcpToolComponentsRegistered } from "@/services/builtinMcpToolComponents";
 import {
     AUTO_MCP_TOOL_COMPONENT_ID,
     DEFAULT_MCP_TOOL_COMPONENT_ID,
@@ -20,6 +20,24 @@ interface DisplayConfigFormProps {
     showButlerHomeWindow: boolean;
 }
 
+export function withCurrentCodeThemeOption(
+    options: Array<{ value: string; label: string }>,
+    current: string | undefined,
+): Array<{ value: string; label: string }> {
+    if (!current || options.some((option) => option.value === current)) {
+        return options;
+    }
+    const known = AVAILABLE_CODE_THEMES.find((theme) => theme.id === current);
+    return [{ value: current, label: known ? known.name : current }, ...options];
+}
+
+/** 「显示」分区副标题：只提及当前平台实际展示的配置项（移动端没有「默认主页窗口」，且文案要短到窄屏单行不被截断）。 */
+export function getDisplayConfigDescription(isMobilePlatform: boolean): string {
+    return isMobilePlatform
+        ? "配置外观主题、深浅色模式和消息渲染方式"
+        : "配置默认主页窗口、系统外观主题、深浅色模式和用户消息渲染方式";
+}
+
 export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     form,
     onSave,
@@ -28,10 +46,21 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
     const mcpToolComponents = useMcpToolComponentRegistrySnapshot();
+    const isMobilePlatform = useIsMobilePlatform();
     const [pluginThemeOptions, setPluginThemeOptions] = useState<Array<{ value: string; label: string }>>([]);
 
     useEffect(() => {
-        ensureBuiltinMcpToolComponentsRegistered();
+        let disposed = false;
+        // 动态加载内置 MCP 工具组件注册模块，避免设置页静态拉入整个聊天消息渲染树。
+        // 注册完成后 useMcpToolComponentRegistrySnapshot 会自动更新下拉选项。
+        void import("@/services/builtinMcpToolComponents").then((m) => {
+            if (!disposed) {
+                m.ensureBuiltinMcpToolComponentsRegistered();
+            }
+        });
+        return () => {
+            disposed = true;
+        };
     }, []);
 
     useEffect(() => {
@@ -152,12 +181,25 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
         }));
     }, []);
 
-    const lightCodeThemeOptions = syntectThemeOptionsByMode?.light?.length
+    const lightCodeThemeOptionsBase = syntectThemeOptionsByMode?.light?.length
         ? syntectThemeOptionsByMode.light
         : syntectThemeOptions ?? fallbackLightOptions;
-    const darkCodeThemeOptions = syntectThemeOptionsByMode?.dark?.length
+    const darkCodeThemeOptionsBase = syntectThemeOptionsByMode?.dark?.length
         ? syntectThemeOptionsByMode.dark
         : syntectThemeOptions ?? fallbackDarkOptions;
+
+    // 已保存的值可能是旧的 UI 主题 id（如默认的 github / github-dark，后端会映射到 syntect 主题），
+    // 不在 syntect 选项里时下拉框会显示为空；把当前值补进选项，保证选择框有可见值且不改动已保存配置。
+    const currentLightCodeTheme = form.watch("code_theme_light");
+    const currentDarkCodeTheme = form.watch("code_theme_dark");
+    const lightCodeThemeOptions = useMemo(
+        () => withCurrentCodeThemeOption(lightCodeThemeOptionsBase, currentLightCodeTheme),
+        [lightCodeThemeOptionsBase, currentLightCodeTheme],
+    );
+    const darkCodeThemeOptions = useMemo(
+        () => withCurrentCodeThemeOption(darkCodeThemeOptionsBase, currentDarkCodeTheme),
+        [darkCodeThemeOptionsBase, currentDarkCodeTheme],
+    );
 
     const handleSaveDisplayConfig = useCallback(async () => {
         const values = form.getValues();
@@ -188,7 +230,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
                 // 权限获取成功，发送测试通知
                 sendNotification({
                     title: "AIPP - 系统通知已开启",
-                    body: "AI 消息完成时将发送系统通知",
+                    body: "AI 消息或 Agent 任务完成时将发送系统通知",
                 });
                 toast.success("通知权限获取成功，已发送测试通知");
             } catch (e) {
@@ -226,15 +268,20 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     }, [form, onSave]);
 
     const DISPLAY_FORM_CONFIG = [
-        {
-            key: "default_home_window",
-            config: {
-                type: "select" as const,
-                label: "默认主页窗口",
-                options: defaultHomeWindowOptions,
-                tooltip: "影响应用启动、托盘点击和唤醒时默认打开的主窗口",
-            },
-        },
+        // 移动端只有单 WebView 主界面，没有 Ask 悬浮窗/托盘，隐藏「默认主页窗口」
+        ...(isMobilePlatform
+            ? []
+            : [
+                {
+                    key: "default_home_window",
+                    config: {
+                        type: "select" as const,
+                        label: "默认主页窗口",
+                        options: defaultHomeWindowOptions,
+                        tooltip: "影响应用启动、托盘点击和唤醒时默认打开的主窗口",
+                    },
+                },
+            ]),
         {
             key: "theme",
             config: {
@@ -280,7 +327,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
             config: {
                 type: "switch" as const,
                 label: "消息完成时发送系统通知",
-                tooltip: "AI消息生成完成时发送系统通知提醒",
+                tooltip: "AI 消息或 Agent 任务（Codex、Claude Code、ACP）完成时发送系统通知提醒，窗口聚焦时不弹出",
             },
         },
         {
@@ -321,7 +368,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     return (
         <ConfigForm
             title="显示"
-            description="配置默认主页窗口、系统外观主题、深浅色模式和用户消息渲染方式"
+            description={getDisplayConfigDescription(isMobilePlatform)}
             config={DISPLAY_FORM_CONFIG}
             layout="default"
             classNames="bottom-space"

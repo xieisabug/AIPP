@@ -609,6 +609,8 @@ interface AssistantRunApi {
 interface AiResponse {
     conversation_id: number;
     request_prompt_result_with_context: string;
+    /** 对话已创建但在调用模型前失败（如助手未配置模型）时的错误说明；错误也已写入对话。 */
+    error_message?: string | null;
 }
 
 interface CreateConversationResponse {

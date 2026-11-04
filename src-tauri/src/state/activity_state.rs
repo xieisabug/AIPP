@@ -442,20 +442,6 @@ impl ConversationActivityManager {
         .await;
     }
 
-    /// MCP 完成后从数据库重同步活跃调用，再重新计算焦点
-    pub async fn restore_after_mcp(&self, app_handle: &tauri::AppHandle, conversation_id: i64) {
-        let active_calls = Self::fetch_active_mcp_calls(app_handle, conversation_id);
-        self.update_state(app_handle, conversation_id, move |activity| {
-            activity.active_mcp_calls = active_calls;
-        })
-        .await;
-    }
-
-    /// 移除对话的活动状态（对话删除时调用）
-    pub async fn remove_conversation(&self, conversation_id: i64) {
-        let mut activities = self.activities.write().await;
-        activities.remove(&conversation_id);
-    }
 }
 
 impl Default for ConversationActivityManager {

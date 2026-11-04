@@ -45,6 +45,8 @@ export interface Message {
     ttft_ms?: number | null;
     tps?: number | null;
     large_message_preview?: LargeMessagePreviewMetadata | null;
+    /** Display-only: an ungrouped error followed by a new reply in the same turn. */
+    isSupersededError?: boolean;
 }
 
 export interface LargeMessagePreviewMetadata {
@@ -142,6 +144,24 @@ export interface MCPToolCallUpdateEvent {
     error?: string;
     started_time?: Date;
     finished_time?: Date;
+}
+
+export interface AgentActivityEvent {
+    conversation_id: number;
+    response_message_id: number;
+    agent_kind: "codex_app_server" | "claude_sdk" | string;
+    session_id?: string | null;
+    item_id: string;
+    sequence: number;
+    kind: "tool" | "command" | "patch" | "approval" | "status" | "sub_agent" | string;
+    status: "pending" | "executing" | "success" | "failed" | "cancelled" | string;
+    title?: string | null;
+    input?: unknown;
+    output?: string | null;
+    error?: string | null;
+    metadata?: unknown;
+    /** item 开始时已输出的正文字符数，用于把活动卡片穿插到正文对应位置；旧数据缺失时列在正文之后 */
+    content_offset?: number | null;
 }
 
 export interface ConversationCancelEvent {
@@ -256,12 +276,14 @@ export interface AcpAvailableCommand {
 
 export interface AcpConversationSessionState {
     conversation_id: number;
+    agent_kind?: "acp" | "codex_app_server" | string;
     session_id?: string | null;
     title?: string | null;
     updated_at?: string | null;
     load_session_supported: boolean;
     session_resume_supported?: boolean;
     restored_session_method?: "resume" | "load" | string | null;
+    connection_event_id?: string | null;
     prompt_capabilities: AcpPromptCapabilities;
     current_mode_id?: string | null;
     modes: AcpSessionMode[];
@@ -271,6 +293,11 @@ export interface AcpConversationSessionState {
     has_active_prompt: boolean;
     context_tokens_used?: number | null;
     context_window_size?: number | null;
+    model?: string | null;
+    permission_mode?: string | null;
+    collaboration_mode?: string | null;
+    reasoning_effort?: string | null;
+    plan_explanation?: string | null;
     session_cost_amount?: number | null;
     session_cost_currency?: string | null;
 }

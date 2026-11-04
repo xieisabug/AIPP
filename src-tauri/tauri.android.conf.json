@@ -1,0 +1,13 @@
+{
+  "app": {
+    "security": {
+      "csp": {
+        "script-src": "'self' 'unsafe-eval' http://asset.localhost"
+      },
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/files/mobile-files/**", "$APPDATA/skills/**", "$APPDATA/plugin/**"]
+      }
+    }
+  }
+}

@@ -1,10 +1,11 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useEffect, useCallback, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import debounce from "lodash/debounce";
 import TagInputContainer from "./TagInputContainer";
 import ReadOnlyModelList from "./ReadOnlyModelList";
 import ModelSelectionDialog from "./ModelSelectionDialog";
 import ConfigForm from "../ConfigForm";
+import ConfigPageLoading from "../common/ConfigPageLoading";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { Switch } from "../ui/switch";
@@ -24,9 +25,11 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { RadioGroup, RadioGroupItem } from "../ui/radio-group";
-import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, CheckCircle2, XCircle, Loader2, AlertTriangle } from "lucide-react";
+import { Trash2, ChevronDown, Share, Copy, Search, KeyRound, Edit, AlertTriangle } from "lucide-react";
 import { useCopilot, type CopilotTokenScanResult } from "@/hooks/useCopilot";
 import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
+import CliEnvironmentStatus from "./CliEnvironmentStatus";
+import { getProviderEndpointStatus } from "@/utils/providerEndpoint";
 import {
     LLMModel,
     ModelForSelection,
@@ -60,7 +63,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     apiType,
     name,
     description,
-    isOffical,
     enabled,
     onDelete,
     onToggleEnabled,
@@ -78,6 +80,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         useState<ModelSelectionResponse | null>(null);
     const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+    // 已完成读取的提供商 id；与当前 id 不一致时表单仍是上一份（或空）数据，不应展示
+    const [loadedId, setLoadedId] = useState<string | null>(null);
     const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
     const [manualToken, setManualToken] = useState<string>("");
     const [scanTokenDialogOpen, setScanTokenDialogOpen] = useState<boolean>(false);
@@ -88,6 +92,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     const isCopilotProvider = apiType === "github_copilot";
     const isAcpProvider = apiType === "acp";
+    const isCodexAppServerProvider = apiType === "codex_app_server";
+    const isClaudeSdkProvider = apiType === "claude_sdk";
 
     // API 类型显示标签映射
     const apiTypeLabels: Record<string, string> = {
@@ -98,18 +104,22 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'deepseek': 'DeepSeek API',
         'github_copilot': 'GitHub Copilot',
         'acp': 'ACP(Agent Client Protocol)',
+        'codex_app_server': 'Codex',
+        'claude_sdk': 'Claude Code',
     };
     const apiTypeLabel = apiTypeLabels[apiType] || apiType;
 
     // ACP CLI 命令选项
     // 注意：大多数 AI 需要安装专门的 ACP 适配器
     // - Claude Code: npm install -g @zed-industries/claude-code-acp -> 命令 claude-code-acp
-    // - Codex: npm install -g @zed-industries/codex-acp -> 命令 codex-acp  
     // - Gemini: 原生支持 ACP，直接使用 gemini 命令
+    // - Kimi Code CLI: 原生支持 ACP，参考官方文档安装 kimi（启动时自动附加 acp 子命令）
+    // - DeepSeek Harness: npm install -g @deepseek-ai/dsh dsh-acp-server -> 命令 dsh-acp-server
     const acpCliOptions = [
         { value: "claude-code-acp", label: "Claude Code (需安装 @zed-industries/claude-code-acp)" },
-        { value: "codex-acp", label: "Codex (需安装 @zed-industries/codex-acp)" },
         { value: "gemini", label: "Gemini CLI (原生支持)" },
+        { value: "kimi", label: "Kimi Code CLI (原生支持)" },
+        { value: "dsh-acp-server", label: "DeepSeek Harness (需安装 dsh-acp-server)" },
     ];
 
     // GitHub Copilot 授权管理
@@ -117,17 +127,16 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         llmProviderId: id,
         onAuthSuccess: () => {
             // 授权成功后刷新配置
+            const snapshot = saves.snapshot();
             invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id })
                 .then((configArray) => {
                     const newConfig: Record<string, string> = {};
                     configArray.forEach((item) => {
                         newConfig[item.name] = item.value;
                     });
-                    form.reset({
-                        ...defaultValues,
-                        ...newConfig,
-                    });
-                    setHasApiKey(!!newConfig.api_key);
+                    const merged = saves.merge(newConfig, snapshot);
+                    form.reset(merged);
+                    setHasApiKey(!!merged.api_key);
                 })
                 .catch((e) => {
                     console.error("[Copilot] refresh provider config failed", e);
@@ -143,8 +152,14 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             acp_cli_command: "",
             acp_claude_auth_mode: "claude_settings",
             acp_claude_env_vars: "",
-            acp_codex_auth_mode: "codex_config_toml",
-            acp_codex_env_vars: "",
+            codex_cli_command: "codex",
+            codex_additional_args: "",
+            codex_approval_policy: "on-request",
+            codex_sandbox: "workspace-write",
+            claude_cli_command: "claude",
+            claude_permission_mode: "default",
+            claude_effort: "default",
+            acp_env_vars: "",
         }),
         [],
     );
@@ -160,37 +175,67 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 监听 proxy_enabled 字段变化
     const proxyEnabled = form.watch("proxy_enabled");
+    const endpoint = form.watch("endpoint");
+    const endpointStatus = useMemo(() => getProviderEndpointStatus(endpoint), [endpoint]);
 
     // 监听 ACP CLI 命令变化
     const acpCliCommand = form.watch("acp_cli_command");
     const claudeAuthMode = form.watch("acp_claude_auth_mode") || "claude_settings";
-    const codexAuthMode = form.watch("acp_codex_auth_mode") || "codex_config_toml";
 
     // ACP 环境检测 Hook
     const acpEnv = useAcpEnvironment(isAcpProvider ? (acpCliCommand || "") : "");
+    // 官方 Codex CLI 环境检测 Hook（codex_app_server 提供商固定检测 codex 命令）
+    const codexEnv = useAcpEnvironment(isCodexAppServerProvider ? "codex" : "");
+    const claudeEnv = useAcpEnvironment(isClaudeSdkProvider ? "claude" : "");
 
-    // 更新字段
-    const updateField = useCallback(
-        debounce((key: string, value: string) => {
-            invoke("update_llm_provider_config", {
-                llmProviderId: id,
-                name: key,
-                value,
-            })
-                .then(() => console.log(`Field ${key} updated`))
-                .catch((error) =>
-                    console.error(`Error updating field ${key}:`, error),
-                );
-        }, 50),
-        [id],
-    );
-
-    // 当 id 变化时，取消之前的 debounce 操作
-    useEffect(() => {
-        return () => {
-            updateField.cancel();
+    const saves = useMemo(() => {
+        type Field = { value: string; revision: number; pending: boolean; timer?: ReturnType<typeof setTimeout>; running: boolean };
+        const fields = new Map<string, Field>();
+        const flush = (key: string) => {
+            const field = fields.get(key)!;
+            if (field.timer) clearTimeout(field.timer);
+            field.timer = undefined;
+            if (field.running || !field.pending) return;
+            const { value, revision } = field;
+            field.running = true;
+            void invoke("update_llm_provider_config", { llmProviderId: id, name: key, value })
+                .then(() => { if (field.revision === revision) field.pending = false; })
+                .catch((error) => {
+                    const detail = String(error);
+                    const safeDetail = value ? detail.split(value).join("[已隐藏]") : detail;
+                    toast.error(`保存提供商字段 ${key} 失败: ${safeDetail}`);
+                })
+                .finally(() => {
+                    field.running = false;
+                    if (field.revision !== revision && !field.timer) flush(key);
+                });
         };
-    }, [id, updateField]);
+        return {
+            update(key: string, value: string) {
+                const field: Field = fields.get(key) ?? { value, revision: 0, pending: false, running: false };
+                field.value = value;
+                field.revision++;
+                field.pending = true;
+                fields.set(key, field);
+                if (field.timer) clearTimeout(field.timer);
+                field.timer = setTimeout(() => flush(key), 50);
+            },
+            snapshot: () => new Map(Array.from(fields, ([key, field]) => [key, { revision: field.revision, pending: field.pending }])),
+            merge(config: Record<string, string>, snapshot?: Map<string, { revision: number; pending: boolean }>) {
+                const merged = { ...defaultValues, ...config };
+                for (const [key, field] of fields) {
+                    const previous = snapshot?.get(key);
+                    if (field.pending || previous?.pending || (snapshot && field.revision !== previous?.revision)) {
+                        Object.assign(merged, { [key]: field.value });
+                    }
+                }
+                return merged;
+            },
+            flushAll() { for (const [key, field] of fields) if (field.timer) flush(key); },
+        };
+    }, [id, defaultValues]);
+    const updateField = useCallback((key: string, value: string) => saves.update(key, value), [saves]);
+    useEffect(() => () => saves.flushAll(), [saves]);
 
     // 监听字段更新后自动保存
     useEffect(() => {
@@ -206,48 +251,34 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         return () => subscription.unsubscribe();
     }, [form, updateField]);
 
-    // 获取基础数据
-    useEffect(() => {
-        // 立即重置状态，避免显示旧的数据
-        form.reset({
-            endpoint: "",
-            api_key: "",
-            proxy_enabled: "false",
-            acp_cli_command: "",
-            acp_claude_auth_mode: "claude_settings",
-            acp_claude_env_vars: "",
-            acp_codex_auth_mode: "codex_config_toml",
-            acp_codex_env_vars: "",
-        });
-        setTags([]);
-        setHasApiKey(false);
-
-        invoke<Array<LLMProviderConfig>>("get_llm_provider_config", {
-            id,
-        }).then((configArray) => {
-            const newConfig: Record<string, string> = {};
-            configArray.forEach((item) => {
-                newConfig[item.name] = item.value;
-            });
-            form.reset({
-                ...defaultValues,
-                ...newConfig,
-            });
-
-            // 检查 GitHub Copilot 是否有 api_key
-            if (isCopilotProvider) {
-                const apiKey = configArray.find((item) => item.name === "api_key")?.value;
-                setHasApiKey(!!apiKey && apiKey.length > 0);
+    useDataRefresh({
+        events: ["llm_provider_changed"],
+        identity: id,
+        initial: true,
+        refresh: async (isCurrent) => {
+            const snapshot = saves.snapshot();
+            let configArray: Array<LLMProviderConfig>;
+            let modelList: Array<LLMModel>;
+            try {
+                [configArray, modelList] = await Promise.all([
+                    invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id }),
+                    invoke<Array<LLMModel>>("get_llm_models", { llmProviderId: String(id) }),
+                ]);
+            } catch (error) {
+                // 读取失败也结束加载态（错误由 onError 提示），避免一直停在加载中
+                if (isCurrent()) setLoadedId(id);
+                throw error;
             }
-        });
-
-        invoke<Array<LLMModel>>("get_llm_models", {
-            llmProviderId: "" + id,
-        }).then((modelList) => {
-            const newTags = modelList.map(toModelTagItem);
-            setTags(newTags);
-        });
-    }, [defaultValues, form, id, isCopilotProvider]);
+            if (!isCurrent()) return;
+            const config = Object.fromEntries(configArray.map((item) => [item.name, item.value]));
+            const merged = saves.merge(config, snapshot);
+            form.reset(merged);
+            setHasApiKey(!!merged.api_key);
+            setTags(modelList.map(toModelTagItem));
+            setLoadedId(id);
+        },
+        onError: (error) => toast.error(`同步后刷新模型提供商失败（provider=${id}）: ${String(error)}`),
+    });
 
     // 处理模型选择确认
     const handleModelSelectionConfirm = useCallback(
@@ -288,13 +319,17 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 onTagsChange={onTagsChange}
                 isExpanded={isModelListExpanded}
                 onExpandedChange={setIsModelListExpanded}
+                beforeFetchModels={() => {
+                    const status = getProviderEndpointStatus(form.getValues("endpoint"));
+                    if (status.kind === "invalid") throw new Error(status.message);
+                }}
                 onFetchModels={(modelData) => {
                     setModelSelectionData(modelData);
                     setModelSelectionDialogOpen(true);
                 }}
             />
         ),
-        [apiType, id, tags, onTagsChange, isModelListExpanded],
+        [apiType, id, tags, onTagsChange, isModelListExpanded, form],
     );
 
     const renderProxyAdvancedConfig = useCallback(
@@ -527,26 +562,172 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
             ];
         }
 
+        if (isCodexAppServerProvider) {
+            return [
+                {
+                    key: "apiType",
+                    config: {
+                        type: "static" as const,
+                        label: "提供商类型",
+                        value: "Codex",
+                    },
+                },
+                {
+                    key: "codex_cli_command",
+                    config: {
+                        type: "input" as const,
+                        label: "Codex CLI 命令",
+                        value: "codex",
+                        placeholder: "codex 或绝对路径",
+                        tooltip: "启动 Codex app-server 使用的 CLI 命令或绝对路径",
+                    },
+                },
+                {
+                    key: "codex_environment",
+                    config: {
+                        type: "custom" as const,
+                        label: "环境状态",
+                        value: "",
+                        customRender: () => (
+                            <CliEnvironmentStatus
+                                env={codexEnv}
+                                cliCommand="codex"
+                                displayName="Codex CLI"
+                            />
+                        ),
+                    },
+                },
+                {
+                    key: "codex_approval_policy",
+                    config: {
+                        type: "select" as const,
+                        label: "审批策略",
+                        value: "on-request",
+                        options: [
+                            { value: "on-request", label: "按需询问" },
+                            { value: "never", label: "从不询问" },
+                            { value: "untrusted", label: "不可信操作询问" },
+                        ],
+                    },
+                },
+                {
+                    key: "codex_sandbox",
+                    config: {
+                        type: "select" as const,
+                        label: "沙箱模式",
+                        value: "workspace-write",
+                        options: [
+                            { value: "read-only", label: "只读" },
+                            { value: "workspace-write", label: "工作区可写" },
+                            { value: "danger-full-access", label: "完全访问" },
+                        ],
+                    },
+                },
+                {
+                    key: "codex_additional_args",
+                    config: {
+                        type: "input" as const,
+                        label: "额外启动参数",
+                        value: "",
+                        placeholder: "例如 --enable collaboration_modes",
+                    },
+                },
+                {
+                    key: "acp_env_vars",
+                    config: {
+                        type: "textarea" as const,
+                        label: "环境变量（JSON）",
+                        value: "",
+                        className: "min-h-24",
+                        placeholder: '{"OPENAI_BASE_URL":"..."}',
+                        tooltip: "默认复用 ~/.codex 登录态；这里只填写需要覆盖的环境变量",
+                    },
+                },
+            ];
+        }
+
+        if (isClaudeSdkProvider) {
+            return [
+                {
+                    key: "apiType",
+                    config: {
+                        type: "static" as const,
+                        label: "提供商类型",
+                        value: "Claude Code",
+                    },
+                },
+                {
+                    key: "claude_cli_command",
+                    config: {
+                        type: "input" as const,
+                        label: "Claude CLI 命令",
+                        value: "claude",
+                        placeholder: "claude 或绝对路径",
+                        tooltip: "启动官方 Claude Code stream-json 通道使用的命令",
+                    },
+                },
+                {
+                    key: "claude_environment",
+                    config: {
+                        type: "custom" as const,
+                        label: "环境状态",
+                        value: "",
+                        customRender: () => (
+                            <CliEnvironmentStatus
+                                env={claudeEnv}
+                                cliCommand="claude"
+                                displayName="Claude Code"
+                            />
+                        ),
+                    },
+                },
+                {
+                    key: "claude_permission_mode",
+                    config: {
+                        type: "select" as const,
+                        label: "权限模式",
+                        value: "default",
+                        options: [
+                            { value: "default", label: "默认询问" },
+                            { value: "acceptEdits", label: "自动接受编辑" },
+                            { value: "plan", label: "计划模式" },
+                            { value: "dontAsk", label: "不询问" },
+                        ],
+                    },
+                },
+                {
+                    key: "claude_effort",
+                    config: {
+                        type: "select" as const,
+                        label: "思考强度",
+                        value: "default",
+                        options: [
+                            { value: "default", label: "默认" },
+                            { value: "low", label: "低" },
+                            { value: "medium", label: "中" },
+                            { value: "high", label: "高" },
+                            { value: "max", label: "最大" },
+                        ],
+                    },
+                },
+                {
+                    key: "acp_env_vars",
+                    config: {
+                        type: "textarea" as const,
+                        label: "环境变量（JSON）",
+                        value: "",
+                        className: "min-h-24",
+                        placeholder: '{"ANTHROPIC_BASE_URL":"..."}',
+                        tooltip: "默认复用本机 Claude Code 登录态；这里只填写需要覆盖的环境变量",
+                    },
+                },
+            ];
+        }
+
         // ACP 提供商：特殊表单
         if (isAcpProvider) {
             // ACP 环境状态渲染
             const renderAcpEnvironmentStatus = () => {
-                const {
-                    status,
-                    libraryInfo,
-                    installAcpLibrary,
-                    updateAcpLibrary,
-                    checkAcpLibrary,
-                    checkAcpLibraryUpdate,
-                    isCheckingUpdate,
-                    latestVersion,
-                    hasCheckedUpdate,
-                    checkUpdateError,
-                    updateError,
-                    canRetryCheckWithProxy,
-                    canRetryUpdateWithProxy,
-                } = acpEnv;
-
                 // 未选择 CLI 命令时不显示环境状态
                 if (!acpCliCommand) {
                     return (
@@ -559,211 +740,13 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     );
                 }
 
-                switch (status) {
-                    case "checking":
-                        return (
-                            <div className="p-3 border border-border rounded-lg bg-muted/50">
-                                <div className="flex items-center gap-2 text-muted-foreground">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                    <span className="text-sm">正在检测环境...</span>
-                                </div>
-                            </div>
-                        );
-
-                    case "bun-not-installed":
-                        return (
-                            <div className="p-3 border border-destructive/50 rounded-lg bg-destructive/10">
-                                <div className="flex items-center gap-2 text-destructive mb-2">
-                                    <XCircle className="h-4 w-4" />
-                                    <span className="text-sm font-medium">Bun 运行时未安装</span>
-                                </div>
-                                <p className="text-xs text-muted-foreground mb-2">
-                                    ACP 库需要 Bun 运行时来安装。请前往【设置 → 预览配置】安装 Bun。
-                                </p>
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={async () => {
-                                        const { emit } = await import("@tauri-apps/api/event");
-                                        await emit("config-navigate-to", { menu: "feature-assistant-config", subNav: "preview" });
-                                    }}
-                                >
-                                    前往安装 Bun
-                                </Button>
-                            </div>
-                        );
-
-                    case "not-installed":
-                        return (
-                            <div className="p-3 border border-yellow-500/50 rounded-lg bg-yellow-500/10">
-                                <div className="flex items-center gap-2 text-yellow-600 dark:text-yellow-400 mb-2">
-                                    <AlertTriangle className="h-4 w-4" />
-                                    <span className="text-sm font-medium">ACP 库未安装</span>
-                                </div>
-                                <p className="text-xs text-muted-foreground mb-2">
-                                    需要安装 {libraryInfo?.package_name || acpCliCommand} 才能使用此功能。
-                                    {libraryInfo?.install_hint && (
-                                        <span className="block mt-1 text-yellow-600 dark:text-yellow-400">
-                                            提示: {libraryInfo.install_hint}
-                                        </span>
-                                    )}
-                                </p>
-                                <Button
-                                    variant="default"
-                                    size="sm"
-                                    onClick={() => installAcpLibrary()}
-                                >
-                                    一键安装
-                                </Button>
-                            </div>
-                        );
-
-                    case "installing":
-                    case "updating":
-                        return (
-                            <div className="p-3 border border-border rounded-lg bg-muted/50">
-                                <div className="flex items-center gap-2 text-muted-foreground mb-2">
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                    <span className="text-sm font-medium">
-                                        {status === "updating" ? "正在更新..." : "正在安装..."}
-                                    </span>
-                                </div>
-                                <pre className="text-xs bg-background p-2 rounded max-h-32 overflow-auto whitespace-pre-wrap">
-                                    {acpEnv.installLog || "等待安装日志..."}
-                                </pre>
-                            </div>
-                        );
-
-                    case "external-required":
-                        return (
-                            <div className="p-3 border border-yellow-500/50 rounded-lg bg-yellow-500/10">
-                                <div className="flex items-center gap-2 text-yellow-600 dark:text-yellow-400 mb-2">
-                                    <AlertTriangle className="h-4 w-4" />
-                                    <span className="text-sm font-medium">需要手动安装</span>
-                                </div>
-                                <p className="text-xs text-muted-foreground mb-2">
-                                    {libraryInfo?.install_hint || `请手动安装 ${acpCliCommand}`}
-                                </p>
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => checkAcpLibrary()}
-                                >
-                                    重新检测
-                                </Button>
-                            </div>
-                        );
-
-                    case "installed":
-                        return (
-                            <div className="p-3 border border-green-500/50 rounded-lg bg-green-500/10">
-                                <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-                                    <CheckCircle2 className="h-4 w-4" />
-                                    <span className="text-sm font-medium">环境就绪</span>
-                                    {libraryInfo?.version && (
-                                        <span className="text-xs text-muted-foreground">
-                                            (v{libraryInfo.version})
-                                        </span>
-                                    )}
-                                </div>
-                                {libraryInfo?.installed_path && (
-                                    <div className="mt-2">
-                                        <p className="text-xs text-muted-foreground mb-1">已安装位置</p>
-                                        <pre className="text-xs bg-background/80 p-2 rounded overflow-auto whitespace-pre-wrap break-all">
-                                            {libraryInfo.installed_path}
-                                        </pre>
-                                    </div>
-                                )}
-                                {libraryInfo?.install_hint && (
-                                    <p className="text-xs text-muted-foreground mt-1">
-                                        提示: {libraryInfo.install_hint}
-                                    </p>
-                                )}
-                                <div className="mt-2">
-                                    {isCheckingUpdate && (
-                                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                            <span>正在检查更新...</span>
-                                        </div>
-                                    )}
-                                    {!isCheckingUpdate && latestVersion && (
-                                        <p className="text-xs text-amber-700 dark:text-amber-300">
-                                            发现可用更新: v{latestVersion}
-                                        </p>
-                                    )}
-                                    {!isCheckingUpdate && hasCheckedUpdate && !latestVersion && (
-                                        <p className="text-xs text-green-700 dark:text-green-300">
-                                            当前已是最新版本
-                                        </p>
-                                    )}
-                                    {!isCheckingUpdate && checkUpdateError && (
-                                        <p className="text-xs text-amber-700 dark:text-amber-300">
-                                            {checkUpdateError}
-                                        </p>
-                                    )}
-                                    {updateError && (
-                                        <p className="text-xs text-amber-700 dark:text-amber-300 mt-1">
-                                            {updateError}
-                                        </p>
-                                    )}
-                                </div>
-                                <div className="mt-3 flex flex-wrap gap-2">
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={() => checkAcpLibrary()}
-                                        disabled={isCheckingUpdate}
-                                    >
-                                        重新检测
-                                    </Button>
-                                    {!libraryInfo?.requires_external_install && (
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => checkAcpLibraryUpdate()}
-                                            disabled={isCheckingUpdate}
-                                        >
-                                            {isCheckingUpdate && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                                            检查更新
-                                        </Button>
-                                    )}
-                                    {canRetryCheckWithProxy && !libraryInfo?.requires_external_install && (
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => checkAcpLibraryUpdate(true)}
-                                            disabled={isCheckingUpdate}
-                                        >
-                                            使用代理检查更新
-                                        </Button>
-                                    )}
-                                    {latestVersion && (
-                                        <Button
-                                            variant="default"
-                                            size="sm"
-                                            onClick={() => updateAcpLibrary()}
-                                            disabled={isCheckingUpdate}
-                                        >
-                                            更新到 v{latestVersion}
-                                        </Button>
-                                    )}
-                                    {latestVersion && canRetryUpdateWithProxy && (
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => updateAcpLibrary(true)}
-                                            disabled={isCheckingUpdate}
-                                        >
-                                            使用代理更新到 v{latestVersion}
-                                        </Button>
-                                    )}
-                                </div>
-                            </div>
-                        );
-
-                    default:
-                        return null;
-                }
+                return (
+                    <CliEnvironmentStatus
+                        env={acpEnv}
+                        cliCommand={acpCliCommand}
+                        displayName="ACP 库"
+                    />
+                );
             };
 
             return [
@@ -838,50 +821,6 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                             : []),
                     ]
                     : []),
-                ...(acpCliCommand === "codex-acp"
-                    ? [
-                        {
-                            key: "acp_codex_auth_mode",
-                            config: {
-                                type: "radio" as const,
-                                label: "Codex 认证来源",
-                                value: "codex_config_toml",
-                                tooltip: "决定 codex-acp 启动时如何准备 Codex 配置和认证环境变量",
-                                options: [
-                                    {
-                                        value: "codex_config_toml",
-                                        label: "自动读取 ~/.codex/config.toml",
-                                        tooltip:
-                                            "使用 Codex 的本地配置目录，并读取 config.toml 中可选的 [env] 环境变量表",
-                                    },
-                                    {
-                                        value: "env_vars",
-                                        label: "手动填写环境变量",
-                                        tooltip:
-                                            "在下方按 KEY=VALUE 每行一条填写，将在启动 codex-acp 时注入",
-                                    },
-                                ],
-                            },
-                        },
-                        ...(codexAuthMode === "env_vars"
-                            ? [
-                                {
-                                    key: "acp_codex_env_vars",
-                                    config: {
-                                        type: "textarea" as const,
-                                        label: "Codex 环境变量",
-                                        value: "",
-                                        className: "min-h-32",
-                                        placeholder:
-                                            "OPENAI_API_KEY=sk-...\nOPENAI_BASE_URL=https://api.openai.com/v1",
-                                        tooltip:
-                                            "每行一个 KEY=VALUE；仅在“手动填写环境变量”模式下生效",
-                                    },
-                                },
-                            ]
-                            : []),
-                    ]
-                    : []),
                 {
                     key: "advanced_config",
                     config: {
@@ -913,6 +852,10 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     type: "input" as const,
                     label: "Endpoint",
                     value: "",
+                    inputMode: "url" as const,
+                    hint: endpointStatus.kind === "invalid"
+                        ? <span role="alert" className="text-destructive">{endpointStatus.message}</span>
+                        : endpointStatus.message,
                 },
             },
             {
@@ -943,7 +886,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, codexAuthMode]);
+    }, [apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {
@@ -983,34 +926,37 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     </div>
                 )}
 
-                {!isOffical && (
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={onDelete}
-                        className="hover:bg-red-50 hover:border-red-300 hover:text-red-700"
-                    >
-                        <Trash2 className="h-4 w-4 mr-1" />
-                    </Button>
-                )}
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={onDelete}
+                    className="hover:bg-red-50 hover:border-red-300 hover:text-red-700"
+                >
+                    <Trash2 className="h-4 w-4 mr-1" />
+                </Button>
             </div>
         ),
-        [enabled, onToggleEnabled, index, isOffical, onDelete, onShare],
+        [enabled, onToggleEnabled, index, onDelete, onShare],
     );
 
     // 表单部分结束
     return (
         <>
-            <ConfigForm
-                key={id}
-                title={name}
-                description={description}
-                config={configFields}
-                classNames="bottom-space"
-                extraButtons={extraButtons}
-                useFormReturn={form}
-                onTitleClick={onRename ? handleOpenRenameDialog : undefined}
-            />
+            {loadedId === id ? (
+                <ConfigForm
+                    key={id}
+                    title={name}
+                    description={description}
+                    config={configFields}
+                    classNames="bottom-space"
+                    extraButtons={extraButtons}
+                    useFormReturn={form}
+                    onTitleClick={onRename ? handleOpenRenameDialog : undefined}
+                />
+            ) : (
+                // 首次进入立即显示（衔接列表加载）；切换提供商时延迟显示，读取很快时不闪烁
+                <ConfigPageLoading delayMs={loadedId === null ? 0 : 200} />
+            )}
             <ModelSelectionDialog
                 open={modelSelectionDialogOpen}
                 onOpenChange={setModelSelectionDialogOpen}
@@ -1029,7 +975,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         </DialogDescription>
                     </DialogHeader>
                     <div className="flex flex-col gap-4 py-4">
-                        <Input
+                        <Input enterKeyHint="done"
                             placeholder="ghu_xxxxxxxxx 或 gho_xxxxxxxxx..."
                             value={manualToken}
                             onChange={(e) => setManualToken(e.target.value)}
@@ -1137,7 +1083,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                         </DialogDescription>
                     </DialogHeader>
                     <div className="flex flex-col gap-4 py-4">
-                        <Input
+                        <Input enterKeyHint="done"
                             placeholder="请输入提供商名称"
                             value={newProviderName}
                             onChange={(e) => setNewProviderName(e.target.value)}

@@ -10,6 +10,40 @@ use tracing::{instrument, warn};
 
 use crate::db::get_db_path;
 
+pub const UNSTARTED_TOOL_CALL_SKIP_REASON: &str = "未执行：用户发送了后续消息，已跳过工具调用";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolReviewLog {
+    pub id: i64,
+    pub conversation_id: i64,
+    pub mcp_tool_call_id: i64,
+    pub server_name: String,
+    pub tool_name: String,
+    pub parameters: String,
+    pub model_code: String,
+    pub provider_id: Option<i64>,
+    pub verdict: String,
+    pub reason: String,
+    pub duration_ms: i64,
+    pub error_detail: Option<String>,
+    pub user_decision: Option<String>,
+    pub created_at: String,
+}
+
+pub struct NewToolReviewLog {
+    pub conversation_id: i64,
+    pub mcp_tool_call_id: i64,
+    pub server_name: String,
+    pub tool_name: String,
+    pub parameters: String,
+    pub model_code: String,
+    pub provider_id: Option<i64>,
+    pub verdict: String,
+    pub reason: String,
+    pub duration_ms: i64,
+    pub error_detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MCPServer {
     pub id: i64,
@@ -125,6 +159,7 @@ pub struct ConversationLoadedMCPTool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ConversationLoadedMCPToolResolved {
     pub id: i64,
     pub conversation_id: i64,
@@ -374,6 +409,7 @@ impl MCPDatabase {
         self.migrate_mcp_tool_call_table()?;
         self.migrate_mcp_server_table()?; // ensure headers column exists
         self.create_dynamic_loading_tables()?;
+        self.create_tool_review_log_table()?;
         let _ = self.rebuild_dynamic_mcp_catalog();
 
         Ok(())
@@ -432,6 +468,37 @@ impl MCPDatabase {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversation_mcp_loaded_tool_conversation ON conversation_mcp_loaded_tool(conversation_id)",
+            (),
+        )?;
+        Ok(())
+    }
+
+    fn create_tool_review_log_table(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS tool_review_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id INTEGER NOT NULL,
+                mcp_tool_call_id INTEGER NOT NULL,
+                server_name TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                parameters TEXT NOT NULL,
+                model_code TEXT NOT NULL DEFAULT '',
+                provider_id INTEGER,
+                verdict TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                error_detail TEXT,
+                user_decision TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            (),
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_review_log_conversation ON tool_review_log(conversation_id)",
+            (),
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_review_log_call ON tool_review_log(mcp_tool_call_id)",
             (),
         )?;
         Ok(())
@@ -542,7 +609,7 @@ impl MCPDatabase {
             Ok(MCPServer {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                description: row.get(2)?,
+                description: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 transport_type: row.get(3)?,
                 command: row.get(4)?,
                 environment_variables: row.get(5)?,
@@ -577,7 +644,7 @@ impl MCPDatabase {
                 Ok(MCPServer {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    description: row.get(2)?,
+                    description: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     transport_type: row.get(3)?,
                     command: row.get(4)?,
                     environment_variables: row.get(5)?,
@@ -622,7 +689,7 @@ impl MCPDatabase {
             Ok(MCPServer {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                description: row.get(2)?,
+                description: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 transport_type: row.get(3)?,
                 command: row.get(4)?,
                 environment_variables: row.get(5)?,
@@ -706,8 +773,7 @@ impl MCPDatabase {
     }
 
     pub fn delete_mcp_server(&self, id: i64) -> Result<()> {
-        // Cascade delete will handle tools and resources
-        self.conn.execute("DELETE FROM mcp_server WHERE id = ?", params![id])?;
+        super::cascade_delete::delete(&self.conn, "mcp_server", id)?;
         Ok(())
     }
 
@@ -813,33 +879,7 @@ impl MCPDatabase {
         server_id: i64,
         keep_names: &[String],
     ) -> Result<usize> {
-        if keep_names.is_empty() {
-            // 如果没有需要保留的工具，直接删除该服务器下所有工具
-            let rows = self
-                .conn
-                .execute("DELETE FROM mcp_server_tool WHERE server_id = ?", params![server_id])?;
-            return Ok(rows as usize);
-        }
-
-        // 构造 NOT IN (?, ?, ...) 语句
-        let mut sql =
-            String::from("DELETE FROM mcp_server_tool WHERE server_id = ? AND tool_name NOT IN (");
-        for (i, _) in keep_names.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            sql.push('?');
-        }
-        sql.push(')');
-
-        let mut params_vec: Vec<Value> = Vec::with_capacity(1 + keep_names.len());
-        params_vec.push(Value::from(server_id));
-        for name in keep_names {
-            params_vec.push(Value::from(name.as_str().to_string()));
-        }
-
-        let rows = self.conn.execute(&sql, params_from_iter(params_vec))?;
-        Ok(rows as usize)
+        super::cascade_delete::remove_missing_tools(&self.conn, server_id, keep_names)
     }
 
     pub fn update_mcp_server_tool(
@@ -1238,6 +1278,95 @@ impl MCPDatabase {
         })
     }
 
+    fn map_tool_review_log(row: &Row<'_>) -> std::result::Result<ToolReviewLog, rusqlite::Error> {
+        Ok(ToolReviewLog {
+            id: row.get(0)?,
+            conversation_id: row.get(1)?,
+            mcp_tool_call_id: row.get(2)?,
+            server_name: row.get(3)?,
+            tool_name: row.get(4)?,
+            parameters: row.get(5)?,
+            model_code: row.get(6)?,
+            provider_id: row.get(7)?,
+            verdict: row.get(8)?,
+            reason: row.get(9)?,
+            duration_ms: row.get(10)?,
+            error_detail: row.get(11)?,
+            user_decision: row.get(12)?,
+            created_at: row.get(13)?,
+        })
+    }
+
+    pub fn insert_tool_review_log(&self, review: &NewToolReviewLog) -> Result<ToolReviewLog> {
+        self.conn.execute(
+            "INSERT INTO tool_review_log (
+                conversation_id, mcp_tool_call_id, server_name, tool_name, parameters,
+                model_code, provider_id, verdict, reason, duration_ms, error_detail
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                review.conversation_id,
+                review.mcp_tool_call_id,
+                review.server_name,
+                review.tool_name,
+                review.parameters,
+                review.model_code,
+                review.provider_id,
+                review.verdict,
+                review.reason,
+                review.duration_ms,
+                review.error_detail,
+            ],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.get_tool_review_log(id)
+    }
+
+    pub fn get_tool_review_log(&self, id: i64) -> Result<ToolReviewLog> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, conversation_id, mcp_tool_call_id, server_name, tool_name, parameters,
+                    model_code, provider_id, verdict, reason, duration_ms, error_detail,
+                    user_decision, created_at
+             FROM tool_review_log WHERE id = ?",
+        )?;
+        stmt.query_row([id], Self::map_tool_review_log)
+    }
+
+    pub fn get_tool_review_by_call_id(&self, call_id: i64) -> Result<Option<ToolReviewLog>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, conversation_id, mcp_tool_call_id, server_name, tool_name, parameters,
+                    model_code, provider_id, verdict, reason, duration_ms, error_detail,
+                    user_decision, created_at
+             FROM tool_review_log WHERE mcp_tool_call_id = ? ORDER BY id DESC LIMIT 1",
+        )?;
+        stmt.query_row([call_id], Self::map_tool_review_log).optional()
+    }
+
+    pub fn list_tool_reviews_by_conversation(&self, conversation_id: i64) -> Result<Vec<ToolReviewLog>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, conversation_id, mcp_tool_call_id, server_name, tool_name, parameters,
+                    model_code, provider_id, verdict, reason, duration_ms, error_detail,
+                    user_decision, created_at
+             FROM tool_review_log WHERE conversation_id = ? ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([conversation_id], Self::map_tool_review_log)?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    pub fn set_tool_review_user_decision(&self, call_id: i64, decision: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tool_review_log SET user_decision = ?1
+             WHERE id = (
+                SELECT id FROM tool_review_log WHERE mcp_tool_call_id = ?2 ORDER BY id DESC LIMIT 1
+             )",
+            params![decision, call_id],
+        )?;
+        Ok(())
+    }
+
     #[instrument(level = "trace", skip(self, result, error), fields(id, status))]
     pub fn update_mcp_tool_call_status(
         &self,
@@ -1300,11 +1429,26 @@ impl MCPDatabase {
     #[instrument(level = "trace", skip(self), fields(id))]
     pub fn mark_mcp_tool_call_executing_if_pending(&self, id: i64) -> Result<bool> {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        // 允许从 pending/failed 进入 executing；对于 failed 的重试，覆盖 started_time 即可
+        // A skipped call has already produced a terminal tool result and must not run later.
         let rows = self.retry_if_busy(|| {
             self.conn.execute(
-                "UPDATE mcp_tool_call SET status = 'executing', started_time = ? WHERE id = ? AND status IN ('pending', 'failed')",
-                params![now.clone(), id],
+                "UPDATE mcp_tool_call SET status = 'executing', started_time = ? \
+                 WHERE id = ? AND status IN ('pending', 'failed') \
+                 AND (error IS NULL OR error != ?)",
+                params![now.clone(), id, UNSTARTED_TOOL_CALL_SKIP_REASON],
+            )
+        })?;
+        Ok(rows > 0)
+    }
+
+    /// Resolve an unstarted call when the user has moved on to a new prompt.
+    pub fn skip_unstarted_mcp_tool_call(&self, id: i64, reason: &str) -> Result<bool> {
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let rows = self.retry_if_busy(|| {
+            self.conn.execute(
+                "UPDATE mcp_tool_call SET status = 'failed', error = ?, finished_time = ? \
+                 WHERE id = ? AND status = 'pending' AND started_time IS NULL",
+                params![reason, now.clone(), id],
             )
         })?;
         Ok(rows > 0)
@@ -1837,6 +1981,7 @@ impl MCPDatabase {
         Ok(found.is_some())
     }
 
+    #[allow(dead_code)]
     pub fn get_valid_loaded_tools_for_conversation(
         &self,
         conversation_id: i64,
@@ -1910,5 +2055,26 @@ impl MCPDatabase {
             result.push(row?);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod null_description_tests {
+    use super::MCPDatabase;
+    use rusqlite::Connection;
+
+    #[test]
+    fn get_mcp_servers_tolerates_null_description() {
+        let db = MCPDatabase { conn: Connection::open_in_memory().unwrap() };
+        db.create_tables().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO mcp_server (name, description, transport_type, url, is_enabled) VALUES ('n', NULL, 'http', 'http://x/mcp', 1)",
+                [],
+            )
+            .unwrap();
+        let servers = db.get_mcp_servers().expect("NULL description must not break the list");
+        let server = servers.iter().find(|s| s.name == "n").unwrap();
+        assert_eq!(server.description, "");
     }
 }

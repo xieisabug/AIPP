@@ -6,11 +6,15 @@ import { ShineBorder } from "@/components/magicui/shine-border";
 import { MotionMetaRow, MotionStatusSlot, MotionToolCard } from "@/components/mcp-tool-components/McpToolMotion";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { invoke } from "@tauri-apps/api/core";
+import { loadMcpToolCall } from "@/services/conversationResourceCache";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { MCPToolCallUpdateEvent } from "@/data/Conversation";
 import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import { maskToolCall } from "@/utils/antiLeakage";
 import { getErrorMessage } from "@/utils/error";
+import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
+import { noteToolReview, useToolReview } from "@/hooks/toolReviewStore";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface McpToolCallProps {
     serverName?: string;
@@ -28,7 +32,7 @@ interface McpToolCallProps {
     isStreaming?: boolean; // 流式工具调用（LLM正在生成参数）
 }
 
-type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed" | "streaming";
+export type ExecutionState = "idle" | "pending" | "executing" | "success" | "failed" | "streaming" | "cancelled";
 
 const ToolErrorContinueContext = createContext(true);
 
@@ -36,7 +40,7 @@ export const ToolErrorContinueProvider = ToolErrorContinueContext.Provider;
 
 export const useToolErrorContinueEnabled = () => useContext(ToolErrorContinueContext);
 
-const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
+export const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: string }> = ({
     content,
     maxHeight = "120px",
     className = "",
@@ -57,10 +61,16 @@ const JsonDisplay: React.FC<{ content: string; maxHeight?: string; className?: s
     );
 };
 
-const StatusIndicator: React.FC<{ state: ExecutionState }> = ({ state }) => {
+export const StatusIndicator: React.FC<{ state: ExecutionState }> = ({ state }) => {
     switch (state) {
         case "idle":
             return null;
+        case "cancelled":
+            return (
+                <Badge variant="outline" className="flex items-center gap-1 ml-3">
+                    已取消
+                </Badge>
+            );
         case "streaming":
             return (
                 <Badge variant="secondary" className="flex items-center gap-1 ml-3">
@@ -115,7 +125,6 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     callId,
     mcpToolCallStates,
     shiningMcpCallId = null,
-    isLastCall = true, // 默认为 true，向后兼容
     isStreaming = false, // 默认非流式
 }) => {
     const continueOnToolErrorEnabled = useToolErrorContinueEnabled();
@@ -166,6 +175,9 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const [executionError, setExecutionError] = useState<string | null>(
         initialProtocolState === "failed" ? (error || "执行失败") : null
     );
+    const toolReview = useToolReview(effectiveCallId);
+    const isReviewing = toolReview?.phase === "reviewing";
+    const [isRejecting, setIsRejecting] = useState(false);
     // 默认展开：流式调用和新工具调用默认展开，历史调用根据状态决定
     const shouldInitiallyExpand = isStreaming || !callId || initialProtocolState === "failed";
     const [isExpanded, setIsExpanded] = useState<boolean>(shouldInitiallyExpand);
@@ -255,6 +267,11 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     const isProtocolFailureWithoutCall = !effectiveCallId && isFailed && (status === "failed" || Boolean(error));
     const shouldHideFailedActions = isFailed && continueOnToolErrorEnabled;
     const canShowExecutionActions = canExecute && !shouldHideFailedActions && !isProtocolFailureWithoutCall;
+    const canReject = executionState === "pending" && Boolean(effectiveCallId);
+    const canContinueWithError = isFailed && !shouldHideFailedActions;
+    // 移动端：执行/继续/拒绝不挤在头部图标里，而是在头部下方常驻一行带文字的 44px 按钮（展开/收起都可用）
+    const isMobilePlatform = useIsMobilePlatform();
+    const showMobileActionRow = isMobilePlatform && !isExecuting && (canShowExecutionActions || canContinueWithError);
     const isRunning = effectiveCallId !== null && shiningMcpCallId === effectiveCallId; // 闪亮由全局 shine snapshot 决定
 
     // 如果提供了 callId，尝试获取已有的执行结果
@@ -262,9 +279,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         if (effectiveCallId && executionState === "idle") {
             const fetchExistingResult = async () => {
                 try {
-                    const result = await invoke<MCPToolCall>("get_mcp_tool_call", {
-                        callId: effectiveCallId,
-                    });
+                    const result = await loadMcpToolCall(effectiveCallId);
 
                     if (result.status === "success") {
                         setExecutionResult((prev) => result.result ?? prev ?? null);
@@ -372,6 +387,34 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
         });
     }, []);
 
+    const reviewNeedsConfirmation = toolReview?.phase === "done"
+        && (toolReview.verdict === "risky" || toolReview.verdict === "error")
+        && executionState === "pending";
+    const reviewReason = toolReview?.phase === "done" ? toolReview.reason.trim() : "";
+
+    const handleReject = useCallback(async () => {
+        if (!canReject || !effectiveCallId || isRejecting) return;
+        setIsRejecting(true);
+        try {
+            if (isReviewing) {
+                noteToolReview(effectiveCallId, {
+                    phase: "done",
+                    callId: effectiveCallId,
+                    verdict: "cancelled",
+                    reason: "用户已手动介入，已停止自动审核",
+                });
+            }
+            await invoke("reject_mcp_tool_call", { callId: effectiveCallId });
+            const reason = reviewReason || "用户拒绝执行";
+            setExecutionState("failed");
+            setExecutionError(reason.startsWith("用户拒绝执行") ? reason : `用户拒绝执行：${reason}`);
+        } catch (rejectError) {
+            setExecutionError(getErrorMessage(rejectError) || "拒绝失败");
+        } finally {
+            setIsRejecting(false);
+        }
+    }, [canReject, effectiveCallId, isRejecting, isReviewing, reviewReason]);
+
     const handleExecute = useCallback(async () => {
         if (!conversationId) {
             console.error("conversation_id is required for execution");
@@ -387,6 +430,14 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionError(null);
 
             let currentCallId = effectiveCallId;
+            if (isReviewing && currentCallId) {
+                noteToolReview(currentCallId, {
+                    phase: "done",
+                    callId: currentCallId,
+                    verdict: "cancelled",
+                    reason: "用户已手动介入，已停止自动审核",
+                });
+            }
 
             // Create tool call if it doesn't exist
             if (!currentCallId) {
@@ -402,10 +453,10 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             }
 
             // Execute the tool call
-            // 只有当这是消息中最后一个工具调用时才触发续写
+            // 后端根据整轮工具状态决定是否续写，与卡片位置无关。
             const result = await invoke<MCPToolCall>("execute_mcp_tool_call", {
                 callId: currentCallId,
-                triggerContinuation: isLastCall,
+                triggerContinuation: true,
             });
 
             if (result.status === "success") {
@@ -432,7 +483,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             setExecutionState("failed");
             setAutoExpanded(!continueOnToolErrorEnabled);
         }
-    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isLastCall, continueOnToolErrorEnabled, setAutoExpanded]);
+    }, [conversationId, messageId, serverName, toolName, parameters, effectiveCallId, isReviewing, continueOnToolErrorEnabled, setAutoExpanded]);
 
     const handleStop = useCallback(async () => {
         if (!effectiveCallId) {
@@ -494,7 +545,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
     };
 
     return (
-        <MotionToolCard>
+        <MotionToolCard animateEntrance={isRunning || isStreaming}>
             {(isRunning || isStreaming) && (
                 <ShineBorder
                     shineColor={DEFAULT_SHINE_BORDER_CONFIG.shineColor}
@@ -502,14 +553,23 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                     duration={DEFAULT_SHINE_BORDER_CONFIG.duration}
                 />
             )}
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-sm min-w-0 flex-1" title={headerTitle}>
-                    <Blocks className="h-4 w-4 flex-shrink-0" />
-                    <span className="truncate" title={displayServerName}>{displayServerName}</span>
-                    <span className="text-xs font-bold text-muted-foreground flex-shrink-0"> - </span>
-                    <span className="truncate" title={displayToolName}>{displayToolName}</span>
-                </div>
-                <div className="flex items-center gap-1 flex-shrink-0">
+            <div className="flex items-start justify-between gap-2">
+                <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-start gap-2 rounded-md p-1 text-left text-sm hover:bg-muted/60"
+                    title={isExpanded ? "收起完整工具名与参数" : "展开完整工具名与参数"}
+                    aria-expanded={isExpanded}
+                    data-aipp-slot="mcp-tool-call-header"
+                    onClick={handleToggleExpand}
+                >
+                    <Blocks className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                    <span className={`min-w-0 flex-1 ${isExpanded ? "break-words whitespace-normal" : "truncate"}`} title={headerTitle}>
+                        <span title={displayServerName}>{displayServerName}</span>
+                        <span className="text-xs font-bold text-muted-foreground"> - </span>
+                        <span title={displayToolName}>{displayToolName}</span>
+                    </span>
+                </button>
+                <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-1">
                     <MotionStatusSlot stateKey={executionState} present={executionState !== "idle"}>
                         <StatusIndicator state={executionState} />
                     </MotionStatusSlot>
@@ -518,52 +578,111 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                             onClick={handleStop}
                             size="sm"
                             variant="ghost"
-                            className="h-7 w-7 p-0 flex-shrink-0 text-destructive"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0 text-destructive"
                             title="停止"
+                            aria-label="停止"
                         >
-                            <Square className="h-3 w-3 fill-current" />
+                            <Square className="h-4 w-4 fill-current" />
                         </Button>
                     )}
-                    {!isExpanded && canShowExecutionActions && (
+                    {!isMobilePlatform && !isExpanded && canShowExecutionActions && (
                         <Button
                             onClick={handleExecute}
-                            disabled={isExecuting}
+                            disabled={isExecuting || isRejecting}
                             size="sm"
                             variant="ghost"
-                            className="h-7 w-7 p-0 flex-shrink-0"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                             title={isFailed ? "重新执行" : "执行"}
+                            aria-label={isFailed ? "重新执行" : "执行"}
                         >
                             {isExecuting ? (
-                                <Loader2 className="h-3 w-3 animate-spin" />
+                                <Loader2 className="h-4 w-4 animate-spin" />
                             ) : isFailed ? (
-                                <RotateCcw className="h-3 w-3" />
+                                <RotateCcw className="h-4 w-4" />
                             ) : (
-                                <Play className="h-3 w-3" />
+                                <Play className="h-4 w-4" />
                             )}
                         </Button>
                     )}
-                    {!isExpanded && isFailed && !shouldHideFailedActions && (
+                    {!isMobilePlatform && !isExpanded && canContinueWithError && (
                         <Button
                             onClick={handleContinueWithError}
                             size="sm"
                             variant="ghost"
-                            className="h-7 w-7 p-0 flex-shrink-0"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                             title="以错误继续对话"
+                            aria-label="以错误继续对话"
                         >
-                            <ArrowRight className="h-3 w-3" />
+                            <ArrowRight className="h-4 w-4" />
+                        </Button>
+                    )}
+                    {!isMobilePlatform && !isExpanded && canReject && (
+                        <Button
+                            onClick={handleReject}
+                            disabled={isRejecting}
+                            size="sm"
+                            variant="ghost"
+                            className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
+                            title="拒绝执行"
+                            aria-label="拒绝执行"
+                        >
+                            <XCircle className="h-4 w-4" />
                         </Button>
                     )}
                     <Button
                         onClick={handleToggleExpand}
                         size="sm"
                         variant="ghost"
-                        className="h-7 w-7 p-0 flex-shrink-0"
+                        className="h-11 w-11 min-h-11 min-w-11 p-0 flex-shrink-0"
                         title={isExpanded ? "收起详情" : "展开详情"}
+                        aria-label={isExpanded ? "收起详情" : "展开详情"}
                     >
-                        {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                        {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                     </Button>
                 </div>
             </div>
+
+            {showMobileActionRow && (
+                <div className="mt-1 flex flex-wrap items-center gap-2" data-aipp-slot="mcp-tool-call-mobile-actions">
+                    {canShowExecutionActions && (
+                        <Button
+                            onClick={handleExecute}
+                            disabled={isRejecting}
+                            size="sm"
+                            className="flex min-h-11 items-center gap-1 px-4"
+                            aria-label={isFailed ? "重新执行" : reviewNeedsConfirmation ? "确认执行" : "执行"}
+                        >
+                            {isFailed ? <RotateCcw className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                            {isFailed ? "重新执行" : reviewNeedsConfirmation ? "确认执行" : "执行"}
+                        </Button>
+                    )}
+                    {canContinueWithError && (
+                        <Button
+                            onClick={handleContinueWithError}
+                            size="sm"
+                            variant="outline"
+                            className="flex min-h-11 items-center gap-1 px-4"
+                            aria-label="以错误继续对话"
+                        >
+                            <ArrowRight className="h-4 w-4" />
+                            继续
+                        </Button>
+                    )}
+                    {canReject && (
+                        <Button
+                            onClick={handleReject}
+                            disabled={isRejecting}
+                            size="sm"
+                            variant="outline"
+                            className="flex min-h-11 items-center gap-1 px-4"
+                            aria-label="拒绝执行"
+                        >
+                            <XCircle className="h-4 w-4" />
+                            拒绝
+                        </Button>
+                    )}
+                </div>
+            )}
 
             {/* 带动画的可折叠内容区域 */}
             <div
@@ -576,11 +695,12 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             >
                 {shouldRenderDetails ? (
                     <div ref={innerContentRef} className="mt-2 space-y-2 max-w-full overflow-hidden">
+                        <ToolReviewNotice callId={effectiveCallId} />
                         <div className="max-w-full overflow-hidden">
                             <span className="text-xs font-medium mb-1 text-muted-foreground">参数:</span>
                             <JsonDisplay content={displayParameters} maxHeight="120px" className="mt-1" />
                         </div>
-                        {canShowExecutionActions && (
+                        {canShowExecutionActions && !showMobileActionRow && (
                             <div className="flex items-center gap-2">
                                 {isExecuting ? (
                                     <>
@@ -588,7 +708,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                             onClick={handleStop}
                                             size="sm"
                                             variant="ghost"
-                                            className="flex items-center gap-1 h-7 text-xs text-destructive"
+                                            className="flex min-h-11 items-center gap-1 px-3 text-xs text-destructive"
                                             title="停止"
                                         >
                                             <Square className="h-3 w-3 fill-current" />
@@ -599,22 +719,35 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
                                     <>
                                         <Button
                                             onClick={handleExecute}
+                                            disabled={isRejecting}
                                             size="sm"
-                                            className="flex items-center gap-1 h-7 text-xs"
+                                            className="flex min-h-11 items-center gap-1 px-3 text-xs"
                                         >
                                             {isFailed ? (
                                                 <RotateCcw className="h-3 w-3" />
                                             ) : (
                                                 <Play className="h-3 w-3" />
                                             )}
-                                            {isFailed ? "重新执行" : "执行"}
+                                            {isFailed ? "重新执行" : reviewNeedsConfirmation ? "确认执行" : "执行"}
                                         </Button>
+                                        {canReject && (
+                                            <Button
+                                                onClick={handleReject}
+                                                disabled={isRejecting}
+                                                size="sm"
+                                                variant="outline"
+                                                className="flex min-h-11 items-center gap-1 px-3 text-xs"
+                                            >
+                                                <XCircle className="h-3 w-3" />
+                                                拒绝
+                                            </Button>
+                                        )}
                                         {isFailed && !shouldHideFailedActions && (
                                             <Button
                                                 onClick={handleContinueWithError}
                                                 size="sm"
                                                 variant="outline"
-                                                className="flex items-center gap-1 h-7 text-xs"
+                                                className="flex min-h-11 items-center gap-1 px-3 text-xs"
                                             >
                                                 <ArrowRight className="h-3 w-3" />
                                                 以错误继续

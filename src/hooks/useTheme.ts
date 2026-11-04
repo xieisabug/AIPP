@@ -186,6 +186,9 @@ export const useTheme = (windowLabel?: string) => {
         if (themeName && themeName !== 'default') {
             root.classList.add(`theme-${themeName}`);
         }
+        // Android: sync WindowInsetsController icon contrast with resolved theme (#151).
+        // No-op / resolve on desktop; failures are non-fatal (desktop forced-android screenshots).
+        void invoke('set_android_status_bar_appearance', { theme }).catch(() => undefined);
     }, [applyWindowScopeClass, ensurePluginThemeStyle, resolveWindowLabel]);
 
     // 计算最终主题

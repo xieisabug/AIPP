@@ -3,11 +3,13 @@ import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Powe
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
-import { ConfigPageLayout, SidebarList, ListItemButton, SelectOption } from "../common";
+import { ConfigPageLayout, SidebarList, ListItemButton, ConfigPageLoading, SelectOption } from "../common";
 
 // 导入新的 hooks 和组件
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useVersionManager } from "@/hooks/feature/useVersionManager";
+import { useIsMobilePlatform, usePlatform } from "@/hooks/use-platform";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { FeatureFormRenderer } from "./feature/FeatureFormRenderer";
 import { APP_SHORTCUT_KEY_PREFIX, SHORTCUT_ACTIONS } from "@/data/Shortcuts";
 import {
@@ -29,17 +31,15 @@ interface FeatureItem {
     code: string;
 }
 
-interface FeatureItem {
-    id: string;
-    name: string;
-    description: string;
-    icon: React.ReactNode;
-    code: string;
-}
-
 const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () => void }> = ({ subNav, onSubNavConsumed }) => {
+    const platform = usePlatform();
+    // 移动端列表行展示功能说明；桌面下拉保持只有名称
+    const isMobilePlatform = useIsMobilePlatform();
+    const isNarrow = useIsMobile();
+    const isMobileList = isMobilePlatform || isNarrow;
+
     // 功能列表定义
-    const featureList: FeatureItem[] = [
+    const featureList = useMemo<FeatureItem[]>(() => [
         {
             id: "display",
             name: "显示",
@@ -50,7 +50,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         {
             id: "conversation_summary",
             name: "辅助AI",
-            description: "配置AI辅助功能：对话标题生成、表单自动填写和上下文压缩",
+            description: "配置AI辅助功能：对话标题生成、表单自动填写、上下文压缩和工具调用自动审核",
             icon: <MessageSquare className="h-5 w-5" />,
             code: "conversation_summary",
         },
@@ -63,7 +63,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         },
         {
             id: "data_folder",
-            name: "数据目录",
+            name: "数据",
             description: "管理和同步数据文件夹",
             icon: <FolderOpen className="h-5 w-5" />,
             code: "data_folder",
@@ -103,23 +103,55 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             icon: <Info className="h-5 w-5" />,
             code: "about",
         },
-    ];
+    ].filter((feature) => {
+        if (platform !== "android" && platform !== "ios") return true;
+        // 移动平台：隐藏快捷键、React/Vue 预览（C/M3）；保留显示/数据同步/网络/基础项
+        return feature.id !== "shortcuts" && feature.id !== "preview";
+    }), [platform]);
 
     const [selectedFeature, setSelectedFeature] = useState<FeatureItem>(featureList[0]);
+    const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+    // 跨页跳转到某个功能时，移动端直接打开该功能详情
+    const [mobileDetailRequest, setMobileDetailRequest] = useState(0);
+
+    useEffect(() => {
+        const mobileHidden = platform === "android" || platform === "ios"
+            ? selectedFeature.id === "shortcuts" || selectedFeature.id === "preview"
+            : false;
+        if (mobileHidden) {
+            setSelectedFeature(featureList[0]);
+        }
+    }, [featureList, platform, selectedFeature.id]);
 
     // 消费来自父组件的 subNav 导航指令
     useEffect(() => {
         if (subNav) {
-            const target = featureList.find(f => f.id === subNav);
+            const [featureId, anchor] = subNav.split("#");
+            const target = featureList.find(f => f.id === featureId);
             if (target) {
                 setSelectedFeature(target);
+                setPendingAnchor(anchor || null);
+                setMobileDetailRequest(request => request + 1);
             }
             onSubNavConsumed?.();
         }
-    }, [subNav]);
+    }, [featureList, onSubNavConsumed, subNav]);
+
+    useEffect(() => {
+        if (!pendingAnchor) {
+            return;
+        }
+        const timer = window.setTimeout(() => {
+            document.getElementById(pendingAnchor)?.scrollIntoView({ behavior: "smooth", block: "center" });
+            setPendingAnchor(null);
+        }, 0);
+        return () => window.clearTimeout(timer);
+    }, [pendingAnchor, selectedFeature.id]);
 
     // 使用新的 hooks
     const { featureConfig, saveFeatureConfig, loadFeatureConfig, loading } = useFeatureConfig();
+    // 首次读取并回填表单后才展示表单；之后保存触发的重新读取不再切回加载态
+    const [initialLoaded, setInitialLoaded] = useState(false);
     const versionManager = useVersionManager();
     const defaultAppShortcutValues = useMemo(() => {
         const values: Record<string, string> = {};
@@ -149,6 +181,8 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             // 记忆总结（实验功能，默认关闭）
             memory_summary_enabled: false,
             memory_summary_model: "",
+            auto_review_model: "",
+            auto_review_output_mode: "auto",
             // 上下文压缩（底层仍存储在 experimental）
             context_compaction_enabled: false,
             context_max_input_tokens: "128000",
@@ -215,7 +249,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
 
     // 监听 featureConfig 变化，更新表单值
     useEffect(() => {
-        if (!loading && featureConfig.size > 0) {
+        if (!loading) {
             console.log("feature config loaded", featureConfig);
 
             const displayConfig = featureConfig.get("display");
@@ -223,7 +257,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             displayForm.reset(buildDisplayFormValues(displayConfig, experimentalConfig));
 
             // 更新 summary 表单 - 支持新旧配置键兼容
-            const summaryConfig = featureConfig.get("conversation_summary");
+            const summaryConfig = featureConfig.get("conversation_summary") ?? new Map<string, string>();
             if (summaryConfig) {
                 // 读取新配置键
                 const titleModel = summaryConfig.get("title_model") || "";
@@ -254,6 +288,12 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                         const providerId = summaryConfig.get("memory_summary_provider_id") || "";
                         return model && providerId ? `${model}%%${providerId}` : "";
                     })(),
+                    auto_review_output_mode: summaryConfig.get("auto_review_output_mode") || "auto",
+                    auto_review_model: (() => {
+                        const model = summaryConfig.get("auto_review_model") || "";
+                        const providerId = summaryConfig.get("auto_review_provider_id") || "";
+                        return model && providerId ? `${model}%%${providerId}` : "";
+                    })(),
                     // 上下文压缩（全局实验配置，展示在辅助AI）
                     context_compaction_enabled:
                         experimentalConfig?.get("context_compaction_enabled") === "true",
@@ -275,6 +315,8 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                     form_autofill_model: "",
                     memory_summary_enabled: false,
                     memory_summary_model: "",
+                    auto_review_model: "",
+                    auto_review_output_mode: "auto",
                     context_compaction_enabled:
                         experimentalConfig?.get("context_compaction_enabled") === "true",
                     context_max_input_tokens:
@@ -289,7 +331,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             experimentalForm.reset(buildExperimentalConfigFormValues(featureConfig));
 
             // 更新 preview 表单
-            const previewConfig = featureConfig.get("preview");
+            const previewConfig = featureConfig.get("preview") ?? new Map<string, string>();
             if (previewConfig) {
                 previewForm.reset({
                     preview_type: previewConfig.get("preview_type") || "service",
@@ -300,7 +342,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             }
 
             // 更新 network 表单
-            const networkConfig = featureConfig.get("network_config");
+            const networkConfig = featureConfig.get("network_config") ?? new Map<string, string>();
             if (networkConfig) {
                 networkForm.reset({
                     request_timeout: networkConfig.get("request_timeout") || "180",
@@ -332,7 +374,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             }
 
             // 更新 shortcuts 表单
-            const shortcutsConfig = featureConfig.get("shortcuts");
+            const shortcutsConfig = featureConfig.get("shortcuts") ?? new Map<string, string>();
             if (shortcutsConfig) {
                 const shortcut = shortcutsConfig.get("shortcut");
                 const modifier_key = shortcutsConfig.get("modifier_key") || (isMac ? "option" : "alt");
@@ -360,7 +402,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             // 更新 autostart 表单
             const autostartConfig = featureConfig.get("autostart");
             let autostartEnabled = otherForm.getValues("autostart_enabled") ?? "false";
-            let toolErrorContinueEnabled = otherForm.getValues("tool_error_continue_enabled") ?? "true";
+            let toolErrorContinueEnabled = "true";
             if (autostartConfig) {
                 autostartEnabled = autostartConfig.get("autostart_enabled") || "false";
             }
@@ -376,6 +418,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 autostart_enabled: autostartEnabled,
                 tool_error_continue_enabled: toolErrorContinueEnabled,
             });
+            setInitialLoaded(true);
         }
     }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm, defaultAppShortcutValues]);
 
@@ -423,6 +466,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
         const titleModel = parseModel(values.title_model as string);
         const formAutofillModel = parseModel(values.form_autofill_model as string);
         const memorySummaryModel = parseModel(values.memory_summary_model as string);
+        const autoReviewModel = parseModel(values.auto_review_model as string);
 
         // 验证标题模型
         if (values.title_summary_enabled && (!titleModel.provider_id || isNaN(Number(titleModel.provider_id)))) {
@@ -446,6 +490,9 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             memory_summary_enabled: values.memory_summary_enabled.toString(),
             memory_summary_model: memorySummaryModel.model_code,
             memory_summary_provider_id: memorySummaryModel.provider_id,
+            auto_review_model: autoReviewModel.model_code,
+            auto_review_provider_id: autoReviewModel.provider_id,
+            auto_review_output_mode: values.auto_review_output_mode,
         });
 
         const currentExperimentalConfig = featureConfig.get("experimental");
@@ -525,9 +572,10 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             featureList.map((feature) => ({
                 id: feature.id,
                 label: feature.name,
+                description: isMobileList ? feature.description : undefined,
                 icon: feature.icon,
             })),
-        []
+        [featureList, isMobileList]
     );
 
     // 下拉菜单选择回调
@@ -538,7 +586,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 handleSelectFeature(feature);
             }
         },
-        [handleSelectFeature]
+        [featureList, handleSelectFeature]
     );
 
     // 侧边栏内容 - 使用 useMemo 避免重复创建
@@ -596,11 +644,13 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
     return (
         <ConfigPageLayout
             sidebar={sidebar}
-            content={content}
+            content={initialLoaded ? content : <ConfigPageLoading />}
             selectOptions={selectOptions}
             selectedOptionId={selectedFeature.id}
             onSelectOption={handleSelectFromDropdown}
             selectPlaceholder="选择功能"
+            listSearchable={false}
+            mobileDetailRequest={mobileDetailRequest}
         />
     );
 };

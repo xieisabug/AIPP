@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import React, { createContext, useContext, useState, useCallback, useMemo, ReactNode } from "react";
 
 interface AntiLeakageContextValue {
     /** 防泄露模式是否启用 */
@@ -39,13 +39,13 @@ export const AntiLeakageProvider: React.FC<AntiLeakageProviderProps> = ({ childr
         }
     }, []);
 
-    const value: AntiLeakageContextValue = {
+    const value = useMemo<AntiLeakageContextValue>(() => ({
         enabled,
         isRevealed,
         toggleReveal,
         resetReveal,
         setEnabled,
-    };
+    }), [enabled, isRevealed, resetReveal, setEnabled, toggleReveal]);
 
     return <AntiLeakageContext.Provider value={value}>{children}</AntiLeakageContext.Provider>;
 };

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import ChatUIToolbar from "../components/ChatUIToolbar";
 import ConversationList from "../components/ConversationList";
@@ -20,10 +20,12 @@ import {
 import { Conversation, ConversationSearchHit } from "../data/Conversation";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
+import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
 import {
     useAcpPermission,
     useOperationPermission,
 } from "../hooks/useOperationPermission";
+import { useAcpElicitation } from "../hooks/useAcpElicitation";
 import { useAskUserQuestion, usePreviewFile } from "../hooks/useInlineInteraction";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
@@ -31,13 +33,18 @@ import useConversationManager from "../hooks/useConversationManager";
 import { AntiLeakageProvider } from "../contexts/AntiLeakageContext";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { Menu, Plus } from "lucide-react";
+import { Menu, PanelRight, Plus } from "lucide-react";
 import {
     runScrollPerformanceProbe,
     waitForAnimationFrames,
     waitForCondition,
+    type ChatScrollProbeDirection,
     type ChatScrollProbeResult,
 } from "../utils/chatScrollPerf";
+import type {
+    VirtualRowEstimateSummary,
+    VirtualRowMessagePart,
+} from "../utils/messageItemRenderStats";
 import { getErrorMessage } from "../utils/error";
 
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -45,6 +52,8 @@ import { pluginRuntime } from "../services/PluginRuntime";
 
 interface ChatScrollPerfTestOptions {
     conversationIndex?: number;
+    conversationId?: number | null;
+    direction?: ChatScrollProbeDirection;
     scrollDurationMs?: number;
     includeReturnTrip?: boolean;
     settleFrameCount?: number;
@@ -56,6 +65,8 @@ interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
     conversationIndex: number;
     conversationName: string;
     messageItemCount: number;
+    messagesRenderedMs: number;
+    initialSettleMs: number;
     initialScrollTop: number;
     initialMaxScrollTop: number;
     initialDistanceToBottom: number;
@@ -80,6 +91,8 @@ interface ChatScrollPerfTestResult extends ChatScrollProbeResult {
         delta: number;
         lastHeight: number;
     }>;
+    rowEstimateSummary: VirtualRowEstimateSummary | null;
+    viewportWidth: number;
 }
 
 interface ChatScrollPerfTestErrorResult {
@@ -104,7 +117,12 @@ declare global {
             getLastResult: () => ChatScrollPerfTestOutcome | null;
         };
         __AIPP_CHAT_PERF_CAPTURE__?: {
-            recordVirtualRowHeight?: (key: string, height: number) => void;
+            recordVirtualRowHeight?: (
+                key: string,
+                height: number,
+                estimatedHeight?: number,
+                parts?: VirtualRowMessagePart[],
+            ) => void;
             resetVirtualRowHeightDrift?: () => void;
             getVirtualRowHeightDrift?: () => Array<{
                 key: string;
@@ -114,6 +132,10 @@ declare global {
                 delta: number;
                 lastHeight: number;
             }>;
+            recordMessageItemRender?: (messageId: number) => void;
+            resetMessageItemRenderCounts?: () => void;
+            getMessageItemRenderCounts?: () => Record<string, number>;
+            getVirtualRowEstimateSummary?: () => VirtualRowEstimateSummary;
         };
         __AIPP_CHAT_SCROLL_PERF_ACTIVE__?: boolean;
     }
@@ -156,18 +178,25 @@ async function sampleInitialScrollSettle(
     return samples;
 }
 
+const EMPTY_INLINE_INTERACTION_ITEMS: InlineInteractionItem[] = [];
+
 function ChatUIWindow() {
     // 集成主题系统
     useTheme("chat_ui");
 
     // 防泄露模式配置
-    const { getConfigValue, loadFeatureConfig } = useFeatureConfig();
+    const { getConfigValue } = useFeatureConfig();
     const antiLeakageEnabled = getConfigValue("anti_leakage", "enabled") === "true";
 
     // 检测移动端
-    const isMobile = useIsMobile();
+    const isNarrow = useIsMobile();
+    const isMobilePlatform = useIsMobilePlatform();
+    // 移动平台一律走单 WebView 壳；桌面窄屏仅做布局响应（能力仍按平台判断）
+    const isMobile = isMobilePlatform || isNarrow;
+    const platform = usePlatform();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [conversationTitle, setConversationTitle] = useState("");
+    const [conversationAssistantName, setConversationAssistantName] = useState("");
     const [searchOpen, setSearchOpen] = useState(false);
     const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
     const [pendingPreviewFileSelection, setPendingPreviewFileSelection] =
@@ -185,6 +214,8 @@ function ChatUIWindow() {
             minHeight: number;
             maxHeight: number;
             lastHeight: number;
+            estimatedHeight?: number;
+            parts?: VirtualRowMessagePart[];
         }>(),
     );
     const { listConversations } = useConversationManager();
@@ -206,6 +237,14 @@ function ChatUIWindow() {
         isSubmitting: isAcpSubmitting,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
+        conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
+    });
+    const {
+        questionRequest: elicitationQuestionRequest,
+        decisionError: elicitationDecisionError,
+        handleSubmit: handleElicitationSubmit,
+        handleCancel: handleElicitationCancel,
+    } = useAcpElicitation({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
     const {
@@ -231,39 +270,78 @@ function ChatUIWindow() {
     } = usePreviewFile({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
-    const inlineInteractionItems: InlineInteractionItem[] = [];
-    if (isAskUserDialogOpen && pendingAskUserRequest) {
-        inlineInteractionItems.push({
-            key: `ask-user-question-${pendingAskUserRequest.request_id}`,
-            callId: askUserCallId,
-            messageId: askUserMessageId,
-            content: (
-                <AskUserQuestionCard
-                    request={pendingAskUserRequest}
-                    isOpen={isAskUserDialogOpen}
-                    viewMode={askUserViewMode}
-                    completedAnswers={askUserCompletedAnswers}
-                    readOnly={isAskUserReadOnly}
-                    onSubmit={handleAskUserSubmit}
-                    onCancel={handleAskUserCancel}
-                />
-            ),
-        });
-    }
-    if (isPreviewFileDialogOpen && pendingPreviewFileRequest) {
-        inlineInteractionItems.push({
-            key: `preview-file-${pendingPreviewFileRequest.request_id}`,
-            callId: previewFileCallId,
-            messageId: previewFileMessageId,
-            content: (
-                <PreviewFileCard
-                    request={pendingPreviewFileRequest}
-                    isOpen={isPreviewFileDialogOpen}
-                    onOpenChange={handlePreviewFileOpenChange}
-                />
-            ),
-        });
-    }
+    const inlineInteractionItems = useMemo(() => {
+        const items: InlineInteractionItem[] = [];
+        if (isAskUserDialogOpen && pendingAskUserRequest) {
+            items.push({
+                key: `ask-user-question-${pendingAskUserRequest.request_id}`,
+                callId: askUserCallId,
+                messageId: askUserMessageId,
+                content: (
+                    <AskUserQuestionCard
+                        request={pendingAskUserRequest}
+                        isOpen={isAskUserDialogOpen}
+                        viewMode={askUserViewMode}
+                        completedAnswers={askUserCompletedAnswers}
+                        readOnly={isAskUserReadOnly}
+                        onSubmit={handleAskUserSubmit}
+                        onCancel={handleAskUserCancel}
+                    />
+                ),
+            });
+        }
+        if (elicitationQuestionRequest) {
+            items.push({
+                key: `acp-elicitation-${elicitationQuestionRequest.request_id}`,
+                callId: null,
+                messageId: null,
+                content: (
+                    <AskUserQuestionCard
+                        request={elicitationQuestionRequest}
+                        isOpen
+                        viewMode="questionnaire"
+                        errorMessage={elicitationDecisionError}
+                        onSubmit={handleElicitationSubmit}
+                        onCancel={handleElicitationCancel}
+                    />
+                ),
+            });
+        }
+        if (isPreviewFileDialogOpen && pendingPreviewFileRequest) {
+            items.push({
+                key: `preview-file-${pendingPreviewFileRequest.request_id}`,
+                callId: previewFileCallId,
+                messageId: previewFileMessageId,
+                content: (
+                    <PreviewFileCard
+                        request={pendingPreviewFileRequest}
+                        isOpen={isPreviewFileDialogOpen}
+                        onOpenChange={handlePreviewFileOpenChange}
+                    />
+                ),
+            });
+        }
+        return items.length === 0 ? EMPTY_INLINE_INTERACTION_ITEMS : items;
+    }, [
+        askUserCallId,
+        askUserCompletedAnswers,
+        askUserMessageId,
+        askUserViewMode,
+        elicitationDecisionError,
+        elicitationQuestionRequest,
+        handleAskUserCancel,
+        handleAskUserSubmit,
+        handleElicitationCancel,
+        handleElicitationSubmit,
+        handlePreviewFileOpenChange,
+        isAskUserDialogOpen,
+        isAskUserReadOnly,
+        isPreviewFileDialogOpen,
+        pendingAskUserRequest,
+        pendingPreviewFileRequest,
+        previewFileCallId,
+        previewFileMessageId,
+    ]);
     const hasInlineInteraction = inlineInteractionItems.length > 0;
 
     // 移动端选择对话后自动关闭侧边栏
@@ -287,6 +365,7 @@ function ChatUIWindow() {
 
     const handleConversationChange = useCallback((conv?: Conversation) => {
         setConversationTitle(conv?.name || "");
+        setConversationAssistantName(conv?.assistant_name || "");
     }, []);
 
     useEffect(() => {
@@ -298,6 +377,7 @@ function ChatUIWindow() {
             options: ChatScrollPerfTestOptions = {},
         ): Promise<ChatScrollPerfTestResult> => {
             const conversationIndex = Math.max(0, options.conversationIndex ?? 1);
+            const testStartedAt = performance.now();
             const emitProgress = (
                 phase: string,
                 extra: Record<string, unknown> = {},
@@ -316,17 +396,21 @@ function ChatUIWindow() {
             try {
                 emitProgress("start");
                 if (isMobile) {
-                    throw new Error("Chat scroll perf test only supports desktop ChatUIWindow.");
+                    setSidebarOpen(false);
                 }
 
                 const conversations = await listConversations(1, 100);
                 emitProgress("conversations-loaded", {
                     conversationCount: conversations.length,
                 });
-                const targetConversation = conversations[conversationIndex];
+                const targetConversation = options.conversationId != null
+                    ? conversations.find((item) => item.id === options.conversationId)
+                    : conversations[conversationIndex];
                 if (!targetConversation) {
                     throw new Error(
-                        `Conversation index ${conversationIndex} is unavailable; only ${conversations.length} conversation(s) were loaded.`,
+                        options.conversationId != null
+                            ? `Conversation id ${options.conversationId} is not among the ${conversations.length} most recent conversation(s).`
+                            : `Conversation index ${conversationIndex} is unavailable; only ${conversations.length} conversation(s) were loaded.`,
                     );
                 }
 
@@ -353,7 +437,8 @@ function ChatUIWindow() {
                         .length > 0
                     );
                 }, { timeoutMs: 10000, intervalMs: 50 });
-                emitProgress("messages-rendered");
+                const messagesRenderedMs = performance.now() - testStartedAt;
+                emitProgress("messages-rendered", { messagesRenderedMs });
 
                 const scrollContainer = document.querySelector(
                     "[data-aipp-slot='chat-conversation-scroll']",
@@ -366,6 +451,7 @@ function ChatUIWindow() {
                     scrollContainer,
                     72,
                 );
+                const initialSettleMs = performance.now() - testStartedAt - messagesRenderedMs;
                 const lastInitialSample =
                     initialSettleSamples[initialSettleSamples.length - 1];
                 const initialMaxScrollTop = Math.max(
@@ -416,7 +502,12 @@ function ChatUIWindow() {
                     initialFirstVisibleAwayFromBottomFrame,
                 });
 
-                scrollContainer.scrollTop = 0;
+                // Match real user scrolling: cancel initial bottom-follow before
+                // programmatically driving the probe, otherwise it fights the test.
+                scrollContainer.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+                if (options.direction !== "up") {
+                    scrollContainer.scrollTop = 0;
+                }
                 await waitForAnimationFrames(2);
                 window.__AIPP_CHAT_PERF_CAPTURE__?.resetVirtualRowHeightDrift?.();
 
@@ -427,6 +518,7 @@ function ChatUIWindow() {
                     messageItemCount,
                 });
                 const probeResult = await runScrollPerformanceProbe(scrollContainer, {
+                    direction: options.direction,
                     durationMs: options.scrollDurationMs,
                     includeReturnTrip: options.includeReturnTrip,
                     settleFrameCount: options.settleFrameCount,
@@ -443,6 +535,8 @@ function ChatUIWindow() {
                     conversationName: targetConversation.name,
                     messageItemCount,
                     initialScrollTop,
+                    messagesRenderedMs,
+                    initialSettleMs,
                     initialMaxScrollTop,
                     initialDistanceToBottom,
                     initialAtBottom: initialDistanceToBottom <= 4,
@@ -454,6 +548,10 @@ function ChatUIWindow() {
                     rowHeightDrift:
                         window.__AIPP_CHAT_PERF_CAPTURE__?.getVirtualRowHeightDrift?.()
                         ?? [],
+                    rowEstimateSummary:
+                        window.__AIPP_CHAT_PERF_CAPTURE__?.getVirtualRowEstimateSummary?.()
+                        ?? null,
+                    viewportWidth: scrollContainer.clientWidth,
                 };
 
                 lastChatPerfResultRef.current = result;
@@ -630,17 +728,6 @@ function ChatUIWindow() {
         };
     }, []);
 
-    // 监听配置变更事件，当 Settings 窗口修改配置后重新加载
-    useEffect(() => {
-        const unlisten = listen("feature_config_changed", () => {
-            console.log("[ChatUI] feature_config_changed event received, reloading config");
-            loadFeatureConfig();
-        });
-        return () => {
-            unlisten.then((f) => f());
-        };
-    }, [loadFeatureConfig]);
-
     useEffect(() => {
         const api = {
             runConversationScrollTest: runConversationScrollPerfTest,
@@ -664,8 +751,24 @@ function ChatUIWindow() {
     }, [runConversationScrollPerfTest]);
 
     useEffect(() => {
+        const messageRenderCounts = new Map<number, number>();
         const capture = {
-            recordVirtualRowHeight: (key: string, height: number) => {
+            recordMessageItemRender: (messageId: number) => {
+                messageRenderCounts.set(
+                    messageId,
+                    (messageRenderCounts.get(messageId) ?? 0) + 1,
+                );
+            },
+            resetMessageItemRenderCounts: () => {
+                messageRenderCounts.clear();
+            },
+            getMessageItemRenderCounts: () => Object.fromEntries(messageRenderCounts),
+            recordVirtualRowHeight: (
+                key: string,
+                height: number,
+                estimatedHeight?: number,
+                parts?: VirtualRowMessagePart[],
+            ) => {
                 const map = virtualRowHeightDriftRef.current;
                 const existing = map.get(key);
                 if (!existing) {
@@ -674,10 +777,18 @@ function ChatUIWindow() {
                         minHeight: height,
                         maxHeight: height,
                         lastHeight: height,
+                        estimatedHeight,
+                        parts,
                     });
                     return;
                 }
 
+                if (estimatedHeight !== undefined) {
+                    existing.estimatedHeight = estimatedHeight;
+                }
+                if (parts) {
+                    existing.parts = parts;
+                }
                 if (existing.lastHeight === height) {
                     return;
                 }
@@ -703,6 +814,26 @@ function ChatUIWindow() {
             )
                 .sort((a, b) => b.delta - a.delta || b.changeCount - a.changeCount)
                 .slice(0, 12),
+            getVirtualRowEstimateSummary: () => {
+                const rows = Array.from(virtualRowHeightDriftRef.current)
+                    .filter(([, value]) => value.estimatedHeight !== undefined)
+                    .map(([key, value]) => ({
+                        key,
+                        estimatedHeight: Math.round(value.estimatedHeight ?? 0),
+                        measuredHeight: Math.round(value.lastHeight),
+                        parts: value.parts,
+                    }));
+                return {
+                    measuredRowCount: rows.length,
+                    totalEstimatedHeight: rows.reduce((sum, row) => sum + row.estimatedHeight, 0),
+                    totalMeasuredHeight: rows.reduce((sum, row) => sum + row.measuredHeight, 0),
+                    rows: rows
+                        .sort((a, b) =>
+                            Math.abs(b.estimatedHeight - b.measuredHeight)
+                            - Math.abs(a.estimatedHeight - a.measuredHeight))
+                        .slice(0, 40),
+                };
+            },
         };
 
         window.__AIPP_CHAT_PERF_CAPTURE__ = capture;
@@ -723,27 +854,27 @@ function ChatUIWindow() {
                 <div className="flex flex-col h-screen bg-background" data-aipp-window="chat_ui" data-aipp-slot="window-root">
                     {/* 移动端顶部栏 */}
                     <div
-                        className="flex-none flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
+                        className={`flex-none flex items-center justify-between px-2 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
                         data-aipp-slot="chat-mobile-header"
                     >
                         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
                             <SheetTrigger asChild>
-                                <Button variant="ghost" size="icon">
+                                <Button variant="ghost" size="icon" className="min-h-11 min-w-11" aria-label="打开会话列表">
                                     <Menu className="h-5 w-5" />
                                 </Button>
                             </SheetTrigger>
                             <SheetContent
                                 side="left"
-                                className="w-[280px] p-0 flex flex-col"
+                                className={`w-[280px] p-0 flex flex-col safe-top${platform === "android" ? " safe-top-android" : ""}`}
                                 aria-describedby={undefined}
                                 hideCloseButton
                                 data-aipp-slot="chat-mobile-sidebar"
                             >
                                 <SheetTitle className="sr-only">导航菜单</SheetTitle>
-                                <ChatUIInfomation showArtifacts={false} showSchedule={false} isMobile={true} />
+                                <ChatUIInfomation showArtifacts={true} showSchedule={false} isMobile={true} preferInAppNavigation={isMobilePlatform} onNavigate={() => setSidebarOpen(false)} />
                                 <ChatUIToolbar
                                     onNewConversation={handleNewConversation}
-                                    onSearch={() => setSearchOpen(true)}
+                                    onSearch={() => { setSidebarOpen(false); setSearchOpen(true); }}
                                 />
                                 <ConversationList
                                     conversationId={selectedConversation}
@@ -751,12 +882,39 @@ function ChatUIWindow() {
                                 />
                             </SheetContent>
                         </Sheet>
-                        <span className="font-medium text-sm truncate flex-1 text-center mx-3" data-aipp-slot="chat-mobile-title">
-                            {mobileTitle}
-                        </span>
-                        <Button variant="ghost" size="icon" onClick={handleNewConversation} aria-label="新建对话">
-                            <Plus className="h-5 w-5" />
-                        </Button>
+                        {/* 标题 + 助手名副标题；有会话时点击标题重命名（复用 ConversationUI 的标题编辑对话框） */}
+                        <button
+                            type="button"
+                            className="mx-1 flex min-h-11 min-w-0 flex-1 flex-col items-center justify-center rounded-md px-1 leading-tight disabled:cursor-default"
+                            data-aipp-slot="chat-mobile-title"
+                            disabled={!selectedConversation}
+                            aria-label={selectedConversation ? `重命名会话：${mobileTitle}` : mobileTitle}
+                            onClick={() => conversationUIRef.current?.openTitleEdit()}
+                        >
+                            <span className="max-w-full truncate text-sm font-medium">{mobileTitle}</span>
+                            {selectedConversation && conversationAssistantName ? (
+                                <span className="max-w-full truncate text-xs text-muted-foreground" data-aipp-slot="chat-mobile-subtitle">
+                                    {conversationAssistantName}
+                                </span>
+                            ) : null}
+                        </button>
+                        <div className="flex items-center">
+                            {selectedConversation ? (
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="min-h-11 min-w-11"
+                                    aria-label="会话详情"
+                                    data-aipp-slot="chat-mobile-details"
+                                    onClick={() => conversationUIRef.current?.openDetails()}
+                                >
+                                    <PanelRight className="h-5 w-5" />
+                                </Button>
+                            ) : null}
+                            <Button variant="ghost" size="icon" className="min-h-11 min-w-11" onClick={handleNewConversation} aria-label="新建对话">
+                                <Plus className="h-5 w-5" />
+                            </Button>
+                        </div>
                     </div>
 
                     {/* 主内容区域 */}
@@ -771,8 +929,6 @@ function ChatUIWindow() {
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
                             onPreviewFileContextClick={handlePreviewFileContextSelection}
-                            virtualizeMessages
-                            virtualizedListEngine="virtuoso"
                         />
                     </div>
 
@@ -826,8 +982,6 @@ function ChatUIWindow() {
                         inlineInteractionItems={inlineInteractionItems}
                         inlineInteractionVisible={hasInlineInteraction}
                         onPreviewFileContextClick={handlePreviewFileContextSelection}
-                        virtualizeMessages
-                        virtualizedListEngine="virtuoso"
                     />
                 </div>
 

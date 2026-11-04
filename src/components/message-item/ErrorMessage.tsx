@@ -3,10 +3,12 @@ import IconButton from "../IconButton";
 import { Copy, Check } from "lucide-react";
 import { useCopyHandler } from "@/hooks/useCopyHandler";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface ErrorMessageProps {
     content: string;
     messageId?: number;
+    superseded?: boolean;
 }
 
 interface ParsedErrorContent {
@@ -42,7 +44,16 @@ const getStatusBadgeStyle = (status: number): string => {
     return "bg-gray-200 text-gray-800 border-gray-300";
 };
 
-const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
+/** 从 genai 的多行错误里取根因："Cause: xxx" 优先，否则取最后一行。 */
+export function extractRootCause(originalError: string): string {
+    const lines = originalError.split("\n").map((line) => line.trim()).filter(Boolean);
+    const causeLine = lines.find((line) => /^cause:/i.test(line));
+    const cause = causeLine ? causeLine.replace(/^cause:\s*/i, "") : lines[lines.length - 1] ?? "";
+    return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
+}
+
+const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId, superseded = false }) => {
+    const [showPreviousError, setShowPreviousError] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const { copyIconState, handleCopy } = useCopyHandler(content);
 
@@ -68,8 +79,11 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
             if (parsed.message && (parsed.details !== undefined)) {
                 return {
                     mainMessage: parsed.message,
-                    details: typeof parsed.details === "string" ? parsed.details : JSON.stringify(parsed.details),
-                    hasDetails: !!parsed.details,
+                    details: parsed.details == null
+                        ? null
+                        : typeof parsed.details === "string" ? parsed.details : JSON.stringify(parsed.details),
+                    // 没有响应体时（如网络错误）也要能看到原始错误
+                    hasDetails: !!parsed.details || !!parsed.original_error,
                     meta: parsed,
                 };
             }
@@ -129,6 +143,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
     };
 
     const { mainMessage, details, hasDetails, meta } = parseErrorContent(content);
+    const isMobilePlatform = useIsMobilePlatform();
+    // 无响应体时，直接展示原始错误中的根因（如 "error sending request for url ..."）
+    const rootCause = !details && meta?.original_error ? extractRootCause(String(meta.original_error)) : null;
 
     const formatDetails = (details: string) => {
         try {
@@ -141,17 +158,33 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
         }
     };
 
+    if (superseded && !showPreviousError) {
+        return (
+            <button type="button" className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground"
+                aria-expanded={false} onClick={() => setShowPreviousError(true)}
+                data-message-id={messageId} data-message-type="error">
+                <ChevronRight className="h-4 w-4" />此前请求失败 · 查看错误
+            </button>
+        );
+    }
+
     return (
         <div
             data-message-item
             data-message-id={messageId}
             data-message-type="error"
-            className="group relative w-fit max-w-[min(65%,56rem)] overflow-hidden rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-800 transition-all duration-200 self-start"
+            className={`group relative ${isMobilePlatform ? "w-full max-w-full" : "w-fit max-w-[min(65%,56rem)]"} overflow-hidden rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-800 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-200 transition-all duration-200 self-start`}
         >
+            {superseded && (
+                <button type="button" className="mb-2 flex min-h-11 items-center gap-2 text-sm"
+                    aria-expanded={true} onClick={() => setShowPreviousError(false)}>
+                    <ChevronDown className="h-4 w-4" />收起此前错误
+                </button>
+            )}
             <div className="flex items-start gap-3">
                 <div className="flex-shrink-0 w-5 h-5 mt-0.5">
                     <svg
-                        className="w-5 h-5 text-red-500"
+                        className="w-5 h-5 text-red-500 dark:text-red-400"
                         fill="currentColor"
                         viewBox="0 0 20 20"
                     >
@@ -163,21 +196,27 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                     </svg>
                 </div>
                 <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-red-800 mb-1">
+                    <div className="text-sm font-medium text-red-800 dark:text-red-200 mb-1" data-aipp-slot="error-title">
                         AI Request Failed
                     </div>
-                    <div className="prose prose-sm max-w-none break-words text-red-700">
+                    <div className="prose prose-sm max-w-none break-words text-red-700" data-aipp-slot="error-main-message">
                         {mainMessage}
                     </div>
+                    {rootCause && (
+                        <div className="mt-1 text-xs text-red-700 dark:text-red-300 break-words" data-aipp-slot="error-root-cause">
+                            <span className="text-red-600/80 dark:text-red-300/80">原因：</span>
+                            {rootCause}
+                        </div>
+                    )}
                     {meta && (
-                        <div className="mt-2 text-xs text-red-700 space-y-2">
+                        <div className="mt-2 text-xs text-red-700 dark:text-red-300 space-y-2">
                             {/* HTTP 状态码 - 突出显示 */}
                             {meta.status && (
                                 <div className="flex flex-wrap items-center gap-2">
                                     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold border ${getStatusBadgeStyle(meta.status)}`}>
                                         {meta.status}
                                     </span>
-                                    <span className="break-words text-red-600/80">
+                                    <span className="break-words text-red-600/80 dark:text-red-300/80">
                                         {getStatusDescription(meta.status)}
                                     </span>
                                 </div>
@@ -187,31 +226,31 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                             <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
                                 {meta.model && (
                                     <div className="min-w-0">
-                                        <span className="text-red-600/80">模型：</span>
+                                        <span className="text-red-600/80 dark:text-red-300/80">模型：</span>
                                         <span className="font-medium break-all">{meta.model}</span>
                                     </div>
                                 )}
                                 {meta.phase && (
                                     <div className="min-w-0">
-                                        <span className="text-red-600/80">阶段：</span>
+                                        <span className="text-red-600/80 dark:text-red-300/80">阶段：</span>
                                         <span className="font-medium break-words">{meta.phase === 'stream' ? '流式请求' : meta.phase === 'non_stream' ? '非流式请求' : meta.phase}</span>
                                     </div>
                                 )}
                                 {typeof meta.attempts !== "undefined" && meta.attempts !== null && (
                                     <div className="min-w-0">
-                                        <span className="text-red-600/80">重试次数：</span>
+                                        <span className="text-red-600/80 dark:text-red-300/80">重试次数：</span>
                                         <span className="font-medium">{meta.attempts}</span>
                                     </div>
                                 )}
                                 {meta.request_id && (
                                     <div className="min-w-0 break-all sm:col-span-2">
-                                        <span className="text-red-600/80">请求ID：</span>
+                                        <span className="text-red-600/80 dark:text-red-300/80">请求ID：</span>
                                         <span className="font-medium font-mono text-[11px]">{String(meta.request_id)}</span>
                                     </div>
                                 )}
                                 {meta.endpoint && (
                                     <div className="min-w-0 break-all sm:col-span-2">
-                                        <span className="text-red-600/80">端点：</span>
+                                        <span className="text-red-600/80 dark:text-red-300/80">端点：</span>
                                         <span className="font-medium font-mono text-[11px]">{String(meta.endpoint)}</span>
                                     </div>
                                 )}
@@ -220,11 +259,11 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                             {/* 建议标签 */}
                             {Array.isArray(meta.suggestions) && meta.suggestions.length > 0 && (
                                 <div className="flex flex-wrap gap-1 pt-1">
-                                    <span className="text-red-600/80 text-[11px]">建议：</span>
+                                    <span className="text-red-600/80 dark:text-red-300/80 text-[11px]">建议：</span>
                                     {meta.suggestions.map((s: string, idx: number) => (
                                         <span
                                             key={idx}
-                                            className="inline-flex items-center px-2 py-0.5 rounded bg-red-100 text-red-700 border border-red-200 text-[11px]"
+                                            className="inline-flex items-center px-2 py-0.5 rounded bg-red-100 text-red-700 border border-red-200 dark:bg-red-900/40 dark:text-red-200 dark:border-red-800 text-[11px]"
                                         >
                                             {s}
                                         </span>
@@ -237,7 +276,7 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                         <div className="mt-3">
                             <button
                                 onClick={() => setIsExpanded(!isExpanded)}
-                                className="flex items-center gap-1 text-xs text-red-600 transition-colors hover:text-red-800"
+                                className="flex items-center gap-1 text-xs text-red-600 transition-colors hover:text-red-800 dark:text-red-300 dark:hover:text-red-100"
                             >
                                 {isExpanded ? (
                                     <ChevronDown className="w-3 h-3 text-icon" />
@@ -249,17 +288,17 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                                 </span>
                             </button>
                             {isExpanded && (
-                                <div className="mt-2 w-full max-w-full space-y-3 rounded-lg border border-red-200 bg-red-100 p-3">
+                                <div className="mt-2 w-full max-w-full space-y-3 rounded-lg border border-red-200 bg-red-100 p-3 dark:border-red-900/70 dark:bg-red-950/60">
                                     {/* 响应体 / 错误详情 - 重点展示 */}
                                     {details && (
                                         <div>
                                             <div className="flex items-center justify-between mb-1">
-                                                <div className="text-[11px] text-red-600/80 font-medium">
+                                                <div className="text-[11px] text-red-600/80 dark:text-red-300/80 font-medium">
                                                     {meta?.status ? `HTTP ${meta.status} 响应体` : '错误详情'}
                                                 </div>
                                             </div>
-                                            <div className="max-w-full overflow-hidden rounded border border-red-200 bg-white/50 p-2">
-                                                <pre className="max-w-full overflow-auto whitespace-pre-wrap break-words text-xs font-mono text-red-800">
+                                            <div className="max-w-full overflow-hidden rounded border border-red-200 bg-white/50 p-2 dark:border-red-900/70 dark:bg-black/30">
+                                                <pre className="max-w-full overflow-auto whitespace-pre-wrap break-words text-xs font-mono text-red-800 dark:text-red-200">
                                                     {formatDetails(details)}
                                                 </pre>
                                             </div>
@@ -269,9 +308,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                                     {/* 原始错误信息 */}
                                     {meta && meta.original_error && (
                                         <div>
-                                            <div className="text-[11px] text-red-600/80 mb-1 font-medium">原始错误信息</div>
-                                            <div className="max-w-full overflow-hidden rounded border border-red-200 bg-white/30 p-2">
-                                                <pre className="max-h-32 max-w-full overflow-auto whitespace-pre-wrap break-words text-[11px] font-mono text-red-700">
+                                            <div className="text-[11px] text-red-600/80 dark:text-red-300/80 mb-1 font-medium">原始错误信息</div>
+                                            <div className="max-w-full overflow-hidden rounded border border-red-200 bg-white/30 p-2 dark:border-red-900/70 dark:bg-black/20">
+                                                <pre className="max-h-32 max-w-full overflow-auto whitespace-pre-wrap break-words text-[11px] font-mono text-red-700 dark:text-red-300">
                                                     {String(meta.original_error)}
                                                 </pre>
                                             </div>
@@ -283,7 +322,9 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId }) => {
                     )}
                 </div>
             </div>
-            <div className="hidden group-hover:flex items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-red-200 bg-red-50 left-0">
+            <div className={isMobilePlatform
+                ? "aipp-mobile-action-bar mt-3 flex w-fit items-center px-1 box-border rounded-[26px] border border-red-200 bg-red-50 dark:border-red-900/70 dark:bg-red-950"
+                : "hidden group-hover:flex items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-red-200 bg-red-50 dark:border-red-900/70 dark:bg-red-950 left-0"}>
                 <IconButton
                     icon={
                         copyIconState === "copy" ? (

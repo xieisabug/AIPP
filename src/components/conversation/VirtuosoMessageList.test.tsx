@@ -79,11 +79,13 @@ function makeMessage(overrides: Partial<Message>): Message {
     } as Message;
 }
 
-function makeProps(messages: Message[]) {
+function makeProps(messages: Message[], forceVirtualized = false) {
     return {
         conversationId: "1",
-        allDisplayMessages: messages,
-        streamingMessages: new Map<number, never>(),
+        allDisplayMessages: forceVirtualized
+            ? [...Array.from({ length: 81 }, (_, i) => makeMessage({ id: 10000 + i, message_type: "user" })), ...messages]
+            : messages,
+        streamingMessages: new Map<number, any>(),
         shiningMessageIds: new Set<number>(),
         shiningMcpCallId: null,
         reasoningExpandStates: new Map<number, boolean>(),
@@ -123,6 +125,62 @@ describe("VirtuosoMessageList row height reservation", () => {
         ).toBe(240);
     });
 
+    it("should keep bounded history mounted when messages are rich but few", () => {
+        render(<VirtuosoMessageList {...makeProps([
+            makeMessage({ id: 1, message_type: "user" }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+            makeMessage({ id: 4 }),
+        ])} />);
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        for (const id of [1, 2, 3, 4]) expect(screen.getByTestId(`message-${id}`)).toBeInTheDocument();
+        expect(document.querySelector("[style*='content-visibility']")).toBeNull();
+    });
+
+    it("should keep virtualization when a few messages exceed the text budget", () => {
+        render(<VirtuosoMessageList {...makeProps([
+            makeMessage({ id: 1, message_type: "user", content: "x".repeat(500001) }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+        ])} />);
+        expect(screen.getByTestId("virtuoso")).toBeInTheDocument();
+    });
+
+    it("should keep retained history visible when the scroll parent is unavailable", () => {
+        render(<VirtuosoMessageList {...makeProps([
+            makeMessage({ id: 1, message_type: "user" }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+            makeMessage({ id: 4 }),
+        ])} scrollContainerRef={{ current: null }} />);
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        expect(screen.getByTestId("message-1")).toBeVisible();
+        expect(screen.getByTestId("message-4")).toBeVisible();
+        expect(document.querySelector("[data-aipp-initial-bottom-positioning='true']")).toBeNull();
+    });
+
+    it("should navigate to mounted history when a message is selected", async () => {
+        const props = makeProps([
+            makeMessage({ id: 1, message_type: "user" }),
+            makeMessage({ id: 2 }),
+            makeMessage({ id: 3, message_type: "user" }),
+            makeMessage({ id: 4 }),
+        ]);
+        const scrollIntoView = vi.fn();
+        const target = document.createElement("div");
+        target.dataset.messageId = "1";
+        target.scrollIntoView = scrollIntoView;
+        props.scrollContainerRef.current!.append(target);
+
+        render(<VirtuosoMessageList {...props} pendingScrollMessageId={1} />);
+
+        expect(screen.queryByTestId("virtuoso")).not.toBeInTheDocument();
+        expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", behavior: "smooth" });
+        await waitFor(() => expect(props.clearPendingScrollMessageId).toHaveBeenCalledWith(null));
+        expect(props.setShiningMessageIds).toHaveBeenCalled();
+        expect(document.querySelector("[data-aipp-initial-bottom-positioning='true']")).toBeNull();
+    });
+
     it("does not force estimated min height on later history rows", () => {
         expect(
             getVirtuosoRowMinHeight(1, { estimatedHeight: 240 }),
@@ -160,7 +218,7 @@ describe("VirtuosoMessageList row height reservation", () => {
                         message_type: "user",
                         content: "user-2",
                     }),
-                ])}
+                ], true)}
                 scrollContainerRef={{
                     current: scrollContainer,
                 }}
@@ -343,7 +401,7 @@ describe("VirtuosoMessageList row height reservation", () => {
                         message_type: "response",
                         content: "response-2",
                     }),
-                ])}
+                ], true)}
                 scrollContainerRef={{
                     current: scrollContainer,
                 }}
@@ -355,6 +413,32 @@ describe("VirtuosoMessageList row height reservation", () => {
             align: "end",
         });
         expect(virtuosoMockState.lastProps.initialTopMostItemIndex.offset).toBeLessThan(0);
+    });
+
+    it("should pass per-row heightEstimates without defaultItemHeight when history is virtualized", () => {
+        const scrollContainer = document.createElement("div");
+
+        render(
+            <VirtuosoMessageList
+                {...makeProps([
+                    makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+                    makeMessage({
+                        id: 2,
+                        message_type: "response",
+                        content: "response line\n\n".repeat(30),
+                    }),
+                    makeMessage({ id: 3, message_type: "user", content: "user-2" }),
+                    makeMessage({ id: 4, message_type: "response", content: "response-2" }),
+                ], true)}
+                scrollContainerRef={{ current: scrollContainer }}
+            />,
+        );
+
+        const props = virtuosoMockState.lastProps;
+        // defaultItemHeight 会先填充 sizeTree，导致 Virtuoso 丢弃逐行 heightEstimates。
+        expect(props.defaultItemHeight).toBeUndefined();
+        expect(props.heightEstimates).toHaveLength(props.data.length);
+        expect(new Set(props.heightEstimates).size).toBeGreaterThan(1);
     });
 
     it("renders the latest Butler user message and error without hiding the live footer", () => {
@@ -438,7 +522,7 @@ describe("VirtuosoMessageList row height reservation", () => {
                         message_type: "user",
                         content: "user-2",
                     }),
-                ])}
+                ], true)}
                 scrollContainerRef={{
                     current: scrollContainer,
                 }}
@@ -458,4 +542,296 @@ describe("VirtuosoMessageList row height reservation", () => {
         );
         expect(screen.getByTestId("virtuoso")).toBeVisible();
     });
+    it("keeps sticking to bottom after pin effect restarts and content grows late", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const messages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "user-2",
+            }),
+        ];
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 模拟父组件重渲染导致 onScrollStateChange identity 变化 → effect cleanup 停掉 follow
+        rerender(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{
+                    current: scrollContainer,
+                }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        // 晚到的布局增高（代码高亮 / 图片 / Virtuoso 估高校正）
+        scrollHeight = 2000;
+        scrollContainer.scrollTop = 600;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(1600);
+        });
+    });
+
+
+    it("keeps sticking to bottom while streaming content grows", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const streamEvent = {
+            message_id: 99,
+            conversation_id: 1,
+            content: "stream-start",
+            is_done: false,
+            reasoning_content: null,
+        } as any;
+
+        const baseMessages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "ask-long",
+            }),
+        ];
+
+        const props = makeProps(baseMessages, true);
+        props.streamingMessages = new Map([[99, streamEvent]]);
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...props}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 流式 token 导致内容持续增高（无用户上滑）
+        scrollHeight = 2500;
+        scrollContainer.scrollTop = 600;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(2100);
+        });
+
+        // 流式结束后不再强制跟（清理 follow）；这里只验证流式期间贴底
+        const doneProps = makeProps(baseMessages, true);
+        doneProps.streamingMessages = new Map();
+        rerender(
+            <VirtuosoMessageList
+                {...doneProps}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+    });
+
+    it("pauses stream follow when user wheels up, resumes after return to bottom", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const streamEvent = {
+            message_id: 99,
+            conversation_id: 1,
+            content: "stream-start",
+            is_done: false,
+            reasoning_content: null,
+        } as any;
+
+        const baseMessages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "ask-long",
+            }),
+        ];
+
+        const props = makeProps(baseMessages, true);
+        props.streamingMessages = new Map([[99, streamEvent]]);
+
+        render(
+            <VirtuosoMessageList
+                {...props}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        // 等初始 pin 结束，避免 pin 的 scroll 监听把用户上滑抢回底部
+        await waitFor(
+            () => {
+                expect(
+                    document.querySelector(
+                        "[data-aipp-initial-bottom-positioning='true']",
+                    ),
+                ).toBeNull();
+            },
+            { timeout: 2000 },
+        );
+
+        // 用户上滑：follow 应暂停
+        scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+        scrollContainer.scrollTop = 200;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        scrollHeight = 2200;
+        // 触发 height poll / 程序 scroll 路径
+        await new Promise((r) => setTimeout(r, 150));
+        expect(scrollContainer.scrollTop).toBe(200);
+
+        // 滚回底部（wheel-down force resume）→ 恢复 follow
+        scrollContainer.scrollTop = 2200 - 400;
+        scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: 120 }));
+
+        scrollHeight = 3000;
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(2600);
+        }, { timeout: 2000 });
+    });
+
+    it("does not pull the scrollbar back to the bottom after the conversation opens", async () => {
+        let scrollHeight = 1000;
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            get: () => scrollHeight,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+
+        const messages = [
+            makeMessage({
+                id: 1,
+                message_type: "user",
+                content: "user-1",
+            }),
+            makeMessage({
+                id: 2,
+                message_type: "response",
+                content: "response-1",
+            }),
+            makeMessage({
+                id: 3,
+                message_type: "user",
+                content: "user-2",
+            }),
+        ];
+
+        const { rerender } = render(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        await waitFor(() => {
+            expect(
+                document.querySelector("[data-aipp-initial-bottom-positioning='true']"),
+            ).toBeNull();
+        }, { timeout: 2000 });
+
+        // 高度没变，从底部向上拖一段，仍落在宽松恢复阈值内
+        scrollContainer.scrollTop = 480;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+        scrollContainer.scrollTop = 220;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(scrollContainer.scrollTop).toBe(220);
+
+        rerender(
+            <VirtuosoMessageList
+                {...makeProps(messages, true)}
+                scrollContainerRef={{ current: scrollContainer }}
+                onScrollStateChange={vi.fn()}
+            />,
+        );
+
+        scrollHeight = 1800;
+        scrollContainer.dispatchEvent(new Event("scroll"));
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(scrollContainer.scrollTop).toBe(220);
+    });
+
 });

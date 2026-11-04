@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkCodeBlockMeta from "@/react-markdown/remarkCodeBlockMeta";
 import type { ExportData, ConversationExportOptions } from "@/utils/exportFormatters";
@@ -184,6 +184,7 @@ const ExportMarkdown: React.FC<{ children: string; colors: ColorScheme }> = ({ c
         <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkCodeBlockMeta]}
             components={components}
+            urlTransform={(url) => /^data:image\/(png|jpeg|gif|webp);base64,/i.test(url) ? url : defaultUrlTransform(url)}
         >
             {children}
         </ReactMarkdown>

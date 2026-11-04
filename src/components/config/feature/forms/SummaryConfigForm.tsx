@@ -12,6 +12,42 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { invoke } from "@tauri-apps/api/core";
+
+export const ReviewOutputCapability: React.FC<{ model: string; mode: string }> = ({ model, mode }) => {
+    const [status, setStatus] = React.useState<{ prompt: boolean; reason: string } | null>(null);
+    const [error, setError] = React.useState("");
+    const [busy, setBusy] = React.useState(false);
+    const [revision, setRevision] = React.useState(0);
+    const [modelCode, provider] = model.split("%%");
+    React.useEffect(() => {
+        let active = true;
+        setStatus(null);
+        setError("");
+        if (modelCode && provider && mode === "auto") {
+            invoke<{ prompt: boolean; reason: string }>("get_tool_review_output_capability", {
+                providerId: Number(provider), modelCode,
+            }).then((value) => { if (active) setStatus(value); })
+                .catch((e) => { if (active) setError(getErrorMessage(e)); });
+        }
+        return () => { active = false; };
+    }, [modelCode, provider, mode, revision]);
+    if (!modelCode || !provider || mode !== "auto") return null;
+    return <div className="space-y-2 text-sm text-muted-foreground">
+        <p>{error ? `读取检测结果失败：${error}` : status?.prompt
+            ? "当前使用 Prompt：该接口不支持 JSON Schema。"
+            : status ? "尚未记忆 Prompt 模式，下次审核优先尝试 JSON Schema。" : "正在读取检测结果…"}</p>
+        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={async () => {
+            setBusy(true);
+            try {
+                await invoke("reset_tool_review_output_capability", { providerId: Number(provider), modelCode });
+                setRevision((value) => value + 1);
+                toast.success("已重置，下次自动审核将重新检测输出方式");
+            } catch (e) { toast.error("重置检测结果失败：" + getErrorMessage(e)); }
+            finally { setBusy(false); }
+        }}>重新检测</Button>
+    </div>;
+};
 
 interface SummaryConfigFormProps {
     form: UseFormReturn<any>;
@@ -37,7 +73,7 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({
     const [isExpanded, setIsExpanded] = React.useState(true);
 
     return (
-        <Card className="border-l-4 border-l-muted shadow-sm">
+        <Card className="border-l-4 border-l-muted shadow-sm" data-aipp-config-section>
             <CardHeader
                 className="flex flex-row items-center py-3 cursor-pointer hover:bg-muted/50 transition-colors rounded-t-lg"
                 onClick={() => setIsExpanded(!isExpanded)}
@@ -77,12 +113,15 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({
     );
 };
 
+const CLEAR_MODEL_VALUE = "__none__";
+
 // 模型选择组件
 interface ModelSelectProps {
     value: string;
     onChange: (value: string) => void;
     placeholder?: string;
     disabled?: boolean;
+    allowClear?: boolean;
 }
 
 const ModelSelect: React.FC<ModelSelectProps> = ({
@@ -90,6 +129,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
     onChange,
     placeholder = "选择模型",
     disabled,
+    allowClear = false,
 }) => {
     const { models, loading, error } = useModels(!disabled);
 
@@ -100,11 +140,13 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
         }));
     }, [models]);
 
+    const selectValue = allowClear && !value ? CLEAR_MODEL_VALUE : value;
+
     return (
         <Select
             disabled={disabled || loading}
-            value={value}
-            onValueChange={onChange}
+            value={selectValue}
+            onValueChange={(next) => onChange(next === CLEAR_MODEL_VALUE ? "" : next)}
         >
             <SelectTrigger className="w-full">
                 <SelectValue
@@ -114,6 +156,9 @@ const ModelSelect: React.FC<ModelSelectProps> = ({
                 />
             </SelectTrigger>
             <SelectContent>
+                {allowClear && (
+                    <SelectItem value={CLEAR_MODEL_VALUE}>不使用</SelectItem>
+                )}
                 {modelOptions.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
                         {option.label}
@@ -146,7 +191,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
         <Form {...form}>
             <div className="space-y-4">
                 {/* 总开关 */}
-                <Card className="border-l-4 border-l-primary">
+                <Card className="border-l-4 border-l-primary" data-aipp-config-section>
                     <CardContent className="py-4">
                         <div className="flex items-center justify-between">
                             <div>
@@ -305,6 +350,55 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                         )}
                     />
                 </ConfigSection> */}
+
+                <Card id="auto-review-model" className="border-l-4 border-l-muted shadow-sm" data-aipp-config-section>
+                    <CardHeader className="py-3">
+                        <CardTitle className="text-base font-medium">自动审核模型</CardTitle>
+                        <p className="text-sm text-muted-foreground mt-0.5">
+                            助手选择「模型自动审核」后，用这里的模型判断未开启自动运行的工具能否直接执行。已开启自动运行的工具不经过审核。审核进行中仍可手动确认或拒绝，手动介入会停止本次自动审核。清空后视为未配置，这些调用会转为需要人工确认。助手选「人工审核」时即使配置了模型也不会自动审核。
+                        </p>
+                    </CardHeader>
+                    <CardContent className="pt-0 pb-4 space-y-4">
+                        <Controller
+                            control={form.control}
+                            name="auto_review_model"
+                            render={({ field }) => (
+                                <FormItem>
+                                    <FormLabel>审核模型</FormLabel>
+                                    <FormControl>
+                                        <ModelSelect
+                                            value={field.value || ""}
+                                            onChange={field.onChange}
+                                            placeholder="选择自动审核模型"
+                                            allowClear
+                                            disabled={!form.watch("assistant_ai_enabled")}
+                                        />
+                                    </FormControl>
+                                    <FormDescription>
+                                        只使用所选模型，不会在缺失时改用其他模型。
+                                    </FormDescription>
+                                    <FormMessage />
+                                </FormItem>
+                            )}
+                        />
+                        <Controller control={form.control} name="auto_review_output_mode" render={({ field }) => (
+                            <FormItem>
+                                <FormLabel>审核输出方式</FormLabel>
+                                <Select value={field.value || "auto"} onValueChange={field.onChange} disabled={!form.watch("assistant_ai_enabled")}>
+                                    <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                                    <SelectContent>
+                                        <SelectItem value="auto">自动（推荐）</SelectItem>
+                                        <SelectItem value="schema">强制 Format（JSON Schema）</SelectItem>
+                                        <SelectItem value="prompt">仅 Prompt（JSON）</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <FormDescription>自动模式优先使用 JSON Schema；仅在明确不支持时，用同一模型以 Prompt 重试一次，校验成功后记忆。所有模式都严格校验结果，失败则等待人工确认。保存配置后生效。</FormDescription>
+                                <FormMessage />
+                            </FormItem>
+                        )} />
+                        <ReviewOutputCapability model={form.watch("auto_review_model") || ""} mode={form.watch("auto_review_output_mode") || "auto"} />
+                    </CardContent>
+                </Card>
 
                 <ConfigSection
                     title="上下文压缩"

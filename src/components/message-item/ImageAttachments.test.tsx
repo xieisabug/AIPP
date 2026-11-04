@@ -4,9 +4,47 @@ import { invoke } from '@tauri-apps/api/core';
 
 import ImageAttachments from './ImageAttachments';
 
+const platformState = vi.hoisted(() => ({ mobile: false }));
+vi.mock('@/hooks/use-platform', () => ({
+    useIsMobilePlatform: () => platformState.mobile,
+}));
+const mobileFiles = vi.hoisted(() => ({ outputMobileFile: vi.fn() }));
+vi.mock('@/services/mobileFileService', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/services/mobileFileService')>()),
+    outputMobileFile: mobileFiles.outputMobileFile,
+}));
+
 describe('ImageAttachments', () => {
     afterEach(() => {
         vi.clearAllMocks();
+        platformState.mobile = false;
+    });
+
+    it('should open images through the mobile file service when on mobile', async () => {
+        platformState.mobile = true;
+        mobileFiles.outputMobileFile.mockResolvedValue({ status: 'opened' });
+
+        render(
+            <ImageAttachments
+                conversationId={42}
+                messageId={101}
+                attachments={[
+                    {
+                        id: 7,
+                        attachment_type: 'Image',
+                        attachment_url: 'generated-image-1.png',
+                        attachment_content: 'data:image/png;base64,Zm9v',
+                    },
+                ]}
+            />
+        );
+
+        fireEvent.click(screen.getByRole('button', { name: '点击使用系统默认程序打开图片' }));
+
+        await waitFor(() => {
+            expect(mobileFiles.outputMobileFile).toHaveBeenCalledWith('open', expect.any(Uint8Array), 'image.png');
+        });
+        expect(invoke).not.toHaveBeenCalledWith('open_image', expect.anything());
     });
 
     it('opens image attachments with the system image command when clicked', async () => {

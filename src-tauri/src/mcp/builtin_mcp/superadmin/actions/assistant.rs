@@ -145,9 +145,9 @@ impl ActionHandler for AssistantCreateHandler {
 
     async fn undo(
         &self,
-        app_handle: &AppHandle,
+        _app_handle: &AppHandle,
         _snapshot: &serde_json::Value,
-        original_args: &serde_json::Value,
+        _original_args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         // Undo create = delete the created assistant
         // We need the result from the original execution to get the ID

@@ -196,6 +196,21 @@ describe("useMcpToolCallProcessor MCP identity", () => {
         expect(screen.getAllByTestId("shine-border")).toHaveLength(1);
     });
 
+    it("renders call_mcp_tool as the target tool", async () => {
+        render(
+            <ProcessorHarness
+                markdown='<!-- MCP_TOOL_CALL: {"server_name":"Agent 工具","tool_name":"call_mcp_tool","parameters":"{\"server_name\":\"Search\",\"tool_name\":\"search_web\",\"parameters\":{}}","display_server_name":"Search","display_tool_name":"search_web","display_parameters":"{\"query\":\"aipp\"}"} -->'
+                conversationId={1}
+                messageId={12}
+                mcpToolCallStates={new Map()}
+                shiningMcpCallId={null}
+            />,
+        );
+
+        expect(screen.getByText("准备搜索")).toBeInTheDocument();
+        expect(screen.queryByText("call_mcp_tool")).not.toBeInTheDocument();
+    });
+
     it("renders streaming tool call markers with '生成中' badge", async () => {
         const conversationId = 22;
 

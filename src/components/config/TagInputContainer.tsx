@@ -19,6 +19,7 @@ interface TagInputContainerProps {
     isExpanded?: boolean;
     onExpandedChange?: (expanded: boolean) => void;
     onFetchModels?: (modelData: ModelSelectionResponse) => void;
+    beforeFetchModels?: () => void;
 }
 
 const TagInputContainer: React.FC<TagInputContainerProps> = ({
@@ -28,7 +29,8 @@ const TagInputContainer: React.FC<TagInputContainerProps> = ({
     onTagsChange,
     isExpanded: externalIsExpanded,
     onExpandedChange,
-    onFetchModels
+    onFetchModels,
+    beforeFetchModels,
 }) => {
     const [internalIsExpanded, setInternalIsExpanded] = useState<boolean>(false);
     const [isFetchingModels, setIsFetchingModels] = useState<boolean>(false);
@@ -87,6 +89,9 @@ const TagInputContainer: React.FC<TagInputContainerProps> = ({
         
         setIsFetchingModels(true);
         try {
+            // Check the current draft before reading persisted provider config.
+            // Autosave may still be debouncing an invalid Endpoint.
+            beforeFetchModels?.();
             const modelData = await invoke<ModelSelectionResponse>("preview_model_list", { 
                 llmProviderId: parseInt(llmProviderId) 
             });
@@ -98,7 +103,7 @@ const TagInputContainer: React.FC<TagInputContainerProps> = ({
         } finally {
             setIsFetchingModels(false);
         }
-    }, [llmProviderId, onFetchModels]);
+    }, [llmProviderId, onFetchModels, beforeFetchModels]);
 
     return (
         <TagInput
@@ -130,5 +135,7 @@ export default React.memo(TagInputContainer, (prevProps, nextProps) => {
         prevProps.isExpanded === nextProps.isExpanded &&
         prevProps.onTagsChange === nextProps.onTagsChange &&
         prevProps.onExpandedChange === nextProps.onExpandedChange
+        && prevProps.beforeFetchModels === nextProps.beforeFetchModels
+        && prevProps.onFetchModels === nextProps.onFetchModels
     );
 });

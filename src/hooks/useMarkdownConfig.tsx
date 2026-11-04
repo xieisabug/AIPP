@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from "react";
+import { createContext, useContext, useMemo, useCallback } from "react";
 import React from "react";
 import { Components } from "react-markdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -14,12 +14,23 @@ import CodeBlock from "@/components/RustCodeBlock";
 import LazyImage from "@/components/common/LazyImage";
 import { resolveCodeBlockMeta } from "@/react-markdown/remarkCodeBlockMeta";
 import { useMarkdownRegistrySnapshot } from "@/services/markdownRegistry";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface UseMarkdownConfigOptions {
     onCodeRun?: (lang: string, code: string) => void;
     disableMarkdownSyntax?: boolean;
-    // 是否处于流式输出中，用于代码块自动折叠的首次触发
-    isStreaming?: boolean;
+}
+
+/**
+ * 代码块是否处于流式输出中（影响自动折叠和高亮节奏）。
+ * 走 Context 而不是放进 components，流式状态变化时 components 引用保持稳定，
+ * 已 memo 的 Markdown 片段也能收到变化。
+ */
+export const MarkdownStreamingContext = createContext(false);
+
+function StreamingAwareCodeBlock(props: Omit<React.ComponentProps<typeof CodeBlock>, "isStreaming">) {
+    const isStreaming = useContext(MarkdownStreamingContext);
+    return <CodeBlock {...props} isStreaming={isStreaming} />;
 }
 
 function extractMarkdownAttributes(props: Record<string, unknown>): Record<string, string> {
@@ -35,8 +46,10 @@ function extractMarkdownAttributes(props: Record<string, unknown>): Record<strin
     return attributes;
 }
 
-export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, isStreaming = false }: UseMarkdownConfigOptions = {}) => {
+export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false }: UseMarkdownConfigOptions = {}) => {
     const registeredMarkdownTags = useMarkdownRegistrySnapshot();
+    // 移动平台：宽表格放进局部横向滚动容器，避免列被挤成 1~2 个字（MOB-03）
+    const isMobilePlatform = useIsMobilePlatform();
 
     // 换行处理函数 - 完全按原样展示文本，保留所有换行和空行
     const renderTextWithBreaks = useCallback((children: React.ReactNode): React.ReactNode => {
@@ -100,14 +113,13 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, is
                 }
 
                 return isBlock ? (
-                    <CodeBlock
+                    <StreamingAwareCodeBlock
                         language={language}
                         meta={meta}
                         onCodeRun={onCodeRun || (() => { })}
-                        isStreaming={isStreaming}
                     >
                         {String(children).replace(/\n$/, "")}
-                    </CodeBlock>
+                    </StreamingAwareCodeBlock>
                 ) : (
                     <code className={className} style={{ overflow: "auto" }}>
                         {children}
@@ -137,10 +149,19 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, is
                 );
             },
             img: ({ src, alt, ...props }: any) => <LazyImage src={src} alt={alt} {...props} />,
+            ...(isMobilePlatform && !disableMarkdownSyntax
+                ? {
+                    table: ({ node: _node, ...props }: any) => (
+                        <div className="aipp-mobile-table-scroll" data-no-action-toggle>
+                            <table {...props} />
+                        </div>
+                    ),
+                }
+                : {}),
         }),
         [
+            isMobilePlatform,
             disableMarkdownSyntax,
-            isStreaming,
             onCodeRun,
             pluginMarkdownComponents,
             renderTextWithBreaks,
@@ -176,9 +197,9 @@ export const useMarkdownConfig = ({ onCodeRun, disableMarkdownSyntax = false, is
         ];
     }, [disableMarkdownSyntax, registeredMarkdownTags]);
 
-    return {
+    return useMemo(() => ({
         remarkPlugins,
         rehypePlugins,
         markdownComponents,
-    };
+    }), [remarkPlugins, rehypePlugins, markdownComponents]);
 };

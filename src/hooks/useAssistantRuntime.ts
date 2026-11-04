@@ -1,3 +1,4 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { invoke } from "@tauri-apps/api/core";
 import { useState, useEffect, useRef } from "react";
 import { Conversation, ConversationWithMessages, Message, FileInfo } from "../data/Conversation";
@@ -12,6 +13,7 @@ export interface UseAssistantRuntimeProps {
     onChangeConversationId: (conversationId: string) => void;
     smartScroll: (forceScroll?: boolean, behaviorOverride?: ScrollBehavior) => void;
     updateShiningMessages: () => void;
+    clearShiningMessages: () => void;
     setAiIsResponsing: (isResponsing: boolean) => void;
 }
 
@@ -27,7 +29,8 @@ export function useAssistantRuntime({
     setMessages,
     onChangeConversationId,
     smartScroll,
-    updateShiningMessages,
+    updateShiningMessages: _updateShiningMessages,
+    clearShiningMessages,
     setAiIsResponsing,
 }: UseAssistantRuntimeProps): UseAssistantRuntimeReturn {
     // Cache for the current assistant's model ID
@@ -54,34 +57,18 @@ export function useAssistantRuntime({
         }
     }, [conversation, runtimeConversation]);
 
-    // Load assistant model ID when assistant changes
-    useEffect(() => {
-        const loadAssistantModelId = async () => {
-            try {
-                const effectiveConversation = getEffectiveConversation();
-                const assistantId = effectiveConversation?.assistant_id || selectedAssistant;
-                if (!assistantId) {
-                    setCachedModelId("");
-                    return;
-                }
-
-                const assistantDetail = await invoke<AssistantDetail>("get_assistant", {
-                    assistantId: +assistantId,
-                });
-
-                if (assistantDetail.model.length > 0) {
-                    setCachedModelId(assistantDetail.model[0].model_code);
-                } else {
-                    setCachedModelId("");
-                }
-            } catch (error) {
-                console.error("Failed to load assistant model ID:", error);
-                setCachedModelId("");
-            }
-        };
-
-        loadAssistantModelId();
-    }, [conversation?.assistant_id, selectedAssistant, runtimeConversation?.assistant_id]);
+    useDataRefresh({
+        events: ["assistant_list_changed", "llm_provider_changed"],
+        identity: `${conversation?.assistant_id}:${selectedAssistant}:${runtimeConversation?.assistant_id}`,
+        initial: true,
+        refresh: async (isCurrent) => {
+            const assistantId = getEffectiveConversation()?.assistant_id || selectedAssistant;
+            if (!assistantId || assistantId <= 0) { setCachedModelId(""); return; }
+            const detail = await invoke<AssistantDetail>("get_assistant", { assistantId });
+            if (isCurrent()) setCachedModelId(detail.model[0]?.model_code ?? "");
+        },
+        onError: (error) => { setCachedModelId(""); console.error("刷新助手模型失败:", error); },
+    });
 
     // 助手运行时API接口，提供给插件在运行时使用
     const assistantRunApi: AssistantRunApi = {
@@ -138,6 +125,11 @@ export function useAssistantRuntime({
                     if (!suppressConversationSwitch && conversationId != res.conversation_id + "") {
                         onChangeConversationId(res.conversation_id + "");
                     }
+                    // 对话已创建但请求在调用模型前失败（如未配置模型）：错误已写入对话，这里结束响应状态
+                    if (res.error_message) {
+                        setAiIsResponsing(false);
+                        clearShiningMessages();
+                    }
 
                     // 事件处理现在由共享的 useConversationEvents hook 处理
 
@@ -146,9 +138,7 @@ export function useAssistantRuntime({
                 .catch((e) => {
                     console.error("ask assistant error", e);
                     setAiIsResponsing(false);
-                    // 使用智能边框控制，而不是直接清空
-                    updateShiningMessages();
-                    // 错误信息将在对话框中显示
+                    clearShiningMessages();
                     throw e;
                 });
         },

@@ -1,3 +1,4 @@
+use super::launch_browser_recovering_stale_locks;
 use chromiumoxide::browser::Browser;
 use futures::StreamExt;
 use std::fs;
@@ -28,6 +29,8 @@ pub struct BrowserPool {
     browser_stale_notify: Arc<Notify>,
     /// 浏览器实例代际，用于避免旧 handler 污染新实例状态
     browser_generation: Arc<AtomicU64>,
+    /// 串行化关闭、回收 profile 锁和再次启动，避免两个 Chrome 抢同一份 profile
+    lifecycle: Arc<Mutex<()>>,
 }
 
 /// 浏览器池配置
@@ -37,8 +40,6 @@ pub struct BrowserPoolConfig {
     pub max_pages: usize,
     /// 获取页面 permit 的等待超时（毫秒）
     pub acquire_timeout_ms: u64,
-    /// 页面空闲超时（秒），暂未实现
-    pub page_idle_timeout_secs: u64,
     /// 用户数据目录
     pub user_data_dir: Option<String>,
     /// 浏览器路径
@@ -60,6 +61,7 @@ impl BrowserPool {
             browser_stale: Arc::new(AtomicBool::new(false)),
             browser_stale_notify: Arc::new(Notify::new()),
             browser_generation: Arc::new(AtomicU64::new(0)),
+            lifecycle: Arc::new(Mutex::new(())),
         }
     }
 
@@ -194,6 +196,11 @@ impl BrowserPool {
 
     /// 获取或初始化浏览器
     async fn get_or_init_browser(&self) -> Result<Arc<Mutex<Browser>>, String> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.get_or_init_browser_locked().await
+    }
+
+    async fn get_or_init_browser_locked(&self) -> Result<Arc<Mutex<Browser>>, String> {
         let mut browser_slot = self.browser.lock().await;
         if let Some(existing) = browser_slot.as_ref() {
             return Ok(existing.clone());
@@ -205,8 +212,24 @@ impl BrowserPool {
     }
 
     pub(crate) async fn recreate_browser(&self) -> Result<Arc<Mutex<Browser>>, String> {
-        info!("Recreating Chromium BrowserPool browser instance");
+        let observed_generation = self.browser_generation.load(Ordering::SeqCst);
+        let _lifecycle = self.lifecycle.lock().await;
 
+        if self.browser_generation.load(Ordering::SeqCst) != observed_generation
+            && !self.is_browser_stale()
+        {
+            let browser_slot = self.browser.lock().await;
+            if let Some(existing) = browser_slot.as_ref() {
+                info!(
+                    observed_generation,
+                    generation = self.browser_generation.load(Ordering::SeqCst),
+                    "Reusing Chromium browser created while waiting to recreate"
+                );
+                return Ok(existing.clone());
+            }
+        }
+
+        info!("Recreating Chromium BrowserPool browser instance");
         self.idle_pages_lock().clear();
 
         let old_browser = {
@@ -224,7 +247,7 @@ impl BrowserPool {
             }
         }
 
-        self.get_or_init_browser().await
+        self.get_or_init_browser_locked().await
     }
 
     async fn ensure_page_healthy(&self, page: &chromiumoxide::page::Page) -> Result<(), String> {
@@ -244,15 +267,19 @@ impl BrowserPool {
             || lower.contains("broken pipe")
     }
 
+    fn profile_dir(&self) -> PathBuf {
+        if let Some(ref dir) = self.config.user_data_dir {
+            PathBuf::from(dir)
+        } else {
+            std::env::temp_dir().join("aipp_chromiumoxide_pool")
+        }
+    }
+
     /// 初始化浏览器（只在首次调用时执行）
     async fn initialize_browser(&self) -> Result<Browser, String> {
         info!("Initializing Chromium BrowserPool");
 
-        let user_data_dir = if let Some(ref dir) = self.config.user_data_dir {
-            PathBuf::from(dir)
-        } else {
-            std::env::temp_dir().join("aipp_chromiumoxide_pool")
-        };
+        let user_data_dir = self.profile_dir();
 
         if let Err(e) = fs::create_dir_all(&user_data_dir) {
             warn!(error = %e, "Failed to create user_data_dir");
@@ -292,20 +319,35 @@ impl BrowserPool {
             "Launching Chromiumoxide BrowserPool"
         );
 
-        let config =
-            builder.build().map_err(|e| format!("Failed to build browser config: {}", e))?;
-
-        let (browser, mut handler) = Browser::launch(config).await.map_err(|e| {
-            format!(
-                "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}, args={:?}): {}",
-                self.config.browser_path.display(),
-                browser_path_exists,
-                self.config.headless,
-                user_data_dir.display(),
-                self.config.launch_args,
-                e
-            )
-        })?;
+        let browser_path = self.config.browser_path.clone();
+        let headless = self.config.headless;
+        let launch_args = self.config.launch_args.clone();
+        let (browser, mut handler) = launch_browser_recovering_stale_locks(
+            &user_data_dir,
+            "browser_pool",
+            || {
+                let config = builder.clone().build();
+                let browser_path = browser_path.clone();
+                let launch_args = launch_args.clone();
+                let user_data_dir = user_data_dir.clone();
+                async move {
+                    let config =
+                        config.map_err(|e| format!("Failed to build browser config: {}", e))?;
+                    Browser::launch(config).await.map_err(|e| {
+                        format!(
+                            "Failed to launch browser (path={}, exists={}, headless={}, user_data_dir={}, args={:?}): {}",
+                            browser_path.display(),
+                            browser_path_exists,
+                            headless,
+                            user_data_dir.display(),
+                            launch_args,
+                            e
+                        )
+                    })
+                }
+            },
+        )
+        .await?;
 
         let generation = self.browser_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.browser_stale.store(false, Ordering::SeqCst);
@@ -352,6 +394,7 @@ impl BrowserPool {
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().await;
         let browser = {
             let mut browser_slot = self.browser.lock().await;
             browser_slot.take()
@@ -400,11 +443,6 @@ impl PooledPage {
         self.page.as_ref().expect("Page not available")
     }
 
-    /// 获取底层页面可变引用
-    pub fn page_mut(&mut self) -> &mut chromiumoxide::page::Page {
-        self.page.as_mut().expect("Page not available")
-    }
-
     /// 消费 self，不归还页面（用于出错时）
     pub fn consume(mut self) -> chromiumoxide::page::Page {
         let page = self.page.take().expect("Page not available");
@@ -433,7 +471,6 @@ mod tests {
         BrowserPool::new(BrowserPoolConfig {
             max_pages,
             acquire_timeout_ms: 250,
-            page_idle_timeout_secs: 60,
             user_data_dir: None,
             browser_path: PathBuf::from("/tmp/nonexistent-chromium"),
             headless: true,

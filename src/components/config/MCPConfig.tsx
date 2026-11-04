@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
@@ -8,13 +9,14 @@ import { Trash2, Edit, RefreshCw, Zap } from "lucide-react";
 import MCP from "@/assets/mcp.svg?react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { toast } from 'sonner';
-import { listen } from "@tauri-apps/api/event";
 import ConfirmDialog from "../ConfirmDialog";
 import MCPServerDialog from "./MCPServerDialog";
 import MCPActionDropdown from "./MCPActionDropdown";
 import JSONImportDialog from "./JSONImportDialog";
 import MCPToolItem from "./MCPToolItem";
 import BuiltinToolDialog from "./BuiltinToolDialog";
+import MobileMCPServerDetail from "./mcp/MobileMCPServerDetail";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 // 导入公共组件
 import {
@@ -22,21 +24,30 @@ import {
     SidebarList,
     ListItemButton,
     EmptyState,
+    ConfigPageLoading,
     SelectOption
 } from "../common";
 
 import { MCPServer, MCPServerTool, MCPServerResource, MCPServerPrompt, MCPServerRequest } from "../../data/MCP";
 import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { MOBILE_UNEXECUTABLE_LABEL, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
 
 const MCPConfig: React.FC = () => {
+    const isMobilePlatform = useIsMobilePlatform();
+    // 移动端（移动平台或窄屏）使用列表 → 详情布局与紧凑详情页
+    const isNarrow = useIsMobile();
+    const isMobileLayout = isMobilePlatform || isNarrow;
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
     const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
     const [serverTools, setServerTools] = useState<MCPServerTool[]>([]);
     const [serverResources, setServerResources] = useState<MCPServerResource[]>([]);
     const [serverPrompts, setServerPrompts] = useState<MCPServerPrompt[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
     // 所有服务器的工具缓存，用于搜索穿透
     const [allServerTools, setAllServerTools] = useState<Map<number, MCPServerTool[]>>(new Map());
 
@@ -58,6 +69,8 @@ const MCPConfig: React.FC = () => {
 
     // Loading states
     const [isRefreshing, setIsRefreshing] = useState(false);
+    // 首次读取完成前不渲染空状态，避免先闪「还没有配置MCP服务器」
+    const [serversLoaded, setServersLoaded] = useState(false);
 
     // Tool expansion states
     const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
@@ -129,53 +142,51 @@ const MCPConfig: React.FC = () => {
         setAllServerTools(toolsMap);
     }, []);
 
-    // 获取服务器工具列表
-    const getServerTools = useCallback((serverId: number) => {
-        invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })
-            .then(setServerTools)
-            .catch((e) => {
-                toast.error('获取服务器工具失败: ' + e);
-            });
-    }, []);
+    useDataRefresh({
+        events: ["mcp_state_changed"],
+        identity: `${selectedServer?.id ?? ""}:${editingServer?.id ?? ""}`,
+        initial: true,
+        refresh: async (isCurrent) => {
+            try {
+                await refreshMcpState(isCurrent);
+            } finally {
+                // 失败时错误由 onError 提示，这里只负责结束首次加载态
+                if (isCurrent()) setServersLoaded(true);
+            }
+        },
+        onError: (error) => toast.error(`同步后刷新 MCP 配置失败: ${String(error)}`),
+    });
 
-    // 获取服务器资源列表
-    const getServerResources = useCallback((serverId: number) => {
-        invoke<MCPServerResource[]>('get_mcp_server_resources', { serverId })
-            .then(setServerResources)
-            .catch((e) => {
-                toast.error('获取服务器资源失败: ' + e);
-            });
-    }, []);
-
-    // 获取服务器提示列表
-    const getServerPrompts = useCallback((serverId: number) => {
-        invoke<MCPServerPrompt[]>('get_mcp_server_prompts', { serverId })
-            .then(setServerPrompts)
-            .catch((e) => {
-                toast.error('获取服务器提示失败: ' + e);
-            });
-    }, []);
-
-    useEffect(() => {
-        getMcpServers();
-
-        // 监听后端 MCP 状态变更事件，自动刷新
-        const unlistenPromise = listen('mcp_state_changed', () => {
-            getMcpServers();
-        });
-
-        return () => {
-            unlistenPromise.then(unlisten => unlisten());
-        };
-    }, []);
-
-    useEffect(() => {
-        if (selectedServer) {
-            getServerTools(selectedServer.id);
-            getServerResources(selectedServer.id);
-            getServerPrompts(selectedServer.id);
+    async function refreshMcpState(isCurrent: () => boolean) {
+        const servers = await invoke<MCPServer[]>("get_mcp_servers");
+        const selected = servers.find((server) => server.id === selectedServer?.id) ?? servers[0] ?? null;
+        const [tools, resources, prompts, allTools] = await Promise.all([
+            selected ? invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: selected.id }) : Promise.resolve([]),
+            selected ? invoke<MCPServerResource[]>("get_mcp_server_resources", { serverId: selected.id }) : Promise.resolve([]),
+            selected ? invoke<MCPServerPrompt[]>("get_mcp_server_prompts", { serverId: selected.id }) : Promise.resolve([]),
+            Promise.all(servers.map(async (server) => [server.id, await invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: server.id })] as const)),
+        ]);
+        if (!isCurrent()) return;
+        setMcpServers(servers);
+        setSelectedServer(selected);
+        setServerTools(tools);
+        setServerResources(resources);
+        setServerPrompts(prompts);
+        setAllServerTools(new Map(allTools));
+        if (editingServer) {
+            const updated = servers.find((server) => server.id === editingServer.id) ?? null;
+            setEditingServer(updated);
+            setBuiltinEditEnv(updated?.environment_variables ?? "");
+            setBuiltinEditName(updated?.name ?? "");
+            setBuiltinEditTimeout(updated?.timeout ?? null);
+            if (!updated) { setServerDialogOpen(false); setBuiltinEditOpen(false); }
         }
-    }, [selectedServer, getServerTools, getServerResources, getServerPrompts]);
+        if (deletingServerId && !servers.some((server) => server.id === deletingServerId)) {
+            setConfirmDialogOpen(false);
+            setDeletingServerId(null);
+        }
+    }
+
 
     // 切换服务器启用状态
     const handleToggleServer = useCallback(async (serverId: number, isEnabled: boolean) => {
@@ -432,11 +443,36 @@ const MCPConfig: React.FC = () => {
 
     // 下拉菜单选项
     const selectOptions: SelectOption[] = useMemo(() =>
-        mcpServers.map(server => ({
-            id: server.id.toString(),
-            label: server.name,
-            icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <MCP className="h-4 w-4" />
-        })), [mcpServers]);
+        mcpServers.map(server => {
+            const unexecutable = isMobilePlatform && !isMobileExecutableMcpServer(server);
+            if (!isMobileLayout) {
+                return {
+                    id: server.id.toString(),
+                    label: server.name,
+                    description: unexecutable ? MOBILE_UNEXECUTABLE_LABEL : undefined,
+                    icon: server.is_enabled ? <Zap className="h-4 w-4" /> : <MCP className="h-4 w-4" />
+                };
+            }
+            // 移动端列表行：工具数 + 状态说明，右侧直接开关
+            const tools = allServerTools.get(server.id);
+            const summary = [
+                tools ? `${tools.filter(tool => tool.is_enabled).length}/${tools.length} 个工具` : null,
+                unexecutable ? MOBILE_UNEXECUTABLE_LABEL : server.transport_type,
+            ].filter(Boolean).join(" · ");
+            return {
+                id: server.id.toString(),
+                label: server.name,
+                description: summary,
+                icon: <MCP className="h-5 w-5" />,
+                trailing: (
+                    <Switch
+                        checked={server.is_enabled}
+                        aria-label={`启用 ${server.name}`}
+                        onCheckedChange={(checked) => handleToggleServer(server.id, checked)}
+                    />
+                ),
+            };
+        }), [mcpServers, isMobilePlatform, isMobileLayout, allServerTools, handleToggleServer]);
 
     // 下拉菜单选择回调
     const handleSelectFromDropdown = useCallback((serverId: string) => {
@@ -467,7 +503,7 @@ const MCPConfig: React.FC = () => {
                 (tool.tool_description && PinyinFilter.matches(tool.tool_description, searchQuery))
             );
         });
-    }, [mcpServers, allServerTools, searchQuery]);
+    }, [mcpServers, allServerTools, searchQuery, pinyinReady]);
 
     const sidebar = useMemo(() => (
         <SidebarList
@@ -496,6 +532,9 @@ const MCPConfig: React.FC = () => {
                     <div className="flex items-center w-full">
                         <div className="flex-1 truncate">
                             <div className="font-medium truncate">{server.name}</div>
+                            {isMobilePlatform && !isMobileExecutableMcpServer(server) && (
+                                <div className="text-[10px] text-muted-foreground truncate">此设备不可执行</div>
+                            )}
                         </div>
                         {server.is_enabled && (
                             <Zap className="h-3 w-3 ml-2 flex-shrink-0" />
@@ -504,10 +543,29 @@ const MCPConfig: React.FC = () => {
                 </ListItemButton>
             ))}
         </SidebarList>
-    ), [filteredMcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport, searchQuery]);
+    ), [filteredMcpServers, selectedServer?.id, handleSelectServer, handleTemplateSelect, handleJSONImport, searchQuery, isMobilePlatform]);
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
-    const content = useMemo(() => selectedServer ? (
+    const content = useMemo(() => selectedServer ? (isMobileLayout ? (
+        <MobileMCPServerDetail
+            server={selectedServer}
+            tools={serverTools}
+            prompts={serverPrompts}
+            resources={serverResources}
+            isRefreshing={isRefreshing}
+            serverUnexecutable={isMobilePlatform && !isMobileExecutableMcpServer(selectedServer)}
+            isToolUnexecutable={(toolName) => isMobilePlatform && isMobileUnexecutableBuiltinTool(selectedServer.command, toolName)}
+            expandedTools={expandedTools}
+            onToggleToolExpansion={toggleToolExpansion}
+            onToggleServer={handleToggleServer}
+            onRefresh={handleRefreshServerCapabilities}
+            onEdit={openEditServerDialog}
+            onDelete={handleDeleteServer}
+            onUpdateTool={handleUpdateTool}
+            onUpdatePrompt={handleUpdatePrompt}
+            truncateText={truncateText}
+        />
+    ) : (
         <div className="space-y-6">
             {/* 服务器基本信息 */}
             <div className="bg-background rounded-lg border border-border p-6">
@@ -515,6 +573,11 @@ const MCPConfig: React.FC = () => {
                     <div className='mr-8 mb-5'>
                         <h3 className="text-lg font-semibold text-foreground">{selectedServer.name}</h3>
                         <p className="text-sm text-muted-foreground">{selectedServer.description || '暂无描述'}</p>
+                        {isMobilePlatform && !isMobileExecutableMcpServer(selectedServer) && (
+                            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                                此 MCP 依赖外部进程，移动端不可执行（可查看配置；HTTP 与 aipp:* 内置仍可用）。
+                            </p>
+                        )}
                     </div>
                     <div className="flex items-center gap-1">
                         <Switch
@@ -528,8 +591,10 @@ const MCPConfig: React.FC = () => {
                                     size="sm"
                                     onClick={() => handleRefreshServerCapabilities(selectedServer.id)}
                                     disabled={isRefreshing}
+                                    aria-label="测试连接并刷新能力"
                                 >
                                     <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                    {isMobilePlatform && <span>测试连接</span>}
                                 </Button>
                             </TooltipTrigger>
                             <TooltipContent>重新获取能力</TooltipContent>
@@ -541,6 +606,7 @@ const MCPConfig: React.FC = () => {
                                     variant="ghost"
                                     size="sm"
                                     onClick={() => openEditServerDialog(selectedServer)}
+                                    aria-label="编辑MCP"
                                 >
                                     <Edit className="h-4 w-4" />
                                 </Button>
@@ -556,6 +622,7 @@ const MCPConfig: React.FC = () => {
                                         variant="ghost"
                                         size="sm"
                                         onClick={() => handleDeleteServer(selectedServer.id)}
+                                        aria-label="删除MCP"
                                     >
                                         <Trash2 className="h-4 w-4 text-destructive" />
                                     </Button>
@@ -635,6 +702,10 @@ const MCPConfig: React.FC = () => {
                                                 onToggleExpansion={toggleToolExpansion}
                                                 onUpdateTool={handleUpdateTool}
                                                 truncateText={truncateText}
+                                                mobileUnexecutable={
+                                                    isMobilePlatform
+                                                    && isMobileUnexecutableBuiltinTool(selectedServer?.command, tool.tool_name)
+                                                }
                                             />
                                         ))}
                                     </div>
@@ -697,13 +768,17 @@ const MCPConfig: React.FC = () => {
                 })()}
             </div>
         </div>
-    ) : (
+    )) : (
         <EmptyState
             icon={<MCP className="h-8 w-8 text-muted-foreground" />}
             title="选择一个MCP服务器"
             description="从左侧列表中选择一个服务器开始配置"
         />
-    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText]);
+    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText, isMobilePlatform, isMobileLayout]);
+
+    if (!serversLoaded) {
+        return <ConfigPageLoading />;
+    }
 
     // 空状态
     if (mcpServers.length === 0) {

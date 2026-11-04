@@ -29,14 +29,8 @@ pub enum AppError {
     #[error("运行代码错误: {0}")]
     RunCodeError(String),
 
-    #[error("未进行配置: {0}")]
-    NoConfigError(String),
-
     #[error("Anyhow错误: {0}")]
     Anyhow(String),
-
-    #[error("对话不存在: {0}")]
-    ConversationNotFound(i64),
 
     #[error("消息数量不足以生成标题")]
     InsufficientMessages,

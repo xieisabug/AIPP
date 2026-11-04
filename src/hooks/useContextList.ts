@@ -5,10 +5,11 @@ import {
     ContextItem,
     ContextPreviewData,
     ContextPreviewListItem,
-    CONTEXT_TOOL_NAMES,
     SearchResultItem,
     getContextTypeFromToolName,
+    isContextToolName,
 } from '../components/chat-sidebar/types';
+import { parsePreviewCodeRequest } from '@/utils/previewCode';
 
 interface Attachment {
     attachment_url?: string;
@@ -642,11 +643,7 @@ export function useContextList({
             const toolName = toolCall.tool_name?.toLowerCase() || '';
             
             // Check if this is a context-related tool
-            const isContextTool = CONTEXT_TOOL_NAMES.some(name => 
-                toolName.includes(name.toLowerCase())
-            );
-
-            if (!isContextTool) return;
+            if (!isContextToolName(toolName)) return;
 
             // Parse parameters to get meaningful details
             let rawValue = '';
@@ -667,6 +664,47 @@ export function useContextList({
             const finishedAt = toolCall.finished_time
                 ? new Date(toolCall.finished_time)
                 : undefined;
+
+            if (contextType === 'preview_code') {
+                const parsedPreviewCode = toolCall.parameters
+                    ? parsePreviewCodeRequest(toolCall.parameters)
+                    : null;
+                const title =
+                    parsedPreviewCode?.title?.trim() ||
+                    toolCall.tool_name ||
+                    'preview_code';
+                const renderer = parsedPreviewCode?.renderer || 'html';
+                const code = parsedPreviewCode?.code || '';
+                const codeExcerpt =
+                    code.trim().length > 240 ? `${code.trim().slice(0, 240)}…` : code.trim();
+                const details = `preview_code · ${renderer}`;
+
+                items.push({
+                    id: `mcp-${callId}`,
+                    type: 'preview_code',
+                    name: title,
+                    details,
+                    source: 'mcp',
+                    timestamp: finishedAt ?? new Date(),
+                    previewStatus: 'ready',
+                    previewData: {
+                        title,
+                        subtitle: details,
+                        rawValue: title,
+                        contentType: 'code',
+                        content: codeExcerpt || undefined,
+                        language: renderer === 'html' ? 'html' : renderer,
+                        metadata: buildMetadata({
+                            来源: 'PreviewCode',
+                            工具: toolCall.tool_name,
+                            标题: title,
+                            渲染器: renderer,
+                            交互: parsedPreviewCode?.interactionMode,
+                        }),
+                    },
+                });
+                return;
+            }
 
             if (contextType === 'preview_file') {
                 const parsedPreviewFile = parsePreviewFileRequest(toolCall.parameters);

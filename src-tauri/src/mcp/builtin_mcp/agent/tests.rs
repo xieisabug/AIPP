@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use crate::mcp::builtin_mcp::agent::types::*;
-    use crate::mcp::builtin_mcp::templates::{get_builtin_tools_for_command, BuiltinToolInfo};
+    use crate::mcp::builtin_mcp::templates::get_builtin_tools_for_command;
 
     // ============================================
     // Agent Template Tests

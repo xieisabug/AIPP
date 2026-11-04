@@ -1,0 +1,161 @@
+import { useEffect, useState } from "react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import MobileShell from "./MobileShell";
+import { navigateMobile, popMobile, previewMobile, registerMobileBackHandler } from "./navigation";
+
+const mounts = vi.hoisted(() => ({ chat: 0 }));
+vi.mock("../windows/ChatUIWindow", () => ({
+    default: () => {
+        const [draft, setDraft] = useState("");
+        useEffect(() => { mounts.chat += 1; }, []);
+        return <input aria-label="chat draft" value={draft} onChange={event => setDraft(event.target.value)} />;
+    },
+}));
+vi.mock("../windows/ConfigWindow", () => ({ default: () => <div>config page</div> }));
+vi.mock("./MobileArtifactPreview", () => ({
+    default: ({ preview }: { preview: object }) => {
+        const [count, setCount] = useState(0);
+        useEffect(() => { setCount(0); }, [preview]);
+        return <button onClick={() => setCount(value => value + 1)}>preview count {count}</button>;
+    },
+}));
+
+describe("MobileShell navigation", () => {
+    it("preserves the mounted chat and draft across navigation and back", async () => {
+        mounts.chat = 0;
+        render(<MobileShell />);
+        const draft = await screen.findByLabelText("chat draft");
+        fireEvent.change(draft, { target: { value: "unfinished" } });
+        act(() => navigateMobile("config"));
+        expect(await screen.findByText("config page")).toBeVisible();
+        expect(draft).not.toBeVisible();
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(draft).toBeVisible();
+        expect(draft).toHaveValue("unfinished");
+        act(() => navigateMobile("config"));
+        act(() => navigateMobile("chat_ui"));
+        expect(draft).toBeVisible();
+        expect(mounts.chat).toBe(1);
+        expect(window.__aippMobileBack?.()).toBe(false);
+    });
+
+    it("returns through the navigation stack and rejects invalid routes", async () => {
+        render(<MobileShell />);
+        const draft = await screen.findByLabelText("chat draft");
+        expect(window.__aippMobileBack?.()).toBe(false);
+        act(() => window.dispatchEvent(new CustomEvent("aipp:mobile-navigate", { detail: "invalid" })));
+        expect(draft).toBeVisible();
+        expect(screen.queryByText("config page")).toBeNull();
+        act(() => navigateMobile("config"));
+        expect(await screen.findByText("config page")).toBeVisible();
+        act(() => navigateMobile("config"));
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(draft).toBeVisible();
+        expect(window.__aippMobileBack?.()).toBe(false);
+    });
+
+    it("sends Escape to the top visible panel before returning a page", async () => {
+        render(<MobileShell />);
+        await screen.findByLabelText("chat draft");
+        act(() => navigateMobile("config"));
+        const config = await screen.findByText("config page");
+        const panel = document.createElement("div");
+        panel.setAttribute("data-mobile-panel", "");
+        panel.getClientRects = () => [new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList;
+        const handler = vi.fn();
+        panel.addEventListener("keydown", handler);
+        document.body.append(panel);
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(handler).toHaveBeenCalledOnce();
+        expect((handler.mock.calls[0][0] as KeyboardEvent).key).toBe("Escape");
+        expect(config).toBeVisible();
+        panel.remove();
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(screen.getByLabelText("chat draft")).toBeVisible();
+    });
+
+    it("closes an open select listbox before returning a page", async () => {
+        render(<MobileShell />);
+        await screen.findByLabelText("chat draft");
+        act(() => navigateMobile("config"));
+        const config = await screen.findByText("config page");
+        const listbox = document.createElement("div");
+        listbox.setAttribute("role", "listbox");
+        listbox.setAttribute("data-state", "open");
+        listbox.getClientRects = () => [new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList;
+        const escape = vi.fn();
+        document.addEventListener("keydown", escape, { capture: true });
+        document.body.append(listbox);
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(escape).toHaveBeenCalledOnce();
+        expect((escape.mock.calls[0][0] as KeyboardEvent).key).toBe("Escape");
+        expect(config).toBeVisible();
+        listbox.remove();
+        document.removeEventListener("keydown", escape, { capture: true });
+    });
+
+    it("lets the current page consume back and pops on request", async () => {
+        render(<MobileShell />);
+        const draft = await screen.findByLabelText("chat draft");
+        act(() => navigateMobile("config"));
+        const config = await screen.findByText("config page");
+        let consume = true;
+        const unregister = registerMobileBackHandler("config", () => consume);
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(config).toBeVisible();
+        act(() => popMobile());
+        expect(draft).toBeVisible();
+        act(() => navigateMobile("config"));
+        consume = false;
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(draft).toBeVisible();
+        unregister();
+    });
+
+    it("handles back immediately after navigation in the same batch", async () => {
+        render(<MobileShell />);
+        const draft = await screen.findByLabelText("chat draft");
+        act(() => {
+            navigateMobile("config");
+            expect(window.__aippMobileBack?.()).toBe(true);
+        });
+        expect(draft).toBeVisible();
+        expect(window.__aippMobileBack?.()).toBe(false);
+    });
+
+    it("preserves preview state when the same content is reopened", async () => {
+        render(<MobileShell />);
+        await screen.findByLabelText("chat draft");
+        const preview = { language: "react", code: "example", title: "Example" };
+        act(() => previewMobile(preview));
+        fireEvent.click(await screen.findByRole("button", { name: "preview count 0" }));
+        expect(screen.getByRole("button", { name: "preview count 1" })).toBeVisible();
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        act(() => previewMobile({ ...preview }));
+        expect(screen.getByRole("button", { name: "preview count 1" })).toBeVisible();
+    });
+});
+
+it("fits the mobile shell to the visual viewport and restores it when the keyboard closes", () => {
+    const original = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    const viewport = new EventTarget() as VisualViewport;
+    Object.defineProperties(viewport, { height: { value: 400, writable: true }, offsetTop: { value: 80, writable: true } });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+    const { container, unmount } = render(<MobileShell />);
+    const shell = container.querySelector<HTMLElement>("[data-aipp-mobile-shell]")!;
+    expect(shell.style.height).toBe("400px");
+    expect(shell.style.transform).toBe("translateY(80px)");
+    // Shell owns geometry: zero keyboard inset on the shell to prevent chat double-lift
+    expect(shell.style.getPropertyValue("--aipp-keyboard-inset-bottom")).toBe("0px");
+    expect(shell.dataset.aippShellKeyboardOffset).toBe("true");
+    Object.defineProperty(viewport, "height", { value: window.innerHeight });
+    act(() => viewport.dispatchEvent(new Event("resize")));
+    expect(shell.style.height).toBe("");
+    expect(shell.style.transform).toBe("");
+    expect(shell.style.getPropertyValue("--aipp-keyboard-inset-bottom")).toBe("");
+    expect(shell.dataset.aippShellKeyboardOffset).toBeUndefined();
+    unmount();
+    if (original) Object.defineProperty(window, "visualViewport", original);
+    else Reflect.deleteProperty(window, "visualViewport");
+});

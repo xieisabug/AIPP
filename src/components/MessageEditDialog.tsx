@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
+import { useIsMobile } from '../hooks/use-mobile';
+import { useIsMobilePlatform } from '../hooks/use-platform';
 
 interface MessageEditDialogProps {
     isOpen: boolean;
@@ -21,6 +23,9 @@ const MessageEditDialog: React.FC<MessageEditDialogProps> = ({
     onSaveAndRegenerate,
 }) => {
     const [content, setContent] = useState(initialContent);
+    const narrow = useIsMobile();
+    const mobile = useIsMobilePlatform();
+    const compact = narrow || mobile;
 
     useEffect(() => {
         if (isOpen) {
@@ -49,13 +54,16 @@ const MessageEditDialog: React.FC<MessageEditDialogProps> = ({
             />
 
             {/* 模态框内容 */}
-            <div className="relative bg-background rounded-xl shadow-2xl w-[50%] min-w-[32rem] h-[70%] min-h-[28rem] max-w-[90%] max-h-[90%] transform transition-all duration-200 scale-100 flex flex-col">
+            <div role="dialog" aria-modal="true" aria-label="编辑消息" data-mobile-panel
+                onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); onClose(); } }}
+                className={compact ? "fixed inset-0 bg-background flex flex-col safe-top safe-bottom" : "relative bg-background rounded-xl shadow-2xl w-[50%] min-w-[32rem] h-[70%] min-h-[28rem] max-w-[90%] max-h-[90%] transform transition-all duration-200 scale-100 flex flex-col"}>
                 {/* 标题栏 */}
                 <div className="flex items-center justify-between p-6 border-b border-border">
                     <h2 className="text-xl font-semibold text-foreground">编辑消息</h2>
                     <button
                         onClick={onClose}
-                        className="p-2 hover:bg-muted rounded-lg transition-colors duration-200 flex-shrink-0"
+                        aria-label="关闭编辑"
+                        className="h-11 w-11 flex items-center justify-center hover:bg-muted rounded-lg transition-colors duration-200 flex-shrink-0"
                     >
                         <X className="h-5 w-5 text-muted-foreground" />
                     </button>
@@ -66,14 +74,14 @@ const MessageEditDialog: React.FC<MessageEditDialogProps> = ({
                     <Textarea
                         value={content}
                         onChange={(e) => setContent(e.target.value)}
-                        className="w-full flex-1 min-h-64 resize-none"
+                        className="w-full flex-1 min-h-0 resize-none"
                         placeholder="请输入消息内容..."
                         autoFocus
                     />
                 </div>
 
                 {/* 按钮区域 */}
-                <div className="flex justify-end gap-3 p-6 pt-0">
+                <div className="flex flex-wrap shrink-0 justify-end gap-3 p-4 [&_button]:min-h-11">
                     <Button
                         variant="outline"
                         onClick={onClose}

@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, memo } from 'react';
 import ReactMarkdown, { Components } from 'react-markdown';
 import McpToolCallRenderer from '@/components/McpToolCallRenderer';
 import { MCPToolCallUpdateEvent } from '@/data/Conversation';
@@ -82,10 +82,13 @@ function normalizeToolCallData(raw: unknown): ToolCallData {
             : undefined;
     const setupError = typeof value.setup_error === "string" ? value.setup_error : undefined;
     const error = typeof value.error === "string" ? value.error : setupError;
+    const displayServer = typeof value.display_server_name === "string" ? value.display_server_name : undefined;
+    const displayTool = typeof value.display_tool_name === "string" ? value.display_tool_name : undefined;
+    const displayParameters = typeof value.display_parameters === "string" ? value.display_parameters : undefined;
     return {
-        server_name: typeof value.server_name === "string" ? value.server_name : undefined,
-        tool_name: typeof value.tool_name === "string" ? value.tool_name : undefined,
-        parameters: typeof value.parameters === "string" ? value.parameters : undefined,
+        server_name: displayServer ?? (typeof value.server_name === "string" ? value.server_name : undefined),
+        tool_name: displayTool ?? (typeof value.tool_name === "string" ? value.tool_name : undefined),
+        parameters: displayParameters ?? (typeof value.parameters === "string" ? value.parameters : undefined),
         call_id: callId,
         llm_call_id: typeof llmCallIdRaw === "string" ? llmCallIdRaw : undefined,
         status: status ?? (setupError ? "failed" : undefined),
@@ -114,6 +117,18 @@ function parsePartialToolCallPayload(rawPayload: string): ToolCallData {
     const toolMatch = rawPayload.match(/"tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
     if (toolMatch) {
         result.tool_name = decodeJsonString(toolMatch[1]);
+    }
+    const displayServerMatch = rawPayload.match(/"display_server_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (displayServerMatch) {
+        result.server_name = decodeJsonString(displayServerMatch[1]);
+    }
+    const displayToolMatch = rawPayload.match(/"display_tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (displayToolMatch) {
+        result.tool_name = decodeJsonString(displayToolMatch[1]);
+    }
+    const displayParametersMatch = rawPayload.match(/"display_parameters"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    if (displayParametersMatch) {
+        result.parameters = decodeJsonString(displayParametersMatch[1]);
     }
     const callIdMatch = rawPayload.match(/"call_id"\s*:\s*(\d+)/);
     if (callIdMatch) {
@@ -453,6 +468,28 @@ function getMcpToolCallKey(
     return `mcp-slot-${messageId ?? "message"}-${index}-${data.server_name ?? "server"}-${data.tool_name ?? "tool"}`;
 }
 
+const MemoMarkdownSegment = memo(function MemoMarkdownSegment({
+    content,
+    remarkPlugins,
+    rehypePlugins,
+    markdownComponents,
+}: {
+    content: string;
+    remarkPlugins: readonly any[];
+    rehypePlugins: readonly any[];
+    markdownComponents: Components;
+}) {
+    return (
+        <ReactMarkdown
+            children={content}
+            remarkPlugins={remarkPlugins as any}
+            rehypePlugins={rehypePlugins as any}
+            components={markdownComponents}
+            urlTransform={customUrlTransform}
+        />
+    );
+});
+
 export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: ProcessorContext) => {
     const { remarkPlugins, rehypePlugins, markdownComponents } = options;
     const {
@@ -507,19 +544,18 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
             // 添加注释前的内容
             if (beforeComment.trim()) {
                 parts.push(
-                    <ReactMarkdown
+                    <MemoMarkdownSegment
                         key={`before-${index}`}
-                        children={beforeComment}
-                        remarkPlugins={[...remarkPlugins]}
-                        rehypePlugins={[...rehypePlugins]}
-                        components={markdownComponents}
-                        urlTransform={customUrlTransform}
+                        content={beforeComment}
+                        remarkPlugins={remarkPlugins}
+                        rehypePlugins={rehypePlugins}
+                        markdownComponents={markdownComponents}
                     />
                 );
             }
 
             // 添加 MCP 工具调用组件
-            // 只有最后一个工具调用在执行成功后才触发续写
+            // 保留位置信息供渲染使用；续写由后端按整轮完成状态判断。
             const isLastCall = index === mcpCalls.length - 1;
             const toolCallKey = getMcpToolCallKey(data, messageId, index);
             parts.push(
@@ -565,13 +601,12 @@ export const useMcpToolCallProcessor = (options: McpProcessorOptions, context?: 
         const remainingContent = markdownContent.slice(lastIndex);
         if (remainingContent.trim()) {
             parts.push(
-                <ReactMarkdown
+                <MemoMarkdownSegment
                     key="remaining"
-                    children={remainingContent}
-                    remarkPlugins={[...remarkPlugins]}
-                    rehypePlugins={[...rehypePlugins]}
-                    components={markdownComponents}
-                    urlTransform={customUrlTransform}
+                    content={remainingContent}
+                    remarkPlugins={remarkPlugins}
+                    rehypePlugins={rehypePlugins}
+                    markdownComponents={markdownComponents}
                 />
             );
         }

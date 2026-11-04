@@ -81,6 +81,7 @@ import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "@/hooks/useAppShortcuts";
 import { useTheme } from "@/hooks/useTheme";
 import { useAcpPermission, useOperationPermission } from "@/hooks/useOperationPermission";
+import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
 import { pluginRuntime } from "@/services/PluginRuntime";
 
@@ -179,10 +180,12 @@ function getStatusVariant(
 ): "default" | "destructive" | "secondary" | "outline" {
     switch (status) {
         case "succeeded":
+        case "completed":
             return "default";
         case "failed":
             return "destructive";
         case "cancelled":
+        case "interrupted":
             return "secondary";
         case "running":
             return "outline";
@@ -198,11 +201,14 @@ function getStatusLabel(status: string) {
         case "running":
             return "执行中";
         case "succeeded":
+        case "completed":
             return "已完成";
         case "failed":
             return "失败";
         case "cancelled":
             return "已取消";
+        case "interrupted":
+            return "已中断";
         default:
             return status;
     }
@@ -384,6 +390,15 @@ function ButlerExperimentWindow() {
         conversationIds: permissionConversationIds,
     });
     const {
+        questionRequest: elicitationQuestionRequest,
+        decisionError: elicitationDecisionError,
+        handleSubmit: handleElicitationSubmit,
+        handleCancel: handleElicitationCancel,
+    } = useAcpElicitation({
+        conversationId: conversationIdNumber,
+        conversationIds: permissionConversationIds,
+    });
+    const {
         pendingRequest: pendingAskUserRequest,
         isDialogOpen: isAskUserDialogOpen,
         viewMode: askUserViewMode,
@@ -429,6 +444,23 @@ function ButlerExperimentWindow() {
                     readOnly={isAskUserReadOnly}
                     onSubmit={handleAskUserSubmit}
                     onCancel={handleAskUserCancel}
+                />
+            ),
+        });
+    }
+    if (elicitationQuestionRequest) {
+        inlineInteractionItems.push({
+            key: `butler-acp-elicitation-${elicitationQuestionRequest.request_id}`,
+            callId: null,
+            messageId: null,
+            content: (
+                <AskUserQuestionCard
+                    request={elicitationQuestionRequest}
+                    isOpen
+                    viewMode="questionnaire"
+                    errorMessage={elicitationDecisionError}
+                    onSubmit={handleElicitationSubmit}
+                    onCancel={handleElicitationCancel}
                 />
             ),
         });
@@ -1503,8 +1535,6 @@ function ButlerExperimentWindow() {
                                     allowFeishuDebugResend={
                                         showFeishuStatus && isMainConversationFeishuBound
                                     }
-                                    virtualizeMessages
-                                    virtualizedListEngine="virtuoso"
                                     windowLabel="butler_experiment"
                                     busySendBehavior="interrupt"
                                     onPreviewFileContextClick={handlePreviewFileContextSelection}

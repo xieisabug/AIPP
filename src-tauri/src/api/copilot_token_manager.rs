@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 const COPILOT_TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 
@@ -106,13 +106,6 @@ impl CopilotTokenManagerState {
         inner.cached = Some(CachedSession { oauth_token_hash: token_hash, info, effective_expiry });
 
         Ok(result)
-    }
-
-    /// 使缓存失效（如 OAuth token 更新后）
-    pub async fn invalidate(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.cached = None;
-        info!("[CopilotTokenManager] Cache invalidated");
     }
 }
 

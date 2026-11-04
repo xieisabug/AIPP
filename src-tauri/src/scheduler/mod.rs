@@ -7,6 +7,7 @@ mod summary_task;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, info};
@@ -19,15 +20,32 @@ pub struct SchedulerState {
     /// 正在进行总结的对话 ID 集合
     pub summarizing_conversations: Arc<TokioMutex<std::collections::HashSet<i64>>>,
     /// 正在执行的定时任务 ID 集合
-    pub running_scheduled_tasks: Arc<TokioMutex<HashSet<i64>>>,
+    running_scheduled_tasks: Arc<Mutex<HashSet<i64>>>,
+}
+
+pub(crate) struct ScheduledTaskClaim {
+    running: Arc<Mutex<HashSet<i64>>>,
+    task_id: i64,
+}
+
+impl Drop for ScheduledTaskClaim {
+    fn drop(&mut self) {
+        self.running.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.task_id);
+    }
 }
 
 impl SchedulerState {
     pub fn new() -> Self {
         Self {
             summarizing_conversations: Arc::new(TokioMutex::new(std::collections::HashSet::new())),
-            running_scheduled_tasks: Arc::new(TokioMutex::new(HashSet::new())),
+            running_scheduled_tasks: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    pub(crate) fn claim_scheduled_task(&self, task_id: i64) -> Option<ScheduledTaskClaim> {
+        let mut running = self.running_scheduled_tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if !running.insert(task_id) { return None; }
+        Some(ScheduledTaskClaim { running: self.running_scheduled_tasks.clone(), task_id })
     }
 }
 
@@ -36,6 +54,10 @@ impl Default for SchedulerState {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "scheduler_claim_tests.rs"]
+mod claim_tests;
 
 pub async fn run_conversation_summary_now(
     app_handle: &tauri::AppHandle,

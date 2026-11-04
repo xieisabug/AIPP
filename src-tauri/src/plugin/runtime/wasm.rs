@@ -33,6 +33,9 @@ pub(crate) fn execute_wasm_hook(
     hook_name: &str,
     context: &Value,
 ) -> Result<HookRuntimeResult, String> {
+    if cfg!(mobile) {
+        return Err(format!("MOBILE_UNSUPPORTED: capability=wasm_plugin; stage=plugin_hook; plugin={}; hook={}; WASM 尚未通过 Android 设备核验", manifest.code, hook_name));
+    }
     let wasm_path = manifest.plugin_dir.join(&manifest.runtime.entry);
     verify_entry_checksum(&wasm_path, manifest.runtime.checksum.as_deref())?;
     let input = WasmHookInput {

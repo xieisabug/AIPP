@@ -1,3 +1,6 @@
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import { useMobileResume } from "@/hooks/useMobileResume";
+import MobileRecoveryNotice from "./conversation/MobileRecoveryNotice";
 import { invoke } from "@tauri-apps/api/core";
 import {
     Fragment,
@@ -24,6 +27,7 @@ import {
     AcpConversationSessionState,
     AcpSessionConfigChoice,
     AcpSessionConfigOption,
+    AgentActivityEvent,
 } from "../data/Conversation";
 import "katex/dist/katex.min.css";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -37,10 +41,19 @@ import useFileManagement from "@/hooks/useFileManagement";
 import { useConversationEvents } from "@/hooks/useConversationEvents";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { AssistantListItem } from "@/data/Assistant";
+import { claimAgentConnectionEvent } from "./conversation/agentSessionNotice";
+import { agentSupportsPlanToggle } from "@/utils/agentPlanMode";
+
+interface AgentRuntimeInfo {
+    agent_kind: string;
+    working_directory: string;
+}
 
 // 导入新创建的 hooks
 import { usePluginManagement } from "@/hooks/usePluginManagement";
 import { useScrollManagement } from "@/hooks/useScrollManagement";
+import { useConversationDraft } from "@/hooks/useConversationDraft";
+import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
@@ -50,13 +63,15 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 
 // 导入新创建的组件
 import ConversationHeader from "./conversation/ConversationHeader";
-import ConversationContent, {
-    type VirtualizedListEngine,
-} from "./conversation/ConversationContent";
+import ConversationExportDialog from "./conversation/ConversationExportDialog";
+import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail from "./conversation/ConversationTurnRail";
-import { applyScrollHighlight } from "./conversation/scrollHighlight";
+import MobileTurnScrubber from "./conversation/MobileTurnScrubber";
+import type { MessageScrollAlign } from "./conversation/scrollHighlight";
 import { ToolErrorContinueProvider } from "./McpToolCall";
 import IconButton from "./IconButton";
+import { Button } from "./ui/button";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
@@ -66,7 +81,7 @@ import { toast } from "sonner";
 import { cn } from "@/utils/utils";
 
 // 导入 Chat Sidebar 相关
-import { ChatSidebar, type ContextItem, type TodoItem } from "./chat-sidebar";
+import { ChatSidebar, ChatSidebarContent, type ContextItem, type TodoItem } from "./chat-sidebar";
 import { useTodoList } from "@/hooks/useTodoList";
 import { useArtifactExtractor } from "@/hooks/useArtifactExtractor";
 import { useExplicitArtifacts } from "@/hooks/useExplicitArtifacts";
@@ -74,6 +89,7 @@ import { useContextList } from "@/hooks/useContextList";
 import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -86,6 +102,10 @@ export interface ConversationUIRef {
     toggleSidebar: () => void;
     openSidebarWindow: () => void;
     openSettings: () => void;
+    /** 打开当前会话重命名对话框（移动端顶栏点标题） */
+    openTitleEdit: () => void;
+    /** 移动端：打开会话详情面板（待办/上下文/制品/插件面板） */
+    openDetails: () => void;
 }
 
 export interface InlineInteractionItem {
@@ -163,11 +183,20 @@ function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
                 <Input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="搜索配置"
+                    placeholder={option.options.length === 0 ? "输入值后按 Enter" : "搜索配置"}
                     className="mb-1 h-8"
+                    onKeyDown={(event) => {
+                        if (option.options.length === 0 && event.key === "Enter" && query.trim()) {
+                            handleSelect(query.trim());
+                        }
+                    }}
                 />
                 <div className="max-h-72 overflow-y-auto">
-                    {visibleChoices.length === 0 ? (
+                    {option.options.length === 0 ? (
+                        <div className="px-2 py-3 text-xs text-muted-foreground">
+                            {option.id === "reasoning_effort" ? "当前模型未返回 supportedReasoningEfforts" : "该配置支持直接输入值"}
+                        </div>
+                    ) : visibleChoices.length === 0 ? (
                         <div className="px-2 py-6 text-center text-sm text-muted-foreground">无匹配项</div>
                     ) : (
                         visibleChoices.map((choice) => {
@@ -214,8 +243,6 @@ interface ConversationUIProps {
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
-    virtualizeMessages?: boolean;
-    virtualizedListEngine?: VirtualizedListEngine;
     windowLabel?: string;
     busySendBehavior?: "queue" | "interrupt";
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
@@ -229,6 +256,40 @@ function makeTurnPreview(content: string): string {
         return collapsed;
     }
     return collapsed.slice(0, TURN_PREVIEW_MAX) + "…";
+}
+
+const EMPTY_GENERATION_GROUPS = new Map<string, any>();
+const EMPTY_GROUP_ROOT_MESSAGE_IDS = new Map<string, number>();
+const showAllMessageVersions = () => ({ shouldShow: true });
+const persistedAgentActivitiesCache = new WeakMap<Message, AgentActivityEvent[]>();
+const MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES = 500;
+
+interface PluginMessageActionCacheEntry {
+    messageType: string;
+    content: string;
+    rendered: React.ReactNode;
+}
+
+function readPersistedAgentActivities(message: Message): AgentActivityEvent[] {
+    const cached = persistedAgentActivitiesCache.get(message);
+    if (cached) {
+        return cached;
+    }
+    let activities: AgentActivityEvent[] = [];
+    if (message.metadata_json) {
+        try {
+            const metadata = JSON.parse(message.metadata_json) as {
+                agent_activities?: AgentActivityEvent[];
+            };
+            activities = (metadata.agent_activities ?? []).filter(
+                (activity) => activity?.item_id && activity.agent_kind,
+            );
+        } catch {
+            activities = [];
+        }
+    }
+    persistedAgentActivitiesCache.set(message, activities);
+    return activities;
 }
 
 const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
@@ -247,8 +308,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             allowDelete = true,
             headerExtraActions,
             allowFeishuDebugResend = false,
-            virtualizeMessages = false,
-            virtualizedListEngine = "legacy",
             windowLabel = "chat_ui",
             busySendBehavior = "queue",
             onPreviewFileContextClick,
@@ -261,16 +320,59 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const [conversation, setConversation] = useState<Conversation>();
         const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
         const [selectedAssistant, setSelectedAssistant] = useState(-1);
+        const [selectedAgentModel, setSelectedAgentModel] = useState("");
+        const [selectedAgentEffort, setSelectedAgentEffort] = useState("");
+        const [selectedAgentApprovalPolicy, setSelectedAgentApprovalPolicy] = useState("");
+        const [selectedAgentSandbox, setSelectedAgentSandbox] = useState("");
+        const [selectedAgentMode, setSelectedAgentMode] = useState("default");
+        useEffect(() => {
+            setSelectedAgentMode("default");
+        }, [selectedAssistant]);
+        const handleAgentConfigChange = useCallback((model: string, effort: string, approvalPolicy: string, sandbox: string) => {
+            setSelectedAgentModel(model);
+            setSelectedAgentEffort(effort);
+            setSelectedAgentApprovalPolicy(approvalPolicy);
+            setSelectedAgentSandbox(sandbox);
+        }, []);
 
         // 对话加载状态
         const [isLoadingShow, setIsLoadingShow] = useState(false);
+        const [renderingConversationId, setRenderingConversationId] = useState<string | null>(null);
+        const readingPositions = useRef(new Map<string, number>());
+
+        useEffect(() => {
+            if (renderingConversationId !== conversationId || isLoadingShow) return;
+            const deadline = performance.now() + 2000;
+            const finishAfterPositioning = () => {
+                const isPositioning = scrollContainerRef.current?.querySelector(
+                    "[data-aipp-initial-bottom-positioning='true']",
+                );
+                if (isPositioning && performance.now() < deadline) {
+                    frame = requestAnimationFrame(finishAfterPositioning);
+                } else {
+                    const saved = readingPositions.current.get(conversationId);
+                    if (saved !== undefined && scrollContainerRef.current) {
+                        handleUserScrollIntent();
+                        scrollContainerRef.current.scrollTop = saved;
+                        syncScrollState();
+                    }
+                    setRenderingConversationId(null);
+                }
+            };
+            let frame = requestAnimationFrame(() => {
+                frame = requestAnimationFrame(finishAfterPositioning);
+            });
+            return () => cancelAnimationFrame(frame);
+        }, [renderingConversationId, conversationId, isLoadingShow]);
 
         // ACP assistant working directory (resolved by backend)
         const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
+        const [configuredAgentKind, setConfiguredAgentKind] = useState<string | null>(null);
         const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
+        const syncScrollPositionRef = useRef<{ conversationId: string; top: number } | null>(null);
         const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
         const smartScrollRef = useRef<
@@ -280,8 +382,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // AI响应状态管理
         const [aiIsResponsing, setAiIsResponsing] = useState<boolean>(false);
 
-        // 输入相关状态
-        const [inputText, setInputText] = useState("");
+        const [showBackToBottom, setShowBackToBottom] = useState(false);
         const inputAreaRef = useRef<InputAreaRef>(null);
         // 加载请求标识，避免旧请求覆盖最新状态（StrictMode 双调用等场景）
         const loadRequestIdRef = useRef<number>(0);
@@ -294,12 +395,37 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 文本选择
         const { selectedText } = useTextSelection();
 
-        // 文件管理
-        const { fileInfoList, clearFileInfoList, handleChooseFile, handleDeleteFile, handlePaste, handleDropFiles } =
-            useFileManagement();
+        // 文件管理（需先于草稿，便于跨进程恢复附件引用）
+        const {
+            fileInfoList,
+            clearFileInfoList,
+            restoreFiles,
+            handleChooseFile,
+            handleDeleteFile,
+            handlePaste,
+            handleDropFiles,
+        } = useFileManagement();
+
+        const [draftReady, setDraftReady] = useState(false);
+        useEffect(() => {
+            setDraftReady(false);
+            restoreFiles([]);
+        }, [conversationId, restoreFiles]);
+
+        // 输入相关状态（移动端会把附件 ID 一并写入本机草稿）
+        const [inputText, setInputText, saveDraftAttachmentIds] = useConversationDraft(
+            conversationId,
+            restoreFiles,
+            () => setDraftReady(true),
+        );
 
         // 文件拖拽
         const { isDragging, setIsDragging, dropRef } = useFileDropHandler(handleDropFiles);
+
+        useEffect(() => {
+            if (!draftReady) return;
+            saveDraftAttachmentIds((fileInfoList ?? []).map((file) => file.id).filter((id) => id > 0));
+        }, [fileInfoList, draftReady, saveDraftAttachmentIds]);
 
         // Reasoning 展开状态
         const { reasoningExpandStates, toggleReasoningExpand } = useReasoningExpand();
@@ -308,7 +434,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const { resetReveal } = useAntiLeakage();
         const {
             getConfigValue,
-            loadFeatureConfig,
             loading: featureConfigLoading,
         } = useFeatureConfig();
         const { config: displayConfig } = useDisplayConfig();
@@ -318,15 +443,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             : !["false", "0"].includes(
                 getConfigValue("tool_error_continue", "enabled", "true").trim().toLowerCase(),
             );
-
-        useEffect(() => {
-            const unlisten = listen("feature_config_changed", () => {
-                void loadFeatureConfig();
-            });
-            return () => {
-                unlisten.then((f) => f());
-            };
-        }, [loadFeatureConfig]);
 
         // ============= Chat Sidebar Hooks =============
 
@@ -493,8 +609,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     handleMessageCompletion(streamEvent);
                 }
 
-                // 每次消息更新时手动触发滚动
-                setTimeout(() => smartScrollRef.current?.(), 0);
+                // 每次消息更新时手动触发滚动；流式用 auto，避免 smooth 锁期内假阳性上滑后停在半截
+                setTimeout(() => smartScrollRef.current?.(false, "auto"), 0);
             };
 
             return {
@@ -552,6 +668,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             setShiningMessageIds,
             setManualShineMessage,
             mcpToolCallStates,
+            agentActivities,
             shiningMcpCallId,
             runtimeState,
             updateShiningMessages,
@@ -599,7 +716,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [conversationId]);
 
         const showAcpConnectionError = useCallback(
-            (assistantId: number, error: unknown) => {
+            (assistantId: number, error: unknown, agentKind?: string | null) => {
                 const errorMessage =
                     error instanceof Error
                         ? error.message
@@ -612,7 +729,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 }
 
                 acpConnectionErrorNoticeRef.current = noticeKey;
-                toast.error("ACP 会话启动失败", {
+                const agentLabel = agentKind === "codex_app_server"
+                    ? "Codex"
+                    : agentKind === "claude_sdk"
+                        ? "Claude Code"
+                        : "Agent";
+                toast.error(`${agentLabel} 会话启动失败`, {
                     description: errorMessage,
                     position: "bottom-right",
                 });
@@ -625,10 +747,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [streamingMessages]);
 
         useEffect(() => {
+            const isNativeCodex = acpSessionState?.agent_kind === "codex_app_server";
             const canRestoreAcpSession =
                 acpSessionState?.load_session_supported ||
                 acpSessionState?.session_resume_supported;
-            if (!acpSessionState?.session_id || canRestoreAcpSession) {
+            if (isNativeCodex || !acpSessionState?.session_id || canRestoreAcpSession) {
                 return;
             }
 
@@ -644,6 +767,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [
             acpSessionState?.load_session_supported,
             acpSessionState?.session_resume_supported,
+            acpSessionState?.agent_kind,
             acpSessionState?.session_id,
             conversationId,
         ]);
@@ -655,20 +779,44 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
 
             const noticeKey = `${conversationId}:${acpSessionState.session_id}:${method}`;
-            if (acpRestoreNoticeRef.current === noticeKey) {
-                return;
+            const connectionEventId = acpSessionState.connection_event_id;
+            if (connectionEventId) {
+                if (!claimAgentConnectionEvent(connectionEventId)) {
+                    return;
+                }
+            } else {
+                if (acpRestoreNoticeRef.current === noticeKey) {
+                    return;
+                }
+                acpRestoreNoticeRef.current = noticeKey;
             }
 
-            acpRestoreNoticeRef.current = noticeKey;
-            const methodLabel = method === "resume" ? "session/resume" : "session/load";
+            const isCodexSession = acpSessionState.agent_kind === "codex_app_server";
+            const isClaudeSession = acpSessionState.agent_kind === "claude_sdk";
+            const sessionLabel = isCodexSession ? "Codex" : isClaudeSession ? "Claude Code" : "ACP";
+            const methodLabel = method === "resume"
+                ? isCodexSession
+                    ? "thread/resume"
+                    : isClaudeSession
+                        ? "--resume"
+                        : "session/resume"
+                : "session/load";
             const description =
                 method === "resume"
-                    ? "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
-                    : "AIPP 已抑制历史回放，避免重复写入当前对话。";
-            toast.success(`已通过 ${methodLabel} 恢复 ACP 会话`, {
+                    ? isCodexSession
+                        ? "Codex 已恢复线程内部上下文，AIPP 保留本地对话展示。"
+                        : isClaudeSession
+                            ? "Claude Code 已确认恢复原 session，AIPP 保留本地对话展示。"
+                            : "AIPP 保留本地对话展示，Agent 仅恢复内部上下文。"
+                    : isCodexSession
+                        ? "Codex 已恢复线程，AIPP 已抑制历史回放，避免重复写入当前对话。"
+                        : "AIPP 已抑制历史回放，避免重复写入当前对话。";
+            toast.success(`已通过 ${methodLabel} 恢复 ${sessionLabel} 会话`, {
                 description,
             });
         }, [
+            acpSessionState?.agent_kind,
+            acpSessionState?.connection_event_id,
             acpSessionState?.restored_session_method,
             acpSessionState?.session_id,
             conversationId,
@@ -735,9 +883,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             messages: messagesWithQueued,
             streamingMessages,
             conversation,
-            generationGroups: new Map(), // 第一步只需要合并消息用于分组
-            groupRootMessageIds: new Map(),
-            getMessageVersionInfo: () => ({ shouldShow: true }),
+            generationGroups: EMPTY_GENERATION_GROUPS,
+            groupRootMessageIds: EMPTY_GROUP_ROOT_MESSAGE_IDS,
+            getMessageVersionInfo: showAllMessageVersions,
         });
 
         // 第二步：使用合并后的消息进行分组计算
@@ -755,27 +903,54 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
             getMessageVersionInfo: messageGroupsData.getMessageVersionInfo,
         });
+        const displayAgentActivities = useMemo(() => {
+            const combined = new Map<string, AgentActivityEvent>();
+            for (const message of allDisplayMessages) {
+                for (const activity of readPersistedAgentActivities(message)) {
+                    const key = `${activity.agent_kind}:${activity.session_id ?? ""}:${activity.item_id}`;
+                    const existing = combined.get(key);
+                    if (!existing || existing.sequence < activity.sequence) {
+                        combined.set(key, activity);
+                    }
+                }
+            }
+            for (const [key, activity] of agentActivities) {
+                const existing = combined.get(key);
+                if (!existing || existing.sequence < activity.sequence) {
+                    combined.set(key, activity);
+                }
+            }
+            return combined;
+        }, [agentActivities, allDisplayMessages]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
             scrollContainerRef,
-            handleScroll,
             handleUserScrollIntent,
             syncScrollState,
             smartScroll,
-            scrollToUserMessage,
-            scrollToBottomStable,
         } = useScrollManagement({
-            disableTailObservation: virtualizeMessages,
+            disableTailObservation: true,
         });
         smartScrollRef.current = smartScroll;
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
+        const [pendingScrollAlign, setPendingScrollAlign] = useState<MessageScrollAlign>("center");
 
         // ============= Chat Sidebar 数据提取 =============
 
         // Artifacts from messages (code blocks)
+        const activeStreamingMessageIds = useMemo(() => {
+            const ids = new Set<number>();
+            streamingMessages.forEach((event, id) => {
+                if (!event.is_done) {
+                    ids.add(id);
+                }
+            });
+            return ids;
+        }, [streamingMessages]);
         const { artifacts: inferredArtifacts } = useArtifactExtractor({
             messages: allDisplayMessages,
+            activeStreamingMessageIds,
         });
         const { artifacts: explicitArtifacts } = useExplicitArtifacts({
             conversationId,
@@ -889,6 +1064,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onChangeConversationId,
             smartScroll,
             updateShiningMessages,
+            clearShiningMessages,
             setAiIsResponsing,
         });
 
@@ -912,7 +1088,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleEditSave,
             handleEditSaveAndRegenerate,
             handleSend,
-            handleArtifact,
+            handleArtifact: handleDesktopArtifact,
             editDialogIsOpen,
             editingMessage,
             closeEditDialog,
@@ -938,9 +1114,23 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             assistantTypePluginMap,
             assistantRunApi,
             busySendBehavior,
+            selectedAgentModel,
+            selectedAgentEffort,
+            selectedAgentApprovalPolicy,
+            selectedAgentSandbox,
+            selectedAgentMode,
         });
 
+        const mobilePlatform = useIsMobilePlatform();
+        const handleArtifact = useCallback((language: string, code: string) => {
+            if (mobilePlatform) previewMobile({ language, code });
+            else handleDesktopArtifact(language, code);
+        }, [mobilePlatform, handleDesktopArtifact]);
+
         // ============= 初始化和生命周期逻辑 =============
+
+        // 移动端：会话详情面板（桌面由右侧 ChatSidebar 承担；轮次导航由 MobileTurnScrubber 承担）
+        const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
 
         // 暴露给外部的方法
         useImperativeHandle(
@@ -950,6 +1140,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     inputAreaRef.current?.focus();
                 },
                 scrollToMessage: (messageId: number) => {
+                    setPendingScrollAlign("center");
                     setPendingScrollMessageId(messageId);
                 },
                 openStats: () => {
@@ -973,8 +1164,14 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 openSettings: () => {
                     invoke("open_config_window");
                 },
+                openTitleEdit: () => {
+                    if (conversationId && allowRename) openTitleEditDialog();
+                },
+                openDetails: () => {
+                    if (conversationId) setMobileDetailsOpen(true);
+                },
             }),
-            [conversationId, handleOpenSidebarWindow]
+            [conversationId, handleOpenSidebarWindow, allowRename, openTitleEditDialog]
         );
 
         // 左侧对话轮次导航条：从当前展示的消息中抽取用户提问轮次
@@ -1012,6 +1209,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 对话加载和管理逻辑
         // 注意：为避免 React StrictMode 下的双调用导致“取消”标记错误触发，使用 requestId 跳过过期请求
         useEffect(() => {
+            const requestId = ++loadRequestIdRef.current;
             // 仅依赖 conversationId，保持函数引用稳定
             if (!conversationId) {
                 // 无对话 ID时，清理状态并加载助手列表
@@ -1031,8 +1229,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
 
             // 使用递增的 requestId 避免旧请求覆盖最新状态
-            const requestId = (loadRequestIdRef.current || 0) + 1;
-            loadRequestIdRef.current = requestId;
 
             // 加载指定对话的消息和信息
             setIsLoadingShow(true);
@@ -1068,6 +1264,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     const setStateStartTime = performance.now();
                     setMessages(res.messages);
                     setConversation(res.conversation);
+                    setRenderingConversationId(conversationId);
                     setIsLoadingShow(false); // 这里会触发 useLayoutEffect 中的聚焦
 
                     if (res.messages.length === 2) {
@@ -1090,6 +1287,39 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
             // 不使用清理函数的取消标记，依赖 requestId 判定最新请求
         }, [conversationId]);
+
+        const refreshPersistedConversation = useDataRefresh({
+            events: ["conversation_data_changed"],
+            identity: conversationId,
+            paused: effectiveAiIsResponsing,
+            refresh: async (isCurrent) => {
+                if (!conversationId) return;
+                const requestId = ++loadRequestIdRef.current;
+                const result = await invoke<ConversationWithMessages>("get_conversation_with_messages", {
+                    conversationId: +conversationId,
+                });
+                if (!isCurrent() || requestId !== loadRequestIdRef.current) return;
+                setConversation(result.conversation);
+                const container = scrollContainerRef.current;
+                if (container) syncScrollPositionRef.current = { conversationId, top: container.scrollTop };
+                // The local run has finished: the persisted snapshot is authoritative,
+                // including remote edits that shorten content or delete messages.
+                clearStreamingMessages();
+                setMessages(result.messages);
+                setIsLoadingShow(false);
+            },
+            onError: (error) => toast.error(`同步后刷新聊天失败（conversation=${conversationId}）: ${String(error)}`),
+        });
+        useMobileResume(refreshPersistedConversation, conversationId);
+
+        useLayoutEffect(() => {
+            const position = syncScrollPositionRef.current;
+            syncScrollPositionRef.current = null;
+            if (position?.conversationId === conversationId && scrollContainerRef.current) {
+                scrollContainerRef.current.scrollTop = position.top;
+                syncScrollState();
+            }
+        }, [messages, conversationId, syncScrollState]);
 
         // 监听对话标题变化
         useEffect(() => {
@@ -1136,18 +1366,23 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [activeAssistantId, assistants]);
 
+        // 移动端不能连接/启动本机 CLI Agent（MOB-02），不自动连接 ACP 会话
+        const isMobilePlatform = useIsMobilePlatform();
+
         // Fetch ACP working directory for current assistant
         useEffect(() => {
             const assistantId = activeAssistantId;
-            if (!assistantId || !isAcpAssistant) {
+            if (!assistantId || !isAcpAssistant || isMobilePlatform) {
                 setAcpWorkingDirectory(null);
+                setConfiguredAgentKind(null);
                 applyAcpSessionState(null);
                 return;
             }
 
-            invoke<string>("get_acp_working_directory", { assistantId })
-                .then((workingDirectory) => {
-                    setAcpWorkingDirectory(workingDirectory);
+            invoke<AgentRuntimeInfo>("get_agent_runtime_info", { assistantId })
+                .then((runtimeInfo) => {
+                    setAcpWorkingDirectory(runtimeInfo.working_directory);
+                    setConfiguredAgentKind(runtimeInfo.agent_kind);
                     const conversationIdNum = Number(conversationId);
                     if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
                         return;
@@ -1173,16 +1408,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 acpAutoConnectKeyRef.current = null;
                             }
                             console.warn("[ACP] Auto connect failed", error);
-                            showAcpConnectionError(assistantId, error);
+                            showAcpConnectionError(assistantId, error, runtimeInfo.agent_kind);
                         });
                 })
                 .catch((error) => {
                     setAcpWorkingDirectory(null);
+                    setConfiguredAgentKind(null);
                     showAcpConnectionError(assistantId, error);
                 });
         }, [
             activeAssistantId,
             isAcpAssistant,
+            isMobilePlatform,
             conversationId,
             applyAcpSessionState,
             showAcpConnectionError,
@@ -1192,7 +1429,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             async (option: AcpSessionConfigOption, value: string) => {
                 const conversationIdNum = Number(conversationId);
                 if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
-                    return;
+                    return false;
                 }
 
                 setAcpMutationKey(`config:${option.id}`);
@@ -1202,17 +1439,94 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         configId: option.id,
                         value,
                     });
+                    return true;
                 } catch (error) {
-                    toast.error("更新 ACP 配置失败", {
+                    toast.error("更新 Agent 配置失败", {
                         description: String(error),
                         position: "bottom-right",
                     });
+                    return false;
                 } finally {
                     setAcpMutationKey(null);
                 }
             },
             [conversationId]
         );
+
+        const planModeOption = useMemo(
+            () => acpSessionState?.config_options.find((option) =>
+                option.category === "mode" &&
+                option.options.some((choice) => choice.value.toLowerCase() === "plan")
+            ) ?? null,
+            [acpSessionState?.config_options]
+        );
+        const planModeChoice = planModeOption?.options.find(
+            (choice) => choice.value.toLowerCase() === "plan"
+        ) ?? null;
+        const executionModeChoice = planModeOption?.options.find(
+            (choice) => choice.value.toLowerCase() === "default"
+        ) ?? planModeOption?.options.find((choice) => choice.value !== planModeChoice?.value) ?? null;
+        const showPlanModeToggle = agentSupportsPlanToggle(
+            acpSessionState?.agent_kind ?? configuredAgentKind,
+            Boolean(planModeOption),
+        );
+        const isPlanMode = planModeOption && planModeChoice
+            ? planModeOption.current_value === planModeChoice.value
+            : selectedAgentMode === "plan";
+        const planModeSwitching = Boolean(
+            planModeOption && acpMutationKey === `config:${planModeOption.id}`
+        );
+
+        const setAgentPlanMode = useCallback(
+            async (enabled: boolean) => {
+                if (enabled === isPlanMode) return true;
+                if (!planModeOption) {
+                    setSelectedAgentMode(enabled ? "plan" : "default");
+                    return true;
+                }
+                const choice = enabled ? planModeChoice : executionModeChoice;
+                if (!choice) return false;
+                return handleAcpConfigChange(planModeOption, choice.value);
+            },
+            [executionModeChoice, handleAcpConfigChange, isPlanMode, planModeChoice, planModeOption]
+        );
+
+        const pendingPlanExecutionRef = useRef(false);
+        const planExecutionPrompt = "通过";
+        const handleContinuePlanning = useCallback(async () => {
+            if (await setAgentPlanMode(true)) {
+                inputAreaRef.current?.focus();
+            }
+        }, [setAgentPlanMode]);
+        const handleStartPlanExecution = useCallback(async () => {
+            if (!isPlanMode || await setAgentPlanMode(false)) {
+                pendingPlanExecutionRef.current = true;
+                setInputText(planExecutionPrompt);
+            }
+        }, [isPlanMode, setAgentPlanMode, setInputText]);
+        const handleContinueAgentPlan = useCallback(() => {
+            void handleContinuePlanning();
+        }, [handleContinuePlanning]);
+        const handleApproveAgentPlan = useCallback(() => {
+            void handleStartPlanExecution();
+        }, [handleStartPlanExecution]);
+
+        const actionableAgentPlanMessageId = useMemo(() => {
+            if (!isPlanMode) return null;
+            return [...allDisplayMessages]
+                .reverse()
+                .find((message) =>
+                    message.message_type === "agent_plan"
+                    && Boolean(message.finish_time)
+                    && Boolean(message.content.trim())
+                )?.id ?? null;
+        }, [allDisplayMessages, isPlanMode]);
+
+        useEffect(() => {
+            if (!pendingPlanExecutionRef.current || inputText !== planExecutionPrompt) return;
+            pendingPlanExecutionRef.current = false;
+            handleSend();
+        }, [handleSend, inputText]);
 
         const pluginHeaderActions = useMemo(() => {
             const actionContext = {
@@ -1283,7 +1597,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             );
         }, [headerExtraActions, pluginHeaderActions]);
 
+        const pluginMessageActionCacheRef = useRef<{
+            pluginList: any[];
+            entries: Map<number, PluginMessageActionCacheEntry>;
+        }>({ pluginList, entries: new Map() });
         const renderPluginMessageActions = useCallback((message: Message) => {
+            const cache = pluginMessageActionCacheRef.current;
+            if (cache.pluginList !== pluginList) {
+                cache.pluginList = pluginList;
+                cache.entries.clear();
+            }
             const actionEntries = pluginList
                 .flatMap((plugin) =>
                     (plugin.contributions?.actions ?? []).map((action: {
@@ -1299,6 +1622,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 return null;
             }
 
+            // 缓存渲染结果，让历史消息的 messageActions 引用保持稳定，MessageItem 的 memo 才不会被击穿。
+            const cached = cache.entries.get(message.id);
+            if (
+                cached
+                && cached.messageType === message.message_type
+                && cached.content === message.content
+            ) {
+                return cached.rendered;
+            }
+
             const actionContext = {
                 conversationId: message.conversation_id,
                 messageId: message.id,
@@ -1306,7 +1639,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 messageContent: message.content,
             };
 
-            return actionEntries.map(({ plugin, action }) => {
+            const rendered = actionEntries.map(({ plugin, action }) => {
                 const instance = plugin.instance as
                     | { renderAction?: (actionId: string, context?: Record<string, unknown>) => React.ReactNode }
                     | null;
@@ -1314,9 +1647,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     return null;
                 }
                 try {
-                    const rendered = instance.renderAction(action.id, actionContext);
-                    return rendered ? (
-                        <Fragment key={`${plugin.code}:${action.id}:${message.id}`}>{rendered}</Fragment>
+                    const node = instance.renderAction(action.id, actionContext);
+                    return node ? (
+                        <Fragment key={`${plugin.code}:${action.id}:${message.id}`}>{node}</Fragment>
                     ) : null;
                 } catch (error) {
                     console.error(
@@ -1326,6 +1659,19 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     return null;
                 }
             });
+            cache.entries.delete(message.id);
+            cache.entries.set(message.id, {
+                messageType: message.message_type,
+                content: message.content,
+                rendered,
+            });
+            if (cache.entries.size > MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES) {
+                const oldest = cache.entries.keys().next().value;
+                if (oldest !== undefined) {
+                    cache.entries.delete(oldest);
+                }
+            }
+            return rendered;
         }, [pluginList]);
 
         const sendButtonSlotContext = useMemo(
@@ -1427,6 +1773,27 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 ? new Date(acpSessionState.updated_at).toLocaleString()
                 : null;
             const configOptionCount = acpSessionState?.config_options.length ?? 0;
+            const effectiveAgentKind = acpSessionState?.agent_kind ?? configuredAgentKind;
+            const isCodexSession = effectiveAgentKind === "codex_app_server";
+            const isClaudeSession = effectiveAgentKind === "claude_sdk";
+            const isAcpSession = effectiveAgentKind === "acp";
+            const sessionLabel = isCodexSession
+                ? "Codex 会话"
+                : isClaudeSession
+                    ? "Claude Code 会话"
+                    : isAcpSession
+                        ? "ACP 会话"
+                        : "Agent 会话";
+            const configLabel = isCodexSession
+                ? "Codex 配置"
+                : isClaudeSession
+                    ? "Claude Code 配置"
+                    : "会话配置";
+            const currentModelLabel = modelOption?.options.find((choice) => choice.value === modelOption.current_value)?.name
+                ?? modelOption?.current_value
+                ?? acpSessionState?.model
+                ?? (selectedAgentModel ? selectedAgentModel.split("%%")[0] : null)
+                ?? "未选择模型";
             const renderAcpConfigSelect = (option: AcpSessionConfigOption) => (
                 <div key={option.id} className="space-y-1.5">
                     <div className="flex items-center gap-2">
@@ -1449,12 +1816,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     />
                 </div>
             );
-            const statusLabel = (status: string) => {
-                if (status === "completed") return "完成";
-                if (status === "in_progress") return "进行中";
-                return "待处理";
-            };
-
             return (
                 <>
                     {combinedHeaderActions}
@@ -1471,7 +1832,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     }
                                     onClick={() => { }}
                                     border
-                                    title="ACP 会话控制"
+                                    title={`${sessionLabel}控制`}
                                     dataAippSlot="chat-conversation-title-acp"
                                 />
                             </span>
@@ -1479,12 +1840,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         <PopoverContent align="end" className="w-80 space-y-3">
                             <div className="space-y-1">
                                 <div className="flex items-center justify-between gap-2">
-                                    <span className="text-sm font-medium">ACP 会话</span>
+                                    <span className="text-sm font-medium">{sessionLabel}</span>
                                     {acpSessionState?.session_id ? (
                                         <Badge variant="outline">已连接</Badge>
                                     ) : (
                                         <Badge variant="secondary">未启动</Badge>
                                     )}
+                                </div>
+                                <div className="text-xs text-muted-foreground truncate" title={currentModelLabel}>
+                                    当前模型：{currentModelLabel}
                                 </div>
                                 {acpSessionState?.title ? (
                                     <div className="text-xs text-muted-foreground break-all">
@@ -1502,12 +1866,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     </div>
                                 ) : null}
                                 {acpSessionState?.session_id &&
+                                    acpSessionState.agent_kind !== "codex_app_server" &&
                                     !(
                                         acpSessionState.load_session_supported ||
                                         acpSessionState.session_resume_supported
                                     ) ? (
                                     <div className="text-xs text-muted-foreground">
-                                        该 Agent 不支持恢复历史 ACP 会话，新会话会使用 AIPP 对话上下文继续。
+                                        该 Agent 不支持恢复历史会话，新会话会使用 AIPP 对话上下文继续。
                                     </div>
                                 ) : null}
                             </div>
@@ -1516,18 +1881,20 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                             <div className="space-y-2">
                                 <div className="flex items-center justify-between gap-2">
-                                    <span className="text-xs font-medium">会话配置</span>
+                                    <span className="text-xs font-medium">{configLabel}</span>
                                     <Badge variant="secondary" className="text-[10px]">
                                         {configOptionCount} 项
                                     </Badge>
                                 </div>
                                 {!acpSessionState?.session_id ? (
                                     <div className="text-xs text-muted-foreground">
-                                        正在连接 ACP session；连接成功后会读取 Agent 返回的 configOptions。
+                                        {isCodexSession || isClaudeSession
+                                            ? `发送消息时连接 ${isCodexSession ? "Codex" : "Claude Code"} session；连接成功后会读取会话配置。`
+                                            : `正在连接 ${isAcpSession ? "ACP" : "Agent"} session；连接成功后会读取 Agent 返回的配置项。`}
                                     </div>
                                 ) : configOptionCount === 0 ? (
                                     <div className="text-xs text-muted-foreground">
-                                        {acpSessionState.restored_session_method
+                                        {acpSessionState?.restored_session_method
                                             ? `该 Agent 本次通过 session/${acpSessionState.restored_session_method} 恢复，但没有返回可配置的 configOptions。`
                                             : "该 Agent 当前没有返回可配置的 configOptions。"}
                                     </div>
@@ -1544,32 +1911,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                             {acpSessionState?.session_id ? (
                                 <>
-                                    {acpSessionState.plan.length > 0 ? (
-                                        <>
-                                            <Separator />
-                                            <div className="space-y-2">
-                                                <div className="text-xs font-medium">执行计划</div>
-                                                <div className="space-y-1.5">
-                                                    {acpSessionState.plan.map((entry, index) => (
-                                                        <div key={`${entry.content}:${index}`} className="flex items-start gap-2 text-xs">
-                                                            <Badge variant="outline" className="mt-0.5 text-[10px]">
-                                                                {statusLabel(entry.status)}
-                                                            </Badge>
-                                                            <span className="min-w-0 flex-1 text-muted-foreground">
-                                                                {entry.content}
-                                                            </span>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        </>
-                                    ) : null}
-
                                     {acpSessionState.available_commands.length > 0 ? (
                                         <>
                                             <Separator />
                                             <div className="text-xs text-muted-foreground">
-                                                可用 ACP 命令：{acpSessionState.available_commands.length} 个，可在输入框输入 / 选择。
+                                                可用命令：{acpSessionState.available_commands.length} 个，可在输入框输入 / 选择。
                                             </div>
                                         </>
                                     ) : null}
@@ -1584,12 +1930,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             acpSessionState,
             acpWorkingDirectory,
             combinedHeaderActions,
+            configuredAgentKind,
             handleAcpConfigChange,
             isAcpAssistant,
+            selectedAgentModel,
         ]);
 
         const sidebarTodos = useMemo<TodoItem[]>(() => {
-            const acpPlanTodos: TodoItem[] = (acpSessionState?.plan ?? []).map((entry) => ({
+            if (!isAcpAssistant) return todos;
+            return (acpSessionState?.plan ?? []).map((entry) => ({
                 content: entry.content,
                 status:
                     entry.status === "completed"
@@ -1597,10 +1946,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         : entry.status === "in_progress"
                             ? "in_progress"
                             : "pending",
-                activeForm: entry.priority ? `ACP ${entry.priority}` : "ACP Plan",
+                activeForm: "正在执行",
             }));
-            return [...acpPlanTodos, ...todos];
-        }, [acpSessionState?.plan, todos]);
+        }, [acpSessionState?.plan, isAcpAssistant, todos]);
 
         // 监听错误通知事件
         useEffect(() => {
@@ -1611,8 +1959,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 // 重置AI响应状态
                 setAiIsResponsing(false);
 
-                // 使用智能边框控制，而不是直接清空
-                updateShiningMessages();
+                // Error notification means the run stopped — drop any stuck shine border.
+                clearShiningMessages();
             });
 
             return () => {
@@ -1620,93 +1968,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     unsubscribe.then((f) => f());
                 }
             };
-        }, [updateShiningMessages]);
-
-        // 在切换对话后，加载完成并渲染出消息后，强制滚动到底部
-        useEffect(() => {
-            if (virtualizeMessages) return;
-            // 必须有对话且不在加载中，且有可显示的消息时才执行
-            if (!conversationId) return;
-            if (isLoadingShow) return;
-            if (allDisplayMessages.length === 0) return;
-            // 用户正在通过角标/搜索定位到某条消息时，不要抢回底部
-            if (pendingScrollMessageId !== null) return;
-
-            const renderStartTime = performance.now();
-            console.log(`[PERF-FRONTEND] 开始渲染 ${allDisplayMessages.length} 条消息`);
-
-            // 等待渲染与布局稳定后再滚动（双 rAF）
-            requestAnimationFrame(() =>
-                requestAnimationFrame(() => {
-                    const renderDuration = performance.now() - renderStartTime;
-                    console.log(`[PERF-FRONTEND] 消息渲染完成耗时: ${renderDuration.toFixed(2)}ms`);
-                    // 忽略"用户上滑"状态，切换话题后总是瞬时滚动到底部（无平滑动画）
-                    smartScroll(true, 'auto');
-                })
-            );
-        }, [conversationId, isLoadingShow, allDisplayMessages.length, pendingScrollMessageId, smartScroll, virtualizeMessages]);
-
-        // 按消息 ID 定位滚动（用于搜索结果）
-        useEffect(() => {
-            if (virtualizeMessages) {
-                return;
-            }
-            if (pendingScrollMessageId === null) {
-                return;
-            }
-            const container = scrollContainerRef.current;
-            if (!container) {
-                return;
-            }
-            const target = container.querySelector(
-                `[data-message-id='${pendingScrollMessageId}']`
-            ) as HTMLElement | null;
-            if (!target) {
-                return;
-            }
-            applyScrollHighlight({
-                target,
-                messageId: pendingScrollMessageId,
-                setShiningMessageIds,
-                clearPendingScrollMessageId: setPendingScrollMessageId,
-            });
-        }, [
-            pendingScrollMessageId,
-            allDisplayMessages.length,
-            scrollContainerRef,
-            setShiningMessageIds,
-            virtualizeMessages,
-        ]);
-
-        useEffect(() => {
-            // 用户正在定位到某条消息时，不要抢回底部
-            if (pendingScrollMessageId !== null) return;
-            const lastMessage = allDisplayMessages[allDisplayMessages.length - 1];
-            if (!lastMessage || lastMessage.message_type !== "user") {
-                return;
-            }
-            // Virtuoso 列表在 VirtuosoMessageList 内用 useLayoutEffect + ResizeObserver 钉底
-            if (virtualizeMessages && virtualizedListEngine === "virtuoso") {
-                return;
-            }
-            // 在渲染和布局之后执行，避免时间竞态
-            requestAnimationFrame(() =>
-                requestAnimationFrame(() => {
-                    if (virtualizeMessages) {
-                        scrollToBottomStable();
-                        return;
-                    }
-                    scrollToUserMessage();
-                }),
-            );
-        }, [
-            allDisplayMessages.length,
-            pendingScrollMessageId,
-            scrollToBottomStable,
-            scrollToUserMessage,
-            virtualizeMessages,
-            virtualizedListEngine,
-        ]);
+        }, [clearShiningMessages]);
 
         useEffect(() => {
             if (!inlineInteractionVisible) {
@@ -1716,6 +1978,33 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 smartScroll();
             });
         }, [inlineInteractionVisible, smartScroll]);
+
+        // 移动端虚拟键盘适配：可视高度明显收缩视为键盘弹起，此时用户刚点了输入框，
+        // 强制滚动到底部，保证最新消息与输入框可见
+        useEffect(() => {
+            if (!isMobile || typeof window === "undefined" || !window.visualViewport) {
+                return;
+            }
+            const viewport = window.visualViewport;
+            let lastHeight = viewport.height;
+            const onResize = () => {
+                const shrunk = lastHeight - viewport.height;
+                lastHeight = viewport.height;
+                if (shrunk > 150) {
+                    requestAnimationFrame(() => smartScroll(false, "auto"));
+                }
+            };
+            viewport.addEventListener("resize", onResize);
+            return () => viewport.removeEventListener("resize", onResize);
+        }, [isMobile, smartScroll]);
+
+        const handleSelectTurn = useCallback((messageId: number) => {
+            // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
+            handleUserScrollIntent();
+            // 轮次导航把提问顶到视口顶部，便于从这一轮开始往下读
+            setPendingScrollAlign("start");
+            setPendingScrollMessageId(messageId);
+        }, [handleUserScrollIntent]);
 
         // ============= 组件渲染 =============
 
@@ -1730,16 +2019,28 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         <ConversationTurnRail
                             turns={userTurns}
                             scrollContainerRef={scrollContainerRef}
-                            onSelect={(messageId) => {
-                                // 先断开存活的 ResizeObserver + 抑制自动滚动，避免刚跳转就被抢回底部
-                                handleUserScrollIntent();
-                                setPendingScrollMessageId(messageId);
-                            }}
+                            onSelect={handleSelectTurn}
+                        />
+                    )}
+                    {isMobile && conversationId && (
+                        <MobileTurnScrubber
+                            turns={userTurns}
+                            scrollContainerRef={scrollContainerRef}
+                            onSelect={handleSelectTurn}
                         />
                     )}
                     {/* Main content area：min-h-0 防止嵌套 flex（如总管家）把滚动区撑破导致占位过高 */}
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-aipp-slot="chat-conversation-main">
-                        {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏 */}
+                        {isMobilePlatform && conversationId && <MobileRecoveryNotice conversationId={conversationId} />}
+                        {/* 移动端不显示 ConversationHeader，因为顶部已有菜单栏；整会话导出对话框仍需挂载供顶栏入口调用 */}
+                        {isMobile && conversationId ? (
+                            <ConversationExportDialog
+                                conversationId={conversationId}
+                                externalOpen={exportDialogOpen}
+                                onExternalOpenChange={setExportDialogOpen}
+                                hideTrigger
+                            />
+                        ) : null}
                         {!isMobile && !hideHeader && (
                             <ConversationHeader
                                 conversationId={conversationId}
@@ -1760,11 +2061,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             ref={scrollContainerRef}
                             onWheelCapture={handleUserScrollIntent}
                             onTouchMoveCapture={handleUserScrollIntent}
-                            onScroll={virtualizeMessages ? undefined : handleScroll}
+                            onScroll={event => {
+                                const container = event.currentTarget;
+                                if (!isLoadingShow && renderingConversationId === null && !container.closest('[hidden]')) readingPositions.current.set(conversationId, container.scrollTop);
+                                setShowBackToBottom(container.scrollHeight - container.scrollTop - container.clientHeight > 96);
+                            }}
                             className={`conversation-scroll-transparent-track min-h-0 h-full flex-1 overflow-y-auto flex flex-col box-border gap-4 ${isMobile ? 'p-3' : 'p-6'}`}
                             data-aipp-slot="chat-conversation-scroll"
+                            style={{ overflowAnchor: "none" }}
                         >
                             <ConversationContent
+                                isMobile={isMobile}
                                 conversationId={conversationId}
                                 // MessageList props
                                 allDisplayMessages={allDisplayMessages}
@@ -1773,6 +2080,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 shiningMcpCallId={shiningMcpCallId}
                                 reasoningExpandStates={reasoningExpandStates}
                                 mcpToolCallStates={mcpToolCallStates}
+                                agentActivities={displayAgentActivities}
                                 generationGroups={messageGroupsData.generationGroups}
                                 selectedVersions={messageGroupsData.selectedVersions}
                                 getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
@@ -1786,10 +2094,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}
                                 renderMessageActions={renderPluginMessageActions}
-                                virtualizeMessages={virtualizeMessages}
-                                virtualizedListEngine={virtualizedListEngine}
+                                actionableAgentPlanMessageId={actionableAgentPlanMessageId}
+                                agentPlanModeSwitching={planModeSwitching}
+                                onContinueAgentPlan={handleContinueAgentPlan}
+                                onApproveAgentPlan={handleApproveAgentPlan}
                                 scrollContainerRef={scrollContainerRef}
                                 pendingScrollMessageId={pendingScrollMessageId}
+                                pendingScrollAlign={pendingScrollAlign}
                                 clearPendingScrollMessageId={setPendingScrollMessageId}
                                 setShiningMessageIds={setShiningMessageIds}
                                 onScrollStateChange={syncScrollState}
@@ -1799,12 +2110,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 selectedAssistant={selectedAssistant}
                                 assistants={assistants}
                                 setSelectedAssistant={setSelectedAssistant}
+                                selectedModel={selectedAgentModel}
+                                selectedEffort={selectedAgentEffort}
+                                selectedApprovalPolicy={selectedAgentApprovalPolicy}
+                                selectedSandbox={selectedAgentSandbox}
+                                onAgentConfigChange={handleAgentConfigChange}
                             />
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>
 
                         {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
+                        {isMobile && showBackToBottom && <Button variant="secondary" className="self-center min-h-11 shrink-0"
+                            onClick={() => { smartScroll(true, "auto"); setShowBackToBottom(false); }}>
+                            <ChevronDown className="h-4 w-4" />回到底部
+                        </Button>}
                         <InputArea
                             ref={inputAreaRef}
                             inputText={inputText}
@@ -1822,6 +2142,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             sendButtonIcon={sendButtonIconSlot}
                             sendButtonVisual={sendButtonVisualSlot}
                             acpAvailableCommands={acpSessionState?.available_commands ?? []}
+                            planMode={isPlanMode}
+                            planModeSwitching={planModeSwitching}
+                            onPlanModeToggle={showPlanModeToggle
+                                ? () => void setAgentPlanMode(!isPlanMode)
+                                : undefined}
                         />
                     </div>
 
@@ -1842,6 +2167,55 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         />
                     )}
 
+                    {isMobile && conversationId ? (
+                        <Sheet open={mobileDetailsOpen} onOpenChange={setMobileDetailsOpen}>
+                            <SheetContent
+                                side="right"
+                                className="w-full max-w-none gap-0 p-0 sm:max-w-none safe-top safe-bottom"
+                                aria-describedby={undefined}
+                                data-aipp-slot="chat-mobile-details-sheet"
+                            >
+                                <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border px-4 py-2 pr-12">
+                                    <SheetTitle className="text-sm font-medium">会话详情</SheetTitle>
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="min-h-11"
+                                        onClick={() => {
+                                            setMobileDetailsOpen(false);
+                                            setExportDialogOpen(true);
+                                        }}
+                                    >
+                                        导出对话
+                                    </Button>
+                                </div>
+                                <div className="min-h-0 flex-1 overflow-y-auto">
+                                    {sidebarTodos.length === 0 && artifacts.length === 0 && contextItems.length === 0 ? (
+                                        <div className="px-4 py-6 text-sm text-muted-foreground">当前会话暂无待办、上下文或制品</div>
+                                    ) : null}
+                                    <ChatSidebarContent
+                                        className="h-full"
+                                        todos={sidebarTodos}
+                                        artifacts={artifacts}
+                                        contextItems={contextItems}
+                                        pluginList={pluginList}
+                                        conversationId={conversationId}
+                                        focusedContextId={focusedContextId}
+                                        onArtifactClick={(artifact) => {
+                                            setMobileDetailsOpen(false);
+                                            handleArtifact(artifact.language, artifact.code);
+                                        }}
+                                        onPreviewFileClick={(item) => {
+                                            setMobileDetailsOpen(false);
+                                            handlePreviewFileContextClick(item);
+                                        }}
+                                    />
+                                </div>
+                            </SheetContent>
+                        </Sheet>
+                    ) : null}
+
                     <ConversationTitleEditDialog
                         isOpen={titleEditDialogIsOpen}
                         conversationId={conversation?.id || 0}
@@ -1858,13 +2232,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         onSaveAndRegenerate={handleEditSaveAndRegenerate}
                     />
 
-                    {isLoadingShow ? (
+                    {isLoadingShow || renderingConversationId === conversationId ? (
                         <div
-                            className="bg-background/95 w-full h-full absolute flex items-center justify-center backdrop-blur rounded-xl"
+                            className="bg-background/95 inset-0 absolute z-20 flex items-center justify-center gap-2 rounded-xl"
                             data-aipp-slot="chat-loading-overlay"
+                            role="status"
+                            aria-live="polite"
                         >
                             <div className="loading-icon"></div>
-                            <div className="text-primary text-base font-medium">加载中...</div>
+                            <div className="text-primary text-base font-medium">
+                                {isLoadingShow ? "正在读取对话…" : "正在排版消息…"}
+                            </div>
                         </div>
                     ) : null}
                 </div>

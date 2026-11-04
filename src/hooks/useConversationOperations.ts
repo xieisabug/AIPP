@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { throttle } from "lodash";
@@ -6,6 +6,9 @@ import { Message, Conversation, FileInfo } from "../data/Conversation";
 import { AssistantListItem } from "../data/Assistant";
 import { extractAssistantFromMessage } from "../utils/assistantMentions";
 import useConversationManager from "./useConversationManager";
+import { useIsMobilePlatform } from "./use-platform";
+import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
+import { AskAiResponse, describeAskAiError } from "../lib/askAiError";
 
 // 从 plugin.d.ts 导入的接口类型
 interface AiResponse {
@@ -32,6 +35,11 @@ export interface UseConversationOperationsProps {
     assistantTypePluginMap: Map<number, any>;
     assistantRunApi: any;
     busySendBehavior?: "queue" | "interrupt";
+    selectedAgentModel?: string;
+    selectedAgentEffort?: string;
+    selectedAgentApprovalPolicy?: string;
+    selectedAgentSandbox?: string;
+    selectedAgentMode?: string;
 }
 
 export interface UseConversationOperationsReturn {
@@ -77,7 +85,20 @@ export function useConversationOperations({
     assistantTypePluginMap,
     assistantRunApi,
     busySendBehavior = "queue",
+    selectedAgentModel = "",
+    selectedAgentEffort = "",
+    selectedAgentApprovalPolicy = "",
+    selectedAgentSandbox = "",
+    selectedAgentMode = "",
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
+    const isMobilePlatform = useIsMobilePlatform();
+    const latestInput = useRef({ conversationId: conversation?.id, fileInfoList });
+    latestInput.current = { conversationId: conversation?.id, fileInfoList };
+    const clearAcceptedMobileInput = () => {
+        setInputText(current => current === inputText ? "" : current);
+        if (latestInput.current.conversationId === conversation?.id &&
+            latestInput.current.fileInfoList === fileInfoList) clearFileInfoList();
+    };
 
     // 对话标题管理相关状态
     const [titleEditDialogIsOpen, setTitleEditDialogIsOpen] = useState<boolean>(false);
@@ -112,12 +133,11 @@ export function useConversationOperations({
                 .catch((error) => {
                     console.error("Regenerate error:", error);
                     setAiIsResponsing(false);
-                    // 使用智能边框控制，而不是直接清空
-                    updateShiningMessages();
-                    // 错误信息将在对话框中显示
+                    // Regenerate sets optimistic manual shine first; must clear on invoke failure.
+                    clearShiningMessages();
                 });
         },
-        [setAiIsResponsing, updateShiningMessages],
+        [setAiIsResponsing, setManualShineMessage, clearShiningMessages],
     );
 
     // 消息分支处理函数
@@ -233,7 +253,7 @@ export function useConversationOperations({
     }, []);
 
     // 发送消息的主要处理函数，使用节流防止频繁点击
-    const handleSend = throttle(() => {
+    const handleSend = throttle(async () => {
         if (aiIsResponsing) {
             if (inputText.trim() !== "" && conversation?.id) {
                 let assistantId = conversation.assistant_id ?? selectedAssistant;
@@ -264,8 +284,8 @@ export function useConversationOperations({
                     queueKind: busySendBehavior === "interrupt" ? "interrupt" : "normal",
                 })
                     .then(() => {
-                        setInputText("");
-                        clearFileInfoList();
+                        if (isMobilePlatform) clearAcceptedMobileInput();
+                        else { setInputText(""); clearFileInfoList(); }
                     })
                     .catch((error) => {
                         console.error("Queue message error:", error);
@@ -328,7 +348,33 @@ export function useConversationOperations({
             // ACP 助手 (assistant_type === 4) 走后端 ask_ai 路径，不作为插件处理
             // 注意：如果 assistantData 为 undefined（助手不在列表中），应该走普通 ask_ai 路径
             const assistantType = assistantData?.assistant_type;
+            // 移动端：本地 CLI Agent / 插件助手不可执行，明确报错且不静默换模型或通道
+            if (isMobilePlatform && !isMobileExecutableAssistantType(assistantType)) {
+                setAiIsResponsing(false);
+                toast.error(
+                    assistantType === 4
+                        ? "MOBILE_UNSUPPORTED: 本地 CLI Agent（Codex/Claude/ACP）不支持移动平台，请改选普通 API 助手"
+                        : "MOBILE_UNSUPPORTED: 该助手类型在移动端不可执行，请改选普通 API 助手",
+                );
+                return;
+            }
             const isPluginAssistant = assistantType !== undefined && assistantType !== 0 && assistantType !== 4;
+            if (isMobilePlatform) {
+                try {
+                    const capability = await invoke<import("../lib/mobileUnsupported").AssistantExecutionCapability>(
+                        "get_assistant_execution_capability", { assistantId: parsedAssistantId },
+                    );
+                    if (!capability.available) {
+                        setAiIsResponsing(false);
+                        toast.error(capability.issues.map((issue) => `${issue.code}: ${issue.reason}`).join("\n"));
+                        return;
+                    }
+                } catch (error) {
+                    setAiIsResponsing(false);
+                    toast.error(`移动执行能力检查失败（assistant_id=${parsedAssistantId}）: ${String(error)}`);
+                    return;
+                }
+            }
             
             console.log("[SEND DEBUG] Assistant info:", {
                 parsedAssistantId,
@@ -401,29 +447,67 @@ export function useConversationOperations({
                     assistant_id: parsedAssistantId,
                     assistant_type: assistantData?.assistant_type,
                 });
-                invoke<AiResponse>("ask_ai", {
+                // 新对话界面的 Agent 会话级覆盖（模型/思考强度/审批策略/沙箱），仅在当前选中助手一致时下发
+                const agentOverrideConfig: Record<string, string> = {};
+                if (parsedAssistantId === +selectedAssistant) {
+                    if (selectedAgentEffort) {
+                        agentOverrideConfig.reasoning_effort = selectedAgentEffort;
+                        agentOverrideConfig.claude_effort = selectedAgentEffort;
+                    }
+                    if (selectedAgentApprovalPolicy) {
+                        agentOverrideConfig.approval_policy = selectedAgentApprovalPolicy;
+                    }
+                    if (selectedAgentSandbox) {
+                        agentOverrideConfig.sandbox = selectedAgentSandbox;
+                    }
+                    if (selectedAgentMode) {
+                        agentOverrideConfig.collaboration_mode = selectedAgentMode;
+                        agentOverrideConfig.permission_mode = selectedAgentMode;
+                    }
+                }
+                await invoke<AskAiResponse>("ask_ai", {
                     request: {
                         prompt: finalPrompt,
                         conversation_id: conversationId,
                         assistant_id: parsedAssistantId,
                         attachment_list: fileInfoList?.map((i) => i.id),
+                        override_model_id: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,
                     },
+                    override_model_config: Object.keys(agentOverrideConfig).length > 0
+                        ? agentOverrideConfig
+                        : undefined,
                 })
                     .then((res) => {
                         console.log("ask ai response", res);
+                        // 先切到对话（新对话也能立即出现在列表和消息区），再处理请求前失败
                         if (conversationId != String(res.conversation_id)) {
                             onChangeConversationId(String(res.conversation_id));
+                        }
+                        if (res.error_message) {
+                            setAiIsResponsing(false);
+                            clearShiningMessages();
+                            toast.error(`${assistantData?.name ?? "Agent"} 运行失败`, {
+                                description: res.error_message,
+                            });
+                        } else if (isMobilePlatform) {
+                            clearAcceptedMobileInput();
                         }
                     })
                     .catch((error) => {
                         console.error("Send message error:", error);
                         setAiIsResponsing(false);
-                        updateShiningMessages();
+                        clearShiningMessages();
+                        const assistantName = assistantData?.name ?? "Agent";
+                        toast.error(`${assistantName} 运行失败`, {
+                            description: describeAskAiError(error),
+                        });
                     });
             }
 
-            setInputText("");
-            clearFileInfoList();
+            if (!isMobilePlatform) {
+                setInputText("");
+                clearFileInfoList();
+            }
         }
     }, 200);
 

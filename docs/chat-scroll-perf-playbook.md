@@ -1,5 +1,14 @@
 # UI 性能问题调试方法（以 Chat 滚动为例）
 
+## 浏览器内核对照
+
+独立的 Safari / Chrome 历史消息渲染基准见
+[浏览器对照测试指南](./chat-browser-perf.md)（技术细节见
+[scripts/chat-perf/README.md](../scripts/chat-perf/README.md)）。它支持只读筛选复杂对话、
+导出完整消息及 MCP 工具记录、校验样本哈希和下载滚动指标。私有样本与构建产物均放在
+`tmp/chat-perf/`，不要提交或发布。该入口替换了 Tauri API 和 Rust 高亮服务，
+不代表完整应用性能；外部预览资源等未适配能力会在结果中标记为不完整。
+
 ## 目的
 
 这份文档只记录**调试方法**，不记录某一次问题的复盘。  
@@ -67,8 +76,18 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 
 说明：
 
-- `AIPP_CHAT_SCROLL_PERF_INDEX` 从 `0` 开始
+- `AIPP_CHAT_SCROLL_PERF_INDEX` 从 `0` 开始，且是**当前 ChatUI 会话列表顺序**里的下标；先从结果 JSON 的 `conversationName` 确认目标会话，不要凭序号想当然
+- 也可以用 `AIPP_CHAT_SCROLL_PERF_CONVERSATION_ID=<会话 id>` 直接按 id 选会话（需在最近 100 个会话内），优先于下标
+- `AIPP_CHAT_SCROLL_PERF_DIRECTION=up` 模拟"打开后从底部拖滚动条到顶部"：不先回顶，每帧按 `滑块比例 × 当前 maxScrollTop` 写 `scrollTop`。重点看 `maxObservedMaxScrollTop` 与 `finalMaxScrollTop` 的差（总高收缩 = 估高偏大 = 滑块跳动）、`externalScrollAdjustCount/maxExternalScrollAdjustPx`（Virtuoso 在两帧之间修正了 scrollTop）、`thumbReverseJumpCount`（滑块逆向跳）
+- `AIPP_CHAT_SCROLL_PERF_KEEP_OPEN=1`：结果写出后不退出应用，便于继续手动观察或接调试工具
+- 估高相关红线：`VirtuosoMessageList` 不能传 `defaultItemHeight`（它会先填充 sizeTree，Virtuoso 随后会丢弃逐行 `heightEstimates`，所有未测行都按同一个平均值计算）；Virtuoso 按数据所属会话 `key` 重建，并在读到列表宽度后才挂载，保证第一份 `heightEstimates` 就是按真实宽度估的
+- 结果里的 `rowEstimateSummary` 列出已测量行的估高与实测高（含行内每条消息 `parts`），`viewportWidth` 是滚动容器宽度；估高逻辑在 `src/components/conversation/messageHeightEstimate.ts`，会按合并气泡、"显示思考过程"开关和列表宽度估算
+- 高合并气泡拆行：历史中估高 ≥720px 的合并组按约 360px 拆成多个虚拟行（`mergedGroupSegments.ts`，行 key 形如 `merged-<ids>:segment-<首条id>`，`joinsNext` 的行之间不加行间距），由 `MergedAssistantGroupSegment` 分段画边框；同组各段通过 `mergedGroupWidthStore.ts` 共享已测到的最大自然宽度，内容层 `w-fit` 不随组宽重排。尾部 last-reply 组不拆
 - 结果会写到 `tmp/*.json`
+- `messagesRenderedMs` 表示 harness 启动到出现消息 DOM 的耗时（不是完整可交互耗时）；`initialSettleMs` 是随后 72 帧采样所用时间。滚动探针会先发出 wheel 事件解除初始贴底跟随，避免程序滚动被跟随逻辑拉回。
+- `VirtuosoMessageList` 当前在展示消息不超过80条且正文总量不超过500,000字符时保留节点。屏外行不能用 `content-visibility: auto`：估高小于真实高度时，滚出视口的行会被压扁，`scrollTop` 会被夹到最底部。超过任一阈值时使用虚拟列表，上下 overscan 约 1.5 倍视口，两侧最少各 4 条。贴底 ResizeObserver 只在用户仍在底部时跟随尾部变高，不能沿用上一次 `forceScroll`。回归时应覆盖两条路径，并分别记录冷打开、Loading关闭和真实滚轮往返。只看预热后的程序滚动帧率，不能证明首次滚动不跳动；流式新增消息跨阈值也应单独验证。用户上滑或拖滚动条时，视口不得被拉回底部。
+- 流式更新期间，`window.__AIPP_CHAT_PERF_CAPTURE__.getMessageItemRenderCounts()` 应只让尾部消息的渲染次数增加。历史消息持续增加，说明 memo 又被新的 props 引用击穿。
+- **不要并行跑多个 harness**：它们会竞争 Cargo 默认构建/输出锁，必须串行执行、等上一个结束再跑下一个
 - 如果以后排查别的 UI 问题，没有现成入口，就按同样模式补一个：
   - 前端暴露测试 API
   - 前端上报 progress
@@ -274,3 +293,13 @@ cargo run --manifest-path src-tauri/Cargo.toml --features custom-protocol
 
 **先把问题做成“能自动得到结果”，再开始优化。**  
 这比一开始就猜原因更重要。
+
+## Android 移动验收补充
+
+安装当前构建 APK 后，可通过可调试 WebView 的 CDP 调用 `window.__AIPP_CHAT_PERF__.runConversationScrollTest({ conversationId, includeReturnTrip: true })`；harness 在移动布局中会关闭导航抽屉，复用同一消息滚动容器与采样指标。不要把程序驱动的探针等同于真实触控验收。
+
+补充操作：流式回复中向上触摸滚动并等待新 token；打开设置再返回应恢复历史阅读位置；回到底部后重新跟随；输入中文组合文本、弹出/收起键盘；切换版本、编辑、复制和分叉；横竖屏及前后台切换。普通会话与跨虚拟化阈值的长会话分别记录。仅在本轮创建的测试会话内执行发送和编辑，保留已有用户内容。
+
+模拟器对比时使用当前构建的 APK，并记录设备、CSS 视口、总滚动距离、滚动时长和 `messageItemCount`。连续追加的助手消息可能全部属于最后回复，被保留在 live 区域；要测试历史虚拟列表，必须先结束该轮次，并确认实际挂载消息数远小于历史总数。不能直接比较全量挂载场景与历史虚拟化场景。
+
+CDP 的 CPU throttling 可用于定位较弱算力下的瓶颈，但不代表某款真机，也不模拟其 GPU、温度和内存条件。每次只运行一个滚动探针；CPU profiler 与正式基线分开运行，性能采样中的行高观测和布局读取也有开销。最后补充触控事件滑动验证，区分直接写入 `scrollTop` 的压力测试与日常触控。

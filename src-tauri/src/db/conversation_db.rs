@@ -283,6 +283,7 @@ pub struct ConversationRepository {
 
 impl ConversationRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }
@@ -685,11 +686,13 @@ impl Repository<Conversation> for ConversationRepository {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn delete(&self, id: i64) -> Result<()> {
-        self.with_serialized_write(|conn| {
-            conn.execute("DELETE FROM conversation WHERE id = ?", &[&id])?;
-            Ok(())
-        })
+        self.with_serialized_write(|conn| cascade_delete_conversation(conn, id))
     }
+}
+
+/// Delete owned data through the same transaction used by remote tombstones.
+pub fn cascade_delete_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
+    super::cascade_delete::delete(conn, "conversation", conversation_id)
 }
 
 pub struct MessageRepository {
@@ -699,6 +702,7 @@ pub struct MessageRepository {
 
 impl MessageRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }
@@ -868,18 +872,52 @@ impl MessageRepository {
     }
 
     /// 更新对话中所有正在进行的消息的 finish_time（用于取消操作）
-    /// 只更新 start_time IS NOT NULL 且 finish_time IS NULL 的消息
+    /// 只更新 start_time IS NOT NULL 且 finish_time IS NULL 的消息。
+    /// 同时写入 metadata.end_reason="cancelled"，供 Butler 终态判定区分
+    /// 「取消盖戳的半截输出」与「自然完成」——避免中途取消被误标 succeeded。
     #[instrument(level = "debug", skip(self), fields(conversation_id = conversation_id))]
     pub fn finish_pending_messages(&self, conversation_id: i64) -> Result<usize> {
         let now = chrono::Utc::now();
         self.with_serialized_write(|conn| {
-            let updated = conn.execute(
-                "UPDATE message SET finish_time = ?1 WHERE conversation_id = ?2 AND start_time IS NOT NULL AND finish_time IS NULL",
-                rusqlite::params![now, conversation_id],
+            let mut stmt = conn.prepare(
+                "SELECT id, metadata_json FROM message                  WHERE conversation_id = ?1 AND start_time IS NOT NULL AND finish_time IS NULL",
             )?;
+            let rows: Vec<(i64, Option<String>)> = stmt
+                .query_map(rusqlite::params![conversation_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            let mut updated = 0usize;
+            for (id, metadata_json) in rows {
+                let merged = merge_message_end_reason_metadata(metadata_json.as_deref(), "cancelled");
+                conn.execute(
+                    "UPDATE message SET finish_time = ?1, metadata_json = ?2 WHERE id = ?3",
+                    rusqlite::params![now, merged, id],
+                )?;
+                updated += 1;
+            }
             Ok(updated)
         })
     }
+}
+
+/// Merge `end_reason` into message metadata JSON without dropping other keys.
+pub(crate) fn merge_message_end_reason_metadata(
+    existing: Option<&str>,
+    end_reason: &str,
+) -> String {
+    let mut map = existing
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw).ok())
+        .unwrap_or_default();
+    map.insert(
+        "end_reason".to_string(),
+        serde_json::Value::String(end_reason.to_string()),
+    );
+    serde_json::Value::Object(map).to_string()
 }
 
 impl Repository<Message> for MessageRepository {
@@ -946,11 +984,17 @@ impl Repository<Message> for MessageRepository {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     fn delete(&self, id: i64) -> Result<()> {
-        self.with_serialized_write(|conn| {
-            conn.execute("DELETE FROM message WHERE id = ?", &[&id])?;
-            Ok(())
-        })
+        self.with_serialized_write(|conn| super::cascade_delete::delete(conn, "message", id))
     }
+}
+
+/// Remove `message_attachment` rows owned by a message before the message itself.
+pub fn delete_attachments_for_message(conn: &Connection, message_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM message_attachment WHERE message_id = ?1",
+        params![message_id],
+    )?;
+    Ok(())
 }
 
 pub struct MessageAttachmentRepository {
@@ -960,6 +1004,7 @@ pub struct MessageAttachmentRepository {
 
 impl MessageAttachmentRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }
@@ -1169,7 +1214,7 @@ impl QueuedConversationMessageRepository {
         let mut stmt = self.conn.prepare(
             "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
              FROM queued_conversation_message
-             WHERE conversation_id = ?1 AND status = 'queued'
+             WHERE conversation_id = ?1 AND status IN ('queued', 'paused')
              ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], Self::queued_message_from_row)?;
@@ -1181,8 +1226,8 @@ impl QueuedConversationMessageRepository {
         self.with_serialized_write(|conn| {
             let changed = conn.execute(
                 "UPDATE queued_conversation_message
-                 SET queue_kind = 'interrupt', updated_time = CURRENT_TIMESTAMP
-                 WHERE id = ?1 AND status = 'queued'",
+                 SET queue_kind = 'interrupt', status = 'queued', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status IN ('queued', 'paused')",
                 params![id],
             )?;
             if changed == 0 {
@@ -1249,12 +1294,20 @@ impl QueuedConversationMessageRepository {
 
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn reset_dispatch(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.set_dispatch_status(id, "queued")
+    }
+
+    pub fn pause_dispatch(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.set_dispatch_status(id, "paused")
+    }
+
+    fn set_dispatch_status(&self, id: i64, status: &str) -> Result<Option<QueuedConversationMessage>> {
         self.with_serialized_write(|conn| {
             conn.execute(
                 "UPDATE queued_conversation_message
-                 SET status = 'queued', updated_time = CURRENT_TIMESTAMP
+                 SET status = ?2, updated_time = CURRENT_TIMESTAMP
                  WHERE id = ?1",
-                params![id],
+                params![id, status],
             )?;
             conn.query_row(
                 "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
@@ -1352,6 +1405,43 @@ pub(crate) fn ensure_conversation_table(conn: &Connection) -> rusqlite::Result<(
         conn.execute("ALTER TABLE conversation ADD COLUMN butler_task_finalized_at DATETIME", [])?;
     }
 
+    Ok(())
+}
+
+pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS acp_session (
+            conversation_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_kind TEXT NOT NULL DEFAULT 'acp',
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (conversation_id, agent_kind)
+        )",
+        [],
+    )?;
+    let columns: Vec<(String, i64)> = conn
+        .prepare("PRAGMA table_info(acp_session)")?
+        .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_agent_kind = columns.iter().any(|(name, _)| name == "agent_kind");
+    let has_composite_primary_key = columns.iter().filter(|(_, pk)| *pk > 0).count() >= 2;
+    if !has_agent_kind || !has_composite_primary_key {
+        let legacy_agent_kind = if has_agent_kind { "agent_kind" } else { "'acp'" };
+        conn.execute_batch(&format!(
+            "ALTER TABLE acp_session RENAME TO acp_session_legacy;
+             CREATE TABLE acp_session (
+                 conversation_id INTEGER NOT NULL,
+                 session_id TEXT NOT NULL,
+                 agent_kind TEXT NOT NULL DEFAULT 'acp',
+                 updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                 PRIMARY KEY (conversation_id, agent_kind)
+             );
+             INSERT INTO acp_session (conversation_id, session_id, agent_kind, updated_time)
+             SELECT conversation_id, session_id, {legacy_agent_kind}, updated_time
+             FROM acp_session_legacy;
+             DROP TABLE acp_session_legacy;"
+        ))?;
+    }
     Ok(())
 }
 
@@ -1458,14 +1548,11 @@ impl ConversationDatabase {
             [],
         )?;
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS acp_session (
-                conversation_id INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
-            )",
-            [],
-        )?;
+        // Older databases used conversation_id as the sole primary key and had
+        // no agent_kind column. Rebuild that small table so ACP and native
+        // Codex threads can coexist for one conversation without overwriting
+        // each other. Existing rows are ACP sessions for backward compatibility.
+        ensure_agent_session_table(&conn)?;
 
         // 添加迁移逻辑：如果新增列不存在，则按需补齐
         let mut stmt = conn.prepare("PRAGMA table_info(message)")?;
@@ -1771,11 +1858,20 @@ impl ConversationDatabase {
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn get_acp_session_id(&self, conversation_id: i64) -> Result<Option<String>, AppError> {
+        self.get_agent_session_id(conversation_id, "acp")
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn get_agent_session_id(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+    ) -> Result<Option<String>, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
         let session_id = conn
             .query_row(
-                "SELECT session_id FROM acp_session WHERE conversation_id = ?1",
-                params![conversation_id],
+                "SELECT session_id FROM acp_session WHERE conversation_id = ?1 AND agent_kind = ?2",
+                params![conversation_id, agent_kind],
                 |row| row.get(0),
             )
             .optional()
@@ -1789,25 +1885,40 @@ impl ConversationDatabase {
         conversation_id: i64,
         session_id: &str,
     ) -> Result<(), AppError> {
+        self.upsert_agent_session_id(conversation_id, "acp", session_id)
+    }
+
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn upsert_agent_session_id(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+        session_id: &str,
+    ) -> Result<(), AppError> {
         self.with_write_connection(|conn| {
             conn.execute(
-                "INSERT INTO acp_session (conversation_id, session_id, updated_time)
-                 VALUES (?1, ?2, CURRENT_TIMESTAMP)
-                 ON CONFLICT(conversation_id)
+                "INSERT INTO acp_session (conversation_id, agent_kind, session_id, updated_time)
+                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+                 ON CONFLICT(conversation_id, agent_kind)
                  DO UPDATE SET session_id = excluded.session_id, updated_time = CURRENT_TIMESTAMP",
-                params![conversation_id, session_id],
+                params![conversation_id, agent_kind, session_id],
             )
             .map_err(AppError::from)?;
             Ok(())
         })
     }
 
+
     #[instrument(level = "debug", skip(self), err)]
-    pub fn delete_acp_session_id(&self, conversation_id: i64) -> Result<(), AppError> {
+    pub fn delete_agent_session_id(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+    ) -> Result<(), AppError> {
         self.with_write_connection(|conn| {
             conn.execute(
-                "DELETE FROM acp_session WHERE conversation_id = ?1",
-                params![conversation_id],
+                "DELETE FROM acp_session WHERE conversation_id = ?1 AND agent_kind = ?2",
+                params![conversation_id, agent_kind],
             )
             .map_err(AppError::from)?;
             Ok(())
@@ -2465,11 +2576,6 @@ pub struct ConversationSummaryRepository {
 }
 
 impl ConversationSummaryRepository {
-    #[instrument(level = "debug", skip(conn))]
-    pub fn new(conn: Connection) -> Self {
-        Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
-    }
-
     #[instrument(level = "debug", skip(conn, write_lock))]
     pub fn new_with_write_lock(conn: Connection, write_lock: Arc<Mutex<()>>) -> Self {
         ConversationSummaryRepository { conn, write_lock }
@@ -2510,30 +2616,6 @@ impl ConversationSummaryRepository {
             })
         })
     }
-
-    #[instrument(level = "debug", skip(self))]
-    pub fn get_by_conversation_id(
-        &self,
-        conversation_id: i64,
-    ) -> Result<Option<ConversationSummary>> {
-        self.conn
-            .query_row(
-                "SELECT id, conversation_id, summary, user_intent, key_outcomes, created_time FROM conversation_summary WHERE conversation_id = ?",
-                &[&conversation_id],
-                |row| {
-                    Ok(ConversationSummary {
-                        id: row.get(0)?,
-                        conversation_id: row.get(1)?,
-                        summary: row.get(2)?,
-                        user_intent: row.get(3)?,
-                        key_outcomes: row.get(4)?,
-                        created_time: get_required_datetime_from_row(row, 5, "created_time")?,
-                    })
-                },
-            )
-            .optional()
-    }
-
     #[instrument(level = "debug", skip(self))]
     pub fn exists(&self, conversation_id: i64) -> Result<bool> {
         let count: i64 = self.conn.query_row(
@@ -2617,6 +2699,7 @@ pub struct ButlerRepository {
 
 impl ButlerRepository {
     #[instrument(level = "debug", skip(conn))]
+    #[allow(dead_code)]
     pub fn new(conn: Connection) -> Self {
         Self::new_with_write_lock(conn, Arc::new(Mutex::new(())))
     }

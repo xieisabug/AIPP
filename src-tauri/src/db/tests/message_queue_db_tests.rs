@@ -4,6 +4,20 @@ use crate::db::conversation_db::QueuedConversationMessageRepository;
 
 use super::test_helpers::{build_test_conversation, create_test_db};
 
+#[test]
+fn test_mobile_queue_failure_pauses_until_explicit_retry() {
+    let (repo, conversation_id) = create_queue_test_repo();
+    let queued = repo.enqueue(conversation_id, "normal", "{}", "preserved input", 1).unwrap();
+    repo.take_next_for_dispatch(conversation_id, false).unwrap().unwrap();
+    repo.pause_dispatch(queued.id).unwrap().unwrap();
+    assert!(repo.take_next_for_dispatch(conversation_id, false).unwrap().is_none());
+    let pending = repo.list_queued_by_conversation(conversation_id).unwrap();
+    assert_eq!(pending[0].status, "paused");
+    assert_eq!(pending[0].prompt, "preserved input");
+    repo.promote_to_interrupt(queued.id).unwrap().unwrap();
+    assert_eq!(repo.take_next_for_dispatch(conversation_id, true).unwrap().unwrap().id, queued.id);
+}
+
 fn create_queue_test_repo() -> (QueuedConversationMessageRepository, i64) {
     let conn = create_test_db();
     let conversation = build_test_conversation("queue test", Some(1));

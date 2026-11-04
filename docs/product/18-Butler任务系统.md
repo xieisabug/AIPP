@@ -88,9 +88,10 @@ Butler（总管家）是 AIPP 的实验性任务编排能力。它不是普通�
 ### 状态流转
 - `accepted`
 - `running`
-- `succeeded`
+- `succeeded`（自然完成；`completed_at`）
 - `failed`
-- `cancelled`
+- `cancelled`（取消且无可用部分输出；`cancelled_at`）
+- `interrupted`（取消时保留部分输出，但不标成功；`interrupted_at` / `cancelled_at`）
 
 ### 任务台展示
 - 任务列表按最近更新时间排序
@@ -134,7 +135,7 @@ Butler（总管家）是 AIPP 的实验性任务编排能力。它不是普通�
 ### 结果摘要
 - Butler 对任务结果会优先提取最终 `response`
 - 如果出现错误，则优先记录错误结果
-- 如果用户在任务中途发起取消，但任务仍然产出了完成结果，系统会优先保留这份最终产物
+- 取消与自然完成竞态：仅当响应在取消盖戳前已自然 `finish`（无 `end_reason=cancelled`）时记为 `succeeded` 并保留 `cancel_requested`；取消路径写入的半截输出记为 `interrupted`，内容可见但不标成功；无可用输出记为 `cancelled`
 
 ---
 
@@ -191,3 +192,9 @@ Butler（总管家）是 AIPP 的实验性任务编排能力。它不是普通�
 - `src-tauri/src/api/butler_api.rs` - Butler 后端 API 与任务生命周期
 - `src/windows/ButlerExperimentWindow.tsx` - Butler 实验窗口
 - `src/data/Butler.ts` - 前端 Butler 数据结构
+
+## Android 本机任务入口
+
+移动设置的“本机任务”提供任务派发、详情和本机取消。进入页面只读取已有任务，不自动创建主会话或恢复历史运行；首次使用由用户点击初始化。派发前核验所选助手真实能力，CLI、进程工具等不支持的依赖会明确拒绝，保留输入。
+
+本机审批只展示当前 Butler 主会话子任务中、当前进程内仍等待响应的操作请求，可允许一次或拒绝。已处理的请求不能重复消费；同步历史没有本机等待实例时仅供查看，不提供远程审批。结果未知不视为成功，也不自动重发。列表以本机已有任务定义为准，不保证跨设备同步历史完整。

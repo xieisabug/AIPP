@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
+#[cfg(mobile)]
+use crate::api::system_api::mobile_unsupported_error;
 use crate::FeatureConfigState;
 
 /// 更新状态信息
@@ -106,7 +108,7 @@ async fn check_update_impl(
     }
     #[cfg(mobile)]
     {
-        Err("自动更新不支持移动平台".to_string())
+        Err(mobile_unsupported_error("自动更新"))
     }
 }
 
@@ -144,7 +146,7 @@ pub async fn download_and_install_update(app_handle: AppHandle) -> Result<String
     }
     #[cfg(mobile)]
     {
-        Err("自动更新不支持移动平台".to_string())
+        Err(mobile_unsupported_error("自动更新"))
     }
 }
 
@@ -202,7 +204,7 @@ pub async fn download_and_install_update_with_proxy(
     }
     #[cfg(mobile)]
     {
-        Err("自动更新不支持移动平台".to_string())
+        Err(mobile_unsupported_error("自动更新"))
     }
 }
 

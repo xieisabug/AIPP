@@ -126,3 +126,12 @@ Skills 系统用于给助手追加“可复用的任务说明书”。它不是�
 - `src-tauri/src/skills/parser.rs` - `SKILL.md` 解析器
 - `src/components/config/SkillsConfig.tsx` - Skills 管理界面
 - `src/hooks/useSkillsMcpValidation.ts` - Skills 与 Agent/MCP 联动校验
+
+
+## Android 应用内 Skills
+
+Android 的扫描、安装、查看与加载统一使用应用数据目录下的 `skills`，不会迁移到桌面的 `~/.agents/skills`。移动页面支持系统 ZIP 导入、HTTPS 压缩包安装、内容查看及助手绑定；绑定按钮明确启用 Agent 的 `load_skill` 工具。未覆盖的同名技能会被拒绝，不自动替换旧版本。
+
+压缩包上限 20 MiB、解压内容上限 50 MiB、最多 4096 项；拒绝路径穿越、绝对路径及符号链接。所引用的附加文件不能越出技能目录。
+
+兼容性与安装状态分开：含脚本目录或明确本地执行指令时提示 Android 不可执行这些步骤；作者用 `instruction-only` 标签声明的纯指令技能单独标注；其余显示“兼容性未验证”。加载时保留完整指令和限制提示，不得静默跳过不可执行步骤并声称完成。安装数据随应用重启保留，卸载清除。

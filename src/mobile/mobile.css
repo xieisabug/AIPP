@@ -1,0 +1,91 @@
+/* Platform-scoped: tablet landscape follows the same mobile form contract. */
+.aipp-mobile-platform [data-slot="dialog-content"] {
+    top: 0; left: 0;
+    /* Desktop centering / enter animations must not translate a fullscreen panel. */
+    --tw-translate-x: 0; --tw-translate-y: 0;
+    transform: none !important; translate: none !important; animation: none;
+    /* Desktop min widths (e.g. min-w-xl) would overflow a 360px screen. */
+    width: 100%; min-width: 0; max-width: 100%; height: 100dvh; max-height: 100dvh;
+    border-radius: 0; overflow-y: auto;
+    padding-top: max(24px, env(safe-area-inset-top));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+/* Desktop p-6 wastes ~15% of a 360px screen on side gutters. */
+.aipp-mobile-platform [data-slot="dialog-content"] {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+}
+/* Header actions (e.g. refresh buttons) must not sit under the 44px close X. */
+.aipp-mobile-platform [data-slot="dialog-content"] > [data-slot="dialog-header"] { padding-right: 44px; }
+.aipp-mobile-platform [data-slot="dialog-content"] input[data-slot="input"] { min-height: 44px; }
+/* Built-in close X: keep it below the status bar with a 44px hit area. */
+.aipp-mobile-platform [data-slot="dialog-content"] > [data-slot="dialog-close"].absolute {
+    top: max(24px, env(safe-area-inset-top)); right: max(.25rem, env(safe-area-inset-right));
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px;
+}
+.aipp-mobile-platform [data-slot="dialog-footer"] {
+    position: sticky; bottom: 0; background: var(--background); padding-top: .75rem;
+}
+/* Single-column forms, but keep segmented tab lists (grid-cols-2/3) horizontal. */
+.aipp-mobile-platform [data-aipp-window="config"] .grid:not([role="tablist"]):not([data-slot="tabs-list"]) {
+    grid-template-columns: minmax(0, 1fr);
+}
+/* Switch / Checkbox / Radio are buttons too: stretching them to 44px distorts the control. */
+.aipp-mobile-platform [data-slot="dialog-content"] button:not([role="switch"]):not([role="checkbox"]):not([role="radio"]),
+.aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] button,
+.aipp-mobile-platform [data-aipp-slot="chat-info-actions"] button,
+.aipp-mobile-platform [data-aipp-window="config"] button:not([role="switch"]):not([role="checkbox"]):not([role="radio"]),
+.aipp-mobile-platform [data-slot="dialog-content"] [role="combobox"],
+.aipp-mobile-platform .aipp-mobile-action-bar button { min-width: 44px; min-height: 44px; }
+/* Keep their visual size and extend the touch target with an invisible overlay instead. */
+.aipp-mobile-platform [role="switch"],
+.aipp-mobile-platform [role="checkbox"],
+.aipp-mobile-platform [role="radio"] { position: relative; }
+.aipp-mobile-platform [role="switch"]::after,
+.aipp-mobile-platform [role="checkbox"]::after,
+.aipp-mobile-platform [role="radio"]::after {
+    content: ""; position: absolute; top: 50%; left: 50%;
+    width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%);
+}
+/* Portal-rendered list items (select / dropdown / command) live outside the config window. */
+.aipp-mobile-platform [data-slot="select-item"],
+.aipp-mobile-platform [data-slot="command-item"],
+.aipp-mobile-platform [role="menuitem"],
+.aipp-mobile-platform [role="menuitemcheckbox"],
+.aipp-mobile-platform [role="menuitemradio"],
+.aipp-mobile-platform [role="option"] { min-height: 44px; }
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-scroll"] table {
+    display: block; max-width: 100%; overflow-x: auto;
+}
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-scroll"] pre { max-width: 100%; overflow-x: auto; }
+
+/* The mobile chat fills the shell, including when the IME shrinks its visual viewport. */
+[data-aipp-mobile-shell] [data-aipp-window='chat_ui'] { height: 100%; }
+
+/* Settings forms on phones: drop the desktop card chrome so fields use the full width. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] {
+    border: 0; border-radius: 0; box-shadow: none; background: transparent;
+    padding-top: 0; padding-bottom: 0; gap: 1rem;
+}
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] > [data-slot="card-header"],
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] > [data-slot="card-content"] {
+    padding-left: 0; padding-right: 0; border-radius: 0;
+}
+/* Consecutive sections are separated by a hairline instead of card borders. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] ~ [data-aipp-config-section] {
+    border-top: 1px solid var(--border); padding-top: 1.5rem;
+}
+
+/* Sticky save bar sits flush with the screen bottom: no trailing scroll padding or card margin below it. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-page-scroll"]:has([data-aipp-slot="config-form-save-footer"]) {
+    padding-bottom: 0;
+}
+.aipp-mobile-platform [data-aipp-window="config"] .bottom-space { margin-bottom: 0; }
+/* Full-bleed bar across the 1rem scroll gutters; the save button stretches for an easy thumb target. */
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-form-save-footer"] {
+    margin-left: -1rem; margin-right: -1rem; padding-left: 1rem; padding-right: 1rem;
+    padding-top: .75rem; background: var(--card);
+}
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-form-save-footer"] > div { flex-direction: row-reverse; }
+.aipp-mobile-platform [data-aipp-window="config"] [data-aipp-slot="config-form-save-footer"] button { flex: 1 1 auto; }

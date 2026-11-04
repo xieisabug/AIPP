@@ -1,5 +1,7 @@
 #[cfg(desktop)]
 use crate::api::highlight_api::highlight_code_for_export;
+#[cfg(not(desktop))]
+use crate::api::system_api::MOBILE_UNSUPPORTED_PREFIX;
 use crate::errors::AppError;
 #[cfg(desktop)]
 use crate::mcp::builtin_mcp::search::browser::BrowserManager;
@@ -15,7 +17,6 @@ use docx_rs::*;
 use futures::StreamExt;
 use image::GenericImageView;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use regex::Regex;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -39,7 +40,9 @@ pub async fn markdown_to_pdf(markdown: String) -> Result<Vec<u8>, AppError> {
 #[cfg(not(desktop))]
 #[tauri::command]
 pub async fn markdown_to_pdf(_markdown: String) -> Result<Vec<u8>, AppError> {
-    Err(AppError::InternalError("PDF 导出暂不支持移动端".to_string()))
+    Err(AppError::InternalError(format!(
+        "{MOBILE_UNSUPPORTED_PREFIX}: PDF 导出暂不支持移动端"
+    )))
 }
 
 #[cfg(desktop)]
@@ -302,39 +305,6 @@ fn escape_pdf_html(raw: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
-}
-
-#[cfg(desktop)]
-fn inline_html_images_as_data_uri(html: &str) -> String {
-    let img_regex =
-        Regex::new(r#"(?is)<img([^>]*?)src="([^"]+)"([^>]*)>"#).expect("invalid image regex");
-    img_regex
-        .replace_all(html, |caps: &regex::Captures| {
-            let before = caps.get(1).map_or("", |m| m.as_str());
-            let src = caps.get(2).map_or("", |m| m.as_str());
-            let after = caps.get(3).map_or("", |m| m.as_str());
-            if let Some(bytes) = load_markdown_image_bytes(src) {
-                let mime = detect_image_mime_type(&bytes);
-                let data_uri = format!("data:{mime};base64,{}", STANDARD.encode(bytes));
-                format!(r#"<img{before}src="{data_uri}"{after}>"#)
-            } else {
-                caps.get(0).map_or("", |m| m.as_str()).to_string()
-            }
-        })
-        .into_owned()
-}
-
-#[cfg(desktop)]
-fn detect_image_mime_type(image_bytes: &[u8]) -> &'static str {
-    match image::guess_format(image_bytes) {
-        Ok(image::ImageFormat::Jpeg) => "image/jpeg",
-        Ok(image::ImageFormat::Png) => "image/png",
-        Ok(image::ImageFormat::Gif) => "image/gif",
-        Ok(image::ImageFormat::WebP) => "image/webp",
-        Ok(image::ImageFormat::Bmp) => "image/bmp",
-        Ok(image::ImageFormat::Tiff) => "image/tiff",
-        _ => "image/png",
-    }
 }
 
 const DOCX_BODY_FONT_SIZE: usize = 22; // 11pt
@@ -719,6 +689,11 @@ fn load_markdown_image_bytes(image_src: &str) -> Option<Vec<u8>> {
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         return fetch_remote_image(trimmed);
     }
+
+    // Mobile exports only embed supplied image bytes or remote resources. Arbitrary
+    // local paths in Markdown must never become an unrestricted file-read API.
+    #[cfg(mobile)]
+    return None;
 
     let decoded = urlencoding::decode(trimmed).ok()?.into_owned();
     let path = normalize_image_path(&decoded);

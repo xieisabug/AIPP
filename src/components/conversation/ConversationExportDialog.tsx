@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import IconButton from "../IconButton";
 import { conversationExportService } from "@/services/conversationExportService";
+import { usePlatform } from "@/hooks/use-platform";
 import type { ConversationExportOptions } from "@/utils/exportFormatters";
 import type { ExportData } from "@/utils/exportFormatters";
 import { Loader2, FileText, FileImage, File, FileType, Download } from "lucide-react";
@@ -20,6 +21,7 @@ interface ConversationExportDialogProps {
     conversationId: string;
     externalOpen?: boolean;
     onExternalOpenChange?: (open: boolean) => void;
+    hideTrigger?: boolean;
 }
 
 const defaultOptions: ConversationExportOptions = {
@@ -33,8 +35,10 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
     conversationId,
     externalOpen,
     onExternalOpenChange,
+    hideTrigger = false,
 }) => {
     const [internalOpen, setInternalOpen] = useState(false);
+    const platform = usePlatform();
     const open = externalOpen !== undefined ? externalOpen : internalOpen;
     const setOpen = onExternalOpenChange || setInternalOpen;
     const [loading, setLoading] = useState(false);
@@ -131,13 +135,15 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
 
     return (
         <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild>
-                <IconButton
-                    icon={<Download size={16} className="text-icon" />}
-                    onClick={() => {}}
-                    border
-                />
-            </DialogTrigger>
+            {!hideTrigger ? (
+                <DialogTrigger asChild>
+                    <IconButton
+                        icon={<Download size={16} className="text-icon" />}
+                        onClick={() => {}}
+                        border
+                    />
+                </DialogTrigger>
+            ) : null}
             <DialogContent className="max-w-md">
                 <DialogHeader>
                     <DialogTitle>导出对话</DialogTitle>
@@ -274,7 +280,7 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                     ) : (
                                         <File className="h-4 w-4" />
                                     )}
-                                    <span className="text-xs">PDF</span>
+                                    <span className="text-xs">{platform === "android" ? "打印 / PDF" : "PDF"}</span>
                                 </Button>
 
                                 <Button

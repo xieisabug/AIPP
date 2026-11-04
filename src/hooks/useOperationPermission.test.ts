@@ -197,4 +197,30 @@ describe("useAcpPermission", () => {
         });
         expect(result.current.isDialogOpen).toBe(false);
     });
+
+    it("routes Codex approval decisions to the native confirmation command", async () => {
+        const invokeHandler = vi.fn();
+        mockInvokeHandler("confirm_codex_permission", invokeHandler);
+        const { result } = renderHook(() => useAcpPermission({ conversationId: 9 }));
+        await flushEffects();
+
+        await act(async () => {
+            await emit("acp-permission-request", {
+                request_id: "codex:9:17",
+                conversation_id: 9,
+                agent_kind: "codex_app_server",
+                tool_call_id: "item-1",
+                options: [{ option_id: "accept", name: "本次允许", kind: "allow_once" }],
+            });
+        });
+        await waitFor(() => expect(result.current.pendingRequest?.request_id).toBe("codex:9:17"));
+        await act(async () => {
+            await result.current.handleDecision("codex:9:17", "accept", false);
+        });
+        expect(invokeHandler).toHaveBeenCalledWith({
+            requestId: "codex:9:17",
+            optionId: "accept",
+            cancelled: false,
+        });
+    });
 });

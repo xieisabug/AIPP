@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import React, { useCallback, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 import FormDialog from "../FormDialog";
 import ConfirmDialog from "../ConfirmDialog";
@@ -12,7 +12,8 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { Zap, Settings, ServerCrash, Download, Plus } from "lucide-react";
 import { toast } from 'sonner';
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 
 // 导入公共组件
 import {
@@ -20,6 +21,7 @@ import {
     SidebarList,
     ListItemButton,
     EmptyState,
+    ConfigPageLoading,
     SelectOption
 } from "../common";
 
@@ -32,10 +34,16 @@ interface LLMProvider {
     is_enabled: boolean;
 }
 
+const LOCAL_CLI_AGENT_API_TYPES: ReadonlySet<string> = new Set(['acp', 'codex_app_server', 'claude_sdk']);
+
 const LLMProviderConfig: React.FC = () => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
     const [selectedProvider, setSelectedProvider] = useState<LLMProvider | null>(null);
+    // 首次列表读取完成前不渲染空状态，避免先闪「还没有配置提供商」
+    const [providersLoaded, setProvidersLoaded] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
     const handleToggle = useCallback((index: number) => {
         const newProviders = [...LLMProviders];
@@ -56,37 +64,26 @@ const LLMProviderConfig: React.FC = () => {
         }
     }, [LLMProviders, selectedProvider]);
 
-    const getLLMProviderList = useCallback(() => {
-        invoke<Array<LLMProvider>>('get_llm_providers')
+    const getLLMProviderList = useCallback((isCurrent: () => boolean = () => true) => {
+        return invoke<Array<LLMProvider>>('get_llm_providers')
             .then((providers) => {
+                if (!isCurrent()) return;
                 setLLMProviders(providers);
-                // 如果没有选中的提供商，选择第一个
-                if (!selectedProvider && providers.length > 0) {
-                    setSelectedProvider(providers[0]);
-                }
-                // 如果当前选中的提供商已被删除，选择第一个
-                if (selectedProvider && !providers.find(p => p.id === selectedProvider.id)) {
-                    setSelectedProvider(providers.length > 0 ? providers[0] : null);
-                }
+                setSelectedProvider((current) => providers.find((p) => p.id === current?.id) ?? providers[0] ?? null);
             })
             .catch((e) => {
                 toast.error('获取大模型提供商失败: ' + e);
+            })
+            .finally(() => {
+                if (isCurrent()) setProvidersLoaded(true);
             });
-    }, [selectedProvider]);
-
-    useEffect(() => {
-        getLLMProviderList();
     }, []);
 
-    // 自建同步 pull/冲突落地远端 llm.* 变更后刷新列表
-    useEffect(() => {
-        const unlistenPromise = listen('llm_provider_changed', () => {
-            getLLMProviderList();
-        });
-        return () => {
-            unlistenPromise.then((unlisten) => unlisten()).catch(console.warn);
-        };
-    }, [getLLMProviderList]);
+    useDataRefresh({
+        events: ["llm_provider_changed"],
+        initial: true,
+        refresh: async (isCurrent) => { await getLLMProviderList(isCurrent); },
+    });
 
     const [newProviderDialogOpen, setNewProviderDialogOpen] = useState(false);
     const [providerName, setProviderName] = useState('');
@@ -99,7 +96,14 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'deepseek', label: 'DeepSeek API' },
         { value: 'github_copilot', label: 'GitHub Copilot' },
         { value: 'acp', label: 'ACP (Agent Client Protocol)' },
+        { value: 'codex_app_server', label: 'Codex' },
+        { value: 'claude_sdk', label: 'Claude Code' },
     ]
+    // 本地 CLI Agent 类型仅桌面可新建；已有记录仍按 apiTypes 显示名称
+    const localCliAgentAvailable = useFeatureAvailableOnPlatform("local_cli_agent");
+    const creatableApiTypes = localCliAgentAvailable
+        ? apiTypes
+        : apiTypes.filter((type) => !LOCAL_CLI_AGENT_API_TYPES.has(type.value));
 
     const openNewProviderDialog = useCallback(() => {
         setNewProviderDialogOpen(true);
@@ -295,7 +299,7 @@ const LLMProviderConfig: React.FC = () => {
             PinyinFilter.matches(provider.name, searchQuery) ||
             PinyinFilter.matches(provider.api_type, searchQuery)
         );
-    }, [LLMProviders, searchQuery]);
+    }, [LLMProviders, searchQuery, pinyinReady]);
 
     const sidebar = useMemo(() => (
         <SidebarList
@@ -352,6 +356,10 @@ const LLMProviderConfig: React.FC = () => {
             description="从左侧列表中选择一个提供商开始配置"
         />
     ), [selectedProvider, LLMProviders, selectedProviderApiType, handleToggle, openConfirmDialog, handleShareProvider, handleRenameProvider]);
+
+    if (!providersLoaded) {
+        return <ConfigPageLoading />;
+    }
 
     // 空状态
     if (LLMProviders.length === 0) {
@@ -443,7 +451,7 @@ const LLMProviderConfig: React.FC = () => {
                                 <SelectValue placeholder="选择 API 类型" />
                             </SelectTrigger>
                             <SelectContent>
-                                {apiTypes.map((type) => (
+                                {creatableApiTypes.map((type) => (
                                     <SelectItem key={type.value} value={type.value}>
                                         {type.label}
                                     </SelectItem>

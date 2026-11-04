@@ -1,4 +1,5 @@
 import java.util.Properties
+import groovy.json.JsonSlurper
 
 plugins {
     id("com.android.application")
@@ -57,7 +58,29 @@ rust {
     rootDirRel = "../../../"
 }
 
+// Use the Kotlin verifier shipped with the exact crate resolved by Cargo.
+val cargoMetadata = providers.exec {
+    workingDir = file("../../..")
+    commandLine("cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+        "--filter-platform", "aarch64-linux-android")
+}.standardOutput.asText.get()
+val cargoPackages = (JsonSlurper().parseText(cargoMetadata) as Map<*, *>)["packages"] as List<*>
+val verifierPackage = cargoPackages.map { it as Map<*, *> }
+    .single { it["name"] == "rustls-platform-verifier-android" }
+repositories {
+    exclusiveContent {
+        forRepository {
+            maven {
+                url = uri(File(File(verifierPackage["manifest_path"] as String).parentFile, "maven"))
+                metadataSources { artifact() }
+            }
+        }
+        filter { includeGroup("rustls") }
+    }
+}
+
 dependencies {
+    implementation("rustls:rustls-platform-verifier:${verifierPackage["version"]}@aar")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

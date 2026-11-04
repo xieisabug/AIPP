@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useRef, useState, memo } from "react";
+import { useCallback, useEffect, useRef, useState, memo, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
 import { listen } from "@tauri-apps/api/event";
 import { CircleCheckBig, EllipsisVertical, Loader2 } from "lucide-react";
 import ConversationTitleEditDialog from "./ConversationTitleEditDialog";
@@ -15,6 +18,72 @@ import {
 } from "./ui/dropdown-menu";
 import { Button } from "./ui/button";
 import ConfirmDialog from "./ConfirmDialog";
+import { useIsMobilePlatform } from "../hooks/use-platform";
+
+const LONG_PRESS_DELAY_MS = 500;
+const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
+
+/**
+ * 触屏长按（≈500ms）打开会话菜单；手指移动超过 10px、抬起或系统接管滚动（pointercancel）即取消。
+ * 长按触发后吞掉随后的 click，避免同时切换会话。
+ */
+function useLongPress(enabled: boolean, onLongPress: () => void) {
+    const timerRef = useRef<number | null>(null);
+    const startRef = useRef<{ x: number; y: number } | null>(null);
+    const firedRef = useRef(false);
+
+    const cancel = useCallback(() => {
+        if (timerRef.current !== null) {
+            window.clearTimeout(timerRef.current);
+            timerRef.current = null;
+        }
+        startRef.current = null;
+    }, []);
+
+    useEffect(() => cancel, [cancel]);
+
+    const onPointerDown = useCallback((event: ReactPointerEvent) => {
+        firedRef.current = false;
+        if (!enabled || event.pointerType === "mouse") return;
+        cancel();
+        startRef.current = { x: event.clientX, y: event.clientY };
+        timerRef.current = window.setTimeout(() => {
+            timerRef.current = null;
+            startRef.current = null;
+            firedRef.current = true;
+            onLongPress();
+        }, LONG_PRESS_DELAY_MS);
+    }, [cancel, enabled, onLongPress]);
+
+    const onPointerMove = useCallback((event: ReactPointerEvent) => {
+        const start = startRef.current;
+        if (!start) return;
+        if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > LONG_PRESS_MOVE_TOLERANCE_PX) {
+            cancel();
+        }
+    }, [cancel]);
+
+    /** 返回 true 表示本次 click 来自长按，调用方应忽略。 */
+    const consumeClick = useCallback(() => {
+        const fired = firedRef.current;
+        firedRef.current = false;
+        return fired;
+    }, []);
+
+    return {
+        handlers: enabled
+            ? {
+                onPointerDown,
+                onPointerMove,
+                onPointerUp: cancel,
+                onPointerCancel: cancel,
+                onPointerLeave: cancel,
+                onContextMenu: (event: ReactMouseEvent) => event.preventDefault(),
+            }
+            : { onPointerDown },
+        consumeClick,
+    };
+}
 
 interface ConversationItemProps {
     conversation: Conversation;
@@ -34,6 +103,10 @@ const ConversationItem = memo(function ConversationItem({
     onOpenDelete,
 }: ConversationItemProps) {
     const { enabled: antiLeakageEnabled, isRevealed } = useAntiLeakage();
+    const isMobilePlatform = useIsMobilePlatform();
+    const [menuOpen, setMenuOpen] = useState(false);
+    const openMenu = useCallback(() => setMenuOpen(true), []);
+    const longPress = useLongPress(isMobilePlatform, openMenu);
 
     // 判断是否需要脱敏
     const shouldMask = antiLeakageEnabled && !isRevealed;
@@ -44,7 +117,10 @@ const ConversationItem = memo(function ConversationItem({
         <li
             className={`group h-16 w-full mx-0 mb-2 text-sm border-0 rounded-xl cursor-pointer select-none flex flex-col justify-center p-3 box-border relative transition-all duration-200 ${isSelected ? "font-bold text-primary bg-primary-foreground" : "bg-transparent hover:bg-muted hover:translate-x-0.5"}`}
             data-aipp-slot="chat-conversation-list-item"
+            data-status={status}
+            {...longPress.handlers}
             onClick={() => {
+                if (longPress.consumeClick()) return;
                 onSelect(conversation.id.toString());
             }}
         >
@@ -73,12 +149,13 @@ const ConversationItem = memo(function ConversationItem({
                     </div>
                 )}
 
-                <DropdownMenu>
+                <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
                     <DropdownMenuTrigger asChild>
                         <Button
                             variant="link"
                             size="icon"
                             className="invisible absolute inset-0 h-9 w-9 p-0 group-hover:visible transition-opacity duration-200"
+                            aria-label="会话操作"
                             data-aipp-slot="chat-conversation-item-menu-trigger"
                             onClick={(e) => {
                                 // 避免点击菜单按钮时触发列表项选择
@@ -134,48 +211,55 @@ const ConversationList = memo(function ConversationList({
 }: ConversationListProps) {
     const { getItemStatus } = useConversationListStatus(conversationId);
     const [conversations, setConversations] = useState<Array<Conversation>>([]);
-    const [currentPage, setCurrentPage] = useState(1);
+
     const [isLoading, setIsLoading] = useState(false);
     const [hasMoreData, setHasMoreData] = useState(true);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const { deleteConversation, listConversations } = useConversationManager();
 
-    useEffect(() => {
-        setIsLoading(true);
-        listConversations(1, 100)
-            .then((c) => {
-                setConversations(c);
-                setHasMoreData(c.length === 100); // 如果返回的数据等于页面大小，可能还有更多数据
-                setIsLoading(false);
-            })
-            .catch(() => {
-                setIsLoading(false);
-            });
-    }, []);
-
-    // 加载下一页数据
-    const loadNextPage = useCallback(async () => {
-        if (isLoadingMore || !hasMoreData) return;
-
-        setIsLoadingMore(true);
-        try {
-            const nextPage = currentPage + 1;
-            const newConversations = await listConversations(nextPage, 100);
-
-            if (newConversations.length > 0) {
-                setConversations((prev) => [...prev, ...newConversations]);
-                setCurrentPage(nextPage);
-                setHasMoreData(newConversations.length === 100);
-            } else {
-                setHasMoreData(false);
+    const pageCountRef = useRef(1);
+    const refreshList = useDataRefresh({
+        events: ["conversation_data_changed", "conversation_created", "conversation_deleted"],
+        identity: conversationId,
+        initial: true,
+        refresh: async (isCurrent) => {
+            setIsLoading((value) => conversations.length === 0 ? true : value);
+            try {
+                const pageCount = pageCountRef.current;
+                const rows = await listConversations(1, pageCount * 100);
+                if (!isCurrent()) return;
+                // A selected conversation can lie outside the loaded range.
+                if (conversationId && !rows.some((row) => String(row.id) === conversationId)) {
+                    const exists = await invoke<boolean>("conversation_exists", { conversationId: +conversationId });
+                    if (!isCurrent()) return;
+                    if (!exists) onSelectConversation(rows[0]?.id.toString() ?? "");
+                }
+                const editing = editingDialogStateRef.current;
+                if (editing.isOpen) {
+                    const updated = rows.find((row) => row.id === editing.id);
+                    if (updated) setEditingConversationTitle(updated.name);
+                }
+                setConversations(rows);
+                setHasMoreData(rows.length === pageCount * 100);
+            } finally {
+                if (isCurrent()) { setIsLoading(false); setIsLoadingMore(false); }
             }
-        } catch (error) {
-            console.error("Failed to load more conversations:", error);
-        } finally {
+        },
+        onError: (error) => {
+            setIsLoading(false);
             setIsLoadingMore(false);
-        }
-    }, [currentPage, hasMoreData, isLoadingMore, listConversations]);
+            toast.error(`刷新聊天列表失败: ${String(error)}`);
+        },
+    });
+
+    // Reload the loaded prefix instead of appending pages fetched against an old ordering.
+    const loadNextPage = useCallback(() => {
+        if (isLoadingMore || isLoading || !hasMoreData) return;
+        setIsLoadingMore(true);
+        pageCountRef.current += 1;
+        refreshList();
+    }, [hasMoreData, isLoading, isLoadingMore, refreshList]);
 
     // 滚动监听，检测是否滚动到最后10%
     useEffect(() => {
@@ -195,47 +279,6 @@ const ConversationList = memo(function ConversationList({
         container.addEventListener("scroll", handleScroll);
         return () => container.removeEventListener("scroll", handleScroll);
     }, [hasMoreData, isLoadingMore, loadNextPage]);
-
-    // 当 conversationId 不在当前列表中时，自动重新拉取列表。
-    const lastFetchConversationIdRef = useRef<string | null>(null);
-    useEffect(() => {
-        if (!conversationId) {
-            lastFetchConversationIdRef.current = null;
-            return;
-        }
-
-        const exists = conversations.some(
-            (conversation) => conversation.id.toString() === conversationId,
-        );
-
-        if (exists) {
-            lastFetchConversationIdRef.current = null;
-            return;
-        }
-
-        if (lastFetchConversationIdRef.current === conversationId) {
-            return;
-        }
-
-        lastFetchConversationIdRef.current = conversationId;
-
-        const fetchConversations = async () => {
-            console.log(
-                "ConversationList: 选中的 conversationId 不在列表中，重新获取列表...",
-                conversationId,
-            );
-            try {
-                const c = await listConversations(1, 100);
-                setConversations(c);
-                setCurrentPage(1);
-                setHasMoreData(c.length === 100);
-            } catch (error) {
-                console.error("ConversationList: reload conversations failed", error);
-            }
-        };
-
-        fetchConversations();
-    }, [conversationId, conversations, listConversations]);
 
     const [titleEditDialogIsOpen, setTitleEditDialogIsOpen] =
         useState<boolean>(false);
@@ -306,61 +349,6 @@ const ConversationList = memo(function ConversationList({
         };
     }, []);
 
-    // 监听对话创建事件，刷新列表
-    useEffect(() => {
-        let unlisten: (() => void) | undefined;
-
-        const setupListener = async () => {
-            unlisten = await listen("conversation_created", async () => {
-                try {
-                    const conversations = await listConversations(1, 100);
-                    setConversations(conversations);
-                    setCurrentPage(1);
-                    setHasMoreData(conversations.length === 100);
-                } catch (error) {
-                    console.error("ConversationList: reload after create failed", error);
-                }
-            });
-        };
-
-        setupListener();
-
-        return () => {
-            if (unlisten) {
-                unlisten();
-            }
-        };
-    }, [listConversations]);
-
-    // 监听对话删除事件
-    useEffect(() => {
-        const unsubscribe = listen("conversation_deleted", (event) => {
-            const deletedConversationId = event.payload as number;
-
-            // 从列表中移除被删除的对话
-            setConversations((prevConversations) => {
-                const updated = prevConversations.filter(
-                    (conversation) => conversation.id !== deletedConversationId,
-                );
-
-                if (conversationId === deletedConversationId.toString()) {
-                    const nextId = updated[0]?.id?.toString() ?? "";
-                    if (nextId !== conversationId) {
-                        onSelectConversation(nextId);
-                    }
-                }
-
-                return updated;
-            });
-        });
-
-        return () => {
-            if (unsubscribe) {
-                unsubscribe.then((f) => f());
-            }
-        };
-    }, [conversationId, onSelectConversation]);
-
     const [deleteDialogIsOpen, setDeleteDialogIsOpen] =
         useState<boolean>(false);
     const [deleteConversationId, setDeleteConversationId] =
@@ -429,32 +417,8 @@ const ConversationList = memo(function ConversationList({
                 confirmText={`确定要删除对话 "${deleteConversationName}" 吗？此操作无法撤销。`}
                 onConfirm={() => {
                     deleteConversation(deleteConversationId, {
-                        onSuccess: async () => {
-                            // 删除后重新加载第一页数据
-                            setIsLoading(true);
-                            try {
-                                const conversations = await listConversations(
-                                    1,
-                                    100,
-                                );
-                                setConversations(conversations);
-                                setCurrentPage(1);
-                                setHasMoreData(conversations.length === 100);
-                                if (deleteConversationId === conversationId) {
-                                    const nextId =
-                                        conversations[0]?.id?.toString() ?? "";
-                                    if (nextId !== conversationId) {
-                                        onSelectConversation(nextId);
-                                    }
-                                }
-                            } catch (error) {
-                                console.error(
-                                    "Failed to reload conversations after delete:",
-                                    error,
-                                );
-                            } finally {
-                                setIsLoading(false);
-                            }
+                        onSuccess: () => {
+                            refreshList();
                             closeDeleteDialog();
                         },
                     });

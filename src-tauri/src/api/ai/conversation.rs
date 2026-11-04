@@ -14,9 +14,7 @@ use genai::chat::{
 };
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tauri::Emitter;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 fn strip_skill_attachment_tags(content: &str) -> String {
@@ -237,6 +235,8 @@ fn build_user_message_with_attachments(
     ChatMessage::user(parts)
 }
 
+// History filtering needs every legacy alias. Request validation must instead use
+// the single ID that will actually be sent for each tool call.
 pub fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String> {
     let mcp_call_regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").unwrap();
     let mut ids = HashSet::new();
@@ -256,6 +256,27 @@ pub fn extract_tool_call_ids_from_mcp_comments(content: &str) -> HashSet<String>
         }
     }
     ids
+}
+
+fn request_tool_call_id(tool_data: &serde_json::Value) -> Option<String> {
+    tool_data["llm_call_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| tool_data["call_id"].as_u64().map(|id| format!("mcp_tool_call_{}", id)))
+}
+
+pub fn extract_request_tool_call_ids(content: &str) -> HashSet<String> {
+    let regex = Regex::new(r"<!-- MCP_TOOL_CALL:(.*?) -->").unwrap();
+    regex.captures_iter(content)
+        .filter_map(|capture| serde_json::from_str::<serde_json::Value>(&capture[1]).ok())
+        .filter(|data| {
+            data["server_name"].is_string()
+                && data["tool_name"].is_string()
+                && data["parameters"].is_string()
+        })
+        .filter_map(|data| request_tool_call_id(&data))
+        .collect()
 }
 
 fn collect_valid_tool_call_ids(messages: &[Message]) -> HashSet<String> {
@@ -435,6 +456,11 @@ pub fn build_chat_messages_with_context(
     let mut pending_reasoning_content: Option<String> = None;
     for (message_type, content, attachment_list) in init_message_list.iter() {
         debug!(message_type, preview = %content.chars().take(50).collect::<String>(), "processing message");
+
+        // 失败轮次的错误卡片（message_type=error）只用于展示，不能作为 assistant 历史发给模型
+        if message_type == "error" {
+            continue;
+        }
 
         if message_type != "reasoning" && message_type != "response" && message_type != "assistant"
         {
@@ -656,6 +682,11 @@ fn build_native_toolcall_paired_messages(
         if message_type == "tool_result" {
             if let Some(call_id) = extract_tool_call_id(content) {
                 if let Some(result) = extract_tool_result(content) {
+                    // Old histories may use a bare database ID instead of the
+                    // prefixed ID used by persisted non-native tool results.
+                    if call_id.parse::<u64>().is_ok() {
+                        tool_call_to_response.insert(format!("mcp_tool_call_{}", call_id), result.clone());
+                    }
                     tool_call_to_response.insert(call_id, result);
                 }
             }
@@ -663,6 +694,10 @@ fn build_native_toolcall_paired_messages(
     }
 
     for (message_type, content, attachment_list) in init_message_list.iter() {
+        // 错误卡片不进入模型上下文
+        if message_type == "error" {
+            continue;
+        }
         if message_type != "reasoning" && message_type != "response" && message_type != "assistant"
         {
             flush_pending_reasoning_message(&mut chat_messages, &mut pending_reasoning_content);
@@ -724,7 +759,6 @@ fn build_native_toolcall_paired_messages(
 
 #[derive(Clone, Copy, Debug)]
 pub enum BranchSelection {
-    All,
     LatestBranch,
 }
 
@@ -846,28 +880,11 @@ pub fn build_message_list_with_metadata_from_db(
                 (messages, metadata)
             }
         }
-        BranchSelection::All => {
-            let mut seen = HashSet::new();
-            let mut message_ids = Vec::new();
-            let mut db_token_counts = Vec::new();
-            let messages = all_messages
-                .iter()
-                .filter(|(message, _)| seen.insert(message.id))
-                .map(|(message, attachment)| {
-                    message_ids.push(message.id);
-                    db_token_counts.push(message.input_token_count);
-                    (
-                        message.message_type.clone(),
-                        message.content.clone(),
-                        attachment.clone().map(|a| vec![a]).unwrap_or_else(Vec::new),
-                    )
-                })
-                .collect();
-            (messages, MessageListMetadata { message_ids, db_token_counts })
-        }
     }
 }
 
+/// 目前仅被分支相关测试使用。
+#[allow(dead_code)]
 pub fn build_message_list_from_db(
     all_messages: &[(Message, Option<MessageAttachment>)],
     branch_selection: BranchSelection,
@@ -903,6 +920,8 @@ pub fn extract_tool_result(content: &str) -> Option<String> {
 }
 
 // Helper function to reconstruct assistant message with tool calls from MCP_TOOL_CALL comments
+// 目前仅被测试使用。
+#[allow(dead_code)]
 pub fn reconstruct_assistant_with_tool_calls_from_content(content: &str) -> Option<ChatMessage> {
     reconstruct_assistant_with_tool_calls_and_reasoning(content, None)
 }
@@ -967,11 +986,8 @@ fn reconstruct_assistant_with_tool_calls_and_reasoning(
                     .filter(|value| value.is_object())
                     .unwrap_or_else(|| serde_json::json!({}));
 
-                // 优先使用 llm_call_id，如果没有则使用 call_id 转换为字符串
-                let call_id = tool_data["llm_call_id"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| tool_data["call_id"].as_u64().map(|n| n.to_string()))
+                // Use the same ID as request validation and persisted tool results.
+                let call_id = request_tool_call_id(&tool_data)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
                 tool_calls.push(ToolCall {
@@ -1041,14 +1057,6 @@ pub fn parse_data_url(data_url: &str) -> Option<(String, String)> {
         return None;
     }
     Some((mime_type.to_string(), content.to_string()))
-}
-
-pub async fn cleanup_token(
-    tokens: &Arc<tokio::sync::Mutex<HashMap<i64, CancellationToken>>>,
-    message_id: i64,
-) {
-    let mut map = tokens.lock().await;
-    map.remove(&message_id);
 }
 
 pub async fn handle_message_type_end(
@@ -1288,4 +1296,22 @@ pub fn init_conversation(
         message_result_array.push(message.clone());
     }
     Ok((conversation_clone, message_result_array))
+}
+
+#[cfg(test)]
+mod error_message_context_tests {
+    use super::build_chat_messages;
+
+    #[test]
+    fn error_cards_are_not_sent_as_history() {
+        let list = vec![
+            ("system".to_string(), "sys".to_string(), Vec::new()),
+            ("user".to_string(), "q1".to_string(), Vec::new()),
+            ("error".to_string(), "{\"message\":\"AI请求失败\"}".to_string(), Vec::new()),
+            ("user".to_string(), "q2".to_string(), Vec::new()),
+        ];
+        let messages = build_chat_messages(&list);
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().all(|m| !format!("{:?}", m.content).contains("AI请求失败")));
+    }
 }

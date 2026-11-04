@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -99,7 +98,6 @@ fn scheduled_task_run_from_row(row: &Row) -> rusqlite::Result<ScheduledTaskRun> 
 
 pub struct ScheduledTaskDatabase {
     pub conn: Connection,
-    pub db_path: PathBuf,
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -109,15 +107,7 @@ impl ScheduledTaskDatabase {
         let db_path = get_db_path(app_handle, "conversation.db").unwrap();
         let conn = Connection::open(&db_path)?;
         let write_lock = get_db_write_lock(&db_path);
-        Ok(ScheduledTaskDatabase { conn, db_path, write_lock })
-    }
-
-    pub fn get_connection(&self) -> rusqlite::Result<Connection> {
-        Connection::open(&self.db_path)
-    }
-
-    pub fn write_lock(&self) -> Arc<Mutex<()>> {
-        self.write_lock.clone()
+        Ok(ScheduledTaskDatabase { conn, write_lock })
     }
 
     fn with_write_lock<T, F>(&self, f: F) -> Result<T>
@@ -204,7 +194,7 @@ impl ScheduledTaskDatabase {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id INTEGER NOT NULL,
                 run_id TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('running', 'success', 'failed')),
+                status TEXT NOT NULL CHECK(status IN ('running', 'success', 'failed', 'missed')),
                 notify BOOLEAN NOT NULL DEFAULT 0,
                 summary TEXT,
                 error_message TEXT,
@@ -233,6 +223,8 @@ impl ScheduledTaskDatabase {
                 [],
             )?;
         }
+
+        self.with_write_lock(|| migrate_scheduled_run_missed(conn))?;
 
         debug!("Scheduled task tables ensured");
         Ok(())
@@ -326,12 +318,7 @@ impl ScheduledTaskDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn delete_task(&self, id: i64) -> Result<()> {
-        self.with_write_lock(|| {
-            let _ = self.conn.execute("DELETE FROM scheduled_task_log WHERE task_id = ?", [id]);
-            let _ = self.conn.execute("DELETE FROM scheduled_task_run WHERE task_id = ?", [id]);
-            self.conn.execute("DELETE FROM scheduled_task WHERE id = ?", [id])?;
-            Ok(())
-        })
+        self.with_write_lock(|| super::cascade_delete::delete(&self.conn, "scheduled_task", id))
     }
 
     #[instrument(level = "debug", skip(self, now), fields(now = %now))]
@@ -350,11 +337,14 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self, log), fields(task_id = log.task_id))]
     pub fn add_log(&self, log: &ScheduledTaskLog) -> Result<ScheduledTaskLog> {
         self.with_write_lock(|| {
-            self.conn.execute(
+            let inserted = self.conn.execute(
                 "INSERT INTO scheduled_task_log (task_id, run_id, message_type, content, created_time)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS(SELECT 1 FROM scheduled_task WHERE id=?1)",
                 params![log.task_id, log.run_id, log.message_type, log.content, log.created_time],
             )?;
+            if inserted == 0 {
+                return Err(rusqlite::Error::InvalidParameterName(format!("定时任务 {} 已删除，拒绝写入日志 run={}", log.task_id, log.run_id)));
+            }
             let id = self.conn.last_insert_rowid();
             Ok(ScheduledTaskLog { id, ..log.clone() })
         })
@@ -431,9 +421,9 @@ impl ScheduledTaskDatabase {
     #[instrument(level = "debug", skip(self, run), fields(task_id = run.task_id, status = %run.status))]
     pub fn create_run(&self, run: &ScheduledTaskRun) -> Result<ScheduledTaskRun> {
         self.with_write_lock(|| {
-            self.conn.execute(
+            let inserted = self.conn.execute(
                 "INSERT INTO scheduled_task_run (task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE EXISTS(SELECT 1 FROM scheduled_task WHERE id=?1)",
                 params![
                     run.task_id,
                     run.run_id,
@@ -446,6 +436,9 @@ impl ScheduledTaskDatabase {
                     run.butler_followup_status
                 ],
             )?;
+            if inserted == 0 {
+                return Err(rusqlite::Error::InvalidParameterName(format!("定时任务 {} 已删除，拒绝创建运行记录 run={}", run.task_id, run.run_id)));
+            }
             let id = self.conn.last_insert_rowid();
             Ok(ScheduledTaskRun { id, ..run.clone() })
         })
@@ -502,21 +495,97 @@ impl ScheduledTaskDatabase {
     }
 }
 
+/// Rebuild only the known legacy status constraint, retaining the table's other schema,
+/// columns, explicit indexes, triggers and AUTOINCREMENT high-water mark.
+fn migrate_scheduled_run_missed(conn: &Connection) -> Result<()> {
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='scheduled_task_run'", [], |row| row.get(0),
+    )?;
+    let constraint = regex::Regex::new(r#"(?i)CHECK\s*\(\s*["`\[]?status["`\]]?\s+IN\s*\(([^)]*)\)\s*\)"#).expect("static regex");
+    let Some(captures) = constraint.captures(&sql) else {
+        // Unknown status constraints must not be silently removed or treated as migrated.
+        if regex::Regex::new(r"(?i)CHECK\s*\([^)]*\bstatus\b").expect("static regex").is_match(&sql) {
+            return Err(rusqlite::Error::InvalidParameterName("scheduled_task_run: unknown status CHECK; migration refused".into()));
+        }
+        return Ok(());
+    };
+    let statuses: Vec<String> = captures[1].split(',')
+        .map(|s| s.trim().trim_matches('\'').to_ascii_lowercase()).collect();
+    if statuses.iter().any(|status| status == "missed") {
+        if ["running", "success", "failed"].iter().all(|required| statuses.iter().any(|s| s == *required)) {
+            return Ok(());
+        }
+        return Err(rusqlite::Error::InvalidParameterName("scheduled_task_run: incomplete status values; migration refused".into()));
+    }
+    if statuses != ["running", "success", "failed"] {
+        return Err(rusqlite::Error::InvalidParameterName("scheduled_task_run: unexpected status values; migration refused".into()));
+    }
+    if !regex::Regex::new(r"(?i)\bAUTOINCREMENT\b").expect("static regex").is_match(&sql) {
+        return Err(rusqlite::Error::InvalidParameterName("scheduled_task_run: legacy schema without AUTOINCREMENT; migration refused".into()));
+    }
+    let table_prefix = regex::Regex::new(r#"(?i)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"scheduled_task_run"|`scheduled_task_run`|\[scheduled_task_run\]|scheduled_task_run)\s*\("#).expect("static regex");
+    let expanded = constraint.replace(&sql, "CHECK(status IN ('running', 'success', 'failed', 'missed'))");
+    if !table_prefix.is_match(&expanded) {
+        return Err(rusqlite::Error::InvalidParameterName("scheduled_task_run: unsupported CREATE TABLE; migration refused".into()));
+    }
+    let new_sql = table_prefix.replace(&expanded, "CREATE TABLE scheduled_task_run_missed_migration (").into_owned();
+
+    conn.execute_batch("SAVEPOINT scheduled_run_missed_migration")?;
+    let result = (|| -> Result<()> {
+        // Never drop a table referenced by foreign keys: DROP can cascade before rollback.
+        let tables: Vec<String> = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
+            .query_map([], |row| row.get(0))?.collect::<Result<_>>()?;
+        for table in tables {
+            let quoted = format!("\"{}\"", table.replace('"', "\"\""));
+            let sql = format!("PRAGMA foreign_key_list({quoted})");
+            let refs: Vec<String> = conn.prepare(&sql)?.query_map([], |row| row.get(2))?.collect::<Result<_>>()?;
+            if refs.iter().any(|name| name.eq_ignore_ascii_case("scheduled_task_run")) {
+                return Err(rusqlite::Error::InvalidParameterName(format!("scheduled_task_run is referenced by foreign keys in {table}; migration refused")));
+            }
+        }
+        let objects: Vec<String> = conn.prepare(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='scheduled_task_run' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name",
+        )?.query_map([], |row| row.get(0))?.collect::<Result<_>>()?;
+        let columns: Vec<String> = conn.prepare("PRAGMA table_xinfo(scheduled_task_run)")?
+            .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(6)?)))?
+            .filter_map(|row| match row { Ok((name, 0)) => Some(Ok(format!("\"{}\"", name.replace('"', "\"\"")))), Ok(_) => None, Err(e) => Some(Err(e)) })
+            .collect::<Result<_>>()?;
+        let sequence: Option<i64> = conn.query_row("SELECT seq FROM sqlite_sequence WHERE name='scheduled_task_run'", [], |row| row.get(0)).optional()?;
+        conn.execute_batch(&new_sql)?;
+        let fields = columns.join(",");
+        conn.execute_batch(&format!("INSERT INTO scheduled_task_run_missed_migration ({fields}) SELECT {fields} FROM scheduled_task_run; DROP TABLE scheduled_task_run; ALTER TABLE scheduled_task_run_missed_migration RENAME TO scheduled_task_run;"))?;
+        for object in objects { conn.execute_batch(&object)?; }
+        if let Some(sequence) = sequence {
+            conn.execute("INSERT INTO sqlite_sequence(name, seq) SELECT 'scheduled_task_run', ?1 WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='scheduled_task_run')", [sequence])?;
+            conn.execute("UPDATE sqlite_sequence SET seq=MAX(seq, ?1) WHERE name='scheduled_task_run'", [sequence])?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("RELEASE scheduled_run_missed_migration"),
+        Err(error) => {
+            if let Err(rollback) = conn.execute_batch("ROLLBACK TO scheduled_run_missed_migration; RELEASE scheduled_run_missed_migration") {
+                return Err(rusqlite::Error::InvalidParameterName(format!("scheduled_task_run migration failed: {error}; rollback failed: {rollback}")));
+            }
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "scheduled_task_db_tests.rs"]
+mod migration_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{ScheduledTask, ScheduledTaskDatabase};
     use chrono::Utc;
     use rusqlite::Connection;
-    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     fn build_test_db() -> ScheduledTaskDatabase {
         let conn = Connection::open_in_memory().unwrap();
-        let db = ScheduledTaskDatabase {
-            conn,
-            db_path: PathBuf::from(":memory:"),
-            write_lock: Arc::new(Mutex::new(())),
-        };
+        let db = ScheduledTaskDatabase { conn, write_lock: Arc::new(Mutex::new(())) };
         db.create_tables().unwrap();
         db
     }
@@ -559,3 +628,7 @@ mod tests {
         assert!(ids.contains(&task_b.id));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/scheduled_task_db_tests.rs"]
+mod cascade_tests;

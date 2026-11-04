@@ -4,8 +4,37 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ConfigForm from "@/components/ConfigForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import {
+    canShowCleanupDangling,
+    canShowRetryDeadLetters,
+    canShowRetryFailed,
+    canShowSyncNow,
+    canStopSync,
+    decideSyncNowAction,
+    formatDanglingFkStatusText,
+    formatLastSyncAt,
+    formatRecentSyncError,
+    formatSyncConnectionState,
+    formatSyncStatusMetrics,
+    friendlySyncError,
+    type SyncStatusMetric,
+    isAutoSyncEnabled,
+    saveThenSyncSuccessMessage,
+    secretSyncTone,
+    shouldTriggerSyncAfterSave,
+    showsSelfHostedSyncControls,
+    syncConflictNotice,
+    isSyncPassphraseMismatch,
+    providerConflictNotice,
+    validateSyncPassphrase,
+} from "./dataFolderSyncHelpers";
 
 interface DataFolderConfigFormProps {
     form: UseFormReturn<any>;
@@ -18,36 +47,104 @@ interface SyncStatus {
     connected: boolean;
     running: boolean;
     syncing: boolean;
+    paused?: boolean;
     last_sync_at?: string | null;
     last_error?: string | null;
     pending_outbox_count: number;
     pushing_outbox_count: number;
     failed_outbox_count: number;
     dead_letter_count: number;
+    dead_letter_summary?: string | null;
     needs_reset: boolean;
     conflict_resolved_count: number;
     server_cursor: number;
+    dangling_fk_count?: number;
+    dangling_fk_summary?: string | null;
+    secret_sync_state?: string;
+    secret_sync_message?: string;
+    secret_pending_count?: number;
+    duplicate_provider_conflicts?: string[];
 }
 
 const STATUS_FALLBACK_POLL_MS = 30_000;
+// Survives settings panel remounts; lifetime counters are never fresh conflicts.
+const conflictNotices = new Map<string, { count: number; pending: number }>();
+
+const SYNC_ACTIONS_HINT =
+    "开启自动同步后，本地变更会防抖推送并定期/经服务器通知拉取。关闭后后台 worker 持久暂停；仍可用「立即同步一次」手动跑一轮。无论自动开或关，同步进行中都可「停止同步」取消本轮（不会关自动同步）。「立即同步一次」也会重试失败项。";
+
+function connectionStateDotClass(state: string): string {
+    switch (state) {
+        case "已连接":
+            return "bg-emerald-500";
+        case "同步中":
+            return "bg-primary";
+        case "未连接":
+            return "bg-amber-500";
+        default:
+            return "bg-muted-foreground";
+    }
+}
+
+function secretToneDotClass(tone: ReturnType<typeof secretSyncTone>): string {
+    switch (tone) {
+        case "ok":
+            return "bg-emerald-500";
+        case "warn":
+            return "bg-amber-500";
+        default:
+            return "bg-muted-foreground";
+    }
+}
+
+const PASSPHRASE_FIELD = "sync_passphrase";
+
+const SECRET_SYNC_HINT =
+    "API Key 等密钥只在本机用同步口令加密后上传，服务器只保存密文。每台设备输入相同口令后才会同步 API Key；口令不会上传，忘记口令可「更换口令」（其他设备需重新输入）。";
+
+function metricValueClass(metric: SyncStatusMetric): string {
+    if (metric.value > 0 && (metric.label === "失败" || metric.label === "无法应用")) {
+        return "text-destructive";
+    }
+    return "text-foreground";
+}
 
 export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form }) => {
+    const isMobilePlatform = useIsMobilePlatform();
     const [status, setStatus] = useState<SyncStatus | null>(null);
+    const [statusReadError, setStatusReadError] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
+    const [stopping, setStopping] = useState(false);
+    const [togglingAutoSync, setTogglingAutoSync] = useState(false);
     const [retryingFailed, setRetryingFailed] = useState(false);
     const [retryingDeadLetters, setRetryingDeadLetters] = useState(false);
     const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
     const [resetting, setResetting] = useState(false);
+    const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+    const [cleaningDangling, setCleaningDangling] = useState(false);
+    const [passphraseError, setPassphraseError] = useState<string | null>(null);
+    const [savingPassphrase, setSavingPassphrase] = useState(false);
+    const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false);
     const watchedMode = useWatch({ control: form.control, name: "mode" });
     const mode = watchedMode || "local";
     const watchedServerUrl = useWatch({ control: form.control, name: "server_url" }) || "";
     const isPlaintextUrl = watchedServerUrl.trim().toLowerCase().startsWith("http://");
 
+    const acceptStatus = useCallback((next: SyncStatus) => {
+        const notice = syncConflictNotice(conflictNotices.get(next.server_url), next.conflict_resolved_count, next.syncing);
+        conflictNotices.set(next.server_url, notice.state);
+        setStatus(next);
+        setStatusReadError(null);
+        if (notice.delta > 0) {
+            toast.warning(`有 ${notice.delta} 处修改与服务器冲突，已采用服务器版本`, { id: "sync-conflicts" });
+        }
+    }, []);
+
     const loadStatus = useCallback(async (syncFormValues = false) => {
         try {
             const nextStatus = await invoke<SyncStatus>("get_sync_status");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             if (syncFormValues) {
                 form.reset({
                     mode: nextStatus.mode || "local",
@@ -56,26 +153,19 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 });
             }
         } catch (error) {
-            toast.error("读取同步状态失败: " + getErrorMessage(error));
+            setStatusReadError(friendlySyncError(getErrorMessage(error), "读取同步状态失败"));
         }
-    }, [form]);
+    }, [form, acceptStatus]);
 
     useEffect(() => {
         void loadStatus(true);
         const unlistenPromise = listen<SyncStatus>("sync_status_changed", (event) => {
-            setStatus((prev) => {
-                const next = event.payload;
-                const resolvedDelta = (next.conflict_resolved_count ?? 0) - (prev?.conflict_resolved_count ?? 0);
-                if (resolvedDelta > 0) {
-                    toast.warning(`有 ${resolvedDelta} 处修改与服务器冲突，已采用服务器版本`);
-                }
-                return next;
-            });
+            acceptStatus(event.payload);
         });
         return () => {
             void unlistenPromise.then((unlisten) => unlisten());
         };
-    }, [loadStatus]);
+    }, [loadStatus, acceptStatus]);
 
     useEffect(() => {
         if (mode !== "self_hosted") {
@@ -97,9 +187,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             }
         };
         window.addEventListener("focus", refresh);
+        window.addEventListener("online", refresh);
+        window.addEventListener("aipp:mobile-navigate", refresh);
         document.addEventListener("visibilitychange", refreshWhenVisible);
         return () => {
             window.removeEventListener("focus", refresh);
+            window.removeEventListener("online", refresh);
+            window.removeEventListener("aipp:mobile-navigate", refresh);
             document.removeEventListener("visibilitychange", refreshWhenVisible);
         };
     }, [loadStatus]);
@@ -112,46 +206,130 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         }
     }, []);
 
-    const handleSave = useCallback(async () => {
+    const persistSyncSettings = useCallback(async (opts?: { quietSuccess?: boolean }) => {
         const values = form.getValues();
+        const nextStatus = await invoke<SyncStatus>("save_sync_settings", {
+            request: {
+                mode: values.mode || "local",
+                server_url: values.server_url || "",
+                token: values.token || "",
+            },
+        });
+        setStatus(nextStatus);
+        form.reset({
+            mode: nextStatus.mode || "local",
+            server_url: nextStatus.server_url || "",
+            token: "",
+        });
+        if (!opts?.quietSuccess) {
+            toast.success(
+                nextStatus.mode === "self_hosted"
+                    ? "自建同步配置已保存，后台将自动同步"
+                    : "已切换为本地模式",
+            );
+        }
+        if (nextStatus.mode === "self_hosted") {
+            void loadStatus(false);
+        }
+        return nextStatus;
+    }, [form, loadStatus]);
+
+    const handleSave = useCallback(async () => {
         setSaving(true);
         try {
-            const nextStatus = await invoke<SyncStatus>("save_sync_settings", {
-                request: {
-                    mode: values.mode || "local",
-                    server_url: values.server_url || "",
-                    token: values.token || "",
-                },
-            });
-            setStatus(nextStatus);
-            form.reset({
-                mode: nextStatus.mode || "local",
-                server_url: nextStatus.server_url || "",
-                token: "",
-            });
-            toast.success(nextStatus.mode === "self_hosted" ? "自建同步配置已保存" : "已切换为本地模式");
-            if (nextStatus.mode === "self_hosted") {
-                void loadStatus(false);
-            }
+            await persistSyncSettings();
         } catch (error) {
-            toast.error("保存同步配置失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "保存同步配置失败"));
         } finally {
             setSaving(false);
         }
-    }, [form]);
+    }, [persistSyncSettings]);
 
     const handleSyncNow = useCallback(async () => {
+        const values = form.getValues();
+        const decision = decideSyncNowAction({
+            formMode: values.mode || "local",
+            formServerUrl: values.server_url || "",
+            formToken: values.token || "",
+            tokenConfigured: Boolean(status?.token_configured),
+            savedServerUrl: status?.server_url || "",
+        });
+
+        if (decision.action === "wrong_mode" || decision.action === "need_token" || decision.action === "need_server_url") {
+            toast.error(decision.message);
+            return;
+        }
+
         setSyncing(true);
         try {
+            if (decision.action === "save_then_sync") {
+                setSaving(true);
+                let saved: SyncStatus;
+                try {
+                    saved = await persistSyncSettings({ quietSuccess: true });
+                    if (saved.mode === "self_hosted" && !saved.token_configured) {
+                        toast.error("访问 token 未能保存成功，请检查后重试");
+                        return;
+                    }
+                } finally {
+                    setSaving(false);
+                }
+
+                // Normal self_hosted save already ran sync; only trigger again
+                // when save skipped sync (needs_reset) — one merged success toast.
+                const needSyncNow = shouldTriggerSyncAfterSave(saved);
+                if (needSyncNow) {
+                    const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
+                    setStatus(nextStatus);
+                } else {
+                    setStatus(saved);
+                }
+                toast.success(saveThenSyncSuccessMessage(needSyncNow));
+                return;
+            }
+
+            // sync_only: save did not run, so trigger sync now.
             const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
             setStatus(nextStatus);
-            toast.success("同步已触发");
+            toast.success(
+                status?.paused ? "已触发一次同步（自动同步已关闭）" : "已触发一次同步",
+            );
         } catch (error) {
-            toast.error("触发同步失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "触发同步失败"));
         } finally {
             setSyncing(false);
         }
+    }, [form, persistSyncSettings, status?.paused, status?.server_url, status?.token_configured]);
+
+    const handleStopSync = useCallback(async () => {
+        setStopping(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("stop_sync");
+            setStatus(nextStatus);
+            toast.success("已停止当前同步");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "停止同步失败"));
+        } finally {
+            setStopping(false);
+        }
     }, []);
+
+    const handleSetAutoSync = useCallback(async (enabled: boolean) => {
+        if (mode !== "self_hosted") {
+            toast.error("请先切换到「自建同步」并保存");
+            return;
+        }
+        setTogglingAutoSync(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("set_auto_sync", { enabled });
+            setStatus(nextStatus);
+            toast.success(enabled ? "已开启自动同步" : "已关闭自动同步");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "切换自动同步失败"));
+        } finally {
+            setTogglingAutoSync(false);
+        }
+    }, [mode]);
 
     const handleRetryFailed = useCallback(async () => {
         setRetryingFailed(true);
@@ -160,7 +338,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             setStatus(nextStatus);
             toast.success("已重新触发失败项");
         } catch (error) {
-            toast.error("重试失败项失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "重试失败项失败"));
         } finally {
             setRetryingFailed(false);
         }
@@ -171,9 +349,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         try {
             const nextStatus = await invoke<SyncStatus>("retry_sync_dead_letters");
             setStatus(nextStatus);
-            toast.success("已重试无法应用的变更");
+            if (nextStatus.dead_letter_count > 0) {
+                toast.warning(`重试后仍有 ${nextStatus.dead_letter_count} 条无法应用，请查看具体原因`, { id: "sync-dead-letters" });
+            } else {
+                toast.success("无法应用的变更已全部处理");
+            }
         } catch (error) {
-            toast.error("重试无法应用的变更失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "重试无法应用的变更失败"));
         } finally {
             setRetryingDeadLetters(false);
         }
@@ -187,33 +369,346 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             setStatus(nextStatus);
             toast.success("同步状态已重置，正在重新全量同步");
         } catch (error) {
-            toast.error("重置同步状态失败: " + getErrorMessage(error));
+            toast.error(friendlySyncError(getErrorMessage(error), "重置同步状态失败"));
         } finally {
             setResetting(false);
         }
     }, []);
 
-    const statusText = useMemo(() => {
-        if (!status) {
-            return "读取中";
+    const handleCleanupDanglingFks = useCallback(async () => {
+        setCleanupConfirmOpen(false);
+        setCleaningDangling(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("cleanup_dangling_foreign_keys");
+            setStatus(nextStatus);
+            const notice = formatDanglingFkStatusText(nextStatus);
+            toast.success(notice || "已清理失效的本地引用");
+        } catch (error) {
+            toast.error(friendlySyncError(getErrorMessage(error), "清理失效引用失败"));
+        } finally {
+            setCleaningDangling(false);
         }
-        if (status.mode === "local") {
-            return "本地模式：仅使用本机 SQLite，后台同步已停止。";
+    }, []);
+
+    // The passphrase lives in the form (not component state): ConfigForm remounts
+    // custom rows whenever this component re-renders, which would drop focus on
+    // every keystroke. It is never part of save_sync_settings.
+    const submitPassphrase = useCallback(async (replaceExisting: boolean) => {
+        const passphrase: string = form.getValues(PASSPHRASE_FIELD) || "";
+        const invalid = validateSyncPassphrase(passphrase);
+        if (invalid) {
+            setPassphraseError(invalid);
+            return;
         }
-        const state = status.syncing ? "同步中" : status.connected ? "已连接" : status.running ? "等待同步" : "未运行";
-        return `${state}；待推送 ${status.pending_outbox_count}，推送中 ${status.pushing_outbox_count ?? 0}，失败 ${status.failed_outbox_count}，无法应用 ${status.dead_letter_count ?? 0}，游标 ${status.server_cursor}`;
-    }, [status]);
+        setPassphraseError(null);
+        setSavingPassphrase(true);
+        try {
+            const nextStatus = await invoke<SyncStatus>("set_sync_passphrase", {
+                request: { passphrase, replace_existing: replaceExisting },
+            });
+            setStatus(nextStatus);
+            form.setValue(PASSPHRASE_FIELD, "");
+            toast.success(replaceExisting ? "已更换同步口令" : "同步口令已保存");
+        } catch (error) {
+            const message = getErrorMessage(error) || "设置同步口令失败";
+            // One button: a different passphrase than the account's means "replace",
+            // which only happens after the user confirms it.
+            if (!replaceExisting && isSyncPassphraseMismatch(message)) {
+                setReplaceConfirmOpen(true);
+                return;
+            }
+            // Passphrase errors are already user-facing; do not route them through the
+            // generic "解密" → token hint mapping.
+            setPassphraseError(message);
+            toast.error(message);
+        } finally {
+            setSavingPassphrase(false);
+        }
+    }, [form]);
+
+    const connectionState = useMemo(() => formatSyncConnectionState(status), [status]);
+    const statusMetrics = useMemo(() => formatSyncStatusMetrics(status), [status]);
+    const danglingText = useMemo(() => formatDanglingFkStatusText(status), [status]);
+    const danglingCount = status?.dangling_fk_count ?? 0;
+    const autoSyncOn = isAutoSyncEnabled({ mode, paused: status?.paused });
+    const primaryControlInput = {
+        mode,
+        // Stop whenever a round is in flight (backend syncing or local Sync Now click).
+        syncing: Boolean(status?.syncing) || syncing,
+        running: Boolean(status?.running),
+        paused: status?.paused,
+    };
+    const stopEnabled = canStopSync(primaryControlInput);
+    const showSyncNow = canShowSyncNow(primaryControlInput);
+    const failedOutboxCount = status?.failed_outbox_count ?? 0;
+    const deadLetterCount = status?.dead_letter_count ?? 0;
+    const showRetryFailed = canShowRetryFailed(failedOutboxCount);
+    const showRetryDeadLetters = canShowRetryDeadLetters(deadLetterCount);
+    const showCleanupDangling = canShowCleanupDangling(danglingCount);
+
+    const renderSyncStatusRow = useCallback(() => {
+        const summaryItems = [
+            { label: "上次同步时间", value: formatLastSyncAt(status?.last_sync_at) },
+            {
+                label: "最近错误",
+                value: formatRecentSyncError({
+                    last_error: status?.last_error,
+                    failed_outbox_count: status?.failed_outbox_count,
+                    syncing: Boolean(status?.syncing) || syncing,
+                }),
+            },
+        ];
+        return (
+            <div className="space-y-3">
+                <div className="min-w-0 space-y-2">
+                    <div className="font-semibold text-sm text-foreground">连接状态</div>
+                    <div className="px-3 py-2 bg-muted rounded-md">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                                <span
+                                    className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${connectionStateDotClass(connectionState)}`}
+                                    aria-hidden
+                                />
+                                {connectionState}
+                            </div>
+                            {statusMetrics.map((metric) => (
+                                <span
+                                    key={metric.label}
+                                    className="inline-flex items-center gap-1 rounded-md bg-background px-2 py-1 text-xs"
+                                >
+                                    <span className="text-muted-foreground">{metric.label}</span>
+                                    <span className={`font-medium tabular-nums ${metricValueClass(metric)}`}>
+                                        {metric.value.toLocaleString("zh-CN")}
+                                    </span>
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {summaryItems.map((item) => (
+                        <div key={item.label} className="min-w-0 space-y-2">
+                            <div className="font-semibold text-sm text-foreground">{item.label}</div>
+                            <div className="text-sm text-muted-foreground px-3 py-2 bg-muted rounded-md break-words whitespace-pre-wrap">
+                                {item.value}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                {statusReadError ? <p className="text-sm text-destructive break-words">{statusReadError}</p> : null}
+                {status?.dead_letter_summary ? (
+                    <details className="text-sm text-destructive break-words">
+                        <summary className="cursor-pointer">无法应用的原因（{status.dead_letter_count} 条）</summary>
+                        <p className="mt-2 whitespace-pre-wrap">{status.dead_letter_summary}</p>
+                    </details>
+                ) : null}
+                {danglingText ? (
+                    <div className="text-sm text-foreground px-3 py-2 bg-muted border border-border rounded-md break-words">
+                        {danglingText}
+                        {danglingCount > 0
+                            ? " 如需把本机对应字段也清空，可点下方「清理失效引用」。"
+                            : ""}
+                    </div>
+                ) : null}
+            </div>
+        );
+    }, [connectionState, danglingCount, danglingText, statusReadError, status?.dead_letter_count, status?.dead_letter_summary, status?.failed_outbox_count, status?.last_error, status?.last_sync_at, status?.syncing, statusMetrics, syncing]);
+
+    const secretState = status?.secret_sync_state;
+    const secretTone = secretSyncTone(secretState);
+    const conflictNotice = providerConflictNotice(status?.duplicate_provider_conflicts);
+
+    const renderSecretSyncRow = useCallback((field: { value?: string; onChange: (value: string) => void }) => {
+        const passphrase = field.value || "";
+        const busy = savingPassphrase || saving;
+        return (
+            <div className="space-y-3">
+                <div
+                    className="flex items-start gap-2 px-3 py-2 bg-muted rounded-md text-sm"
+                    data-testid="secret-sync-status"
+                >
+                    <span
+                        className={`mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full ${secretToneDotClass(secretTone)}`}
+                        aria-hidden
+                    />
+                    <span
+                        className={`min-w-0 break-words text-foreground ${secretTone === "warn" ? "font-medium" : ""}`}
+                    >
+                        {status?.secret_sync_message || "读取中"}
+                    </span>
+                </div>
+                <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                    {isMobilePlatform ? (
+                        <PasswordInput
+                            autoComplete="new-password"
+                            aria-label="同步口令"
+                            className="w-full md:max-w-xs"
+                            placeholder="同步口令（至少 8 个字符，所有设备相同）"
+                            value={passphrase}
+                            disabled={busy}
+                            onChange={(event) => field.onChange(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void submitPassphrase(false);
+                                }
+                            }}
+                        />
+                    ) : (
+                        <Input
+                            type="password"
+                            autoComplete="new-password"
+                            aria-label="同步口令"
+                            className="w-full md:max-w-xs"
+                            placeholder="同步口令（至少 8 个字符，所有设备相同）"
+                            value={passphrase}
+                            disabled={busy}
+                            onChange={(event) => field.onChange(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void submitPassphrase(false);
+                                }
+                            }}
+                        />
+                    )}
+                    <Button
+                        type="button"
+                        variant="outline"
+                        className="hover:bg-muted hover:border-border"
+                        disabled={busy || !passphrase}
+                        onClick={() => void submitPassphrase(false)}
+                    >
+                        {savingPassphrase ? "处理中..." : "保存口令"}
+                    </Button>
+                </div>
+                {passphraseError ? <p className="text-sm text-destructive break-words">{passphraseError}</p> : null}
+                {conflictNotice ? (
+                    <p className="text-sm font-medium text-foreground break-words" data-testid="provider-conflict-status">
+                        {conflictNotice}
+                    </p>
+                ) : null}
+            </div>
+        );
+    }, [conflictNotice, isMobilePlatform, passphraseError, saving, savingPassphrase, secretTone, status?.secret_sync_message, submitPassphrase]);
+
+    const renderSyncActionButtons = useCallback(() => {
+        // Auto-sync toggle is the persistent on/off. Stop shows while any round is syncing.
+        // 「同步中」lives only in the connection status row, not as a button label.
+        return (
+            <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex items-center gap-2">
+                        <Switch
+                            checked={autoSyncOn}
+                            disabled={togglingAutoSync || saving || mode !== "self_hosted"}
+                            onCheckedChange={(value) => {
+                                void handleSetAutoSync(value);
+                            }}
+                        />
+                        <span className="text-sm text-foreground">
+                            {autoSyncOn ? "自动同步：开" : "自动同步：关"}
+                        </span>
+                    </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    {showSyncNow ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={syncing || saving || stopping || togglingAutoSync || Boolean(status?.syncing)}
+                            onClick={handleSyncNow}
+                        >
+                            {status?.token_configured ? "立即同步一次" : "保存并同步"}
+                        </Button>
+                    ) : null}
+                    {stopEnabled ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={stopping || saving}
+                            onClick={handleStopSync}
+                        >
+                            {stopping ? "停止中..." : "停止同步"}
+                        </Button>
+                    ) : null}
+                    {showRetryFailed ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={retryingFailed || saving}
+                            onClick={handleRetryFailed}
+                        >
+                            {retryingFailed ? "重试中..." : "重试失败"}
+                        </Button>
+                    ) : null}
+                    {showRetryDeadLetters ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={retryingDeadLetters || saving}
+                            onClick={handleRetryDeadLetters}
+                        >
+                            {retryingDeadLetters ? "重试中..." : "重试无法应用的变更"}
+                        </Button>
+                    ) : null}
+                    {showCleanupDangling ? (
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="hover:bg-muted hover:border-border"
+                            disabled={cleaningDangling || saving}
+                            onClick={() => setCleanupConfirmOpen(true)}
+                        >
+                            {cleaningDangling ? "清理中..." : "清理失效引用"}
+                        </Button>
+                    ) : null}
+                </div>
+            </div>
+        );
+    }, [
+        autoSyncOn,
+        cleaningDangling,
+        handleRetryDeadLetters,
+        handleRetryFailed,
+        handleSetAutoSync,
+        handleStopSync,
+        handleSyncNow,
+        mode,
+        retryingDeadLetters,
+        retryingFailed,
+        saving,
+        showCleanupDangling,
+        showRetryDeadLetters,
+        showRetryFailed,
+        showSyncNow,
+        status?.syncing,
+        status?.token_configured,
+        stopEnabled,
+        stopping,
+        syncing,
+        togglingAutoSync,
+    ]);
 
     const dataFolderConfig = [
-        {
-            key: "openDataFolder",
-            config: {
-                type: "button" as const,
-                label: "数据文件夹",
-                value: "打开",
-                onClick: handleOpenDataFolder,
-            },
-        },
+        // 移动端没有可调起的系统文件管理器，隐藏「打开数据文件夹」（后端同样返回 MOBILE_UNSUPPORTED）
+        ...(isMobilePlatform
+            ? []
+            : [
+                {
+                    key: "openDataFolder",
+                    config: {
+                        type: "button" as const,
+                        label: "数据文件夹",
+                        value: "打开",
+                        onClick: handleOpenDataFolder,
+                    },
+                },
+            ]),
         {
             key: "mode",
             config: {
@@ -228,7 +723,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                     {
                         value: "self_hosted",
                         label: "自建同步",
-                        tooltip: "连接你自建的 AIPP sync-server，按业务对象同步核心数据。",
+                        tooltip: "连接你自建的 AIPP sync-server。配置完成后本地改动与远端变更会自动同步，一般无需点「立即同步一次」。",
                     },
                 ],
             },
@@ -239,91 +734,60 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 type: "input" as const,
                 label: "服务器地址",
                 placeholder: "https://sync.example.com",
+                inputMode: "url" as const,
                 disabled: mode !== "self_hosted",
                 hidden: mode !== "self_hosted",
-            },
-        },
-        {
-            key: "plaintextWarning",
-            config: {
-                type: "static" as const,
-                label: "安全警告",
-                value: "当前服务器地址使用 http:// 明文传输，同步数据（包含敏感配置）在传输过程中可能被窃听或篡改，生产环境请改用 https://。",
-                hidden: mode !== "self_hosted" || !isPlaintextUrl,
+                hint: isPlaintextUrl
+                    ? "当前地址使用 http:// 明文传输，同步数据可能被窃听或篡改，生产环境请改用 https://。"
+                    : undefined,
             },
         },
         {
             key: "token",
             config: {
                 type: "password" as const,
-                label: status?.token_configured ? "访问 token（留空则沿用已保存 token）" : "访问 token",
-                placeholder: status?.token_configured ? "已保存，可留空" : "Bearer token",
+                label: "访问 token",
+                placeholder: status?.token_configured ? "留空则沿用已保存 token" : "Bearer token",
                 disabled: mode !== "self_hosted",
                 hidden: mode !== "self_hosted",
             },
         },
         {
-            key: "status",
+            key: "syncStatusRow",
             config: {
-                type: "static" as const,
-                label: "连接状态",
-                value: statusText,
+                type: "custom" as const,
+                label: "",
+                hidden: !showsSelfHostedSyncControls(mode),
+                customRender: renderSyncStatusRow,
             },
         },
         {
-            key: "lastSyncAt",
+            key: "syncActions",
             config: {
-                type: "static" as const,
-                label: "上次同步时间",
-                value: status?.last_sync_at || "尚未同步",
+                type: "custom" as const,
+                label: "同步操作",
+                tooltip: SYNC_ACTIONS_HINT,
+                hidden: !showsSelfHostedSyncControls(mode),
+                customRender: renderSyncActionButtons,
             },
         },
         {
-            key: "lastError",
+            key: PASSPHRASE_FIELD,
             config: {
-                type: "static" as const,
-                label: "最近错误",
-                value: status?.last_error || "无",
-            },
-        },
-        {
-            key: "syncNow",
-            config: {
-                type: "button" as const,
-                label: "手动同步",
-                value: syncing ? "同步中..." : "立即同步",
-                disabled: mode !== "self_hosted" || syncing || saving,
-                onClick: handleSyncNow,
-            },
-        },
-        {
-            key: "retryFailed",
-            config: {
-                type: "button" as const,
-                label: "失败重试",
-                value: retryingFailed ? "重试中..." : "重试失败",
-                disabled: mode !== "self_hosted" || retryingFailed || saving || (status?.failed_outbox_count ?? 0) === 0,
-                onClick: handleRetryFailed,
-            },
-        },
-        {
-            key: "retryDeadLetters",
-            config: {
-                type: "button" as const,
-                label: "无法应用的变更",
-                value: retryingDeadLetters ? "重试中..." : "重试无法应用的变更",
-                disabled:
-                    mode !== "self_hosted" || retryingDeadLetters || saving || (status?.dead_letter_count ?? 0) === 0,
-                onClick: handleRetryDeadLetters,
+                type: "custom" as const,
+                label: "API Key 加密同步",
+                tooltip: SECRET_SYNC_HINT,
+                hidden: !showsSelfHostedSyncControls(mode),
+                customRender: renderSecretSyncRow,
             },
         },
         {
             key: "needsResetWarning",
             config: {
                 type: "static" as const,
-                label: "同步状态待重置",
-                value: "检测到服务器地址或访问 token 已变更，本机数据需要先与新服务器重新对齐后才能继续同步。",
-                hidden: !status?.needs_reset,
+                label: "同步账号范围已变更",
+                value: "服务器地址或访问 token 已变更。请先备份，再使用独立数据目录连接；重置无法安全合并两份已有历史。",
+                hidden: !showsSelfHostedSyncControls(mode) || !status?.needs_reset,
             },
         },
         {
@@ -332,8 +796,8 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 type: "button" as const,
                 label: "重置同步状态",
                 value: resetting ? "重置中..." : "重置并重新全量同步",
-                hidden: !status?.needs_reset,
-                disabled: mode !== "self_hosted" || resetting || saving,
+                hidden: !showsSelfHostedSyncControls(mode) || !!status?.needs_reset,
+                disabled: resetting || saving,
                 onClick: () => setResetConfirmOpen(true),
             },
         },
@@ -342,7 +806,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     return (
         <>
             <ConfigForm
-                title="数据目录"
+                title="数据"
                 description="管理本地数据目录与自建同步。"
                 config={dataFolderConfig}
                 layout="default"
@@ -353,9 +817,26 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             <ConfirmDialog
                 isOpen={resetConfirmOpen}
                 title="重置同步状态"
-                confirmText="将清空本机的同步游标、对象映射与待推送队列，然后与新服务器重新全量同步。本机数据本身不会被删除，但未推送的本地修改会以全量方式重新上传。确认继续？"
+                confirmText="将从头重新读取当前服务器的同步记录，保留对象身份、已确认版本和待上传修改，不会把历史会话重新生成为新对象。此操作仅适用于原服务器和账号；更换账号请先备份并使用独立数据目录。确认继续？"
                 onConfirm={handleResetSyncState}
                 onCancel={() => setResetConfirmOpen(false)}
+            />
+            <ConfirmDialog
+                isOpen={replaceConfirmOpen}
+                title="更换同步口令"
+                confirmText="输入的口令与已有同步口令不一致。继续将更换所有设备的同步口令，其他设备需要重新输入新口令。"
+                onConfirm={() => {
+                    setReplaceConfirmOpen(false);
+                    void submitPassphrase(true);
+                }}
+                onCancel={() => setReplaceConfirmOpen(false)}
+            />
+            <ConfirmDialog
+                isOpen={cleanupConfirmOpen}
+                title="清理失效引用"
+                confirmText={`将把本机约 ${danglingCount} 处悬空外键（如 llm_model_id、message_id 等指向已不存在行的字段）置为空值。同步推送时本就会按空值处理；此操作会改写本地数据库，请确认后继续。`}
+                onConfirm={handleCleanupDanglingFks}
+                onCancel={() => setCleanupConfirmOpen(false)}
             />
         </>
     );

@@ -48,6 +48,11 @@ export function useScrollManagement(
     const isUserScrolledUpRef = useRef(false); // 使用 Ref 来跟踪滚动状态，避免闭包问题
     const isAutoScrolling = useRef(false);
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
+    const observedTailElementRef = useRef<Element | null>(null);
+    const smartScrollOptionsRef = useRef<{
+        forceScroll: boolean;
+        behaviorOverride?: ScrollBehavior;
+    }>({ forceScroll: false });
     const autoScrollTimeoutRef = useRef<number | null>(null);
     const pendingSmartScrollRef = useRef<{
         forceScroll: boolean;
@@ -170,15 +175,37 @@ export function useScrollManagement(
         if (container) {
             const distanceToBottom =
                 container.scrollHeight - container.scrollTop - container.clientHeight;
-            const isWheelUp =
-                !!event && "deltaY" in event && event.deltaY < 0;
-            if (isWheelUp || distanceToBottom >= 10) {
+            const isWheel =
+                !!event && "deltaY" in event && typeof event.deltaY === "number";
+            const isWheelUp = isWheel && event.deltaY < 0;
+            const isWheelDown = isWheel && event.deltaY > 0;
+            // 与 syncScrollState 贴底阈值对齐：只有已经接近底部时，下滚才恢复跟滚。
+            // 中段阅读时下滚绝不能清掉上滑标记，否则 ResizeObserver/smartScroll 会立刻拽到底。
+            const nearBottomForResume = distanceToBottom < 96;
+            if (isWheelDown && nearBottomForResume) {
+                isUserScrolledUpRef.current = false;
+            } else if (isWheelUp || distanceToBottom >= 10) {
                 isUserScrolledUpRef.current = true;
             }
         }
-        if (resizeObserverRef.current) {
-            resizeObserverRef.current.disconnect();
-            resizeObserverRef.current = null;
+        // 上滑、或中段下滚（仍视为离开底部）时拆掉贴底观察器。
+        // 接近底部的下滚保留观察器，便于恢复跟滚。
+        const isWheelUpEvent =
+            !!event && "deltaY" in event && event.deltaY < 0;
+        const isWheelDownAwayFromBottom =
+            !!event
+            && "deltaY" in event
+            && event.deltaY > 0
+            && scrollContainerRef.current !== null
+            && (scrollContainerRef.current.scrollHeight
+                - scrollContainerRef.current.scrollTop
+                - scrollContainerRef.current.clientHeight) >= 96;
+        if (isWheelUpEvent || isWheelDownAwayFromBottom || !event) {
+            if (resizeObserverRef.current) {
+                resizeObserverRef.current.disconnect();
+                resizeObserverRef.current = null;
+                observedTailElementRef.current = null;
+            }
         }
     }, [clearAutoScrollTimeout]);
 
@@ -188,9 +215,28 @@ export function useScrollManagement(
             return;
         }
 
+        // 程序滚动（smartScroll / pin / follow）中途也会触发 scroll；
+        // 若此时按距离标成「用户上滑」，流式 token 的后续 smartScroll 会全部早退，视口停在半截。
+        if (isAutoScrolling.current) {
+            return;
+        }
+
         const { scrollTop, scrollHeight, clientHeight } = target;
-        const atBottom = scrollHeight - scrollTop - clientHeight < 10;
-        isUserScrolledUpRef.current = !atBottom;
+        // 与 follow 的 resume 阈值对齐：Virtuoso 估高修正后常残留 >10px
+        const atBottom = scrollHeight - scrollTop - clientHeight < 96;
+        if (atBottom) {
+            isUserScrolledUpRef.current = false;
+            return;
+        }
+
+        // 程序滚动已在上方返回，流式增高不会走到这里。
+        // 滚动条拖动不走 wheel，离开底部后拆掉贴底观察器，避免尾部变高时把视口拽回去。
+        isUserScrolledUpRef.current = true;
+        if (resizeObserverRef.current) {
+            resizeObserverRef.current.disconnect();
+            resizeObserverRef.current = null;
+            observedTailElementRef.current = null;
+        }
     }, []);
 
     // 处理用户滚动事件
@@ -205,6 +251,7 @@ export function useScrollManagement(
 
     // 智能滚动函数
     const smartScroll = useCallback((forceScroll: boolean = false, behaviorOverride?: ScrollBehavior) => {
+        if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
         if (isChatScrollPerfProbeActive()) {
             return;
         }
@@ -226,33 +273,43 @@ export function useScrollManagement(
         const container = scrollContainerRef.current;
         if (!container) return;
 
-        // 清理之前的观察器
-        if (resizeObserverRef.current) {
-            resizeObserverRef.current.disconnect();
-        }
+        smartScrollOptionsRef.current = { forceScroll, behaviorOverride };
 
         const scrollToBottom = () => {
-            // 再次从 Ref 检查，确保万无一失
-            if (isAutoScrolling.current || (!forceScroll && isUserScrolledUpRef.current) || !scrollContainerRef.current) {
-                if (isAutoScrolling.current) {
-                    queuePendingSmartScroll(forceScroll, behaviorOverride);
+            if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
+            const options = smartScrollOptionsRef.current;
+            // 用户已经开始滚（滚轮或滚动条）时，排队中的强制滚动也不能再抢到底部。
+            if (
+                hasRecentUserScrollIntent()
+                || isAutoScrolling.current
+                || (!options.forceScroll && isUserScrolledUpRef.current)
+                || !scrollContainerRef.current
+            ) {
+                if (isAutoScrolling.current && !hasRecentUserScrollIntent()) {
+                    queuePendingSmartScroll(options.forceScroll, options.behaviorOverride);
                 }
-                if (resizeObserverRef.current) {
+                // 锁定期内不要 disconnect ResizeObserver：流式增高仍需继续观察，
+                // 否则锁窗口内的 token/排版增长会丢，表现为跟滚中断。
+                // 用户已经上滑或正在滚时则拆掉，并清掉已观察节点以便之后重新挂上。
+                if (
+                    (hasRecentUserScrollIntent() || isUserScrolledUpRef.current)
+                    && resizeObserverRef.current
+                ) {
                     resizeObserverRef.current.disconnect();
+                    resizeObserverRef.current = null;
+                    observedTailElementRef.current = null;
                 }
                 return;
             }
             const c = scrollContainerRef.current!;
             const distanceToBottom = c.scrollHeight - c.scrollTop - c.clientHeight;
             // 优先使用外部传入的行为；否则距离较大时使用平滑滚动，小距离使用 auto
-            const behavior: ScrollBehavior = behaviorOverride ?? (distanceToBottom > 120 ? 'smooth' : 'auto');
+            const behavior: ScrollBehavior = options.behaviorOverride ?? (distanceToBottom > 120 ? 'smooth' : 'auto');
 
             lastUserScrollIntentAtRef.current = null;
             isAutoScrolling.current = true;
             c.scrollTo({ top: c.scrollHeight, behavior });
-            if (resizeObserverRef.current) {
-                resizeObserverRef.current.disconnect();
-            }
+            // 保持 ResizeObserver：流式回复持续长高时继续钉底，直到用户上滑或新的 smartScroll 重建观察器
             scheduleAutoScrollRelease(
                 behavior === "smooth"
                     ? SMOOTH_SCROLL_LOCK_MS
@@ -270,11 +327,25 @@ export function useScrollManagement(
             : null);
         const observed: Element | null = lastReplyContainer || lastMessageItem || (disableTailObservation ? null : container.lastElementChild);
 
-        if (observed) {
+        if (observed && observedTailElementRef.current !== observed) {
+            resizeObserverRef.current?.disconnect();
             resizeObserverRef.current = new ResizeObserver(() => {
+                if (hasRecentUserScrollIntent() || isUserScrolledUpRef.current) {
+                    resizeObserverRef.current?.disconnect();
+                    resizeObserverRef.current = null;
+                    observedTailElementRef.current = null;
+                    return;
+                }
+                // 只在仍然贴底时跟随变高。不能复用上一次 smartScroll(true)，
+                // 否则用户离开底部后，尾部任意一次尺寸变化都会跳回底部。
+                smartScrollOptionsRef.current = {
+                    forceScroll: false,
+                    behaviorOverride: "auto",
+                };
                 scrollToBottom();
             });
             resizeObserverRef.current.observe(observed);
+            observedTailElementRef.current = observed;
         }
 
         // 回退：若 ResizeObserver 未触发，下一帧也滚动一次
@@ -285,6 +356,7 @@ export function useScrollManagement(
 
     // 发送用户消息后滚动到最后一组消息所在的底部位置，利用 min-height 占位让用户消息贴近顶部
     const scrollToUserMessage = useCallback(() => {
+        if (scrollContainerRef.current?.closest('[data-aipp-mobile-shell] [hidden]')) return;
         if (isChatScrollPerfProbeActive()) {
             return;
         }
@@ -355,7 +427,7 @@ export function useScrollManagement(
         const step = () => {
             stableScrollFrameRef.current = null;
             const target = scrollContainerRef.current;
-            if (!target) {
+            if (!target || target.closest('[data-aipp-mobile-shell] [hidden]')) {
                 isAutoScrolling.current = false;
                 return;
             }

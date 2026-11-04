@@ -1,21 +1,29 @@
-import React, { ReactNode, useEffect, useState, useCallback, useMemo } from "react";
+import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import LLMProviderConfig from "../components/config/LLMProviderConfig";
-import AssistantConfig from "../components/config/AssistantConfig";
-import FeatureAssistantConfig from "../components/config/FeatureAssistantConfig";
-import MCPConfig from "../components/config/MCPConfig";
-import SkillsConfig from "../components/config/SkillsConfig";
-import PluginCenterConfig from "../components/config/PluginCenterConfig";
+// 各设置页体积较大，按需动态加载，避免打开设置窗口时一次性解析全部页面代码
+const LLMProviderConfig = React.lazy(() => import("../components/config/LLMProviderConfig"));
+const AssistantConfig = React.lazy(() => import("../components/config/AssistantConfig"));
+const FeatureAssistantConfig = React.lazy(() => import("../components/config/FeatureAssistantConfig"));
+const MCPConfig = React.lazy(() => import("../components/config/MCPConfig"));
+const SkillsConfig = React.lazy(() => import("../components/config/SkillsConfig"));
+const PluginCenterConfig = React.lazy(() => import("../components/config/PluginCenterConfig"));
+const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTasksConfig"));
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
+import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
+import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { Home, Menu } from "lucide-react";
+import { ChevronLeft, Home, Menu } from "lucide-react";
 import MCP from "../assets/mcp.svg?react";
 import { pluginRuntime } from "../services/PluginRuntime";
+import { navigateMobile, popMobile, registerMobileBackHandler } from "../mobile/navigation";
+import { canLeaveConfigNow, requestConfigLeave } from "@/lib/configLeaveGuard";
+import ConfigPageLoading from "../components/common/ConfigPageLoading";
+import { backConfigSection, ConfigSectionContext, useConfigSectionDetailTitle } from "@/lib/configSectionNav";
 
 interface MenuItem {
     id: string;
@@ -32,54 +40,94 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "mcp-config": MCPConfig,
     "skills-config": SkillsConfig,
     "plugins-config": PluginCenterConfig,
+    "mobile-tasks": MobileTasksConfig,
 };
+
+// 设置页动态加载时的占位，保持黑白灰主色调
+const configPageFallback = <ConfigPageLoading />;
 
 function ConfigWindow() {
     // 集成主题系统
     useTheme("config");
-    const isMobile = useIsMobile();
+    const isNarrow = useIsMobile();
+    const isMobilePlatform = useIsMobilePlatform();
+    // 移动平台一律移动壳；桌面窄屏仅布局
+    const isMobile = isMobilePlatform || isNarrow;
+    const platform = usePlatform();
+    const skillsAvailable = useFeatureAvailableOnPlatform("skills_manager");
+    const pluginsAvailable = true; // Manager remains available; each plugin is capability-checked.
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
-    const menuList: Array<MenuItem> = [
-        {
-            id: "llm-provider-config",
-            name: "模型提供商",
-            icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
-            iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "assistant-config",
-            name: "个人助手",
-            icon: <Bot className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Bot className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "mcp-config",
-            name: "MCP",
-            icon: <MCP className="w-full h-full text-muted-foreground" />,
-            iconSelected: <MCP className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "skills-config",
-            name: "Skills",
-            icon: <Sparkles className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Sparkles className="w-full h-full text-foreground" />,
-        },
-        {
-            id: "plugins-config",
-            name: "插件",
-            icon: <Puzzle className="w-full h-full text-muted-foreground" />,
-            iconSelected: <Puzzle className="w-full h-full text-foreground" />,
-        },
-        {
+    const menuList: Array<MenuItem> = useMemo(() => {
+        const items: Array<MenuItem> = [
+            {
+                id: "llm-provider-config",
+                name: "模型提供商",
+                icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
+                iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
+            },
+            {
+                id: "assistant-config",
+                name: "个人助手",
+                icon: <Bot className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Bot className="w-full h-full text-foreground" />,
+            },
+            {
+                id: "mcp-config",
+                name: "MCP",
+                icon: <MCP className="w-full h-full text-muted-foreground" />,
+                iconSelected: <MCP className="w-full h-full text-foreground" />,
+            },
+        ];
+        if (isMobilePlatform) items.push({ id: "mobile-tasks", name: "本机任务", icon: <Bot className="h-full w-full text-muted-foreground" />, iconSelected: <Bot className="h-full w-full text-foreground" /> });
+        if (skillsAvailable) {
+            items.push({
+                id: "skills-config",
+                name: "Skills",
+                icon: <Sparkles className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Sparkles className="w-full h-full text-foreground" />,
+            });
+        }
+        if (pluginsAvailable) {
+            items.push({
+                id: "plugins-config",
+                name: "插件",
+                icon: <Puzzle className="w-full h-full text-muted-foreground" />,
+                iconSelected: <Puzzle className="w-full h-full text-foreground" />,
+            });
+        }
+        items.push({
             id: "feature-assistant-config",
             name: "程序功能",
             icon: <Settings className="w-full h-full text-muted-foreground" />,
             iconSelected: <Settings className="w-full h-full text-foreground" />,
-        },
-    ];
+        });
+        return items;
+    }, [skillsAvailable, pluginsAvailable, isMobilePlatform]);
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
+    const selectedMenuRef = useRef(selectedMenu);
+    selectedMenuRef.current = selectedMenu;
+    // 页面内打开了二级详情（列表 → 详情）时，顶栏显示详情标题，返回先回到列表
+    const sectionDetailTitle = useConfigSectionDetailTitle(selectedMenu);
+    // 设置分区是平级切换，不记录历史：返回直接退出设置页
+    const goToSection = useCallback((menu: string) => {
+        setSelectedMenu(menu);
+    }, []);
+    const [visitedMenus, setVisitedMenus] = useState<string[]>(["llm-provider-config"]);
+    useEffect(() => {
+        if (isMobilePlatform) setVisitedMenus(previous => previous.includes(selectedMenu) ? previous : [...previous, selectedMenu]);
+    }, [selectedMenu, isMobilePlatform]);
+    // 移动端 keep-alive 页切回时广播激活，供目录订阅在无需重启下刷新。
+    useEffect(() => {
+        window.dispatchEvent(new CustomEvent("aipp:config-menu-activated", { detail: selectedMenu }));
+    }, [selectedMenu]);
+    useEffect(() => {
+        if (!menuList.some((item) => item.id === selectedMenu)) {
+            setSelectedMenu(menuList[0]?.id ?? "llm-provider-config");
+        }
+    }, [menuList, selectedMenu]);
+
     const [subNav, setSubNav] = useState<string | undefined>(undefined);
     const [pluginList, setPluginList] = useState<any[]>([]);
 
@@ -102,15 +150,24 @@ function ConfigWindow() {
         const unlistenNav = listen<{ menu: string; subNav?: string }>("config-navigate-to", (event) => {
             const { menu, subNav: sub } = event.payload;
             if (contentMap[menu]) {
-                setSubNav(sub);
-                setSelectedMenu(menu);
+                requestConfigLeave(() => {
+                    setSubNav(sub);
+                    goToSection(menu);
+                });
             }
         });
 
         return () => {
             unlistenNav.then((fn) => fn());
         };
-    }, []);
+    }, [goToSection]);
+
+    // Android 返回：直接退出设置页，离开前经过未保存保护
+    useEffect(() => {
+        if (!isMobilePlatform) return;
+        return registerMobileBackHandler("config", () =>
+            backConfigSection(selectedMenuRef.current) || !canLeaveConfigNow(popMobile));
+    }, [isMobilePlatform]);
 
     useEffect(() => {
         let mounted = true;
@@ -129,7 +186,9 @@ function ConfigWindow() {
                 }
             }
         };
-        loadPlugins(true);
+        // 打开设置时不强制重载插件（避免重复注入并执行插件 JS）；
+        // 仅在插件注册表变化时才 forceReload
+        loadPlugins();
 
         const unlistenRegistryChanged = listen("plugin_registry_changed", () => {
             loadPlugins(true);
@@ -146,10 +205,9 @@ function ConfigWindow() {
 
     // 导航函数 - 使用 useCallback 稳定化引用
     const navigateTo = useCallback((menuKey: string) => {
-        if (contentMap[menuKey]) {
-            setSelectedMenu(menuKey);
-        }
-    }, []);
+        if (!contentMap[menuKey]) return;
+        requestConfigLeave(() => goToSection(menuKey));
+    }, [goToSection]);
 
     // 稳定化 pluginList 引用
     const stablePluginList = useMemo(() => pluginList, [pluginList]);
@@ -157,11 +215,13 @@ function ConfigWindow() {
     const renderMenuItems = (onSelect: (id: string) => void) => (
         <div className="flex flex-col gap-1 mt-2">
             {menuList.map((item, index) => (
-                <div
+                <button
+                    type="button"
                     key={index}
+                    aria-current={selectedMenu === item.id ? "page" : undefined}
                     className={`
-                                    relative flex items-center px-3 md:px-4 lg:px-5 py-3 md:py-3.5 rounded-lg cursor-pointer
-                                    transition-all duration-200 ease-out font-medium text-xs md:text-sm
+                                    relative flex w-full items-center text-left px-3 md:px-4 lg:px-5 py-3 md:py-3.5 rounded-lg cursor-pointer
+                                    transition-all duration-200 ease-out font-medium ${isMobilePlatform ? "min-h-11 text-sm" : "text-xs md:text-sm"}
                                     select-none hover:translate-x-0.5
                                     ${selectedMenu === item.id
                             ? "bg-primary/10 text-primary font-semibold shadow-sm"
@@ -180,19 +240,16 @@ function ConfigWindow() {
                         </div>
                         <span className="truncate">{item.name}</span>
                     </div>
-                </div>
+                </button>
             ))}
         </div>
     );
 
     const handleBackHome = async () => {
-        // 移动端优先在单 webview 内直接切换视图，避免多窗口体验割裂
-        if (isMobile) {
-            const switchWindow = (window as any).__setAppWindow as ((label: string) => void) | undefined;
-            if (switchWindow) {
-                switchWindow("chat_ui");
-                return;
-            }
+        // 移动平台在单 WebView 内切换；桌面窄窗口仍走桌面导航。
+        if (isMobilePlatform) {
+            requestConfigLeave(() => navigateMobile("chat_ui"));
+            return;
         }
 
         // 桌面端保持原先多窗口逻辑
@@ -207,24 +264,58 @@ function ConfigWindow() {
         }
     };
 
+    const currentSectionName = menuList.find((item) => item.id === selectedMenu)?.name ?? "设置";
+    // 与系统返回一致：经未保存保护后退出设置页，回到进入设置前的页面
+    const handleHeaderBack = () => {
+        if (backConfigSection(selectedMenu)) return;
+        requestConfigLeave(popMobile);
+    };
+
     // 移动端布局：顶部栏 + 侧滑菜单
     if (isMobile) {
         return (
             <div className="flex flex-col h-screen bg-background" data-aipp-window="config" data-aipp-slot="window-root">
                 <div
-                    className="flex items-center justify-between px-4 py-3 bg-secondary border-b border-border"
+                    className={`flex items-center justify-between px-4 py-3 bg-secondary border-b border-border safe-top${platform === "android" ? " safe-top-android" : ""}`}
                     data-tauri-drag-region
                     data-aipp-slot="config-mobile-header"
                 >
                     <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
-                        <SheetTrigger asChild>
-                            <Button variant="ghost" size="icon">
-                                <Menu className="h-5 w-5" />
-                            </Button>
-                        </SheetTrigger>
+                        {isMobilePlatform ? (
+                            <>
+                                <Button variant="ghost" size="icon" onClick={handleHeaderBack} aria-label={sectionDetailTitle !== null ? "返回列表" : "退出设置"}
+                                    data-aipp-slot="config-mobile-back">
+                                    <ChevronLeft className="h-5 w-5" />
+                                </Button>
+                                <button
+                                    type="button"
+                                    className="min-h-11 min-w-0 flex-1 truncate px-2 text-center text-sm font-medium"
+                                    onClick={() => setSidebarOpen(true)}
+                                    aria-label={`${sectionDetailTitle || currentSectionName}，打开设置菜单`}
+                                >
+                                    {sectionDetailTitle ? (
+                                        <span className="flex min-w-0 flex-col items-center leading-tight">
+                                            <span className="max-w-full truncate">{sectionDetailTitle}</span>
+                                            <span className="max-w-full truncate text-[11px] font-normal text-muted-foreground">{currentSectionName}</span>
+                                        </span>
+                                    ) : currentSectionName}
+                                </button>
+                                <SheetTrigger asChild>
+                                    <Button variant="ghost" size="icon" aria-label="设置菜单">
+                                        <Menu className="h-5 w-5" />
+                                    </Button>
+                                </SheetTrigger>
+                            </>
+                        ) : (
+                            <SheetTrigger asChild>
+                                <Button variant="ghost" size="icon">
+                                    <Menu className="h-5 w-5" />
+                                </Button>
+                            </SheetTrigger>
+                        )}
                         <SheetContent
                             side="left"
-                            className="w-[280px] p-0 flex flex-col"
+                            className={`w-[280px] p-0 flex flex-col safe-top${platform === "android" ? " safe-top-android" : ""}`}
                             aria-describedby={undefined}
                             hideCloseButton
                             data-aipp-slot="config-mobile-sidebar"
@@ -236,25 +327,43 @@ function ConfigWindow() {
                                 data-aipp-slot="config-menu"
                             >
                                 {renderMenuItems((id) => {
-                                    setSelectedMenu(id);
-                                    setSidebarOpen(false);
+                                    requestConfigLeave(() => {
+                                        goToSection(id);
+                                        setSidebarOpen(false);
+                                    });
                                 })}
                             </div>
                         </SheetContent>
                     </Sheet>
-                    <span className="font-medium text-sm truncate flex-1 text-center">设置</span>
-                    <Button variant="ghost" size="icon" onClick={handleBackHome} aria-label="返回首页">
-                        <Home className="h-5 w-5" />
-                    </Button>
+                    {!isMobilePlatform && (
+                        <>
+                            <span className="font-medium text-sm truncate flex-1 text-center">设置</span>
+                            <Button variant="ghost" size="icon" onClick={handleBackHome} aria-label="返回首页">
+                                <Home className="h-5 w-5" />
+                            </Button>
+                        </>
+                    )}
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-card" data-aipp-slot="config-content">
-                    <SelectedComponent
-                        pluginList={stablePluginList}
-                        navigateTo={navigateTo}
-                        subNav={subNav}
-                        onSubNavConsumed={() => setSubNav(undefined)}
-                    />
+                    <Suspense fallback={configPageFallback}>
+                        {isMobilePlatform ? visitedMenus.map(menu => {
+                            const Page = contentMap[menu];
+                            return <div key={menu} hidden={menu !== selectedMenu} className="h-full min-h-0">
+                                <ConfigSectionContext.Provider value={menu}>
+                                    <Page pluginList={stablePluginList} navigateTo={navigateTo} subNav={menu === selectedMenu ? subNav : undefined}
+                                        onSubNavConsumed={() => setSubNav(undefined)} />
+                                </ConfigSectionContext.Provider>
+                            </div>;
+                        }) : <ConfigSectionContext.Provider value={selectedMenu}>
+                            <SelectedComponent
+                                pluginList={stablePluginList}
+                                navigateTo={navigateTo}
+                                subNav={subNav}
+                                onSubNavConsumed={() => setSubNav(undefined)}
+                            />
+                        </ConfigSectionContext.Provider>}
+                    </Suspense>
                 </div>
             </div>
         );
@@ -273,13 +382,15 @@ function ConfigWindow() {
                     data-theme-slot="settings-menu-container"
                     data-aipp-slot="config-menu"
                 >
-                    {renderMenuItems(setSelectedMenu)}
+                    {renderMenuItems((id) => requestConfigLeave(() => goToSection(id)))}
                 </div>
 
                 {/* 内容区域 */}
                 <div className="bg-card min-h-0 overflow-hidden flex flex-col md:px-2 lg:px-4" data-aipp-slot="config-content">
                     {/* 配置组件内容 */}
-                    <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} subNav={subNav} onSubNavConsumed={() => setSubNav(undefined)} />
+                    <Suspense fallback={configPageFallback}>
+                        <SelectedComponent pluginList={stablePluginList} navigateTo={navigateTo} subNav={subNav} onSubNavConsumed={() => setSubNav(undefined)} />
+                    </Suspense>
                 </div>
             </div>
         </div>

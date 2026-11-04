@@ -1,11 +1,11 @@
 use crate::artifacts::artifacts_db::ArtifactCollection;
 use crate::db::system_db::SystemDatabase;
-use serde::{Deserialize, Serialize};
 use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri::{LogicalPosition, LogicalSize};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
+use crate::api::system_api::mobile_unsupported_error;
 
 /// 当按照显示器大小调整窗口尺寸时保留的屏幕占比（90%）
 #[cfg(desktop)]
@@ -634,10 +634,15 @@ pub async fn open_artifact_preview_window_inner(app_handle: AppHandle) {
 }
 
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_artifact_preview_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    if cfg!(mobile) {
+        return Err(mobile_unsupported_error("Artifact 预览窗口"));
+    }
     if app_handle.get_webview_window("artifact_preview").is_none() {
         debug!("Creating artifact preview window");
 
@@ -717,10 +722,15 @@ pub async fn open_chat_ui_window(
 }
 
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_butler_experiment_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    if cfg!(mobile) {
+        return Err(mobile_unsupported_error("Butler 窗口"));
+    }
     if let Some(window) = app_handle.get_webview_window("butler_experiment") {
         debug!("Showing butler_experiment window");
         #[cfg(desktop)]
@@ -750,10 +760,15 @@ pub async fn open_butler_experiment_window(
 }
 
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_plugin_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    if cfg!(mobile) {
+        return Err(mobile_unsupported_error("插件窗口"));
+    }
     if app_handle.get_webview_window("plugin").is_none() {
         debug!("Creating window");
 
@@ -771,12 +786,6 @@ pub async fn open_plugin_window(
         }
     }
     Ok(())
-}
-
-#[derive(Serialize, Deserialize)]
-struct ReactComponentPayload {
-    code: String,
-    css: String,
 }
 
 pub fn handle_open_ask_window(app_handle: &AppHandle) {
@@ -812,6 +821,8 @@ pub fn handle_open_ask_window(app_handle: &AppHandle) {
     info!(elapsed_ms=%t_handle.elapsed().as_millis(), "handle_open_ask_window done");
 }
 
+// 目前仅被 macOS 的 RunEvent::Reopen 分支调用
+#[allow(dead_code)]
 pub fn awaken_aipp(app_handle: &AppHandle) {
     use chrono::Local;
 
@@ -1014,10 +1025,15 @@ fn create_artifact_window(app_handle: &AppHandle, artifact: &ArtifactCollection)
 
 /// Open artifact collections management window
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_artifact_collections_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    if cfg!(mobile) {
+        return Err(mobile_unsupported_error("Artifact 合集窗口"));
+    }
     if app_handle.get_webview_window("artifact_collections").is_none() {
         debug!("Creating artifact collections window");
         create_artifact_collections_window(&app_handle);
@@ -1037,10 +1053,15 @@ pub async fn open_artifact_collections_window(
 }
 
 /// Open artifact window to display a single artifact
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_artifact_window(
     app_handle: AppHandle,
     artifact: ArtifactCollection,
 ) -> Result<(), String> {
+    if cfg!(mobile) {
+        return Err(mobile_unsupported_error("Artifact 窗口"));
+    }
     let window_label = "artifact";
     if app_handle.get_webview_window(&window_label).is_none() {
         debug!(label=%window_label, "Creating artifact window");
@@ -1117,10 +1138,15 @@ fn create_schedule_window_with_visibility(app_handle: &AppHandle, visible: bool)
 
 /// Open schedule window
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_schedule_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    if cfg!(mobile) {
+        return Err(mobile_unsupported_error("定时任务窗口"));
+    }
     if let Some(window) = app_handle.get_webview_window("schedule") {
         debug!("Showing schedule window");
         #[cfg(desktop)]
@@ -1135,73 +1161,6 @@ pub async fn open_schedule_window(
     } else {
         debug!("Creating schedule window");
         create_schedule_window_with_visibility(&app_handle, true);
-    }
-    Ok(())
-}
-
-// Create hidden search window for builtin MCP tools
-fn create_hidden_search_window(app_handle: &AppHandle) {
-    #[cfg(desktop)]
-    {
-        let builder = WebviewWindowBuilder::new(
-            app_handle,
-            "hidden_search",
-            WebviewUrl::External("about:blank".parse().unwrap()),
-        )
-        .title("Search Window")
-        .inner_size(800.0, 600.0)
-        .resizable(false)
-        .minimizable(true)
-        .maximizable(false)
-        .closable(false)
-        .visible(true) // 改为可见，但会立即最小化
-        .skip_taskbar(false) // 允许在任务栏显示
-        .decorations(true);
-
-        match builder.build() {
-            Ok(window) => {
-                info!("Search window created successfully");
-
-                // 立即最小化窗口，让用户看不到但JavaScript仍可执行
-                if let Err(e) = window.minimize() {
-                    warn!(error=%e, "Failed to minimize search window");
-                }
-
-                // 测试JavaScript执行能力
-                if let Err(e) =
-                    window.eval("console.log('JavaScript execution test in search window');")
-                {
-                    warn!(error=%e, "JavaScript execution failed in search window");
-                } else {
-                    debug!("JavaScript execution test successful in search window");
-                }
-            }
-            Err(e) => {
-                error!(error=%e, "Failed to create search window");
-            }
-        }
-    }
-    #[cfg(mobile)]
-    {
-        // Mobile doesn't support hidden windows or multiple windows easily in the same way
-        // But we can try creating a window
-        let builder = WebviewWindowBuilder::new(
-            app_handle,
-            "hidden_search",
-            WebviewUrl::External("about:blank".parse().unwrap()),
-        );
-        if let Err(e) = builder.build() {
-            error!(error=%e, "Failed to create search window");
-        }
-    }
-}
-
-/// Create or get search window for builtin MCP tools
-#[tauri::command]
-pub async fn ensure_hidden_search_window(app_handle: AppHandle) -> Result<(), String> {
-    if app_handle.get_webview_window("hidden_search").is_none() {
-        debug!("Creating search window for content extraction");
-        create_hidden_search_window(&app_handle);
     }
     Ok(())
 }
@@ -1298,10 +1257,15 @@ fn create_sidebar_window(app_handle: &AppHandle) {
 
 /// Open sidebar window
 #[tauri::command]
+// 移动端在函数开头直接返回 MOBILE_UNSUPPORTED，余下桌面逻辑里的变量只在 cfg(desktop) 块中使用
+#[cfg_attr(mobile, allow(unused_variables))]
 pub async fn open_sidebar_window(
     app_handle: AppHandle,
     source_window: tauri::WebviewWindow,
 ) -> Result<(), String> {
+    if cfg!(mobile) {
+        return Err(mobile_unsupported_error("Sidebar 窗口"));
+    }
     if let Some(window) = app_handle.get_webview_window("sidebar") {
         debug!("Showing sidebar window");
         #[cfg(desktop)]

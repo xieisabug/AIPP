@@ -2,6 +2,7 @@ import { render, renderHook, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     findFirstLiveSuffixIndex,
+    readMcpCallRefs,
     useMessageListElements,
     type UseMessageListElementsProps,
 } from "./useMessageListElements";
@@ -44,6 +45,7 @@ vi.mock("../MessageItem", () => ({
         <div
             data-testid={`message-${message.id}`}
             data-last-message={isLastMessage ? "true" : "false"}
+            data-error-superseded={message.isSupersededError ? "true" : "false"}
             data-merged-mode={mergedMode ? "true" : "false"}
         >
             {message.content}
@@ -183,7 +185,7 @@ describe("useMessageListElements merged assistant preview state", () => {
             makeMessage({
                 id: 2,
                 message_type: "response",
-                content: Array.from({ length: 240 }, () => "a very long assistant response line").join("\n"),
+                content: Array.from({ length: 12 }, () => "a very long assistant response line").join("\n"),
             }),
             makeMessage({ id: 3, message_type: "tool_result", content: "ok" }),
             makeMessage({ id: 4, message_type: "user", content: "user-2" }),
@@ -212,6 +214,33 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(mergedGroupItem?.estimatedHeight ?? 0).toBeGreaterThan(
             singleItem?.estimatedHeight ?? 0,
         );
+    });
+
+    it("should split tall historical merged groups into joined segment rows", () => {
+        const longResponse = Array.from({ length: 40 }, () => "a very long assistant response line").join("\n\n");
+        const messages = [
+            makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+            makeMessage({ id: 2, message_type: "response", content: longResponse }),
+            makeMessage({ id: 3, message_type: "response", content: longResponse }),
+            makeMessage({ id: 4, message_type: "response", content: "done" }),
+            makeMessage({ id: 5, message_type: "user", content: "user-2" }),
+            makeMessage({ id: 6, message_type: "response", content: longResponse }),
+            makeMessage({ id: 7, message_type: "response", content: longResponse }),
+        ];
+
+        const { result } = renderHook(() => useMessageListElements(makeHookProps(messages)));
+        const items = result.current.renderItems;
+        const segmentItems = items.filter((item) => item.key.includes(":segment-"));
+
+        expect(segmentItems.length).toBeGreaterThan(1);
+        expect(segmentItems.flatMap((item) => item.messageIds)).toEqual([2, 3, 4]);
+        expect(segmentItems.map((item) => item.joinsNext ?? false)).toEqual([
+            ...segmentItems.slice(0, -1).map(() => true),
+            false,
+        ]);
+        // 尾部组仍整体留在 last-reply 容器中
+        const lastReply = items.find((item) => item.key === "last-reply-container");
+        expect(lastReply?.messageIds).toEqual([5, 7]);
     });
 
     it("caps historical row height estimates for auto-collapsed code blocks", () => {
@@ -280,4 +309,45 @@ describe("findFirstLiveSuffixIndex", () => {
             ]),
         ).toBe(-1);
     });
+});
+
+describe("readMcpCallRefs", () => {
+    it("collects numeric call ids from finished tool call comments", () => {
+        const refs = readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL:{"call_id":12,"tool_name":"x"} --> b <!-- MCP_TOOL_CALL:34 -->',
+        }));
+        expect(refs).toEqual({ ids: [12, 34], needsFullMap: false });
+    });
+
+    it("needs the full state map when a streaming comment only carries llm_call_id", () => {
+        const refs = readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL_STREAMING:{"llm_call_id":"call_abc","tool_name":"x"} -->',
+        }));
+        expect(refs.needsFullMap).toBe(true);
+    });
+
+    it("needs the full state map for a comment without any call id or an unterminated comment", () => {
+        expect(readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL:{"server_name":"s","tool_name":"t"} -->',
+        })).needsFullMap).toBe(true);
+        expect(readMcpCallRefs(makeMessage({
+            content: 'a <!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"t","param',
+        })).needsFullMap).toBe(true);
+    });
+
+    it("returns no refs for plain messages", () => {
+        expect(readMcpCallRefs(makeMessage({ content: "plain" }))).toEqual({
+            ids: [],
+            needsFullMap: false,
+        });
+    });
+});
+
+it("should refresh a merged error when its folded state changes", () => {
+    const error = makeMessage({ id: 2, message_type: "error", content: "未配置模型" });
+    const reply = makeMessage({ id: 3, message_type: "response", content: "新的回复" });
+    const { rerender } = render(<Harness messages={[error, reply]} />);
+    expect(screen.getByTestId("message-2")).toHaveAttribute("data-error-superseded", "false");
+    rerender(<Harness messages={[{ ...error, isSupersededError: true }, reply]} />);
+    expect(screen.getByTestId("message-2")).toHaveAttribute("data-error-superseded", "true");
 });

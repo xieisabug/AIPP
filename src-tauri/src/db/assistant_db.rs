@@ -88,6 +88,16 @@ pub struct AssistantSummary {
     pub updated_time: Option<String>,
 }
 
+/// Seed values written by `init_assistant` for the quick assistant (id 1).
+/// Sync uses them to recognise a device that only has defaults.
+pub const DEFAULT_QUICK_ASSISTANT_PROMPT: &str = "You are a helpful assistant.";
+pub const DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS: [(&str, &str, &str); 4] = [
+    ("max_tokens", "1000", "number"),
+    ("temperature", "0.75", "float"),
+    ("top_p", "1.0", "float"),
+    ("stream", "false", "boolean"),
+];
+
 pub struct AssistantDatabase {
     pub conn: Connection,
     pub mcp_conn: Connection,
@@ -259,26 +269,6 @@ impl AssistantDatabase {
         debug!(assistant_id = id, "assistant inserted");
         Ok(id)
     }
-
-    #[instrument(level = "debug", skip(self), fields(assistant_type = assistant_type))]
-    pub fn get_assistants_by_type(&self, assistant_type: i64) -> Result<Vec<Assistant>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, description, assistant_type, is_addition, created_time FROM assistant WHERE assistant_type = ? ORDER BY created_time DESC",
-        )?;
-        let rows = stmt.query_map([assistant_type], |row| {
-            Ok(Assistant {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                assistant_type: row.get(3)?,
-                is_addition: row.get(4)?,
-                created_time: row.get(5)?,
-            })
-        })?;
-        let assistants: Vec<Assistant> = rows.collect::<Result<Vec<_>>>()?;
-        Ok(assistants)
-    }
-
     #[instrument(level = "debug", skip(self), fields(id = id, name = name))]
     pub fn update_assistant(&self, id: i64, name: &str, description: &str) -> Result<()> {
         self.conn.execute(
@@ -291,7 +281,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
     pub fn delete_assistant(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM assistant WHERE id = ?", params![id])?;
+        super::cascade_delete::delete(&self.conn, "assistant", id)?;
         debug!("assistant deleted");
         Ok(())
     }
@@ -317,10 +307,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn delete_assistant_prompt_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM assistant_prompt WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
+        super::cascade_delete::delete_by_owner(&self.conn, "assistant_prompt", "assistant_id", assistant_id)?;
         debug!("assistant prompts deleted by assistant_id");
         Ok(())
     }
@@ -355,6 +342,15 @@ impl AssistantDatabase {
             params![model_code, provider_id, alias, id],
         )?;
         debug!("assistant model updated");
+        Ok(())
+    }
+
+    /// Clear model bindings that point at a provider being deleted.
+    pub fn clear_provider_references(&self, provider_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE assistant_model SET provider_id = 0, model_code = '', alias = '' WHERE provider_id = ?",
+            params![provider_id],
+        )?;
         Ok(())
     }
 
@@ -398,8 +394,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn delete_assistant_model_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM assistant_model WHERE assistant_id = ?", params![assistant_id])?;
+        super::cascade_delete::delete_by_owner(&self.conn, "assistant_model", "assistant_id", assistant_id)?;
         debug!("assistant models deleted by assistant_id");
         Ok(())
     }
@@ -491,7 +486,7 @@ impl AssistantDatabase {
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn get_assistant_model(&self, assistant_id: i64) -> Result<Vec<AssistantModel>> {
-        let mut stmt = self.conn.prepare("SELECT id, assistant_id, provider_id, model_code, alias FROM assistant_model WHERE assistant_id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT id, assistant_id, provider_id, model_code, alias FROM assistant_model WHERE assistant_id = ? ORDER BY id")?;
         let assistant_model_iter = stmt.query_map(params![assistant_id], |row| {
             Ok(AssistantModel {
                 id: row.get(0)?,
@@ -506,12 +501,24 @@ impl AssistantDatabase {
         for assistant_model in assistant_model_iter {
             assistant_models.push(assistant_model?);
         }
+        // Every new client seeds quick assistant 1 with an empty selection.
+        // A synced explicit binding has a different natural key and coexists
+        // with that row. Do not expose the initialization row as model[0].
+        // Keep stored rows/identities intact, and keep all explicit bindings,
+        // including invalid ones: model validation must report those errors.
+        if assistant_id == 1
+            && assistant_models.iter().any(|m| m.provider_id != 0 || !m.model_code.is_empty())
+        {
+            assistant_models.retain(|m| {
+                m.provider_id != 0 || !m.model_code.is_empty() || !m.alias.is_empty()
+            });
+        }
         Ok(assistant_models)
     }
 
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn get_assistant_prompt(&self, assistant_id: i64) -> Result<Vec<AssistantPrompt>> {
-        let mut stmt = self.conn.prepare("SELECT id, assistant_id, prompt, created_time FROM assistant_prompt WHERE assistant_id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT id, assistant_id, prompt, created_time FROM assistant_prompt WHERE assistant_id = ? ORDER BY id")?;
         let assistant_prompt_iter = stmt.query_map(params![assistant_id], |row| {
             Ok(AssistantPrompt {
                 id: row.get(0)?,
@@ -524,6 +531,14 @@ impl AssistantDatabase {
         let mut assistant_prompts = Vec::new();
         for assistant_prompt in assistant_prompt_iter {
             assistant_prompts.push(assistant_prompt?);
+        }
+        // Other devices' initialization prompts have independent sync UUIDs.
+        // Keep those rows for replay/deletion, but do not let a seed mask the
+        // user's prompt in callers that use prompts[0]. Preserve custom order.
+        if assistant_id == 1
+            && assistant_prompts.iter().any(|p| p.prompt != "You are a helpful assistant.")
+        {
+            assistant_prompts.retain(|p| p.prompt != "You are a helpful assistant.");
         }
         Ok(assistant_prompts)
     }
@@ -538,7 +553,7 @@ impl AssistantDatabase {
             Ok(AssistantModelConfig {
                 id: row.get(0)?,
                 assistant_id: row.get(1)?,
-                assistant_model_id: row.get(2)?,
+                assistant_model_id: row.get::<_, Option<i64>>(2)?.unwrap_or(-1),
                 name: row.get(3)?,
                 value: row.get(4)?,
                 value_type: row.get(5)?,
@@ -558,13 +573,13 @@ impl AssistantDatabase {
         assistant_id: i64,
         assistant_model_id: i64,
     ) -> Result<Vec<AssistantModelConfig>> {
-        let mut stmt = self.conn.prepare("SELECT id, assistant_id, assistant_model_id, name, value, value_type FROM assistant_model_config WHERE assistant_id = ? AND assistant_model_id = ?")?;
+        let mut stmt = self.conn.prepare("SELECT id, assistant_id, assistant_model_id, name, value, value_type FROM assistant_model_config WHERE assistant_id = ? AND COALESCE(assistant_model_id, -1) = ?")?;
         let assistant_model_config_iter =
             stmt.query_map(params![assistant_id, assistant_model_id], |row| {
                 Ok(AssistantModelConfig {
                     id: row.get(0)?,
                     assistant_id: row.get(1)?,
-                    assistant_model_id: row.get(2)?,
+                    assistant_model_id: row.get::<_, Option<i64>>(2)?.unwrap_or(-1),
                     name: row.get(3)?,
                     value: row.get(4)?,
                     value_type: row.get(5)?,
@@ -613,7 +628,7 @@ impl AssistantDatabase {
         // 2) 默认 prompt：仅当该助手没有任何 prompt 时再插入
         let prompts = self.get_assistant_prompt(1)?;
         if prompts.is_empty() {
-            self.add_assistant_prompt(1, "You are a helpful assistant.")?;
+            self.add_assistant_prompt(1, DEFAULT_QUICK_ASSISTANT_PROMPT)?;
         }
 
         // 3) 确保存在一个默认 model
@@ -636,14 +651,7 @@ impl AssistantDatabase {
         let mut existing_names: std::collections::HashSet<String> =
             existing_configs.into_iter().map(|c| c.name).collect();
 
-        let defaults = vec![
-            ("max_tokens", "1000", "number"),
-            ("temperature", "0.75", "float"),
-            ("top_p", "1.0", "float"),
-            ("stream", "false", "boolean"),
-        ];
-
-        for (name, value, value_type) in defaults {
+        for (name, value, value_type) in DEFAULT_QUICK_ASSISTANT_MODEL_CONFIGS {
             if !existing_names.contains(name) {
                 let _ = self.add_assistant_model_config(1, model_id, name, value, value_type)?;
                 existing_names.insert(name.to_string());
@@ -904,18 +912,6 @@ impl AssistantDatabase {
         debug!("assistant workspace deleted");
         Ok(())
     }
-
-    /// Remove all workspace paths for an assistant
-    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
-    pub fn remove_assistant_workspaces_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM assistant_workspace WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
-        debug!("assistant workspaces deleted by assistant_id");
-        Ok(())
-    }
-
     /// Check if a path is in the assistant's workspace (prefix match)
     #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
     pub fn is_path_in_assistant_workspace(&self, assistant_id: i64, path: &str) -> Result<bool> {
@@ -956,28 +952,6 @@ impl AssistantDatabase {
             )
             .optional()
     }
-
-    #[instrument(level = "debug", skip(self))]
-    pub fn list_assistant_summaries(&self) -> Result<Vec<AssistantSummary>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, assistant_id, summary, tags_json, source_hash, created_time, updated_time
-             FROM assistant_summary
-             ORDER BY updated_time DESC, id DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(AssistantSummary {
-                id: row.get(0)?,
-                assistant_id: row.get(1)?,
-                summary: row.get(2)?,
-                tags_json: row.get(3)?,
-                source_hash: row.get(4)?,
-                created_time: row.get(5)?,
-                updated_time: row.get(6)?,
-            })
-        })?;
-        rows.collect()
-    }
-
     #[instrument(level = "debug", skip(self, summary, tags_json, source_hash), fields(assistant_id = assistant_id))]
     pub fn upsert_assistant_summary(
         &self,
@@ -999,14 +973,5 @@ impl AssistantDatabase {
         )?;
         self.get_assistant_summary(assistant_id)?
             .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
-    }
-
-    #[instrument(level = "debug", skip(self), fields(assistant_id = assistant_id))]
-    pub fn delete_assistant_summary_by_assistant_id(&self, assistant_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM assistant_summary WHERE assistant_id = ?",
-            params![assistant_id],
-        )?;
-        Ok(())
     }
 }

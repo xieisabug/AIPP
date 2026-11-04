@@ -229,7 +229,8 @@ fn given_tool_call_response_and_tool_result_when_build_chat_request_then_include
         ("system".to_string(), "system".to_string(), vec![]),
         ("user".to_string(), "question".to_string(), vec![]),
         ("response".to_string(), response_with_tool_call(1, "call tool"), vec![]),
-        ("tool_result".to_string(), tool_result_content("1", "ok"), vec![]),
+        // 持久化的 tool_result 使用 llm_call_id（见 execution_api::tool_call_history_id）
+        ("tool_result".to_string(), tool_result_content("call_1", "ok"), vec![]),
     ];
 
     let result =
@@ -377,9 +378,10 @@ fn given_long_conversation_when_regenerating_mid_then_truncates_tail() {
         id += 1;
     }
 
+    // 重新生成第 2 轮回复（g2），应截断 g2 及其之后的所有消息
     time = time + Duration::seconds(1);
-    let regen_id = 5;
-    messages.push(wrap(make_message(regen_id, "response", time, Some("g5b"), Some("g5"), "r5b")));
+    let regen_id = id;
+    messages.push(wrap(make_message(regen_id, "response", time, Some("g2b"), Some("g2"), "r2b")));
 
     let result = get_latest_branch_messages(&messages);
     let ids: Vec<i64> = result.iter().map(|msg| msg.id).collect();

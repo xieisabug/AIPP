@@ -22,6 +22,7 @@ impl ScopedFileKey {
 
 /// 文件读取记录
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileReadRecord {
     /// 文件路径
     pub path: String,
@@ -108,6 +109,7 @@ impl OperationState {
     }
 
     /// 记录文件已被读取
+    #[allow(dead_code)]
     pub async fn record_file_read(&self, path: &str) {
         self.record_file_read_for_conversation(path, None).await;
     }
@@ -131,6 +133,7 @@ impl OperationState {
     }
 
     /// 检查文件是否已被读取过
+    #[allow(dead_code)]
     pub async fn has_file_been_read(&self, path: &str) -> bool {
         self.has_file_been_read_for_conversation(path, None).await
     }
@@ -146,23 +149,27 @@ impl OperationState {
     }
 
     /// 清除文件读取记录
+    #[allow(dead_code)]
     pub async fn clear_file_read(&self, path: &str) {
         self.clear_file_read_for_conversation(path, None).await;
     }
 
     /// 清除文件读取记录（按会话隔离）
+    #[allow(dead_code)]
     pub async fn clear_file_read_for_conversation(&self, path: &str, conversation_id: Option<i64>) {
         let mut files = self.read_files.lock().await;
         files.remove(&ScopedFileKey::new(path, conversation_id));
     }
 
     /// 清除所有文件读取记录
+    #[allow(dead_code)]
     pub async fn clear_all_file_reads(&self) {
         let mut files = self.read_files.lock().await;
         files.clear();
     }
 
     /// 记录文件已被写入
+    #[allow(dead_code)]
     pub async fn record_file_write(&self, path: &str) {
         self.record_file_write_for_conversation(path, None).await;
     }
@@ -183,6 +190,7 @@ impl OperationState {
     }
 
     /// 检查文件是否在当前会话中已被写入过
+    #[allow(dead_code)]
     pub async fn has_file_been_written(&self, path: &str) -> bool {
         self.has_file_been_written_for_conversation(path, None).await
     }
@@ -198,11 +206,13 @@ impl OperationState {
     }
 
     /// 清除文件写入记录
+    #[allow(dead_code)]
     pub async fn clear_file_write(&self, path: &str) {
         self.clear_file_write_for_conversation(path, None).await;
     }
 
     /// 清除文件写入记录（按会话隔离）
+    #[allow(dead_code)]
     pub async fn clear_file_write_for_conversation(
         &self,
         path: &str,
@@ -213,6 +223,7 @@ impl OperationState {
     }
 
     /// 清除所有文件写入记录
+    #[allow(dead_code)]
     pub async fn clear_all_file_writes(&self) {
         let mut files = self.written_files.lock().await;
         files.clear();
@@ -452,12 +463,6 @@ impl OperationState {
         false
     }
 
-    /// 清除会话信任路径（对话结束时调用）
-    pub async fn clear_conversation_trusted_paths(&self, conversation_id: i64) {
-        let mut trusted = self.conversation_trusted_paths.lock().await;
-        trusted.remove(&conversation_id);
-        debug!(conversation_id, "Cleared conversation trusted paths");
-    }
 
     /// 检查 Bash 进程是否存在
     pub async fn bash_process_exists(&self, bash_id: &str) -> bool {

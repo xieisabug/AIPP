@@ -276,7 +276,7 @@ pub async fn inspect_skill_install_recipe(
     skills_dir: &Path,
     proxy_url: Option<&str>,
 ) -> Result<SkillInstallPlan, String> {
-    let archive = download_and_extract_source(&recipe.source, proxy_url).await?;
+    let archive = download_and_extract_source(&recipe.source, proxy_url, skills_dir).await?;
     build_install_plan(recipe, &archive.repo_root, skills_dir, &archive.download_url)
 }
 
@@ -285,7 +285,7 @@ pub async fn install_skill_install_recipe(
     skills_dir: &Path,
     proxy_url: Option<&str>,
 ) -> Result<SkillInstallResult, String> {
-    let archive = download_and_extract_source(&recipe.source, proxy_url).await?;
+    let archive = download_and_extract_source(&recipe.source, proxy_url, skills_dir).await?;
     install_recipe_from_repo_root(recipe, &archive.repo_root, skills_dir, &archive.download_url)
 }
 
@@ -295,7 +295,7 @@ pub async fn inspect_skill_archive(
     skills_dir: &Path,
     proxy_url: Option<&str>,
 ) -> Result<SkillArchiveInspection, String> {
-    let archive = download_and_extract_source(source, proxy_url).await?;
+    let archive = download_and_extract_source(source, proxy_url, skills_dir).await?;
     let skills =
         build_archive_plan_skills(source, configured_dirs, &archive.repo_root, skills_dir)?;
 
@@ -327,7 +327,7 @@ pub async fn install_skill_archive(
     };
     recipe.validate()?;
 
-    let archive = download_and_extract_source(source, proxy_url).await?;
+    let archive = download_and_extract_source(source, proxy_url, skills_dir).await?;
     let result = install_recipe_from_repo_root(
         &recipe,
         &archive.repo_root,
@@ -344,15 +344,44 @@ pub async fn install_skill_archive(
     })
 }
 
+pub fn install_local_archive(path: &Path, skills_dir: &Path) -> Result<Vec<String>, String> {
+    if fs::metadata(path).map_err(|e| e.to_string())?.len() > 20 * 1024 * 1024 {
+        return Err("Skill archive exceeds 20 MiB".into());
+    }
+    let bytes = fs::read(path).map_err(|e| format!("Skill archive read: {e}"))?;
+    // Use the private application directory, not Android's inaccessible /tmp.
+    fs::create_dir_all(skills_dir).map_err(|e| e.to_string())?;
+    let temp_dir = TempExtractDir { path: skills_dir.join(format!(".import-{}", uuid::Uuid::new_v4())) };
+    fs::create_dir(&temp_dir.path).map_err(|e| e.to_string())?;
+    extract_zip_bytes_to_dir(&bytes, &temp_dir.path)?;
+    let root = resolve_archive_root(&temp_dir.path)?;
+    let source = SkillInstallRecipeSource { source_type: SkillInstallRecipeSourceType::Zip,
+        repo: None, git_ref: "main".into(), url: Some("https://local.invalid/import.zip".into()) };
+    let plan = build_archive_plan_skills(&source, None, &root, skills_dir)?;
+    if plan.is_empty() { return Err("Archive contains no SKILL.md".into()); }
+    if plan.iter().any(|skill| skill.will_replace) { return Err("同名 Skill 已存在，请先确认并删除旧版本，导入未覆盖任何技能".into()); }
+    let recipe = SkillInstallRecipe { id: "local-import".into(), name: "系统文件导入".into(), description: None,
+        source, dirs: plan.iter().map(|skill| SkillInstallRecipeDir { from: skill.from.clone(), to: skill.to.clone() }).collect() };
+    let result = install_recipe_from_repo_root(&recipe, &root, skills_dir, "system-document")?;
+    Ok(result.installed_skills.into_iter().map(|skill| skill.display_name).collect())
+}
+
 pub(crate) fn extract_zip_bytes_to_dir(bytes: &[u8], output_dir: &Path) -> Result<(), String> {
+    if bytes.len() > 20 * 1024 * 1024 { return Err("Skill archive exceeds 20 MiB".into()); }
     let cursor = Cursor::new(bytes);
     let mut zip =
         zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip archive: {}", e))?;
 
+    if zip.len() > 4096 { return Err("Skill archive exceeds 4096 entries".into()); }
+    let mut expanded_size = 0u64;
     for i in 0..zip.len() {
         let mut file =
             zip.by_index(i).map_err(|e| format!("Failed to get file from zip: {}", e))?;
-        let file_path = output_dir.join(file.mangled_name());
+        expanded_size = expanded_size.checked_add(file.size()).ok_or("Archive size overflow")?;
+        if expanded_size > 50 * 1024 * 1024 { return Err("Expanded skill archive exceeds 50 MiB".into()); }
+        validate_archive_entry(file.name(), file.unix_mode(), expanded_size)?;
+        let enclosed = file.enclosed_name().ok_or("Skill archive contains an unsafe path")?;
+        let file_path = output_dir.join(enclosed);
 
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -364,8 +393,10 @@ pub(crate) fn extract_zip_bytes_to_dir(bytes: &[u8], output_dir: &Path) -> Resul
 
         let mut output =
             fs::File::create(&file_path).map_err(|e| format!("Failed to create file: {}", e))?;
-        std::io::copy(&mut file, &mut output)
+        let expected_size = file.size();
+        let written = std::io::copy(&mut std::io::Read::take(&mut file, expected_size + 1), &mut output)
             .map_err(|e| format!("Failed to write file: {}", e))?;
+        if written != expected_size { return Err("Skill archive entry size does not match its header".into()); }
 
         #[cfg(unix)]
         {
@@ -373,7 +404,7 @@ pub(crate) fn extract_zip_bytes_to_dir(bytes: &[u8], output_dir: &Path) -> Resul
 
             if let Some(mode) = file.unix_mode() {
                 let mut perms = fs::Permissions::from_mode(0o644);
-                perms.set_mode(mode);
+                perms.set_mode(mode & 0o777);
                 output
                     .set_permissions(perms)
                     .map_err(|e| format!("Failed to set permissions: {}", e))?;
@@ -383,6 +414,22 @@ pub(crate) fn extract_zip_bytes_to_dir(bytes: &[u8], output_dir: &Path) -> Resul
 
     Ok(())
 }
+
+pub(crate) fn validate_archive_entry(name: &str, mode: Option<u32>, expanded_size: u64) -> Result<(), String> {
+    if expanded_size > 50 * 1024 * 1024 { return Err("Expanded skill archive exceeds 50 MiB".into()); }
+    if mode.is_some_and(|mode| mode & 0o170000 == 0o120000) {
+        return Err("Skill archives cannot contain symbolic links".into());
+    }
+    if name.is_empty() || name.starts_with('/') || name.contains('\\') || name.contains(':')
+        || name.contains('\0') || name.split('/').any(|part| part == "..") {
+        return Err("Skill archive contains an unsafe path".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "installer_tests.rs"]
+mod archive_safety_tests;
 
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -431,13 +478,14 @@ struct DownloadedSkillArchive {
 async fn download_and_extract_source(
     source: &SkillInstallRecipeSource,
     proxy_url: Option<&str>,
+    skills_dir: &Path,
 ) -> Result<DownloadedSkillArchive, String> {
     source.validate()?;
 
     let download_url = source.archive_url()?;
     let client = build_archive_http_client(proxy_url)?;
 
-    let response = client
+    let mut response = client
         .get(&download_url)
         .timeout(std::time::Duration::from_secs(ARCHIVE_DOWNLOAD_TIMEOUT_SECS))
         .send()
@@ -452,12 +500,18 @@ async fn download_and_extract_source(
         ));
     }
 
-    let archive_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("读取下载的技能压缩包失败：{}（{}）", download_url, e))?;
+    if response.content_length().is_some_and(|size| size > 20 * 1024 * 1024) {
+        return Err("Skill archive download exceeds 20 MiB".into());
+    }
+    let mut archive_bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Skill archive download: {e}"))? {
+        if archive_bytes.len() + chunk.len() > 20 * 1024 * 1024 { return Err("Skill archive download exceeds 20 MiB".into()); }
+        archive_bytes.extend_from_slice(&chunk);
+    }
 
-    let temp_dir = TempExtractDir::new("skill_recipe_extract")?;
+    fs::create_dir_all(skills_dir).map_err(|e| format!("Skill temporary directory: {e}"))?;
+    let temp_dir = TempExtractDir { path: skills_dir.join(format!(".extract-{}", uuid::Uuid::new_v4())) };
+    fs::create_dir(&temp_dir.path).map_err(|e| e.to_string())?;
     extract_zip_bytes_to_dir(archive_bytes.as_ref(), &temp_dir.path)?;
     let repo_root = resolve_archive_root(&temp_dir.path)?;
 
@@ -621,9 +675,45 @@ fn install_recipe_from_repo_root(
         format!("Failed to create skills directory {}: {}", skills_dir.display(), e)
     })?;
 
+    #[cfg(mobile)]
+    {
+        static INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = INSTALL_LOCK.lock().map_err(|e| format!("Skill installation lock: {e}"))?;
+        if plan.skills.iter().any(|skill| skills_dir.join(&skill.to).exists()) {
+            return Err("同名 Skill 已存在，本次未覆盖任何技能".into());
+        }
+        let staged = TempExtractDir { path: skills_dir.join(format!(".install-{}", uuid::Uuid::new_v4())) };
+        fs::create_dir(&staged.path).map_err(|e| e.to_string())?;
+        for skill in &plan.skills {
+            let source_dir = resolve_recipe_dir(repo_root, &skill.from)?;
+            let target = staged.path.join(&skill.to);
+            copy_dir_recursive(&source_dir, &target)?;
+            normalize_selected_entry_file(&target, &skill.detected_entry_file, &skill.normalized_entry_file)?;
+            if find_skill_entry_file_for_current_scanner(&target)?.is_none() {
+                return Err(format!("Skill {} has no readable SKILL.md", skill.to));
+            }
+        }
+        let mut committed: Vec<PathBuf> = Vec::new();
+        for skill in &plan.skills {
+            let target = skills_dir.join(&skill.to);
+            if let Err(error) = fs::rename(staged.path.join(&skill.to), &target) {
+                let mut cleanup_errors = Vec::new();
+                for path in committed {
+                    if let Err(cleanup) = fs::remove_dir_all(&path) { cleanup_errors.push(format!("{}: {cleanup}", path.display())); }
+                }
+                return Err(format!("Skill installation commit: {error}; rollback errors: {}", cleanup_errors.join("; ")));
+            }
+            committed.push(target);
+        }
+        return Ok(SkillInstallResult { recipe_id: plan.recipe_id, recipe_name: plan.recipe_name,
+            source: plan.source, source_label: plan.source_label, download_url: plan.download_url,
+            target_directory: plan.target_directory, installed_skills: plan.skills });
+    }
+
     for skill in &plan.skills {
         let source_dir = resolve_recipe_dir(repo_root, &skill.from)?;
         let target_dir = skills_dir.join(&skill.to);
+
 
         replace_existing_target(&target_dir)?;
         copy_dir_recursive(&source_dir, &target_dir)?;

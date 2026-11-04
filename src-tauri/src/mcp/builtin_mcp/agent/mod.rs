@@ -11,4 +11,4 @@ pub mod types;
 mod tests;
 
 pub use handler::AgentHandler;
-pub use todo::{TodoHandler, TodoState};
+pub use todo::TodoState;

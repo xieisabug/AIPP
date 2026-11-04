@@ -33,6 +33,8 @@ pub struct AskUserQuestionItem {
     pub options: Vec<AskUserQuestionOption>,
     #[serde(default, rename = "multiSelect", alias = "multi_select")]
     pub multi_select: bool,
+    #[serde(default, rename = "isSecret", alias = "is_secret")]
+    pub is_secret: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,8 +64,13 @@ impl AskUserQuestionRequest {
             if question.header.trim().is_empty() {
                 return Err(format!("Question #{} header cannot be empty", index + 1));
             }
-            if question.options.len() < 2 || question.options.len() > 4 {
-                return Err(format!("Question #{} must provide 2-4 options", index + 1));
+            if !question.options.is_empty()
+                && (question.options.len() < 2 || question.options.len() > 4)
+            {
+                return Err(format!(
+                    "Question #{} must provide no options or 2-4 options",
+                    index + 1
+                ));
             }
 
             let mut seen_labels = HashSet::new();
@@ -798,14 +805,6 @@ impl InteractionState {
 
         let mut pending_events = self.pending_preview_code_events.lock().await;
         pending_events.insert(event.request_id.clone(), event);
-    }
-
-    pub async fn get_preview_code_request(
-        &self,
-        request_id: &str,
-    ) -> Option<PreviewCodeRequestEvent> {
-        let pending_events = self.pending_preview_code_events.lock().await;
-        pending_events.get(request_id).cloned()
     }
 
     pub async fn remove_preview_code_request(&self, request_id: &str) {

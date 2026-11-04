@@ -386,6 +386,11 @@ pub async fn test_mcp_connection(
 
 // 测试stdio连接
 async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
+    // 外部 stdio 在移动端不可执行（aipp:* 内置已在 test_mcp_connection 分流）
+    if cfg!(mobile) {
+        let _ = server;
+        return Err(crate::api::system_api::mobile_unsupported_error("外部 stdio MCP"));
+    }
     use rmcp::{
         transport::{ConfigureCommandExt, TokioChildProcess},
         ServiceExt,
@@ -433,44 +438,12 @@ async fn test_sse_connection(_server: &MCPServer) -> Result<(), String> {
 
 // 测试HTTP连接
 async fn test_http_connection(server: &MCPServer) -> Result<(), String> {
-    use crate::mcp::util::parse_server_headers;
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::StreamableHttpClientTransport,
         ServiceExt,
     };
 
-    let url = server.url.as_ref().ok_or("No URL specified for HTTP transport")?;
-
-    // 创建StreamableHttpClientTransport传输，注入自定义 headers
-    let (auth_header, all_headers) = parse_server_headers(server);
-    let transport = {
-        let mut header_map = HeaderMap::new();
-        if let Some(hdrs) = all_headers.as_ref() {
-            let to_log = crate::mcp::util::sanitize_headers_for_log(hdrs);
-            info!(server_id = server.id, headers = ?to_log, "Testing HTTP with headers");
-            for (k, v) in hdrs.iter() {
-                if let (Ok(name), Ok(value)) =
-                    (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                {
-                    header_map.insert(name, value);
-                }
-            }
-        }
-        let client = reqwest::Client::builder()
-            .default_headers(header_map)
-            .build()
-            .map_err(|e| e.to_string())?;
-        let mut cfg =
-            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
-                url.as_str(),
-            );
-        if let Some(auth) = auth_header.as_ref() {
-            cfg = cfg.auth_header(auth.clone());
-        }
-        StreamableHttpClientTransport::with_client(client, cfg)
-    };
+    let transport = crate::mcp::http_transport::create_http_transport(server, reqwest::Client::builder())?;
 
     // 创建客户端信息
     let client_info = ClientInfo {
@@ -591,6 +564,11 @@ async fn get_stdio_capabilities(
     server_id: i64,
     server: MCPServer,
 ) -> Result<(), String> {
+    // 外部 stdio 在移动端不可执行（aipp:* 内置已在调用方分流，不会进入此函数）。
+    if cfg!(mobile) {
+        return Err(crate::api::system_api::mobile_unsupported_error("外部 stdio MCP"));
+    }
+
     use rmcp::{
         transport::{ConfigureCommandExt, TokioChildProcess},
         ServiceExt,
@@ -734,47 +712,19 @@ async fn get_http_capabilities(
     server_id: i64,
     server: MCPServer,
 ) -> Result<(), String> {
-    use crate::mcp::util::parse_server_headers;
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
-        transport::StreamableHttpClientTransport,
         ServiceExt,
     };
 
     let db = open_db(&app_handle)?;
 
-    // 获取URL，如果没有则返回错误
-    let url = server.url.clone().ok_or("No URL specified for HTTP transport")?;
-
     // 创建HTTP传输和客户端（复用 test_http_connection 中的模式，仅增加能力同步逻辑）
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
-            let (auth_header, all_headers) = parse_server_headers(&server);
-            let transport = {
-                let mut header_map = HeaderMap::new();
-                if let Some(hdrs) = all_headers.as_ref() {
-                    let to_log = crate::mcp::util::sanitize_headers_for_log(hdrs);
-                    info!(server_id = server.id, headers = ?to_log, "Fetching HTTP capabilities with headers");
-                    for (k, v) in hdrs.iter() {
-                        if let (Ok(name), Ok(value)) =
-                            (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v.as_str()))
-                        {
-                            header_map.insert(name, value);
-                        }
-                    }
-                }
-                let client = reqwest::Client::builder()
-                    .default_headers(header_map)
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to build reqwest client for HTTP: {}", e))?;
-                let mut cfg = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url.as_str());
-                if let Some(auth) = auth_header.as_ref() {
-                    cfg = cfg.auth_header(auth.clone());
-                }
-                StreamableHttpClientTransport::with_client(client, cfg)
-            };
+            let transport = crate::mcp::http_transport::create_http_transport(&server, reqwest::Client::builder())
+                .map_err(anyhow::Error::msg)?;
 
             let client_info = ClientInfo {
                 meta: None,

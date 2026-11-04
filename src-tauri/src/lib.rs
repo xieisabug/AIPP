@@ -7,13 +7,17 @@ mod db;
 mod errors;
 mod external_channels;
 mod feishu;
+mod host_bridge;
 mod mcp;
 mod plugin;
 mod scheduler;
 mod skills;
+mod mobile_files;
+mod mobile_system_ui;
 mod slash;
 mod state;
 mod sync;
+pub use sync::prepare_assistant_recovery;
 mod template_engine;
 mod utils;
 mod window;
@@ -27,7 +31,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use crate::api::ai::acp::{
-    get_acp_session_state, set_acp_session_config_option, AcpPermissionState,
+    get_acp_session_state, set_acp_session_config_option, AcpElicitationState, AcpPermissionState,
 };
 use crate::api::ai_api::{
     ask_ai, cancel_ai, enqueue_conversation_message, get_activity_focus,
@@ -39,8 +43,8 @@ use crate::api::ai_api::{
 use crate::api::assistant_api::{
     add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
     delete_assistant, ensure_acp_session_connected, export_assistant, get_acp_launch_diagnostics,
-    get_acp_working_directory, get_assistant, get_assistant_field_value,
-    get_assistant_mcp_servers_with_tools,
+    get_acp_working_directory, get_agent_runtime_info, get_assistant, get_assistant_field_value,
+    get_agent_model_options, get_codex_agent_defaults, get_assistant_mcp_servers_with_tools,
     get_assistant_workspaces, get_assistants, import_assistant, remove_assistant_workspace,
     save_assistant, update_assistant_mcp_config, update_assistant_mcp_tool_config,
     update_assistant_model_config_value,
@@ -53,7 +57,7 @@ use crate::api::butler_api::{
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
-    get_conversation_with_messages, list_conversations, search_conversations,
+    conversation_exists, get_conversation_with_messages, list_conversations, search_conversations,
     update_assistant_message, update_conversation, update_message_content,
 };
 use crate::api::copilot_api::{poll_github_copilot_token, start_github_copilot_device_flow};
@@ -72,7 +76,7 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_model_request_mode, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
-use crate::api::operation_api::{confirm_acp_permission, confirm_operation_permission};
+use crate::api::operation_api::{confirm_acp_elicitation, confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
     disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
     get_plugin_assistant_configs, get_plugin_config, get_plugin_data, get_plugin_detail,
@@ -103,15 +107,18 @@ use crate::api::skill_api::{
 use crate::api::system_api::{
     clear_butler_feishu_secret, conversation_has_feishu_target, copy_image_to_clipboard,
     debug_resend_message_to_feishu, get_all_feature_config, get_autostart_state, get_bang_list,
-    get_butler_feishu_runtime_status, get_experimental_summary_task_status, get_selected_text_api,
+    get_butler_feishu_runtime_status, get_experimental_summary_task_status, get_platform,
+    get_selected_text_api,
     open_data_folder, open_image, refresh_butler_feishu_runtime_command, resume_global_shortcut,
     save_butler_feishu_secret, save_feature_config, set_autostart, set_shortcut_recording,
     suspend_global_shortcut, trigger_assistant_summary_generation,
     trigger_conversation_summary_generation, trigger_mcp_summary_generation,
 };
 use crate::sync::{
-    get_sync_status, reset_sync_state, retry_failed_sync_outbox, retry_sync_dead_letters,
-    save_sync_settings, trigger_sync_now,
+    cleanup_dangling_foreign_keys, get_sync_status,
+    reset_sync_state, retry_failed_sync_outbox,
+    retry_sync_dead_letters, save_sync_settings, set_auto_sync, set_sync_passphrase, stop_sync,
+    trigger_sync_now,
 };
 use crate::api::todo_api::get_todos;
 use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
@@ -174,8 +181,10 @@ use crate::mcp::builtin_mcp::{
 use crate::mcp::execution_api::{
     continue_with_error, create_mcp_tool_call, execute_mcp_tool_call,
     get_conversation_loaded_mcp_tools, get_mcp_tool_call, get_mcp_tool_calls_by_conversation,
-    report_preview_code_runtime_error, send_mcp_tool_results, stop_mcp_tool_call,
+    reject_mcp_tool_call, report_preview_code_runtime_error, send_mcp_tool_results,
+    stop_mcp_tool_call,
 };
+use crate::mcp::tool_review::{get_tool_review, list_tool_reviews};
 use crate::mcp::registry_api::{
     add_mcp_server,
     build_mcp_prompt,
@@ -210,12 +219,14 @@ use crate::window::{
     close_sidebar_window, create_ask_window, create_ask_window_hidden,
     create_butler_experiment_window, create_butler_experiment_window_hidden,
     create_chat_ui_window_hidden, create_config_window_hidden, create_schedule_window_hidden,
-    ensure_hidden_search_window, handle_open_ask_window, is_butler_experiment_enabled,
+    handle_open_ask_window, is_butler_experiment_enabled,
     open_artifact_collections_window, open_artifact_preview_window, open_butler_experiment_window,
     open_butler_experiment_window_inner, open_chat_ui_window, open_chat_ui_window_inner,
     open_config_window, open_config_window_inner, open_default_home_window, open_plugin_window,
     open_schedule_window, open_sidebar_window, preferred_home_window_label,
 };
+#[cfg(mobile)]
+use crate::window::create_chat_ui_window;
 use db::conversation_db::ConversationDatabase;
 use db::database_upgrade;
 use db::plugin_db::PluginDatabase;
@@ -254,6 +265,26 @@ struct AcpSessionState {
     sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::acp::AcpSessionEntry>>>,
 }
 
+#[derive(Clone)]
+struct CodexSessionState {
+    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::codex_app_server::CodexSessionEntry>>>,
+}
+
+#[derive(Clone)]
+struct ClaudeSessionState {
+    sessions: Arc<TokioMutex<HashMap<i64, crate::api::ai::claude_sdk::ClaudeSessionEntry>>>,
+}
+
+impl ClaudeSessionState {
+    fn new() -> Self { Self { sessions: Arc::new(TokioMutex::new(HashMap::new())) } }
+}
+
+impl CodexSessionState {
+    fn new() -> Self {
+        Self { sessions: Arc::new(TokioMutex::new(HashMap::new())) }
+    }
+}
+
 impl AcpSessionState {
     fn new() -> Self {
         Self { sessions: Arc::new(TokioMutex::new(HashMap::new())) }
@@ -269,7 +300,6 @@ struct FeatureConfigState {
 #[derive(Clone)]
 struct NameCacheState {
     assistant_names: Arc<TokioMutex<HashMap<i64, String>>>,
-    model_names: Arc<TokioMutex<HashMap<i64, String>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -281,6 +311,8 @@ struct Config {
 #[derive(Debug, Clone)]
 struct ChatScrollPerfAutorunConfig {
     conversation_index: usize,
+    conversation_id: Option<i64>,
+    direction: String,
     scroll_duration_ms: u64,
     include_return_trip: bool,
     settle_frame_count: u32,
@@ -310,6 +342,14 @@ fn read_chat_scroll_perf_autorun_config() -> Option<ChatScrollPerfAutorunConfig>
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
+    let conversation_id = std::env::var("AIPP_CHAT_SCROLL_PERF_CONVERSATION_ID")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok());
+    let direction = std::env::var("AIPP_CHAT_SCROLL_PERF_DIRECTION")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| value == "up" || value == "down")
+        .unwrap_or_else(|| "down".to_string());
     let scroll_duration_ms = std::env::var("AIPP_CHAT_SCROLL_PERF_DURATION_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -328,6 +368,8 @@ fn read_chat_scroll_perf_autorun_config() -> Option<ChatScrollPerfAutorunConfig>
 
     Some(ChatScrollPerfAutorunConfig {
         conversation_index,
+        conversation_id,
+        direction,
         scroll_duration_ms,
         include_return_trip: parse_bool_env("AIPP_CHAT_SCROLL_PERF_INCLUDE_RETURN_TRIP", true),
         settle_frame_count,
@@ -411,6 +453,8 @@ async fn run_chat_scroll_perf_autorun(
 
     let options_json = serde_json::json!({
         "conversationIndex": config.conversation_index,
+        "conversationId": config.conversation_id,
+        "direction": config.direction,
         "scrollDurationMs": config.scroll_duration_ms,
         "includeReturnTrip": config.include_return_trip,
         "settleFrameCount": config.settle_frame_count,
@@ -495,7 +539,9 @@ fn spawn_chat_scroll_perf_autorun_if_requested(app_handle: &AppHandle) {
         };
 
         write_chat_scroll_perf_output(&config.result_path, &output);
-        request_app_exit(&app_handle);
+        if !parse_bool_env("AIPP_CHAT_SCROLL_PERF_KEEP_OPEN", false) {
+            request_app_exit(&app_handle);
+        }
     });
 }
 
@@ -508,29 +554,13 @@ fn request_app_exit(app_handle: &tauri::AppHandle) {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn query_accessibility_permissions() -> bool {
-    let trusted = macos_accessibility_client::accessibility::application_is_trusted();
-    if trusted {
-        print!("Application is totally trusted!");
-    } else {
-        print!("Application isn't trusted :(");
-        // let trusted = macos_accessibility_client::accessibility::application_is_trusted_with_prompt();
-        // return trusted;
-    }
-    trusted
-}
-
-#[cfg(not(target_os = "macos"))]
-fn query_accessibility_permissions() -> bool {
-    return true;
-}
-
 #[tauri::command]
 async fn get_selected() -> Result<String, String> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         // First try native selected-text crate
+        // mut 仅在 macOS 的剪贴板回退分支中需要
+        #[allow(unused_mut)]
         let mut result = get_selected_text().unwrap_or_default();
 
         // Fallback on macOS: simulate Cmd+C and read from clipboard, then restore clipboard
@@ -632,6 +662,22 @@ fn copy_selection_via_clipboard_fallback() -> Option<String> {
     }
 }
 
+// reqwest 0.13 uses Android's trust store through this verifier. Initialize it
+// before the WebView can dispatch HTTPS commands, including after Activity recreation.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_xieisabug_aipp_MainActivity_initCertificateVerifier(
+    mut env: jni::JNIEnv,
+    activity: jni::objects::JObject,
+) {
+    if let Err(error) = rustls_platform_verifier::android::init_with_env(&mut env, activity) {
+        let _ = env.throw_new(
+            "java/lang/IllegalStateException",
+            format!("Android TLS certificate verifier initialization failed: {error}"),
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 初始化 tracing 日志 (RUST_LOG 环境变量可覆盖)
@@ -651,18 +697,23 @@ pub fn run() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
     ensure_rustls_crypto_provider();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(mobile_files::init())
+        .plugin(mobile_system_ui::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["com.xieisabug.aipp"]),
-        ))
+        ));
+    let app = builder
         .setup(|app| {
             let app_handle = app.handle();
 
@@ -824,11 +875,16 @@ pub fn run() {
                 warn!(error = %e, "Failed to initialize builtin MCP servers");
             }
 
-            info!("Running search profile lock cleanup on startup");
-            if let Err(e) =
-                crate::mcp::builtin_mcp::search::handler::cleanup_search_profile_locks(&app_handle)
+            #[cfg(desktop)]
             {
-                warn!(error = %e, "Failed to cleanup search profile locks on startup");
+                info!("Running search profile lock cleanup on startup");
+                if let Err(e) =
+                    crate::mcp::builtin_mcp::search::handler::cleanup_search_profile_locks(
+                        &app_handle,
+                    )
+                {
+                    warn!(error = %e, "Failed to cleanup search profile locks on startup");
+                }
             }
 
             // Initialize TodoState with app handle for database persistence
@@ -902,11 +958,14 @@ pub fn run() {
             recording_shortcut: TokioMutex::new(false),
         })
         .manage(AcpSessionState::new())
+        .manage(CodexSessionState::new())
+        .manage(ClaudeSessionState::new())
         .manage(MessageTokenManager::new())
         .manage(ConversationActivityManager::new())
         .manage(crate::slash::SlashRegistryCacheState::default())
         .manage(OperationState::new())
         .manage(AcpPermissionState::new())
+        .manage(AcpElicitationState::new())
         .manage(TodoState::new())
         .manage(InteractionState::new())
         .manage(PreviewFileRelayState::new())
@@ -958,9 +1017,13 @@ pub fn run() {
             get_sync_status,
             retry_failed_sync_outbox,
             save_sync_settings,
+            set_sync_passphrase,
             trigger_sync_now,
+            stop_sync,
+            set_auto_sync,
             retry_sync_dead_letters,
             reset_sync_state,
+            cleanup_dangling_foreign_keys,
             get_llm_providers,
             get_filtered_providers,
             update_llm_provider,
@@ -980,9 +1043,16 @@ pub fn run() {
             export_llm_provider,
             import_llm_provider,
             add_attachment,
+            mobile_files::mobile_file_action,
+            mobile_system_ui::set_android_status_bar_appearance,
+            api::skill_api::install_mobile_skill_archive,
+            api::skill_api::get_mobile_skill_compatibility,
             open_attachment_with_default_app,
             get_assistants,
             get_assistant,
+            get_agent_model_options,
+            get_agent_runtime_info,
+            get_codex_agent_defaults,
             get_assistant_field_value,
             get_acp_working_directory,
             ensure_acp_session_connected,
@@ -1005,6 +1075,7 @@ pub fn run() {
             get_butler_task_detail,
             reset_butler_main_conversation,
             spawn_butler_task_conversation,
+            conversation_exists,
             get_conversation_with_messages,
             create_conversation_with_messages,
             delete_conversation,
@@ -1118,16 +1189,28 @@ pub fn run() {
             start_github_copilot_device_flow,
             poll_github_copilot_token,
             // Copilot LSP commands
+            #[cfg(desktop)]
             stop_copilot_lsp,
+            #[cfg(desktop)]
             check_copilot_status,
+            #[cfg(desktop)]
             sign_in_initiate,
+            #[cfg(desktop)]
             sign_in_confirm,
+            #[cfg(desktop)]
             sign_out_copilot,
+            #[cfg(desktop)]
             get_copilot_lsp_status,
+            #[cfg(desktop)]
             get_copilot_oauth_token_from_config,
             test_copilot_token_exchange,
             create_mcp_tool_call,
             execute_mcp_tool_call,
+            reject_mcp_tool_call,
+            get_tool_review,
+            crate::mcp::tool_review_output::get_tool_review_output_capability,
+            crate::mcp::tool_review_output::reset_tool_review_output_capability,
+            list_tool_reviews,
             get_mcp_tool_call,
             get_mcp_tool_calls_by_conversation,
             get_conversation_loaded_mcp_tools,
@@ -1150,8 +1233,9 @@ pub fn run() {
             submit_preview_code_response,
             confirm_operation_permission,
             confirm_acp_permission,
+            confirm_acp_elicitation,
+            confirm_codex_permission,
             highlight_code,
-            ensure_hidden_search_window,
             list_syntect_themes,
             // Skill commands
             scan_skills,
@@ -1187,6 +1271,15 @@ pub fn run() {
             // Autostart commands
             get_autostart_state,
             set_autostart,
+            // Platform detection command
+            get_platform,
+            crate::api::mobile_capability::get_assistant_execution_capability,
+            crate::api::mobile_recovery::get_mobile_recovery_snapshot,
+            crate::api::mobile_recovery::get_mobile_draft,
+            crate::api::mobile_tasks::get_mobile_butler_overview,
+            crate::api::mobile_tasks::stop_mobile_feishu_runtime,
+            crate::api::mobile_recovery::save_mobile_draft,
+            crate::api::plugin_api::validate_mobile_plugin_command,
             // Updater commands
             check_update,
             check_update_with_proxy,
@@ -1266,6 +1359,7 @@ pub fn run() {
                     {
                         let app_handle = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
+                            #[cfg(desktop)]
                             if let Err(e) = crate::mcp::builtin_mcp::search::handler::shutdown_search_browser_pool().await {
                                 warn!(error = %e, "Failed to shutdown search browser pool");
                             }
@@ -1326,16 +1420,8 @@ fn initialize_name_cache_state(app_handle: &tauri::AppHandle) -> NameCacheState 
         assistant_names.insert(assistant.id, assistant.name.clone());
     }
 
-    let llm_db = LLMDatabase::new(app_handle).expect("Failed to connect to database");
-    let models = llm_db.get_models_for_select().expect("Failed to load models");
-    let mut model_names = HashMap::new();
-    for model in models.clone().into_iter() {
-        model_names.insert(model.2, model.0);
-    }
-
     NameCacheState {
         assistant_names: Arc::new(TokioMutex::new(assistant_names)),
-        model_names: Arc::new(TokioMutex::new(model_names)),
     }
 }
 

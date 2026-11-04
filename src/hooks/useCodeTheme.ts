@@ -1,6 +1,5 @@
-import { useCallback } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import { useDisplayConfig } from './useDisplayConfig';
-import { useTheme } from './useTheme';
 
 // 可用的代码主题配置
 export interface CodeThemeOption {
@@ -24,9 +23,47 @@ export const AVAILABLE_CODE_THEMES: CodeThemeOption[] = [
     { id: 'atom-one-dark-reasonable', name: 'Atom One Dark Reasonable', category: 'dark' },
 ];
 
+function readSystemDark(): boolean {
+    return typeof window !== 'undefined'
+        && Boolean(window.matchMedia?.('(prefers-color-scheme: dark)').matches);
+}
+
+let systemDark = readSystemDark();
+const systemThemeListeners = new Set<() => void>();
+
+if (typeof window !== 'undefined' && window.matchMedia) {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (event: MediaQueryListEvent) => {
+        systemDark = event.matches;
+        systemThemeListeners.forEach((listener) => listener());
+    };
+    if (media.addEventListener) {
+        media.addEventListener('change', handleChange);
+    } else {
+        media.addListener(handleChange);
+    }
+}
+
+function subscribeSystemTheme(listener: () => void) {
+    systemThemeListeners.add(listener);
+    return () => {
+        systemThemeListeners.delete(listener);
+    };
+}
+
 export const useCodeTheme = () => {
     const { config } = useDisplayConfig();
-    const { resolvedTheme } = useTheme();
+    const systemIsDark = useSyncExternalStore(
+        subscribeSystemTheme,
+        () => systemDark,
+        () => false,
+    );
+    const colorMode = config?.color_mode ?? 'system';
+    const resolvedTheme = colorMode === 'dark'
+        ? 'dark'
+        : colorMode === 'light'
+            ? 'light'
+            : (systemIsDark ? 'dark' : 'light');
 
     // 获取当前应该使用的主题
     const getCurrentTheme = useCallback((): string => {
@@ -48,6 +85,7 @@ export const useCodeTheme = () => {
 
     return {
         currentTheme: getCurrentTheme(),
+        resolvedTheme,
         getLightThemes,
         getDarkThemes,
         availableThemes: AVAILABLE_CODE_THEMES

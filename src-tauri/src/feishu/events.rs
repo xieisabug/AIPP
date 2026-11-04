@@ -1,8 +1,5 @@
-use std::collections::HashMap;
-
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
-use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::api::ai::acp::AcpPermissionState;
@@ -42,8 +39,7 @@ pub(super) async fn handle_payload(
     let envelope: EventEnvelope = match serde_json::from_slice(payload) {
         Ok(value) => value,
         Err(error) => {
-            debug!(error = %error, "ignore unparsable feishu payload");
-            return Ok(());
+            return Err(format!("stage=parse_payload: {error}"));
         }
     };
     if envelope.header.event_type == "application.bot.menu_v6" {
@@ -76,10 +72,11 @@ pub(super) async fn handle_payload(
                     );
                 }
                 mutate_status(app_handle, |status| {
-                    status.last_error = Some(error);
+                    status.last_error = Some(error.clone());
                     status.status_text = "处理飞书消息时发生错误".to_string();
                 })
                 .await;
+                return Err(format!("message_id={}; stage=process_incoming_text: {}", event.message_id, error));
             }
         }
         "card.action.trigger" => {
@@ -161,7 +158,6 @@ async fn handle_bot_menu_event(
     mutate_status(app_handle, |status| {
         status.running = true;
         status.connected = true;
-        status.last_error = None;
         status.status_text = "正在处理飞书菜单事件".to_string();
         status.status_detail = Some("收到“新建会话”菜单点击，正在重置总管家上下文".to_string());
     })
@@ -693,7 +689,6 @@ async fn process_incoming_text_message(
     mutate_status(app_handle, |status| {
         status.running = true;
         status.connected = true;
-        status.last_error = None;
         status.status_text = "总管家正在处理飞书消息".to_string();
         status.status_detail =
             Some(format!("收到飞书消息，正在总管家主会话中处理（chat_type={}）", event.chat_type));
@@ -785,7 +780,6 @@ async fn process_incoming_text_message(
     mutate_status(app_handle, |status| {
         status.running = true;
         status.connected = true;
-        status.last_error = None;
         status.status_text = "飞书消息已受理，正在持续回发".to_string();
         status.status_detail =
             Some("总管家会继续处理本轮消息，并把后续输出持续回发到飞书".to_string());
@@ -809,50 +803,6 @@ pub(super) fn build_feishu_system_message(event: &IncomingTextEvent) -> String {
     )
 }
 
-pub(super) async fn wait_for_butler_to_settle(
-    app_handle: &AppHandle,
-    butler_conversation_id: i64,
-) -> Result<(), String> {
-    let activity_manager =
-        app_handle.state::<crate::state::activity_state::ConversationActivityManager>();
-    let mut idle_checks = 0;
-    let max_checks =
-        (FEISHU_SETTLE_TIMEOUT.as_millis() / FEISHU_SETTLE_CHECK_INTERVAL.as_millis()) as usize;
-    for attempt in 0..max_checks {
-        let runtime_state = activity_manager.get_runtime_state(butler_conversation_id).await;
-        let pending_tasks = count_pending_butler_tasks(app_handle, butler_conversation_id)?;
-        if !runtime_state.is_running && pending_tasks == 0 {
-            idle_checks += 1;
-            if idle_checks >= 2 {
-                return Ok(());
-            }
-        } else {
-            idle_checks = 0;
-            if attempt % FEISHU_SETTLE_STATUS_INTERVAL_STEPS == 0 {
-                let waited_seconds =
-                    (((attempt + 1) as u128) * FEISHU_SETTLE_CHECK_INTERVAL.as_millis()) / 1000;
-                mutate_status(app_handle, |status| {
-                    status.running = true;
-                    status.connected = true;
-                    status.status_text = "总管家仍在处理飞书消息".to_string();
-                    status.status_detail = Some(format!(
-                        "正在等待总管家完成当前消息（运行中={}, 待完成任务={}，已等待 {} 秒）",
-                        runtime_state.is_running, pending_tasks, waited_seconds
-                    ));
-                })
-                .await;
-            }
-        }
-        sleep(FEISHU_SETTLE_CHECK_INTERVAL).await;
-    }
-    let pending_tasks = count_pending_butler_tasks(app_handle, butler_conversation_id)?;
-    let runtime_state = activity_manager.get_runtime_state(butler_conversation_id).await;
-    Err(format!(
-        "等待总管家处理飞书消息超时（运行中={}，待完成任务={}）",
-        runtime_state.is_running, pending_tasks
-    ))
-}
-
 pub(super) fn count_pending_butler_tasks(
     app_handle: &AppHandle,
     butler_conversation_id: i64,
@@ -866,13 +816,14 @@ pub(super) fn count_pending_butler_tasks(
            AND conversation_kind = 'butler_task'
            AND (
              butler_task_finalized_at IS NULL
-             OR COALESCE(butler_task_status, '') NOT IN (?2, ?3, ?4)
+             OR COALESCE(butler_task_status, '') NOT IN (?2, ?3, ?4, ?5)
            )",
         params![
             butler_conversation_id,
             TERMINAL_TASK_STATUSES[0],
             TERMINAL_TASK_STATUSES[1],
-            TERMINAL_TASK_STATUSES[2]
+            TERMINAL_TASK_STATUSES[2],
+            TERMINAL_TASK_STATUSES[3]
         ],
         |row| row.get::<_, i64>(0),
     )

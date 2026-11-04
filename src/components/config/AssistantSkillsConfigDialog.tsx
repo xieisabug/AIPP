@@ -6,7 +6,7 @@ import { Sparkles, RefreshCw, Search } from "lucide-react";
 import { toast } from 'sonner';
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
-import { PinyinFilter } from "../../utils/pinyinFilter";
+import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import {
     Dialog,
     DialogContent,
@@ -42,6 +42,8 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
     const [mcpEnableConfirmOpen, setMcpEnableConfirmOpen] = useState(false);
     const [pendingSkillEnable, setPendingSkillEnable] = useState<{ skill: ScannedSkill; enabled: boolean } | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
+    // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
+    const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
 
     const { checkOperationMcpForSkills, enableOperationMcpAndSkill, isAgentLoadSkillError } = useSkillsMcpValidation();
 
@@ -178,7 +180,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
             }
         }
         return filtered;
-    }, [groupedSkills, searchQuery]);
+    }, [groupedSkills, searchQuery, pinyinReady]);
 
     // Source order for display
     const sourceOrder: SkillSourceType[] = ['aipp', 'claude_code_agents', 'claude_code_rules', 'claude_code_memory', 'codex'];
@@ -212,7 +214,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                         </div>
                     </DialogHeader>
 
-                    <div className="flex-1 overflow-auto">
+                    <div className="flex-1 min-h-0 overflow-auto">
                         {allSkills.length === 0 ? (
                             <div className="text-center py-8">
                                 <Sparkles className="h-12 w-12 text-muted-foreground mx-auto mb-4" />

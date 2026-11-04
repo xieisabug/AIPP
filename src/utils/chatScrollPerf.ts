@@ -10,7 +10,15 @@ export interface ChatScrollFrameSummary {
     estimatedDroppedFrameCount: number;
 }
 
+export type ChatScrollProbeDirection = "down" | "up";
+
 export interface ChatScrollProbeOptions {
+    /**
+     * "down": reset to top, scroll down (and optionally back).
+     * "up": start from the current position and emulate a scrollbar-thumb drag
+     * to the top, where scrollTop follows thumbRatio * current maxScrollTop.
+     */
+    direction?: ChatScrollProbeDirection;
     durationMs?: number;
     includeReturnTrip?: boolean;
     settleFrameCount?: number;
@@ -30,6 +38,13 @@ export interface ChatScrollProbeResult extends ChatScrollFrameSummary {
     averageBlankViewportRatio: number;
     maxBlankViewportRatio: number;
     minVisibleMessageCount: number;
+    direction: ChatScrollProbeDirection;
+    /** Frames where the thumb ratio moved against the drag direction. */
+    thumbReverseJumpCount: number;
+    maxThumbReverseJumpRatio: number;
+    /** Frames where scrollTop was changed by someone else between our writes. */
+    externalScrollAdjustCount: number;
+    maxExternalScrollAdjustPx: number;
     warning?: string;
 }
 
@@ -288,20 +303,100 @@ async function runScrollPass(
     });
 }
 
+interface ThumbDragStats {
+    reverseJumpCount: number;
+    maxReverseJumpRatio: number;
+    externalAdjustCount: number;
+    maxExternalAdjustPx: number;
+}
+
+async function runThumbDragUpPass(
+    container: HTMLElement,
+    durationMs: number,
+    frameDurations: number[],
+    lastFrameAtRef: { current: number | null },
+    observeMaxScrollTop: () => void,
+    recordViewportSample: () => void,
+    stats: ThumbDragStats,
+): Promise<void> {
+    const getMaxScrollTop = () =>
+        Math.max(0, container.scrollHeight - container.clientHeight);
+    const startMax = getMaxScrollTop();
+    const startRatio = startMax > 0 ? container.scrollTop / startMax : 0;
+    let lastWrittenScrollTop: number | null = null;
+    let lastObservedRatio = startRatio;
+
+    await new Promise<void>((resolve) => {
+        let passStartedAt = 0;
+
+        const step = (now: number) => {
+            if (passStartedAt === 0) {
+                passStartedAt = now;
+            }
+            if (lastFrameAtRef.current !== null) {
+                frameDurations.push(now - lastFrameAtRef.current);
+            }
+            lastFrameAtRef.current = now;
+            observeMaxScrollTop();
+
+            const maxScrollTop = getMaxScrollTop();
+            const currentScrollTop = container.scrollTop;
+            if (lastWrittenScrollTop !== null) {
+                const adjust = Math.abs(currentScrollTop - lastWrittenScrollTop);
+                if (adjust > 1) {
+                    stats.externalAdjustCount += 1;
+                    stats.maxExternalAdjustPx = Math.max(stats.maxExternalAdjustPx, adjust);
+                }
+            }
+            const observedRatio = maxScrollTop > 0 ? currentScrollTop / maxScrollTop : 0;
+            const reverse = observedRatio - lastObservedRatio;
+            if (reverse > 0.002) {
+                stats.reverseJumpCount += 1;
+                stats.maxReverseJumpRatio = Math.max(stats.maxReverseJumpRatio, reverse);
+            }
+
+            const progress = Math.min(1, (now - passStartedAt) / durationMs);
+            const thumbRatio = startRatio * (1 - progress);
+            const target = thumbRatio * maxScrollTop;
+            container.scrollTop = target;
+            lastWrittenScrollTop = container.scrollTop;
+            lastObservedRatio = maxScrollTop > 0 ? lastWrittenScrollTop / maxScrollTop : 0;
+            recordViewportSample();
+
+            if (progress >= 1) {
+                resolve();
+                return;
+            }
+            requestAnimationFrame(step);
+        };
+
+        requestAnimationFrame(step);
+    });
+}
+
 export async function runScrollPerformanceProbe(
     container: HTMLElement,
     options: ChatScrollProbeOptions = {},
 ): Promise<ChatScrollProbeResult> {
     const {
+        direction = "down",
         durationMs = 2200,
         includeReturnTrip = true,
         settleFrameCount = 4,
     } = options;
+    const thumbStats: ThumbDragStats = {
+        reverseJumpCount: 0,
+        maxReverseJumpRatio: 0,
+        externalAdjustCount: 0,
+        maxExternalAdjustPx: 0,
+    };
 
     await waitForAnimationFrames(settleFrameCount);
-    await resetScrollPosition(container, {
-        frameCount: Math.max(2, settleFrameCount),
-    });
+    if (direction === "down") {
+        await resetScrollPosition(container, {
+            frameCount: Math.max(2, settleFrameCount),
+        });
+    }
 
     const startScrollTop = container.scrollTop;
     const maxScrollTop = Math.max(
@@ -341,6 +436,11 @@ export async function runScrollPerformanceProbe(
             averageBlankViewportRatio: 0,
             maxBlankViewportRatio: 0,
             minVisibleMessageCount: 0,
+            direction,
+            thumbReverseJumpCount: 0,
+            maxThumbReverseJumpRatio: 0,
+            externalScrollAdjustCount: 0,
+            maxExternalScrollAdjustPx: 0,
             warning: "Scroll container does not overflow; no scroll probe was run.",
         };
     }
@@ -372,18 +472,30 @@ export async function runScrollPerformanceProbe(
     const startedAt = performance.now();
 
     try {
-        await runScrollPass(
-            container,
-            0,
-            maxScrollTop,
-            durationMs,
-            frameDurations,
-            lastFrameAtRef,
-            observeMaxScrollTop,
-            recordViewportSample,
-        );
+        if (direction === "up") {
+            await runThumbDragUpPass(
+                container,
+                durationMs,
+                frameDurations,
+                lastFrameAtRef,
+                observeMaxScrollTop,
+                recordViewportSample,
+                thumbStats,
+            );
+        } else {
+            await runScrollPass(
+                container,
+                0,
+                maxScrollTop,
+                durationMs,
+                frameDurations,
+                lastFrameAtRef,
+                observeMaxScrollTop,
+                recordViewportSample,
+            );
+        }
 
-        if (includeReturnTrip) {
+        if (includeReturnTrip && direction === "down") {
             await runScrollPass(
                 container,
                 maxScrollTop,
@@ -432,5 +544,10 @@ export async function runScrollPerformanceProbe(
             minVisibleMessageCount === Number.POSITIVE_INFINITY
                 ? 0
                 : minVisibleMessageCount,
+        direction,
+        thumbReverseJumpCount: thumbStats.reverseJumpCount,
+        maxThumbReverseJumpRatio: roundToTwo(thumbStats.maxReverseJumpRatio * 100) / 100,
+        externalScrollAdjustCount: thumbStats.externalAdjustCount,
+        maxExternalScrollAdjustPx: roundToTwo(thumbStats.maxExternalAdjustPx),
     };
 }

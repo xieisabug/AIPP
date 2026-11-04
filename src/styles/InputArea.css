@@ -17,31 +17,58 @@
     display: flex;
     flex-direction: row;
     justify-content: flex-start;
-    align-content: center;
+    align-items: stretch;
     flex-wrap: wrap;
+    gap: 8px;
+}
+
+.input-area-attachment-tray {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.input-area-attachment-tray-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 2px;
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+}
+
+.input-area-attachment-preview {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    min-width: 0;
+    flex: 1;
+    gap: 4px;
+    height: 100%;
 }
 
 .input-area-img-wrapper {
     position: relative;
-    margin-left: 10px;
-    margin-top: 10px;
     border: 1px solid hsl(var(--border));
     border-radius: 10px;
     overflow: hidden;
     cursor: pointer;
-    height: 70px;
-    width: 70px;
+    height: 64px;
+    width: 64px;
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
 }
 
 .input-area-text-wrapper {
     position: relative;
-    margin-left: 10px;
-    margin-top: 10px;
-    width: 120px;
-    height: 30px;
+    min-width: 132px;
+    max-width: 200px;
+    min-height: 44px;
+    height: auto;
     font-size: 12px;
     background-color: hsl(var(--background));
     border: 1px solid hsl(var(--primary));
@@ -49,29 +76,66 @@
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    padding: 5px;
+    padding: 6px 36px 6px 8px;
     cursor: pointer;
+    box-sizing: border-box;
 }
 
-.input-area-text-wrapper span {
+.input-area-attachment-name {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 90px;
+    max-width: 96px;
     display: inline-block;
-    padding-left: 5px;
+    padding-left: 2px;
+    color: hsl(var(--foreground));
 }
 
+.input-area-attachment-type {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: hsl(var(--muted-foreground));
+    background: hsl(var(--muted));
+    border-radius: 999px;
+    padding: 1px 6px;
+}
+
+.input-area-attachment-icon {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    color: hsl(var(--foreground));
+}
+
+/* Desktop: remove stays hover-revealed. Touch/mobile: always visible (see .mobile / platform rules). */
 .input-area-img-delete-button {
     position: absolute;
     top: 0;
     right: 0;
     display: none;
+    z-index: 2;
 }
 
-.input-area-img-wrapper:hover>.input-area-img-delete-button,
-.input-area-text-wrapper:hover>.input-area-img-delete-button {
+.input-area-img-wrapper:hover > .input-area-img-delete-button,
+.input-area-text-wrapper:hover > .input-area-img-delete-button {
     display: flex;
+}
+
+.input-area.mobile .input-area-img-delete-button,
+.aipp-mobile-platform .input-area-img-delete-button {
+    display: flex !important;
+    min-width: 44px;
+    min-height: 44px;
+    width: 44px;
+    height: 44px;
+    top: -4px;
+    right: -4px;
+    align-items: center;
+    justify-content: center;
+    background: hsl(var(--background) / 0.92);
+    border-radius: 999px;
 }
 
 .input-area-img {
@@ -102,39 +166,118 @@
     transition: height 0.2s;
 }
 
-/* 移动端输入框样式 - 使用 .mobile 类控制 */
+/*
+ * 移动端输入框：底部栏占位 + 胶囊自适应高度（48px 起，约 30vh 封顶），按钮贴胶囊底边。
+ * --aipp-composer-grow 由 InputArea 写入（胶囊超出 48px 的增量），用来同步撑高底部栏，
+ * 让消息列表（flex 兄弟节点）随之收缩，不被多行输入遮挡。
+ * 键盘避让由 MobileShell 把整个壳体收缩到 visualViewport 完成，这里不再叠加键盘 inset，避免双重偏移。
+ */
+.input-area.mobile.bottom {
+    position: relative;
+    bottom: auto;
+    /* 12 顶边距 + 48 胶囊 + 12 底边距 + safe-area；有附件时由 tray 撑开高度 */
+    flex: 0 0 auto;
+    width: 100%;
+    height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+    box-sizing: border-box;
+}
+
+.input-area.mobile.bottom.has-attachments {
+    height: auto;
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+    /* 为绝对定位胶囊/按钮预留底部空间，托盘内容在其上方 */
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+}
+
+.input-area.mobile.bottom .input-area-attachment-tray {
+    position: relative;
+    z-index: 11;
+    padding: 8px 12px 4px;
+    /* 独立托盘：不被 48px 胶囊 overflow 裁切 */
+    max-height: min(36vh, 220px);
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: hsl(var(--background) / 0.96);
+    border-top: 1px solid hsl(var(--border));
+}
+
 .input-area.mobile.bottom .input-area-textarea-container {
     left: 12px;
-    right: 12px;
-    bottom: 12px;
-    min-height: 50px;
-    border-radius: 25px;
-    padding: 0 55px 0 45px;
+    /* 右侧留给 44px 发送钮 + 间距；!important 防止桌面 inline right 残留 */
+    right: 64px !important;
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    /* 底边锚定、向上生长：高度由 textarea 内容决定（JS 写入 textarea 高度），附件已移出胶囊 */
+    height: auto !important;
+    min-height: 48px !important;
+    max-height: none;
+    border-radius: 24px;
+    /* 左侧给 44px「+」留白 */
+    padding: 0 12px 0 56px !important;
+    opacity: 1;
+    display: flex;
+    align-items: flex-end;
+    overflow: hidden;
 }
 
 .input-area.mobile .input-area-textarea {
-    padding: 12px 5px 8px 5px;
-    font-size: 15px;
-    height: 50px;
+    /* 单行：10 + 24 + 10 = 44 = 48 - 2*2 边框；多行时由 JS 增高，超过 30vh 内部滚动 */
+    padding: 10px 4px;
+    /* 16px 避免部分 WebView 聚焦时强制缩放 */
+    font-size: 16px;
+    height: 44px;
+    min-height: 44px !important;
+    max-height: 30vh;
+    line-height: 24px;
+    overflow-y: auto;
+    margin: 0;
 }
 
-/* 移动端发送按钮 - 覆盖 large 尺寸，改为更小的尺寸 */
+/*
+ * 发送钮 44×44，贴胶囊底边（胶囊向上生长时按钮保持在底部）：
+ * capsule bottom = 12+safe → button bottom = 12+safe + (48-44)/2 = 14+safe
+ */
 .input-area.mobile.bottom .input-area-send-button {
-    bottom: 45px;
-    right: 16px;
+    position: absolute !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    right: 12px !important;
+    left: auto !important;
     height: 44px !important;
     width: 44px !important;
+    min-height: 44px !important;
+    min-width: 44px !important;
     border-radius: 22px !important;
 }
 
-/* 移动端添加按钮 */
+/*
+ * 「+」≥44×44（AGENTS-mobile / LeaderAI #158），贴胶囊底边：
+ * button bottom = 12+safe + (48-44)/2 = 14+safe
+ */
 .input-area.mobile.bottom .input-area-add-button {
-    bottom: 54px;
-    left: 20px;
-    right: auto;
-    height: 28px !important;
-    width: 28px !important;
-    border-radius: 14px !important;
+    position: absolute !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    left: 14px !important;
+    right: auto !important;
+    height: 44px !important;
+    width: 44px !important;
+    min-height: 44px !important;
+    min-width: 44px !important;
+    border-radius: 22px !important;
+}
+
+/* 视觉圆环从 44px 缩为 40px，外层保留 44px 点击范围。 */
+.input-area.mobile.bottom .input-area-add-button {
+    border-color: transparent;
+    background: transparent;
+}
+.input-area.mobile.bottom .input-area-add-button::before {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    border: 1px solid hsl(var(--primary));
+    border-radius: 50%;
+    pointer-events: none;
 }
 
 .input-area-textarea {
@@ -174,6 +317,41 @@
     right: 190px;
 }
 
+.bottom .input-area-plan-mode-button {
+    position: fixed;
+    bottom: 80px;
+    right: 230px;
+    z-index: 20;
+}
+
+.bottom .input-area-textarea-container.has-plan-mode {
+    padding-right: 128px;
+}
+
+.input-area.mobile.bottom .input-area-plan-mode-button {
+    position: absolute !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    left: 20px !important;
+    right: auto !important;
+    /* 触控目标 ≥44px，与「+」/发送钮同高、同底边 */
+    height: 44px;
+    min-height: 44px;
+    border-radius: 22px;
+    width: auto;
+    padding-left: 8px;
+    padding-right: 8px;
+    font-size: 12px;
+    z-index: 20;
+}
+
+.input-area.mobile.bottom.has-plan-mode .input-area-add-button {
+    left: 96px !important;
+}
+
+.input-area.mobile.bottom.has-plan-mode .input-area-textarea-container {
+    padding-left: 148px !important;
+}
+
 .top .input-area-send-button {
     position: absolute;
     bottom: 10px;
@@ -184,6 +362,17 @@
     position: absolute;
     bottom: 10px;
     right: 62px;
+}
+
+.top .input-area-plan-mode-button {
+    position: absolute;
+    bottom: 10px;
+    right: 102px;
+    z-index: 20;
+}
+
+.top.has-plan-mode .input-area-textarea {
+    padding-right: 168px;
 }
 
 /* Unified completion list base styles */
@@ -541,4 +730,38 @@
     overflow: hidden;
     text-overflow: ellipsis;
     text-align: right;
+}
+
+/*
+ * 移动端补全弹窗：不跟随光标 x（360px 屏会溢出），改为横向铺满、紧贴输入栏上方，
+ * 高度受可视区限制并内部滚动；条目 ≥44px 触控高度。!important 覆盖组件的 inline left/bottom。
+ */
+.input-area.mobile .completion-bang-list,
+.input-area.mobile .assistant-completion-list,
+.input-area.mobile .artifact-completion-list,
+.input-area.mobile .slash-completion-list {
+    left: 12px !important;
+    right: 12px !important;
+    top: auto !important;
+    bottom: calc(100% + 4px) !important;
+    min-width: 0;
+    max-width: none;
+    max-height: min(320px, calc(var(--aipp-vv-height, 100dvh) * 0.4));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+.input-area.mobile .completion-bang-container,
+.input-area.mobile .assistant-completion-item,
+.input-area.mobile .completion-artifact-container,
+.input-area.mobile .slash-completion-item {
+    min-height: 44px;
+}
+
+.input-area.mobile .assistant-completion-item,
+.input-area.mobile .completion-artifact-container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }

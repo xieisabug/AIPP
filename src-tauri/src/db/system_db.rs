@@ -23,6 +23,15 @@ pub struct SecureConfigEntry {
     pub updated_time: Option<String>,
 }
 
+/// Seed values written by `init_feature_config` (feature `conversation_summary`).
+/// Sync uses them to recognise a device that only has defaults.
+pub const DEFAULT_SUMMARY_LENGTH: &str = "100";
+pub const DEFAULT_SUMMARY_PROMPT: &str = "请根据提供的大模型问答对话,总结一个简洁明了的标题。标题要求:
+- 字数在5-15个字左右，必须是中文，不要包含标点符号
+- 准确概括对话的核心主题，尽量贴近用户的提问
+- 不要透露任何私人信息
+- 用祈使句或陈述句";
+
 pub struct SystemDatabase {
     pub conn: Connection,
 }
@@ -189,29 +198,6 @@ impl SystemDatabase {
     }
 
     // 查询特定模块的所有配置
-    #[instrument(level = "debug", skip(self), fields(feature_code))]
-    fn get_feature_config_by_module(&self, feature_code: &str) -> Result<Vec<FeatureConfig>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, feature_code, key, value, data_type, description
-             FROM feature_config WHERE feature_code = ?1",
-        )?;
-        let configs = stmt
-            .query_map(params![feature_code], |row| {
-                Ok(FeatureConfig {
-                    id: Some(row.get(0)?),
-                    feature_code: row.get(1)?,
-                    key: row.get(2)?,
-                    value: row.get(3)?,
-                    data_type: row.get(4)?,
-                    description: row.get(5)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        trace!(count = configs.len(), "Fetched feature configs by module");
-        Ok(configs)
-    }
-
-    // 查询特定模块的所有配置
     #[instrument(level = "debug", skip(self))]
     pub fn get_all_feature_config(&self) -> Result<Vec<FeatureConfig>> {
         let mut stmt = self.conn.prepare(
@@ -282,7 +268,7 @@ impl SystemDatabase {
             id: None,
             feature_code: "conversation_summary".to_string(),
             key: "summary_length".to_string(),
-            value: "100".to_string(),
+            value: DEFAULT_SUMMARY_LENGTH.to_string(),
             data_type: "string".to_string(),
             description: Some("对话总结使用长度".to_string()),
         })?;
@@ -290,12 +276,7 @@ impl SystemDatabase {
             id: None,
             feature_code: "conversation_summary".to_string(),
             key: "prompt".to_string(),
-            value: "请根据提供的大模型问答对话,总结一个简洁明了的标题。标题要求:
-- 字数在5-15个字左右，必须是中文，不要包含标点符号
-- 准确概括对话的核心主题，尽量贴近用户的提问
-- 不要透露任何私人信息
-- 用祈使句或陈述句"
-                .to_string(),
+            value: DEFAULT_SUMMARY_PROMPT.to_string(),
             data_type: "string".to_string(),
             description: Some("对话总结使用长度".to_string()),
         })?;

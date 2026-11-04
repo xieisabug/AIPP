@@ -1,9 +1,6 @@
-use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai::types::McpOverrideConfig;
 use crate::api::ai_api::sanitize_tool_name;
 use crate::db::conversation_db::Repository;
-use crate::db::mcp_db::MCPToolCall;
-use crate::utils::window_utils::send_conversation_event_to_chat_windows;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -16,44 +13,22 @@ type ConversationMcpState = Arc<Mutex<HashMap<i64, u32>>>;
 
 static CONVERSATION_MCP_DEPTH: OnceLock<ConversationMcpState> = OnceLock::new();
 
-/// 构建并广播 MCP 工具调用状态更新事件
-fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCPToolCall) {
-    let parse_ts = |s: &str| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .unwrap_or_else(|_| chrono::Utc::now().into())
-            .with_timezone(&chrono::Utc)
-    };
-
-    let update_event = ConversationEvent {
-        r#type: "mcp_tool_call_update".to_string(),
-        data: serde_json::to_value(MCPToolCallUpdateEvent {
-            call_id: tool_call.id,
-            conversation_id: tool_call.conversation_id,
-            message_id: tool_call.message_id,
-            status: tool_call.status.clone(),
-            llm_call_id: tool_call.llm_call_id.clone(),
-            server_name: Some(tool_call.server_name.clone()),
-            tool_name: Some(tool_call.tool_name.clone()),
-            parameters: Some(tool_call.parameters.clone()),
-            result: tool_call.result.clone(),
-            error: tool_call.error.clone(),
-            started_time: tool_call.started_time.as_deref().map(parse_ts),
-            finished_time: tool_call.finished_time.as_deref().map(parse_ts),
-        })
-        .unwrap(),
-    };
-
-    send_conversation_event_to_chat_windows(app_handle, tool_call.conversation_id, update_event);
-}
-
 const MAX_MCP_RECURSION_DEPTH: u32 = 3;
 
-fn should_auto_run_tool(
+pub(crate) fn should_auto_run_tool(
     mcp_override_config: Option<&McpOverrideConfig>,
     server_name: &str,
     tool_name: &str,
     default_auto_run: bool,
+    server_command: Option<&str>,
 ) -> bool {
+    // ask_user_question / preview_* are themselves the user-facing interaction.
+    // They must never sit in pending waiting for a separate "run" permission click.
+    if server_command == Some("aipp:ui_interaction")
+        && matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file")
+    {
+        return true;
+    }
     if let Some(all_auto_run) = mcp_override_config.and_then(|cfg| cfg.all_tool_auto_run) {
         return all_auto_run;
     }
@@ -72,6 +47,56 @@ fn should_auto_run_tool(
     }
 
     default_auto_run
+}
+
+#[cfg(test)]
+mod auto_run_tests {
+    use super::*;
+
+    #[test]
+    fn test_builtin_ui_interaction_tools_auto_run_even_when_disabled_by_config() {
+        let override_config = McpOverrideConfig {
+            all_tool_auto_run: Some(false),
+            tool_auto_run: None,
+            use_native_toolcall: None,
+            tool_call_timeout: None,
+        };
+        assert!(should_auto_run_tool(
+            Some(&override_config),
+            "UI交互工具",
+            "preview_code",
+            false,
+            Some("aipp:ui_interaction"),
+        ));
+        assert!(should_auto_run_tool(
+            Some(&override_config),
+            "UI交互工具",
+            "preview_file",
+            false,
+            Some("aipp:ui_interaction"),
+        ));
+        assert!(should_auto_run_tool(
+            Some(&override_config),
+            "UI交互工具",
+            "ask_user_question",
+            false,
+            Some("aipp:ui_interaction"),
+        ));
+        assert!(!should_auto_run_tool(
+            Some(&override_config),
+            "other",
+            "preview_code",
+            false,
+            Some("external-command"),
+        ));
+        assert!(!should_auto_run_tool(
+            Some(&override_config),
+            "other",
+            "preview_file",
+            false,
+            Some("external-command"),
+        ));
+    }
 }
 
 #[instrument(level = "debug", skip(app_handle, window, content), fields(conversation_id, message_id, content_len = content.len()))]
@@ -101,12 +126,18 @@ pub async fn detect_and_process_mcp_calls(
         let mcp_regex = regex::Regex::new(r"<mcp_tool_call>\s*<server_name>([^<]*)</server_name>\s*<tool_name>([^<]*)</tool_name>\s*<parameters>([\s\S]*?)</parameters>\s*</mcp_tool_call>").unwrap();
         let mut updated_content: Option<String> = None;
         let mut temp_content = content.to_string();
+        let mut auto_run_ids = Vec::new();
 
         // 处理所有匹配的 MCP 调用，支持多工具并发执行
         for cap in mcp_regex.captures_iter(content) {
             let server_name = cap[1].trim().to_string();
             let tool_name = cap[2].trim().to_string();
             let parameters = cap[3].trim().to_string();
+            let projected =
+                crate::mcp::execution_api::project_call_mcp_tool(&tool_name, &parameters);
+            let (record_server, record_tool, record_params) = projected.clone().unwrap_or_else(|| {
+                (server_name.clone(), tool_name.clone(), parameters.clone())
+            });
 
             debug!(server = %server_name, tool = %tool_name, "Detected MCP call in message");
 
@@ -117,9 +148,9 @@ pub async fn detect_and_process_mcp_calls(
                     .and_then(|calls| {
                         calls.into_iter().find(|c| {
                             c.message_id == Some(message_id)
-                                && c.server_name == server_name
-                                && c.tool_name == tool_name
-                                && c.parameters.trim() == parameters.trim()
+                                && c.server_name == record_server
+                                && c.tool_name == record_tool
+                                && c.parameters.trim() == record_params.trim()
                         })
                     })
             };
@@ -131,9 +162,9 @@ pub async fn detect_and_process_mcp_calls(
                     app_handle.clone(),
                     conversation_id,
                     Some(message_id),
-                    server_name.clone(),
-                    tool_name.clone(),
-                    parameters.clone(),
+                    record_server.clone(),
+                    record_tool.clone(),
+                    record_params.clone(),
                     None,
                     None,
                 )
@@ -145,16 +176,19 @@ pub async fn detect_and_process_mcp_calls(
                     debug!(call_id = tool_call.id, "Created MCP tool call");
 
                     // 将 MCP 标签替换为包含 call_id 的 UI 注释，确保前端能正确匹配工具调用的状态
-                    let ui_hint = format!(
-                        "<!-- MCP_TOOL_CALL:{} -->",
-                        json!({
-                            "server_name": server_name,
-                            "tool_name": tool_name,
-                            "parameters": parameters,
-                            "call_id": tool_call.id,
-                            "llm_call_id": tool_call.llm_call_id,
-                        })
-                    );
+                    let mut hint_payload = json!({
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "parameters": parameters,
+                        "call_id": tool_call.id,
+                        "llm_call_id": tool_call.llm_call_id,
+                    });
+                    if let Some((display_server, display_tool, display_parameters)) = &projected {
+                        hint_payload["display_server_name"] = json!(display_server);
+                        hint_payload["display_tool_name"] = json!(display_tool);
+                        hint_payload["display_parameters"] = json!(display_parameters);
+                    }
+                    let ui_hint = format!("<!-- MCP_TOOL_CALL:{} -->", hint_payload);
                     // 替换当前内容中的第一个匹配（使用 temp_content 累积更新）
                     temp_content = mcp_regex.replacen(&temp_content, 1, &ui_hint).to_string();
                     updated_content = Some(temp_content.clone());
@@ -174,63 +208,60 @@ pub async fn detect_and_process_mcp_calls(
                                     {
                                         Ok(mcp_info) => {
                                             let servers_with_tools = mcp_info.enabled_servers;
-                                            let mut should_auto_run = false;
+                                            let mut legacy_auto_run = false;
                                             for s in servers_with_tools.iter() {
                                                 // 支持精确匹配和清理后名称匹配
-                                                let name_matches = s.name == server_name
-                                                    || sanitize_tool_name(&s.name) == server_name;
+                                                let name_matches = s.name == record_server
+                                                    || sanitize_tool_name(&s.name) == record_server;
                                                 if name_matches && s.is_enabled {
-                                                    if let Some(tool) = s.tools.iter().find(|t| t.name == tool_name && t.is_enabled) {
+                                                    if let Some(tool) = s.tools.iter().find(|t| t.name == record_tool && t.is_enabled) {
                                                         let auto_run = should_auto_run_tool(
                                                             mcp_override_config,
-                                                            &server_name,
-                                                            &tool_name,
+                                                            &record_server,
+                                                            &record_tool,
                                                             tool.is_auto_run,
+                                                            s.command.as_deref(),
                                                         );
                                                         if auto_run {
-                                                            should_auto_run = true;
+                                                            legacy_auto_run = true;
                                                         }
                                                     }
                                                 }
                                             }
 
-                                            if should_auto_run {
-                                                let app_handle_clone = app_handle.clone();
-                                                let window_clone = window.clone();
-                                                let tool_call_id = tool_call.id;
-                                                tauri::async_runtime::spawn_blocking(move || {
-                                                    let app_handle_for_state = app_handle_clone.clone();
-                                                    tauri::async_runtime::block_on(async move {
-                                                        let state =
-                                                            app_handle_for_state.state::<crate::AppState>();
-                                                        let feature_config_state =
-                                                            app_handle_for_state
-                                                                .state::<crate::FeatureConfigState>();
-                                                        if let Err(e) =
-                                                            crate::mcp::execution_api::execute_mcp_tool_call(
-                                                                app_handle_clone,
-                                                                state,
-                                                                feature_config_state,
-                                                                window_clone,
-                                                                tool_call_id,
-                                                                true, // trigger_continuation
-                                                            )
-                                                            .await
-                                                        {
-                                                            error!(
-                                                                call_id = tool_call_id,
-                                                                error = %e,
-                                                                "Auto-execute MCP tool failed"
-                                                            );
-                                                        }
-                                                    });
-                                                });
-                                            } else {
+                                            if crate::mcp::tool_review::should_auto_execute_after_review(
+                                                app_handle,
+                                                assistant_id,
+                                                conversation_id,
+                                                tool_call.id,
+                                                &record_server,
+                                                &record_tool,
+                                                &record_params,
+                                                legacy_auto_run,
+                                            )
+                                            .await
+                                            {
+                                                auto_run_ids.push(tool_call.id);
+                                            } else if !legacy_auto_run {
                                                 debug!(server = %server_name, tool = %tool_name, "MCP tool auto-run disabled");
                                             }
                                         }
                                         Err(e) => {
                                             warn!(error = %e, "Failed to load MCP configs for auto-run");
+                                            if crate::mcp::tool_review::should_auto_execute_after_review(
+                                                app_handle,
+                                                assistant_id,
+                                                conversation_id,
+                                                tool_call.id,
+                                                &record_server,
+                                                &record_tool,
+                                                &record_params,
+                                                false,
+                                            )
+                                            .await
+                                            {
+                                                auto_run_ids.push(tool_call.id);
+                                            }
                                         }
                                     }
                                 }
@@ -242,6 +273,22 @@ pub async fn detect_and_process_mcp_calls(
                     error!(error = %e, "Failed to create MCP tool call");
                 }
             }
+        }
+
+        // Register the whole round before a fast auto-run tool can finish and continue.
+        for tool_call_id in auto_run_ids {
+            let app = app_handle.clone();
+            let window = window.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                tauri::async_runtime::block_on(async move {
+                    if let Err(error) = crate::mcp::execution_api::execute_mcp_tool_call(
+                        app.clone(), app.state::<crate::AppState>(),
+                        app.state::<crate::FeatureConfigState>(), window, tool_call_id, true,
+                    ).await {
+                        error!(call_id = tool_call_id, error = %error, "Auto-execute MCP tool failed");
+                    }
+                });
+            });
         }
 
         // 如果没有检测到任何工具调用，输出日志

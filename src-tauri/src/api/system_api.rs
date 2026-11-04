@@ -11,6 +11,17 @@ use crate::FeatureConfigState;
 
 use crate::db::system_db::{FeatureConfig, SystemDatabase};
 
+/// 移动端不支持功能的统一错误前缀，前端可据此识别并给出一致提示
+// 注意：仅在 cfg(mobile) / 非桌面端的代码路径中使用，桌面端编译会报 dead_code，故保留并豁免。
+#[allow(dead_code)]
+pub const MOBILE_UNSUPPORTED_PREFIX: &str = "MOBILE_UNSUPPORTED";
+
+/// 生成统一的"移动端不支持"错误信息
+#[allow(dead_code)]
+pub fn mobile_unsupported_error(feature: &str) -> String {
+    format!("{MOBILE_UNSUPPORTED_PREFIX}: {feature} 不支持移动平台")
+}
+
 #[derive(Serialize)]
 pub struct ExperimentalSummaryTaskStatus {
     pub mcp_running: bool,
@@ -245,6 +256,11 @@ pub async fn conversation_has_feishu_target(
 
 #[tauri::command]
 pub async fn open_data_folder(app: tauri::AppHandle) -> Result<(), String> {
+    // 移动端没有系统文件管理器可调起（open::that 会尝试 exec 进程并 EACCES）
+    if cfg!(mobile) {
+        let _ = &app;
+        return Err(mobile_unsupported_error("打开数据文件夹"));
+    }
     let app_dir = app.path().app_data_dir().unwrap();
     let db_path = app_dir.join("db");
     if let Err(e) = open::that(db_path) {
@@ -352,7 +368,43 @@ pub async fn copy_image_to_clipboard(image_data: String) -> Result<(), String> {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[tauri::command]
 pub async fn copy_image_to_clipboard(_image_data: String) -> Result<(), String> {
-    Err("Clipboard image copy is not supported on mobile platforms".to_string())
+    Err(mobile_unsupported_error("剪贴板图片复制"))
+}
+
+/// 获取当前运行平台
+///
+/// 返回 "windows" / "macos" / "linux" / "android" / "ios"，
+/// 用于前端区分"移动平台"与"窄屏布局"（窄屏判断见前端 useIsMobile）。
+#[tauri::command]
+pub async fn get_platform() -> Result<String, String> {
+    // 桌面调试用：允许用环境变量强制平台，便于验证移动能力门禁与单 WebView 壳（不改变编译期 cfg）。
+    // 仅 debug 构建生效，release 包不受环境变量影响
+    if cfg!(debug_assertions) {
+        if let Ok(forced) = std::env::var("AIPP_FORCE_PLATFORM") {
+            let forced = forced.trim().to_ascii_lowercase();
+            if matches!(
+                forced.as_str(),
+                "android" | "ios" | "windows" | "macos" | "linux" | "unknown"
+            ) {
+                return Ok(forced);
+            }
+        }
+    }
+
+    let platform = if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unknown"
+    };
+    Ok(platform.to_string())
 }
 
 /// 获取开机自启动状态
@@ -401,7 +453,7 @@ pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), S
     }
     #[cfg(mobile)]
     {
-        Err("Autostart is not supported on mobile platforms".to_string())
+        Err(mobile_unsupported_error("开机自启动"))
     }
 }
 
@@ -471,4 +523,14 @@ pub async fn open_image(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod mobile_unsupported_tests {
+    #[test]
+    fn mobile_unsupported_error_has_stable_prefix_and_feature() {
+        let msg = super::mobile_unsupported_error("打开数据文件夹");
+        assert!(msg.starts_with("MOBILE_UNSUPPORTED: "));
+        assert!(msg.contains("打开数据文件夹"));
+    }
 }
