@@ -2,7 +2,7 @@ name: Release
 
 on:
     push:
-        tags: [v\d+\.\d+\.\d+]
+        tags: ['v[0-9]+.[0-9]+.[0-9]+']
     workflow_dispatch:
 
 env:
@@ -14,6 +14,7 @@ jobs:
             contents: write
         runs-on: ubuntu-latest
         outputs:
+            version: ${{ steps.get_version.outputs.version }}
             release_id: ${{ steps.create-release.outputs.id }}
             release_upload_url: ${{ steps.create-release.outputs.upload_url }}
             release_body: "${{ steps.changelog.outputs.changelog }}"
@@ -129,18 +130,8 @@ jobs:
         steps:
             - uses: actions/checkout@v5
 
-            - name: Get version
-              id: get_version
-              shell: bash
-              run: |
-                  VERSION="${GITHUB_REF_NAME}"
-                  if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
-                      VERSION=$(git describe --tags --abbrev=0)
-                  fi
-                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
             - name: Setup pnpm
-              uses: pnpm/action-setup@v4
+              uses: pnpm/action-setup@v6
 
             - name: Setup Node.js
               uses: actions/setup-node@v5
@@ -185,6 +176,71 @@ jobs:
                   tauriScript: pnpm run tauri
                   args: --target ${{ matrix.target }}
 
+    build-android:
+        needs: create-release
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@v5
+            - uses: pnpm/action-setup@v6
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: pnpm
+            - uses: actions/setup-java@v5
+              with:
+                  distribution: temurin
+                  java-version: '17'
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: aarch64-linux-android
+            - uses: arduino/setup-protoc@v3
+              with:
+                  repo-token: ${{ secrets.GITHUB_TOKEN }}
+                  version: "26.1"
+
+            - name: Prepare Android tools and dependencies
+              run: |
+                  "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+                  echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+                  echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+                  chmod +x src-tauri/gen/android/gradlew
+                  pnpm install --frozen-lockfile
+                  cargo fetch --locked --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android
+
+            - name: Build ARM64 release APK
+              run: pnpm exec tauri android build --ci --apk --target aarch64 --split-per-abi
+
+            - name: Sign and verify APK
+              env:
+                  ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+                  ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+                  ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+                  ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+                  RELEASE_TAG: ${{ needs.create-release.outputs.version }}
+              run: |
+                  : "${ANDROID_KEYSTORE_BASE64:?Missing Android release keystore}" "${ANDROID_KEY_ALIAS:?Missing signing alias}"
+                  : "${ANDROID_KEYSTORE_PASSWORD:?Missing keystore password}" "${ANDROID_KEY_PASSWORD:?Missing key password}"
+                  umask 077
+                  keystore="$RUNNER_TEMP/aipp-release.keystore"
+                  trap 'rm -f "$keystore"' EXIT
+                  printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+                  tools="$ANDROID_HOME/build-tools/36.0.0"
+                  unsigned="src-tauri/gen/android/app/build/outputs/apk/arm64/release/app-arm64-release-unsigned.apk"
+                  apk="AIPP-$RELEASE_TAG-android-arm64.apk"
+                  "$tools/zipalign" -P 16 -f 4 "$unsigned" "$RUNNER_TEMP/aligned.apk"
+                  "$tools/apksigner" sign --ks "$keystore" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+                      --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+                      --out "$apk" "$RUNNER_TEMP/aligned.apk"
+                  "$tools/apksigner" verify --verbose "$apk"
+
+            - name: Upload signed APK to release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  RELEASE_TAG: ${{ needs.create-release.outputs.version }}
+              run: gh release upload "$RELEASE_TAG" "AIPP-$RELEASE_TAG-android-arm64.apk" --clobber
+
     # 生成并上传 latest.json 文件（带签名）
     generate-latest-json:
         needs: [create-release, build-tauri]
@@ -192,20 +248,10 @@ jobs:
             contents: write
         runs-on: ubuntu-latest
         outputs:
-            version: ${{ steps.get_version.outputs.version }}
+            version: ${{ needs.create-release.outputs.version }}
 
         steps:
             - uses: actions/checkout@v5
-
-            - name: Get version
-              id: get_version
-              shell: bash
-              run: |
-                  VERSION="${GITHUB_REF_NAME}"
-                  if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
-                      VERSION=$(git describe --tags --abbrev=0)
-                  fi
-                  echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
             - name: Get release assets and signatures
               id: get_assets
@@ -326,7 +372,7 @@ jobs:
                 URLS=$(cat urls.json)
 
                 # 获取版本号（去掉 v 前缀）
-                VERSION="${{ steps.get_version.outputs.version }}"
+                VERSION="${{ needs.create-release.outputs.version }}"
                 VERSION=${VERSION#v}
 
                 # 检查必需平台资源是否齐全
@@ -409,7 +455,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [create-release, build-tauri, generate-latest-json]
+        needs: [create-release, build-tauri, build-android, generate-latest-json]
 
         steps:
             - name: publish release

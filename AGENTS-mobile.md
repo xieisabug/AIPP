@@ -21,6 +21,19 @@
 - **Android 原生配置**：`src-tauri/gen/android/app/src/main/AndroidManifest.xml` 当前声明 `INTERNET` 权限，Activity 已配置 `windowSoftInputMode="adjustResize"`；尚无 deep link、系统分享接收（ACTION_SEND）和拍照（ACTION_IMAGE_CAPTURE）intent-filter。`POST_NOTIFICATIONS` 由 `tauri-plugin-notification` 自带 Manifest 合并进入最终清单（见 `app/build/intermediates/merged_manifest/**/AndroidManifest.xml`），但仓库内没有运行时请求权限的代码。应用为 `singleTask`，任何新增原生入口都必须同时处理冷启动 intent 与 `MainActivity.onNewIntent`，不能只接一头。修改原生权限与入口时需同步检查 Manifest、Tauri capability 和 Android 生命周期行为。
 - **HTTPS 初始化**：reqwest 0.13 的 Android 系统证书校验依赖 `MainActivity.onWebViewCreate` 调用 JNI 初始化，以及 Gradle 引入 Cargo 锁定版本附带的 `rustls-platform-verifier-android` AAR；缺少初始化会使请求线程 panic。更新依赖时须同步检查这条链路及 ProGuard 保留规则。
 
+### Android 发布包
+
+GitHub Actions 的 Release 工作流为 ARM64 手机生成 `AIPP-<tag>-android-arm64.apk`。APK 使用 release 配置构建，经签名验证后上传到同一份 GitHub Release 草稿。发布前需要在仓库的 Settings → Secrets and variables → Actions 中配置：
+
+| Repository secret | 内容 |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | Android 发布 keystore 文件的 Base64 内容 |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore 密码 |
+| `ANDROID_KEY_ALIAS` | 发布密钥的别名 |
+| `ANDROID_KEY_PASSWORD` | 该别名对应的私钥密码 |
+
+首次发布且尚无密钥时，在本机运行 `keytool -genkeypair -keystore aipp-release.p12 -storetype PKCS12 -alias aipp -keyalg RSA -keysize 3072 -validity 10000`，按提示设置密码。此方式的别名为 `aipp`，两个密码 secret 填同一个值。妥善备份 keystore，后续版本沿用同一发布密钥，已安装的发布版才能直接覆盖升级。
+
 ## 核心机制与已知坑
 
 ### 1. 移动端检测（重要，抽象有问题）
