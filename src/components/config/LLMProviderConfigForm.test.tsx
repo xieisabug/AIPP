@@ -28,8 +28,23 @@ describe("LLM provider field autosave", () => {
     function mount() {
         render(<LLMProviderConfigForm id="1" index={0} apiType="openai_api" name="test" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
     }
-    it("should show field errors and destination hints when the endpoint changes", async () => {
+    it("should show loading instead of an empty form when provider config has not loaded", async () => {
         mount();
+        expect(screen.getByText("加载中...")).toBeInTheDocument();
+        expect(screen.queryByLabelText("endpoint")).not.toBeInTheDocument();
+        await refresh();
+        expect(screen.queryByText("加载中...")).not.toBeInTheDocument();
+        expect(screen.getByLabelText("endpoint")).toHaveValue("remote");
+    });
+    it("should leave loading when provider config read fails", async () => {
+        mocks.invoke.mockImplementation((command: string) => command === "get_llm_provider_config" ? Promise.reject("db locked") : Promise.resolve([]));
+        mount();
+        await act(async () => { await expect(mocks.refresh!(() => true)).rejects.toBe("db locked"); });
+        expect(screen.queryByText("加载中...")).not.toBeInTheDocument();
+    });
+    it("should show field errors and destination hints when the endpoint changes", async () => {
+        mocks.invoke.mockImplementation((command: string) => command === "get_llm_provider_config" || command === "get_llm_models" ? Promise.resolve([]) : Promise.resolve());
+        mount(); await refresh();
         expect(screen.getByText("Endpoint 未填写，将使用该提供商的默认端点。")).toBeInTheDocument();
         const input = screen.getByLabelText("endpoint");
         fireEvent.change(input, { target: { value: "bad" } });

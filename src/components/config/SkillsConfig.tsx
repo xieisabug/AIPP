@@ -14,6 +14,7 @@ import {
     SidebarList,
     ListItemButton,
     EmptyState,
+    ConfigPageLoading,
     SelectOption
 } from "../common";
 
@@ -41,6 +42,8 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
     const [skillContent, setSkillContent] = useState<string>('');
     const [isLoading, setIsLoading] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
+    // 首次扫描完成前不渲染「暂无Skills」空状态
+    const [hasScanned, setHasScanned] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
@@ -75,6 +78,7 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             toast.error('扫描Skills失败: ' + e);
         } finally {
             setIsRefreshing(false);
+            setHasScanned(true);
         }
     }, [selectedSkill]);
 
@@ -508,6 +512,10 @@ const SkillsManager: React.FC<SkillsManagerProps> = ({ assistantId }) => {
             description="从左侧列表中选择一个Skill查看详情"
         />
     ), [selectedSkill, skillContent, isLoading, assistantId, isSkillEnabled, handleToggleSkill, handleOpenSkillFolder]);
+
+    if (!hasScanned) {
+        return <ConfigPageLoading />;
+    }
 
     // Empty state when no skills found
     if (skills.length === 0 && !isRefreshing) {

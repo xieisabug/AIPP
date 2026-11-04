@@ -214,7 +214,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                         </div>
                     </DialogHeader>
 
-                    <div className="flex-1 overflow-auto">
+                    <div className="flex-1 min-h-0 overflow-auto">
                         {allSkills.length === 0 ? (
                             <div className="text-center py-8">
                                 <Sparkles className="h-12 w-12 text-muted-foreground mx-auto mb-4" />

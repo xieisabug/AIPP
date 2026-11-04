@@ -368,8 +368,8 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                     />
                                 </div>
 
-                                <div className="flex items-center justify-between">
-                                    <div>
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="min-w-0">
                                         <Label>是否长期运行</Label>
                                         <p className="text-sm text-muted-foreground mt-1">长期运行的服务器会保持连接状态</p>
                                     </div>
@@ -428,8 +428,8 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                 )}
 
                                 {(formData.transport_type === 'http') && (
-                                    <div className="flex items-center justify-between">
-                                        <div>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="min-w-0">
                                             <Label>使用网络代理进行请求</Label>
                                             <p className="text-sm text-muted-foreground mt-1">启用后将使用全局网络代理配置</p>
                                         </div>

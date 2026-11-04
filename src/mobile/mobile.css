@@ -10,6 +10,14 @@
     padding-top: max(24px, env(safe-area-inset-top));
     padding-bottom: max(1rem, env(safe-area-inset-bottom));
 }
+/* Desktop p-6 wastes ~15% of a 360px screen on side gutters. */
+.aipp-mobile-platform [data-slot="dialog-content"] {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+}
+/* Header actions (e.g. refresh buttons) must not sit under the 44px close X. */
+.aipp-mobile-platform [data-slot="dialog-content"] > [data-slot="dialog-header"] { padding-right: 44px; }
+.aipp-mobile-platform [data-slot="dialog-content"] input[data-slot="input"] { min-height: 44px; }
 /* Built-in close X: keep it below the status bar with a 44px hit area. */
 .aipp-mobile-platform [data-slot="dialog-content"] > [data-slot="dialog-close"].absolute {
     top: max(24px, env(safe-area-inset-top)); right: max(.25rem, env(safe-area-inset-right));

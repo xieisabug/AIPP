@@ -356,7 +356,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                 <DialogHeader>
                     <DialogTitle>{editing ? "编辑内置工具" : "添加内置工具"}</DialogTitle>
                 </DialogHeader>
-                <div className="space-y-4 overflow-y-auto flex-1 min-h-0 px-4">
+                <div className="space-y-4 overflow-y-auto flex-1 min-h-0 px-1 sm:px-4">
                     {/* Template selector; hidden in edit mode */}
                     {!editing && (
                         <div className="space-y-2">
@@ -377,7 +377,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                     )}
 
                     {/* Readonly basics as plain text, name editable in edit mode */}
-                    <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                         <div>
                             <div className="text-muted-foreground">名称</div>
                             {editing ? (
@@ -397,13 +397,13 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                             <div className="text-muted-foreground">类型</div>
                             <div className="text-foreground">{editing ? "stdio" : selected?.transport_type ?? ""}</div>
                         </div>
-                        <div className="col-span-2">
+                        <div className="sm:col-span-2">
                             <div className="text-muted-foreground">描述</div>
                             <div className="text-foreground whitespace-pre-wrap">
                                 {editing ? initialDescription || "" : selected?.description ?? ""}
                             </div>
                         </div>
-                        <div className="col-span-2">
+                        <div className="sm:col-span-2">
                             <div className="text-muted-foreground">命令</div>
                             <div className="text-foreground break-all font-mono">
                                 {editing ? initialCommand || "" : selected?.command ?? ""}
@@ -430,7 +430,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
 
                     {/* Environment Variables */}
                     <div className="space-y-4">
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
                             <Label className="text-base font-semibold">环境变量配置</Label>
                             {!editing && selected?.required_envs?.some((e) => e.required) && (
                                 <div className="text-xs text-muted-foreground">
@@ -444,7 +444,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                         </div>
 
                         <Card className="shadow-none">
-                            <CardContent className="p-6">
+                            <CardContent className="p-4 sm:p-6">
                                 {templateForFields?.required_envs?.length ? (
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         {templateForFields.required_envs

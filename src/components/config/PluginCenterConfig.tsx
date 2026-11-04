@@ -51,7 +51,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { ConfigPageLayout, ListItemButton, SidebarList, type SelectOption } from "../common";
+import { ConfigPageLayout, ConfigPageLoading, ListItemButton, SidebarList, type SelectOption } from "../common";
 import { pluginRuntime } from "../../services/PluginRuntime";
 import PluginViewHost from "../plugin/PluginViewHost";
 import type { LoadedPlugin } from "../../services/PluginRuntime";
@@ -306,6 +306,8 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
     const [selectedPluginId, setSelectedPluginId] = useState<number | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [loading, setLoading] = useState(false);
+    // 首次读取插件列表完成前不渲染列表与「插件商店」占位
+    const [pluginsLoaded, setPluginsLoaded] = useState(false);
     const [configs, setConfigs] = useState<PluginConfigItem[]>([]);
     const [configLoading, setConfigLoading] = useState(false);
     const [newConfigKey, setNewConfigKey] = useState("");
@@ -393,9 +395,10 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
             await syncRuntimePlugins(true);
         } catch (error) {
             console.error("[PluginCenterConfig] Failed to load plugins:", error);
-            toast.error("加载插件列表失败");
+            toast.error(`加载插件列表失败: ${String(error)}`);
         } finally {
             setLoading(false);
+            setPluginsLoaded(true);
         }
     }, [syncRuntimePlugins]);
 
@@ -1452,15 +1455,19 @@ const PluginCenterConfig: React.FC<PluginCenterConfigProps> = ({ pluginList }) =
 
     return (
         <div className={isMobilePlatform ? "h-full [&_button]:min-h-11 [&_button]:min-w-11" : "h-full"}>
-            <ConfigPageLayout
-                sidebar={sidebar}
-                content={content}
-                showEmptyState={false}
-                selectOptions={selectOptions}
-                selectedOptionId={selectedPluginId ? String(selectedPluginId) : undefined}
-                onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
-                selectPlaceholder="选择插件"
-            />
+            {pluginsLoaded ? (
+                <ConfigPageLayout
+                    sidebar={sidebar}
+                    content={content}
+                    showEmptyState={false}
+                    selectOptions={selectOptions}
+                    selectedOptionId={selectedPluginId ? String(selectedPluginId) : undefined}
+                    onSelectOption={(optionId) => setSelectedPluginId(Number(optionId))}
+                    selectPlaceholder="选择插件"
+                />
+            ) : (
+                <ConfigPageLoading />
+            )}
             <Dialog open={installDialogOpen} onOpenChange={handleCloseInstallDialog}>
                 <DialogContent className={`flex h-[85vh] max-h-[85vh] flex-col overflow-hidden sm:max-w-5xl ${isMobilePlatform ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""}`}>
                     <DialogHeader>

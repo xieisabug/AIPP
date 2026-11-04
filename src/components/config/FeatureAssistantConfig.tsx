@@ -3,7 +3,7 @@ import { MessageSquare, Eye, FolderOpen, Settings, Wifi, Monitor, Keyboard, Powe
 import { useForm } from "react-hook-form";
 
 // 导入公共组件
-import { ConfigPageLayout, SidebarList, ListItemButton, SelectOption } from "../common";
+import { ConfigPageLayout, SidebarList, ListItemButton, ConfigPageLoading, SelectOption } from "../common";
 
 // 导入新的 hooks 和组件
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
@@ -150,6 +150,8 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
 
     // 使用新的 hooks
     const { featureConfig, saveFeatureConfig, loadFeatureConfig, loading } = useFeatureConfig();
+    // 首次读取并回填表单后才展示表单；之后保存触发的重新读取不再切回加载态
+    const [initialLoaded, setInitialLoaded] = useState(false);
     const versionManager = useVersionManager();
     const defaultAppShortcutValues = useMemo(() => {
         const values: Record<string, string> = {};
@@ -416,6 +418,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                 autostart_enabled: autostartEnabled,
                 tool_error_continue_enabled: toolErrorContinueEnabled,
             });
+            setInitialLoaded(true);
         }
     }, [loading, featureConfig, displayForm, summaryForm, previewForm, networkForm, shortcutsForm, otherForm, experimentalForm, defaultAppShortcutValues]);
 
@@ -640,7 +643,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
     return (
         <ConfigPageLayout
             sidebar={sidebar}
-            content={content}
+            content={initialLoaded ? content : <ConfigPageLoading />}
             selectOptions={selectOptions}
             selectedOptionId={selectedFeature.id}
             onSelectOption={handleSelectFromDropdown}

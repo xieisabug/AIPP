@@ -22,6 +22,7 @@ import {
     SidebarList,
     ListItemButton,
     EmptyState,
+    ConfigPageLoading,
     SelectOption
 } from "../common";
 
@@ -63,6 +64,8 @@ const MCPConfig: React.FC = () => {
 
     // Loading states
     const [isRefreshing, setIsRefreshing] = useState(false);
+    // 首次读取完成前不渲染空状态，避免先闪「还没有配置MCP服务器」
+    const [serversLoaded, setServersLoaded] = useState(false);
 
     // Tool expansion states
     const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
@@ -139,36 +142,45 @@ const MCPConfig: React.FC = () => {
         identity: `${selectedServer?.id ?? ""}:${editingServer?.id ?? ""}`,
         initial: true,
         refresh: async (isCurrent) => {
-            const servers = await invoke<MCPServer[]>("get_mcp_servers");
-            const selected = servers.find((server) => server.id === selectedServer?.id) ?? servers[0] ?? null;
-            const [tools, resources, prompts, allTools] = await Promise.all([
-                selected ? invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: selected.id }) : Promise.resolve([]),
-                selected ? invoke<MCPServerResource[]>("get_mcp_server_resources", { serverId: selected.id }) : Promise.resolve([]),
-                selected ? invoke<MCPServerPrompt[]>("get_mcp_server_prompts", { serverId: selected.id }) : Promise.resolve([]),
-                Promise.all(servers.map(async (server) => [server.id, await invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: server.id })] as const)),
-            ]);
-            if (!isCurrent()) return;
-            setMcpServers(servers);
-            setSelectedServer(selected);
-            setServerTools(tools);
-            setServerResources(resources);
-            setServerPrompts(prompts);
-            setAllServerTools(new Map(allTools));
-            if (editingServer) {
-                const updated = servers.find((server) => server.id === editingServer.id) ?? null;
-                setEditingServer(updated);
-                setBuiltinEditEnv(updated?.environment_variables ?? "");
-                setBuiltinEditName(updated?.name ?? "");
-                setBuiltinEditTimeout(updated?.timeout ?? null);
-                if (!updated) { setServerDialogOpen(false); setBuiltinEditOpen(false); }
-            }
-            if (deletingServerId && !servers.some((server) => server.id === deletingServerId)) {
-                setConfirmDialogOpen(false);
-                setDeletingServerId(null);
+            try {
+                await refreshMcpState(isCurrent);
+            } finally {
+                // 失败时错误由 onError 提示，这里只负责结束首次加载态
+                if (isCurrent()) setServersLoaded(true);
             }
         },
         onError: (error) => toast.error(`同步后刷新 MCP 配置失败: ${String(error)}`),
     });
+
+    async function refreshMcpState(isCurrent: () => boolean) {
+        const servers = await invoke<MCPServer[]>("get_mcp_servers");
+        const selected = servers.find((server) => server.id === selectedServer?.id) ?? servers[0] ?? null;
+        const [tools, resources, prompts, allTools] = await Promise.all([
+            selected ? invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: selected.id }) : Promise.resolve([]),
+            selected ? invoke<MCPServerResource[]>("get_mcp_server_resources", { serverId: selected.id }) : Promise.resolve([]),
+            selected ? invoke<MCPServerPrompt[]>("get_mcp_server_prompts", { serverId: selected.id }) : Promise.resolve([]),
+            Promise.all(servers.map(async (server) => [server.id, await invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: server.id })] as const)),
+        ]);
+        if (!isCurrent()) return;
+        setMcpServers(servers);
+        setSelectedServer(selected);
+        setServerTools(tools);
+        setServerResources(resources);
+        setServerPrompts(prompts);
+        setAllServerTools(new Map(allTools));
+        if (editingServer) {
+            const updated = servers.find((server) => server.id === editingServer.id) ?? null;
+            setEditingServer(updated);
+            setBuiltinEditEnv(updated?.environment_variables ?? "");
+            setBuiltinEditName(updated?.name ?? "");
+            setBuiltinEditTimeout(updated?.timeout ?? null);
+            if (!updated) { setServerDialogOpen(false); setBuiltinEditOpen(false); }
+        }
+        if (deletingServerId && !servers.some((server) => server.id === deletingServerId)) {
+            setConfirmDialogOpen(false);
+            setDeletingServerId(null);
+        }
+    }
 
 
     // 切换服务器启用状态
@@ -716,6 +728,10 @@ const MCPConfig: React.FC = () => {
             description="从左侧列表中选择一个服务器开始配置"
         />
     ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText, isMobilePlatform]);
+
+    if (!serversLoaded) {
+        return <ConfigPageLoading />;
+    }
 
     // 空状态
     if (mcpServers.length === 0) {

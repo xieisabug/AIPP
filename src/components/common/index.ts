@@ -3,6 +3,7 @@ export { default as ConfigPageLayout } from './ConfigPageLayout';
 export { default as SidebarList } from './SidebarList';
 export { default as ListItemButton } from './ListItemButton';
 export { default as EmptyState } from './EmptyState';
+export { default as ConfigPageLoading } from './ConfigPageLoading';
 
 // 类型导出
 export type { SelectOption } from './ConfigPageLayout'; 

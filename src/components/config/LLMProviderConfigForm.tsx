@@ -5,6 +5,7 @@ import TagInputContainer from "./TagInputContainer";
 import ReadOnlyModelList from "./ReadOnlyModelList";
 import ModelSelectionDialog from "./ModelSelectionDialog";
 import ConfigForm from "../ConfigForm";
+import ConfigPageLoading from "../common/ConfigPageLoading";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { Switch } from "../ui/switch";
@@ -79,6 +80,8 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         useState<ModelSelectionResponse | null>(null);
     const [isUpdatingModels, setIsUpdatingModels] = useState<boolean>(false);
     const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+    // 已完成读取的提供商 id；与当前 id 不一致时表单仍是上一份（或空）数据，不应展示
+    const [loadedId, setLoadedId] = useState<string | null>(null);
     const [manualTokenDialogOpen, setManualTokenDialogOpen] = useState<boolean>(false);
     const [manualToken, setManualToken] = useState<string>("");
     const [scanTokenDialogOpen, setScanTokenDialogOpen] = useState<boolean>(false);
@@ -254,16 +257,25 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         initial: true,
         refresh: async (isCurrent) => {
             const snapshot = saves.snapshot();
-            const [configArray, modelList] = await Promise.all([
-                invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id }),
-                invoke<Array<LLMModel>>("get_llm_models", { llmProviderId: String(id) }),
-            ]);
+            let configArray: Array<LLMProviderConfig>;
+            let modelList: Array<LLMModel>;
+            try {
+                [configArray, modelList] = await Promise.all([
+                    invoke<Array<LLMProviderConfig>>("get_llm_provider_config", { id }),
+                    invoke<Array<LLMModel>>("get_llm_models", { llmProviderId: String(id) }),
+                ]);
+            } catch (error) {
+                // 读取失败也结束加载态（错误由 onError 提示），避免一直停在加载中
+                if (isCurrent()) setLoadedId(id);
+                throw error;
+            }
             if (!isCurrent()) return;
             const config = Object.fromEntries(configArray.map((item) => [item.name, item.value]));
             const merged = saves.merge(config, snapshot);
             form.reset(merged);
             setHasApiKey(!!merged.api_key);
             setTags(modelList.map(toModelTagItem));
+            setLoadedId(id);
         },
         onError: (error) => toast.error(`同步后刷新模型提供商失败（provider=${id}）: ${String(error)}`),
     });
@@ -930,16 +942,21 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     // 表单部分结束
     return (
         <>
-            <ConfigForm
-                key={id}
-                title={name}
-                description={description}
-                config={configFields}
-                classNames="bottom-space"
-                extraButtons={extraButtons}
-                useFormReturn={form}
-                onTitleClick={onRename ? handleOpenRenameDialog : undefined}
-            />
+            {loadedId === id ? (
+                <ConfigForm
+                    key={id}
+                    title={name}
+                    description={description}
+                    config={configFields}
+                    classNames="bottom-space"
+                    extraButtons={extraButtons}
+                    useFormReturn={form}
+                    onTitleClick={onRename ? handleOpenRenameDialog : undefined}
+                />
+            ) : (
+                // 首次进入立即显示（衔接列表加载）；切换提供商时延迟显示，读取很快时不闪烁
+                <ConfigPageLoading delayMs={loadedId === null ? 0 : 200} />
+            )}
             <ModelSelectionDialog
                 open={modelSelectionDialogOpen}
                 onOpenChange={setModelSelectionDialogOpen}

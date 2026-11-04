@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { fileErrorMessage, mobileFileAction } from "@/services/mobileFileService";
 import type { ScannedSkill, SkillWithConfig } from "@/data/Skill";
 import { useSkillsMcpValidation } from "@/hooks/useSkillsMcpValidation";
+import ConfigPageLoading from "@/components/common/ConfigPageLoading";
 
 export default function MobileSkillsManager({ assistantId }: { assistantId?: number }) {
     const [skills, setSkills] = useState<ScannedSkill[]>([]);
@@ -17,13 +18,17 @@ export default function MobileSkillsManager({ assistantId }: { assistantId?: num
     const [busy, setBusy] = useState(false);
     const [query, setQuery] = useState("");
     const [confirmUninstall, setConfirmUninstall] = useState(false);
+    // 首次读取完成前不显示「尚未安装技能」
+    const [loaded, setLoaded] = useState(false);
     const detailRef = useRef<HTMLElement>(null);
     const { enableOperationMcpAndSkill } = useSkillsMcpValidation();
     const refresh = async () => {
         setSkills(await invoke<ScannedSkill[]>("scan_skills"));
         if (assistantId) setBound(await invoke<SkillWithConfig[]>("get_assistant_skills", { assistantId }));
     };
-    useEffect(() => { void refresh().catch(error => toast.error(fileErrorMessage(error))); }, [assistantId]);
+    useEffect(() => {
+        void refresh().catch(error => toast.error(fileErrorMessage(error))).finally(() => setLoaded(true));
+    }, [assistantId]);
     useEffect(() => {
         let active = true;
         setContent(""); setCompatibility("");
@@ -71,6 +76,7 @@ export default function MobileSkillsManager({ assistantId }: { assistantId?: num
     const visibleSkills = keyword
         ? skills.filter(skill => skill.display_name.toLowerCase().includes(keyword) || skill.identifier.toLowerCase().includes(keyword))
         : skills;
+    if (!loaded) return <ConfigPageLoading />;
     return <div className="flex flex-col gap-4 p-4 safe-bottom overflow-auto h-full">
         <h2 className="text-lg font-semibold">应用内 Skills</h2>
         <p className="text-sm text-muted-foreground">技能保存在此应用内，重启后保留。安装不代表可执行；本地脚本在 Android 不可执行。ZIP 上限 20 MiB，解压上限 50 MiB。</p>

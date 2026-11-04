@@ -14,6 +14,7 @@ vi.mock("@/components/common", () => ({
     SidebarList: ({ children }: { children: ReactNode }) => <>{children}</>,
     ListItemButton: ({ children, onClick }: { children: ReactNode; onClick: () => void }) => <button onClick={onClick}>{children}</button>,
     EmptyState: () => <div>empty</div>,
+    ConfigPageLoading: () => <div>loading</div>,
 }));
 vi.mock("./AddAssistantDialog", () => ({ default: () => null }));
 vi.mock("./assistant/AssistantDialogs", () => ({ AssistantDialogs: () => null }));

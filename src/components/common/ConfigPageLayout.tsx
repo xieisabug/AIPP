@@ -142,17 +142,20 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
                 <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 py-6">
                     {emptyState}
                 </div>
+            ) : shouldShowDropdown ? (
+                // 窄屏：滚动容器占满宽度、内边距放在滚动容器内部，滚动条贴住屏幕边缘
+                <div className="flex-1 min-h-0 overflow-y-auto thin-scrollbar px-4 pb-6" data-aipp-slot="config-page-scroll">
+                    {content}
+                </div>
             ) : (
-                <div className={`flex-1 min-h-0 grid gap-6 px-4 py-6 ${shouldShowDropdown ? 'grid-cols-1' : 'grid-cols-12'}`}>
+                <div className="flex-1 min-h-0 grid gap-6 px-4 py-6 grid-cols-12">
                     {/* 左侧列表 - 大屏幕时显示，列表内部独立滚动（标题/搜索栏固定） */}
-                    {!shouldShowDropdown && (
-                        <div className="col-span-12 lg:col-span-4 xl:col-span-4 2xl:col-span-3 min-h-0">
-                            {sidebar}
-                        </div>
-                    )}
+                    <div className="col-span-12 lg:col-span-4 xl:col-span-4 2xl:col-span-3 min-h-0">
+                        {sidebar}
+                    </div>
 
                     {/* 右侧配置区域，独立滚动 */}
-                    <div className={`min-h-0 overflow-y-auto thin-scrollbar ${shouldShowDropdown ? 'col-span-1' : 'col-span-12 lg:col-span-8 xl:col-span-8 2xl:col-span-9'}`}>
+                    <div className="min-h-0 overflow-y-auto thin-scrollbar col-span-12 lg:col-span-8 xl:col-span-8 2xl:col-span-9" data-aipp-slot="config-page-scroll">
                         {content}
                     </div>
                 </div>

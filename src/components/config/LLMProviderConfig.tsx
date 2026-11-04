@@ -21,6 +21,7 @@ import {
     SidebarList,
     ListItemButton,
     EmptyState,
+    ConfigPageLoading,
     SelectOption
 } from "../common";
 
@@ -38,6 +39,8 @@ const LOCAL_CLI_AGENT_API_TYPES: ReadonlySet<string> = new Set(['acp', 'codex_ap
 const LLMProviderConfig: React.FC = () => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
     const [selectedProvider, setSelectedProvider] = useState<LLMProvider | null>(null);
+    // 首次列表读取完成前不渲染空状态，避免先闪「还没有配置提供商」
+    const [providersLoaded, setProvidersLoaded] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
@@ -70,6 +73,9 @@ const LLMProviderConfig: React.FC = () => {
             })
             .catch((e) => {
                 toast.error('获取大模型提供商失败: ' + e);
+            })
+            .finally(() => {
+                if (isCurrent()) setProvidersLoaded(true);
             });
     }, []);
 
@@ -350,6 +356,10 @@ const LLMProviderConfig: React.FC = () => {
             description="从左侧列表中选择一个提供商开始配置"
         />
     ), [selectedProvider, LLMProviders, selectedProviderApiType, handleToggle, openConfirmDialog, handleShareProvider, handleRenameProvider]);
+
+    if (!providersLoaded) {
+        return <ConfigPageLoading />;
+    }
 
     // 空状态
     if (LLMProviders.length === 0) {

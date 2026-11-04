@@ -47,6 +47,9 @@
 - 虚拟键盘：AndroidManifest 已配 `windowSoftInputMode="adjustResize"`；`ConversationUI.tsx` 移动端监听 `visualViewport`，仅跟随底部阅读状态，键盘弹起不抢占历史阅读位置。
 - 消息操作、编辑、版本选择和移动预览使用至少 44px 触控目标；新增页面仍需逐项检查。
 - 设置表单分组卡片带 `data-aipp-config-section`，移动端由 `src/mobile/mobile.css` 去掉卡片外框；列表项卡片（插件、技能）不加该属性，保留卡片。
+- 设置页窄屏滚动容器由 `ConfigPageLayout` 提供（全宽、内边距在内部，滚动条贴边），页面内容不要再自建带外边距的滚动容器。
+- 设置页首次读取完成前统一渲染 `ConfigPageLoading`（`@/components/common`），不要先渲染空状态；新增设置页沿用此约定。
+- 移动平台对话框由 `mobile.css` 全屏化并收窄左右内边距、DialogHeader 右侧预留关闭按钮位置；对话框内的行布局用 `flex-wrap` + `min-w-0`，不要依赖固定宽度或单行并排多个开关。
 - **新写移动端 UI 时**：可点目标 ≥44px；全屏容器直接用 `h-screen`（已自动走 dvh）；顶部/底部固定栏必须加 `safe-top` / `safe-bottom` 类。
 
 ### 4. 桌面功能在移动端的行为

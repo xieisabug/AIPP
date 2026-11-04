@@ -12,7 +12,7 @@ import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import AddAssistantDialog from "./AddAssistantDialog";
 
 // 导入公共组件
-import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState, SelectOption } from "../common";
+import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState, ConfigPageLoading, SelectOption } from "../common";
 
 // 导入新的 hooks 和组件
 import { useAssistantTypePlugin } from "@/hooks/assistant/useAssistantTypePlugin";
@@ -315,13 +315,20 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [currentAssistant, form, loadAgentModelOptions, setCurrentAssistant]
     );
 
+    // 首次进入：列表与首个助手详情（含表单回填）都完成后才展示，避免先闪空状态/空表单
+    const [initialLoaded, setInitialLoaded] = useState(false);
+
     // 初始化助手列表
     useEffect(() => {
-        loadAssistants().then((assistantList) => {
-            if (assistantList.length) {
-                handleChooseAssistant(assistantList[0]);
-            }
-        });
+        loadAssistants()
+            .then((assistantList) => {
+                if (assistantList.length) {
+                    return handleChooseAssistant(assistantList[0]);
+                }
+            })
+            // 列表/详情读取失败已在 useAssistantOperations 中 toast 具体原因
+            .catch(() => undefined)
+            .finally(() => setInitialLoaded(true));
     }, [loadAssistants]);
     // Only explicit selections invalidate a refresh. Its own fallback selection
     // must finish loading plugin values and resetting the form.
@@ -951,6 +958,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             </AlertDialogContent>
         </AlertDialog>
     );
+
+    if (!initialLoaded) {
+        return <ConfigPageLoading />;
+    }
 
     // 空状态
     if (assistants.length === 0) {

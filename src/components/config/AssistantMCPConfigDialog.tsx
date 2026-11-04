@@ -343,7 +343,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                         </div>
                     </DialogHeader>
 
-                    <div className="flex-1 overflow-auto">
+                    <div className="flex-1 min-h-0 overflow-auto">
                         {availableServers.length === 0 ? (
                             <div className="text-center py-8">
                                 <Server className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
@@ -376,9 +376,9 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                                                 : 'border-border bg-muted'
                                                 }`}>
                                                 <CollapsibleTrigger asChild>
-                                                    <div className="flex items-center justify-between p-4 cursor-pointer hover:bg-muted/50">
-                                                        <div className="flex items-center gap-3">
-                                                            <div className="flex items-center gap-2">
+                                                    <div className="flex items-center justify-between gap-3 p-3 sm:p-4 cursor-pointer hover:bg-muted/50">
+                                                        <div className="flex min-w-0 flex-1 items-center gap-3">
+                                                            <div className="flex shrink-0 items-center gap-2">
                                                                 {isExpanded ? (
                                                                     <ChevronDown className="h-4 w-4 text-muted-foreground" />
                                                                 ) : (
@@ -390,15 +390,15 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                                                                     <Pause className="h-5 w-5 text-muted-foreground" />
                                                                 )}
                                                             </div>
-                                                            <div>
-                                                                <div className="font-medium text-foreground">{server.name}</div>
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="font-medium text-foreground break-all">{server.name}</div>
                                                                 <div className="text-sm text-muted-foreground">
                                                                     {server.is_enabled ? '已启用' : '已禁用'}
                                                                     {serverToolsList.length > 0 && ` • ${enabledToolsCount}/${serverToolsList.length} 工具已启用`}
                                                                 </div>
                                                             </div>
                                                         </div>
-                                                        <div className="flex items-center gap-3">
+                                                        <div className="flex shrink-0 items-center gap-3">
                                                             {server.is_enabled && (
                                                                 <DropdownMenu>
                                                                     <DropdownMenuTrigger asChild>
@@ -434,7 +434,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                                                 </CollapsibleTrigger>
 
                                                 <CollapsibleContent>
-                                                    <div className="px-4 pb-4 border-t border-border">
+                                                    <div className="px-3 pb-3 sm:px-4 sm:pb-4 border-t border-border">
                                                         {isLoadingTools ? (
                                                             <div className="text-center py-6">
                                                                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-foreground mx-auto"></div>
@@ -448,11 +448,11 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                                                         ) : (
                                                             <div className="space-y-3 mt-3">
                                                                 {serverToolsList.map(tool => (
-                                                                    <div key={tool.id} className="flex items-center justify-between p-3 bg-background rounded border border-border">
-                                                                        <div className="flex items-center gap-3">
-                                                                            <Wrench className="h-4 w-4 text-muted-foreground" />
-                                                                            <div>
-                                                                                <div className="font-medium text-foreground">{tool.name}</div>
+                                                                    <div key={tool.id} className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3 bg-background rounded border border-border" data-aipp-slot="assistant-mcp-tool-row">
+                                                                        <div className="flex min-w-0 flex-1 basis-48 items-center gap-3">
+                                                                            <Wrench className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                                                            <div className="min-w-0">
+                                                                                <div className="font-medium text-foreground break-all">{tool.name}</div>
                                                                                 <div className="text-sm text-muted-foreground">
                                                                                     {tool.is_enabled ? (
                                                                                         <span className="text-foreground">已启用</span>
@@ -465,9 +465,9 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                                                                                 </div>
                                                                             </div>
                                                                         </div>
-                                                                        <div className="flex items-center gap-4">
+                                                                        <div className="flex shrink-0 items-center gap-4 ml-auto">
                                                                             <div className="flex items-center gap-2">
-                                                                                <span className="text-sm text-foreground">启用</span>
+                                                                                <span className="text-sm text-foreground whitespace-nowrap">启用</span>
                                                                                 <Switch
                                                                                     checked={tool.is_enabled}
                                                                                     onCheckedChange={(checked) =>
@@ -476,7 +476,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
                                                                                 />
                                                                             </div>
                                                                             <div className="flex items-center gap-2">
-                                                                                <span className="text-sm text-foreground">自动运行</span>
+                                                                                <span className="text-sm text-foreground whitespace-nowrap">自动运行</span>
                                                                                 <Switch
                                                                                     checked={tool.is_auto_run}
                                                                                     disabled={!tool.is_enabled}

@@ -22,6 +22,7 @@ import MCP from "../assets/mcp.svg?react";
 import { pluginRuntime } from "../services/PluginRuntime";
 import { navigateMobile, popMobile, registerMobileBackHandler } from "../mobile/navigation";
 import { canLeaveConfigNow, requestConfigLeave } from "@/lib/configLeaveGuard";
+import ConfigPageLoading from "../components/common/ConfigPageLoading";
 
 interface MenuItem {
     id: string;
@@ -42,11 +43,7 @@ const contentMap: Record<string, React.ComponentType<any>> = {
 };
 
 // 设置页动态加载时的占位，保持黑白灰主色调
-const configPageFallback = (
-    <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
-        加载中...
-    </div>
-);
+const configPageFallback = <ConfigPageLoading />;
 
 function ConfigWindow() {
     // 集成主题系统

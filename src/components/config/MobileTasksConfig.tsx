@@ -5,6 +5,7 @@ import { useMobileResume } from "@/hooks/useMobileResume";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import ConfigPageLoading from "@/components/common/ConfigPageLoading";
 import {
     butlerTaskStatusLabel,
     type ButlerTaskDetailResponse,
@@ -44,6 +45,8 @@ export default function MobileTasksConfig() {
     const [detail, setDetail] = useState<{ taskId: number; data: ButlerTaskDetailResponse }>();
     const [selectedSchedule, setSelectedSchedule] = useState<number>();
     const [runs, setRuns] = useState<MobileTaskRun[]>([]);
+    // 首次读取完成前不渲染「暂无…」等空数据界面
+    const [loaded, setLoaded] = useState(false);
     const selectedScheduleRef = useRef<number | undefined>(undefined);
     const runReadRevision = useRef(0);
     const readRuns = async (taskId: number, isCurrent = () => true) => {
@@ -71,9 +74,10 @@ export default function MobileTasksConfig() {
             if (connection.status === "fulfilled") setFeishu(connection.value); else setFeishu(undefined);
             if (available.status === "fulfilled") setAssistants(available.value); else setAssistants([]);
             setErrors(results.flatMap((result, index) => result.status === "rejected" ? [`${["Butler", "定时任务", "飞书", "助手"][index]}读取失败：${String(result.reason)}`] : []));
+            setLoaded(true);
             if (selectedScheduleRef.current !== undefined) await readRuns(selectedScheduleRef.current, isCurrent);
         },
-        onError: error => setErrors([String(error)]),
+        onError: error => { setErrors([String(error)]); setLoaded(true); },
     });
     useMobileResume(refresh);
     const act = async (label: string, action: () => Promise<unknown>, allowWhileBusy = false) => {
@@ -83,6 +87,7 @@ export default function MobileTasksConfig() {
         catch (error) { setActionError(`${label}失败：${String(error)}`); }
         finally { activeActions.current.delete(label); setBusy(activeActions.current.size > 0); refresh(); }
     };
+    if (!loaded) return <ConfigPageLoading />;
     return <div className="h-full overflow-auto p-3 safe-bottom space-y-5">
         <h1 className="text-lg font-semibold">本机任务</h1>
         <p className="text-sm text-muted-foreground">任务和飞书连接依赖应用进程。锁屏或退出后不保证继续执行。历史记录仅供查看，不代表本机正在运行。</p>
