@@ -60,7 +60,7 @@ export const AboutConfigForm: React.FC<AboutConfigFormProps> = ({ form: _form })
     const isAnyBusy = isAnyChecking || isAnyDownloading;
 
     return (
-        <Card className="shadow-sm border-l-4 border-l-primary" data-aipp-config-section>
+        <Card className="shadow-none border-border" data-aipp-config-section>
             <CardHeader>
                 <CardTitle className="text-lg font-semibold">
                     关于 AIPP

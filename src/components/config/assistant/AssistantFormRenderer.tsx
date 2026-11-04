@@ -69,6 +69,7 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
             classNames="bottom-space"
             assistantType={currentAssistant.assistant.assistant_type}
             onSave={onSave}
+            showHeaderSave={mobile}
             onCopy={currentAssistant.assistant.id === 1 ? undefined : onCopy}
             onDelete={currentAssistant.assistant.id === 1 ? undefined : onDelete}
             onEdit={onEdit}

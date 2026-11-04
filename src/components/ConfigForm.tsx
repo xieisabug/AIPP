@@ -77,6 +77,7 @@ interface ConfigFormProps {
     layout?: "default" | "prompt" | "provider";
     assistantType?: number | null;  // 用于过滤模型（ACP 助手 vs 普通助手）
     onSave?: SubmitHandler<any>;
+    showHeaderSave?: boolean;
     onCopy?: () => void;
     onDelete?: () => void;
     onEdit?: () => void;
@@ -460,6 +461,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     assistantConfigApi,
     assistantType,
     onSave,
+    showHeaderSave = true,
     onCopy,
     onDelete,
     onEdit,
@@ -600,7 +602,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     };
 
     return (
-        <Card className={`shadow-none border-l-4 border-l-primary ${classNames || ""}`} data-aipp-config-section>
+        <Card className={`shadow-none border-border ${classNames || ""}`} data-aipp-config-section>
             <CardHeader
                 onClick={toggleExpand}
                 className={`flex flex-row items-center ${enableExpand ? "cursor-pointer hover:bg-muted" : ""
@@ -641,7 +643,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         </span>
                     ) : null}
                     {/* 移动端展开时使用底部固定保存栏，头部只保留状态与更多菜单 */}
-                    {onSave && !(isMobilePlatform && isExpanded) && (
+                    {onSave && showHeaderSave && !(isMobilePlatform && isExpanded) && (
                         <Button
                             type="button"
                             size="sm"

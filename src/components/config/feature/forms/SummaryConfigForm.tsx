@@ -73,7 +73,7 @@ const ConfigSection: React.FC<ConfigSectionProps> = ({
     const [isExpanded, setIsExpanded] = React.useState(true);
 
     return (
-        <Card className="border-l-4 border-l-muted shadow-sm" data-aipp-config-section>
+        <Card className="border-border shadow-none" data-aipp-config-section>
             <CardHeader
                 className="flex flex-row items-center py-3 cursor-pointer hover:bg-muted/50 transition-colors rounded-t-lg"
                 onClick={() => setIsExpanded(!isExpanded)}
@@ -191,7 +191,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
         <Form {...form}>
             <div className="space-y-4">
                 {/* 总开关 */}
-                <Card className="border-l-4 border-l-primary" data-aipp-config-section>
+                <Card className="border-border shadow-none" data-aipp-config-section>
                     <CardContent className="py-4">
                         <div className="flex items-center justify-between">
                             <div>
@@ -351,7 +351,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                     />
                 </ConfigSection> */}
 
-                <Card id="auto-review-model" className="border-l-4 border-l-muted shadow-sm" data-aipp-config-section>
+                <Card id="auto-review-model" className="border-border shadow-none" data-aipp-config-section>
                     <CardHeader className="py-3">
                         <CardTitle className="text-base font-medium">自动审核模型</CardTitle>
                         <p className="text-sm text-muted-foreground mt-0.5">

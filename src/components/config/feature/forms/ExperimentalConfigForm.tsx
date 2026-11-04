@@ -603,7 +603,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                 data-aipp-config-section
                 className={
                     showSummarySection
-                        ? "bottom-space border-l-4 border-l-primary shadow-none"
+                        ? "bottom-space border-border shadow-none"
                         : "border-0 shadow-none"
                 }
             >
