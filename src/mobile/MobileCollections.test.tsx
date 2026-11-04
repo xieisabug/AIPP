@@ -15,7 +15,7 @@ describe("MobileCollections", () => {
         mockInvokeHandler("get_artifact_by_id", () => item);
         render(<MobileCollections />);
         fireEvent.click(await screen.findByRole("button", { name: "Sample" }));
-        await vi.waitFor(() => expect(preview).toHaveBeenCalledWith({ title: "Sample", language: "html", code: "<p>hello</p>" }));
+        await vi.waitFor(() => expect(preview).toHaveBeenCalledWith({ title: "Sample", language: "html", code: "<p>hello</p>", collectionId: 7 }));
     });
     it("keeps the item and reports a failed delete", async () => {
         mockInvokeHandler("get_artifacts_collection", () => [item]);
@@ -51,5 +51,16 @@ describe("MobileCollections", () => {
             artifact_type: "markdown",
             code: "# hello",
         }));
+    });
+    it("renames a collection item", async () => {
+        mockInvokeHandler("get_artifacts_collection", () => [item]);
+        const updates: unknown[] = [];
+        mockInvokeHandler("update_artifact_collection", (args: any) => { updates.push(args.request); return null; });
+        render(<MobileCollections />);
+        await screen.findByText("Sample");
+        fireEvent.click(screen.getByRole("button", { name: "重命名" }));
+        fireEvent.change(screen.getByLabelText("新名称"), { target: { value: "  Renamed " } });
+        fireEvent.click(screen.getByRole("button", { name: "保存名称" }));
+        await vi.waitFor(() => expect(updates[0]).toEqual({ id: 7, name: "Renamed" }));
     });
 });

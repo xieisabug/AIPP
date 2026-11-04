@@ -47,4 +47,17 @@ describe("mobile skills", () => {
         fireEvent.click(screen.getByText("启用技能加载工具并绑定"));
         await waitFor(() => expect(mocks.enable).toHaveBeenCalledWith(42, "demo", 0));
     });
+    it("should filter skills and uninstall the selected skill after confirmation", async () => {
+        const base = vi.mocked(invoke).getMockImplementation()!;
+        vi.mocked(invoke).mockImplementation(async (command, args) => command === "delete_skill" ? undefined : base(command, args));
+        render(<MobileSkillsManager />);
+        await screen.findByText("Demo");
+        fireEvent.change(screen.getByLabelText("搜索技能"), { target: { value: "missing" } });
+        expect(screen.getByText("没有匹配的技能")).toBeTruthy();
+        fireEvent.change(screen.getByLabelText("搜索技能"), { target: { value: "dem" } });
+        fireEvent.click(screen.getByText("Demo"));
+        fireEvent.click(await screen.findByRole("button", { name: "卸载" }));
+        fireEvent.click(screen.getByRole("button", { name: "确认卸载" }));
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_skill", { identifier: "demo" }));
+    });
 });

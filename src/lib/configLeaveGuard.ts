@@ -19,3 +19,18 @@ export function requestConfigLeave(proceed: LeaveProceed): void {
     }
     proceed();
 }
+
+/**
+ * Synchronous variant for system back: returns true when leaving may happen right now.
+ * Otherwise the guard prompt is showing and `onDeferredProceed` runs once the user confirms.
+ */
+export function canLeaveConfigNow(onDeferredProceed: LeaveProceed): boolean {
+    let immediate = false;
+    let deferred = false;
+    requestConfigLeave(() => {
+        if (deferred) onDeferredProceed();
+        else immediate = true;
+    });
+    deferred = true;
+    return immediate;
+}

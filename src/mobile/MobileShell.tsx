@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import LoadingScreen from "../components/LoadingScreen";
-import { isMobileRoute, MobileRoute, MobilePreview } from "./navigation";
+import { isMobileRoute, MobileRoute, MobilePreview, runMobileBackHandlers } from "./navigation";
 
 const Chat = lazy(() => import("../windows/ChatUIWindow"));
 const Config = lazy(() => import("../windows/ConfigWindow"));
@@ -46,27 +46,37 @@ export default function MobileShell() {
         const showPreview = (event: Event) => {
             const detail = (event as CustomEvent<MobilePreview>).detail;
             if (!detail || typeof detail.language !== "string" || typeof detail.code !== "string") return;
-            setPreview(previous => previous?.language === detail.language && previous.code === detail.code && previous.title === detail.title ? previous : detail);
+            setPreview(previous => previous?.language === detail.language && previous.code === detail.code && previous.title === detail.title && previous.collectionId === detail.collectionId ? previous : detail);
             navigate(new CustomEvent("aipp:mobile-navigate", { detail: "preview" }));
         };
         window.addEventListener("aipp:mobile-preview", showPreview);
-        window.__aippMobileBack = () => {
-            const panels = document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [role="menu"][data-state="open"], [data-mobile-panel]');
-            const panel = Array.from(panels).filter(node => node.getClientRects().length > 0).at(-1);
-            if (panel) {
-                panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-                return true;
-            }
+        const pop = () => {
             if (stackRef.current.length <= 1) return false;
             capturePosition();
             stackRef.current = stackRef.current.slice(0, -1);
             setStack(stackRef.current);
             return true;
         };
+        const popPage = () => { pop(); };
+        window.addEventListener("aipp:mobile-pop", popPage);
+        window.__aippMobileBack = () => {
+            // Radix Popover/Dialog/Sheet use role=dialog; Select uses role=listbox; menus use role=menu.
+            // Radix DismissableLayer handles Escape on the document (capture), so a bubbling event closes the top layer.
+            const panels = document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [role="menu"][data-state="open"], [role="listbox"][data-state="open"], [data-mobile-panel]');
+            const panel = Array.from(panels).filter(node => node.getClientRects().length > 0).at(-1);
+            if (panel) {
+                panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+                return true;
+            }
+            if (stackRef.current.length <= 1) return false;
+            if (runMobileBackHandlers(stackRef.current.at(-1)!)) return true;
+            return pop();
+        };
         return () => {
             framePolicy.remove();
             window.removeEventListener("aipp:mobile-navigate", navigate);
             window.removeEventListener("aipp:mobile-preview", showPreview);
+            window.removeEventListener("aipp:mobile-pop", popPage);
             delete window.__aippMobileBack;
         };
     }, []);

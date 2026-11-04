@@ -13,6 +13,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
 import { Zap, Settings, ServerCrash, Download, Plus } from "lucide-react";
 import { toast } from 'sonner';
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
+import { useFeatureAvailableOnPlatform } from "@/lib/mobileUnsupported";
 
 // 导入公共组件
 import {
@@ -31,6 +32,8 @@ interface LLMProvider {
     is_official: boolean;
     is_enabled: boolean;
 }
+
+const LOCAL_CLI_AGENT_API_TYPES: ReadonlySet<string> = new Set(['acp', 'codex_app_server', 'claude_sdk']);
 
 const LLMProviderConfig: React.FC = () => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
@@ -90,6 +93,11 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'codex_app_server', label: 'Codex' },
         { value: 'claude_sdk', label: 'Claude Code' },
     ]
+    // 本地 CLI Agent 类型仅桌面可新建；已有记录仍按 apiTypes 显示名称
+    const localCliAgentAvailable = useFeatureAvailableOnPlatform("local_cli_agent");
+    const creatableApiTypes = localCliAgentAvailable
+        ? apiTypes
+        : apiTypes.filter((type) => !LOCAL_CLI_AGENT_API_TYPES.has(type.value));
 
     const openNewProviderDialog = useCallback(() => {
         setNewProviderDialogOpen(true);
@@ -433,7 +441,7 @@ const LLMProviderConfig: React.FC = () => {
                                 <SelectValue placeholder="选择 API 类型" />
                             </SelectTrigger>
                             <SelectContent>
-                                {apiTypes.map((type) => (
+                                {creatableApiTypes.map((type) => (
                                     <SelectItem key={type.value} value={type.value}>
                                         {type.label}
                                     </SelectItem>

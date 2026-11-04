@@ -1,6 +1,7 @@
 import React from "react";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { useIsMobilePlatform } from "../../hooks/use-platform";
 
 interface MCPToolParameterItemProps {
     paramName: string;
@@ -15,7 +16,11 @@ const MCPToolParameterItem: React.FC<MCPToolParameterItemProps> = ({
     isRequired,
     truncateText,
 }) => {
-    const truncatedParamDesc = truncateText(paramDef.description || "", 2);
+    // 触屏上 Tooltip 打不开：移动平台直接展示完整说明
+    const isMobilePlatform = useIsMobilePlatform();
+    const truncatedParamDesc = isMobilePlatform
+        ? paramDef.description || ""
+        : truncateText(paramDef.description || "", 2);
     const isParamDescTruncated =
         paramDef.description && truncatedParamDesc !== paramDef.description;
 

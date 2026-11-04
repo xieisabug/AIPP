@@ -833,6 +833,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                     type: "input" as const,
                     label: "Endpoint",
                     value: "",
+                    inputMode: "url" as const,
                 },
             },
             {

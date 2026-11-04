@@ -12,6 +12,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { AssistantDetail } from "../../data/Assistant";
 import { Plus } from "lucide-react";
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { isMobileExecutableAssistantType } from "@/lib/mobileUnsupported";
 
 interface AddAssistantDialogProps {
     assistantTypes: AssistantType[];
@@ -25,6 +27,11 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
     triggerButtonProps,
 }) => {
     const [openAddAssistantDialog, setOpenAddAssistantDialog] = React.useState<boolean>(false);
+    const isMobilePlatform = useIsMobilePlatform();
+    // 移动端只能新建可在本机执行的助手类型；已有记录不受影响
+    const creatableAssistantTypes = isMobilePlatform
+        ? assistantTypes.filter((type) => isMobileExecutableAssistantType(type.code))
+        : assistantTypes;
 
     const formSchema = z.object({
         name: z.string().min(1, "名称不能为空"),
@@ -112,7 +119,7 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                                         </FormControl>
                                         <SelectContent>
                                             <SelectGroup>
-                                                {assistantTypes.map((type) => (
+                                                {creatableAssistantTypes.map((type) => (
                                                     <SelectItem key={type.code} value={type.code.toString()}>
                                                         {type.name}
                                                     </SelectItem>

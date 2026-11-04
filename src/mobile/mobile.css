@@ -4,23 +4,49 @@
     /* Desktop centering / enter animations must not translate a fullscreen panel. */
     --tw-translate-x: 0; --tw-translate-y: 0;
     transform: none !important; translate: none !important; animation: none;
-    width: 100%; max-width: 100%; height: 100dvh; max-height: 100dvh;
+    /* Desktop min widths (e.g. min-w-xl) would overflow a 360px screen. */
+    width: 100%; min-width: 0; max-width: 100%; height: 100dvh; max-height: 100dvh;
     border-radius: 0; overflow-y: auto;
     padding-top: max(24px, env(safe-area-inset-top));
     padding-bottom: max(1rem, env(safe-area-inset-bottom));
 }
+/* Built-in close X: keep it below the status bar with a 44px hit area. */
+.aipp-mobile-platform [data-slot="dialog-content"] > [data-slot="dialog-close"].absolute {
+    top: max(24px, env(safe-area-inset-top)); right: max(.25rem, env(safe-area-inset-right));
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px;
+}
 .aipp-mobile-platform [data-slot="dialog-footer"] {
     position: sticky; bottom: 0; background: var(--background); padding-top: .75rem;
 }
-.aipp-mobile-platform [data-aipp-window="config"] .grid {
+/* Single-column forms, but keep segmented tab lists (grid-cols-2/3) horizontal. */
+.aipp-mobile-platform [data-aipp-window="config"] .grid:not([role="tablist"]):not([data-slot="tabs-list"]) {
     grid-template-columns: minmax(0, 1fr);
 }
-.aipp-mobile-platform [data-slot="dialog-content"] button,
+/* Switch / Checkbox / Radio are buttons too: stretching them to 44px distorts the control. */
+.aipp-mobile-platform [data-slot="dialog-content"] button:not([role="switch"]):not([role="checkbox"]):not([role="radio"]),
 .aipp-mobile-platform [data-aipp-slot="chat-mobile-header"] button,
 .aipp-mobile-platform [data-aipp-slot="chat-info-actions"] button,
-.aipp-mobile-platform [data-aipp-window="config"] button,
+.aipp-mobile-platform [data-aipp-window="config"] button:not([role="switch"]):not([role="checkbox"]):not([role="radio"]),
 .aipp-mobile-platform [data-slot="dialog-content"] [role="combobox"],
 .aipp-mobile-platform .aipp-mobile-action-bar button { min-width: 44px; min-height: 44px; }
+/* Keep their visual size and extend the touch target with an invisible overlay instead. */
+.aipp-mobile-platform [role="switch"],
+.aipp-mobile-platform [role="checkbox"],
+.aipp-mobile-platform [role="radio"] { position: relative; }
+.aipp-mobile-platform [role="switch"]::after,
+.aipp-mobile-platform [role="checkbox"]::after,
+.aipp-mobile-platform [role="radio"]::after {
+    content: ""; position: absolute; top: 50%; left: 50%;
+    width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%);
+}
+/* Portal-rendered list items (select / dropdown / command) live outside the config window. */
+.aipp-mobile-platform [data-slot="select-item"],
+.aipp-mobile-platform [data-slot="command-item"],
+.aipp-mobile-platform [role="menuitem"],
+.aipp-mobile-platform [role="menuitemcheckbox"],
+.aipp-mobile-platform [role="menuitemradio"],
+.aipp-mobile-platform [role="option"] { min-height: 44px; }
 .aipp-mobile-platform [data-aipp-slot="chat-conversation-scroll"] table {
     display: block; max-width: 100%; overflow-x: auto;
 }

@@ -26,15 +26,19 @@ export type MobileUnsupportedFeature =
     | "local_cli_agent"
     // 桌面多窗口：Schedule / Artifact / Butler / Plugin / Sidebar 等独立 WebView
     | "desktop_multi_window"
-    // React/Vue 预览运行时（Bun/Vite）
+    // 桌面 React/Vue 预览运行时（Bun/Vite）。移动端改用 src/mobile/previewRuntime.ts 的隔离 iframe
+    // 运行时（MobileArtifactPreview），不经过此标记；当前无前端调用点检查此项。
     | "react_vue_preview"
-    // PDF 导出
+    // 桌面 PDF 导出（export_api 在移动端返回 MOBILE_UNSUPPORTED）。Android 由
+    // conversationExportService.printMobilePdf 走系统打印；当前无前端调用点检查此项。
     | "pdf_export"
-    // 剪贴板图片复制
+    // 桌面剪贴板图片命令（copy_image_to_clipboard 在移动端返回 MOBILE_UNSUPPORTED）。Android 由
+    // LazyImage 经 mobileFileService 的 copyImage 原生桥接实现；当前无前端调用点检查此项。
     | "clipboard_image"
-    // Skills 本机目录管理（M2，本期隐藏入口避免点了才炸）
+    // Skills 管理：清单内默认不可用，但 Android 已由 MobileSkillsManager 提供应用内安装/查看/绑定，
+    // useFeatureAvailableOnPlatform 对 android 单独放行（iOS 仍隐藏）。
     | "skills_manager"
-    // 进程型插件（M2，本期隐藏入口）
+    // 进程型插件（M2）；当前无前端调用点检查此项，插件能力由 plugin_api 按插件逐项返回 MOBILE_UNSUPPORTED
     | "process_plugin"
 
 export const MOBILE_UNSUPPORTED_FEATURES: ReadonlySet<MobileUnsupportedFeature> = new Set([
@@ -77,6 +81,7 @@ export function useFeatureAvailableOnPlatform(feature: MobileUnsupportedFeature)
     const isMobile = useIsMobilePlatform()
     const platform = usePlatform()
     if (!isMobile) return true
+    // Android 有应用内 Skills 管理（MobileSkillsManager），见上方 skills_manager 注释
     if (platform === "android" && feature === "skills_manager") return true
     return !MOBILE_UNSUPPORTED_FEATURES.has(feature)
 }

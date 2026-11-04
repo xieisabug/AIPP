@@ -10,6 +10,7 @@ import {
 import { MCPServerTool } from "../../data/MCP";
 import MCPToolParameters from "./MCPToolParameters";
 import { MOBILE_UNEXECUTABLE_LABEL } from "../../lib/mobileUnsupported";
+import { useIsMobilePlatform } from "../../hooks/use-platform";
 
 interface MCPToolItemProps {
     tool: MCPServerTool;
@@ -38,7 +39,11 @@ const MCPToolItem: React.FC<MCPToolItemProps> = ({
         tool.parameters !== "{}" &&
         tool.parameters !== "null";
     const parameters = hasParameters ? JSON.parse(tool.parameters!) : null;
-    const truncatedDescription = truncateText(tool.tool_description || "", 2);
+    // 触屏上 Tooltip 打不开：移动平台直接展示完整说明
+    const isMobilePlatform = useIsMobilePlatform();
+    const truncatedDescription = isMobilePlatform
+        ? tool.tool_description || ""
+        : truncateText(tool.tool_description || "", 2);
     const isDescriptionTruncated =
         tool.tool_description && truncatedDescription !== tool.tool_description;
 

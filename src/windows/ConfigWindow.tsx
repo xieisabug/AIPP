@@ -1,4 +1,4 @@
-import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo } from "react";
+import React, { ReactNode, Suspense, useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 // 各设置页体积较大，按需动态加载，避免打开设置窗口时一次性解析全部页面代码
 const LLMProviderConfig = React.lazy(() => import("../components/config/LLMProviderConfig"));
@@ -17,11 +17,11 @@ import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
 import { useFeatureAvailableOnPlatform } from "../lib/mobileUnsupported";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "../components/ui/sheet";
 import { Button } from "../components/ui/button";
-import { Home, Menu } from "lucide-react";
+import { ChevronLeft, Home, Menu } from "lucide-react";
 import MCP from "../assets/mcp.svg?react";
 import { pluginRuntime } from "../services/PluginRuntime";
-import { navigateMobile } from "../mobile/navigation";
-import { requestConfigLeave } from "@/lib/configLeaveGuard";
+import { navigateMobile, popMobile, registerMobileBackHandler } from "../mobile/navigation";
+import { canLeaveConfigNow, requestConfigLeave } from "@/lib/configLeaveGuard";
 
 interface MenuItem {
     id: string;
@@ -108,6 +108,14 @@ function ConfigWindow() {
     }, [skillsAvailable, pluginsAvailable, isMobilePlatform]);
 
     const [selectedMenu, setSelectedMenu] = useState<string>("llm-provider-config");
+    // 移动端系统返回键按访问顺序回到上一个设置分区
+    const sectionHistory = useRef<string[]>([]);
+    const selectedMenuRef = useRef(selectedMenu);
+    selectedMenuRef.current = selectedMenu;
+    const goToSection = useCallback((menu: string) => {
+        if (menu !== selectedMenuRef.current) sectionHistory.current.push(selectedMenuRef.current);
+        setSelectedMenu(menu);
+    }, []);
     const [visitedMenus, setVisitedMenus] = useState<string[]>(["llm-provider-config"]);
     useEffect(() => {
         if (isMobilePlatform) setVisitedMenus(previous => previous.includes(selectedMenu) ? previous : [...previous, selectedMenu]);
@@ -131,6 +139,7 @@ function ConfigWindow() {
             console.log("ConfigWindow hidden, resetting state");
             // 重置到默认菜单
             setSelectedMenu("llm-provider-config");
+            sectionHistory.current = [];
             setSidebarOpen(false);
         });
 
@@ -146,7 +155,7 @@ function ConfigWindow() {
             if (contentMap[menu]) {
                 requestConfigLeave(() => {
                     setSubNav(sub);
-                    setSelectedMenu(menu);
+                    goToSection(menu);
                 });
             }
         });
@@ -154,7 +163,23 @@ function ConfigWindow() {
         return () => {
             unlistenNav.then((fn) => fn());
         };
-    }, []);
+    }, [goToSection]);
+
+    // Android 返回：先回到上一个设置分区，离开设置页前经过未保存保护
+    useEffect(() => {
+        if (!isMobilePlatform) return;
+        return registerMobileBackHandler("config", () => {
+            const previous = sectionHistory.current.at(-1);
+            if (previous) {
+                requestConfigLeave(() => {
+                    sectionHistory.current = sectionHistory.current.slice(0, -1);
+                    setSelectedMenu(previous);
+                });
+                return true;
+            }
+            return !canLeaveConfigNow(popMobile);
+        });
+    }, [isMobilePlatform]);
 
     useEffect(() => {
         let mounted = true;
@@ -193,8 +218,8 @@ function ConfigWindow() {
     // 导航函数 - 使用 useCallback 稳定化引用
     const navigateTo = useCallback((menuKey: string) => {
         if (!contentMap[menuKey]) return;
-        requestConfigLeave(() => setSelectedMenu(menuKey));
-    }, []);
+        requestConfigLeave(() => goToSection(menuKey));
+    }, [goToSection]);
 
     // 稳定化 pluginList 引用
     const stablePluginList = useMemo(() => pluginList, [pluginList]);
@@ -202,11 +227,13 @@ function ConfigWindow() {
     const renderMenuItems = (onSelect: (id: string) => void) => (
         <div className="flex flex-col gap-1 mt-2">
             {menuList.map((item, index) => (
-                <div
+                <button
+                    type="button"
                     key={index}
+                    aria-current={selectedMenu === item.id ? "page" : undefined}
                     className={`
-                                    relative flex items-center px-3 md:px-4 lg:px-5 py-3 md:py-3.5 rounded-lg cursor-pointer
-                                    transition-all duration-200 ease-out font-medium text-xs md:text-sm
+                                    relative flex w-full items-center text-left px-3 md:px-4 lg:px-5 py-3 md:py-3.5 rounded-lg cursor-pointer
+                                    transition-all duration-200 ease-out font-medium ${isMobilePlatform ? "min-h-11 text-sm" : "text-xs md:text-sm"}
                                     select-none hover:translate-x-0.5
                                     ${selectedMenu === item.id
                             ? "bg-primary/10 text-primary font-semibold shadow-sm"
@@ -225,7 +252,7 @@ function ConfigWindow() {
                         </div>
                         <span className="truncate">{item.name}</span>
                     </div>
-                </div>
+                </button>
             ))}
         </div>
     );
@@ -233,7 +260,10 @@ function ConfigWindow() {
     const handleBackHome = async () => {
         // 移动平台在单 WebView 内切换；桌面窄窗口仍走桌面导航。
         if (isMobilePlatform) {
-            requestConfigLeave(() => navigateMobile("chat_ui"));
+            requestConfigLeave(() => {
+                sectionHistory.current = [];
+                navigateMobile("chat_ui");
+            });
             return;
         }
 
@@ -249,6 +279,12 @@ function ConfigWindow() {
         }
     };
 
+    const currentSectionName = menuList.find((item) => item.id === selectedMenu)?.name ?? "设置";
+    // 与系统返回一致：先回上一个分区，再经未保存保护离开设置页
+    const handleHeaderBack = () => {
+        if (!window.__aippMobileBack?.()) void handleBackHome();
+    };
+
     // 移动端布局：顶部栏 + 侧滑菜单
     if (isMobile) {
         return (
@@ -259,11 +295,33 @@ function ConfigWindow() {
                     data-aipp-slot="config-mobile-header"
                 >
                     <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
-                        <SheetTrigger asChild>
-                            <Button variant="ghost" size="icon">
-                                <Menu className="h-5 w-5" />
-                            </Button>
-                        </SheetTrigger>
+                        {isMobilePlatform ? (
+                            <>
+                                <Button variant="ghost" className="min-h-11 gap-1 px-2" onClick={handleHeaderBack}>
+                                    <ChevronLeft className="h-5 w-5" />
+                                    返回
+                                </Button>
+                                <button
+                                    type="button"
+                                    className="min-h-11 min-w-0 flex-1 truncate px-2 text-center text-sm font-medium"
+                                    onClick={() => setSidebarOpen(true)}
+                                    aria-label={`${currentSectionName}，打开设置菜单`}
+                                >
+                                    {currentSectionName}
+                                </button>
+                                <SheetTrigger asChild>
+                                    <Button variant="ghost" size="icon" aria-label="设置菜单">
+                                        <Menu className="h-5 w-5" />
+                                    </Button>
+                                </SheetTrigger>
+                            </>
+                        ) : (
+                            <SheetTrigger asChild>
+                                <Button variant="ghost" size="icon">
+                                    <Menu className="h-5 w-5" />
+                                </Button>
+                            </SheetTrigger>
+                        )}
                         <SheetContent
                             side="left"
                             className={`w-[280px] p-0 flex flex-col safe-top${platform === "android" ? " safe-top-android" : ""}`}
@@ -279,17 +337,21 @@ function ConfigWindow() {
                             >
                                 {renderMenuItems((id) => {
                                     requestConfigLeave(() => {
-                                        setSelectedMenu(id);
+                                        goToSection(id);
                                         setSidebarOpen(false);
                                     });
                                 })}
                             </div>
                         </SheetContent>
                     </Sheet>
-                    <span className="font-medium text-sm truncate flex-1 text-center">设置</span>
-                    <Button variant="ghost" size="icon" onClick={handleBackHome} aria-label="返回首页">
-                        <Home className="h-5 w-5" />
-                    </Button>
+                    {!isMobilePlatform && (
+                        <>
+                            <span className="font-medium text-sm truncate flex-1 text-center">设置</span>
+                            <Button variant="ghost" size="icon" onClick={handleBackHome} aria-label="返回首页">
+                                <Home className="h-5 w-5" />
+                            </Button>
+                        </>
+                    )}
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-card" data-aipp-slot="config-content">
@@ -325,7 +387,7 @@ function ConfigWindow() {
                     data-theme-slot="settings-menu-container"
                     data-aipp-slot="config-menu"
                 >
-                    {renderMenuItems((id) => requestConfigLeave(() => setSelectedMenu(id)))}
+                    {renderMenuItems((id) => requestConfigLeave(() => goToSection(id)))}
                 </div>
 
                 {/* 内容区域 */}

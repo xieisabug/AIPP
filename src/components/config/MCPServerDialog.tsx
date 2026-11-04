@@ -4,6 +4,7 @@ import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
 import { Textarea } from '../ui/textarea';
 import { Input } from '../ui/input';
+import { PasswordInput } from '../ui/password-input';
 import { Label } from '../ui/label';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '../ui/accordion';
@@ -390,13 +391,23 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                                         onChange={(e) => updateHeaderRow(row.id, { key: e.target.value })}
                                                         className="flex-[0.45]"
                                                     />
-                                                    <Input
-                                                        placeholder="Header 值，例如 Bearer ${API_KEY}"
-                                                        type="password"
-                                                        value={row.value}
-                                                        onChange={(e) => updateHeaderRow(row.id, { value: e.target.value })}
-                                                        className="flex-1"
-                                                    />
+                                                    {isMobilePlatform ? (
+                                                        <div className="flex-1 min-w-0">
+                                                            <PasswordInput
+                                                                placeholder="Header 值，例如 Bearer ${API_KEY}"
+                                                                value={row.value}
+                                                                onChange={(e) => updateHeaderRow(row.id, { value: e.target.value })}
+                                                            />
+                                                        </div>
+                                                    ) : (
+                                                        <Input
+                                                            placeholder="Header 值，例如 Bearer ${API_KEY}"
+                                                            type="password"
+                                                            value={row.value}
+                                                            onChange={(e) => updateHeaderRow(row.id, { value: e.target.value })}
+                                                            className="flex-1"
+                                                        />
+                                                    )}
                                                     <Button
                                                         type="button"
                                                         variant="outline"

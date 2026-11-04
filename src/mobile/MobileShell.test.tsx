@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import MobileShell from "./MobileShell";
-import { navigateMobile, previewMobile } from "./navigation";
+import { navigateMobile, popMobile, previewMobile, registerMobileBackHandler } from "./navigation";
 
 const mounts = vi.hoisted(() => ({ chat: 0 }));
 vi.mock("../windows/ChatUIWindow", () => ({
@@ -73,6 +73,44 @@ describe("MobileShell navigation", () => {
         panel.remove();
         act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
         expect(screen.getByLabelText("chat draft")).toBeVisible();
+    });
+
+    it("closes an open select listbox before returning a page", async () => {
+        render(<MobileShell />);
+        await screen.findByLabelText("chat draft");
+        act(() => navigateMobile("config"));
+        const config = await screen.findByText("config page");
+        const listbox = document.createElement("div");
+        listbox.setAttribute("role", "listbox");
+        listbox.setAttribute("data-state", "open");
+        listbox.getClientRects = () => [new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList;
+        const escape = vi.fn();
+        document.addEventListener("keydown", escape, { capture: true });
+        document.body.append(listbox);
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(escape).toHaveBeenCalledOnce();
+        expect((escape.mock.calls[0][0] as KeyboardEvent).key).toBe("Escape");
+        expect(config).toBeVisible();
+        listbox.remove();
+        document.removeEventListener("keydown", escape, { capture: true });
+    });
+
+    it("lets the current page consume back and pops on request", async () => {
+        render(<MobileShell />);
+        const draft = await screen.findByLabelText("chat draft");
+        act(() => navigateMobile("config"));
+        const config = await screen.findByText("config page");
+        let consume = true;
+        const unregister = registerMobileBackHandler("config", () => consume);
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(config).toBeVisible();
+        act(() => popMobile());
+        expect(draft).toBeVisible();
+        act(() => navigateMobile("config"));
+        consume = false;
+        act(() => { expect(window.__aippMobileBack?.()).toBe(true); });
+        expect(draft).toBeVisible();
+        unregister();
     });
 
     it("handles back immediately after navigation in the same batch", async () => {

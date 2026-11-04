@@ -36,4 +36,9 @@ describe("MobileArtifactPreview component changes", () => {
         fireEvent.click(await screen.findByRole("button", { name: "保存到收藏" }));
         expect(await screen.findByRole("dialog")).toHaveTextContent("保存对话框");
     });
+    it("does not offer re-saving a preview opened from collections", async () => {
+        render(<MobileArtifactPreview preview={{ language: "markdown", code: "# hi", title: "note", collectionId: 3 }} />);
+        expect(await screen.findByText("已收藏")).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "保存到收藏" })).toBeNull();
+    });
 });

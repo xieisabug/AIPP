@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Control, Controller, SubmitHandler, UseFormReturn } from "react-hook-form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { Copy, Trash2, CircleHelp, ChevronDown, ChevronRight, Edit3 } from "lucide-react";
+import { Copy, Trash2, CircleHelp, ChevronDown, ChevronRight, Edit3, MoreHorizontal } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Form, FormControl, FormItem, FormLabel, FormMessage } from "./ui/form";
 import { Button } from "./ui/button";
@@ -16,6 +16,9 @@ import { useFilteredProviders } from "../hooks/useFilteredProviders";
 import { useMcpServers } from "../hooks/useMcpServers";
 import { FolderPicker } from "./config/FolderPicker";
 import ExpandableTextareaField from "./config/ExpandableTextareaField";
+import { PasswordInput } from "./ui/password-input";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
+import { useIsMobilePlatform } from "../hooks/use-platform";
 
 interface ConfigFieldButton {
     text: string;
@@ -56,6 +59,8 @@ interface ConfigField {
     hidden?: boolean;
     buttons?: ConfigFieldButton[];
     hint?: React.ReactNode;
+    /** input / password 字段的虚拟键盘类型，例如 URL 字段用 "url"。 */
+    inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
 }
 
 interface ConfigFormProps {
@@ -99,6 +104,8 @@ interface ConfigFormFieldProps {
 
 /** One form row. Declared at module level so its identity is stable across renders. */
 const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: ConfigFormFieldProps) => {
+    // 触屏上 Tooltip 无法打开：移动平台把说明文字直接显示为提示行
+    const isMobilePlatform = useIsMobilePlatform();
     const {
         models, modelsLoading, modelsError,
         providers, providersLoading, providersError,
@@ -239,6 +246,18 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                 );
             case "input":
             case "password":
+                if (field.type === "password" && isMobilePlatform) {
+                    return (
+                        <PasswordInput
+                            className={`focus:ring-ring/20 focus:border-ring ${field.className || ""}`}
+                            disabled={field.disabled}
+                            placeholder={field.placeholder}
+                            enterKeyHint="done"
+                            inputMode={field.inputMode}
+                            {...fieldRenderData}
+                        />
+                    );
+                }
                 return (
                     <Input
                         className={`focus:ring-ring/20 focus:border-ring ${field.className || ""}`}
@@ -246,6 +265,7 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                         disabled={field.disabled}
                         placeholder={field.placeholder}
                         enterKeyHint="done"
+                        inputMode={field.inputMode}
                         {...fieldRenderData}
                     />
                 );
@@ -307,7 +327,7 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                         disabled={field.disabled}
                     >
                         {field.options?.map((option) => (
-                            <FormItem className="flex items-center space-x-2" key={option.value}>
+                            <FormItem className={isMobilePlatform ? "flex flex-wrap items-center gap-x-2" : "flex items-center space-x-2"} key={option.value}>
                                 <RadioGroupItem
                                     value={option.value}
                                     id={option.value}
@@ -315,11 +335,14 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                                 />
                                 <label
                                     htmlFor={option.value}
-                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-foreground"
+                                    className={`text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-foreground${isMobilePlatform ? " min-h-11 flex items-center" : ""}`}
                                 >
                                     {option.label}
                                 </label>
-                                {option.tooltip && (
+                                {option.tooltip && isMobilePlatform && (
+                                    <p className="basis-full pl-6 text-xs leading-5 text-muted-foreground">{option.tooltip}</p>
+                                )}
+                                {option.tooltip && !isMobilePlatform && (
                                     <TooltipProvider>
                                         <Tooltip>
                                             <TooltipTrigger>
@@ -392,7 +415,7 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                 <FormItem className={`mb-6 ${field.hidden ? "hidden" : ""}`}>
                     <FormLabel className="flex items-center font-semibold text-sm text-foreground">
                         {field.label}
-                        {field.tooltip && (
+                        {field.tooltip && !isMobilePlatform && (
                             <TooltipProvider>
                                 <Tooltip>
                                     <TooltipTrigger className="ml-2">
@@ -408,6 +431,9 @@ const ConfigFormField = ({ field, name, control, data, assistantConfigApi }: Con
                             </TooltipProvider>
                         )}
                     </FormLabel>
+                    {field.tooltip && isMobilePlatform ? (
+                        <p className="text-xs leading-5 text-muted-foreground">{field.tooltip}</p>
+                    ) : null}
                     <FormControl>{renderField(fieldRenderData)}</FormControl>
                     {field.hint ? (
                         <p className="text-xs leading-5 text-muted-foreground">{field.hint}</p>
@@ -438,6 +464,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     extraButtons,
 }) => {
     const [isExpanded, setIsExpanded] = useState<boolean>(defaultExpanded);
+    const isMobilePlatform = useIsMobilePlatform();
     const contentRef = useRef<HTMLDivElement>(null);
 
     // 检查是否需要获取模型数据
@@ -602,13 +629,14 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                 <div className="flex items-center gap-2 ml-4 flex-shrink-0">
                     {onSave && useFormReturn.formState.isDirty ? (
                         <span
-                            className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300"
+                            className="rounded-full border border-foreground/30 bg-muted px-2 py-0.5 text-xs font-medium text-foreground"
                             data-aipp-slot="config-form-dirty-badge"
                         >
                             未保存
                         </span>
                     ) : null}
-                    {onSave && (
+                    {/* 移动端展开时使用底部固定保存栏，头部只保留状态与更多菜单 */}
+                    {onSave && !(isMobilePlatform && isExpanded) && (
                         <Button
                             type="button"
                             size="sm"
@@ -622,7 +650,42 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             保存配置
                         </Button>
                     )}
-                    {onCopy && (
+                    {isMobilePlatform && (onCopy || onEdit || onDelete) ? (
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label="更多操作"
+                                    onClick={(e) => e.stopPropagation()}
+                                >
+                                    <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+                                {onCopy && (
+                                    <DropdownMenuItem onSelect={onCopy}>
+                                        <Copy className="h-4 w-4" />
+                                        复制
+                                    </DropdownMenuItem>
+                                )}
+                                {onEdit && (
+                                    <DropdownMenuItem onSelect={onEdit}>
+                                        <Edit3 className="h-4 w-4" />
+                                        编辑
+                                    </DropdownMenuItem>
+                                )}
+                                {onDelete && (
+                                    <DropdownMenuItem variant="destructive" onSelect={onDelete}>
+                                        <Trash2 className="h-4 w-4" />
+                                        删除
+                                    </DropdownMenuItem>
+                                )}
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+                    ) : null}
+                    {!isMobilePlatform && onCopy && (
                         <Button
                             variant="ghost"
                             size="sm"
@@ -632,7 +695,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             <Copy className="h-4 w-4 mr-1" />
                         </Button>
                     )}
-                    {onEdit && (
+                    {!isMobilePlatform && onEdit && (
                         <Button
                             variant="ghost"
                             size="sm"
@@ -642,7 +705,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             <Edit3 className="h-4 w-4 mr-1" />
                         </Button>
                     )}
-                    {onDelete && (
+                    {!isMobilePlatform && onDelete && (
                         <Button
                             variant="ghost"
                             size="sm"
@@ -678,7 +741,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                     保存配置
                                 </Button>
                                 {useFormReturn.formState.isDirty ? (
-                                    <span className="text-xs text-amber-700 dark:text-amber-300">有未保存的更改</span>
+                                    <span className="text-xs font-medium text-foreground">有未保存的更改</span>
                                 ) : null}
                             </div>
                         </div>

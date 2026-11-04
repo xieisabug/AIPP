@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { renderToStaticMarkup } from "react-dom/server";
+import { ChevronLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MobilePreview } from "./navigation";
 import { staticPreviewDocument } from "./previewDocument";
@@ -53,13 +54,19 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
         void build().catch(e => { if (active) setError(`制品渲染失败（${preview.language}）：${String(e)}`); });
         return () => { active = false; };
     }, [preview.language, preview.code, preview.title]);
-    return <section className={`h-full flex flex-col safe-top safe-bottom bg-background ${platform === "android" ? "safe-top-android" : ""}`}>
-        <header className="flex flex-wrap gap-2 items-center p-2">
-            <Button className="min-h-11" variant="ghost" onClick={() => window.__aippMobileBack?.()}>返回</Button>
-            <h1 className="flex-1 truncate">{preview.title || "制品预览"}</h1>
-            <Button className="min-h-11" variant="outline" onClick={() => setSaveOpen(true)}>保存到收藏</Button>
+    const fromCollection = preview.collectionId != null;
+    return <section className="h-full flex flex-col safe-bottom bg-background">
+        <header className={`flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-secondary px-2 py-1 safe-top ${platform === "android" ? "safe-top-android" : ""}`}>
+            <Button className="min-h-11 gap-1 px-2" variant="ghost" onClick={() => window.__aippMobileBack?.()}>
+                <ChevronLeft className="h-5 w-5" />
+                返回
+            </Button>
+            <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{preview.title || "制品预览"}</h1>
+            {fromCollection
+                ? <span className="px-2 text-sm text-muted-foreground">已收藏</span>
+                : <Button className="min-h-11" variant="outline" onClick={() => setSaveOpen(true)}>保存到收藏</Button>}
             <Button className="min-h-11 min-w-11" variant="outline" aria-label="缩小" onClick={() => setZoom(value => Math.max(.5, value - .25))}>−</Button>
-            <span>{Math.round(zoom * 100)}%</span>
+            <span className="text-sm tabular-nums">{Math.round(zoom * 100)}%</span>
             <Button className="min-h-11 min-w-11" variant="outline" aria-label="放大" onClick={() => setZoom(value => Math.min(3, value + .25))}>+</Button>
         </header>
         {error && <p role="alert" className="p-4">{error}</p>}
@@ -78,11 +85,11 @@ export default function MobileArtifactPreview({ preview }: { preview: MobilePrev
                 } }}
                 className="border-0 bg-white w-full h-full" style={{ zoom }} />}
         </div>
-        <SaveArtifactDialog
+        {!fromCollection && <SaveArtifactDialog
             isOpen={saveOpen}
             onClose={() => setSaveOpen(false)}
             artifactType={preview.language || "text"}
             code={preview.code}
-        />
+        />}
     </section>;
 }

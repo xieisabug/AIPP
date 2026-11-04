@@ -547,6 +547,7 @@ const MCPConfig: React.FC = () => {
                                     variant="ghost"
                                     size="sm"
                                     onClick={() => openEditServerDialog(selectedServer)}
+                                    aria-label="编辑MCP"
                                 >
                                     <Edit className="h-4 w-4" />
                                 </Button>
@@ -562,6 +563,7 @@ const MCPConfig: React.FC = () => {
                                         variant="ghost"
                                         size="sm"
                                         onClick={() => handleDeleteServer(selectedServer.id)}
+                                        aria-label="删除MCP"
                                     >
                                         <Trash2 className="h-4 w-4 text-destructive" />
                                     </Button>

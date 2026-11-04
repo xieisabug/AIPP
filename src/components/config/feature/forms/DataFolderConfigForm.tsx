@@ -6,6 +6,7 @@ import ConfigForm from "@/components/ConfigForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
@@ -502,7 +503,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                     </details>
                 ) : null}
                 {danglingText ? (
-                    <div className="text-sm text-amber-700 dark:text-amber-300 px-3 py-2 bg-amber-50 dark:bg-amber-950/40 rounded-md break-words">
+                    <div className="text-sm text-foreground px-3 py-2 bg-muted border border-border rounded-md break-words">
                         {danglingText}
                         {danglingCount > 0
                             ? " 如需把本机对应字段也清空，可点下方「清理失效引用」。"
@@ -531,28 +532,46 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                         aria-hidden
                     />
                     <span
-                        className={`min-w-0 break-words ${secretTone === "warn" ? "text-amber-700 dark:text-amber-300" : "text-foreground"}`}
+                        className={`min-w-0 break-words text-foreground ${secretTone === "warn" ? "font-medium" : ""}`}
                     >
                         {status?.secret_sync_message || "读取中"}
                     </span>
                 </div>
                 <div className="flex flex-col gap-2 md:flex-row md:items-center">
-                    <Input
-                        type="password"
-                        autoComplete="new-password"
-                        aria-label="同步口令"
-                        className="w-full md:max-w-xs"
-                        placeholder="同步口令（至少 8 个字符，所有设备相同）"
-                        value={passphrase}
-                        disabled={busy}
-                        onChange={(event) => field.onChange(event.target.value)}
-                        onKeyDown={(event) => {
-                            if (event.key === "Enter") {
-                                event.preventDefault();
-                                void submitPassphrase(false);
-                            }
-                        }}
-                    />
+                    {isMobilePlatform ? (
+                        <PasswordInput
+                            autoComplete="new-password"
+                            aria-label="同步口令"
+                            className="w-full md:max-w-xs"
+                            placeholder="同步口令（至少 8 个字符，所有设备相同）"
+                            value={passphrase}
+                            disabled={busy}
+                            onChange={(event) => field.onChange(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void submitPassphrase(false);
+                                }
+                            }}
+                        />
+                    ) : (
+                        <Input
+                            type="password"
+                            autoComplete="new-password"
+                            aria-label="同步口令"
+                            className="w-full md:max-w-xs"
+                            placeholder="同步口令（至少 8 个字符，所有设备相同）"
+                            value={passphrase}
+                            disabled={busy}
+                            onChange={(event) => field.onChange(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void submitPassphrase(false);
+                                }
+                            }}
+                        />
+                    )}
                     <Button
                         type="button"
                         variant="outline"
@@ -565,13 +584,13 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 </div>
                 {passphraseError ? <p className="text-sm text-destructive break-words">{passphraseError}</p> : null}
                 {conflictNotice ? (
-                    <p className="text-sm text-amber-700 dark:text-amber-300 break-words" data-testid="provider-conflict-status">
+                    <p className="text-sm font-medium text-foreground break-words" data-testid="provider-conflict-status">
                         {conflictNotice}
                     </p>
                 ) : null}
             </div>
         );
-    }, [conflictNotice, passphraseError, saving, savingPassphrase, secretTone, status?.secret_sync_message, submitPassphrase]);
+    }, [conflictNotice, isMobilePlatform, passphraseError, saving, savingPassphrase, secretTone, status?.secret_sync_message, submitPassphrase]);
 
     const renderSyncActionButtons = useCallback(() => {
         // Auto-sync toggle is the persistent on/off. Stop shows while any round is syncing.
@@ -715,6 +734,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 type: "input" as const,
                 label: "服务器地址",
                 placeholder: "https://sync.example.com",
+                inputMode: "url" as const,
                 disabled: mode !== "self_hosted",
                 hidden: mode !== "self_hosted",
                 hint: isPlaintextUrl
