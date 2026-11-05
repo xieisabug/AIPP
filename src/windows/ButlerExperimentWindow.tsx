@@ -5,6 +5,8 @@ import { useForm } from "react-hook-form";
 import ButlerPeerActivity from "@/components/butler/ButlerPeerActivity";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
+import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
+import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import "@/components/butler/butlerDesktop.css";
 import { toast } from "sonner";
 import {
@@ -71,7 +73,7 @@ import {
 import { ConversationStatsDialog } from "@/components/token-statistics";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
 import { buildButlerWorkspaceConfig } from "@/components/butler/butlerWorkspaceConfig";
-import { AssistantListItem } from "@/data/Assistant";
+import { AssistantListItem, type AssistantDetail } from "@/data/Assistant";
 import {
     ButlerMainLoadResponse,
     ButlerTaskDetailResponse,
@@ -311,6 +313,33 @@ function ButlerExperimentWindow() {
     const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
     const activeConversationId = contact ? String(contact.conversationId) : mainConversationId;
     const activeAssistant = assistants.find(assistant => assistant.id === contact?.assistantId);
+    const [profileTarget, setProfileTarget] = useState<{ id?: number; name: string } | null>(null);
+    const saveProfile = async (name: string, appearance: ButlerAppearance) => {
+        if (!profileTarget) return;
+        const target = profileTarget;
+        let nameSaved = false;
+        try {
+            const latest = await loadFeatureConfig();
+            if (target.id === undefined) {
+                await saveFeatureConfig("experimental", {
+                    ...Object.fromEntries(latest.get("experimental") ?? []),
+                    butler_display_name: name,
+                });
+            } else if (name !== target.name) {
+                const detail = await invoke<AssistantDetail>("get_assistant", { assistantId: target.id });
+                await invoke("save_assistant", { assistantDetail: { ...detail, assistant: { ...detail.assistant, name } } });
+                setAssistants(previous => previous.map(assistant => assistant.id === target.id ? { ...assistant, name } : assistant));
+            }
+            nameSaved = true;
+            await saveFeatureConfig("butler_appearance", {
+                ...Object.fromEntries(latest.get("butler_appearance") ?? []),
+                [appearanceKey(target.id)]: JSON.stringify(appearance),
+            });
+            toast.success("名字与形象已保存");
+        } catch (error) {
+            throw new Error(`${nameSaved ? "名称已保存，但形象保存失败" : "保存助手名称失败"}（${target.id === undefined ? "总管家" : `助手 ${target.id}`}）：${error instanceof Error ? error.message : String(error)}`);
+        }
+    };
     const [rosterError, setRosterError] = useState("");
     const rosterRequest = useRef(0);
     const [previews, setPreviews] = useState<ContactPreview[]>([]);
@@ -1334,6 +1363,7 @@ function ButlerExperimentWindow() {
         "";
 
     return (
+        <ButlerAppearanceContext.Provider value={featureConfig.get("butler_appearance") ?? new Map()}>
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div
                 className="flex h-screen bg-background text-foreground"
@@ -1546,11 +1576,13 @@ function ButlerExperimentWindow() {
                                         {getFeishuStatusIcon(feishuStatus, loadingFeishuStatus)} 飞书
                                     </Badge>}
                                 </div>
-                                <div className="flex items-center gap-1.5 rounded-full border bg-background px-3 py-1 shadow-sm"
-                                    title={contact ? activeAssistant?.name : mainModelDisplayName}>
+                                <button type="button" className="flex min-w-0 items-center gap-1.5 rounded-full border bg-background px-3 py-1 shadow-sm hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                                    aria-label="修改助手名字与形象"
+                                    onClick={() => setProfileTarget({ id: contact?.assistantId, name: activeAssistant?.name ?? butlerDisplayName })}
+                                    title={contact ? "修改名字与形象" : `修改名字与形象 · ${mainModelDisplayName}`}>
                                     <ButlerAvatar id={contact?.assistantId ?? 0} chief={!contact} size={22}/>
                                     <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
-                                </div>
+                                </button>
                                 <div className="flex min-w-0 items-center justify-end gap-1">
                                     <ButlerPeerActivity key={activeConversationId} conversationId={Number(activeConversationId)} />
                                     <IconButton
@@ -2108,7 +2140,12 @@ function ButlerExperimentWindow() {
                     </DialogContent>
                 </Dialog>
             </div>
+            {profileTarget && <ButlerProfileDialog
+                name={profileTarget.name}
+                appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(profileTarget.id)))}
+                onClose={() => setProfileTarget(null)} onSave={saveProfile} />}
         </AntiLeakageProvider>
+        </ButlerAppearanceContext.Provider>
     );
 }
 
