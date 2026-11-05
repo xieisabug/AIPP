@@ -6,7 +6,7 @@ import { GlassesArtwork, HatArtwork } from "./AvatarAccessories";
 import { useAvatarMotion, type AvatarActionRequest } from "./useAvatarMotion";
 import { useAvatarPerformance } from "./useAvatarPerformance";
 import AvatarEye from "./AvatarEye";
-import AvatarEffects from "./AvatarEffects";
+import { ConfettiOverlay, MorphParts } from "./AvatarEffects";
 
 export interface AnimatedAvatarProps {
     appearance: ButlerAppearance;
@@ -16,6 +16,10 @@ export interface AnimatedAvatarProps {
     actionRequest?: AvatarActionRequest;
 }
 
+const smoothstep = (a: number, b: number, x: number) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+/** 圆核与装饰的颜色：黑白（品牌默认）形象跟随前景色，保证深浅主题下都看得见；彩色形象沿用外圈色。 */
+export const coreColorOf = (appearance: ButlerAppearance) => /^#(000000|ffffff)$/i.test(appearance.colors.secondary) ? "currentColor" : appearance.colors.secondary;
+
 export default function AnimatedAvatar({ appearance, size = 32, animated = false, state = "idle", actionRequest }: AnimatedAvatarProps) {
     const definition = avatarDefinitions[appearance.shape];
     const id = useId().replace(/:/g, "");
@@ -24,12 +28,23 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     const full = size >= 48;
     const performance = useAvatarPerformance(action ? "idle" : state, active, !full, id);
     const v = performance.values;
-    const bodyScaleX = useTransform(() => v.sx.get()*v.zoom.get()*Math.cos(v.yaw.get()*0.45*Math.PI/180)*(1-performance.amount.get()*0.72));
-    const bodyScaleY = useTransform(() => v.sy.get()*v.zoom.get()*(1-performance.amount.get()*0.72));
-    const bodyY = useTransform(() => v.y.get()+performance.amount.get()*130);
-    const bodyRoll = useTransform(() => v.roll.get()+performance.amount.get()*180);
-    const eyeOpacity = useTransform(() => 1-performance.amount.get());
-    const effectOpacity = useTransform(() => !active || !full ? 0 : performance.effect === "confetti" ? 1 : performance.amount.get());
+    const m = performance.morph;
+    const glasses = appearance.accessories.eyes === "round-glasses" && definition.capabilities.includes("eyes");
+    const hat = appearance.accessories.head === "beret" && definition.capabilities.includes("headwear");
+    // 变形中心对齐可视区域中心：带帽/大尺寸的 viewBox 整体上移了 45 单位。
+    const morphCenterY = hat || full ? 210 : 255;
+    // 身体原地缩成圆核；绕竖轴的转身用 cos(spin) 压缩横向，半程正好侧对观众。
+    const bodyScaleX = useTransform(() => v.sx.get()*v.zoom.get()*Math.cos(v.yaw.get()*0.45*Math.PI/180)*m.scale.get()*m.sx.get()*Math.cos(m.spin.get()));
+    const bodyScaleY = useTransform(() => v.sy.get()*v.zoom.get()*m.scale.get()*m.sy.get());
+    const bodyX = useTransform(() => v.x.get()+m.dx.get());
+    const bodyY = useTransform(() => v.y.get()+m.dy.get()+(morphCenterY-255)*m.amount.get());
+    // 形象 ⇄ 圆盘在转到侧面（amount≈0.5）时交接，交接瞬间几乎看不见，读起来就是「转身变形」。
+    const logoOpacity = useTransform(() => 1-smoothstep(0.4, 0.6, m.amount.get()));
+    const discOpacity = useTransform(() => smoothstep(0.4, 0.6, m.amount.get()));
+    const eyeOpacity = useTransform(() => Math.max(0, 1-m.amount.get()*2.2));
+    const currentWeight = useTransform(() => m.amount.get()*(performance.outgoing ? m.swap.get() : 1));
+    const outgoingWeight = useTransform(() => m.amount.get()*(1-m.swap.get()));
+    const confettiOpacity = useTransform((): number => active && full ? 1 : 0);
     const targetX = useMotionValue(0);
     const targetY = useMotionValue(0);
     const gazeX = useSpring(targetX, { stiffness: 150, damping: 22 });
@@ -37,15 +52,15 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     useEffect(() => {
         if (!active) { targetX.set(0); targetY.set(0); gazeX.jump(0); gazeY.jump(0); }
     }, [active, targetX, targetY, gazeX, gazeY]);
-    const faceX = useTransform(() => Math.sin(v.yaw.get()*Math.PI/180)*28 + gazeX.get() + v.gazeX.get());
+    // 转身起步时眼睛先往转向一侧滑，给出方向感（随后眼睛淡出）。
+    const faceX = useTransform(() => Math.sin(v.yaw.get()*Math.PI/180)*28 + Math.sin(m.spin.get())*40 + gazeX.get() + v.gazeX.get());
     const faceY = useTransform(() => v.pitch.get()*0.55 + gazeY.get() + v.gazeY.get());
     const smiling = action === "smile" || action === "glasses";
     const blinking = action === "blink";
-    const glasses = appearance.accessories.eyes === "round-glasses" && definition.capabilities.includes("eyes");
-    const hat = appearance.accessories.head === "beret" && definition.capabilities.includes("headwear");
     const takingGlasses = active && full && glasses && action === "glasses";
     const tippingHat = active && full && hat && action === "hat";
     const face = definition.face;
+    const coreColor = coreColorOf(appearance);
     const dock = definition.propDock;
     const glassesPose = takingGlasses ? {
         x: [face.x, face.x + 12, dock.x, dock.x, face.x],
@@ -74,8 +89,11 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                 </linearGradient>
             </defs>
             <g transform="translate(255 255)">
-                <motion.g style={{ x: v.x, y: bodyY, rotate: bodyRoll, scaleX: bodyScaleX, scaleY: bodyScaleY, transformOrigin: "0px 0px" }}>
-                    <g transform="translate(-255 -255)">
+                <motion.g style={{ x: bodyX, y: bodyY, rotate: v.roll, scaleX: bodyScaleX, scaleY: bodyScaleY, opacity: m.opacity, transformOrigin: "0px 0px" }}>
+                    {performance.kind && <motion.g data-avatar-core="" style={{ opacity: discOpacity }}>
+                        <circle r="250" fill={coreColor} />
+                    </motion.g>}
+                    <motion.g style={{ opacity: logoOpacity }}><g transform="translate(-255 -255)">
                         {definition.parts.map(part => <g key={part.color}>
                             <path d={part.path} fill={appearance.colors[part.color]} />
                             <path d={part.path} fill={`url(#${id}-${part.color})`} opacity="0.2" />
@@ -101,16 +119,14 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                                 <HatArtwork />
                             </motion.g>
                         </g>}
-                    </g>
+                    </g></motion.g>
                 </motion.g>
             </g>
-            <g transform="translate(255 180)">
-                <AnimatePresence mode="sync">
-                    {performance.effect !== "none" && <motion.g key={performance.effect} initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.6 }} transition={{ duration: active ? 0.28 : 0 }} style={{ transformOrigin: "0px 0px" }}>
-                        <AvatarEffects kind={performance.effect} time={performance.time} opacity={effectOpacity} color="currentColor" />
-                    </motion.g>}
-                </AnimatePresence>
-            </g>
+            {active && <g transform={`translate(255 ${morphCenterY})`}>
+                {performance.outgoing && <MorphParts key={`out-${performance.outgoing}`} kind={performance.outgoing} time={m.outgoingTime} weight={outgoingWeight} color={coreColor} />}
+                {performance.kind && <MorphParts key={performance.kind} kind={performance.kind} time={m.kindTime} weight={currentWeight} color={coreColor} />}
+                {performance.overlay && full && <g transform="translate(0 -30)"><ConfettiOverlay time={performance.time} opacity={confettiOpacity} /></g>}
+            </g>}
         </svg>
     </span>;
 }

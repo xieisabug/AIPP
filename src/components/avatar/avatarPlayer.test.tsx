@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { AvatarPlayer, bezierEase, sampleClip } from "./avatarPlayer";
 import { avatarClips, avatarRecipes, type RecipeState } from "./avatarRecipes";
+import { BODY_RADIUS, coreMotion, morphKinds, morphRadius } from "./avatarMorphs";
+
+const sample0 = (state: RecipeState) => avatarRecipes[state].effect ?? "none";
 
 describe("avatar choreography player", () => {
     it("should produce finite distinct performances across the complete state catalogue", () => {
@@ -15,9 +18,9 @@ describe("avatar choreography player", () => {
                 for (const value of Object.values(sample.pose)) expect(Number.isFinite(value), `${state} frame ${frame}`).toBe(true);
                 expect(sample.pose.sx).toBeGreaterThan(0.5);
                 expect(sample.pose.sy).toBeGreaterThan(0.5);
-                if (frame % 60 === 0) signature.push(sample.pose.y, sample.pose.roll, sample.pose.left, sample.amount);
+                if (frame % 60 === 0) signature.push(sample.pose.y, sample.pose.roll, sample.pose.left, sample.amount, sample.morph.core.dy, sample.morph.core.sy);
             }
-            signatures.add(JSON.stringify(signature.map(value => Math.round(value*100))));
+            signatures.add(sample0(state) + JSON.stringify(signature.map(value => Math.round(value*100))));
         }
         expect(signatures.size).toBeGreaterThan(45);
     });
@@ -53,14 +56,58 @@ describe("avatar choreography player", () => {
         expect(Math.max(...values)).toBeGreaterThan(1);
     });
 
-    it("should transition one-shot states and suppress functional morphs at compact sizes", () => {
+    it("should transition one-shot states and run functional morphs at every size", () => {
         const player = new AvatarPlayer("waking");
         for (let i=0;i<180;i++) player.advance(1/60);
         expect(player.state).toBe("idle");
         player.setState("thinking");
-        for (let i=0;i<120;i++) player.advance(1/60,true);
-        expect(player.amount).toBe(0);
-        for (let i=0;i<120;i++) player.advance(1/60,false);
-        expect(player.amount).toBeGreaterThan(0.95);
+        let frame = player.advance(0, true);
+        for (let i=0;i<120;i++) frame = player.advance(1/60,true);
+        expect(frame.morph.kind).toBe("dots");
+        expect(frame.morph.amount).toBeGreaterThan(0.95);
+    });
+
+    it("should shrink the body in place into the core and turn exactly once around", () => {
+        const player = new AvatarPlayer("idle", 3);
+        for (let i=0;i<60;i++) player.advance(1/60);
+        player.setState("waiting");
+        let frame = player.advance(0);
+        let maxDrift = 0;
+        for (let i=0;i<120;i++) { frame = player.advance(1/60); maxDrift = Math.max(maxDrift, Math.abs(frame.morph.core.dy), Math.abs(frame.pose.y)); }
+        expect(frame.morph.core.scale).toBeCloseTo(morphRadius.orbit / BODY_RADIUS, 2);
+        // 核心原地缩小，不再掉到底部
+        expect(maxDrift).toBeLessThan(15);
+        expect(Math.abs(frame.morph.spin)).toBeCloseTo(Math.PI, 1);
+        const entry = Math.sign(frame.morph.spin);
+        player.setState("idle");
+        for (let i=0;i<120;i++) frame = player.advance(1/60);
+        // 退场沿同方向再转半圈：一整圈，不回卷
+        expect(frame.morph.spin * entry).toBeCloseTo(2*Math.PI, 1);
+        expect(frame.morph.kind).toBeNull();
+        expect(frame.morph.core.scale).toBeCloseTo(1, 2);
+    });
+
+    it("should crossfade between decorations without passing through the full body", () => {
+        const player = new AvatarPlayer("thinking", 9);
+        for (let i=0;i<90;i++) player.advance(1/60);
+        player.setState("searching");
+        let frame = player.advance(1/60);
+        expect(frame.morph.outgoing).toBe("dots");
+        expect(frame.morph.kind).toBe("radar");
+        let minAmount = 1;
+        for (let i=0;i<90;i++) { frame = player.advance(1/60); minAmount = Math.min(minAmount, frame.morph.amount); }
+        expect(minAmount).toBeGreaterThan(0.95);
+        expect(frame.morph.outgoing).toBeNull();
+        expect(frame.morph.swap).toBeGreaterThan(0.99);
+    });
+
+    it("should keep every morph core finite and inside the frame", () => {
+        for (const kind of morphKinds) for (let t = 0; t < 6; t += 1/30) {
+            const core = coreMotion(kind, t);
+            for (const value of Object.values(core)) expect(Number.isFinite(value), `${kind}@${t}`).toBe(true);
+            expect(Math.abs(core.dx) + morphRadius[kind]).toBeLessThan(255);
+            expect(Math.abs(core.dy) + morphRadius[kind]*core.sy).toBeLessThan(255);
+            expect(core.opacity).toBeGreaterThanOrEqual(0);
+        }
     });
 });
