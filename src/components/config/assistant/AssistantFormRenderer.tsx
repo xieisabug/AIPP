@@ -7,6 +7,7 @@ import { AssistantDetail } from "@/data/Assistant";
 import { AssistantFormConfig, AssistantConfigApi } from "@/types/forms";
 import { Button } from "@/components/ui/button";
 import { Share } from "lucide-react";
+import AssistantAvatarSettings from "./AssistantAvatarSettings";
 
 interface AssistantFormRendererProps {
     currentAssistant: AssistantDetail | null;
@@ -66,6 +67,7 @@ export const AssistantFormRenderer: React.FC<AssistantFormRendererProps> = ({
             description={currentAssistant.assistant.description || "配置你的智能助手"}
             config={formConfig}
             layout="prompt"
+            beforePrompt={<AssistantAvatarSettings key={currentAssistant.assistant.id} id={currentAssistant.assistant.id} name={currentAssistant.assistant.name} />}
             classNames="bottom-space"
             assistantType={currentAssistant.assistant.assistant_type}
             onSave={onSave}

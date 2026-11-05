@@ -83,6 +83,7 @@ interface ConfigFormProps {
     onEdit?: () => void;
     onTitleClick?: () => void;
     extraButtons?: React.ReactNode;
+    beforePrompt?: React.ReactNode;
 }
 
 interface FieldOptionsData {
@@ -467,6 +468,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     onEdit,
     onTitleClick,
     extraButtons,
+    beforePrompt,
 }) => {
     const [isExpanded, setIsExpanded] = useState<boolean>(defaultExpanded);
     const isMobilePlatform = useIsMobilePlatform();
@@ -574,6 +576,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                         </div>
                         {config.find((item) => item.key === "prompt") && (
                             <div className="space-y-6">
+                                {beforePrompt}
                                 {renderFormField("prompt", config.find((item) => item.key === "prompt")!.config)}
                             </div>
                         )}

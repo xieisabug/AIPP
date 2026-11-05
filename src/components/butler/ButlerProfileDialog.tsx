@@ -23,13 +23,14 @@ const darkColors = [
 ];
 
 interface Props {
+    appearanceOnly?: boolean;
     name: string;
     appearance?: ButlerAppearance;
     onClose: () => void;
     onSave: (name: string, appearance: ButlerAppearance) => Promise<void>;
 }
 
-export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, onClose, onSave }: Props) {
+export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, onClose, onSave, appearanceOnly = false }: Props) {
     const [name, setName] = useState(initialName);
     const [appearance, setAppearance] = useState(initialAppearance ?? defaultAppearance);
     const [saving, setSaving] = useState(false);
@@ -68,8 +69,8 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
     return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
         <DialogContent className="sm:max-w-[720px] max-h-[90vh] overflow-y-auto" showCloseButton={!saving}>
             <DialogHeader>
-                <DialogTitle>名字与形象</DialogTitle>
-                <DialogDescription>为助手选一个名字，搭配属于它的颜色。</DialogDescription>
+                <DialogTitle>{appearanceOnly ? "助手头像" : "名字与形象"}</DialogTitle>
+                <DialogDescription>{appearanceOnly ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。" : "为助手选一个名字，搭配属于它的颜色。"}</DialogDescription>
             </DialogHeader>
             <form onSubmit={event => { event.preventDefault(); void save(); }} className="space-y-6">
                 <fieldset disabled={saving} className="grid gap-6 sm:grid-cols-[220px_1fr]">
@@ -97,10 +98,10 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
                         </div>
                     </div>
                     <div className="min-w-0 space-y-5">
-                        <div className="space-y-2">
+                        {!appearanceOnly && <div className="space-y-2">
                             <label htmlFor="butler-profile-name" className="text-sm font-medium">助手名称</label>
                             <Input id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
-                        </div>
+                        </div>}
                         <fieldset className="space-y-2">
                             <legend className="text-sm font-medium">形状</legend>
                             <div className="flex gap-2">
