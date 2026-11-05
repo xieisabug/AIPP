@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { getErrorMessage } from "@/utils/error";
 import { useModels } from "@/hooks/useModels";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Form, FormControl, FormDescription, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Form, FormControl, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
@@ -103,10 +103,43 @@ interface SummaryActionLoadingState {
 const isEnabledValue = (value: unknown) => value === true || value === "true";
 const toggleCardClassName = "flex items-center justify-between rounded-md border bg-background p-4";
 const nestedGroupClassName = "space-y-4 rounded-lg bg-muted/30 p-4";
-const nestedSubGroupClassName = "space-y-4 rounded-lg bg-muted/40 p-4";
 const actionPanelClassName =
     "flex flex-col gap-3 rounded-md border bg-background p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between";
 const statusPanelClassName = "space-y-2 rounded-md border bg-background p-4 shadow-sm";
+
+// ── 总管家设置：扁平设置列表（一组一个边框容器，行之间用分隔线）──
+const settingRowClassName = "flex items-center justify-between gap-4 px-4 py-3";
+const stackedRowClassName = "grid gap-2 px-4 py-3";
+
+const SettingsGroup = ({
+    title,
+    description,
+    action,
+    children,
+}: {
+    title: React.ReactNode;
+    description?: React.ReactNode;
+    action?: React.ReactNode;
+    children: React.ReactNode;
+}) => (
+    <section className="space-y-2">
+        <div className="flex items-end justify-between gap-3">
+            <div className="min-w-0">
+                <h3 className="text-sm font-medium">{title}</h3>
+                {description ? <p className="mt-0.5 text-xs text-muted-foreground">{description}</p> : null}
+            </div>
+            {action}
+        </div>
+        <div className="divide-y rounded-lg border">{children}</div>
+    </section>
+);
+
+const SettingRowText = ({ label, description }: { label: React.ReactNode; description?: React.ReactNode }) => (
+    <div className="min-w-0 space-y-0.5">
+        <div className="text-sm font-medium">{label}</div>
+        {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
+    </div>
+);
 
 const readSummaryEnabledState = (values?: Record<string, unknown>): SummaryEnabledState => ({
     mcp: isEnabledValue(values?.dynamic_mcp_loading_enabled),
@@ -597,6 +630,24 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
         || (butlerEnabled && feishuEnabled && !feishuAppId.trim())
         || (butlerEnabled && feishuEnabled && !feishuAppSecret.trim() && !feishuStatus?.secret_configured);
 
+    const renderToggleRow = (name: string, label: React.ReactNode, description?: React.ReactNode) => (
+        <Controller
+            control={form.control}
+            name={name}
+            render={({ field }) => (
+                <FormItem className={settingRowClassName}>
+                    <SettingRowText label={label} description={description} />
+                    <FormControl>
+                        <Switch
+                            checked={isEnabledValue(field.value)}
+                            onCheckedChange={field.onChange}
+                        />
+                    </FormControl>
+                </FormItem>
+            )}
+        />
+    );
+
     return (
         <Form {...form}>
             <Card
@@ -972,535 +1023,412 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                         </div>
                     ) : null}
 
-                    <div className="space-y-4">
-                        <div>
-                            <h3 className="text-sm font-medium">总管家与飞书接入</h3>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                                先开启总管家模式，再配置模型、主页和飞书连接等依赖项。
-                            </p>
-                        </div>
-
-                        <Controller
-                            control={form.control}
-                            name="butler_experiment_enabled"
-                            render={({ field }) => (
-                                <FormItem className={toggleCardClassName}>
-                                    <div>
-                                        <FormLabel className="text-base">总管家模式（实验）</FormLabel>
-                                        <p className="mt-1 text-sm text-muted-foreground">
-                                            开启后新增独立的总管家工作台、隐藏任务会话和任务结果聚合视图。
-                                        </p>
-                                    </div>
-                                    <FormControl>
-                                        <Switch
-                                            checked={isEnabledValue(field.value)}
-                                            onCheckedChange={field.onChange}
-                                        />
-                                    </FormControl>
-                                </FormItem>
+                    <div className="space-y-6">
+                        <SettingsGroup
+                            title="总管家与飞书接入"
+                            description="先开启总管家模式，再配置模型、工作区和飞书连接。"
+                            action={
+                                butlerEnabled && saveFeatureConfigProp ? (
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => setIsOnboardingOpen(true)}
+                                    >
+                                        <Wand2 className="h-4 w-4 mr-1.5" />
+                                        开始引导
+                                    </Button>
+                                ) : null
+                            }
+                        >
+                            {renderToggleRow(
+                                "butler_experiment_enabled",
+                                "总管家模式（实验）",
+                                "开启后新增独立的总管家工作台、隐藏任务会话和任务结果聚合视图。"
                             )}
-                        />
+                        </SettingsGroup>
 
                         {butlerEnabled && (
-                            <div className={nestedGroupClassName}>
-                                {saveFeatureConfigProp && (
-                                    <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
-                                        <div className="flex-1 space-y-0.5">
-                                            <p className="text-sm font-medium">引导配置</p>
-                                            <p className="text-xs text-muted-foreground">
-                                                通过分步向导快速完成总管家的模型、环境、工作区和飞书配置。
-                                            </p>
-                                        </div>
-                                        <Button
-                                            type="button"
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={() => setIsOnboardingOpen(true)}
-                                        >
-                                            <Wand2 className="h-4 w-4 mr-1.5" />
-                                            开始引导
-                                        </Button>
-                                    </div>
-                                )}
-                                <Controller
-                                    control={form.control}
-                                    name="butler_model_id"
-                                    render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel>总管家模型</FormLabel>
-                                            <FormControl>
-                                                <Select
-                                                    value={field.value || ""}
-                                                    onValueChange={field.onChange}
-                                                    disabled={modelsLoading}
-                                                >
-                                                    <SelectTrigger>
-                                                        <SelectValue
-                                                            placeholder={
-                                                                modelsLoading
-                                                                    ? "加载中..."
-                                                                    : modelsError
-                                                                        ? "加载失败"
-                                                                        : "选择总管家模型"
-                                                            }
-                                                        />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        {modelOptions.map((option) => (
-                                                            <SelectItem
-                                                                key={option.value}
-                                                                value={option.value}
-                                                            >
-                                                                {option.label}
-                                                            </SelectItem>
-                                                        ))}
-                                                    </SelectContent>
-                                                </Select>
-                                            </FormControl>
-                                            <p className="text-sm text-muted-foreground mt-1">
-                                                总管家主会话会使用固定内置提示词，并绑定到这里选择的模型。
-                                            </p>
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <Controller
-                                    control={form.control}
-                                    name="butler_display_name"
-                                    render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel>总管家显示名称</FormLabel>
-                                            <FormControl>
-                                                <Input
-                                                    value={field.value || ""}
-                                                    onChange={field.onChange}
-                                                    placeholder="总管家"
-                                                />
-                                            </FormControl>
-                                            <p className="mt-1 text-sm text-muted-foreground">
-                                                用于总管家工作台头部展示；留空时回退为“总管家”。
-                                            </p>
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
-
-                                {/* ── 可信工作区配置 ── */}
-                                <div className="space-y-3 pt-3 border-t border-border/50">
-                                    <p className="text-sm font-medium text-muted-foreground">可信工作区</p>
-
+                            <>
+                                <SettingsGroup title="基础">
                                     <Controller
                                         control={form.control}
-                                        name="butler_trust_all_workspaces"
+                                        name="butler_model_id"
                                         render={({ field }) => (
-                                            <FormItem className={toggleCardClassName}>
-                                                <div>
-                                                    <FormLabel className="text-base flex items-center gap-2">
-                                                        信任任何工作区
-                                                        <span className="inline-flex items-center gap-1 rounded-md bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
-                                                            <AlertTriangle className="h-3 w-3" />
-                                                            危险
-                                                        </span>
-                                                    </FormLabel>
-                                                    <p className="text-sm text-muted-foreground mt-1">
-                                                        开启后总管家对所有路径的文件操作将自动放行，不再弹出任何权限确认弹窗。仅建议在完全受信环境下使用。
-                                                    </p>
+                                            <FormItem className={settingRowClassName}>
+                                                <SettingRowText
+                                                    label="总管家模型"
+                                                    description="主会话使用固定内置提示词，并绑定到这里选择的模型。"
+                                                />
+                                                <div className="w-64 shrink-0 space-y-1">
+                                                    <FormControl>
+                                                        <Select
+                                                            value={field.value || ""}
+                                                            onValueChange={field.onChange}
+                                                            disabled={modelsLoading}
+                                                        >
+                                                            <SelectTrigger className="w-full">
+                                                                <SelectValue
+                                                                    placeholder={
+                                                                        modelsLoading
+                                                                            ? "加载中..."
+                                                                            : modelsError
+                                                                                ? "加载失败"
+                                                                                : "选择总管家模型"
+                                                                    }
+                                                                />
+                                                            </SelectTrigger>
+                                                            <SelectContent>
+                                                                {modelOptions.map((option) => (
+                                                                    <SelectItem
+                                                                        key={option.value}
+                                                                        value={option.value}
+                                                                    >
+                                                                        {option.label}
+                                                                    </SelectItem>
+                                                                ))}
+                                                            </SelectContent>
+                                                        </Select>
+                                                    </FormControl>
+                                                    <FormMessage />
                                                 </div>
-                                                <FormControl>
-                                                    <Switch
-                                                        checked={isEnabledValue(field.value)}
-                                                        onCheckedChange={field.onChange}
-                                                    />
-                                                </FormControl>
                                             </FormItem>
                                         )}
                                     />
-
-                                    <div className={nestedGroupClassName}>
-                                        <p className="text-sm text-muted-foreground">
-                                            主工作区为必填，额外工作区按需补充。在这些路径下的文件操作将自动放行，描述会注入到总管家的提示词中帮助 AI 理解工作区用途。
-                                        </p>
-                                        <div className="space-y-3 rounded-lg border border-primary/20 bg-background p-4">
-                                            <div>
-                                                <p className="text-sm font-medium">主工作区</p>
-                                                <p className="mt-1 text-xs text-muted-foreground">
-                                                    总管家会优先在这里组织任务、文件与产物。
-                                                </p>
-                                            </div>
-                                            <FolderPicker
-                                                value={butlerMainWorkspacePath}
-                                                onChange={(value) =>
-                                                    setMainWorkspace(
-                                                        value,
-                                                        butlerMainWorkspaceDescription
-                                                    )
-                                                }
-                                                placeholder="选择或输入主工作区目录路径"
-                                            />
-                                            <Input
-                                                value={butlerMainWorkspaceDescription}
-                                                onChange={(event) =>
-                                                    setMainWorkspace(
-                                                        butlerMainWorkspacePath,
-                                                        event.target.value
-                                                    )
-                                                }
-                                                placeholder={BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION}
-                                            />
-                                            {!butlerMainWorkspacePath.trim() ? (
-                                                <p className="text-xs text-destructive">
-                                                    请先配置主工作区
-                                                </p>
-                                            ) : null}
-                                        </div>
-
-                                        {!trustAllWorkspaces && (
-                                            <>
-                                                <div className="space-y-2">
-                                                    <p className="text-sm font-medium">额外可信工作区</p>
-                                                    <p className="text-xs text-muted-foreground">
-                                                        用于补充主工作区之外也允许自动放行的目录。
-                                                    </p>
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_display_name"
+                                        render={({ field }) => (
+                                            <FormItem className={settingRowClassName}>
+                                                <SettingRowText
+                                                    label="总管家显示名称"
+                                                    description="用于工作台头部展示；留空时回退为“总管家”。"
+                                                />
+                                                <div className="w-64 shrink-0 space-y-1">
+                                                    <FormControl>
+                                                        <Input
+                                                            value={field.value || ""}
+                                                            onChange={field.onChange}
+                                                            placeholder="总管家"
+                                                        />
+                                                    </FormControl>
+                                                    <FormMessage />
                                                 </div>
+                                            </FormItem>
+                                        )}
+                                    />
+                                </SettingsGroup>
 
-                                            <div className="space-y-2">
-                                                <div className="flex items-center gap-2">
+                                <SettingsGroup
+                                    title="可信工作区"
+                                    description="这些路径下的文件操作自动放行，描述会注入总管家提示词，帮助理解工作区用途。"
+                                >
+                                    <div className={stackedRowClassName}>
+                                        <SettingRowText
+                                            label="主工作区"
+                                            description="必填。总管家会优先在这里组织任务、文件与产物。"
+                                        />
+                                        <FolderPicker
+                                            value={butlerMainWorkspacePath}
+                                            onChange={(value) =>
+                                                setMainWorkspace(value, butlerMainWorkspaceDescription)
+                                            }
+                                            placeholder="选择或输入主工作区目录路径"
+                                        />
+                                        <Input
+                                            value={butlerMainWorkspaceDescription}
+                                            onChange={(event) =>
+                                                setMainWorkspace(butlerMainWorkspacePath, event.target.value)
+                                            }
+                                            placeholder={BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION}
+                                        />
+                                        {!butlerMainWorkspacePath.trim() ? (
+                                            <p className="text-xs text-destructive">请先配置主工作区</p>
+                                        ) : null}
+                                    </div>
+
+                                    {renderToggleRow(
+                                        "butler_trust_all_workspaces",
+                                        <span className="flex items-center gap-2">
+                                            信任任何工作区
+                                            <span className="inline-flex items-center gap-1 rounded border border-destructive/40 px-1.5 py-0.5 text-[11px] font-normal text-destructive">
+                                                <AlertTriangle className="h-3 w-3" />
+                                                危险
+                                            </span>
+                                        </span>,
+                                        "开启后所有路径的文件操作都自动放行，不再弹出权限确认。仅建议在完全受信环境下使用。"
+                                    )}
+
+                                    {!trustAllWorkspaces && (
+                                        <div className={stackedRowClassName}>
+                                            <SettingRowText
+                                                label="额外可信工作区"
+                                                description="主工作区之外也允许自动放行的目录。"
+                                            />
+                                            <div className="flex items-center gap-2">
+                                                <div className="min-w-0 flex-1">
                                                     <FolderPicker
                                                         value={newTrustedPath}
                                                         onChange={setNewTrustedPath}
                                                         placeholder="选择或输入额外可信目录路径"
                                                     />
-                                                    <Button
-                                                        type="button"
-                                                        size="sm"
-                                                        onClick={handleAddTrustedPath}
-                                                        disabled={!newTrustedPath.trim()}
-                                                    >
-                                                        <Plus className="h-4 w-4 mr-1" />
-                                                        添加
-                                                    </Button>
                                                 </div>
-                                                <Input
-                                                    value={newTrustedDesc}
-                                                    onChange={(e) => setNewTrustedDesc(e.target.value)}
-                                                    placeholder="工作区描述（可选），例如：前端项目、Rust 后端代码仓库"
-                                                    className="text-sm"
-                                                />
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={handleAddTrustedPath}
+                                                    disabled={!newTrustedPath.trim()}
+                                                >
+                                                    <Plus className="h-4 w-4 mr-1" />
+                                                    添加
+                                                </Button>
                                             </div>
-                                            {/* 已有工作区列表 */}
-                                            <div className="space-y-2 max-h-64 overflow-y-auto">
-                                                {trustedWorkspaces.length === 0 ? (
-                                                    <div className="text-sm text-muted-foreground text-center py-3">
-                                                        暂未配置额外可信工作区
-                                                    </div>
-                                                ) : (
-                                                    trustedWorkspaces.map((ws) => (
-                                                        <div
-                                                            key={ws.path}
-                                                            className="p-2 bg-background rounded-md border space-y-1"
-                                                        >
-                                                            <div className="flex items-center justify-between">
-                                                                <span className="text-sm font-mono break-all flex-1 mr-2">
-                                                                    {ws.path}
-                                                                </span>
-                                                                <Button
-                                                                    type="button"
-                                                                    variant="ghost"
-                                                                    size="sm"
-                                                                    onClick={() => handleRemoveTrustedPath(ws.path)}
-                                                                    className="text-destructive hover:text-destructive shrink-0"
-                                                                >
-                                                                    <Trash2 className="h-4 w-4" />
-                                                                </Button>
-                                                            </div>
+                                            <Input
+                                                value={newTrustedDesc}
+                                                onChange={(e) => setNewTrustedDesc(e.target.value)}
+                                                placeholder="工作区描述（可选），例如：前端项目、Rust 后端代码仓库"
+                                            />
+                                            {trustedWorkspaces.length === 0 ? (
+                                                <p className="text-xs text-muted-foreground">暂未配置额外可信工作区</p>
+                                            ) : (
+                                                <div className="max-h-64 divide-y overflow-y-auto">
+                                                    {trustedWorkspaces.map((ws) => (
+                                                        <div key={ws.path} className="flex items-center gap-2 py-2">
+                                                            <span
+                                                                className="min-w-0 flex-1 truncate font-mono text-xs"
+                                                                title={ws.path}
+                                                            >
+                                                                {ws.path}
+                                                            </span>
                                                             <Input
                                                                 value={ws.description}
-                                                                onChange={(e) => handleUpdateDescription(ws.path, e.target.value)}
+                                                                onChange={(e) =>
+                                                                    handleUpdateDescription(ws.path, e.target.value)
+                                                                }
                                                                 placeholder="添加描述…"
-                                                                className="text-xs h-7"
+                                                                className="h-8 w-56 shrink-0 text-xs"
                                                             />
+                                                            <Button
+                                                                type="button"
+                                                                variant="ghost"
+                                                                size="icon"
+                                                                aria-label={`移除 ${ws.path}`}
+                                                                onClick={() => handleRemoveTrustedPath(ws.path)}
+                                                                className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive"
+                                                            >
+                                                                <Trash2 className="h-4 w-4" />
+                                                            </Button>
                                                         </div>
-                                                    ))
-                                                )}
-                                            </div>
-                                            </>
-                                        )}
-                                    </div>
-                                </div>
-
-                                <Controller
-                                    control={form.control}
-                                    name="butler_feishu_enabled"
-                                    render={({ field }) => (
-                                        <FormItem className={toggleCardClassName}>
-                                            <div>
-                                                <FormLabel className="text-base">飞书机器人接入（实验）</FormLabel>
-                                                <p className="text-sm text-muted-foreground mt-1">
-                                                    开启后总管家会通过飞书长连接接收文本消息，并把最终答复回发到飞书。
-                                                </p>
-                                            </div>
-                                            <FormControl>
-                                                <Switch
-                                                    checked={field.value === true || field.value === "true"}
-                                                    onCheckedChange={field.onChange}
-                                                />
-                                            </FormControl>
-                                        </FormItem>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
                                     )}
-                                />
+                                </SettingsGroup>
 
-                                {feishuEnabled && (
-                                    <div className={nestedSubGroupClassName}>
-                                        <div className={statusPanelClassName}>
-                                            <div className="flex items-center justify-between gap-3">
-                                                <div>
-                                                    <p className="text-sm font-medium">飞书机器人状态</p>
-                                                    <p className="text-xs text-muted-foreground mt-1">
-                                                        {feishuStatus?.status_text || "正在读取状态..."}
-                                                    </p>
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <Button
-                                                        type="button"
-                                                        variant="outline"
-                                                        onClick={handleRefreshFeishu}
-                                                        disabled={isSaving}
-                                                    >
-                                                        重连机器人
-                                                    </Button>
-                                                    <Button
-                                                        type="button"
-                                                        variant="outline"
-                                                        onClick={handleClearFeishuSecret}
-                                                        disabled={isSaving || !feishuStatus?.secret_configured}
-                                                    >
-                                                        清除密钥
-                                                    </Button>
-                                                </div>
-                                            </div>
-                                            <div className="grid gap-2 text-xs text-muted-foreground md:grid-cols-2">
-                                                <div>App ID：{feishuStatus?.app_id || feishuAppId || "未配置"}</div>
-                                                <div>Secret：{feishuStatus?.secret_configured ? "已保存" : "未保存"}</div>
-                                                <div>连接：{feishuStatus?.connected ? "已连接" : "未连接"}</div>
-                                                <div>最近事件：{feishuStatus?.last_event_at || "暂无"}</div>
-                                                <div className="md:col-span-2">
-                                                    当前阶段：{feishuStatus?.status_detail || "暂无详细状态"}
-                                                </div>
-                                                <div className="md:col-span-2">
-                                                    状态更新时间：{feishuStatus?.last_status_at || "暂无"}
-                                                </div>
-                                                {feishuStatus?.last_error && (
-                                                    <div className="md:col-span-2 text-destructive">
-                                                        最近错误：{feishuStatus.last_error}
+                                <SettingsGroup title="飞书">
+                                    {renderToggleRow(
+                                        "butler_feishu_enabled",
+                                        "飞书机器人接入（实验）",
+                                        "通过飞书长连接接收文本消息，并把最终答复回发到飞书。"
+                                    )}
+
+                                    {feishuEnabled && (
+                                        <>
+                                            <div className={stackedRowClassName}>
+                                                <div className="flex items-start justify-between gap-4">
+                                                    <SettingRowText
+                                                        label="飞书机器人状态"
+                                                        description={feishuStatus?.status_text || "正在读取状态..."}
+                                                    />
+                                                    <div className="flex shrink-0 gap-2">
+                                                        <Button
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            onClick={handleRefreshFeishu}
+                                                            disabled={isSaving}
+                                                        >
+                                                            重连机器人
+                                                        </Button>
+                                                        <Button
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            onClick={handleClearFeishuSecret}
+                                                            disabled={isSaving || !feishuStatus?.secret_configured}
+                                                        >
+                                                            清除密钥
+                                                        </Button>
                                                     </div>
-                                                )}
+                                                </div>
+                                                <div className="grid gap-x-4 gap-y-1 text-xs text-muted-foreground md:grid-cols-2">
+                                                    <div>App ID：{feishuStatus?.app_id || feishuAppId || "未配置"}</div>
+                                                    <div>Secret：{feishuStatus?.secret_configured ? "已保存" : "未保存"}</div>
+                                                    <div>连接：{feishuStatus?.connected ? "已连接" : "未连接"}</div>
+                                                    <div>最近事件：{feishuStatus?.last_event_at || "暂无"}</div>
+                                                    <div className="md:col-span-2">
+                                                        当前阶段：{feishuStatus?.status_detail || "暂无详细状态"}
+                                                    </div>
+                                                    <div className="md:col-span-2">
+                                                        状态更新时间：{feishuStatus?.last_status_at || "暂无"}
+                                                    </div>
+                                                    {feishuStatus?.last_error && (
+                                                        <div className="md:col-span-2 text-destructive">
+                                                            最近错误：{feishuStatus.last_error}
+                                                        </div>
+                                                    )}
+                                                </div>
                                             </div>
-                                        </div>
 
-                                        <Controller
-                                            control={form.control}
-                                            name="butler_feishu_app_id"
-                                            render={({ field }) => (
-                                                <FormItem>
-                                                    <FormLabel>飞书 App ID</FormLabel>
-                                                    <FormControl>
-                                                        <Input {...field} value={field.value || ""} placeholder="cli_xxx" />
-                                                    </FormControl>
-                                                    <FormDescription>
-                                                        使用飞书自建应用机器人的 App ID。
-                                                    </FormDescription>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-
-                                        <Controller
-                                            control={form.control}
-                                            name="butler_feishu_app_secret"
-                                            render={({ field }) => (
-                                                <FormItem>
-                                                    <FormLabel>飞书 App Secret</FormLabel>
-                                                    <FormControl>
-                                                        <Input
-                                                            {...field}
-                                                            type="password"
-                                                            value={field.value || ""}
-                                                            placeholder={
-                                                                feishuStatus?.secret_configured
-                                                                    ? "已保存，留空则保持不变"
-                                                                    : "输入新的 App Secret"
-                                                            }
-                                                        />
-                                                    </FormControl>
-                                                    <FormDescription>
-                                                        仅在点击“保存配置”时单独加密保存，不会进入普通 experimental 配置。
-                                                    </FormDescription>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-
-                                        <Controller
-                                            control={form.control}
-                                            name="butler_feishu_base_url"
-                                            render={({ field }) => (
-                                                <FormItem>
-                                                    <FormLabel>飞书开放平台域名</FormLabel>
-                                                    <FormControl>
-                                                        <Select value={field.value || feishuBaseUrl} onValueChange={field.onChange}>
-                                                            <SelectTrigger>
-                                                                <SelectValue placeholder="选择飞书开放平台域名" />
-                                                            </SelectTrigger>
-                                                            <SelectContent>
-                                                                <SelectItem value="https://open.feishu.cn">
-                                                                    飞书（中国大陆）
-                                                                </SelectItem>
-                                                                <SelectItem value="https://open.larksuite.com">
-                                                                    Lark（国际版）
-                                                                </SelectItem>
-                                                            </SelectContent>
-                                                        </Select>
-                                                    </FormControl>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-
-                                        <div className="grid gap-4 md:grid-cols-2">
                                             <Controller
                                                 control={form.control}
-                                                name="butler_feishu_receive_p2p"
+                                                name="butler_feishu_app_id"
                                                 render={({ field }) => (
-                                                    <FormItem className={toggleCardClassName}>
-                                                        <div>
-                                                            <FormLabel>接收单聊</FormLabel>
-                                                            <p className="text-xs text-muted-foreground mt-1">
-                                                                允许飞书用户私聊机器人驱动总管家。
-                                                            </p>
+                                                    <FormItem className={settingRowClassName}>
+                                                        <SettingRowText
+                                                            label="飞书 App ID"
+                                                            description="飞书自建应用机器人的 App ID。"
+                                                        />
+                                                        <div className="w-64 shrink-0 space-y-1">
+                                                            <FormControl>
+                                                                <Input {...field} value={field.value || ""} placeholder="cli_xxx" />
+                                                            </FormControl>
+                                                            <FormMessage />
                                                         </div>
-                                                        <FormControl>
-                                                            <Switch
-                                                                checked={field.value === true || field.value === "true"}
-                                                                onCheckedChange={field.onChange}
-                                                            />
-                                                        </FormControl>
                                                     </FormItem>
                                                 )}
                                             />
 
                                             <Controller
                                                 control={form.control}
-                                                name="butler_feishu_receive_group"
+                                                name="butler_feishu_app_secret"
                                                 render={({ field }) => (
-                                                    <FormItem className={toggleCardClassName}>
-                                                        <div>
-                                                            <FormLabel>接收群聊</FormLabel>
-                                                            <p className="text-xs text-muted-foreground mt-1">
-                                                                允许群消息进入总管家。
-                                                            </p>
+                                                    <FormItem className={settingRowClassName}>
+                                                        <SettingRowText
+                                                            label="飞书 App Secret"
+                                                            description="仅在保存配置时单独加密保存，不会进入普通实验配置。"
+                                                        />
+                                                        <div className="w-64 shrink-0 space-y-1">
+                                                            <FormControl>
+                                                                <Input
+                                                                    {...field}
+                                                                    type="password"
+                                                                    value={field.value || ""}
+                                                                    placeholder={
+                                                                        feishuStatus?.secret_configured
+                                                                            ? "已保存，留空则保持不变"
+                                                                            : "输入新的 App Secret"
+                                                                    }
+                                                                />
+                                                            </FormControl>
+                                                            <FormMessage />
                                                         </div>
-                                                        <FormControl>
-                                                            <Switch
-                                                                checked={field.value === true || field.value === "true"}
-                                                                onCheckedChange={field.onChange}
-                                                            />
-                                                        </FormControl>
                                                     </FormItem>
                                                 )}
                                             />
-                                        </div>
 
-                                        <Controller
-                                            control={form.control}
-                                            name="butler_feishu_group_require_mention"
-                                            render={({ field }) => (
-                                                <FormItem className={toggleCardClassName}>
-                                                    <div>
-                                                        <FormLabel>@ 或回复后才处理群消息</FormLabel>
-                                                        <p className="text-xs text-muted-foreground mt-1">
-                                                            群聊默认只处理带 mention 或回复机器人已发送消息的文本。
-                                                        </p>
-                                                    </div>
-                                                    <FormControl>
-                                                        <Switch
-                                                            checked={field.value === true || field.value === "true"}
-                                                            onCheckedChange={field.onChange}
-                                                        />
-                                                    </FormControl>
-                                                </FormItem>
-                                            )}
-                                        />
+                                            <Controller
+                                                control={form.control}
+                                                name="butler_feishu_base_url"
+                                                render={({ field }) => (
+                                                    <FormItem className={settingRowClassName}>
+                                                        <SettingRowText label="飞书开放平台域名" />
+                                                        <div className="w-64 shrink-0 space-y-1">
+                                                            <FormControl>
+                                                                <Select
+                                                                    value={field.value || feishuBaseUrl}
+                                                                    onValueChange={field.onChange}
+                                                                >
+                                                                    <SelectTrigger className="w-full">
+                                                                        <SelectValue placeholder="选择飞书开放平台域名" />
+                                                                    </SelectTrigger>
+                                                                    <SelectContent>
+                                                                        <SelectItem value="https://open.feishu.cn">
+                                                                            飞书（中国大陆）
+                                                                        </SelectItem>
+                                                                        <SelectItem value="https://open.larksuite.com">
+                                                                            Lark（国际版）
+                                                                        </SelectItem>
+                                                                    </SelectContent>
+                                                                </Select>
+                                                            </FormControl>
+                                                            <FormMessage />
+                                                        </div>
+                                                    </FormItem>
+                                                )}
+                                            />
 
-                                        <Controller
-                                            control={form.control}
-                                            name="butler_feishu_only_reply_feishu_originated"
-                                            render={({ field }) => (
-                                                <FormItem className={toggleCardClassName}>
-                                                    <div>
-                                                        <FormLabel>是否只返回飞书请求的响应到飞书</FormLabel>
-                                                        <p className="text-xs text-muted-foreground mt-1">
-                                                            默认关闭。关闭时，总管家主会话会尽量同步到 AIPP 与飞书；开启后，仅飞书触发的回合会回发到飞书。
-                                                        </p>
-                                                    </div>
-                                                    <FormControl>
-                                                        <Switch
-                                                            checked={field.value === true || field.value === "true"}
-                                                            onCheckedChange={field.onChange}
-                                                        />
-                                                    </FormControl>
-                                                </FormItem>
+                                            {renderToggleRow(
+                                                "butler_feishu_receive_p2p",
+                                                "接收单聊",
+                                                "允许飞书用户私聊机器人驱动总管家。"
                                             )}
-                                        />
+                                            {renderToggleRow(
+                                                "butler_feishu_receive_group",
+                                                "接收群聊",
+                                                "允许群消息进入总管家。"
+                                            )}
+                                            {renderToggleRow(
+                                                "butler_feishu_group_require_mention",
+                                                "@ 或回复后才处理群消息",
+                                                "群聊默认只处理带 mention 或回复机器人已发送消息的文本。"
+                                            )}
+                                            {renderToggleRow(
+                                                "butler_feishu_only_reply_feishu_originated",
+                                                "是否只返回飞书请求的响应到飞书",
+                                                "默认关闭：主会话尽量同步到 AIPP 与飞书；开启后仅飞书触发的回合回发到飞书。"
+                                            )}
 
-                                        <Controller
-                                            control={form.control}
-                                            name="butler_feishu_allowed_open_ids"
-                                            render={({ field }) => (
-                                                <FormItem>
-                                                    <FormLabel>允许对话的用户 Open ID 列表</FormLabel>
-                                                    <FormControl>
-                                                        <Textarea
-                                                            {...field}
-                                                            value={field.value || ""}
-                                                            placeholder={"ou_xxx\nou_yyy"}
-                                                            rows={4}
+                                            <Controller
+                                                control={form.control}
+                                                name="butler_feishu_allowed_open_ids"
+                                                render={({ field }) => (
+                                                    <FormItem className={stackedRowClassName}>
+                                                        <SettingRowText
+                                                            label="允许对话的用户 Open ID 列表"
+                                                            description="为空则不按用户限制；支持换行、逗号或分号分隔。"
                                                         />
-                                                    </FormControl>
-                                                    <FormDescription>
-                                                        为空则不按用户限制；支持换行、逗号或分号分隔。
-                                                    </FormDescription>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
+                                                        <FormControl>
+                                                            <Textarea
+                                                                {...field}
+                                                                value={field.value || ""}
+                                                                placeholder={"ou_xxx\nou_yyy"}
+                                                                rows={3}
+                                                            />
+                                                        </FormControl>
+                                                        <FormMessage />
+                                                    </FormItem>
+                                                )}
+                                            />
 
-                                        <Controller
-                                            control={form.control}
-                                            name="butler_feishu_allowed_chat_ids"
-                                            render={({ field }) => (
-                                                <FormItem>
-                                                    <FormLabel>允许对话的群 Chat ID 列表</FormLabel>
-                                                    <FormControl>
-                                                        <Textarea
-                                                            {...field}
-                                                            value={field.value || ""}
-                                                            placeholder={"oc_xxx\noc_yyy"}
-                                                            rows={4}
+                                            <Controller
+                                                control={form.control}
+                                                name="butler_feishu_allowed_chat_ids"
+                                                render={({ field }) => (
+                                                    <FormItem className={stackedRowClassName}>
+                                                        <SettingRowText
+                                                            label="允许对话的群 Chat ID 列表"
+                                                            description="仅对群聊生效；为空则不按群限制。"
                                                         />
-                                                    </FormControl>
-                                                    <FormDescription>
-                                                        仅对群聊生效；为空则不按群限制。
-                                                    </FormDescription>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-                                    </div>
-                                )}
-                            </div>
+                                                        <FormControl>
+                                                            <Textarea
+                                                                {...field}
+                                                                value={field.value || ""}
+                                                                placeholder={"oc_xxx\noc_yyy"}
+                                                                rows={3}
+                                                            />
+                                                        </FormControl>
+                                                        <FormMessage />
+                                                    </FormItem>
+                                                )}
+                                            />
+                                        </>
+                                    )}
+                                </SettingsGroup>
+                            </>
                         )}
-
                     </div>
 
                     <div className="pt-4 border-t border-border">

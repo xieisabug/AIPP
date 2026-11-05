@@ -29,6 +29,13 @@ describe("Butler exchange context", () => {
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
         expect(view.container).not.toHaveTextContent(post.text);
     });
+    it("should show a direct report in full under the reporting assistant's name", () => {
+        const view = render(<ButlerExchangeRow conversationId={10} posts={[{...post,direct:true,text:"核查结论：未发现 6.2"}]}/>);
+        expect(view.container).toHaveTextContent("审稿");
+        expect(view.container).toHaveTextContent("直接汇报");
+        expect(view.container).toHaveTextContent("核查结论：未发现 6.2");
+        expect(screen.getByRole("button",{name:"查看往来"})).toBeVisible();
+    });
     it("should keep technical failure details out of both the receipt and the dialog", async () => {
         mockInvokeHandler("get_butler_exchange_context", () => [{prompt:"问早安",status:"failed",messages:[]}]);
         const view = render(<ButlerExchangeRow conversationId={10} posts={[{...post,status:"failed",error:"401 Unauthorized"}]}/>);

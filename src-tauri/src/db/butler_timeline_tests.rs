@@ -6,11 +6,11 @@ fn task_fixture() -> Connection {
     conn.execute_batch("
         CREATE TABLE conversation(id INTEGER PRIMARY KEY,assistant_id INTEGER,conversation_kind TEXT,butler_task_status TEXT,butler_task_finalized_at TEXT,butler_task_summary TEXT);
         CREATE TABLE message(id INTEGER PRIMARY KEY,conversation_id INTEGER,created_time TEXT,content TEXT);
-        CREATE TABLE butler_task_definition(id INTEGER PRIMARY KEY,task_conversation_id INTEGER,butler_conversation_id INTEGER,executor_assistant_id INTEGER,goal TEXT,created_time TEXT);
+        CREATE TABLE butler_task_definition(id INTEGER PRIMARY KEY,task_conversation_id INTEGER,butler_conversation_id INTEGER,executor_assistant_id INTEGER,goal TEXT,created_time TEXT,result_handling_mode TEXT);
         CREATE TABLE butler_task_result(task_conversation_id INTEGER,created_time TEXT,structured_output_json TEXT,summary TEXT,final_message_id INTEGER,handoff_message_id INTEGER);
         INSERT INTO conversation VALUES(10,1,'butler_main',NULL,NULL,NULL),(20,2,'butler_contact',NULL,NULL,NULL),(30,2,'butler_task','running',NULL,NULL),(40,3,'butler_contact',NULL,NULL,NULL);
         INSERT INTO message VALUES(1,10,'2026-11-05 01:00:00','请让助手问早安');
-        INSERT INTO butler_task_definition VALUES(1,30,10,2,'问候用户','2026-11-05 01:00:01');
+        INSERT INTO butler_task_definition VALUES(1,30,10,2,'问候用户','2026-11-05 01:00:01',NULL);
     ").unwrap();
     conn
 }
@@ -58,4 +58,20 @@ fn test_butler_task_timeline_reports_auth_failure_without_inventing_reply() {
     assert!(result[1]["error"].as_str().unwrap().contains("401 Unauthorized"));
     assert_eq!(result[1]["peer"],"问候助手");
     assert!(result[0]["error"].is_null(), "terminal error is shown once on the result event");
+}
+
+#[test]
+fn test_butler_task_timeline_marks_direct_report_only_in_owner_view() {
+    let conn = task_fixture();
+    conn.execute_batch("
+        UPDATE butler_task_definition SET result_handling_mode='direct_report' WHERE id=1;
+        INSERT INTO message VALUES(2,30,'2026-11-05 01:00:10','核查结论：官网未发布 6.2');
+        INSERT INTO butler_task_result VALUES(30,'2026-11-05 01:00:11',NULL,'短摘要',2,NULL);
+        UPDATE conversation SET butler_task_status='succeeded' WHERE id=30;
+    ").unwrap();
+    let owner = posts(&conn,10);
+    assert_eq!(owner[0]["direct"],false);
+    assert_eq!(owner[1]["direct"],true);
+    assert_eq!(owner[1]["text"],"核查结论：官网未发布 6.2");
+    assert_eq!(posts(&conn,20)[1]["direct"],false);
 }

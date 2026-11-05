@@ -56,6 +56,13 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([delivered, history[4]])).toEqual([history[4]]);
     });
 
+    it("should hide silent replies from internal turns but keep a later summary", () => {
+        const callback = message(2, "user", "系统任务提醒", { metadata_json: '{"origin":"internal"}' });
+        const silent = message(3, "response", "  [[NO_REPLY]]  ");
+        const summary = message(5, "response", "核查完成，结论如下");
+        expect(butlerTranscript([history[0], callback, silent, callback, summary])).toEqual([history[0], summary]);
+    });
+
     it("should drop interrupted retry fragments when rendering the final answer", () => {
         const partial = message(7, "response", "中断的半句话", { metadata_json: JSON.stringify({
             stream_retry: {session_id:"s1",attempt:1,status:"interrupted",error:"401"},

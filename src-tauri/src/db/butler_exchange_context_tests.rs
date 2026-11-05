@@ -6,7 +6,7 @@ fn fixture() -> Connection {
     conn.execute_batch("
         CREATE TABLE conversation(id INTEGER PRIMARY KEY,assistant_id INTEGER,conversation_kind TEXT,butler_task_status TEXT,butler_task_finalized_at TEXT,butler_task_summary TEXT);
         CREATE TABLE message(id INTEGER PRIMARY KEY,conversation_id INTEGER,message_type TEXT,metadata_json TEXT,created_time TEXT,content TEXT);
-        CREATE TABLE butler_task_definition(id INTEGER PRIMARY KEY,task_conversation_id INTEGER,butler_conversation_id INTEGER,executor_assistant_id INTEGER,goal TEXT,created_time TEXT);
+        CREATE TABLE butler_task_definition(id INTEGER PRIMARY KEY,task_conversation_id INTEGER,butler_conversation_id INTEGER,executor_assistant_id INTEGER,goal TEXT,created_time TEXT,result_handling_mode TEXT);
         CREATE TABLE butler_task_result(task_conversation_id INTEGER,created_time TEXT,structured_output_json TEXT,summary TEXT,final_message_id INTEGER,handoff_message_id INTEGER);
         INSERT INTO conversation VALUES (10,1,'butler_main',NULL,NULL,NULL),(20,2,'butler_contact',NULL,NULL,NULL),(30,3,'butler_contact',NULL,NULL,NULL),(40,2,'butler_task','failed','2026-11-05 01:00:03','401 Unauthorized');
         INSERT INTO message VALUES (1,10,'user',NULL,'2026-11-05 01:00:00','请迭代两轮'),(2,10,'user',NULL,'2026-11-05 01:00:10','另一次委托');
@@ -41,7 +41,7 @@ fn test_butler_exchange_context_exact_root_from_either_side() {
 fn test_butler_exchange_context_task_prompt_and_errors_stay_in_records() {
     let conn = fixture();
     conn.execute_batch("INSERT INTO message VALUES(3,10,'user','{\"origin\":\"internal\"}','2026-11-05 01:00:01','内部通知');
-        INSERT INTO butler_task_definition VALUES(1,40,10,2,'写个早安','2026-11-05 01:00:02');").unwrap();
+        INSERT INTO butler_task_definition VALUES(1,40,10,2,'写个早安','2026-11-05 01:00:02',NULL);").unwrap();
     let names = HashMap::from([(1,"总管家".into()),(2,"审稿".into())]);
     for conversation in [10,20] {
         let episodes = context(&conn,&names,conversation,&[(1_i64<<40)+40*2+1]).unwrap();

@@ -307,7 +307,7 @@ impl ConversationRepository {
                     ELSE substr(m.content,1,140) END
              FROM conversation c LEFT JOIN message m ON m.id=(
                  SELECT id FROM message WHERE conversation_id=c.id
-                   AND message_type IN ('user','assistant','response') AND trim(content)!=''
+                   AND message_type IN ('user','assistant','response') AND trim(content) NOT IN ('','[[NO_REPLY]]')
                    AND (message_type='user' OR (content NOT LIKE '%MCP_TOOL_CALL%' AND content NOT LIKE '%<mcp_tool_call%'
                        AND COALESCE(tool_calls_json,'') IN ('','[]','null')))
                    AND CASE WHEN json_valid(metadata_json) THEN COALESCE(json_extract(metadata_json,'$.origin'),'') NOT IN ('internal','butler_peer') ELSE 1 END

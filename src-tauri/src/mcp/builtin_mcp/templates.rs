@@ -378,7 +378,8 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "to":{"type":"string","description":"Exact contact name or #assistant_id"},
                     "message":{"type":"string","description":"Goal, relevant context and expected deliverable"},
                     "request_id":{"type":"string","description":"Reuse on retry; use a new key for a new round"},
-                    "max_rounds":{"type":"integer","minimum":1,"maximum":6,"description":"Budget for the entire user instruction, set on first request"}
+                    "max_rounds":{"type":"integer","minimum":1,"maximum":6,"description":"Budget for the entire user instruction, set on first request"},
+                    "report_to_user":{"type":"boolean","description":"Set true when the user wants this assistant to report to them directly. Its answer is then shown to the user under its own name and you must not restate it."}
                 }}),
             },
             BuiltinToolInfo {
@@ -579,7 +580,11 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "result_handling_mode": {
                             "type": "string",
-                            "description": "Optional result handling mode such as notify_only."
+                            "description": "Optional result handling mode: notify_only (default) or direct_report."
+                        },
+                        "report_to_user": {
+                            "type": "boolean",
+                            "description": "Set true when the user wants the executing assistant to report to them directly. Its final result is shown to the user under its own name and you must not restate it."
                         },
                         "notification_policy": {
                             "type": "string",

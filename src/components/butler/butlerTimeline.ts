@@ -15,6 +15,8 @@ export interface PeerPost {
     root?: number | null;
     task_id?: number | null;
     task_reply?: boolean;
+    /** The user asked the executing assistant to report directly; show its answer in full. */
+    direct?: boolean;
 }
 
 export function withPeerTimeline(messages: Message[], unpublished: Set<number>, posts: PeerPost[], conversationId: number): Message[] {
@@ -36,7 +38,7 @@ export function withPeerTimeline(messages: Message[], unpublished: Set<number>, 
         if (message) { result.push(message); continue; }
         if (!post) continue;
         const previous = result.at(-1)?.butler_posts;
-        if (previous && !post.task_id && previous.every(p => !p.task_id && p.root === post.root) && Math.abs(Date.parse(post.occurred_at) - Date.parse(previous[previous.length - 1].occurred_at)) < 600_000 &&
+        if (previous && !post.task_id && !post.direct && previous.every(p => !p.direct) && previous.every(p => !p.task_id && p.root === post.root) && Math.abs(Date.parse(post.occurred_at) - Date.parse(previous[previous.length - 1].occurred_at)) < 600_000 &&
             (previous.every(p => p.peer_conversation === post.peer_conversation) || (post.outgoing && previous.every(p => p.outgoing)))) {
             previous.push(post);
             continue;

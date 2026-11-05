@@ -1967,19 +1967,11 @@ pub async fn create_mcp_tool_call(
         )
         .await;
 
-    if let Err(error) = crate::api::butler_api::emit_butler_task_pending_mcp_tool_attention(
+    crate::api::butler_api::schedule_butler_task_pending_mcp_tool_attention(
         &app_handle,
         result.conversation_id,
-    )
-    .await
-    {
-        debug!(
-            conversation_id = result.conversation_id,
-            call_id = result.id,
-            error = %error,
-            "failed to refresh Butler pending MCP tool attention"
-        );
-    }
+        result.id,
+    );
 
     Ok(result)
 }

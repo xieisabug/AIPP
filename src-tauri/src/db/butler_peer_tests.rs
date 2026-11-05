@@ -28,6 +28,7 @@ pub(super) fn request<'a>(key: &'a str, body: &'a str) -> NewRequest<'a> {
         body,
         tool_message_id: None,
         limit: 2,
+        report_to_user: false,
     }
 }
 fn reread(conn: &Connection, id: i64) -> Exchange {
@@ -344,4 +345,18 @@ async fn test_live_peer_review_history() {
         }
         println!("round {round}: {feedback}");
     }
+}
+
+#[test]
+fn test_butler_peer_report_to_user_persists_and_is_part_of_idempotency() {
+    let mut db = database();
+    message(&db, 20, "user", "让审稿查完直接告诉我");
+    let direct = NewRequest { report_to_user: true, ..request("direct", "核查并直接汇报") };
+    let ex = enqueue(&mut db, direct).unwrap();
+    assert!(ex.report_to_user);
+    assert!(reread(&db, ex.id).report_to_user);
+    // 同一 request_id 改变汇报方式视为不同请求，不能静默复用旧协作。
+    assert!(enqueue(&mut db, request("direct", "核查并直接汇报")).is_err());
+    // 迁移可重复执行。
+    schema(&db).unwrap();
 }

@@ -1,6 +1,9 @@
 import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
 import type { Message } from "@/data/Conversation";
 
+// Kept in sync with BUTLER_SILENT_REPLY in src-tauri/src/api/butler_api.rs.
+export const BUTLER_SILENT_REPLY = "[[NO_REPLY]]";
+
 // Rendering only. Conversation history, runtime and export retain the original messages.
 export function butlerTranscript(messages: Message[], unpublished = new Set<number>()): Message[] {
     const result: Message[] = [];
@@ -26,6 +29,7 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
             result.push(message);
             continue;
         }
+        if (message.content.trim() === BUTLER_SILENT_REPLY) continue;
         if (unpublished.has(message.id) || message.finish_time === null || parseStreamRetryMeta(message)?.status === "interrupted") continue;
         const content = /MCP_TOOL_CALL/i.test(message.content) ? message.content.replace(
             /(`+)[\s\S]*?\1|(~{3,})[\s\S]*?\2|<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:[\s\S]*?(?:-->|$)|<mcp_tool_call(?:\s[^>]*)?>[\s\S]*?(?:<\/mcp_tool_call>|$)/gi,

@@ -9,3 +9,6 @@
 [data-aipp-window="butler_experiment"] :is([data-message-type="response"],[data-message-type="assistant"],[data-message-type="merged"]) > .relative { background:hsl(var(--muted)); border-color:transparent; padding:.65rem .85rem; }
 [data-aipp-window="butler_experiment"] [data-message-item] .prose > :first-child { margin-top: 0; }
 [data-aipp-window="butler_experiment"] [data-message-item] .prose > :last-child { margin-bottom: 0; }
+/* 输入区按钮是 fixed 定位，偏移量按主聊天窗口内容区的 m-2（8px）外边距校准；
+   管家窗口内容区贴边，这里把输入框同样上移、左移 8px，与按钮对齐。 */
+[data-aipp-slot="butler-main-content"] .input-area.bottom:not(.mobile) { bottom: 38px; right: 8px; }

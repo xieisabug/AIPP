@@ -14,9 +14,11 @@ import {
     Clock,
     ExternalLink,
     Loader2,
+    MessageSquareText,
     PauseCircle,
     Plus,
     RefreshCw,
+    ScrollText,
     Settings,
     X,
 } from "lucide-react";
@@ -1551,10 +1553,15 @@ function ButlerExperimentWindow() {
                                 </div>
                                 <div className="flex min-w-0 items-center justify-end gap-1">
                                     <ButlerPeerActivity key={activeConversationId} conversationId={Number(activeConversationId)} />
-                                    <Button size="sm" variant="ghost" aria-pressed={detailsConversation === activeConversationId}
-                                        onClick={() => setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId)}>
-                                        {detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
-                                    </Button>
+                                    <IconButton
+                                        icon={detailsConversation === activeConversationId
+                                            ? <MessageSquareText className="h-4 w-4 text-icon" />
+                                            : <ScrollText className="h-4 w-4 text-icon" />}
+                                        onClick={() => setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId)}
+                                        border
+                                        title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
+                                        dataAippSlot="butler-main-toggle-details"
+                                    />
                                     <ConversationStatsDialog
                                         showCacheActivity
                                         conversationId={activeConversationId}

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import ButlerAvatar from "./ButlerAvatar";
 import type { PeerPost } from "./butlerTimeline";
 
@@ -50,8 +51,24 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
     const incoming = posts.every(p => !p.outgoing);
     const incomplete = posts.some(p => ["failed", "stopped"].includes(p.status));
     const label = incomplete ? "与" : sent ? (first.task_reply ? "已回复" : posts.some(p => ["queued", "sending"].includes(p.status)) ? "正在联系" : "已发消息给") : incoming ? "消息来自" : `${posts.length} 条消息往来`;
+    const directReport = posts.length === 1 && first.direct && !first.error && first.text.trim() !== "";
     return <Dialog open={open} onOpenChange={setOpen}>
-        <div className="butler-exchange" data-aipp-slot="butler-peer-event">
+        {directReport ? <div className="butler-exchange" data-aipp-slot="butler-direct-report">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <ButlerAvatar id={first.peer_assistant ?? first.peer_conversation} size={20}/>
+                <span className="font-medium text-foreground">{first.peer}</span>
+                <span>直接汇报</span>
+                <time dateTime={first.occurred_at}>
+                    {new Date(first.occurred_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                </time>
+                <DialogTrigger asChild>
+                    <button type="button" className="ml-auto rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground">查看往来</button>
+                </DialogTrigger>
+            </div>
+            <div className="butler-peer-bubble mt-1.5 max-w-full">
+                <UnifiedMarkdown>{first.text}</UnifiedMarkdown>
+            </div>
+        </div> : <div className="butler-exchange" data-aipp-slot="butler-peer-event">
             <time className="block text-center text-[11px] text-muted-foreground" dateTime={first.occurred_at}>
                 {new Date(first.occurred_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
             </time>
@@ -64,7 +81,7 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
                     </button>
                 </DialogTrigger>
             </div>
-        </div>
+        </div>}
         <DialogContent className="sm:max-w-xl max-h-[75vh] flex flex-col">
             <DialogHeader>
                 <DialogTitle>助手对话</DialogTitle>

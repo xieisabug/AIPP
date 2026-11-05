@@ -19,6 +19,13 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS butler_peer_stop(
         root INTEGER PRIMARY KEY, conversation_id INTEGER NOT NULL, reason TEXT NOT NULL,
         created_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")?;
+    // 用户要求执行助手直接汇报时，答复以该助手名义展示给用户，发起方不再转述。
+    let has_report_column: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_peer_exchange') WHERE name='report_to_user')",
+        [], |r| r.get(0))?;
+    if !has_report_column {
+        conn.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN report_to_user INTEGER NOT NULL DEFAULT 0")?;
+    }
     super::butler_timeline::schema(conn)
 }
 
@@ -38,9 +45,10 @@ pub struct Exchange {
     pub round_no: i64,
     pub max_rounds: i64,
     pub stop_requested: bool,
+    pub report_to_user: bool,
 }
-const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested FROM butler_peer_exchange";
-const SUMMARY: &str = "SELECT id,root,owner,target,sender,recipient,'',state,input_id,NULL,error,round_no,max_rounds,stop_requested FROM butler_peer_exchange";
+const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user FROM butler_peer_exchange";
+const SUMMARY: &str = "SELECT id,root,owner,target,sender,recipient,'',state,input_id,NULL,error,round_no,max_rounds,stop_requested,report_to_user FROM butler_peer_exchange";
 fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
     Ok(Exchange {
         id: r.get(0)?,
@@ -57,6 +65,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
         round_no: r.get(11)?,
         max_rounds: r.get(12)?,
         stop_requested: r.get(13)?,
+        report_to_user: r.get(14)?,
     })
 }
 pub fn list(
@@ -84,6 +93,7 @@ pub struct NewRequest<'a> {
     pub body: &'a str,
     pub limit: i64,
     pub tool_message_id: Option<i64>,
+    pub report_to_user: bool,
 }
 
 pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exchange> {
@@ -115,7 +125,8 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
         .optional()?
     {
         anyhow::ensure!(
-            old.owner == req.owner && old.target == req.target && old.body == req.body,
+            old.owner == req.owner && old.target == req.target && old.body == req.body
+                && old.report_to_user == req.report_to_user,
             "同一 request_id 已用于不同请求"
         );
         return Ok(old);
@@ -142,8 +153,8 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
         |r| r.get(0),
     )?;
     anyhow::ensure!(!busy, "与该助手的上一轮仍在进行，收到回复后可继续发送");
-    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9)",params![root,req.owner,req.target,req.sender,req.recipient,req.key,req.body,count+1,limit])?;
+    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds,report_to_user)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?10)",params![root,req.owner,req.target,req.sender,req.recipient,req.key,req.body,count+1,limit,req.report_to_user])?;
     let ex = tx.query_row(&format!("{SELECT} WHERE id=?1"), [tx.last_insert_rowid()], row)?;
     let anchor = match req.tool_message_id {
         Some(id) => id,

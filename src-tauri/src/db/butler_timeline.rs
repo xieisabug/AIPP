@@ -49,17 +49,20 @@ pub struct Post {
     pub(super) id:i64, pub(super) anchor:i64, pub(super) occurred_at:DateTime<Utc>, pub(super) outgoing:bool, pub(super) peer:String,
     pub(super) peer_conversation:i64, pub(super) peer_assistant:Option<i64>, pub(super) text:String, pub(super) status:String, pub(super) error:Option<String>,
     pub(super) task_id:Option<i64>, pub(super) task_reply:bool, pub(super) root:Option<i64>,
+    /// 用户要求执行助手直接汇报：在发起方会话里以执行助手的名义完整展示答复。
+    pub(super) direct:bool,
 }
 pub fn list(conn:&Connection,conversation:i64)->rusqlite::Result<Vec<Post>> {
     let mut stmt=conn.prepare("SELECT p.id,p.anchor,p.occurred_at,p.outgoing,
         CASE WHEN p.conversation_id=e.owner THEN e.recipient ELSE e.sender END,c.id,c.assistant_id,
-        CASE p.leg WHEN 'request' THEN e.body ELSE e.reply END,e.state,e.error,e.root
+        CASE p.leg WHEN 'request' THEN e.body ELSE e.reply END,e.state,e.error,e.root,
+        p.leg='reply' AND p.conversation_id=e.owner AND e.report_to_user=1
         FROM butler_peer_post p JOIN butler_peer_exchange e ON e.id=p.exchange_id JOIN conversation c ON c.id=
         CASE WHEN p.conversation_id=e.owner THEN e.target ELSE e.owner END
         WHERE p.conversation_id=?1 ORDER BY p.id")?;
     let rows=stmt.query_map([conversation],|r| Ok(Post{id:r.get(0)?,anchor:r.get(1)?,occurred_at:r.get(2)?,
         outgoing:r.get(3)?,peer:r.get(4)?,peer_conversation:r.get(5)?,peer_assistant:r.get(6)?,
-        text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:false,root:r.get(10)?}))?;
+        text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:false,root:r.get(10)?,direct:r.get(11)?}))?;
     rows.collect()
 }
 
@@ -79,7 +82,8 @@ pub fn task_posts(
                 coalesce(r.handoff_message_id,0),
                 CASE WHEN current.id=d.butler_conversation_id THEN 1 ELSE 0 END,
                 coalesce((SELECT max(id) FROM message WHERE conversation_id=current.id
-                    AND julianday(created_time)<=julianday(d.created_time)),0)
+                    AND julianday(created_time)<=julianday(d.created_time)),0),
+                coalesce(d.result_handling_mode,'')='direct_report'
          FROM butler_task_definition d
          JOIN conversation t ON t.id=d.task_conversation_id
          JOIN conversation parent ON parent.id=d.butler_conversation_id
@@ -96,6 +100,7 @@ pub fn task_posts(
         let executor: i64 = row.get(2)?;
         let chief: Option<i64> = row.get(3)?;
         let owner_view: bool = row.get(10)?;
+        let direct_report: bool = row.get(12)?;
         let peer_assistant = if owner_view { Some(executor) } else { chief };
         let peer = peer_assistant.and_then(|id| names.get(&id).cloned())
             .unwrap_or_else(|| format!("助手 #{}", peer_assistant.unwrap_or(0)));
@@ -126,6 +131,7 @@ pub fn task_posts(
             task_id: Some(task),
             root: None,
             task_reply: false,
+            direct: false,
         };
         let mut posts = vec![request];
         if let Some(at) = finished {
@@ -145,6 +151,7 @@ pub fn task_posts(
                 task_id: Some(task),
             root: None,
                 task_reply: true,
+                direct: owner_view && direct_report && status == "delivered",
             });
         }
         Ok(posts)

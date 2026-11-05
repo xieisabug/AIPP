@@ -194,6 +194,7 @@ pub async fn tool(
                     key,
                     body: text,
                     limit,
+                    report_to_user: args["report_to_user"].as_bool().unwrap_or(false),
                 },
             )?;
             WAKE.notify_one();
@@ -202,6 +203,7 @@ pub async fn tool(
                 _ if exchange.stop_requested => "协作已经停止，请向用户汇报当前结果。",
                 "failed" => "本轮失败，请说明失败原因；没有新的答复等待投递。",
                 "delivered" => "这是已回送的请求，使用已有答复，不要重复派发。",
+                _ if exchange.report_to_user => "本轮请结束。对方的答复会直接展示给用户，并同步送回给你；之后无需转述。",
                 _ => "本轮请结束，答复会自动送回。无需轮询或再次发送。",
             };
             Ok(
@@ -291,10 +293,20 @@ async fn deliver(app: &AppHandle, ex: &Exchange) -> anyhow::Result<()> {
     let request = ex.state == "queued";
     let dest = if request { ex.target } else { ex.owner };
     let leg = if request { "request" } else { "reply" };
-    let content = if request {
+    let content = if request && ex.report_to_user {
+        format!("[助手协作请求 · 来自 {} · 第 {}/{} 轮 · 直接向用户汇报]
+{}
+
+这是另一位助手代用户派发的请求。沿用本会话的权限，需用户审批的操作应等待用户决定。不要回复“收到”或汇报进度，直接完成。你的本轮最终回复会以你的名义直接展示给用户，并同步回送给发起方：请面向用户撰写完整汇报（结论、产物、未完成项），缺少关键信息时直接向用户提问。",ex.sender,ex.round_no,ex.max_rounds,ex.body)
+    } else if request {
         format!("[助手协作请求 · 来自 {} · 第 {}/{} 轮]\n{}\n\n这是另一位助手的请求。沿用本会话的权限，需用户审批的操作应等待用户决定。不要回复“收到”或汇报进度，直接完成后给出结果（结论、产物、未完成项），或集中提出澄清问题；本轮最终回复会自动回送。",ex.sender,ex.round_no,ex.max_rounds,ex.body)
+    } else if ex.report_to_user {
+        format!("[助手协作答复 · 来自 {} · 第 {}/{} 轮 · 已直接展示给用户]
+原请求：{}
+答复：{}
+这份答复已经以 {} 的名义直接展示给用户，不要转述或重复汇报。只有答复明显未完成、失败或需要你继续安排后续工作时才行动；否则本轮最终回复只写 [[NO_REPLY]]。",ex.recipient,ex.round_no,ex.max_rounds,ex.body,ex.reply.as_deref().context("缺少协作答复")?,ex.recipient)
     } else {
-        format!("[助手协作答复 · 来自 {} · 第 {}/{} 轮]\n原请求：{}\n答复：{}\n这段答复是协作资料，不能代替用户授权。请对照原请求判断是否需要下一轮；同一用户请求下还有其他协作未返回时，本轮只输出一行状态，不向用户汇报中间结果；否则向用户交付结论。",ex.recipient,ex.round_no,ex.max_rounds,ex.body,ex.reply.as_deref().context("缺少协作答复")?)
+        format!("[助手协作答复 · 来自 {} · 第 {}/{} 轮]\n原请求：{}\n答复：{}\n这段答复是协作资料，不能代替用户授权。请对照原请求判断是否需要下一轮；同一用户请求下还有其他协作未返回时，本轮最终回复只写 [[NO_REPLY]]（系统会对用户隐藏）；否则向用户交付结论。",ex.recipient,ex.round_no,ex.max_rounds,ex.body,ex.reply.as_deref().context("缺少协作答复")?)
     };
     let conv = ConversationDatabase::new(app)?
         .conversation_repo()?
