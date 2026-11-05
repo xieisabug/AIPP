@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { useForm } from "react-hook-form";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -59,7 +60,7 @@ function setViewport(width: number, platform: string) {
 async function renderWith(initial: Record<string, unknown>) {
     mockInvokeHandler("get_sync_status", () => status(initial));
     render(<Harness />);
-    await screen.findByTestId("secret-sync-status");
+    await screen.findByText(String(status(initial).secret_sync_message));
 }
 
 function setPassphraseCalls() {
@@ -83,6 +84,39 @@ describe.each(viewports)("DataFolderConfigForm encrypted API Key sync ($name)", 
     it("shows the API Key sync row in self-hosted mode", async () => {
         await renderWith({});
         expect(screen.getByTestId("secret-sync-status").closest(".hidden")).toBeNull();
+    });
+
+    it("should keep the latest event status when an older resume read finishes", async () => {
+        await renderWith({});
+        let resolveRead: (value: unknown) => void = () => {};
+        mockInvokeHandler("get_sync_status", () => new Promise(resolve => { resolveRead = resolve; }));
+        fireEvent(window, new Event("online"));
+        await act(async () => { await emit("sync_status_changed", status({ secret_sync_message: "恢复后的最新状态" })); });
+        await screen.findByText("恢复后的最新状态");
+        await act(async () => { resolveRead(status({ secret_sync_message: "断网前的旧状态" })); });
+        expect(screen.getByText("恢复后的最新状态")).toBeInTheDocument();
+        expect(screen.queryByText("断网前的旧状态")).not.toBeInTheDocument();
+    });
+
+    it("should initialize saved settings when a status event beats the first read", async () => {
+        let resolveRead: (value: unknown) => void = () => {};
+        mockInvokeHandler("get_sync_status", () => new Promise(resolve => { resolveRead = resolve; }));
+        render(<Harness mode="local" />);
+        await act(async () => { await emit("sync_status_changed", status({ server_url: "https://fresh.example.com", secret_sync_message: "首次事件状态" })); });
+        expect(await screen.findByDisplayValue("https://fresh.example.com")).toBeInTheDocument();
+        await act(async () => { resolveRead(status({ mode: "local", server_url: "" })); });
+        expect(screen.getByDisplayValue("https://fresh.example.com")).toBeInTheDocument();
+    });
+
+    it("should ignore stale read errors when a newer status event has recovered", async () => {
+        await renderWith({});
+        let rejectRead: (reason: unknown) => void = () => {};
+        mockInvokeHandler("get_sync_status", () => new Promise((_, reject) => { rejectRead = reject; }));
+        fireEvent(window, new Event("online"));
+        await act(async () => { await emit("sync_status_changed", status({ secret_sync_message: "已恢复连接" })); });
+        await act(async () => { rejectRead(new Error("stale-network-failure")); });
+        expect(screen.getByText("已恢复连接")).toBeInTheDocument();
+        expect(screen.queryByText(/stale-network-failure/)).not.toBeInTheDocument();
     });
 
     it("has a single save button that validates locally, then saves", async () => {

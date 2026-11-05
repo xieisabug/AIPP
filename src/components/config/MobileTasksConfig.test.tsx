@@ -15,6 +15,7 @@ describe("mobile task controls", () => {
             if (command === "list_scheduled_tasks") return [{ id: 3, name: "计划任务", isEnabled: true, taskPrompt: "检查状态" }];
             if (command === "get_butler_feishu_runtime_status") return { configured: false, running: false, connected: false, status_text: "未配置" };
             if (command === "get_assistants") return [{ id: 4, name: "API 助手", assistant_type: 0 }];
+            if (command === "get_assistant_execution_capability") return { available: true, issues: [] };
             if (command === "list_scheduled_task_runs") return { runs: [{ runId: "remote-1", status: "running", localRunning: false }, { runId: "missed-1", status: "missed", localRunning: false }] };
             throw new Error(`unexpected command: ${command}`);
         });
@@ -39,12 +40,30 @@ describe("mobile task controls", () => {
         fireEvent.change(screen.getByRole("combobox"), { target: { value: "4" } });
         fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "测试任务" } });
         fireEvent.change(screen.getByLabelText("任务目标"), { target: { value: "保留内容" } });
+        await waitFor(() => expect(screen.getByText("在本机派发")).toBeEnabled());
         fireEvent.click(screen.getByText("在本机派发"));
         fireEvent.click(screen.getByText("在本机派发"));
         expect(vi.mocked(invoke).mock.calls.filter(([name]) => name === "spawn_butler_task_conversation")).toHaveLength(1);
         rejectDispatch(new Error("MOBILE_UNSUPPORTED: assistant_id=4; CLI"));
         await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("assistant_id=4"));
         expect((screen.getByLabelText("任务目标") as HTMLTextAreaElement).value).toBe("保留内容");
+    });
+    it("should explain incompatible assistants without dispatching or changing the selection when capability fails", async () => {
+        const original = vi.mocked(invoke).getMockImplementation()!;
+        vi.mocked(invoke).mockImplementation((command, args) => {
+            if (command === "get_assistants") return Promise.resolve([{ id: 8, name: "桌面助手", assistant_type: 4 }]);
+            if (command === "get_assistant_execution_capability") return Promise.resolve({ available: false, issues: [{ reason: "本地 CLI 需要桌面进程" }] });
+            return original(command, args);
+        });
+        render(<MobileTasksConfig />);
+        await screen.findByText("桌面助手");
+        fireEvent.change(screen.getByRole("combobox"), { target: { value: "8" } });
+        fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "测试任务" } });
+        fireEvent.change(screen.getByLabelText("任务目标"), { target: { value: "保留目标" } });
+        await screen.findByText(/此助手无法在本机执行.*本地 CLI/);
+        expect(screen.getByRole("combobox")).toHaveValue("8");
+        expect(screen.getByText("在本机派发")).toBeDisabled();
+        expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "spawn_butler_task_conversation")).toBe(false);
     });
     it("should discard old run records when another task is selected during refresh", async () => {
         const original = vi.mocked(invoke).getMockImplementation()!;

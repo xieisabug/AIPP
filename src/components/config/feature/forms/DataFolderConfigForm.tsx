@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { UseFormReturn, useWatch } from "react-hook-form";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -111,6 +111,8 @@ function metricValueClass(metric: SyncStatusMetric): string {
 
 export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form }) => {
     const isMobilePlatform = useIsMobilePlatform();
+    const statusRevision = useRef(0);
+    const initialFormPending = useRef(true);
     const [status, setStatus] = useState<SyncStatus | null>(null);
     const [statusReadError, setStatusReadError] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
@@ -132,18 +134,25 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const isPlaintextUrl = watchedServerUrl.trim().toLowerCase().startsWith("http://");
 
     const acceptStatus = useCallback((next: SyncStatus) => {
+        statusRevision.current += 1;
         const notice = syncConflictNotice(conflictNotices.get(next.server_url), next.conflict_resolved_count, next.syncing);
         conflictNotices.set(next.server_url, notice.state);
         setStatus(next);
+        if (initialFormPending.current) {
+            initialFormPending.current = false;
+            form.reset({ mode: next.mode || "local", server_url: next.server_url || "", token: "" });
+        }
         setStatusReadError(null);
         if (notice.delta > 0) {
             toast.warning(`有 ${notice.delta} 处修改与服务器冲突，已采用服务器版本`, { id: "sync-conflicts" });
         }
-    }, []);
+    }, [form]);
 
     const loadStatus = useCallback(async (syncFormValues = false) => {
+        const revision = ++statusRevision.current;
         try {
             const nextStatus = await invoke<SyncStatus>("get_sync_status");
+            if (revision !== statusRevision.current) return;
             acceptStatus(nextStatus);
             if (syncFormValues) {
                 form.reset({
@@ -153,6 +162,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 });
             }
         } catch (error) {
+            if (revision !== statusRevision.current) return;
             setStatusReadError(friendlySyncError(getErrorMessage(error), "读取同步状态失败"));
         }
     }, [form, acceptStatus]);
@@ -163,6 +173,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             acceptStatus(event.payload);
         });
         return () => {
+            statusRevision.current += 1;
             void unlistenPromise.then((unlisten) => unlisten());
         };
     }, [loadStatus, acceptStatus]);
@@ -215,7 +226,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 token: values.token || "",
             },
         });
-        setStatus(nextStatus);
+        acceptStatus(nextStatus);
         form.reset({
             mode: nextStatus.mode || "local",
             server_url: nextStatus.server_url || "",
@@ -232,7 +243,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             void loadStatus(false);
         }
         return nextStatus;
-    }, [form, loadStatus]);
+    }, [form, loadStatus, acceptStatus]);
 
     const handleSave = useCallback(async () => {
         setSaving(true);
@@ -280,9 +291,9 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
                 const needSyncNow = shouldTriggerSyncAfterSave(saved);
                 if (needSyncNow) {
                     const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
-                    setStatus(nextStatus);
+                    acceptStatus(nextStatus);
                 } else {
-                    setStatus(saved);
+                    acceptStatus(saved);
                 }
                 toast.success(saveThenSyncSuccessMessage(needSyncNow));
                 return;
@@ -290,7 +301,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
 
             // sync_only: save did not run, so trigger sync now.
             const nextStatus = await invoke<SyncStatus>("trigger_sync_now");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             toast.success(
                 status?.paused ? "已触发一次同步（自动同步已关闭）" : "已触发一次同步",
             );
@@ -299,20 +310,20 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         } finally {
             setSyncing(false);
         }
-    }, [form, persistSyncSettings, status?.paused, status?.server_url, status?.token_configured]);
+    }, [form, persistSyncSettings, status?.paused, status?.server_url, status?.token_configured, acceptStatus]);
 
     const handleStopSync = useCallback(async () => {
         setStopping(true);
         try {
             const nextStatus = await invoke<SyncStatus>("stop_sync");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             toast.success("已停止当前同步");
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "停止同步失败"));
         } finally {
             setStopping(false);
         }
-    }, []);
+    }, [acceptStatus]);
 
     const handleSetAutoSync = useCallback(async (enabled: boolean) => {
         if (mode !== "self_hosted") {
@@ -322,33 +333,33 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         setTogglingAutoSync(true);
         try {
             const nextStatus = await invoke<SyncStatus>("set_auto_sync", { enabled });
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             toast.success(enabled ? "已开启自动同步" : "已关闭自动同步");
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "切换自动同步失败"));
         } finally {
             setTogglingAutoSync(false);
         }
-    }, [mode]);
+    }, [mode, acceptStatus]);
 
     const handleRetryFailed = useCallback(async () => {
         setRetryingFailed(true);
         try {
             const nextStatus = await invoke<SyncStatus>("retry_failed_sync_outbox");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             toast.success("已重新触发失败项");
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "重试失败项失败"));
         } finally {
             setRetryingFailed(false);
         }
-    }, []);
+    }, [acceptStatus]);
 
     const handleRetryDeadLetters = useCallback(async () => {
         setRetryingDeadLetters(true);
         try {
             const nextStatus = await invoke<SyncStatus>("retry_sync_dead_letters");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             if (nextStatus.dead_letter_count > 0) {
                 toast.warning(`重试后仍有 ${nextStatus.dead_letter_count} 条无法应用，请查看具体原因`, { id: "sync-dead-letters" });
             } else {
@@ -359,28 +370,28 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         } finally {
             setRetryingDeadLetters(false);
         }
-    }, []);
+    }, [acceptStatus]);
 
     const handleResetSyncState = useCallback(async () => {
         setResetConfirmOpen(false);
         setResetting(true);
         try {
             const nextStatus = await invoke<SyncStatus>("reset_sync_state");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             toast.success("同步状态已重置，正在重新全量同步");
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "重置同步状态失败"));
         } finally {
             setResetting(false);
         }
-    }, []);
+    }, [acceptStatus]);
 
     const handleCleanupDanglingFks = useCallback(async () => {
         setCleanupConfirmOpen(false);
         setCleaningDangling(true);
         try {
             const nextStatus = await invoke<SyncStatus>("cleanup_dangling_foreign_keys");
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             const notice = formatDanglingFkStatusText(nextStatus);
             toast.success(notice || "已清理失效的本地引用");
         } catch (error) {
@@ -388,7 +399,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         } finally {
             setCleaningDangling(false);
         }
-    }, []);
+    }, [acceptStatus]);
 
     // The passphrase lives in the form (not component state): ConfigForm remounts
     // custom rows whenever this component re-renders, which would drop focus on
@@ -406,7 +417,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             const nextStatus = await invoke<SyncStatus>("set_sync_passphrase", {
                 request: { passphrase, replace_existing: replaceExisting },
             });
-            setStatus(nextStatus);
+            acceptStatus(nextStatus);
             form.setValue(PASSPHRASE_FIELD, "");
             toast.success(replaceExisting ? "已更换同步口令" : "同步口令已保存");
         } catch (error) {
@@ -424,7 +435,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         } finally {
             setSavingPassphrase(false);
         }
-    }, [form]);
+    }, [form, acceptStatus]);
 
     const connectionState = useMemo(() => formatSyncConnectionState(status), [status]);
     const statusMetrics = useMemo(() => formatSyncStatusMetrics(status), [status]);
