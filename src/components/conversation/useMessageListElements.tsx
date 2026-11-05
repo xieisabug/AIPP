@@ -871,6 +871,23 @@ export function useMessageListElements({
                     virtualizationMode: "live",
                 });
             });
+
+            // 与 last-reply 容器一致：桌面端输入框悬浮在列表上方，尾部需要留出空间。
+            if (!isMobile && items.length > 0) {
+                items.push({
+                    key: "chat-bottom-spacer",
+                    messageId: null,
+                    estimatedHeight: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
+                    element: (
+                        <div
+                            className="flex-none"
+                            style={{ height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX }}
+                            data-aipp-slot="chat-bottom-spacer"
+                        />
+                    ),
+                    virtualizationMode: "live",
+                });
+            }
         }
 
         return items;

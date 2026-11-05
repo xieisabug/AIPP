@@ -168,7 +168,19 @@ describe("useMessageListElements merged assistant preview state", () => {
             makeMessage({id: -7, message_type: "butler_exchange", butler_posts: posts}),
             makeMessage({id: 11, content: "已审核"}),
         ])));
-        expect(result.current.renderItems.map(item => item.messageId)).toEqual([-7, 11]);
+        expect(result.current.renderItems.map(item => item.messageId)).toEqual([-7, 11, null]);
+        // 桌面端输入框悬浮于列表上，没有用户消息时也要保留底部空间
+        expect(result.current.renderItems.at(-1)?.key).toBe("chat-bottom-spacer");
+    });
+
+    it("omits the bottom spacer on mobile where the input has its own layout space", () => {
+        const posts = [{ id: 7, anchor: 10, occurred_at: "2026-11-04T12:00:00Z", outgoing: false,
+            peer: "研究助手", peer_assistant: 2, peer_conversation: 20, text: "请审核", status: "delivered", error: null }];
+        const { result } = renderHook(() => useMessageListElements({
+            ...makeHookProps([makeMessage({id: -7, message_type: "butler_exchange", butler_posts: posts})]),
+            isMobile: true,
+        }));
+        expect(result.current.renderItems.map(item => item.key)).not.toContain("chat-bottom-spacer");
     });
 
     it("renders a Butler user message followed by an error message", () => {
