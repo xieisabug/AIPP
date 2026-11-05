@@ -1364,6 +1364,21 @@ pub async fn ask_ai(
         assistant_prompt_result
     };
 
+    // 管家模式：为联系人/任务成员追加团队协作约定（仅按会话判断，不修改助手原配置）
+    let assistant_prompt_result = match existing_conversation.as_ref() {
+        Some(conversation) => match crate::api::butler_api::build_butler_member_prompt(
+            &app_handle,
+            &conversation.conversation_kind,
+            &assistant_detail.assistant,
+        )
+        .await
+        {
+            Some(member_prompt) => format!("{}\n\n{}", assistant_prompt_result, member_prompt),
+            None => assistant_prompt_result,
+        },
+        None => assistant_prompt_result,
+    };
+
     let _need_generate_title = processed_request.conversation_id.is_empty();
     let request_prompt_result = compose_user_message_with_active_skills(
         &template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await,
