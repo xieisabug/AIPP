@@ -355,7 +355,7 @@ export const SummaryConfigForm: React.FC<SummaryConfigFormProps> = ({
                     <CardHeader className="py-3">
                         <CardTitle className="text-base font-medium">自动审核模型</CardTitle>
                         <p className="text-sm text-muted-foreground mt-0.5">
-                            助手选择「模型自动审核」后，用这里的模型判断未开启自动运行的工具能否直接执行。已开启自动运行的工具不经过审核。审核进行中仍可手动确认或拒绝，手动介入会停止本次自动审核。清空后视为未配置，这些调用会转为需要人工确认。助手选「人工审核」时即使配置了模型也不会自动审核。
+                            安全的内置操作（如加载技能、加载工具定义、更新任务清单）直接执行。其他操作及外部工具必须审核，自动运行开关不能跳过。助手选择「模型自动审核」后，用这里的模型判断能否执行。审核进行中仍可手动确认或拒绝，手动介入会停止本次自动审核。清空后视为未配置，这些调用会转为需要人工确认。助手选「人工审核」时即使配置了模型也不会自动审核。
                         </p>
                     </CardHeader>
                     <CardContent className="pt-0 pb-4 space-y-4">
