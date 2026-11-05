@@ -1,7 +1,7 @@
 //! 工具调用自动审核。
 //!
-//! 已开启自动运行的工具直接执行，不调用审核模型。
-//! 未开启自动运行且助手 `tool_review_mode=auto_model` 时，用「设置 → 辅助AI」里配置的审核模型判断安全性。
+//! 仅可信内置的免审核操作直接执行，旧自动运行开关不能绕过审核。
+//! 其他操作在助手 `tool_review_mode=auto_model` 时，用「设置 → 辅助AI」里配置的审核模型判断安全性。
 //! 助手选人工审核（`off`）时即使已配置审核模型也不会自动审核。
 //! 审核进行中用户可手动确认/拒绝；手动介入会取消进行中的自动审核请求。
 //! 审核模型会把该工具的描述和字段说明写成普通文本放进 prompt（schema 会展开成字段列表，不走 tools API）；
@@ -122,25 +122,61 @@ pub struct ReviewRecordDraft {
     pub error_detail: Option<String>,
 }
 
-pub fn is_review_exempt_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file")
+pub fn is_review_exempt_tool(
+    is_builtin: bool,
+    command: Option<&str>,
+    tool_name: &str,
+    parameters: &str,
+) -> bool {
+    if !is_builtin {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(parameters) else {
+        return false;
+    };
+    if !args.is_object() {
+        return false;
+    }
+    match command {
+        Some("aipp:ui_interaction") => matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file"),
+        Some("aipp:agent") => match tool_name {
+            "load_skill" | "todo_write" | "load_mcp_server" | "load_mcp_tool" | "spawn_task_conversation" => true,
+            "task_conversation_operation" => matches!(args["action"].as_str(), Some("read" | "reply_prompt")),
+            "schedule_task" => matches!(args["action"].as_str(), Some("list" | "get" | "disable")),
+            // 转调用不按包装工具放行；正常调用记录已投影为真实目标。
+            _ => false,
+        },
+        Some("aipp:operation") => tool_name == "get_bash_output",
+        Some("aipp:artifact") => matches!(tool_name, "get_artifact_workspace" | "show_artifact"),
+        Some("aipp:superadmin") => match tool_name {
+            "superadmin_catalog" | "superadmin_inspect" | "superadmin_audit_query" => true,
+            "superadmin_execute" => is_review_exempt_action(&args),
+            "superadmin_batch" => args["actions"].as_array().is_some_and(|actions| {
+                !actions.is_empty() && actions.iter().all(is_review_exempt_action)
+            }),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
-/// 已开启自动运行则直接执行；用户交互类工具（提问/预览）始终放行，不依赖 run 开关。
-/// 只有未开启自动运行且启用模型审核时，才看审核结论；失败时 `review_safe` 为 None，保持不执行。
+fn is_review_exempt_action(request: &serde_json::Value) -> bool {
+    request["args"].is_object() && matches!(request["action_id"].as_str(), Some(
+        "assistant.list" | "assistant.get" | "assistant.create"
+        | "conversation.list" | "conversation.get" | "conversation.create" | "conversation.archive"
+        | "task.list" | "task.get" | "task.spawn" | "task.cancel"
+        | "schedule.list" | "schedule.get" | "mcp.list" | "mcp.get"
+        | "llm.list_providers" | "llm.get_provider" | "llm.list_models" | "llm.get_model" | "llm.add_model"
+    ))
+}
+
+/// 免审核分类优先；其他操作只有模型明确判定安全才自动执行。
 pub fn resolve_auto_execute(
     mode: &str,
-    tool_name: &str,
-    legacy_auto_run: bool,
+    review_exempt: bool,
     review_safe: Option<bool>,
 ) -> bool {
-    if is_review_exempt_tool(tool_name) {
-        return true;
-    }
-    if legacy_auto_run || mode != "auto_model" {
-        return legacy_auto_run;
-    }
-    review_safe.unwrap_or(false)
+    review_exempt || (mode == "auto_model" && review_safe == Some(true))
 }
 
 pub fn unconfigured_model_reason() -> String {
@@ -781,21 +817,44 @@ fn existing_safe_pending(db: &MCPDatabase, call_id: i64) -> Option<bool> {
     }
 }
 
-/// 返回是否应立即执行。未开启自动运行且启用审核时会写入 `tool_review_log`。
+/// 返回是否应立即执行。非免审核操作启用模型审核时会写入 `tool_review_log`。
 /// 用户手动确认/拒绝时会 `cancel_tool_review`，本函数随之返回 false 且不再自动执行。
 pub async fn should_auto_execute_after_review(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
     conversation_id: i64,
     call_id: i64,
-    server_name: &str,
-    tool_name: &str,
-    parameters: &str,
-    legacy_auto_run: bool,
+    _server_name: &str,
+    _tool_name: &str,
+    _parameters: &str,
+    _legacy_auto_run: bool,
 ) -> bool {
     let mode = read_review_mode(app_handle, assistant_id);
-    if legacy_auto_run || mode != "auto_model" || is_review_exempt_tool(tool_name) {
-        return resolve_auto_execute(&mode, tool_name, legacy_auto_run, None);
+    // 使用持久化调用的 server_id 核实来源，禁止外部同名工具冒充免审核工具。
+    let resolved = (|| -> Result<_, String> {
+        let db = MCPDatabase::new(app_handle).map_err(|e| format!("打开审核数据库失败: {e}"))?;
+        let call = db.get_mcp_tool_call(call_id).map_err(|e| format!("读取待审核调用失败: {e}"))?;
+        let server = db.get_mcp_server(call.server_id).map_err(|e| format!("读取工具来源失败: {e}"))?;
+        Ok((call, server))
+    })();
+    let (call, server) = match resolved {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            emit_tool_review_status(app_handle, conversation_id, call_id, "done", Some("error"),
+                &format!("{error} (conversation_id={conversation_id}, call_id={call_id})"));
+            return false;
+        }
+    };
+    if call.status != "pending" || call.conversation_id != conversation_id {
+        return false;
+    }
+    // 分类、模型输入及审核日志始终使用同一个持久化快照（包括插件改写后的目标）。
+    let server_name = call.server_name.as_str();
+    let tool_name = call.tool_name.as_str();
+    let parameters = call.parameters.as_str();
+    let review_exempt = is_review_exempt_tool(server.is_builtin, server.command.as_deref(), tool_name, parameters);
+    if review_exempt || mode != "auto_model" {
+        return resolve_auto_execute(&mode, review_exempt, None);
     }
 
     if let Ok(db) = MCPDatabase::new(app_handle) {

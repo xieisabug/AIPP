@@ -304,28 +304,65 @@ fn test_lookup_tool_review_definition_from_server_catalog() {
 }
 
 #[test]
-fn test_resolve_auto_execute_keeps_legacy_when_review_disabled() {
-    assert!(resolve_auto_execute("off", "write_file", true, None));
-    assert!(!resolve_auto_execute("off", "write_file", false, Some(true)));
-    assert!(!resolve_auto_execute("", "bash", false, Some(true)));
-    assert!(resolve_auto_execute("auto_model", "preview_code", true, Some(false)));
-    assert!(resolve_auto_execute("auto_model", "preview_file", false, Some(true)));
-    assert!(resolve_auto_execute("auto_model", "ask_user_question", false, None));
-    assert!(resolve_auto_execute("off", "ask_user_question", false, None));
+fn test_resolve_auto_execute_requires_review_for_non_exempt_operations() {
+    assert!(!resolve_auto_execute("off", false, Some(true)));
+    assert!(!resolve_auto_execute("auto_model", false, None));
+    assert!(!resolve_auto_execute("auto_model", false, Some(false)));
+    assert!(resolve_auto_execute("auto_model", false, Some(true)));
+    assert!(resolve_auto_execute("off", true, None));
+    assert!(resolve_auto_execute("auto_model", true, None));
 }
 
 #[test]
-fn test_resolve_auto_execute_skips_review_when_tool_auto_runs() {
-    assert!(resolve_auto_execute("auto_model", "write_file", true, Some(false)));
-    assert!(resolve_auto_execute("auto_model", "bash", true, None));
-    assert!(resolve_auto_execute("auto_model", "load_mcp_tool", true, Some(false)));
+fn test_review_exempt_tools_require_builtin_identity() {
+    for (command, tool) in [
+        ("aipp:agent", "load_skill"), ("aipp:agent", "load_mcp_tool"),
+        ("aipp:agent", "load_mcp_server"), ("aipp:agent", "todo_write"),
+        ("aipp:agent", "spawn_task_conversation"),
+        ("aipp:ui_interaction", "preview_code"), ("aipp:ui_interaction", "preview_file"),
+        ("aipp:ui_interaction", "ask_user_question"),
+        ("aipp:operation", "get_bash_output"), ("aipp:artifact", "show_artifact"),
+        ("aipp:artifact", "get_artifact_workspace"),
+    ] {
+        assert!(is_review_exempt_tool(true, Some(command), tool, "{}"), "{tool}");
+        assert!(!is_review_exempt_tool(false, Some(command), tool, "{}"), "{tool}");
+        assert!(!is_review_exempt_tool(true, Some("external"), tool, "{}"), "{tool}");
+    }
+    for (command, tool) in [
+        ("aipp:search", "search_web"), ("aipp:search", "fetch_url"),
+        ("aipp:operation", "read_file"), ("aipp:operation", "list_directory"),
+        ("aipp:operation", "write_file"), ("aipp:operation", "edit_file"),
+        ("aipp:operation", "execute_bash"), ("aipp:artifact", "capture_artifact_screenshot"),
+        ("aipp:agent", "call_mcp_tool"), ("aipp:superadmin", "superadmin_undo"),
+    ] {
+        assert!(!is_review_exempt_tool(true, Some(command), tool, "{}"), "{tool}");
+    }
 }
 
 #[test]
-fn test_resolve_auto_execute_requires_explicit_safe_verdict_when_not_auto_run() {
-    assert!(resolve_auto_execute("auto_model", "write_file", false, Some(true)));
-    assert!(!resolve_auto_execute("auto_model", "write_file", false, Some(false)));
-    assert!(!resolve_auto_execute("auto_model", "bash", false, None));
+fn test_review_exempt_suboperations_fail_closed() {
+    let agent = |tool: &str, args: &str| is_review_exempt_tool(true, Some("aipp:agent"), tool, args);
+    assert!(agent("task_conversation_operation", r#"{"action":"read"}"#));
+    assert!(agent("task_conversation_operation", r#"{"action":"reply_prompt"}"#));
+    for action in ["mcp_tool_execute", "permission_confirm", "operate_confirm", "acp_permission_confirm", "ask_user_respond", "unknown"] {
+        assert!(!agent("task_conversation_operation", &serde_json::json!({"action": action}).to_string()));
+    }
+    for action in ["list", "get", "disable"] {
+        assert!(agent("schedule_task", &serde_json::json!({"action": action}).to_string()));
+    }
+    for action in ["create", "update", "delete", "enable"] {
+        assert!(!agent("schedule_task", &serde_json::json!({"action": action}).to_string()));
+    }
+    assert!(!agent("load_skill", "invalid"));
+    assert!(!agent("load_skill", "null"));
+    let admin = |tool: &str, args: &str| is_review_exempt_tool(true, Some("aipp:superadmin"), tool, args);
+    assert!(admin("superadmin_execute", r#"{"action_id":"llm.get_model","args":{}}"#));
+    assert!(!admin("superadmin_execute", r#"{"action_id":"llm.get_models","args":{}}"#));
+    assert!(!admin("superadmin_execute", r#"{"action_id":"unknown","args":{},"dry_run":true}"#));
+    assert!(admin("superadmin_batch", r#"{"actions":[{"action_id":"task.list","args":{}},{"action_id":"task.cancel","args":{}}]}"#));
+    assert!(!admin("superadmin_batch", r#"{"actions":[{"action_id":"task.list","args":{}},{"action_id":"schedule.create","args":{}}]}"#));
+    assert!(!admin("superadmin_batch", r#"{"actions":[]}"#));
+    assert!(!admin("superadmin_batch", "{}"));
 }
 
 #[test]
@@ -348,7 +385,7 @@ fn test_review_failure_reasons_stay_visible() {
     let timed_out = error_outcome("slow", Some(2), 20_000, timeout_reason());
     assert!(timed_out.reason.contains("超时"));
     assert!(timed_out.reason.contains("20"));
-    assert!(!resolve_auto_execute("auto_model", "bash", false, None));
+    assert!(!resolve_auto_execute("auto_model", false, None));
 }
 
 #[test]
