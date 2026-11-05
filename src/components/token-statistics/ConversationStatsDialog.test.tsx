@@ -85,5 +85,30 @@ describe("ConversationStatsDialog", () => {
         expect(screen.getByText("ACP 会话 Usage")).toBeInTheDocument();
         expect(screen.getByText("2,048")).toBeInTheDocument();
         expect(screen.getByText("8,192")).toBeInTheDocument();
+        // 没有委派时不显示协作行
+        expect(screen.queryByText(/其中助手协作/)).toBeNull();
+    });
+
+    it("explains how much of the total came from assistant collaboration", async () => {
+        mockInvokeHandler("get_conversation_token_stats", () => ({
+            total_tokens: 8500, input_tokens: 8000, output_tokens: 500, thought_tokens: 0,
+            cached_read_tokens: 0, cached_write_tokens: 0, estimated_message_count: 0,
+            by_model: [], message_count: 4, system_message_count: 0, user_message_count: 2,
+            response_message_count: 2, reasoning_message_count: 0, tool_result_message_count: 0,
+            delegated: {
+                run_count: 7, total_tokens: 5000, input_tokens: 4900, output_tokens: 100,
+                thought_tokens: 0, cached_input_tokens: 0, cached_read_tokens: 0,
+                cached_write_tokens: 0, estimated_message_count: 0,
+            },
+        }));
+        mockInvokeHandler("get_acp_session_state", () => null);
+
+        render(<ConversationStatsDialog conversationId="42" />);
+        fireEvent.click(screen.getByRole("button"));
+
+        await waitFor(() => {
+            expect(screen.getByText("其中助手协作（7 次委派）")).toBeInTheDocument();
+        });
+        expect(screen.getByText("5,000 tokens")).toBeInTheDocument();
     });
 });

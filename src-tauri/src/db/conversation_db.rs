@@ -2465,17 +2465,37 @@ impl ConversationDatabase {
             Some(0.0)
         };
 
+        let (delegated, delegated_by_model) = delegated_token_usage(&conn, conversation_id)?;
+        for extra in delegated_by_model {
+            match by_model.iter_mut().find(|entry| entry.model_id == extra.model_id) {
+                Some(entry) => {
+                    entry.total_tokens += extra.total_tokens;
+                    entry.input_tokens += extra.input_tokens;
+                    entry.output_tokens += extra.output_tokens;
+                    entry.thought_tokens += extra.thought_tokens;
+                    entry.cached_input_tokens += extra.cached_input_tokens;
+                    entry.cached_read_tokens += extra.cached_read_tokens;
+                    entry.cached_write_tokens += extra.cached_write_tokens;
+                    entry.message_count += extra.message_count;
+                }
+                None => by_model.push(extra),
+            }
+        }
+        by_model.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+
         Ok(ConversationTokenStats {
             opencode_go_allowance,
-            total_tokens: total_tokens as i32,
-            input_tokens: input_tokens as i32,
-            output_tokens: output_tokens as i32,
-            thought_tokens: thought_tokens_total as i32,
-            cached_input_tokens: cached_input_tokens_total as i32,
-            cached_read_tokens: cached_read_tokens_total as i32,
-            cached_write_tokens: cached_write_tokens_total as i32,
+            total_tokens: (total_tokens + delegated.total_tokens) as i32,
+            input_tokens: (input_tokens + delegated.input_tokens) as i32,
+            output_tokens: (output_tokens + delegated.output_tokens) as i32,
+            thought_tokens: (thought_tokens_total + delegated.thought_tokens) as i32,
+            cached_input_tokens: (cached_input_tokens_total + delegated.cached_input_tokens) as i32,
+            cached_read_tokens: (cached_read_tokens_total + delegated.cached_read_tokens) as i32,
+            cached_write_tokens: (cached_write_tokens_total + delegated.cached_write_tokens) as i32,
             by_model,
-            estimated_message_count: estimated_message_count as i32,
+            estimated_message_count: (estimated_message_count + delegated.estimated_message_count)
+                as i32,
+            delegated,
             message_count: message_count as i32,
             system_message_count: system_count as i32,
             user_message_count: user_count as i32,
@@ -2621,9 +2641,124 @@ pub struct ConversationTodoInput {
     pub active_form: String,
 }
 
+/// 本对话委派给其他助手的工作（管家任务、Bot 间协作消息）产生的用量。
+/// 这些模型调用落在任务会话或对方会话里，不在本对话的 message 表行中。
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct DelegatedTokenUsage {
+    pub run_count: i64,
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub thought_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub cached_read_tokens: i64,
+    pub cached_write_tokens: i64,
+    pub estimated_message_count: i64,
+}
+
+/// 委派范围：任务会话整段；协作请求只取接收方从投递消息到下一条用户消息之间的回合。
+const DELEGATED_SCOPE_CTE: &str = "WITH delegated(conversation_id, after_id, before_id) AS (
+        SELECT task_conversation_id, 0, NULL FROM butler_task_definition WHERE butler_conversation_id = ?1
+        UNION ALL
+        SELECT e.target, e.input_id,
+               (SELECT min(m.id) FROM message m
+                 WHERE m.conversation_id = e.target AND m.message_type = 'user' AND m.id > e.input_id)
+          FROM butler_peer_exchange e
+         WHERE e.owner = ?1 AND e.input_id IS NOT NULL
+    )";
+
+pub(crate) fn delegated_token_usage(
+    conn: &Connection,
+    conversation_id: i64,
+) -> rusqlite::Result<(DelegatedTokenUsage, Vec<ModelTokenBreakdown>)> {
+    let mut usage = DelegatedTokenUsage {
+        run_count: conn.query_row(
+            &format!("{DELEGATED_SCOPE_CTE} SELECT count(*) FROM delegated"),
+            [conversation_id],
+            |row| row.get(0),
+        )?,
+        ..Default::default()
+    };
+    if usage.run_count == 0 {
+        return Ok((usage, Vec::new()));
+    }
+
+    let mut stmt = conn.prepare(&format!(
+        "{DELEGATED_SCOPE_CTE}
+         SELECT m.llm_model_id, m.llm_model_name, m.token_count, m.input_token_count,
+                m.output_token_count, m.metadata_json
+           FROM delegated d
+           JOIN message m ON m.conversation_id = d.conversation_id
+                         AND m.id > d.after_id
+                         AND (d.before_id IS NULL OR m.id < d.before_id)
+          WHERE m.message_type IN ('response', 'reasoning')"
+    ))?;
+    let rows = stmt.query_map([conversation_id], |row| {
+        Ok((
+            row.get::<_, Option<i64>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+
+    let mut by_model: Vec<ModelTokenBreakdown> = Vec::new();
+    for row in rows {
+        let (model_id, model_name, total, input, output, metadata_json) = row?;
+        let metadata = parse_persisted_usage_metadata(metadata_json.as_deref());
+        usage.total_tokens += total;
+        usage.input_tokens += input;
+        usage.output_tokens += output;
+        usage.thought_tokens += metadata.thought_tokens;
+        usage.cached_input_tokens += metadata.cached_input_tokens;
+        usage.cached_read_tokens += metadata.cached_read_tokens;
+        usage.cached_write_tokens += metadata.cached_write_tokens;
+        if metadata.usage_source.as_deref() == Some("estimated") {
+            usage.estimated_message_count += 1;
+        }
+        if model_id.is_none() {
+            continue;
+        }
+        let index = match by_model.iter().position(|entry| entry.model_id == model_id) {
+            Some(index) => index,
+            None => {
+                by_model.push(ModelTokenBreakdown {
+                    model_id,
+                    model_name: model_name.unwrap_or_else(|| "Unknown".to_string()),
+                    total_tokens: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    thought_tokens: 0,
+                    cached_input_tokens: 0,
+                    cached_read_tokens: 0,
+                    cached_write_tokens: 0,
+                    message_count: 0,
+                    avg_ttft_ms: None,
+                    avg_tps: None,
+                });
+                by_model.len() - 1
+            }
+        };
+        let entry = &mut by_model[index];
+        entry.total_tokens += total;
+        entry.input_tokens += input;
+        entry.output_tokens += output;
+        entry.thought_tokens += metadata.thought_tokens;
+        entry.cached_input_tokens += metadata.cached_input_tokens;
+        entry.cached_read_tokens += metadata.cached_read_tokens;
+        entry.cached_write_tokens += metadata.cached_write_tokens;
+        entry.message_count += 1;
+    }
+    Ok((usage, by_model))
+}
+
 /// 对话token统计信息
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConversationTokenStats {
+    /// 已计入上面各项总量中的助手协作用量，供界面单独说明
+    pub delegated: DelegatedTokenUsage,
     pub opencode_go_allowance: Option<f64>,
     pub total_tokens: i32,
     pub input_tokens: i32,

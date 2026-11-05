@@ -358,6 +358,20 @@ export interface ConversationTokenStats {
     // 时间戳信息
     start_time?: Date | null;
     finish_time?: Date | null;
+    /** 已计入上述总量的助手协作用量（管家任务、Bot 间协作） */
+    delegated?: DelegatedTokenUsage;
+}
+
+export interface DelegatedTokenUsage {
+    run_count: number;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    thought_tokens: number;
+    cached_input_tokens: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
+    estimated_message_count: number;
 }
 
 export interface ModelTokenBreakdown {
