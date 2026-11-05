@@ -33,6 +33,13 @@ pub fn assistant_issue(assistant_type: Option<i64>) -> Option<MobileCapabilityIs
     }
 }
 
+/// Platform projection only: retain desktop configuration in storage.
+pub fn hidden_mobile_tool(transport: &str, command: Option<&str>, tool: &str) -> bool {
+    matches!(transport, "stdio" | "builtin")
+        && command.map(str::trim) == Some("aipp:search")
+        && tool == "search_web"
+}
+
 pub fn tool_issue(transport: &str, command: Option<&str>, tool: Option<&str>) -> Option<MobileCapabilityIssue> {
     // Match the executor's routing, not the editable is_builtin metadata flag.
     if matches!(transport, "http" | "sse") {
@@ -80,6 +87,9 @@ pub async fn get_assistant_execution_capability(
                 continue;
             }
             for tool in configured_server.tools.into_iter().filter(|tool| tool.is_enabled) {
+                if hidden_mobile_tool(&server.transport_type, server.command.as_deref(), &tool.name) {
+                    continue;
+                }
                 if let Some(mut reason) = tool_issue(&server.transport_type, server.command.as_deref(), Some(&tool.name)) {
                     reason.reason = format!("server_id={}; tool={}; {}", server.id, tool.name, reason.reason);
                     issues.push(reason);

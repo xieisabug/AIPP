@@ -550,6 +550,15 @@ fn execute_dynamic_mcp_tool(
         std::collections::HashSet::new()
     };
 
+    let hidden_search_server_ids: std::collections::HashSet<i64> = if cfg!(mobile) {
+        db.get_mcp_servers().map_err(|e| e.to_string())?.into_iter()
+            .filter(|server| crate::api::mobile_capability::hidden_mobile_tool(
+                &server.transport_type, server.command.as_deref(), "search_web",
+            ))
+            .map(|server| server.id).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     match tool_name {
         "load_mcp_server" => {
             let keyword = args
@@ -576,6 +585,7 @@ fn execute_dynamic_mcp_tool(
                     .iter()
                     .filter(|tool| {
                         tool.server_id == server.server_id
+                            && !(hidden_search_server_ids.contains(&tool.server_id) && tool.tool_name == "search_web")
                             && tool.server_enabled
                             && tool.tool_enabled
                             && tool.summary_generated_at.is_some()
@@ -645,6 +655,9 @@ fn execute_dynamic_mcp_tool(
                     continue;
                 }
                 for tool in &tool_catalog {
+                    if hidden_search_server_ids.contains(&tool.server_id) && tool.tool_name == "search_web" {
+                        continue;
+                    }
                     if !tool.server_enabled || !tool.tool_enabled {
                         continue;
                     }

@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn test_mobile_search_projection_preserves_config_and_http_tools() {
+    let configured = vec!["search_web", "search_http", "fetch_url"];
+    let visible: Vec<_> = configured.iter().copied()
+        .filter(|name| !hidden_mobile_tool("stdio", Some("aipp:search"), name))
+        .collect();
+    assert_eq!(visible, vec!["search_http", "fetch_url"]);
+    assert_eq!(configured, vec!["search_web", "search_http", "fetch_url"]);
+    assert!(visible.iter().all(|name| tool_issue("stdio", Some("aipp:search"), Some(name)).is_none()));
+    // Explicit/stale calls still fail; hiding must not authorize browser execution.
+    assert!(tool_issue("stdio", Some("aipp:search"), Some("search_web")).is_some());
+    assert!(!hidden_mobile_tool("http", Some("aipp:search"), "search_web"));
+    assert!(!hidden_mobile_tool("stdio", Some("external-search"), "search_web"));
+}
+
+#[test]
 fn test_mobile_capability_distinguishes_transport_and_real_builtin() {
     assert!(tool_issue("stdio", Some("npx server"), None).is_some());
     assert!(tool_issue("stdio", Some("aipp:unknown"), None).is_some());

@@ -208,7 +208,7 @@ pub async fn collect_mcp_info_for_assistant(
     // 根据传入的 enabled_servers_filter 选择服务器：
     // - 如果提供了 ID 列表，就按该列表精确选择对应服务器（忽略助手层面的启用状态）
     // - 如果未提供，则只保留助手配置里启用的服务器
-    let enabled_servers: Vec<MCPServerWithTools> = if let Some(filters) = enabled_servers_filter {
+    let mut enabled_servers: Vec<MCPServerWithTools> = if let Some(filters) = enabled_servers_filter {
         if !filters.is_empty() {
             use std::collections::HashSet;
             let filter_set: HashSet<&String> = filters.iter().collect();
@@ -292,6 +292,15 @@ pub async fn collect_mcp_info_for_assistant(
         all_servers.into_iter().filter(|s| s.is_enabled).collect()
     };
 
+    if cfg!(mobile) {
+        let db = MCPDatabase::new(app_handle).map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        for configured in &mut enabled_servers {
+            let server = db.get_mcp_server(configured.id).map_err(|e| AppError::DatabaseError(e.to_string()))?;
+            configured.tools.retain(|tool| !crate::api::mobile_capability::hidden_mobile_tool(
+                &server.transport_type, server.command.as_deref(), &tool.name,
+            ));
+        }
+    }
     if cfg!(mobile) && !dynamic_loading_enabled {
         let db = MCPDatabase::new(app_handle).map_err(|e| AppError::DatabaseError(e.to_string()))?;
         for configured in &enabled_servers {
