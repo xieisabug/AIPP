@@ -1,3 +1,5 @@
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { visibleSearchTools } from "@/lib/mobileUnsupported";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
@@ -20,6 +22,7 @@ interface AssistantMCPConfigSectionProps {
 }
 
 interface MCPServerInfo {
+    command?: string;
     id: number;
     name: string;
     is_enabled: boolean;
@@ -37,6 +40,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
     assistantId,
     onConfigChange
 }) => {
+    const isMobilePlatform = useIsMobilePlatform();
     const [availableServers, setAvailableServers] = useState<MCPServerInfo[]>([]);
     const [selectedServerId, setSelectedServerId] = useState<number | null>(null);
     const [availableTools, setAvailableTools] = useState<MCPToolInfo[]>([]);
@@ -56,6 +60,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
             const servers = serversWithTools.map(server => ({
                 id: server.id,
                 name: server.name,
+                command: server.command,
                 is_enabled: server.is_enabled
             }));
             setAvailableServers(servers);
@@ -208,12 +213,13 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
         else setAvailableTools([]);
     }, [selectedServerId, fetchAvailableTools]);
 
+    const visibleTools = visibleSearchTools(availableTools, availableServers.find(server => server.id === selectedServerId)?.command, isMobilePlatform);
     const enabledServers = availableServers.filter(server => server.is_enabled);
     
     // 统计有效启用的工具数量：只有服务器启用时，其工具才算有效启用
     const totalEnabledTools = Array.from(allServerTools.entries())
         .filter(([serverId]) => availableServers.find(s => s.id === serverId)?.is_enabled)
-        .flatMap(([, tools]) => tools)
+        .flatMap(([id, tools]) => visibleSearchTools(tools, availableServers.find(server => server.id === id)?.command, isMobilePlatform))
         .filter(tool => tool.is_enabled).length;
 
     if (availableServers.length === 0) {
@@ -270,7 +276,7 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                         服务器配置 ({availableServers.length})
                     </TabsTrigger>
                     <TabsTrigger value="tools">
-                        工具配置 ({availableTools.length})
+                        工具配置 ({visibleTools.length})
                     </TabsTrigger>
                 </TabsList>
 
@@ -331,14 +337,14 @@ const AssistantMCPConfigSection: React.FC<AssistantMCPConfigSectionProps> = ({
                                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
                                     <p className="text-sm text-gray-500 mt-2">加载工具列表...</p>
                                 </div>
-                            ) : availableTools.length === 0 ? (
+                            ) : visibleTools.length === 0 ? (
                                 <div className="text-center py-8">
                                     <Wrench className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                                     <p className="text-sm text-gray-500">该服务器暂无可用工具</p>
                                 </div>
                             ) : (
                                 <div className="space-y-3">
-                                    {availableTools.map(tool => (
+                                    {visibleTools.map(tool => (
                                         <div key={tool.id} className="flex flex-col gap-3 p-3 border rounded-lg" data-aipp-slot="assistant-mcp-tool-row">
                                             <div className="flex min-w-0 items-start gap-3">
                                                 <Wrench className="h-4 w-4 shrink-0 text-muted-foreground mt-0.5" />

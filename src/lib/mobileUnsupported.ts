@@ -179,3 +179,12 @@ export function isMobileUnexecutableBuiltinTool(
     const key = command.trim().split(/\s+/)[0]
     return MOBILE_UNEXECUTABLE_BUILTIN_TOOLS[key]?.has(toolName) ?? false
 }
+
+
+/** Presentation-only filtering; never changes persisted desktop tool settings. */
+export function visibleSearchTools<T extends { name?: string; tool_name?: string }>(
+    tools: T[], command: string | null | undefined, isMobilePlatform: boolean,
+): T[] {
+    if (!isMobilePlatform || command?.trim().split(/\s+/)[0] !== "aipp:search") return tools;
+    return tools.filter(tool => !isMobileUnexecutableBuiltinTool(command, tool.tool_name ?? tool.name ?? ""));
+}
