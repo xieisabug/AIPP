@@ -13,6 +13,7 @@ fn test_mobile_capability_distinguishes_transport_and_real_builtin() {
 #[test]
 fn test_mobile_capability_preserves_lightweight_tools() {
     assert!(tool_issue("stdio", Some("aipp:search"), Some("fetch_url")).is_none());
+    assert!(tool_issue("stdio", Some("aipp:search"), Some("search_http")).is_none());
     assert!(tool_issue("stdio", Some("aipp:operation"), Some("read_file")).is_none());
     assert!(tool_issue("stdio", Some("aipp:search"), Some("search_web")).is_some());
     assert!(tool_issue("stdio", Some("aipp:operation"), Some("execute_bash")).is_some());

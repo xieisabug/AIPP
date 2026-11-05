@@ -11,6 +11,7 @@
 - 未接入 MobileShell 的独立窗口仍须逐项评估移动兼容性，不能直接开放桌面窗口入口。
 - 移动端使用 `src/mobile/MobileShell.tsx` 的单 WebView 导航，已接入聊天、设置、收藏与受限预览；页面保留挂载以保留聊天订阅和输入。
 - 移动端优化规划见 `docs/mobile-optimization-prd.md`。
+- 内置搜索工具提供移动可用的 `search_http`（Tavily / Brave / SearXNG，显式配置服务）和 `fetch_url`；`search_web` 仍仅限桌面浏览器。配置与错误边界见 `docs/product/04-MCP工具系统.md`。
 
 ## 平台与构建
 

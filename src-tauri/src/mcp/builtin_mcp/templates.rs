@@ -159,11 +159,37 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
         BuiltinTemplateInfo {
             id: "search".into(),
             name: "搜索工具".into(),
-            description: "内置的网络搜索和网页访问工具，支持多种搜索引擎，基于 Chromium 内核抓取页面信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
+            description: "网络搜索与网页访问：HTTP 搜索支持 Tavily、Brave、SearXNG（手机和桌面）；浏览器搜索仅桌面可用。".into(),
             command: "aipp:search".into(),
             transport_type: "stdio".into(),
             default_timeout: Some(60000), // 60秒，搜索和抓取需要更多时间
         required_envs: vec![
+            BuiltinTemplateEnvVar {
+                key: "HTTP_SEARCH_PROVIDER".into(), label: "HTTP 搜索服务".into(), required: false,
+                tip: Some("search_http 使用所选服务；失败不切换服务。Tavily/Brave 需要 API Key，费用和配额由服务商决定；SearXNG 需启用 JSON API。".into()),
+                field_type: "select".into(), default_value: Some("disabled".into()), placeholder: None,
+                options: Some(vec![
+                    EnvVarOption { label: "未配置".into(), value: "disabled".into() },
+                    EnvVarOption { label: "Tavily".into(), value: "tavily".into() },
+                    EnvVarOption { label: "Brave Search".into(), value: "brave".into() },
+                    EnvVarOption { label: "SearXNG（自建）".into(), value: "searxng".into() },
+                ]),
+            },
+            BuiltinTemplateEnvVar {
+                key: "HTTP_SEARCH_ENDPOINT".into(), label: "HTTP 搜索 API 地址".into(), required: false,
+                tip: Some("Tavily/Brave 留空使用所选服务官方地址；SearXNG 必填完整 /search 地址。自定义地址错误时直接报错。".into()),
+                field_type: "text".into(), default_value: None, placeholder: Some("https://search.example.com/search".into()), options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "HTTP_SEARCH_API_KEY".into(), label: "HTTP 搜索 API Key".into(), required: false,
+                tip: Some("Tavily/Brave 必填；SearXNG 可选 Bearer Token。仅发送给配置的 API 地址。".into()),
+                field_type: "password".into(), default_value: None, placeholder: None, options: None,
+            },
+            BuiltinTemplateEnvVar {
+                key: "HTTP_SEARCH_TIMEOUT_MS".into(), label: "HTTP 搜索超时（毫秒）".into(), required: false,
+                tip: Some("1000–60000 毫秒；默认 30000。".into()), field_type: "number".into(),
+                default_value: Some("30000".into()), placeholder: None, options: None,
+            },
             BuiltinTemplateEnvVar {
                 key: "SEARCH_ENGINE".into(),
                 label: "搜索引擎".into(),
@@ -965,6 +991,14 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
         ],
         Some("search") => vec![
+            BuiltinToolInfo {
+                name: "search_http".into(),
+                description: "通过用户配置的 Tavily、Brave 或 SearXNG HTTP API 搜索网络，支持手机和桌面。返回标题、URL、摘要及排名；缺配置或服务失败直接报错，不自动切换服务。使用 fetch_url 读取结果页面。".into(),
+                input_schema: serde_json::json!({"type":"object","properties":{
+                    "query":{"type":"string","minLength":1,"maxLength":600,"description":"搜索关键词"},
+                    "max_results":{"type":"integer","minimum":1,"maximum":20,"default":5}
+                },"required":["query"]}),
+            },
             BuiltinToolInfo {
                 name: "search_web".into(),
                 description: "搜索网络内容，当进行事实性验证、实事信息、研究特定主题等情况时使用最佳。当搜索结果没有可用时，可以尝试更改关键字进行搜索；当搜索结果的简介有限但判断该结果有可用性时，请进一步通过fetch_url工具获取到页面完整的信息。".into(),
@@ -1870,7 +1904,8 @@ mod tests {
     #[test]
     fn test_get_tools_for_search_command() {
         let tools = get_builtin_tools_for_command("aipp:search");
-        assert_eq!(tools.len(), 2, "Search command should have 2 tools");
+        assert_eq!(tools.len(), 3, "Search command should have 3 tools");
+        assert!(tools.iter().any(|tool| tool.name == "search_http"));
     }
 
     #[test]

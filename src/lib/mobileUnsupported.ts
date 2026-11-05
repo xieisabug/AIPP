@@ -62,6 +62,9 @@ export const MOBILE_UNSUPPORTED_FEATURES: ReadonlySet<MobileUnsupportedFeature> 
  * 移动端配置界面隐藏这些字段，保留搜索引擎等普通配置。
  */
 export const BROWSER_SEARCH_ENV_KEYS: ReadonlySet<string> = new Set([
+    "SEARCH_ENGINE",
+    "PROXY_SERVER",
+    "KAGI_SESSION_URL",
     "USER_DATA_DIR",
     "HEADLESS",
     "WAIT_SELECTORS",

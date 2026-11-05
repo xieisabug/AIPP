@@ -221,3 +221,20 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - `src-tauri/src/api/ai/mcp.rs` - AI 中的 MCP 集成
 - `src/hooks/useMcpToolCallProcessor.tsx` - 工具调用处理 Hook
 - `src/services/mcpToolComponentRegistry.tsx` - 工具调用组件注册表
+
+
+## HTTP 搜索（手机与桌面）
+
+内置「搜索工具」（`aipp:search`）提供 `search_http`，不依赖浏览器。设置 → MCP → 搜索工具中选择服务：
+
+- **Tavily**：填写 API Key；默认地址 `https://api.tavily.com/search`。
+- **Brave Search**：填写 API Key；默认地址 `https://api.search.brave.com/res/v1/web/search`。
+- **SearXNG**：填写实例的完整 `/search` 地址，实例须开启 JSON 输出；API Key 可留空，填写时以 Bearer 发送。
+
+HTTP 搜索默认未启用，须明确选择服务；不会在失败时自动换服务。服务可能有费用或配额，以所选服务为准。API Key 在配置界面遮蔽显示。超时可设为 1000–60000 毫秒，默认 30000 毫秒。
+
+调用参数为 `query`（1–600 字符）及可选 `max_results`（1–20，默认 5）；返回标题、URL、摘要和排名。真正的空结果与鉴权失败、配额不足、限流、超时及协议错误分别返回。SearXNG 全部引擎失败时报告失败，部分结果以 `partial` 标识。响应上限 2 MiB，拒绝重定向，错误中保留服务、主机、阶段和会话标识并遮蔽配置密钥。
+
+桌面端原有 `search_web` 继续使用浏览器，移动端只开放 `search_http` 和 `fetch_url`。升级后刷新内置搜索工具列表，并在助手 MCP 工具授权中选用 `search_http`。
+
+协议参考：[Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search)、[Brave](https://api-dashboard.search.brave.com/api-reference/web/search/get)、[SearXNG](https://docs.searxng.org/dev/search_api.html)。

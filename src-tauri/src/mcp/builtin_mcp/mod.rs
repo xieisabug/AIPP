@@ -1069,6 +1069,19 @@ pub async fn execute_aipp_builtin_tool(
         "search" => {
             let handler = SearchHandler::new(app_handle.clone());
             match tool_name.as_str() {
+                "search_http" => {
+                    let query = args.get("query").and_then(|v| v.as_str())
+                        .ok_or("search_http: stage=validate; 缺少 query 字符串")?;
+                    let limit = match args.get("max_results") {
+                        None => 5,
+                        Some(value) => value.as_u64().filter(|value| (1..=20).contains(value))
+                            .ok_or("search_http: stage=validate; max_results 必须为 1–20 的整数")? as usize,
+                    };
+                    let value = handler.search_http(query, limit).await.map_err(|error| {
+                        format!("{error}; conversation_id={conversation_id:?}; tool=search_http")
+                    })?;
+                    serde_json::json!({"content": [{"type": "text", "text": value.to_string()}], "isError": false})
+                }
                 "search_web" => {
                     let query = args
                         .get("query")

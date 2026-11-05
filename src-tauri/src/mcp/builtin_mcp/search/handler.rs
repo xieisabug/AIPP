@@ -14,7 +14,6 @@ use super::types::{SearchRequest, SearchResponse};
 #[cfg(desktop)]
 use super::types::SearchResultType;
 use anyhow::Result;
-#[cfg(desktop)]
 use std::collections::HashMap;
 #[cfg(desktop)]
 use std::fs;
@@ -84,6 +83,11 @@ pub struct SearchHandler {
 }
 
 impl SearchHandler {
+    pub async fn search_http(&self, query: &str, limit: usize) -> Result<serde_json::Value, String> {
+        let env = load_search_config_from_db(&self.app_handle)?;
+        let config = super::http_search::HttpSearchConfig::from_env(&env)?;
+        super::http_search::search(&config, query, limit).await
+    }
     pub fn new(app_handle: AppHandle) -> Self {
         debug!("Creating SearchHandler");
         Self { app_handle }
@@ -455,9 +459,9 @@ impl SearchHandler {
     }
 }
 
-#[cfg(desktop)]
 fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, String>, String> {
     use crate::db::mcp_db::MCPDatabase;
+    use rusqlite::OptionalExtension;
     let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let mut stmt = db
         .conn
@@ -467,7 +471,8 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
         .map_err(|e| format!("Database prepare error: {}", e))?;
 
     let env_text: Option<String> =
-        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0)).unwrap_or(None);
+        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0))
+            .optional().map_err(|e| format!("search config database read failed: {e}"))?.flatten();
     let mut config = HashMap::new();
     if let Some(text) = env_text {
         for line in text.lines() {
@@ -481,12 +486,12 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
         }
     }
     if let Some(legacy_browser_type) = config.remove("BROWSER_TYPE") {
-        warn!(
+        tracing::warn!(
             browser_type = %legacy_browser_type,
             "Ignoring deprecated BROWSER_TYPE config in chromiumoxide mode"
         );
     }
-    debug!(?config, "Loaded search config");
+    debug!("Loaded search config (values omitted)");
     Ok(config)
 }
 

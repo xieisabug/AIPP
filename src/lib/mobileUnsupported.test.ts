@@ -82,6 +82,7 @@ describe("isMobileUnexecutableBuiltinTool", () => {
         const { isMobileUnexecutableBuiltinTool } = await import("./mobileUnsupported")
         expect(isMobileUnexecutableBuiltinTool("aipp:search", "search_web")).toBe(true)
         expect(isMobileUnexecutableBuiltinTool("aipp:search", "fetch_url")).toBe(false)
+        expect(isMobileUnexecutableBuiltinTool("aipp:search", "search_http")).toBe(false)
         expect(isMobileUnexecutableBuiltinTool("aipp:operation", "execute_bash")).toBe(true)
         expect(isMobileUnexecutableBuiltinTool("aipp:operation", "read_file")).toBe(false)
         expect(isMobileUnexecutableBuiltinTool("npx foo", "search_web")).toBe(false)

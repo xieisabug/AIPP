@@ -319,6 +319,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                     </div>
                 );
 
+            case "password":
             case "text":
             default:
                 return (
@@ -329,7 +330,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                         </Label>
                         <Input
                             id={fieldId}
-                            type="text"
+                            type={env.field_type === "password" ? "password" : "text"}
                             value={value}
                             placeholder={env.placeholder}
                             onChange={(e) => handleEnvValueChange(env.key, e.target.value)}
