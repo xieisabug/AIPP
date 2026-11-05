@@ -293,6 +293,7 @@ pub async fn generate_conversation_summary(
     let proxy_enabled = false;
 
     let client = genai_client::create_client_with_config(
+        Some((app_handle, conversation_id)),
         &crate::api::copilot_token_manager::prepare_provider_configs(
             app_handle,
             &model_detail.provider.api_type,

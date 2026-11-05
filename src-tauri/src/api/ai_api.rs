@@ -250,7 +250,7 @@ async fn report_pre_request_error_in_conversation(
     error_text: &str,
 ) {
     let now = chrono::Utc::now();
-    match add_message(
+    let notification = match add_message(
         app_handle,
         None,
         conversation_id,
@@ -284,11 +284,13 @@ async fn report_pre_request_error_in_conversation(
                     }),
                 },
             );
+            error_text.to_string()
         }
         Err(persist_error) => {
             error!(conversation_id, error = %persist_error, "failed to persist pre-request error");
+            format!("{error_text}；错误消息写入会话失败：{persist_error}")
         }
-    }
+    };
     if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
         manager.clear_focus(app_handle, conversation_id).await;
     }
@@ -296,7 +298,7 @@ async fn report_pre_request_error_in_conversation(
         crate::api::ai::events::ERROR_NOTIFICATION_EVENT,
         crate::api::ai::events::ErrorNotificationPayload {
             conversation_id: Some(conversation_id),
-            error_message: error_text.to_string(),
+            error_message: notification,
         },
     );
 }
@@ -1938,8 +1940,12 @@ pub async fn ask_ai(
     );
 
     let task_handle = tokio::spawn(async move {
+        use futures::FutureExt;
+        const MODEL_REQUEST: &str = "发送模型请求";
+        let mut stage = "初始化会话数据库";
+        let outcome = std::panic::AssertUnwindSafe(async {
         // 直接创建数据库连接（避免线程安全问题）
-        let conversation_db = ConversationDatabase::new(&app_handle_clone).unwrap();
+        let conversation_db = ConversationDatabase::new(&app_handle_clone)?;
 
         // 构建聊天配置
         // 从配置中获取网络代理和超时设置
@@ -2016,7 +2022,9 @@ pub async fn ask_ai(
             );
         }
 
+        stage = "创建模型客户端";
         let client = genai_client::create_client_with_config(
+            Some((&app_handle_clone, conversation_id)),
             &crate::api::copilot_token_manager::prepare_provider_configs(
                 &app_handle_clone,
                 &provider_api_type,
@@ -2112,6 +2120,7 @@ pub async fn ask_ai(
         let init_message_ids_for_stateful = init_message_ids.clone();
 
         // Context budget management with LLM compaction
+        stage = "构建模型上下文";
         let budget = ContextBudget::from_config(&_config_feature_map);
         let is_butler = is_butler_system_assistant_name(&assistant_detail.assistant.name);
         let compaction_ctx = CompactionContext {
@@ -2146,6 +2155,7 @@ pub async fn ask_ai(
             &fit_result.messages,
         )
         .await;
+        stage = "执行 chat.beforeModelRequest";
         let init_message_list = run_before_model_request_hook(
             &app_handle_clone,
             conversation_id,
@@ -2181,6 +2191,7 @@ pub async fn ask_ai(
             request_message_list,
             instructions,
         );
+        stage = "回填工具结果";
         let request_message_list = backfill_request_message_list(
             &app_handle_clone,
             conversation_id,
@@ -2198,6 +2209,7 @@ pub async fn ask_ai(
             instructions,
         );
 
+        stage = MODEL_REQUEST;
         if chat_config.stream {
             // 使用 genai 流式处理
             ai_handle_stream_chat(
@@ -2274,6 +2286,26 @@ pub async fn ask_ai(
             .await;
 
         Ok::<(), anyhow::Error>(())
+        }).catch_unwind().await;
+
+        let failure = match outcome {
+            Ok(Ok(())) => return Ok(()),
+            // The model handlers already persist and notify their final request errors.
+            Ok(Err(error)) if error.is::<crate::api::ai::chat::ReportedChatError>() => {
+                error!(conversation_id, model = %model_code, error = %format!("{error:#}"), "model request failed");
+                return Err(error);
+            }
+            Ok(Err(error)) => format!("{error:#}"),
+            Err(panic) => {
+                let detail = panic.downcast_ref::<String>().map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied()).unwrap_or("panic 未提供文本原因");
+                format!("后台任务 panic: {detail}")
+            }
+        };
+        let message = format!("{stage}失败（conversation_id={conversation_id}, provider={provider_api_type}, model={model_code}）：{failure}");
+        error!(conversation_id, error = %message, "ask_ai background task failed");
+        report_pre_request_error_in_conversation(&app_handle_clone, conversation_id, &message).await;
+        Err(anyhow::anyhow!(message))
     });
 
     // Store the task handle for proper cancellation
@@ -2562,6 +2594,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     }
 
     let client = genai_client::create_client_with_config(
+        Some((&app_handle, conversation_id_i64)),
         &crate::api::copilot_token_manager::prepare_provider_configs(
             &app_handle,
             &provider_api_type,
@@ -2982,6 +3015,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     }
 
     let client = genai_client::create_client_with_config(
+        Some((&app_handle, conversation_id)),
         &crate::api::copilot_token_manager::prepare_provider_configs(
             &app_handle,
             &provider_api_type,
@@ -3518,6 +3552,7 @@ pub async fn regenerate_ai(
         }
 
         let client = genai_client::create_client_with_config(
+            Some((&app_handle_clone, conversation_id)),
             &crate::api::copilot_token_manager::prepare_provider_configs(
                 &app_handle_clone,
                 &regenerate_provider_api_type,
@@ -3784,8 +3819,7 @@ pub(crate) fn add_message(
 ) -> Result<Message, AppError> {
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
     let message = db
-        .message_repo()
-        .unwrap()
+        .message_repo()?
         .create(&Message {
             id: 0,
             parent_id,

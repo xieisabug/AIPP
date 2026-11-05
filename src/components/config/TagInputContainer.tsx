@@ -8,7 +8,6 @@ import {
     ModelTagItem,
     supportsRequestModeToggle,
     toModelTagItem,
-    toggleRequestMode,
 } from './llmModelTypes';
 
 interface TagInputContainerProps {
@@ -65,8 +64,7 @@ const TagInputContainer: React.FC<TagInputContainerProps> = ({
             });
     }, [llmProviderId, tags, onTagsChange]);
 
-    const handleToggleRequestMode = useCallback((tag: ModelTagItem, index: number) => {
-        const requestMode = toggleRequestMode(tag.request_mode);
+    const handleToggleRequestMode = useCallback((tag: ModelTagItem, index: number, requestMode: string) => {
         invoke('update_llm_model_request_mode', {
             llmProviderId: parseInt(llmProviderId),
             modelCode: tag.code,
@@ -130,7 +128,8 @@ export default React.memo(TagInputContainer, (prevProps, nextProps) => {
         prevProps.tags.every((tag, index) =>
             tag.code === nextProps.tags[index]?.code &&
             tag.name === nextProps.tags[index]?.name &&
-            tag.request_mode === nextProps.tags[index]?.request_mode
+            tag.request_mode === nextProps.tags[index]?.request_mode &&
+            tag.available_modes === nextProps.tags[index]?.available_modes
         ) &&
         prevProps.isExpanded === nextProps.isExpanded &&
         prevProps.onTagsChange === nextProps.onTagsChange &&

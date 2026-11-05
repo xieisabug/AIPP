@@ -13,6 +13,7 @@ import { Info } from "lucide-react";
 import { tokenStatisticsService } from "@/services/tokenStatisticsService";
 import type { AcpConversationSessionState, ConversationTokenStats } from "@/data/Conversation";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
+import { formatUsageDollars } from "./formatUsageDollars";
 import { Badge } from "@/components/ui/badge";
 
 interface ConversationStatsDialogProps {
@@ -196,6 +197,13 @@ export function ConversationStatsDialog({
                                 cachedWrite={stats.cached_write_tokens}
                                 showPercentage={true}
                             />
+
+                            {stats.opencode_go_allowance != null && (
+                                <div className="flex justify-between text-sm">
+                                    <span>OpenCode Go 订阅额度累计扣减</span>
+                                    <span>{formatUsageDollars(stats.opencode_go_allowance)}</span>
+                                </div>
+                            )}
 
                             {hasAcpSessionUsage && (
                                 <div className="space-y-3 rounded-lg border p-4">

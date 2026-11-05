@@ -129,6 +129,15 @@ function createMessage(overrides: Partial<Message> = {}): Message {
 }
 
 describe('MessageItem attachment updates', () => {
+    it.each([false, true])("keeps usage in the info panel in merged mode %s", (mergedMode) => {
+        const message = createMessage({ token_count: 55, ttft_ms: 2212,
+            metadata_json: JSON.stringify({ opencode_go: { allowance: 0.00000927 } }),
+        });
+        render(<MessageItem message={message} mergedMode={mergedMode} />);
+        expect(screen.queryByLabelText("回复用量")).not.toBeInTheDocument();
+        expect(screen.queryByText(/额度扣减/)).not.toBeInTheDocument();
+    });
+
     it('re-renders when the same message receives image attachments later', () => {
         const { rerender } = render(<MessageItem message={createMessage()} />);
 

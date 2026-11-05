@@ -19,6 +19,7 @@ describe("ConversationStatsDialog", () => {
             cached_read_tokens: 15,
             cached_write_tokens: 5,
             estimated_message_count: 2,
+            opencode_go_allowance: 0.00000927,
             by_model: [
                 {
                     model_id: 0,
@@ -77,6 +78,8 @@ describe("ConversationStatsDialog", () => {
             expect(screen.getByText("Token 用量")).toBeInTheDocument();
         });
 
+        expect(screen.getByText("OpenCode Go 订阅额度累计扣减")).toBeVisible();
+        expect(screen.getByText("$0.00000927")).toBeVisible();
         expect(screen.getByText("含估算 2 条")).toBeInTheDocument();
         expect(screen.getAllByText("Cached input").length).toBeGreaterThan(0);
         expect(screen.getByText("ACP 会话 Usage")).toBeInTheDocument();

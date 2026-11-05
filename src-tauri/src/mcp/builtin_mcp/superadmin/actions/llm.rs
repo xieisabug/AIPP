@@ -52,13 +52,6 @@ fn optional_bool_arg(args: &Value, key: &str) -> Result<Option<bool>, String> {
     }
 }
 
-fn validate_request_mode(request_mode: &str) -> Result<(), String> {
-    match request_mode {
-        "chat_completions" | "responses" => Ok(()),
-        _ => Err(format!("Unsupported request_mode: {request_mode}")),
-    }
-}
-
 fn load_request_mode_map(
     db: &LLMDatabase,
     provider_id: i64,
@@ -481,21 +474,17 @@ impl ActionHandler for LlmListModelsHandler {
         let models: Vec<Value> = rows
             .iter()
             .map(|row| {
-                let request_mode = request_mode_maps
-                    .get(&row.2)
-                    .and_then(|map| map.get(&row.3))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        resolve_request_mode_or_default(
-                            provider_api_types.get(&row.2).map(String::as_str).unwrap_or(""),
-                            &row.3,
-                            None,
-                        )
-                        .to_string()
-                    });
-                stored_model_to_json(row, request_mode)
+                let api_type = provider_api_types.get(&row.2).map(String::as_str).unwrap_or("");
+                let saved = request_mode_maps.get(&row.2).and_then(|map| map.get(&row.3));
+                let request_mode = if api_type == "opencode_go" {
+                    let modes = crate::api::opencode_go::available_modes(&db, &row.3, saved.map(String::as_str))?;
+                    crate::api::opencode_go::selected_mode(&modes, saved)
+                } else {
+                    resolve_request_mode_or_default(api_type, &row.3, saved.map(String::as_str)).to_string()
+                };
+                Ok(stored_model_to_json(row, request_mode))
             })
-            .collect();
+            .collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())?;
 
         Ok(json!({
             "models": models,
@@ -522,12 +511,12 @@ impl ActionHandler for LlmAddModelHandler {
         let audio_support = optional_bool_arg(&args, "audio_support")?.unwrap_or(false);
         let video_support = optional_bool_arg(&args, "video_support")?.unwrap_or(false);
         let request_mode = optional_string_arg(&args, "request_mode")?;
-        if let Some(request_mode) = request_mode.as_deref() {
-            validate_request_mode(request_mode)?;
-        }
 
         let db = LLMDatabase::new(app_handle).map_err(|e| e.to_string())?;
         let provider = db.get_llm_provider(provider_id).map_err(|e| e.to_string())?;
+        if let Some(mode) = request_mode.as_deref() {
+            crate::api::llm_api::validate_request_mode(&db, &provider, &code, mode)?;
+        }
         let exists = db
             .get_llm_models(provider_id.to_string())
             .map_err(|e| e.to_string())?
@@ -537,9 +526,10 @@ impl ActionHandler for LlmAddModelHandler {
             return Err(format!("Model '{code}' already exists for provider {provider_id}"));
         }
 
-        let effective_request_mode = request_mode.clone().unwrap_or_else(|| {
-            resolve_request_mode_or_default(&provider.api_type, &code, None).to_string()
-        });
+        let effective_request_mode = match &request_mode {
+            Some(mode) => mode.clone(),
+            None => db.effective_model_mode(&provider.api_type, provider_id, &code).map_err(|e| e.to_string())?,
+        };
 
         if dry_run {
             return Ok(json!({
@@ -557,6 +547,7 @@ impl ActionHandler for LlmAddModelHandler {
             }));
         }
 
+        let tx = db.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         db.add_llm_model(
             &name,
             provider_id,
@@ -567,12 +558,11 @@ impl ActionHandler for LlmAddModelHandler {
             video_support,
         )
         .map_err(|e| e.to_string())?;
-        if let Some(request_mode) = request_mode.as_deref() {
-            db.upsert_model_request_mode(provider_id, &code, request_mode)
-                .map_err(|e| e.to_string())?;
-        }
-
         let model_id = db.conn.last_insert_rowid();
+        if request_mode.is_some() || (provider.api_type == "opencode_go" && effective_request_mode != "unsupported") {
+            db.upsert_model_request_mode(provider_id, &code, &effective_request_mode).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
 
         Ok(json!({
             "model": {
@@ -653,6 +643,7 @@ impl ActionHandler for LlmGetModelsHandler {
                         "audio_support": model.audio_support,
                         "video_support": model.video_support,
                         "request_mode": model.request_mode,
+                        "available_modes": model.available_modes,
                         "is_selected": model.is_selected,
                     })
                 })

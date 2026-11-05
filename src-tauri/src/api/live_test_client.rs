@@ -28,6 +28,7 @@ pub(crate) fn configured_client() -> (genai::Client, String) {
         HashMap::from([(headers.key.clone(), headers)]),
     )]);
     let client = create_client_with_config(
+        None,
         &[config("endpoint", endpoint), config("api_key", key)],
         &model,
         "openai_api",

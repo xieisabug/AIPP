@@ -9,19 +9,15 @@ import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { AlertTriangle, Eye, Mic, Video, Search } from 'lucide-react';
 import { PinyinFilter, usePinyinReady } from '../../utils/pinyinFilter';
-import ModelRequestModeToggle from './ModelRequestModeToggle';
 import {
     ModelForSelection,
     ModelSelectionResponse,
-    supportsRequestModeToggle,
-    toggleRequestMode,
 } from './llmModelTypes';
 
 interface ModelSelectionDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     modelData: ModelSelectionResponse | null;
-    apiType: string;
     onConfirm: (selectedModels: ModelForSelection[]) => void;
     loading: boolean;
 }
@@ -30,7 +26,6 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     open,
     onOpenChange,
     modelData,
-    apiType,
     onConfirm,
     loading
 }) => {
@@ -41,7 +36,11 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 
     React.useEffect(() => {
         if (modelData) {
-            setSelectedModels(modelData.available_models);
+            setSelectedModels(modelData.available_models.map(model =>
+                !model.is_selected && model.available_modes?.length
+                    ? { ...model, request_mode: model.available_modes[0] }
+                    : model
+            ));
         }
     }, [modelData]);
 
@@ -62,7 +61,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
     const handleModelToggle = (modelCode: string, checked: boolean) => {
         setSelectedModels(prev => 
             prev.map(model => 
-                model.code === modelCode 
+                model.code === modelCode && (!checked || model.request_mode !== "unsupported")
                     ? { ...model, is_selected: checked }
                     : model
             )
@@ -71,7 +70,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 
     const handleSelectAll = () => {
         setSelectedModels(prev => 
-            prev.map(model => ({ ...model, is_selected: true }))
+            prev.map(model => ({ ...model, is_selected: model.request_mode !== "unsupported" }))
         );
     };
 
@@ -81,28 +80,13 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
         );
     };
 
-    const handleRequestModeToggle = (modelCode: string) => {
-        setSelectedModels(prev =>
-            prev.map(model =>
-                model.code === modelCode
-                    ? { ...model, request_mode: toggleRequestMode(model.request_mode) }
-                    : model
-            )
-        );
-    };
-
-    const handleConfirm = () => {
-        onConfirm(selectedModels);
-        onOpenChange(false);
-    };
-
     const selectedCount = selectedModels.filter(m => m.is_selected).length;
 
     if (!modelData) return null;
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="max-w-4xl">
+            <DialogContent className="sm:max-w-2xl">
                 <DialogHeader>
                     <DialogTitle>选择模型</DialogTitle>
                 </DialogHeader>
@@ -164,7 +148,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
 
                     {/* 模型列表 */}
                     <ScrollArea className="h-96">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             {filteredModels.map((model) => (
                                 <div 
                                     key={model.code} 
@@ -172,7 +156,9 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                                     onClick={() => handleModelToggle(model.code, !model.is_selected)}
                                 >
                                     <Checkbox
+                                        aria-label={model.name}
                                         checked={model.is_selected}
+                                        disabled={model.request_mode === "unsupported" && !model.is_selected}
                                         onCheckedChange={(checked) => 
                                             handleModelToggle(model.code, checked as boolean)
                                         }
@@ -182,7 +168,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                                         <div className="flex items-center gap-2">
                                             <Tooltip>
                                                 <TooltipTrigger asChild>
-                                                    <div className="font-medium truncate">
+                                                    <div className="min-w-0 flex-1 break-words font-medium">
                                                         {model.name}
                                                     </div>
                                                 </TooltipTrigger>
@@ -190,13 +176,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                                                     <p>{model.name}</p>
                                                 </TooltipContent>
                                             </Tooltip>
-                                            <div className="flex gap-1">
-                                                {supportsRequestModeToggle(apiType) && (
-                                                    <ModelRequestModeToggle
-                                                        requestMode={model.request_mode}
-                                                        onToggle={() => handleRequestModeToggle(model.code)}
-                                                    />
-                                                )}
+                                            <div className="flex shrink-0 gap-1">
                                                 {model.vision_support && (
                                                     <Eye className="h-3 w-3 text-blue-500" />
                                                 )}
@@ -220,7 +200,7 @@ const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
                     <Button variant="outline" onClick={() => onOpenChange(false)}>
                         取消
                     </Button>
-                    <Button onClick={handleConfirm} disabled={loading}>
+                    <Button onClick={() => onConfirm(selectedModels)} disabled={loading}>
                         {loading ? '更新中...' : '确认更新'}
                     </Button>
                 </DialogFooter>

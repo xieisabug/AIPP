@@ -617,3 +617,29 @@ fn test_message_delete_clears_attachments() {
     msg_repo.delete(created.id).unwrap();
     assert!(msg_repo.read(created.id).unwrap().is_none());
 }
+
+#[test]
+fn test_opencode_go_stream_metrics_preserve_message_and_billing() {
+    let (_, _, repo, conversation) = create_shared_test_db();
+    let mut draft = create_test_message(conversation.id, "response", "answer", None, None);
+    draft.metadata_json = Some(r#"{"stream_retry":{"attempt":2}}"#.into());
+    let msg = repo.create(&draft).unwrap();
+    let start = chrono::Utc::now();
+    let first = start + chrono::Duration::milliseconds(2212);
+    repo.update_stream_metrics(msg.id, start, Some(first), Some(2212), Some(39), Some(16), Some(55),
+        r#"{"usage_source":"reported","opencode_go":{"allowance":0.00000927,"cost":0},"generation_duration_ms":2000}"#).unwrap();
+    let saved = repo.read(msg.id).unwrap().unwrap();
+    assert_eq!((saved.input_token_count, saved.output_token_count, saved.token_count), (39,16,55));
+    assert_eq!(saved.ttft_ms, Some(2212));
+    assert_eq!(saved.content, "answer");
+    let meta: serde_json::Value = serde_json::from_str(saved.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(meta["opencode_go"]["allowance"], 0.00000927);
+    assert_eq!(meta["opencode_go"]["cost"], 0);
+    assert_eq!(meta["stream_retry"]["attempt"], 2);
+    assert_eq!(meta["generation_duration_ms"], 2000);
+    let stats = repo.token_stats(msg.id).unwrap();
+    assert_eq!((stats.total_tokens, stats.input_tokens, stats.output_tokens), (55,39,16));
+    assert_eq!(stats.ttft_ms, Some(2212));
+    assert_eq!(stats.tps, Some(8.0));
+    assert_eq!(stats.opencode_go.unwrap()["allowance"], 0.00000927);
+}

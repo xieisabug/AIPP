@@ -335,6 +335,7 @@ export enum AttachmentType { // 添加AttachmentType枚举
 
 // Token统计相关类型
 export interface ConversationTokenStats {
+    opencode_go_allowance?: number | null;
     total_tokens: number;
     input_tokens: number;
     output_tokens: number;
@@ -376,6 +377,14 @@ export interface ModelTokenBreakdown {
     avg_tps?: number;
 }
 
+export interface OpenCodeGoBilling {
+    billing_source?: string;
+    allowance?: number;
+    cost?: number;
+    list_cost?: number;
+    estimated?: boolean;
+}
+
 export interface MessageTokenStats {
     message_id: number;
     total_tokens: number;
@@ -387,6 +396,7 @@ export interface MessageTokenStats {
     cached_write_tokens: number;
     usage_source?: "reported" | "estimated" | string | null;
     model_name: string | null;
+    opencode_go?: OpenCodeGoBilling | null;
     // 性能指标
     ttft_ms?: number;
     tps?: number;
