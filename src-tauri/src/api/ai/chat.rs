@@ -232,7 +232,12 @@ fn merge_chat_response_metadata(
         return serde_json::to_string(&serde_json::Value::Object(map)).ok();
     }
 
-    map.insert("usage_source".to_string(), serde_json::json!("reported"));
+    if usage.total_tokens.is_some() || usage.prompt_tokens.is_some() || usage.completion_tokens.is_some() {
+        map.insert("usage_source".into(), serde_json::json!("reported"));
+    }
+    if let Some(billing) = crate::api::opencode_go::billing_metadata(usage) {
+        map.insert("opencode_go".into(), billing);
+    }
 
     if let Some(value) = thought_tokens {
         map.insert("thought_tokens".to_string(), serde_json::json!(value));
@@ -644,6 +649,15 @@ fn persist_response_image_attachments(
     Ok(persisted_count)
 }
 
+/// A final error already delivered to the chat by a model handler.
+#[derive(Debug, thiserror::Error)]
+#[error("模型请求失败，错误已写入会话")]
+pub(crate) struct ReportedChatError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("写入流式消息失败（conversation_id={0}）")]
+struct StreamMessageWrite(i64);
+
 /// 创建并发出 message_add 事件，返回消息ID
 /// 同时设置活动状态以显示闪亮边框
 async fn ensure_stream_message(
@@ -670,7 +684,7 @@ async fn ensure_stream_message(
 
     let new_message = conversation_db
         .message_repo()
-        .context("failed to get message_repo")?
+        .context(StreamMessageWrite(conversation_id))?
         .create(&Message {
             id: 0,
             parent_id: None,
@@ -692,7 +706,7 @@ async fn ensure_stream_message(
             first_token_time,
             ttft_ms,
         })
-        .context("failed to create stream message")?;
+        .context(StreamMessageWrite(conversation_id))?;
 
     emit_message_add_event(window, conversation_id, new_message.id, message_type)?;
 
@@ -719,16 +733,8 @@ fn persist_and_emit_update(
     content: &str,
     is_done: bool,
 ) -> anyhow::Result<()> {
-    if let Ok(Some(mut message)) =
-        conversation_db.message_repo().context("failed to get message_repo for read")?.read(msg_id)
-    {
-        message.content = content.to_string();
-        conversation_db
-            .message_repo()
-            .context("failed to get message_repo for update")?
-            .update(&message)
-            .ok();
-    }
+    conversation_db.message_repo().context(StreamMessageWrite(conversation_id))?
+        .update_content(msg_id, content).context(StreamMessageWrite(conversation_id))?;
 
     let update_event = ConversationEvent {
         r#type: "message_update".to_string(),
@@ -1165,6 +1171,7 @@ mod tests {
     #[test]
     fn test_merge_chat_usage_metadata_records_cache_and_reasoning() {
         let usage = Usage {
+            billing: Default::default(),
             prompt_tokens: Some(120),
             prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
                 cache_creation_tokens: Some(5),
@@ -2787,7 +2794,7 @@ pub async fn handle_stream_chat(
                 warn!(attempt = main_attempts, error = %e, "stream chat failed attempt");
 
                 // 认证/权限错误重试不会成功，直接按最终失败处理
-                if main_attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) {
+                if main_attempts >= max_retry_attempts || is_non_retryable_auth_error(&e) || e.is::<StreamMessageWrite>() {
                     // 最终失败，提取 HTTP 错误详情并构建结构化错误
                     let http_details = extract_http_details_from_anyhow(&e);
                     let user_friendly = get_user_friendly_error_message(&e);
@@ -2800,7 +2807,7 @@ pub async fn handle_stream_chat(
                         Some(llm_model_name.clone()),
                         "stream",
                         Some(main_attempts as i32),
-                        e.to_string(),
+                        format!("{e:#}"),
                         Some(http_details),
                     );
                     error!(
@@ -2833,7 +2840,7 @@ pub async fn handle_stream_chat(
                         parent_group_id_override.clone(),
                         window,
                     )
-                    .await;
+                    .await.with_context(|| format!("请求失败（{e:#}），保存错误消息失败"))?;
                     emit_chat_error_hook(
                         app_handle,
                         conversation_id,
@@ -2861,7 +2868,7 @@ pub async fn handle_stream_chat(
                         }
                     }
 
-                    return Err(anyhow::anyhow!("AI stream failed after retries"));
+                    return Err(e.context(ReportedChatError));
                 }
 
                 let delay = calculate_retry_delay(main_attempts);
@@ -3094,7 +3101,7 @@ async fn attempt_stream_chat(
                                 (ft.timestamp_millis() - start_time.timestamp_millis()).max(0)
                             });
 
-                            if let Ok(new_id) = ensure_stream_message(
+                            let new_id = ensure_stream_message(
                                 &conversation_db,
                                 &window,
                                 conversation_id,
@@ -3108,43 +3115,41 @@ async fn attempt_stream_chat(
                                 response_first_token_time.clone(),
                                 ttft_ms,
                             )
-                            .await
-                            {
-                                response_message_id = Some(new_id);
-                                spawn_plugin_event(
-                                    app_handle.clone(),
-                                    "chat.onResponseStarted",
-                                    serde_json::json!({
-                                        "conversationId": conversation_id,
-                                        "messageId": new_id,
-                                        "messageType": "response",
-                                        "modelName": llm_model_name,
-                                        "metadata": {}
-                                    }),
-                                );
+                            .await?;
+                            response_message_id = Some(new_id);
+                            spawn_plugin_event(
+                                app_handle.clone(),
+                                "chat.onResponseStarted",
+                                serde_json::json!({
+                                    "conversationId": conversation_id,
+                                    "messageId": new_id,
+                                    "messageType": "response",
+                                    "modelName": llm_model_name,
+                                    "metadata": {}
+                                }),
+                            );
 
-                                if is_regeneration && !group_merge_event_emitted {
-                                    if let Some(ref parent_group_id) = parent_group_id_override {
-                                        let group_merge_event = serde_json::json!({
-                                            "type": "group_merge",
-                                            "data": {
-                                                "original_group_id": parent_group_id,
-                                                "new_group_id": generation_group_id.clone(),
-                                                "is_regeneration": true,
-                                                "first_message_id": new_id,
-                                                "conversation_id": conversation_id
-                                            }
-                                        });
-                                        send_conversation_event_to_chat_windows(
-                                            window.app_handle(),
-                                            conversation_id,
-                                            ConversationEvent {
-                                                r#type: "group_merge".to_string(),
-                                                data: group_merge_event["data"].clone(),
-                                            },
-                                        );
-                                        group_merge_event_emitted = true;
-                                    }
+                            if is_regeneration && !group_merge_event_emitted {
+                                if let Some(ref parent_group_id) = parent_group_id_override {
+                                    let group_merge_event = serde_json::json!({
+                                        "type": "group_merge",
+                                        "data": {
+                                            "original_group_id": parent_group_id,
+                                            "new_group_id": generation_group_id.clone(),
+                                            "is_regeneration": true,
+                                            "first_message_id": new_id,
+                                            "conversation_id": conversation_id
+                                        }
+                                    });
+                                    send_conversation_event_to_chat_windows(
+                                        window.app_handle(),
+                                        conversation_id,
+                                        ConversationEvent {
+                                            r#type: "group_merge".to_string(),
+                                            data: group_merge_event["data"].clone(),
+                                        },
+                                    );
+                                    group_merge_event_emitted = true;
                                 }
                             }
                         }
@@ -3196,7 +3201,7 @@ async fn attempt_stream_chat(
                             let now = chrono::Utc::now();
                             reasoning_start_time = Some(now);
 
-                            if let Ok(new_id) = ensure_stream_message(
+                            let new_id = ensure_stream_message(
                                 &conversation_db,
                                 &window,
                                 conversation_id,
@@ -3210,21 +3215,19 @@ async fn attempt_stream_chat(
                                 None,
                                 None,
                             )
-                            .await
-                            {
-                                reasoning_message_id = Some(new_id);
-                                spawn_plugin_event(
-                                    app_handle.clone(),
-                                    "chat.onResponseStarted",
-                                    serde_json::json!({
-                                        "conversationId": conversation_id,
-                                        "messageId": new_id,
-                                        "messageType": "reasoning",
-                                        "modelName": llm_model_name,
-                                        "metadata": {}
-                                    }),
-                                );
-                            }
+                            .await?;
+                            reasoning_message_id = Some(new_id);
+                            spawn_plugin_event(
+                                app_handle.clone(),
+                                "chat.onResponseStarted",
+                                serde_json::json!({
+                                    "conversationId": conversation_id,
+                                    "messageId": new_id,
+                                    "messageType": "reasoning",
+                                    "modelName": llm_model_name,
+                                    "metadata": {}
+                                }),
+                            );
                         }
 
                         if let Some(msg_id) = reasoning_message_id {
@@ -3243,6 +3246,7 @@ async fn attempt_stream_chat(
                         debug!(?thought_chunk, "thought signature chunk");
                     }
                     ChatStreamEvent::ToolCallChunk(tool_call_chunk) => {
+                        first_any_token_time.get_or_insert_with(chrono::Utc::now);
                         debug!(?tool_call_chunk, "tool call chunk");
 
                         // 累积流式工具调用数据
@@ -3275,7 +3279,7 @@ async fn attempt_stream_chat(
                             });
                             response_start_time = Some(actual_start_time);
 
-                            if let Ok(new_id) = ensure_stream_message(
+                            let new_id = ensure_stream_message(
                                 &conversation_db,
                                 &window,
                                 conversation_id,
@@ -3289,21 +3293,19 @@ async fn attempt_stream_chat(
                                 response_first_token_time.clone(),
                                 None,
                             )
-                            .await
-                            {
-                                response_message_id = Some(new_id);
-                                spawn_plugin_event(
-                                    app_handle.clone(),
-                                    "chat.onResponseStarted",
-                                    serde_json::json!({
-                                        "conversationId": conversation_id,
-                                        "messageId": new_id,
-                                        "messageType": "response",
-                                        "modelName": llm_model_name,
-                                        "metadata": { "reason": "toolCallChunk" }
-                                    }),
-                                );
-                            }
+                            .await?;
+                            response_message_id = Some(new_id);
+                            spawn_plugin_event(
+                                app_handle.clone(),
+                                "chat.onResponseStarted",
+                                serde_json::json!({
+                                    "conversationId": conversation_id,
+                                    "messageId": new_id,
+                                    "messageType": "response",
+                                    "modelName": llm_model_name,
+                                    "metadata": { "reason": "toolCallChunk" }
+                                }),
+                            );
                         }
 
                         // 构建包含流式工具调用标记的显示内容
@@ -3345,15 +3347,9 @@ async fn attempt_stream_chat(
                         debug!(?end_event, "end event");
                         let captured_response_id = end_event.captured_response_id.clone();
 
-                        // Extract and store token usage data before ownership is taken
-                        let token_data = end_event.captured_usage.as_ref().map(|usage| {
-                            let input_tokens = usage.prompt_tokens.unwrap_or(0);
-                            let output_tokens = usage.completion_tokens.unwrap_or(0);
-                            let total_tokens =
-                                usage.total_tokens.unwrap_or(input_tokens + output_tokens);
-                            (input_tokens, output_tokens, total_tokens, usage.clone())
-                        });
-
+                        let received_end = chrono::Utc::now();
+                        let normalized = end_event.captured_usage.take().map(crate::api::opencode_go::normalize_usage);
+                        let usage = normalized.as_ref();
                         let mut captured_binaries: Vec<Binary> = Vec::new();
 
                         if let Some(captured_content) = end_event.captured_content.take() {
@@ -3385,7 +3381,7 @@ async fn attempt_stream_chat(
                                     .max(0)
                             });
 
-                            if let Ok(new_id) = ensure_stream_message(
+                            let new_id = ensure_stream_message(
                                 &conversation_db,
                                 &window,
                                 conversation_id,
@@ -3399,42 +3395,40 @@ async fn attempt_stream_chat(
                                 response_first_token_time.clone(),
                                 ttft_ms,
                             )
-                            .await
-                            {
-                                response_message_id = Some(new_id);
-                                spawn_plugin_event(
-                                    app_handle.clone(),
-                                    "chat.onResponseStarted",
-                                    serde_json::json!({
-                                        "conversationId": conversation_id,
-                                        "messageId": new_id,
-                                        "messageType": "response",
-                                        "modelName": llm_model_name,
-                                        "metadata": { "reason": "streamEnd" }
-                                    }),
-                                );
+                            .await?;
+                            response_message_id = Some(new_id);
+                            spawn_plugin_event(
+                                app_handle.clone(),
+                                "chat.onResponseStarted",
+                                serde_json::json!({
+                                    "conversationId": conversation_id,
+                                    "messageId": new_id,
+                                    "messageType": "response",
+                                    "modelName": llm_model_name,
+                                    "metadata": { "reason": "streamEnd" }
+                                }),
+                            );
 
-                                if is_regeneration && !group_merge_event_emitted {
-                                    if let Some(ref parent_group_id) = parent_group_id_override {
-                                        let group_merge_event = serde_json::json!({
-                                            "type": "group_merge",
-                                            "data": {
-                                                "original_group_id": parent_group_id,
-                                                "new_group_id": generation_group_id.clone(),
-                                                "is_regeneration": true,
-                                                "first_message_id": new_id,
-                                                "conversation_id": conversation_id
-                                            }
-                                        });
-                                        send_conversation_event_to_chat_windows(
-                                            window.app_handle(),
-                                            conversation_id,
-                                            ConversationEvent {
-                                                r#type: "group_merge".to_string(),
-                                                data: group_merge_event["data"].clone(),
-                                            },
-                                        );
-                                    }
+                            if is_regeneration && !group_merge_event_emitted {
+                                if let Some(ref parent_group_id) = parent_group_id_override {
+                                    let group_merge_event = serde_json::json!({
+                                        "type": "group_merge",
+                                        "data": {
+                                            "original_group_id": parent_group_id,
+                                            "new_group_id": generation_group_id.clone(),
+                                            "is_regeneration": true,
+                                            "first_message_id": new_id,
+                                            "conversation_id": conversation_id
+                                        }
+                                    });
+                                    send_conversation_event_to_chat_windows(
+                                        window.app_handle(),
+                                        conversation_id,
+                                        ConversationEvent {
+                                            r#type: "group_merge".to_string(),
+                                            data: group_merge_event["data"].clone(),
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -3471,169 +3465,6 @@ async fn attempt_stream_chat(
                                 binary_count = captured_binary_count,
                                 "stream response ended with binaries but no response message could be created"
                             );
-                        }
-
-                        // Store the extracted token data
-                        if let Some((input_tokens, output_tokens, total_tokens, usage)) = token_data {
-                            // Update the response or reasoning message with token data
-                            // 优先更新 response 消息，如果没有则更新 reasoning 消息
-                            let target_msg_id = response_message_id.or(reasoning_message_id);
-                            let target_message_type = if response_message_id.is_some() {
-                                "response"
-                            } else {
-                                "reasoning"
-                            };
-
-                            if let Some(msg_id) = target_msg_id {
-                                if let Ok(repo) = conversation_db.message_repo() {
-                                    if let Ok(Some(mut message)) = repo.read(msg_id) {
-                                        message.input_token_count = input_tokens;
-                                        message.output_token_count = output_tokens;
-                                        message.token_count = total_tokens;
-                                        message.metadata_json = merge_chat_response_metadata(
-                                            message.metadata_json.as_deref(),
-                                            Some(&usage),
-                                            captured_response_id.as_deref(),
-                                        );
-
-                                        // Ensure the message used for metrics reflects the whole assistant generation
-                                        // (reasoning + response), not just the response segment.
-                                        let request_start = stream_request_start_time;
-                                        if message
-                                            .start_time
-                                            .map(|t| {
-                                                t.timestamp_millis()
-                                                    > request_start.timestamp_millis()
-                                            })
-                                            .unwrap_or(true)
-                                        {
-                                            message.start_time = Some(request_start);
-                                        }
-                                        if let Some(first_any) = first_any_token_time {
-                                            if message
-                                                .first_token_time
-                                                .map(|t| {
-                                                    t.timestamp_millis()
-                                                        > first_any.timestamp_millis()
-                                                })
-                                                .unwrap_or(true)
-                                            {
-                                                message.first_token_time = Some(first_any);
-                                            }
-                                        }
-                                        if let (Some(start), Some(first)) =
-                                            (message.start_time, message.first_token_time)
-                                        {
-                                            let diff = (first.timestamp_millis()
-                                                - start.timestamp_millis())
-                                            .max(0);
-                                            message.ttft_ms = Some(diff);
-                                        }
-
-                                        // 计算 TPS (Tokens Per Second)
-                                        // TPS = output_tokens / (finish_time - first_token_time) * 1000
-                                        // 优先使用 reasoning/response 的最早首 token 时间，避免 TPS 被高估；
-                                        // 最后使用 stream_request_start_time 作为备用
-                                        let tps = if output_tokens > 0 {
-                                            let token_time = first_any_token_time
-                                                .or(message.first_token_time)
-                                                .or(message.start_time)
-                                                .unwrap_or(stream_request_start_time);
-                                            let end_time = chrono::Utc::now();
-                                            let duration_ms = end_time.timestamp_millis()
-                                                - token_time.timestamp_millis();
-                                            if duration_ms > 0 {
-                                                Some(
-                                                    (output_tokens as f64) * 1000.0
-                                                        / duration_ms as f64,
-                                                )
-                                            } else {
-                                                None
-                                            }
-                                        } else {
-                                            None
-                                        };
-
-                                        match repo.update(&message) {
-                                            Ok(_) => {
-                                                info!(
-                                                    message_id = msg_id,
-                                                    message_type = target_message_type,
-                                                    input_tokens,
-                                                    output_tokens,
-                                                    total_tokens,
-                                                    ttft_ms = message.ttft_ms,
-                                                    tps = ?tps,
-                                                    "Token usage and performance metrics captured and stored for streaming message"
-                                                );
-
-                                                // When tool calls are pending, defer is_done:true
-                                                // until after setup_captured_tool_calls appends
-                                                // MCP hints to avoid is_done flip-flop.
-                                                if captured_tool_calls.is_empty() {
-                                                    let update_event = ConversationEvent {
-                                                        r#type: "message_update".to_string(),
-                                                        data: serde_json::to_value(
-                                                            MessageUpdateEvent {
-                                                                message_id: msg_id,
-                                                                message_type: target_message_type
-                                                                    .to_string(),
-                                                                content: message.content.clone(),
-                                                                is_done: true,
-                                                                token_count: Some(total_tokens),
-                                                                input_token_count: Some(
-                                                                    input_tokens,
-                                                                ),
-                                                                output_token_count: Some(
-                                                                    output_tokens,
-                                                                ),
-                                                                ttft_ms: message.ttft_ms,
-                                                                tps,
-                                                            },
-                                                        )
-                                                        .unwrap(),
-                                                    };
-                                                    send_conversation_event_to_chat_windows(
-                                                        window.app_handle(),
-                                                        conversation_id,
-                                                        update_event,
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                warn!(
-                                                    message_id = msg_id,
-                                                    error = %e,
-                                                    "Failed to update message with token usage"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            debug!("No usage data in End event - AI provider may not support it");
-                            let target_msg_id = response_message_id.or(reasoning_message_id);
-                            if let Some(response_id) = captured_response_id.as_deref() {
-                                if let Some(msg_id) = target_msg_id {
-                                    if let Ok(repo) = conversation_db.message_repo() {
-                                        if let Ok(Some(mut message)) = repo.read(msg_id) {
-                                            message.metadata_json = merge_chat_response_metadata(
-                                                message.metadata_json.as_deref(),
-                                                None,
-                                                Some(response_id),
-                                            );
-                                            if let Err(e) = repo.update(&message) {
-                                                warn!(
-                                                    message_id = msg_id,
-                                                    error = %e,
-                                                    "Failed to update message with response_id metadata"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
                         }
 
                         // Info summary for easier debugging / visibility
@@ -3689,10 +3520,7 @@ async fn attempt_stream_chat(
                                         );
                                     }
                                     Err(e) => {
-                                        warn!(
-                                            "Failed to create response message for MCP hints: {}",
-                                            e
-                                        );
+                                        return Err(e);
                                     }
                                 }
                             }
@@ -3797,10 +3625,7 @@ async fn attempt_stream_chat(
                                         response_message_id = Some(new_id);
                                     }
                                     Err(e) => {
-                                        warn!(
-                                            error = %e,
-                                            "failed to create empty-content notice message"
-                                        );
+                                        return Err(e);
                                     }
                                 }
                             }
@@ -3825,6 +3650,39 @@ async fn attempt_stream_chat(
                             );
                         }
 
+                        if let Some(id) = response_message_id.or(reasoning_message_id) {
+                            let first = first_any_token_time;
+                            let ttft_ms = first.map(|t| (t - stream_request_start_time).num_milliseconds().max(0));
+                            let generation_ms = first.map(|t| (received_end - t).num_milliseconds()).filter(|ms| *ms > 0);
+                            let input = usage.and_then(|u| u.prompt_tokens);
+                            let output = usage.and_then(|u| u.completion_tokens);
+                            let total = usage.and_then(|u| u.total_tokens).or_else(|| input.zip(output).map(|(i, o)| i + o));
+                            let tps = output.zip(generation_ms).map(|(n, ms)| f64::from(n) * 1000.0 / ms as f64);
+                            let metadata = merge_chat_response_metadata(None, usage, captured_response_id.as_deref());
+                            let mut patch = metadata_object_from_raw(metadata.as_deref());
+                            if let Some(ms) = generation_ms {
+                                patch.insert("generation_duration_ms".into(), ms.into());
+                            }
+                            conversation_db.message_repo().context(StreamMessageWrite(conversation_id))?
+                                .update_stream_metrics(id, stream_request_start_time, first, ttft_ms, input, output, total,
+                                    &serde_json::Value::Object(patch).to_string())
+                                .context(StreamMessageWrite(conversation_id))?;
+                            send_conversation_event_to_chat_windows(app_handle, conversation_id, ConversationEvent {
+                                r#type: "message_metadata_update".into(), data: serde_json::json!({"message_id": id}),
+                            });
+                            if captured_tool_calls.is_empty() {
+                                let response = response_message_id.is_some();
+                                send_conversation_event_to_chat_windows(app_handle, conversation_id, ConversationEvent {
+                                    r#type: "message_update".into(),
+                                    data: serde_json::to_value(MessageUpdateEvent {
+                                        message_id: id, message_type: if response { "response" } else { "reasoning" }.into(),
+                                        content: if response { response_content.clone() } else { reasoning_content.clone() },
+                                        is_done: true, token_count: total, input_token_count: input, output_token_count: output,
+                                        ttft_ms, tps,
+                                    })?,
+                                });
+                            }
+                        }
                         // 按当前输出类型收尾，确保 response 触发 MCP 检测与事件
                         match current_output_type {
                             OutputType::Reasoning => {
@@ -4093,12 +3951,12 @@ async fn create_error_message(
     generation_group_id_override: Option<String>,
     parent_group_id_override: Option<String>,
     window: &tauri::Window,
-) {
+) -> Result<(), AppError> {
     let now = chrono::Utc::now();
     let generation_group_id =
         generation_group_id_override.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    if let Ok(error_message) = conversation_db.message_repo().unwrap().create(&Message {
+    let error_message = conversation_db.message_repo().and_then(|repo| repo.create(&Message {
         id: 0,
         parent_id: None,
         conversation_id,
@@ -4118,42 +3976,42 @@ async fn create_error_message(
         metadata_json: None,
         first_token_time: None,
         ttft_ms: None,
-    }) {
-        let error_event = ConversationEvent {
-            r#type: "message_add".to_string(),
-            data: serde_json::to_value(MessageAddEvent {
-                message_id: error_message.id,
-                message_type: "error".to_string(),
-            })
-            .unwrap(),
-        };
-        send_conversation_event_to_chat_windows(
-            window.app_handle(),
-            conversation_id,
-            error_event,
-        );
+    }).map_err(AppError::from))?;
+    let error_event = ConversationEvent {
+        r#type: "message_add".to_string(),
+        data: serde_json::to_value(MessageAddEvent {
+            message_id: error_message.id,
+            message_type: "error".to_string(),
+        })
+        .unwrap(),
+    };
+    send_conversation_event_to_chat_windows(
+        window.app_handle(),
+        conversation_id,
+        error_event,
+    );
 
-        let update_event = ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id: error_message.id,
-                message_type: "error".to_string(),
-                content: error_msg.to_string(),
-                is_done: true,
-                token_count: None,
-                input_token_count: None,
-                output_token_count: None,
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        };
-        send_conversation_event_to_chat_windows(
-            window.app_handle(),
-            conversation_id,
-            update_event,
-        );
-    }
+    let update_event = ConversationEvent {
+        r#type: "message_update".to_string(),
+        data: serde_json::to_value(MessageUpdateEvent {
+            message_id: error_message.id,
+            message_type: "error".to_string(),
+            content: error_msg.to_string(),
+            is_done: true,
+            token_count: None,
+            input_token_count: None,
+            output_token_count: None,
+            ttft_ms: None,
+            tps: None,
+        })
+        .unwrap(),
+    };
+    send_conversation_event_to_chat_windows(
+        window.app_handle(),
+        conversation_id,
+        update_event,
+    );
+    Ok(())
 }
 
 pub async fn handle_non_stream_chat(
@@ -4323,7 +4181,8 @@ pub async fn handle_non_stream_chat(
             let response_binaries = chat_response.content.clone().into_binaries();
 
             // Extract token usage data
-            let usage = &chat_response.usage;
+            let normalized = crate::api::opencode_go::normalize_usage(chat_response.usage.clone());
+            let usage = &normalized;
             let input_tokens = usage.prompt_tokens.unwrap_or(0);
             let output_tokens = usage.completion_tokens.unwrap_or(0);
             let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
@@ -4752,7 +4611,7 @@ pub async fn handle_non_stream_chat(
             }
 
             error!(error = %e, "chat error");
-            Err(anyhow::anyhow!("Chat error: {}", e))
+            Err(e.context(ReportedChatError))
         }
     }
 }

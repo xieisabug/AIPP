@@ -9,7 +9,6 @@ import {
     ModelTagItem,
     supportsRequestModeToggle,
     toModelTagItem,
-    toggleRequestMode,
 } from './llmModelTypes';
 
 interface ReadOnlyModelListProps {
@@ -82,8 +81,7 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
         setIsExpanded(!isExpanded);
     }, [isExpanded]);
 
-    const handleToggleRequestMode = useCallback((tag: ModelTagItem, index: number) => {
-        const requestMode = toggleRequestMode(tag.request_mode);
+    const handleToggleRequestMode = useCallback((tag: ModelTagItem, index: number, requestMode: string) => {
         invoke('update_llm_model_request_mode', {
             llmProviderId: parseInt(llmProviderId),
             modelCode: tag.code,
@@ -161,7 +159,7 @@ const ReadOnlyModelList: React.FC<ReadOnlyModelListProps> = ({
                                     key={tag.code}
                                     model={tag}
                                     showRequestModeToggle={supportsRequestModeToggle(apiType)}
-                                    onToggleRequestMode={() => handleToggleRequestMode(tag, index)}
+                                    onToggleRequestMode={mode => handleToggleRequestMode(tag, index, mode)}
                                 />
                             ))}
                         </div>
@@ -219,7 +217,8 @@ export default React.memo(ReadOnlyModelList, (prevProps, nextProps) => {
         prevProps.tags.every((tag, index) =>
             tag.code === nextProps.tags[index]?.code &&
             tag.name === nextProps.tags[index]?.name &&
-            tag.request_mode === nextProps.tags[index]?.request_mode
+            tag.request_mode === nextProps.tags[index]?.request_mode &&
+            tag.available_modes === nextProps.tags[index]?.available_modes
         )
     );
 });

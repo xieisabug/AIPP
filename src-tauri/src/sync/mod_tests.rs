@@ -686,3 +686,30 @@ fn test_sync_update_missing_row_returns_error() {
     let fields = Map::from_iter([("name".into(),json!("missing"))]);
     assert!(update_row(&data,&spec("assistant"),7,&fields).unwrap_err().contains("local_id=7"));
 }
+
+#[test]
+fn test_opencode_go_session_identity_across_devices_and_forks() {
+    let a = sync_db();
+    let b = sync_db();
+    let get = |conn: &Connection, id| ensure_object_id(conn, "conversation", "conversation", id).unwrap();
+    let original = get(&a, 1);
+    let session = crate::api::opencode_go::session_id;
+    assert_eq!(session(&original), session(&get(&a, 1)));
+    assert_ne!(session(&original), session(&get(&b, 1)));
+    assert_ne!(session(&original), session(&get(&a, 2)));
+    save_object_map(&b, "conversation", "conversation", 42, &original).unwrap();
+    assert_eq!(session(&original), session(&get(&b, 42)));
+}
+
+#[test]
+fn test_opencode_go_seed_pull_preserves_local_provider_ids() {
+    let sync = sync_db();
+    let data = crate::db::llm_db::LLMDatabase { conn: Connection::open_in_memory().unwrap() };
+    data.create_tables().unwrap();
+    let local: i64 = data.conn.query_row("SELECT id FROM llm_provider WHERE api_type='opencode_go'", [], |r| r.get(0)).unwrap();
+    let id = crate::api::opencode_go::BUILTIN_SYNC_ID;
+    let event = change("llm.provider", id, 1, json!({"fields":{"name":"Go","api_type":"opencode_go","is_official":1,"is_enabled":1},"refs":{}}));
+    apply_change_to_db(&sync, &data.conn, &spec("llm.provider"), &event, "local", |_| Ok(())).unwrap();
+    assert_eq!(find_local_id_by_object_id(&sync,"llm.provider",id).unwrap(), Some(local));
+    assert_eq!(data.get_llm_provider(local).unwrap().name,"Go");
+}

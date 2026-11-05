@@ -223,6 +223,7 @@ pub async fn artifact_ai_ask(
 
     // 创建 AI 客户端
     let client = genai_client::create_client_with_config(
+        None,
         &model_detail.configs,
         &model_detail.model.code,
         &model_detail.provider.api_type,
@@ -298,6 +299,7 @@ pub async fn artifact_model_ask(
     let proxy_enabled = false;
 
     let client = genai_client::create_client_with_config(
+        None,
         &model_detail.configs,
         &model_detail.model.code,
         &model_detail.provider.api_type,

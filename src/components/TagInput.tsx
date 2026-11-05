@@ -11,7 +11,7 @@ interface TagInputProps {
     placeholder?: string;
     onAddTag: (tag: string) => void;
     onRemoveTag: (tag: ModelTagItem, index: number) => void;
-    onToggleRequestMode?: (tag: ModelTagItem, index: number) => void;
+    onToggleRequestMode?: (tag: ModelTagItem, index: number, mode: string) => void;
     showRequestModeToggle?: boolean;
     isExpanded?: boolean;
     onExpandedChange?: (expanded: boolean) => void;
@@ -145,7 +145,7 @@ const TagInput: React.FC<TagInputProps> = ({
                                         showRequestModeToggle={showRequestModeToggle}
                                         onToggleRequestMode={
                                             onToggleRequestMode
-                                                ? () => onToggleRequestMode(tag, index)
+                                                ? mode => onToggleRequestMode(tag, index, mode)
                                                 : undefined
                                         }
                                         onRemove={() => onRemoveTag(tag, index)}
@@ -205,7 +205,7 @@ const TagInput: React.FC<TagInputProps> = ({
                     className="focus:ring-primary focus:border-primary"
                 />
                 <p className="text-xs text-muted-foreground">
-                    输入模型名称后按回车键添加；支持的提供商可点击标签上的 c/r 切换请求接口，或点击 × 删除模型
+                    输入模型名称后按回车键添加。已选模型可通过协议菜单切换接口，点击 × 移除。
                 </p>
             </div>
         </div>

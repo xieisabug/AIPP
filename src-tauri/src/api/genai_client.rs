@@ -1,5 +1,6 @@
 use crate::api::ai::config::get_custom_headers_from_config;
 use crate::errors::AppError;
+use super::opencode_go;
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{adapter::AdapterKind, ModelIden, ServiceTarget};
 use genai::{Client, WebConfig};
@@ -23,7 +24,7 @@ pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
 ];
 
 pub fn supports_model_request_mode(api_type: &str) -> bool {
-    matches!(api_type.to_lowercase().as_str(), "openai" | "openai_api" | "github_copilot")
+    matches!(api_type.to_lowercase().as_str(), "openai" | "openai_api" | "github_copilot" | "opencode_go")
 }
 
 pub fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
@@ -39,6 +40,9 @@ pub fn infer_adapter_kind(
     api_type: &str,
     request_mode: Option<&str>,
 ) -> AdapterKind {
+    if api_type == opencode_go::PROVIDER {
+        if let Some((adapter, _)) = opencode_go::route(request_mode) { return adapter; }
+    }
     let request_mode = normalize_request_mode(request_mode);
     debug!(
         model_name = %model_name,
@@ -193,6 +197,7 @@ pub fn effective_endpoint_url(
 
 /// 创建客户端配置
 pub fn create_client_with_config(
+    conversation: Option<(&tauri::AppHandle, i64)>,
     configs: &[crate::db::llm_db::LLMProviderConfig],
     model_name: &str,
     api_type: &str,
@@ -225,6 +230,18 @@ pub fn create_client_with_config(
 
     // 在发起任何网络请求前 fail-closed：非空但非法的 Endpoint 不得静默回退到默认外网地址
     let resolved_endpoint = resolve_provider_endpoint(endpoint_raw.as_deref())?;
+    let (resolved_endpoint, session) = if api_type == opencode_go::PROVIDER {
+        let (_, base) = opencode_go::route(request_mode).ok_or_else(|| AppError::ProviderError(
+            format!("OpenCode Go 模型 {model_name} 的协议未受支持，请刷新模型目录")))?;
+        if api_key.trim().is_empty() {
+            return Err(AppError::ProviderError(format!("OpenCode Go 模型 {model_name} 缺少 API Key")));
+        }
+        let (app, id) = conversation.ok_or_else(|| AppError::ProviderError(format!(
+            "OpenCode Go 模型 {model_name} 需要持久化会话，此调用没有会话标识")))?;
+        let sync_id = crate::sync::conversation_sync_id(app, id).map_err(|e| AppError::ProviderError(
+            format!("OpenCode Go 会话 {id} 获取同步 UUID 失败: {e}")))?;
+        (ProviderEndpointResolution::Custom(base.to_owned()), Some(opencode_go::session_id(&sync_id)))
+    } else { (resolved_endpoint, None) };
     let final_endpoint_url = effective_endpoint_url(&resolved_endpoint, adapter_kind);
     match &resolved_endpoint {
         ProviderEndpointResolution::Unset => {
@@ -259,14 +276,21 @@ pub fn create_client_with_config(
         }
     }
 
-    // 配置代理
-    if proxy_enabled {
+    // Go continuations and auxiliary requests inherit the provider's proxy setting.
+    let go_proxy = if session.is_some() && configs.iter().any(|c| c.name == "proxy_enabled" && c.value == "true") {
+        crate::api::ai::config::get_network_proxy_from_config(config_feature_map)
+    } else { None };
+    let network_proxy = go_proxy.as_deref().or(network_proxy);
+    if proxy_enabled || go_proxy.is_some() {
         if let Some(proxy_url) = network_proxy {
             if !proxy_url.trim().is_empty() {
                 match web_config.clone().with_all_proxy_url(proxy_url) {
                     Ok(config_with_proxy) => {
                         web_config = config_with_proxy;
                         info!(proxy_url = %proxy_url, "proxy configured");
+                    }
+                    Err(e) if session.is_some() => {
+                        return Err(AppError::ProviderError(format!("OpenCode Go 代理配置失败: {e}")));
                     }
                     Err(e) => {
                         warn!(error = %e, proxy_url = %proxy_url, "proxy configuration failed");
@@ -276,9 +300,15 @@ pub fn create_client_with_config(
         }
     }
 
-    // 配置自定义 headers
-    let custom_headers = get_custom_headers_from_config(config_feature_map);
-    if !custom_headers.is_empty() {
+    let go_model = session.map(|_| model_name.to_owned());
+    Ok(build_client(adapter_kind, final_endpoint_url, api_key, go_model, session,
+        web_config, get_custom_headers_from_config(config_feature_map)))
+}
+
+fn build_client(adapter_kind: AdapterKind, endpoint_url: String, api_key: String,
+    go_model: Option<String>, session: Option<uuid::Uuid>, mut web_config: WebConfig,
+    custom_headers: std::collections::HashMap<String, String>) -> Client {
+    if !custom_headers.is_empty() || session.is_some() {
         let mut headers = HeaderMap::new();
         for (key, value) in custom_headers {
             if let Ok(header_name) = HeaderName::from_bytes(key.as_bytes()) {
@@ -287,32 +317,25 @@ pub fn create_client_with_config(
                 }
             }
         }
+        if let Some(session) = session {
+            headers.insert("user-agent", HeaderValue::from_static(opencode_go::USER_AGENT));
+            headers.insert("x-opencode-session", HeaderValue::from_str(&session.to_string()).expect("UUID is ASCII"));
+        }
         web_config = web_config.with_default_headers(headers);
         info!("custom headers configured");
     }
-
-    // 克隆值以便在闭包中使用（自定义端点已在上方严格校验）
-    let api_key_clone = api_key.clone();
-    let custom_endpoint = match resolved_endpoint {
-        ProviderEndpointResolution::Unset => None,
-        ProviderEndpointResolution::Custom(ep) => Some(ep),
-    };
 
     // 使用 ServiceTargetResolver 来配置端点和认证
     let target_resolver = ServiceTargetResolver::from_resolver_fn(
         move |service_target: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
             let ServiceTarget { model, .. } = service_target;
 
-            let endpoint = match custom_endpoint.as_deref() {
-                Some(ep) => Endpoint::from_owned(ep.to_string()),
-                None => {
-                    let default_endpoint = get_default_endpoint(adapter_kind);
-                    Endpoint::from_static(default_endpoint)
-                }
+            let endpoint = Endpoint::from_owned(endpoint_url.clone());
+            let auth = AuthData::from_single(api_key.clone());
+            let model = match &go_model {
+                Some(code) => ModelIden::new(adapter_kind, code.clone()),
+                None => ModelIden::new(adapter_kind, model.model_name),
             };
-
-            let auth = AuthData::from_single(api_key_clone.clone());
-            let model = ModelIden::new(adapter_kind, model.model_name);
 
             debug!(?endpoint, ?model, "resolved service target");
 
@@ -320,12 +343,10 @@ pub fn create_client_with_config(
         },
     );
 
-    let client = Client::builder()
+    Client::builder()
         .with_service_target_resolver(target_resolver)
         .with_web_config(web_config)
-        .build();
-
-    Ok(client)
+        .build()
 }
 
 

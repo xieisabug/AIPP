@@ -596,6 +596,7 @@ async fn execute_review_output(
 
 async fn review_with_configured_model(
     app_handle: &tauri::AppHandle,
+    conversation_id: i64,
     call_id: i64,
     server_name: &str,
     tool_name: &str,
@@ -689,6 +690,7 @@ async fn review_with_configured_model(
         }
     };
     let client = match genai_client::create_client_with_config(
+        Some((app_handle, conversation_id)),
         &prepared_configs,
         &model_detail.model.code,
         &model_detail.provider.api_type,
@@ -806,7 +808,7 @@ pub async fn should_auto_execute_after_review(
     emit_tool_review_status(app_handle, conversation_id, call_id, "reviewing", None, "");
     let review_result = tokio::select! {
         _ = cancel_token.cancelled() => None,
-        draft = review_with_configured_model(app_handle, call_id, server_name, tool_name, parameters) => {
+        draft = review_with_configured_model(app_handle, conversation_id, call_id, server_name, tool_name, parameters) => {
             let _ = take_review_cancel_token(call_id).await;
             Some(draft)
         }

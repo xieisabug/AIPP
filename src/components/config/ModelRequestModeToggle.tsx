@@ -1,46 +1,26 @@
-import React from "react";
-import { Button } from "@/components/ui/button";
-import {
-    Tooltip,
-    TooltipContent,
-    TooltipProvider,
-    TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { getRequestModeLabel, getRequestModeTooltip } from "./llmModelTypes";
+import { requestModeLabels } from "./llmModelTypes";
 
-interface ModelRequestModeToggleProps {
+interface Props {
     requestMode: string;
-    onToggle: () => void;
-    disabled?: boolean;
+    availableModes?: string[];
+    onToggle: (mode: string) => void;
 }
 
-const ModelRequestModeToggle: React.FC<ModelRequestModeToggleProps> = ({
-    requestMode,
-    onToggle,
-    disabled = false,
-}) => (
-    <TooltipProvider>
-        <Tooltip>
-            <TooltipTrigger asChild>
-                <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={disabled}
-                    className="h-4 w-4 p-0 hover:bg-muted-foreground/20 hover:text-foreground rounded-full ml-1 text-[10px] font-semibold lowercase"
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        onToggle();
-                    }}
-                >
-                    {getRequestModeLabel(requestMode)}
-                </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-                <p>{getRequestModeTooltip(requestMode)}</p>
-            </TooltipContent>
-        </Tooltip>
-    </TooltipProvider>
-);
-
-export default ModelRequestModeToggle;
+export default function ModelRequestModeToggle({
+    requestMode, availableModes, onToggle,
+}: Props) {
+    const choices = availableModes ?? ["chat_completions", "responses"];
+    if (choices.length < 2) {
+        return <span className="ml-1 text-xs text-muted-foreground">
+            {requestModeLabels[choices[0] ?? "unsupported"]}
+        </span>;
+    }
+    return <select aria-label="请求协议" value={requestMode}
+        className="ml-1 max-w-full rounded border bg-background px-1 text-xs text-foreground"
+        onClick={event => event.stopPropagation()}
+        onChange={event => onToggle(event.target.value)}>
+        {choices.map((mode, index) => <option key={mode} value={mode}>
+            {requestModeLabels[mode]}{availableModes && index === 0 ? "（推荐）" : ""}
+        </option>)}
+    </select>;
+}

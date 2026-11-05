@@ -117,6 +117,8 @@ fn sqlite_write_lock_poisoned_error(db_name: &str) -> rusqlite::Error {
 #[derive(Debug, Default, Clone)]
 struct PersistedUsageMetadata {
     usage_source: Option<String>,
+    generation_duration_ms: Option<i64>,
+    opencode_go: Option<JsonValue>,
     thought_tokens: i64,
     cached_input_tokens: i64,
     cached_read_tokens: i64,
@@ -138,6 +140,8 @@ fn parse_persisted_usage_metadata(raw: Option<&str>) -> PersistedUsageMetadata {
         .unwrap_or(0);
 
     PersistedUsageMetadata {
+        generation_duration_ms: map.get("generation_duration_ms").and_then(JsonValue::as_i64).filter(|n| *n > 0),
+        opencode_go: map.get("opencode_go").filter(|v| v.is_object()).cloned(),
         usage_source: map
             .get("usage_source")
             .and_then(|value| value.as_str())
@@ -852,6 +856,127 @@ impl MessageRepository {
     }
 
     /// 更新消息内容
+    pub fn token_stats(&self, message_id: i64) -> Result<MessageTokenStats> {
+        self.conn.query_row(
+            "SELECT
+                id,
+                token_count,
+                input_token_count,
+                output_token_count,
+                metadata_json,
+                llm_model_name,
+                ttft_ms,
+                first_token_time,
+                finish_time,
+                start_time,
+                created_time
+            FROM message
+            WHERE id = ?1",
+            &[&message_id],
+            |row| {
+                let total_tokens: i32 = row.get(1)?;
+                let input_tokens: i32 = row.get(2)?;
+                let output_tokens: i32 = row.get(3)?;
+                let metadata = parse_persisted_usage_metadata(row.get::<_, Option<String>>(4)?.as_deref());
+                let first_token_time = get_datetime_from_row(row, 7)?;
+                let finish_time = get_datetime_from_row(row, 8)?;
+                let start_time = get_datetime_from_row(row, 9)?;
+                let created_time = get_required_datetime_from_row(row, 10, "created_time")?;
+                let ttft_ms: Option<i64> =
+                    row.get(6).ok().or_else(|| match (start_time, first_token_time) {
+                        (Some(start), Some(first_token)) => {
+                            Some((first_token.timestamp_millis() - start.timestamp_millis()).max(0))
+                        }
+                        _ => None,
+                    });
+
+                // 计算 TPS (Tokens Per Second)，优先使用输出 token，缺失时回退到总 token
+                let tokens_for_speed: i64 = if output_tokens > 0 {
+                    output_tokens as i64
+                } else if total_tokens > 0 {
+                    total_tokens as i64
+                } else if input_tokens + output_tokens > 0 {
+                    (input_tokens + output_tokens) as i64
+                } else {
+                    0
+                };
+
+                let tps = if let Some(ms) = metadata.generation_duration_ms {
+                    (output_tokens > 0).then(|| f64::from(output_tokens) * 1000.0 / ms as f64)
+                } else if tokens_for_speed > 0 {
+                    let mut end_point = finish_time.unwrap_or_else(chrono::Utc::now);
+                    if finish_time.is_some()
+                        && end_point.timestamp_subsec_millis() == 0
+                        && [first_token_time, start_time].into_iter().flatten().any(|t| {
+                            t.timestamp() == end_point.timestamp()
+                                && t.timestamp_subsec_millis() > 0
+                        })
+                    {
+                        end_point = end_point + chrono::Duration::milliseconds(999);
+                    }
+                    let start_point = {
+                        let candidates = [first_token_time, start_time, Some(created_time)];
+                        let mut selected: Option<DateTime<Utc>> = None;
+                        for candidate in candidates {
+                            if let Some(candidate_dt) = candidate {
+                                if end_point.timestamp_millis() > candidate_dt.timestamp_millis() {
+                                    selected = Some(candidate_dt);
+                                    break;
+                                }
+                            }
+                        }
+                        selected.unwrap_or_else(|| end_point - chrono::Duration::milliseconds(1))
+                    };
+                    let mut duration_ms =
+                        (end_point.timestamp_millis() - start_point.timestamp_millis()).max(1);
+                    if let Some(ttft) = ttft_ms {
+                        if ttft > 0 && ttft > duration_ms {
+                            duration_ms = ttft.max(1);
+                        }
+                    }
+                    Some((tokens_for_speed as f64) * 1000.0 / duration_ms as f64)
+                } else {
+                    None
+                };
+
+                Ok(MessageTokenStats {
+                    message_id: row.get(0)?,
+                    total_tokens,
+                    input_tokens,
+                    output_tokens,
+                    thought_tokens: metadata.thought_tokens as i32,
+                    cached_input_tokens: metadata.cached_input_tokens as i32,
+                    cached_read_tokens: metadata.cached_read_tokens as i32,
+                    cached_write_tokens: metadata.cached_write_tokens as i32,
+                    usage_source: metadata.usage_source,
+                    opencode_go: metadata.opencode_go,
+                    model_name: row.get(5).ok(),
+                    ttft_ms,
+                    tps,
+                    start_time,
+                    finish_time,
+                })
+            },
+        )
+    }
+
+    /// Write only end-of-stream measurements; a concurrent content or tool update
+    /// must retain its own fields. Merge into existing retry/plugin metadata.
+    pub fn update_stream_metrics(&self, id: i64, start: DateTime<Utc>, first: Option<DateTime<Utc>>,
+        ttft: Option<i64>, input: Option<i32>, output: Option<i32>, total: Option<i32>, patch: &str,
+    ) -> Result<()> {
+        self.with_serialized_write(|conn| {
+            let changed = conn.execute(
+                "UPDATE message SET start_time=?2, first_token_time=COALESCE(?3,first_token_time),
+                 ttft_ms=COALESCE(?4,ttft_ms), input_token_count=COALESCE(?5,input_token_count),
+                 output_token_count=COALESCE(?6,output_token_count), token_count=COALESCE(?7,token_count),
+                 metadata_json=json_patch(CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END, ?8)
+                 WHERE id=?1", params![id,start,first,ttft,input,output,total,patch])?;
+            if changed == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+            Ok(())
+        })
+    }
+
     #[instrument(level = "debug", skip(self, content), fields(id = id, content_len = content.len()))]
     pub fn update_content(&self, id: i64, content: &str) -> Result<()> {
         self.with_serialized_write(|conn| {
@@ -1992,9 +2117,16 @@ impl ConversationDatabase {
             ))
         })?;
 
+        let mut opencode_go_allowance = None;
         for row in metadata_rows {
             let (model_id, metadata_json) = row?;
             let metadata = parse_persisted_usage_metadata(metadata_json.as_deref());
+            if let Some(amount) = metadata.opencode_go.as_ref()
+                .and_then(|go| go.get("allowance"))
+                .and_then(JsonValue::as_f64)
+            {
+                *opencode_go_allowance.get_or_insert(0.0) += amount;
+            }
             thought_tokens_total += metadata.thought_tokens;
             cached_input_tokens_total += metadata.cached_input_tokens;
             cached_read_tokens_total += metadata.cached_read_tokens;
@@ -2095,7 +2227,8 @@ impl ConversationDatabase {
                 start_time,
                 first_token_time,
                 finish_time,
-                ttft_ms
+                ttft_ms,
+                CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.generation_duration_ms') END
             FROM message
             WHERE conversation_id = ?1 AND message_type IN ('response', 'reasoning')",
         )?;
@@ -2115,6 +2248,7 @@ impl ConversationDatabase {
                 get_datetime_from_row(row, 6)?,
                 get_datetime_from_row(row, 7)?,
                 row.get::<_, Option<i64>>(8).ok().flatten(),
+                row.get::<_, Option<i64>>(9)?,
             ))
         })?;
 
@@ -2129,9 +2263,10 @@ impl ConversationDatabase {
                 first_token_time,
                 finish_time,
                 ttft_ms,
+                generation_ms,
             ) = row?;
 
-            let tokens_for_speed = if output_token_count > 0 {
+            let tokens_for_speed = if generation_ms.is_some() || output_token_count > 0 {
                 output_token_count
             } else if token_count > 0 {
                 token_count
@@ -2174,7 +2309,9 @@ impl ConversationDatabase {
                 (end_point.timestamp_millis() - start_point.timestamp_millis()).max(1);
             // Backward-compat: older non-stream code stored start_time/first_token_time too late (near finish),
             // but did store the total request duration in ttft_ms. Prefer that when it's clearly larger.
-            if let Some(ttft) = ttft_ms {
+            if let Some(ms) = generation_ms.filter(|n| *n > 0) {
+                duration_ms = ms;
+            } else if let Some(ttft) = ttft_ms {
                 if ttft > 0 && ttft > duration_ms {
                     duration_ms = ttft.max(1);
                 }
@@ -2238,6 +2375,7 @@ impl ConversationDatabase {
         };
 
         Ok(ConversationTokenStats {
+            opencode_go_allowance,
             total_tokens: total_tokens as i32,
             input_tokens: input_tokens as i32,
             output_tokens: output_tokens as i32,
@@ -2264,104 +2402,7 @@ impl ConversationDatabase {
     pub fn get_message_token_stats(&self, message_id: i64) -> rusqlite::Result<MessageTokenStats> {
         let conn = Connection::open(&self.db_path)?;
 
-        conn.query_row(
-            "SELECT
-                id,
-                token_count,
-                input_token_count,
-                output_token_count,
-                metadata_json,
-                llm_model_name,
-                ttft_ms,
-                first_token_time,
-                finish_time,
-                start_time,
-                created_time
-            FROM message
-            WHERE id = ?1",
-            &[&message_id],
-            |row| {
-                let total_tokens: i32 = row.get(1)?;
-                let input_tokens: i32 = row.get(2)?;
-                let output_tokens: i32 = row.get(3)?;
-                let metadata = parse_persisted_usage_metadata(row.get::<_, Option<String>>(4)?.as_deref());
-                let first_token_time = get_datetime_from_row(row, 7)?;
-                let finish_time = get_datetime_from_row(row, 8)?;
-                let start_time = get_datetime_from_row(row, 9)?;
-                let created_time = get_required_datetime_from_row(row, 10, "created_time")?;
-                let ttft_ms: Option<i64> =
-                    row.get(6).ok().or_else(|| match (start_time, first_token_time) {
-                        (Some(start), Some(first_token)) => {
-                            Some((first_token.timestamp_millis() - start.timestamp_millis()).max(0))
-                        }
-                        _ => None,
-                    });
-
-                // 计算 TPS (Tokens Per Second)，优先使用输出 token，缺失时回退到总 token
-                let tokens_for_speed: i64 = if output_tokens > 0 {
-                    output_tokens as i64
-                } else if total_tokens > 0 {
-                    total_tokens as i64
-                } else if input_tokens + output_tokens > 0 {
-                    (input_tokens + output_tokens) as i64
-                } else {
-                    0
-                };
-
-                let tps = if tokens_for_speed > 0 {
-                    let mut end_point = finish_time.unwrap_or_else(chrono::Utc::now);
-                    if finish_time.is_some()
-                        && end_point.timestamp_subsec_millis() == 0
-                        && [first_token_time, start_time].into_iter().flatten().any(|t| {
-                            t.timestamp() == end_point.timestamp()
-                                && t.timestamp_subsec_millis() > 0
-                        })
-                    {
-                        end_point = end_point + chrono::Duration::milliseconds(999);
-                    }
-                    let start_point = {
-                        let candidates = [first_token_time, start_time, Some(created_time)];
-                        let mut selected: Option<DateTime<Utc>> = None;
-                        for candidate in candidates {
-                            if let Some(candidate_dt) = candidate {
-                                if end_point.timestamp_millis() > candidate_dt.timestamp_millis() {
-                                    selected = Some(candidate_dt);
-                                    break;
-                                }
-                            }
-                        }
-                        selected.unwrap_or_else(|| end_point - chrono::Duration::milliseconds(1))
-                    };
-                    let mut duration_ms =
-                        (end_point.timestamp_millis() - start_point.timestamp_millis()).max(1);
-                    if let Some(ttft) = ttft_ms {
-                        if ttft > 0 && ttft > duration_ms {
-                            duration_ms = ttft.max(1);
-                        }
-                    }
-                    Some((tokens_for_speed as f64) * 1000.0 / duration_ms as f64)
-                } else {
-                    None
-                };
-
-                Ok(MessageTokenStats {
-                    message_id: row.get(0)?,
-                    total_tokens,
-                    input_tokens,
-                    output_tokens,
-                    thought_tokens: metadata.thought_tokens as i32,
-                    cached_input_tokens: metadata.cached_input_tokens as i32,
-                    cached_read_tokens: metadata.cached_read_tokens as i32,
-                    cached_write_tokens: metadata.cached_write_tokens as i32,
-                    usage_source: metadata.usage_source,
-                    model_name: row.get(5).ok(),
-                    ttft_ms,
-                    tps,
-                    start_time,
-                    finish_time,
-                })
-            },
-        )
+        MessageRepository::new(conn).token_stats(message_id)
     }
 
     // ============= Todo CRUD Methods =============
@@ -2492,6 +2533,7 @@ pub struct ConversationTodoInput {
 /// 对话token统计信息
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConversationTokenStats {
+    pub opencode_go_allowance: Option<f64>,
     pub total_tokens: i32,
     pub input_tokens: i32,
     pub output_tokens: i32,
@@ -2548,6 +2590,7 @@ pub struct MessageTokenStats {
     pub cached_read_tokens: i32,
     pub cached_write_tokens: i32,
     pub usage_source: Option<String>,
+    pub opencode_go: Option<JsonValue>,
     pub model_name: Option<String>,
     pub ttft_ms: Option<i64>, // Time to First Token (毫秒)
     pub tps: Option<f64>,     // Tokens Per Second

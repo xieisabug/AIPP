@@ -257,6 +257,39 @@ fn seed_provider(db:&LLMDatabase) {
 }
 
 #[test]
+fn test_cascade_delete_model_refresh_first_selection_commits_models_and_preferences_together() {
+    let db = llm_db();
+    db.conn.execute("INSERT INTO llm_provider(id,name,api_type) VALUES(77,'Go','opencode_go')", []).unwrap();
+    // A fresh selection must succeed even when preparing attached databases is forbidden.
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    db.conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Attach { .. } | AuthAction::Pragma { pragma_name: "database_list" | "journal_mode", .. } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }));
+    db.conn.execute_batch("CREATE TRIGGER refuse_pref BEFORE INSERT ON llm_model_request_mode_preference
+        WHEN NEW.model_code='new' BEGIN SELECT RAISE(ABORT,'preference failed'); END;").unwrap();
+    assert!(db.replace_llm_models(77, &[model("first"), model("new")], true).is_err());
+    assert!(db.get_llm_models("77".into()).unwrap().is_empty());
+    assert_eq!(db.get_model_request_mode(77, "first").unwrap(), None);
+    db.conn.execute_batch("DROP TRIGGER refuse_pref").unwrap();
+    db.replace_llm_models(77, &[model("first"), model("new")], true).unwrap();
+    assert_eq!(db.get_llm_models("77".into()).unwrap().len(), 2);
+    assert_eq!(db.get_model_request_mode(77, "first").unwrap().as_deref(), Some("responses"));
+}
+
+#[test]
+fn test_cascade_delete_model_refresh_preserves_messages_for_removed_models() {
+    let db = llm_db();
+    seed_provider(&db);
+    peer(&db.conn, "aipp_delete_conversation", &create_test_db());
+    db.conn.execute_batch("INSERT INTO aipp_delete_conversation.conversation(id,name,created_time) VALUES(10,'history','now');
+        INSERT INTO aipp_delete_conversation.message(id,conversation_id,message_type,content,created_time,llm_model_id,llm_model_name)
+        SELECT 11,10,'response','history','now',id,'gone' FROM llm_model WHERE code='gone';").unwrap();
+    db.replace_llm_models(77, &[model("keep")], true).unwrap();
+    assert_eq!(count(&db.conn, "aipp_delete_conversation.message", "id=11 AND llm_model_id IS NULL AND llm_model_name='gone'"), 1);
+}
+
+#[test]
 fn test_cascade_delete_model_refresh_keeps_ids_and_surviving_preferences() {
     let db=llm_db();seed_provider(&db);
     let old=db.conn.query_row("SELECT id FROM llm_model WHERE llm_provider_id=77 AND code='keep'",[],|r|r.get::<_,i64>(0)).unwrap();

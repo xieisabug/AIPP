@@ -43,6 +43,19 @@ describe("MessageTokenTooltip", () => {
         expect(screen.getByText("2")).toBeInTheDocument();
     });
 
+    it("distinguishes subscription allowance from a zero balance charge", async () => {
+        mockInvokeHandler("get_message_token_stats", () => ({
+            total_tokens: 55, input_tokens: 39, output_tokens: 16, thought_tokens: 13,
+            cached_read_tokens: 0, usage_source: "reported", ttft_ms: 2212, tps: 6.95,
+            opencode_go: { billing_source: "go", allowance: 0.00000927, cost: 0, list_cost: 0.00001545 },
+        }));
+        render(<MessageTokenTooltip messageId={10} messageType="response" />);
+        fireEvent.click(screen.getByRole("button"));
+        expect(await screen.findByText("$0.00000927")).toBeInTheDocument();
+        expect(screen.getByText("$0.00")).toBeInTheDocument();
+        expect(screen.getByText("$0.00001545")).toBeInTheDocument();
+    });
+
     it("shows estimated badge for estimated usage", async () => {
         mockInvokeHandler("get_message_token_stats", () => ({
             message_id: 9,

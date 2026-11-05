@@ -1,9 +1,10 @@
-export type ModelRequestMode = "chat_completions" | "responses";
+export type ModelRequestMode = "chat_completions" | "responses" | "anthropic_messages" | "google_gemini";
 
 export interface ModelTagItem {
     name: string;
     code: string;
     request_mode: string;
+    available_modes?: string[];
 }
 
 export interface LLMModel extends ModelTagItem {
@@ -30,27 +31,22 @@ export interface ModelSelectionResponse {
 
 export const DEFAULT_MODEL_REQUEST_MODE: ModelRequestMode = "chat_completions";
 
-export const normalizeRequestMode = (requestMode?: string): ModelRequestMode =>
-    requestMode === "responses" ? "responses" : "chat_completions";
-
-export const toggleRequestMode = (requestMode?: string): ModelRequestMode =>
-    normalizeRequestMode(requestMode) === "responses" ? "chat_completions" : "responses";
-
 export const supportsRequestModeToggle = (apiType: string): boolean =>
-    ["openai", "openai_api", "github_copilot"].includes(apiType);
+    ["openai", "openai_api", "github_copilot", "opencode_go"].includes(apiType);
 
-export const getRequestModeLabel = (requestMode?: string): "c" | "r" =>
-    normalizeRequestMode(requestMode) === "responses" ? "r" : "c";
-
-export const getRequestModeTooltip = (requestMode?: string): string =>
-    normalizeRequestMode(requestMode) === "responses"
-        ? "当前使用 Responses 接口，点击切换到 Chat Completions"
-        : "当前使用 Chat Completions 接口，点击切换到 Responses";
+export const requestModeLabels: Record<string, string> = {
+    chat_completions: "Chat Completions",
+    responses: "Responses",
+    anthropic_messages: "Anthropic Messages",
+    google_gemini: "Google Gemini",
+    unsupported: "协议待支持",
+};
 
 export const toModelTagItem = (
-    model: Pick<ModelTagItem, "name" | "code" | "request_mode">,
+    model: Pick<ModelTagItem, "name" | "code" | "request_mode" | "available_modes">,
 ): ModelTagItem => ({
     name: model.name,
     code: model.code,
-    request_mode: normalizeRequestMode(model.request_mode),
+    request_mode: model.request_mode || DEFAULT_MODEL_REQUEST_MODE,
+    available_modes: model.available_modes,
 });
