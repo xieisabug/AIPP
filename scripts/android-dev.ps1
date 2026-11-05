@@ -29,7 +29,12 @@ $devices = @(foreach ($line in $deviceLines) {
         if ($serial -like 'emulator-*') {
             $name = @(& $adb -s $serial emu avd name)[0].Trim()
         } else {
-            $name = (@(& $adb -s $serial shell getprop ro.product.model) -join '').Trim()
+            # cargo-mobile2 matches the Bluetooth device name, not ro.product.model.
+            $bluetoothInfo = @(& $adb -s $serial shell dumpsys bluetooth_manager) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $bluetoothInfo -notmatch '\bname: ([^\r\n]+)') {
+                throw "Unable to read Tauri device name from bluetooth_manager for $serial."
+            }
+            $name = $Matches[1].Trim()
         }
         if ($LASTEXITCODE -ne 0 -or -not $name) { throw "Unable to read device name for $serial." }
         [PSCustomObject]@{ Serial = $serial; Name = $name; Model = $model }
@@ -54,7 +59,7 @@ if ($devices.Count -gt 0 -and $tauriArgs -notcontains '--open' -and $tauriArgs -
             $selectedDevice = $devices[0]
         } else {
             for ($i = 0; $i -lt $devices.Count; $i++) {
-                Write-Host "[$($i + 1)] $($devices[$i].Name) ($($devices[$i].Serial))"
+                Write-Host "[$($i + 1)] $($devices[$i].Model) / $($devices[$i].Name) ($($devices[$i].Serial))"
             }
             $choice = 0
             $answer = Read-Host 'Select Android device number'
