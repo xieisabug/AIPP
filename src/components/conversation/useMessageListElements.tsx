@@ -1,6 +1,7 @@
 import React, { useMemo, useRef } from "react";
 
 import MessageItem from "../MessageItem";
+import ButlerProgressRow from "@/components/butler/ButlerProgressRow";
 import ButlerExchangeRow from "../butler/ButlerExchangeRow";
 import VersionPagination from "../VersionPagination";
 import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
@@ -76,8 +77,7 @@ function exchangeEntry(message: Message): MessageElementEntry {
     if (message.message_type === "butler_processing") {
         return {
             messageId: message.id, groupControl: null, estimatedHeight: 32,
-            messageElement: <div role="status" data-aipp-slot="butler-processing"
-                className="butler-exchange flex justify-center text-xs text-muted-foreground">正在处理…</div>,
+            messageElement: <ButlerProgressRow conversationId={message.conversation_id} />,
         };
     }
     return { messageId: message.id, messageElement: <ButlerExchangeRow posts={message.butler_posts!} conversationId={message.conversation_id} />, groupControl: null };

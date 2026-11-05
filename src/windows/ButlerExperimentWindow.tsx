@@ -6,6 +6,8 @@ import ButlerPeerActivity from "@/components/butler/ButlerPeerActivity";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import { useConversationAvatarState } from "@/components/avatar/useConversationAvatarState";
+import type { AvatarState } from "@/components/avatar/avatarDefinition";
+import { useLinger } from "@/hooks/useStablePresence";
 import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
 import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import "@/components/butler/butlerDesktop.css";
@@ -19,6 +21,7 @@ import {
     Loader2,
     MessageSquareText,
     PauseCircle,
+    Pencil,
     Plus,
     RefreshCw,
     ScrollText,
@@ -277,6 +280,14 @@ function getFeishuStatusIcon(
     }
     return <X className="h-3 w-3" />;
 }
+
+const headerStatusLabels: Partial<Record<AvatarState, string>> = {
+    thinking: "思考中…",
+    responding: "回复中…",
+    working: "执行中…",
+    waiting: "等你处理",
+    error: "执行出错",
+};
 
 function ButlerExperimentWindow() {
     useTheme("butler_experiment");
@@ -592,6 +603,8 @@ function ButlerExperimentWindow() {
     }
     const hasInlineInteraction = inlineInteractionItems.length > 0;
     const avatarState = useConversationAvatarState(activeConversationId, hasInlineInteraction);
+    // 顶部头像保持静止，运行状态改用副标题文字呈现；工具轮次间的短暂空闲不切回模型名。
+    const headerStatus = useLinger(headerStatusLabels[avatarState], 1200, activeConversationId);
 
     const loadAssistants = useCallback(async () => {
         const request = ++rosterRequest.current;
@@ -1578,12 +1591,19 @@ function ButlerExperimentWindow() {
                                         {getFeishuStatusIcon(feishuStatus, loadingFeishuStatus)} 飞书
                                     </Badge>}
                                 </div>
-                                <button type="button" className="flex min-w-0 items-center gap-1.5 rounded-full border bg-background px-3 py-1 shadow-sm hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                                <button type="button" className="group flex min-w-0 max-w-[22rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
                                     aria-label="修改助手名字与形象"
+                                    data-aipp-slot="butler-main-identity"
                                     onClick={() => setProfileTarget({ id: contact?.assistantId, name: activeAssistant?.name ?? butlerDisplayName })}
-                                    title={contact ? "修改名字与形象" : `修改名字与形象 · ${mainModelDisplayName}`}>
-                                    <ButlerAvatar key={activeConversationId} id={contact?.assistantId ?? 0} chief={!contact} size={22} animated state={avatarState}/>
-                                    <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
+                                    title="修改名字与形象">
+                                    <ButlerAvatar id={contact?.assistantId ?? 0} chief={!contact} size={28} figure />
+                                    <span className="flex min-w-0 flex-col">
+                                        <span className="truncate text-sm font-medium leading-4">{activeAssistant?.name ?? butlerDisplayName}</span>
+                                        <span className={`truncate text-[11px] leading-[14px] ${headerStatus ? "text-foreground/70" : "text-muted-foreground"}`}>
+                                            {headerStatus ?? (contact ? "私聊" : mainModelDisplayName || "总管家")}
+                                        </span>
+                                    </span>
+                                    <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                                 </button>
                                 <div className="flex min-w-0 items-center justify-end gap-1">
                                     <ButlerPeerActivity key={activeConversationId} conversationId={Number(activeConversationId)} />

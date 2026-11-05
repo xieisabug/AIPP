@@ -1515,6 +1515,7 @@ async fn handle_tool_execution_result(
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
+            crate::api::butler_progress::notify_tool_progress(app_handle, tool_call.conversation_id);
 
             // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
             if trigger_continuation {
@@ -1587,6 +1588,7 @@ async fn handle_tool_execution_result(
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
+            crate::api::butler_progress::notify_tool_progress(app_handle, tool_call.conversation_id);
 
             let error_lower = error.to_lowercase();
             let is_user_cancelled = error_lower.contains("cancelled by user")
@@ -2051,6 +2053,7 @@ pub async fn execute_mcp_tool_call(
         activity_manager.set_mcp_executing(&app_handle, tool_call.conversation_id, call_id).await;
     }
     broadcast_mcp_tool_call_update(&app_handle, &tool_call);
+    crate::api::butler_progress::notify_tool_progress(&app_handle, tool_call.conversation_id);
 
     // 获取并验证服务器状态；前置校验失败也写入 failed/error，便于 UI 展示和错误续写
     let mut server = match db.get_mcp_server(tool_call.server_id) {

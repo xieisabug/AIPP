@@ -22,7 +22,11 @@ import {
     serializeButlerWorkspaceConfig,
     type TrustedWorkspace,
 } from "@/components/butler/butlerWorkspaceConfig";
-import { AlertTriangle, Plus, Trash2, Wand2 } from "lucide-react";
+import { AlertTriangle, CircleHelp, Plus, Trash2, Wand2 } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+
+// Radix Select 不允许空字符串作为选项值，用哨兵值表示「不使用」。
+const HELPER_MODEL_NONE = "__none__";
 
 interface ExperimentalConfigFormProps {
     form: UseFormReturn<any>;
@@ -1084,6 +1088,52 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                                         key={option.value}
                                                                         value={option.value}
                                                                     >
+                                                                        {option.label}
+                                                                    </SelectItem>
+                                                                ))}
+                                                            </SelectContent>
+                                                        </Select>
+                                                    </FormControl>
+                                                    <FormMessage />
+                                                </div>
+                                            </FormItem>
+                                        )}
+                                    />
+                                    <Controller
+                                        control={form.control}
+                                        name="butler_helper_model_id"
+                                        render={({ field }) => (
+                                            <FormItem className={settingRowClassName}>
+                                                <SettingRowText
+                                                    label={
+                                                        <span className="inline-flex items-center gap-1">
+                                                            小型辅助模型
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <CircleHelp aria-label="小型辅助模型说明" className="size-3.5 cursor-help text-muted-foreground" />
+                                                                </TooltipTrigger>
+                                                                <TooltipContent className="max-w-xs text-xs">
+                                                                    用于总结之类的辅助任务，例如助手做事时把进展浓缩成一句话，显示在聊天区和左侧联系人中。建议选择便宜、响应快的小模型；不选择时只显示「正在处理…」。
+                                                                </TooltipContent>
+                                                            </Tooltip>
+                                                        </span>
+                                                    }
+                                                    description="可不选。选择后，助手执行任务时会显示一句进度总结。"
+                                                />
+                                                <div className="w-64 shrink-0 space-y-1">
+                                                    <FormControl>
+                                                        <Select
+                                                            value={field.value || HELPER_MODEL_NONE}
+                                                            onValueChange={(value) => field.onChange(value === HELPER_MODEL_NONE ? "" : value)}
+                                                            disabled={modelsLoading}
+                                                        >
+                                                            <SelectTrigger className="w-full">
+                                                                <SelectValue placeholder={modelsLoading ? "加载中..." : "不使用"} />
+                                                            </SelectTrigger>
+                                                            <SelectContent>
+                                                                <SelectItem value={HELPER_MODEL_NONE}>不使用</SelectItem>
+                                                                {modelOptions.map((option) => (
+                                                                    <SelectItem key={option.value} value={option.value}>
                                                                         {option.label}
                                                                     </SelectItem>
                                                                 ))}

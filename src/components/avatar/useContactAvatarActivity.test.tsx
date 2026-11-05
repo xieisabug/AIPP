@@ -27,6 +27,35 @@ describe("contact activity subscriptions", () => {
         await act(async () => { await emit("butler_task_updated", {}); });
         await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("idle"));
     });
+    it("should hold a running state across the brief idle gap between tool rounds", async () => {
+        let now = 1000;
+        vi.spyOn(Date, "now").mockImplementation(() => now);
+        let rows = [row("running")];
+        mockInvokeHandler("list_butler_contact_activity", () => rows);
+        const { result } = renderHook(() => useContactAvatarActivity("1", []));
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("working"));
+        rows = [row()];
+        now += 100;
+        await act(async () => { await emit("butler_task_updated", {}); });
+        expect(result.current.visuals.get(8)?.state).toBe("working");
+        now += 1300;
+        await act(async () => { await emit("butler_task_updated", {}); });
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("idle"));
+    });
+    it("should show the current run's progress summary but never over an approval", async () => {
+        const running = { ...row(), runtime: { ...row().runtime, is_running: true, phase: "mcp_executing" as const, epoch: 2 } };
+        let rows = [running];
+        mockInvokeHandler("list_butler_contact_activity", () => rows);
+        const { result } = renderHook(() => useContactAvatarActivity("1", []));
+        await waitFor(() => expect(result.current.visuals.get(8)?.label).toBe("执行中"));
+        await act(async () => { await emit("butler_progress_summary", { conversation_id: 3, epoch: 1, text: "上一轮", steps: [] }); });
+        expect(result.current.visuals.get(8)?.label).toBe("执行中");
+        await act(async () => { await emit("butler_progress_summary", { conversation_id: 3, epoch: 2, text: "正在对比报价", steps: [] }); });
+        expect(result.current.visuals.get(8)?.label).toBe("正在对比报价");
+        rows = [{ ...running, permission: true }];
+        await act(async () => { await emit("butler_task_updated", {}); });
+        await waitFor(() => expect(result.current.visuals.get(8)?.label).toBe("待审批"));
+    });
     it("should not celebrate cancelled or failed private conversations", async () => {
         mockInvokeHandler("list_butler_contact_activity", () => [row()]);
         const { result } = renderHook(() => useContactAvatarActivity("1", []));

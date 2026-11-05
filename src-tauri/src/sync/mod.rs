@@ -2927,7 +2927,8 @@ fn embedded_provider_value(object_type: &str, fields: &Map<String, JsonValue>) -
                 ("conversation_summary", "title_model" | "form_autofill_model" | "memory_summary_model"
                     | "auto_review_model" | "conversation_summary_model")
                 | ("experimental", "butler_model_id" | "mcp_summarizer_model_id"
-                    | "assistant_summarizer_model_id" | "conversation_summary_model") => true,
+                    | "assistant_summarizer_model_id" | "conversation_summary_model"
+                    | "butler_helper_model_id") => true,
                 _ => return None,
             }
         }

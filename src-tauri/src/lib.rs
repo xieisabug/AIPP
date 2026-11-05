@@ -1077,6 +1077,7 @@ pub fn run() {
             crate::api::butler_peer::stop_butler_peer_exchange,
             list_butler_contact_previews,
             crate::api::butler_contact_activity::list_butler_contact_activity,
+            crate::api::butler_progress::get_butler_progress_summary,
             get_butler_cache_activity,
             open_butler_contact,
             load_butler_main_conversation,

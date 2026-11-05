@@ -65,3 +65,13 @@ export function withButlerProcessing(messages: Message[], conversationId: number
         input_token_count: 0, output_token_count: 0, regenerate: null,
     }];
 }
+
+/** 最后一条用户消息之后是否已经发布了助手回复（简洁视图中可见的 response/assistant）。 */
+export function hasPublishedReply(messages: Message[]): boolean {
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const type = messages[index].message_type;
+        if (type === "user") return false;
+        if (type === "response" || type === "assistant") return true;
+    }
+    return false;
+}

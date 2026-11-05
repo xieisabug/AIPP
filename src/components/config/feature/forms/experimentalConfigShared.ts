@@ -16,6 +16,7 @@ export const EXPERIMENTAL_CONFIG_DEFAULT_VALUES = {
     butler_display_name: "总管家",
     default_home_window: "ask",
     butler_model_id: "",
+    butler_helper_model_id: "",
     butler_main_workspace_path: "",
     butler_main_workspace_description: BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
     butler_feishu_enabled: "false",
@@ -103,6 +104,7 @@ export function buildExperimentalConfigFormValues(
         butler_display_name: experimentalConfig?.get("butler_display_name") || "总管家",
         default_home_window: experimentalConfig?.get("default_home_window") || "ask",
         butler_model_id: experimentalConfig?.get("butler_model_id") || "",
+        butler_helper_model_id: experimentalConfig?.get("butler_helper_model_id") || "",
         butler_main_workspace_path: workspaceConfig.mainWorkspace?.path || "",
         butler_main_workspace_description:
             workspaceConfig.mainWorkspace?.description || BUTLER_MAIN_WORKSPACE_DEFAULT_DESCRIPTION,
@@ -168,6 +170,7 @@ export async function saveExperimentalConfigValues(
         butler_display_name: String(values.butler_display_name || "总管家"),
         default_home_window: String(values.default_home_window || "ask"),
         butler_model_id: String(values.butler_model_id || ""),
+        butler_helper_model_id: String(values.butler_helper_model_id || ""),
         butler_main_workspace_path: workspaceConfig.mainWorkspacePath,
         butler_main_workspace_description: workspaceConfig.mainWorkspaceDescription,
         butler_feishu_enabled: String(values.butler_feishu_enabled),
