@@ -18,6 +18,8 @@
 - **目标平台**：Android（`src-tauri/gen/android`），applicationId `com.xieisabug.aipp`，minSdk 24 / targetSdk 36。
 - **开发命令**：`pnpm run android`（即 `scripts/android-dev.ps1`，自动选局域网 IP 并通过 `--host` 显式传给 `tauri android dev`，支持 HMR；可追加 CLI 列出的设备名称）。直接运行 `pnpm run tauri android dev` 时，多网卡环境应显式传 `--host <局域网 IP>`，避免选到 VPN/TUN 网卡。启动前关闭同项目旧 dev 进程以释放 3000 端口。
 - **Windows Java 环境**：`pnpm run android` 优先使用本机已安装的 JDK 17（当前 `JAVA_HOME` 或 `%USERPROFILE%/.jdks`），可用 `AIPP_ANDROID_JAVA_HOME` 显式指定；脚本统一 UTF-8 输出。应用 Java/Kotlin 编译目标统一为 17。直接调用 Tauri CLI 时须自行设置相同 `JAVA_HOME`。
+- **模拟器自动安装停滞**：当前 Tauri CLI 安装前会等待 `init.svc.bootanim=stopped`。不要用 `-no-boot-anim` 启动模拟器：该参数可能使属性为空，即使 `sys.boot_completed=1` 仍无限等待。遇到 Gradle 完成却没有安装时，先检查这两个属性；保留 AVD 数据，去掉该参数并用 `-no-snapshot-load` 冷启动，避免恢复旧状态。无需卸载应用或清除数据。
+- **多设备开发**：启动脚本在多个已连接设备中提示选择，同时将设备名传给 Tauri、将序列号写入子进程 `ANDROID_SERIAL`，避免 Tauri 启动后的无 `-s` ADB 查询无限重试。可直接传已连接设备的完整名称或序列号；单设备自动选择。`Success` / `Starting: Intent` 后命令继续运行以监听日志和热更新是正常行为，按 Ctrl+C 退出。
 - **启动差异**：移动端启动时 Rust 侧只创建 `chat_ui` 一个窗口（`src-tauri/src/lib.rs` 中移动端分支），桌面端会预创建多个隐藏窗口。
 - **能力配置**：移动端权限在 `src-tauri/capabilities/mobile.json`（与桌面端 `migrated.json` 分离）。修改移动端可用的 Tauri API 时必须更新此文件，且注意 fs scope 不要无限制放开。
 - **Android 原生配置**：`src-tauri/gen/android/app/src/main/AndroidManifest.xml` 当前声明 `INTERNET` 权限，Activity 已配置 `windowSoftInputMode="adjustResize"`；尚无 deep link、系统分享接收（ACTION_SEND）和拍照（ACTION_IMAGE_CAPTURE）intent-filter。`POST_NOTIFICATIONS` 由 `tauri-plugin-notification` 自带 Manifest 合并进入最终清单（见 `app/build/intermediates/merged_manifest/**/AndroidManifest.xml`），但仓库内没有运行时请求权限的代码。应用为 `singleTask`，任何新增原生入口都必须同时处理冷启动 intent 与 `MainActivity.onNewIntent`，不能只接一头。修改原生权限与入口时需同步检查 Manifest、Tauri capability 和 Android 生命周期行为。
