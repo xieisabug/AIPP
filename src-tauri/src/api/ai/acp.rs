@@ -140,57 +140,47 @@ fn build_acp_manual_mcp_servers_from_parts(
 pub fn build_selected_mcp_tools_payload(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
+    conversation_id: Option<i64>,
 ) -> Result<String, String> {
-    let assistant_db = AssistantDatabase::new(app_handle).map_err(|error| error.to_string())?;
-    let servers = assistant_db
-        .get_assistant_mcp_servers_with_tools(assistant_id)
-        .map_err(|error| error.to_string())?;
+    use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
+    let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let mut servers: Vec<MCPServerWithTools> = db.get_assistant_mcp_servers_with_tools(assistant_id)
+        .map_err(|e| e.to_string())?.into_iter()
+        .filter(|(_,name,command,enabled,_)| *enabled && name != "MCP 动态加载工具" && command.as_deref() != Some("aipp:dynamic_mcp"))
+        .map(|(id,name,command,is_enabled,tools)| MCPServerWithTools {
+            id,name,command,is_enabled,summary:String::new(),
+            tools: tools.into_iter().filter(|(_,_,_,enabled,_,_)| *enabled)
+                .map(|(id,name,description,is_enabled,is_auto_run,parameters)| MCPToolInfo {
+                    id,name,description,is_enabled,is_auto_run,parameters,
+                }).collect(),
+        }).collect();
+    let kind = crate::mcp::butler_tools::conversation_kind(app_handle, conversation_id).map_err(|e| e.to_string())?;
+    crate::mcp::butler_tools::inject(app_handle, &mut servers, &kind).map_err(|e| e.to_string())?;
+    // Ordinary chats must not inherit administration just because it was configured on the assistant.
+    if !crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind) {
+        servers.retain(|s| s.command.as_deref() != Some("aipp:superadmin"));
+    }
+    selected_tools_payload(servers)
+}
 
-    let payload = servers
-        .into_iter()
-        .filter(|(_, server_name, server_command, server_enabled, _)| {
-            *server_enabled
-                && server_name != "MCP 动态加载工具"
-                && server_command.as_deref() != Some("aipp:dynamic_mcp")
-        })
-        .filter_map(|(server_id, server_name, _, _, tools)| {
-            let enabled_tools = tools
-                .into_iter()
-                .filter(|(_, _, _, tool_enabled, _, _)| *tool_enabled)
-                .map(|(tool_id, tool_name, tool_description, _, _, parameters)| {
-                    serde_json::json!({
-                        "tool_id": tool_id,
-                        "server_id": server_id,
-                        "server_name": server_name.clone(),
-                        "tool_name": tool_name,
-                        "tool_description": tool_description,
-                        "parameters": parameters,
-                        "is_enabled": true,
-                    })
-                })
-                .collect::<Vec<_>>();
-            if enabled_tools.is_empty() {
-                None
-            } else {
-                Some(serde_json::json!({
-                    "server_id": server_id,
-                    "server_name": server_name,
-                    "is_enabled": true,
-                    "tools": enabled_tools,
-                }))
-            }
-        })
-        .collect::<Vec<_>>();
-
-    serde_json::to_string(&payload).map_err(|error| error.to_string())
+pub(crate) fn selected_tools_payload(servers: Vec<crate::api::assistant_api::MCPServerWithTools>) -> Result<String, String> {
+    let payload: Vec<_> = servers.into_iter().filter(|s| s.is_enabled && !s.tools.is_empty()).map(|server| {
+        let tools: Vec<_> = server.tools.into_iter().map(|tool| serde_json::json!({
+            "tool_id":tool.id,"server_id":server.id,"server_name":server.name,
+            "tool_name":tool.name,"tool_description":tool.description,"parameters":tool.parameters,"is_enabled":true,
+        })).collect();
+        serde_json::json!({"server_id":server.id,"server_name":server.name,"is_enabled":true,"tools":tools})
+    }).collect();
+    serde_json::to_string(&payload).map_err(|e| e.to_string())
 }
 
 pub fn refresh_acp_selected_mcp_tools_payload(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
+    conversation_id: Option<i64>,
     config: &mut AcpConfig,
 ) -> Result<(), String> {
-    config.selected_mcp_tools_payload = build_selected_mcp_tools_payload(app_handle, assistant_id)?;
+    config.selected_mcp_tools_payload = build_selected_mcp_tools_payload(app_handle, assistant_id, conversation_id)?;
     Ok(())
 }
 

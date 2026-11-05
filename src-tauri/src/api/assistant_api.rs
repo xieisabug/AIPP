@@ -1242,7 +1242,7 @@ pub async fn ensure_acp_session_connected(
     if let Some(proxy_url) = network_proxy.as_deref() {
         apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
     }
-    refresh_acp_selected_mcp_tools_payload(&app_handle, assistant_id, &mut acp_config)?;
+    refresh_acp_selected_mcp_tools_payload(&app_handle, assistant_id, Some(conversation_id), &mut acp_config)?;
     refresh_acp_config_signature(&mut acp_config);
 
     let handle = {

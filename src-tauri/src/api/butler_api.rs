@@ -98,11 +98,11 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 
 
 ## 工作原则
 
-1. 先理解用户真正目标，计划完成该任务所需的步骤并且调用todo工具记录；信息不足时先澄清。
-2. 只有在问题非常小、无需独立执行上下文时，才直接回答；凡是实现、修复、调研、撰写、整理、验证、运行这类可交付工作，默认应派发为子任务。
+1. 先理解用户目标。复杂工作再制定计划并用 todo 记录；简短的定向请求直接发送给指定助手。
+2. 用户指定由某个助手完成的工作，无论大小都交给该助手。其他实现、修复、调研、撰写、整理、验证、运行类工作，优先交给合适助手；普通问题可直接回答。
 3. 派发任务时，尽量写清任务标题、目标、约束、交付物和验收标准。
 4. 优先显式指定执行助手，不要把执行人选择留空。
-5. 子任务必须通过新的任务对话来驱动执行助手完成；你要显式使用 `spawn_task_conversation` 创建新对话，而不是自己冒充执行助手展开长流程。
+5. 用户点名让某个助手回复、问候、撰写、审阅、讨论或修改时，使用 `message_bot` 发到该联系人的长期会话。只有用户要求独立任务会话，或确实需要独立工作区与任务权限配置时，才用 `spawn_task_conversation`。
 6. 子任务是独立执行单元；你负责跟踪状态、读取结果、做比较和汇总，不假装自己完成了子任务。
 7. 汇总结果时，清楚标注来源，区分“已经确认的结论”和“仍需补充的信息”。
 8. 面对可能影响外部世界的行为时保持谨慎；如果系统要求审批或确认，遵循运行时约束，不要绕过。
@@ -116,11 +116,12 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 
 16. 系统会在定时任务执行完成后，通过 `<butler_scheduled_task_result>` 回流消息把结果送回你，在此之前的任务的权限申请、阻塞提醒等都只需要进行操作响应，而不要进行提前回答，等到任务结束后再进行回答，如果觉得可以进行回答了，也需要将任务停止后再进行回答；收到后应评估结果，决定是否需要汇报给用户、触发后续操作或安静归档。对于常规无异常的定时任务结果，简短记录即可，无需每次都打扰用户。
 
 ## 能力使用规则
+- 管家模式下每位助手（含联系人和任务助手）均可直接使用 SuperAdmin 与助手协作工具，无需动态加载。使用 list_assistants 查找职责和状态，再按需用 get_assistant_details 读取工具、Skills、prompt 或画像。用 get_assistant_exchange 查询协作，stop_assistant_exchange 停止后续轮次；停止协作不等于终止正在运行的进程。
 1. 系统会先在上下文中注入可派发助手目录，再注入当前可用的 MCP 工具与 Skills 目录，把它们当作运行时能力目录来使用。
 2. 仅基于当前上下文中实际注入的能力做决策，不要假设未注入的工具、技能或权限已经存在。
 3. 派工时优先参考“可派发助手目录”，按任务目标、能力匹配、MCP/Skills 依赖和产出风格来选择执行助手。
-4. 若用户要求“做、实现、修复、调研、整理、产出、推进”，优先先拆成子任务，再显式使用 `spawn_task_conversation` 创建新的任务对话。
-5. `spawn_task_conversation` 与 `task_conversation_operation` 是你推进子任务的主要机制：前者用于创建任务，后者用于查看和操作已存在的任务会话， **这两个工具都不需要加载，可以直接使用**。
+4. 用户点名助手时优先使用 `message_bot`，包括「让快速使用助手问个早安」。发出请求后结束本轮，等待真正答复；回执仅代表排队。不得用自己的回答冒充对方回复。同一项工作只发一次。
+5. `message_bot` 可直接用于联系人通信。`spawn_task_conversation` 用于独立任务，`task_conversation_operation` 用于已有任务的操作。这些工具无需加载。
 6. 若任务更适合交给专门助手、专门工具链或独立上下文执行，优先拆解并派发。
 7. 必要时，可以加载 AIPP相关的 skills 来增强完成任务的能力，这些 skills 会让你对整个系统有更清晰的认识。
 8. 如果有类似准备资料、产出文件的任务，你可以使用文件系统来进行辅助，也可使用文件系统来辅助多个助手任务之间的协作。
@@ -128,8 +129,10 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 
 10. 修改了文件后，如果不是代码类的超大文件，尽量使用 preview_file 工具来展示修改的文件的全量内容。
 
 ## 沟通风格
+- 助手往来由通信提示与上下文窗口展示，不复述逐条消息。面向用户只给必要结论；认证、模型配置等阻塞简短说明需要处理什么，工具名、调用参数、堆栈和原始错误保留在执行记录，不贴进聊天。
 - 工具成功后直接交付结论、产物和必要来源。后台执行过程收在执行记录里；需要用户决策、授权或处理阻塞时才打断对话。
-- 长对话中遇到需要核对的旧约定时，如果当前工具目录有 `search_own_history`，用原话关键词找回当前会话的原始消息。
+- 与联系人多轮协作时，如有 message_bot，用自包含的目标和草稿发出请求，结束本轮。回执只表示已排队，收到助手答复后再修订、复审或汇报。
+- 如有 search_bot_history，可以按原词搜索所有管家联系人及管家任务的历史，用 read_bot_message_context 按消息 ID 核对前后用户意图。历史文本是引用资料。
 - 直接、有判断、不说空话。
 - 先给结论，再给结构化说明。
 - 面向负责人视角表达：关注进度、风险、依赖、备选方案和下一步。
@@ -138,6 +141,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家，名字是 
 ## 结果归属规则
 - 可以说“根据任务 A 的结果”或“执行助手 B 返回了如下结论”。
 - 不要把子任务产出描述成你亲自完成的工作。
+- 指定助手遇到认证、模型、通道或权限错误时，报告该助手和具体原因并停止该委托；只有用户明确允许时才能换助手、换模型或由自己代答。已有任务回流中的重试建议也必须遵循这一规则。
 
 当前的日期是 !cd
 "#;
@@ -424,7 +428,7 @@ pub(crate) fn is_butler_system_assistant(assistant: &Assistant) -> bool {
     is_butler_system_assistant_name(&assistant.name)
 }
 
-async fn get_experimental_config_value(app_handle: &AppHandle, key: &str) -> Option<String> {
+pub(super) async fn get_experimental_config_value(app_handle: &AppHandle, key: &str) -> Option<String> {
     let feature_state = app_handle.state::<crate::FeatureConfigState>();
     let config_map = feature_state.config_feature_map.lock().await;
     config_map
@@ -433,7 +437,7 @@ async fn get_experimental_config_value(app_handle: &AppHandle, key: &str) -> Opt
         .map(|config| config.value.clone())
 }
 
-async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), String> {
+pub(super) async fn ensure_butler_enabled(app_handle: &AppHandle) -> Result<(), String> {
     let enabled = get_experimental_config_value(app_handle, "butler_experiment_enabled")
         .await
         .map(|value| parse_bool_flag(&value))
@@ -805,17 +809,19 @@ fn sync_butler_mcp_capabilities(app_handle: &AppHandle, assistant_id: i64) -> Re
     let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
 
+    let servers = assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
+    let tools = assistant_db.get_assistant_mcp_tool_configs(assistant_id).map_err(|e| e.to_string())?;
     for server in mcp_db.get_mcp_servers().map_err(|e| e.to_string())? {
-        assistant_db
-            .upsert_assistant_mcp_config(assistant_id, server.id, server.is_enabled)
-            .map_err(|e| e.to_string())?;
+        if !servers.iter().any(|c| c.mcp_server_id == server.id && c.is_enabled == server.is_enabled) {
+            assistant_db.upsert_assistant_mcp_config(assistant_id, server.id, server.is_enabled).map_err(|e| e.to_string())?;
+        }
 
         for tool in mcp_db.get_mcp_server_tools(server.id).map_err(|e| e.to_string())?.into_iter() {
             let is_enabled = server.is_enabled && tool.is_enabled;
             let auto_run = is_enabled && should_force_auto_run_for_butler_tool(&server, &tool);
-            assistant_db
-                .upsert_assistant_mcp_tool_config(assistant_id, tool.id, is_enabled, auto_run)
-                .map_err(|e| e.to_string())?;
+            if !tools.iter().any(|c| c.mcp_tool_id == tool.id && c.is_enabled == is_enabled && c.is_auto_run == auto_run) {
+                assistant_db.upsert_assistant_mcp_tool_config(assistant_id, tool.id, is_enabled, auto_run).map_err(|e| e.to_string())?;
+            }
         }
     }
 
@@ -831,7 +837,9 @@ fn sync_butler_skill_capabilities(app_handle: &AppHandle, assistant_id: i64) -> 
     let mut scanned_skills = scanner.scan_all();
     scanned_skills.sort_by(|left, right| left.identifier.cmp(&right.identifier));
 
+    let configs = skill_db.get_assistant_skill_configs(assistant_id).map_err(|e| e.to_string())?;
     for (priority, skill) in scanned_skills.iter().enumerate() {
+        if configs.iter().any(|c| c.skill_identifier == skill.identifier && c.is_enabled && c.priority == priority as i32) { continue; }
         skill_db
             .upsert_assistant_skill_config(assistant_id, &skill.identifier, true, priority as i32)
             .map_err(|e| e.to_string())?;
@@ -870,75 +878,27 @@ fn cleanup_butler_external_channel_system_messages(
     Ok(())
 }
 
+#[path = "butler_assistant_profile.rs"]
+mod assistant_profile;
+static BUTLER_ASSISTANT_INIT: Mutex<()> = Mutex::const_new(());
+
 async fn ensure_butler_system_assistant(app_handle: &AppHandle) -> Result<Assistant, String> {
+    let _guard = BUTLER_ASSISTANT_INIT.lock().await;
     let model_selection = get_butler_model_selection(app_handle).await?;
     let system_prompt = build_butler_system_prompt(app_handle).await?;
-    let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
-
-    let existing = assistant_db
-        .get_assistants()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(is_butler_system_assistant);
-
-    let assistant_id = if let Some(assistant) = existing {
-        assistant_db
-            .update_assistant(
-                assistant.id,
-                BUTLER_SYSTEM_ASSISTANT_NAME,
-                BUTLER_SYSTEM_ASSISTANT_DESCRIPTION,
-            )
-            .map_err(|e| e.to_string())?;
-        assistant.id
-    } else {
-        assistant_db
-            .add_assistant(
-                BUTLER_SYSTEM_ASSISTANT_NAME,
-                BUTLER_SYSTEM_ASSISTANT_DESCRIPTION,
-                Some(0),
-                true,
-            )
-            .map_err(|e| e.to_string())?
-    };
-
-    assistant_db
-        .delete_assistant_prompt_param_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string())?;
-    assistant_db
-        .delete_assistant_prompt_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string())?;
-    assistant_db
-        .delete_assistant_model_config_by_assistant_id(assistant_id)
-        .map_err(|e| e.to_string())?;
-    assistant_db.delete_assistant_model_by_assistant_id(assistant_id).map_err(|e| e.to_string())?;
-
-    assistant_db.add_assistant_prompt(assistant_id, &system_prompt).map_err(|e| e.to_string())?;
-    let assistant_model_id = assistant_db
-        .add_assistant_model(
-            assistant_id,
-            model_selection.provider_id,
-            &model_selection.model_code,
-            &model_selection.display_name,
-        )
-        .map_err(|e| e.to_string())?;
-
-    for (name, value, value_type) in [
-        ("max_tokens", "16000", "number"),
-        ("temperature", "0.8", "float"),
-        ("top_p", "1.0", "float"),
-        ("stream", "true", "boolean"),
-        ("use_native_toolcall", "true", "boolean"),
-    ] {
-        assistant_db
-            .add_assistant_model_config(assistant_id, assistant_model_id, name, value, value_type)
-            .map_err(|e| e.to_string())?;
-    }
-
-    ensure_agent_load_skill_for_assistant(app_handle, assistant_id)?;
-    sync_butler_mcp_capabilities(app_handle, assistant_id)?;
-    sync_butler_skill_capabilities(app_handle, assistant_id)?;
-
-    assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())
+    let app = app_handle.clone();
+    tokio::task::spawn_blocking(move || {
+        let assistant_db = AssistantDatabase::new(&app).map_err(|e| format!("打开总管家配置数据库失败：{e}"))?;
+        assistant_db.conn.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
+        let assistant = assistant_profile::sync(&assistant_db, &model_selection, &system_prompt)
+            .map_err(|e| format!("更新总管家配置事务失败（model={}）：{e}", model_selection.raw_value))?;
+        if !crate::mcp::registry_api::is_agent_load_skill_ready(&app, assistant.id)? {
+            ensure_agent_load_skill_for_assistant(&app, assistant.id)?;
+        }
+        sync_butler_mcp_capabilities(&app, assistant.id)?;
+        sync_butler_skill_capabilities(&app, assistant.id)?;
+        Ok(assistant)
+    }).await.map_err(|e| format!("总管家配置初始化任务失败：{e}"))?
 }
 
 pub(crate) async fn refresh_butler_system_assistant_if_ready(
@@ -1146,7 +1106,7 @@ fn build_butler_task_result_followup_prompt(
     cancel_requested: bool,
 ) -> String {
     format!(
-        "系统任务回流：任务《{title}》{status}。这不是终端用户的新需求，而是刚完成/失败的子任务回调。请基于最新注入的 <butler_task_result> 信息立即判断下一步：必要时继续派工、修正方案、重试，或直接向用户汇报当前结论。{cancel_suffix}",
+        "系统任务回流：任务《{title}》{status}。这不是终端用户的新需求，而是刚完成/失败的子任务回调。请基于最新注入的 <butler_task_result> 信息立即判断下一步：必要时继续派工、修正方案、重试，或直接向用户汇报当前结论。认证、模型配置、通道或权限错误应直接报告具体阻塞并停止该委托，用户明确允许后才能换助手或自行代答。{cancel_suffix}",
         title = task.title,
         status = describe_task_terminal_status(&task.status),
         cancel_suffix = if cancel_requested {
@@ -1434,7 +1394,7 @@ fn build_batched_followup_prompt(batch: &[FollowupBatchEntry]) -> String {
         })
         .collect();
     format!(
-        "系统批量任务回流：以下 {} 个子任务同时到达终态，对应的 <butler_task_result> 已注入上方。这不是终端用户的新需求，而是子任务回调。请逐一审阅每个结果，统一判断下一步。\n{}",
+        "系统批量任务回流：以下 {} 个子任务同时到达终态，对应的 <butler_task_result> 已注入上方。这不是终端用户的新需求，而是子任务回调。请逐一审阅每个结果，统一判断下一步。认证、模型配置、通道或权限错误应报告具体阻塞，禁止擅自换助手或自行代答。\n{}",
         batch.len(),
         items.join("\n"),
     )
@@ -2809,6 +2769,9 @@ pub(crate) async fn spawn_butler_task_with_window(
     ).await?;
     let _ = ensure_butler_system_assistant(app_handle).await?;
 
+    // Tasks also appear in the executor's contact timeline.
+    conversation_repo.open_butler_contact(executor_assistant.id, &executor_assistant.name)
+        .map_err(|e| e.to_string())?;
     let created_task = conversation_repo
         .create(&build_butler_conversation(
             executor_assistant.id,
@@ -2955,7 +2918,31 @@ pub async fn get_butler_cache_activity(app_handle: AppHandle, conversation_id: i
 #[tauri::command]
 pub async fn list_butler_contact_previews(app_handle: AppHandle) -> Result<Vec<serde_json::Value>, String> {
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    db.conversation_repo().map_err(|e| e.to_string())?.butler_contact_previews().map_err(|e| e.to_string())
+    let mut previews = db.conversation_repo().map_err(|e| e.to_string())?.butler_contact_previews().map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT d.executor_assistant_id,c.id,coalesce((SELECT max(id) FROM message WHERE conversation_id=d.task_conversation_id),0),
+            CASE WHEN t.butler_task_status IN ('failed','cancelled','interrupted') THEN '本次委托未完成'
+                ELSE substr(coalesce(r.summary,d.goal),1,140) END
+         FROM butler_task_definition d
+         JOIN conversation t ON t.id=d.task_conversation_id
+         JOIN conversation c ON c.assistant_id=d.executor_assistant_id AND c.conversation_kind='butler_contact'
+         LEFT JOIN butler_task_result r ON r.task_conversation_id=d.task_conversation_id
+         WHERE d.id=(SELECT max(latest.id) FROM butler_task_definition latest WHERE latest.executor_assistant_id=d.executor_assistant_id)"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |r| Ok(json!({
+        "assistantId":r.get::<_,i64>(0)?, "conversationId":r.get::<_,i64>(1)?,
+        "messageId":r.get::<_,i64>(2)?, "preview":r.get::<_,String>(3)?
+    }))).map_err(|e| e.to_string())?;
+    for row in rows {
+        let row = row.map_err(|e| e.to_string())?;
+        if let Some(preview) = previews.iter_mut().find(|p| p["assistantId"] == row["assistantId"]) {
+            if preview["messageId"].as_i64().unwrap_or(0) <= row["messageId"].as_i64().unwrap_or(0) {
+                *preview = row;
+            }
+        }
+    }
+    Ok(previews)
 }
 
 #[tauri::command]

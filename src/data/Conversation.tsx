@@ -22,6 +22,8 @@ export interface ConversationWithMessages {
 }
 
 export interface Message {
+    /** Display-only communication row in the desktop Butler timeline. */
+    butler_posts?: import("../components/butler/butlerTimeline").PeerPost[];
     id: number;
     conversation_id: number;
     message_type: string;

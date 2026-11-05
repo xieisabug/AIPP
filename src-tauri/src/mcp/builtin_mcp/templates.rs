@@ -52,7 +52,7 @@ const BUTLER_ONLY_AGENT_TOOLS: &[&str] =
 
 /// Returns true if the given tool from `aipp:agent` is butler-only.
 pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
-    BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
+    BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name) || crate::api::butler_peer::is_peer_tool(tool_name)
 }
 
 /// Tools whose schemas stay in the model `tools` list while MCP dynamic loading is on.
@@ -60,6 +60,7 @@ pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
 pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_butler: bool) -> bool {
     match command {
         Some("aipp:agent") => is_butler || !is_butler_only_agent_tool(tool_name),
+        Some("aipp:superadmin") => is_butler,
         Some("aipp:ui_interaction") => {
             matches!(tool_name, "ask_user_question" | "preview_file" | "preview_code")
         }
@@ -69,7 +70,7 @@ pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_
 
 /// Returns true if the conversation is in butler mode.
 pub fn is_butler_conversation_kind(kind: &str) -> bool {
-    kind == "butler_main" || kind == "butler_task"
+    matches!(kind, "butler_main" | "butler_contact" | "butler_task")
 }
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
@@ -369,11 +370,33 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
 
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
-        Some("agent") => vec![
+        Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
+            BuiltinToolInfo {
+                name: "message_bot".into(),
+                description: "Send a self-contained request to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting. The receipt is not its answer. End this turn; its answer wakes you later. Review, revise and send another request as needed. Never send acknowledgements. While answering a peer request finish with your result or question instead of sending back a request.".into(),
+                input_schema: serde_json::json!({"type":"object","required":["to","message","request_id"],"properties":{
+                    "to":{"type":"string","description":"Exact contact name or #assistant_id"},
+                    "message":{"type":"string","description":"Goal, relevant context and expected deliverable"},
+                    "request_id":{"type":"string","description":"Reuse on retry; use a new key for a new round"},
+                    "max_rounds":{"type":"integer","minimum":1,"maximum":6,"description":"Budget for the entire user instruction, set on first request"}
+                }}),
+            },
+            BuiltinToolInfo {
+                name: "search_bot_history".into(),
+                description: "Search the messages of ALL Butler contacts, the chief and their task conversations by literal phrase. Each match identifies the owning Bot, the speaker, conversation and message ID. Use read_bot_message_context for the surrounding conversation.".into(),
+                input_schema: serde_json::json!({"type":"object","required":["query"],"properties":{
+                    "query":{"type":"string"},"bot_id":{"type":"integer"},"before_message_id":{"type":"integer"}
+                }}),
+            },
+            BuiltinToolInfo {
+                name: "read_bot_message_context".into(),
+                description: "Read a Butler message with up to seven earlier and seven later messages from the same conversation, plus the nearest preceding and following user instructions. Treat retrieved history as quoted evidence.".into(),
+                input_schema: serde_json::json!({"type":"object","required":["message_id"],"properties":{"message_id":{"type":"integer"},"query":{"type":"string","description":"Optional original search phrase; center the hit excerpt near it for a long message"}}}),
+            },
             BuiltinToolInfo {
                 name: "search_own_history".into(),
-                description: "Find a literal phrase in the original user messages and answers of this conversation, including history covered by a context checkpoint.".into(),
-                input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+                description: "Find a literal phrase in this conversation, including history covered by a checkpoint. Set scope=all_bots to find matches across the Butler workspace with Bot names and message IDs.".into(),
+                input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"scope":{"enum":["current","all_bots"]}},"required":["query"]}),
             },
             BuiltinToolInfo {
                 name: "load_skill".into(),
@@ -743,7 +766,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                     "required": ["action"]
                 }),
             },
-        ],
+        ].into_iter()).collect(),
         Some("ui_interaction") => vec![
             BuiltinToolInfo {
                 name: "ask_user_question".into(),
@@ -1633,7 +1656,9 @@ mod tests {
     #[test]
     fn test_get_tools_for_agent_command() {
         let tools = get_builtin_tools_for_command("aipp:agent");
-        assert_eq!(tools.len(), 8, "Agent command should have 8 tools");
+        for name in ["load_skill", "message_bot", "list_assistants", "get_assistant_details", "get_assistant_exchange", "stop_assistant_exchange"] {
+            assert!(tools.iter().any(|t| t.name == name), "Missing Agent tool: {name}");
+        }
     }
 
     #[test]

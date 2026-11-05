@@ -1,3 +1,4 @@
+import { ButlerResultsOnlyContext } from "../butler/ButlerPresentationContext";
 import { describe, expect, it } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { Message } from "@/data/Conversation";
@@ -38,6 +39,18 @@ describe("StreamRetryAttemptSections", () => {
             />,
         );
         expect(screen.getByText("hello")).toBeInTheDocument();
+        expect(screen.queryByText(/尝试/)).not.toBeInTheDocument();
+    });
+
+    it("should omit retry diagnostics when the Butler transcript is compact", () => {
+        const messages = [makeMessage(1, "最终答复", JSON.stringify({
+            stream_retry: {session_id:"s1",attempt:2,status:"completed",error:"raw transport failure"},
+        }))];
+        render(<ButlerResultsOnlyContext.Provider value={true}>
+            <StreamRetryAttemptSections messages={messages} renderMessages={items => <>{items[0].content}</>}/>
+        </ButlerResultsOnlyContext.Provider>);
+        expect(screen.getByText("最终答复")).toBeVisible();
+        expect(screen.queryByText(/raw transport/)).not.toBeInTheDocument();
         expect(screen.queryByText(/尝试/)).not.toBeInTheDocument();
     });
 

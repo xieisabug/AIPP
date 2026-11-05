@@ -1,6 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import McpToolCallRenderer from "./McpToolCallRenderer";
+import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
 import { noteToolReview, resetToolReviewsForTests } from "@/hooks/toolReviewStore";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
@@ -19,6 +20,34 @@ describe("McpToolCallRenderer review controls", () => {
     afterEach(() => {
         clearAllMockHandlers();
         resetToolReviewsForTests();
+    });
+
+    it("should never mount an execution card in compact Butler mode across tool states", () => {
+        const draw = (status: "pending" | "executing" | "failed" | "success", resultsOnly = true) =>
+            <ButlerResultsOnlyContext.Provider value={resultsOnly}>
+                <McpToolCallRenderer callId={94} conversationId={8} toolName="spawn_task_conversation" status={status}/>
+            </ButlerResultsOnlyContext.Provider>;
+        const view = render(draw("pending"));
+        for (const status of ["pending","executing","failed","success"] as const) {
+            view.rerender(draw(status));
+            expect(view.container).toBeEmptyDOMElement();
+        }
+        view.rerender(draw("success", false));
+        expect(screen.getByText("专用工具卡片")).toBeInTheDocument();
+    });
+
+    it("should never mount preview or custom tool renderers when compact even before status is available", () => {
+        const draw = (status?: React.ComponentProps<typeof McpToolCallRenderer>["status"], streaming = false) =>
+            <ButlerResultsOnlyContext.Provider value={true}>
+                <McpToolCallRenderer callId={95} conversationId={8} toolName="preview_code" status={status} isStreaming={streaming}/>
+            </ButlerResultsOnlyContext.Provider>;
+        const view = render(draw());
+        for (const status of [undefined,"unknown","pending","executing","success","failed"] as const) {
+            view.rerender(draw(status, true));
+            expect(view.container).toBeEmptyDOMElement();
+            view.rerender(draw(status));
+            expect(view.container).toBeEmptyDOMElement();
+        }
     });
 
     it("should use confirmation controls when a specialized tool receives a live review", async () => {

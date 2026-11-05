@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from "react";
+import { ButlerResultsOnlyContext } from "../butler/ButlerPresentationContext";
+import React, { useContext, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Copy, Check } from "lucide-react";
 
 import type { Message } from "@/data/Conversation";
@@ -152,7 +153,8 @@ export function StreamRetryAttemptSections({
         () => groupMessagesByStreamRetryAttempt(messages),
         [messages],
     );
-    const showGrouping = shouldShowStreamRetryGrouping(buckets);
+    const resultsOnly = useContext(ButlerResultsOnlyContext);
+    const showGrouping = !resultsOnly && shouldShowStreamRetryGrouping(buckets);
 
     if (!showGrouping) {
         return <>{renderMessages(messages)}</>;

@@ -1,6 +1,7 @@
 import React, { useMemo, useRef } from "react";
 
 import MessageItem from "../MessageItem";
+import ButlerExchangeRow from "../butler/ButlerExchangeRow";
 import VersionPagination from "../VersionPagination";
 import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
 import { isHiddenAgentActivity } from "./AgentActivityList";
@@ -69,6 +70,17 @@ export interface MessageElementEntry {
     /** Row-sized pieces of a tall merged bubble, used when it is virtualized as history. */
     segments?: MessageElementSegment[];
     groupControl: any;
+}
+
+function exchangeEntry(message: Message): MessageElementEntry {
+    if (message.message_type === "butler_processing") {
+        return {
+            messageId: message.id, groupControl: null, estimatedHeight: 32,
+            messageElement: <div role="status" data-aipp-slot="butler-processing"
+                className="butler-exchange flex justify-center text-xs text-muted-foreground">正在处理…</div>,
+        };
+    }
+    return { messageId: message.id, messageElement: <ButlerExchangeRow posts={message.butler_posts!} conversationId={message.conversation_id} />, groupControl: null };
 }
 
 export interface RenderableConversationItem {
@@ -413,6 +425,7 @@ export function useMessageListElements({
         if (!isMergeAssistantMessages) {
             // 非合并模式：每条消息单独渲染
             return allDisplayMessages.map((message) => {
+                if (message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
                 const streamEvent = streamingMessages.get(message.id);
                 const groupControl = getGenerationGroupControl(message);
                 const shouldShowShineBorder = shiningMessageIds.has(message.id);
@@ -553,6 +566,11 @@ export function useMessageListElements({
         };
 
         for (const message of allDisplayMessages) {
+            if (message.butler_posts || message.message_type === "butler_processing") {
+                flushGroup({ keepExpanded: false });
+                result.push(exchangeEntry(message));
+                continue;
+            }
             if (message.message_type === "user" || message.message_type === "agent_plan") {
                 flushGroup({ keepExpanded: false });
                 const streamEvent = streamingMessages.get(message.id);
@@ -826,6 +844,8 @@ export function useMessageListElements({
                 ),
             });
         } else {
+            // A bot may receive its first message from a peer before a human has spoken here.
+            messageElements.forEach(pushMessageWithVersion);
             placeholderElements.forEach((element, index) => {
                 items.push({
                     key: `placeholder-${index}`,

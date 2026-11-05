@@ -1856,7 +1856,7 @@ async fn setup_captured_tool_calls(
     {
         if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
             let mcp_info =
-                crate::mcp::collect_mcp_info_for_assistant(app_handle, assistant_id, None, None)
+                crate::mcp::collect_mcp_info_for_conversation(app_handle, assistant_id, None, None, Some(conversation_id))
                     .await
                     .ok();
             let servers = mcp_info.as_ref().map(|info| info.enabled_servers.as_slice());

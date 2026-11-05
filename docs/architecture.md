@@ -144,6 +144,11 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 12. GitHub Copilot Integration（device flow + 可选 LSP）
 13. Token Statistics & Export（Markdown / PNG / PDF / DOCX）
 14. Assistant Types（自定义表单）
-15. Butler Orchestration（桌面联系人、独立私聊、主会话、任务会话、结果回流、审批）
+15. Butler Orchestration（桌面联系人、独立私聊、助手间异步请求与回复、管家历史检索、任务回流与审批）
 16. Feishu Integration（实验性）
 17. Self-Hosted Data Sync（server-wins 冲突、删除传播、死信重放）
+
+
+### 管家会话的固定工具
+
+`mcp/butler_tools.rs` 统一按 `butler_main` / `butler_contact` / `butler_task` 会话注入 SuperAdmin 和助手协作工具；覆盖助手 MCP 选择，但不持久化配置变更。标准 AI 首轮、工具续答、重新生成、XML 检测及 Codex/Claude Code/ACP 的选中工具桥接共用该策略。执行器对同一白名单免除动态加载门槛，内置分发仍校验管家会话，普通聊天和普通定时任务不获得权限。助手发现/详情与协作查询/停止定义在 `api/butler_assistant_tools.rs`，停止原因存于 `butler_peer_stop`；不把“停止协作”解释为进程取消。

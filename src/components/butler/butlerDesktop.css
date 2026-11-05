@@ -1,0 +1,11 @@
+.butler-avatar { border-radius: 45% 50% 40% 50%; }
+.butler-eyes { width: 36%; height: 32%; transform: rotate(-24deg); display: flex; justify-content: space-between; }
+.butler-eyes::before, .butler-eyes::after { content: ""; width: 28%; height: 100%; border-radius: 50%; background: #fff; }
+.butler-contact { display:flex; width:100%; align-items:center; gap:.6rem; text-align:left; padding:.45rem .55rem; border-radius:.65rem; }
+.butler-contact:hover { background:hsl(var(--muted)); }
+.butler-contact[aria-pressed="true"] { background:color-mix(in srgb, hsl(var(--foreground)) 9%, hsl(var(--background))); }
+.butler-exchange { width:100%; padding:.35rem 0; }
+.butler-peer-bubble { width:fit-content; max-width:min(80%, 48rem); padding:.65rem .85rem; border-radius:1rem; background:hsl(var(--muted)); font-size:.875rem; }
+[data-aipp-window="butler_experiment"] :is([data-message-type="response"],[data-message-type="assistant"],[data-message-type="merged"]) > .relative { background:hsl(var(--muted)); border-color:transparent; padding:.65rem .85rem; }
+[data-aipp-window="butler_experiment"] [data-message-item] .prose > :first-child { margin-top: 0; }
+[data-aipp-window="butler_experiment"] [data-message-item] .prose > :last-child { margin-bottom: 0; }

@@ -295,14 +295,21 @@ impl ConversationRepository {
 
     pub fn butler_contact_previews(&self) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
-            "SELECT c.assistant_id, c.id, m.id, substr(m.content,1,140)
+            "SELECT c.assistant_id, c.id, nullif(max(coalesce(p.anchor,0),coalesce(m.id,0)),0),
+                    CASE WHEN p.anchor IS NOT NULL AND p.anchor >= coalesce(m.id,0) THEN substr(
+                        CASE WHEN p.outgoing THEN '发给 ' ELSE '来自 ' END ||
+                        CASE WHEN c.id=e.owner THEN e.recipient ELSE e.sender END || '：' ||
+                        CASE WHEN p.leg='request' THEN e.body ELSE e.reply END,1,140)
+                    ELSE substr(m.content,1,140) END
              FROM conversation c LEFT JOIN message m ON m.id=(
                  SELECT id FROM message WHERE conversation_id=c.id
-                   AND message_type IN ('user','assistant','response','error') AND trim(content)!=''
+                   AND message_type IN ('user','assistant','response') AND trim(content)!=''
                    AND (message_type='user' OR (content NOT LIKE '%MCP_TOOL_CALL%' AND content NOT LIKE '%<mcp_tool_call%'
                        AND COALESCE(tool_calls_json,'') IN ('','[]','null')))
-                   AND CASE WHEN json_valid(metadata_json) THEN COALESCE(json_extract(metadata_json,'$.origin'),'')!='internal' ELSE 1 END
+                   AND CASE WHEN json_valid(metadata_json) THEN COALESCE(json_extract(metadata_json,'$.origin'),'') NOT IN ('internal','butler_peer') ELSE 1 END
                  ORDER BY id DESC LIMIT 1)
+             LEFT JOIN butler_peer_post p ON p.id=(SELECT id FROM butler_peer_post WHERE conversation_id=c.id ORDER BY anchor DESC,id DESC LIMIT 1)
+             LEFT JOIN butler_peer_exchange e ON e.id=p.exchange_id
              WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id")?;
         let rows = stmt.query_map([], |row| Ok(serde_json::json!({
             "assistantId":row.get::<_,i64>(0)?, "conversationId":row.get::<_,i64>(1)?,
@@ -1935,6 +1942,7 @@ impl ConversationDatabase {
             "TEXT DEFAULT 'enqueued'",
         )?;
         ensure_column_exists(&conn, "butler_task_result", "handoff_message_id", "INTEGER")?;
+        super::butler_peer::schema(&conn)?;
 
         Ok(())
     }

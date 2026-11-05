@@ -1,6 +1,7 @@
 // Central MCP module: prompt building, detection, execution API, and builtin wrappers
 
 pub mod builtin_mcp;
+pub mod butler_tools;
 pub mod detection;
 pub mod execution_api;
 pub(crate) mod http_transport;
@@ -19,3 +20,5 @@ pub use prompt::{
     collect_mcp_info_for_assistant, format_mcp_prompt,
     is_dynamic_mcp_loading_enabled_for_assistant, MCPInfoForAssistant,
 };
+
+pub use butler_tools::collect_mcp_info_for_conversation;

@@ -4,6 +4,7 @@ pub mod assistant_api;
 pub mod assistant_summary_api;
 pub mod attachment_api;
 pub mod butler_api;
+pub mod butler_peer;
 pub mod conversation_api;
 pub mod copilot_api;
 #[cfg(desktop)]
@@ -11,6 +12,8 @@ pub mod copilot_lsp;
 pub mod copilot_token_manager;
 pub mod export_api;
 pub mod genai_client;
+#[cfg(test)]
+pub(crate) mod live_test_client;
 pub mod highlight_api;
 pub mod llm_api;
 pub mod mobile_capability;
@@ -27,3 +30,5 @@ pub mod updater_api;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) mod butler_assistant_tools;
