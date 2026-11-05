@@ -528,7 +528,7 @@ export const useAssistantFormConfig = ({
                         { value: "auto_model", label: "模型自动审核" },
                     ],
                     tooltip:
-                        "已开启自动运行的工具直接执行，不经过审核。未开启自动运行时，人工审核等待确认；模型自动审核由「设置 → 辅助AI」中的自动审核模型判断能否直接执行。审核进行中仍可手动确认或拒绝。",
+                        "安全的内置操作直接执行；其他操作（包括外部工具）必须审核，自动运行开关不能跳过审核。人工审核等待确认；模型自动审核由「设置 → 辅助AI」中的模型判断能否执行。审核中仍可手动确认或拒绝。",
                     onChange: (value: string | boolean) =>
                         handleConfigChange("tool_review_mode", value, "string"),
                 },
