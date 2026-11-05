@@ -618,6 +618,10 @@ pub struct AcpElicitationState {
 }
 
 impl AcpElicitationState {
+    pub async fn has_pending_request_for_conversation(&self, conversation_id: i64) -> bool {
+        self.pending_requests.lock().await.values().any(|request| request.conversation_id == Some(conversation_id))
+    }
+
     pub fn new() -> Self {
         Self { pending_requests: TokioMutex::new(HashMap::new()) }
     }

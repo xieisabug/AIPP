@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Search, X } from "lucide-react";
 import type { AssistantListItem } from "@/data/Assistant";
-import type { ButlerTaskListItem } from "@/data/Butler";
+import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import { Button } from "@/components/ui/button";
 import AddAssistantDialog from "@/components/config/AddAssistantDialog";
 import { useAssistantTypePlugin } from "@/hooks/assistant/useAssistantTypePlugin";
@@ -14,13 +14,26 @@ interface Props {
     selected?: number;
     ready: boolean;
     previews: ContactPreview[];
-    tasks: ButlerTaskListItem[];
+    mainConversationId: string;
     plugins: any[];
     error: string;
     onRefresh: () => void;
     onSelect: (assistant?: AssistantListItem) => void;
 }
-export default function ButlerContactList({chief, contacts, selected, ready, previews, tasks, plugins, error, onRefresh, onSelect}: Props) {
+export default function ButlerContactList({chief, contacts, selected, ready, previews, mainConversationId, plugins, error, onRefresh, onSelect}: Props) {
+    const { visuals, acknowledge } = useContactAvatarActivity(mainConversationId, previews, selected);
+    const [hovered, setHovered] = useState<number>();
+    const [entered, setEntered] = useState<number>();
+    useEffect(() => {
+        if (entered === undefined) return;
+        const timer = setTimeout(() => setEntered(undefined), 1800);
+        return () => clearTimeout(timer);
+    }, [entered]);
+    const state = (id: number) => {
+        const visual = visuals.get(id);
+        if (visual && (visual.state !== "idle" || visual.label)) return visual.state;
+        return entered === id ? "listening" : hovered === id ? "curious" : "idle";
+    };
     const [searching, setSearching] = useState(false);
     const [query, setQuery] = useState("");
     const {assistantTypes} = useAssistantTypePlugin(plugins);
@@ -35,9 +48,11 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                 triggerButtonProps={{variant:"outline",size:"icon",className:"size-8 rounded-full",title:"添加助手","aria-label":"添加助手"}}/>
         </div>
         <div className="mb-4 flex shrink-0 justify-center">
-            <button onClick={() => onSelect()} aria-pressed={selected === undefined}
+            <button onClick={() => { acknowledge?.(0); setEntered(0); onSelect(); }} aria-pressed={selected === undefined}
+                onMouseEnter={() => setHovered(0)} onMouseLeave={() => setHovered(undefined)}
                 className="flex max-w-full flex-col items-center gap-1.5 rounded-xl px-5 py-2 text-xs font-medium hover:bg-muted aria-pressed:bg-muted">
-                <ButlerAvatar id={0} chief size={44}/>{chief}
+                <ButlerAvatar id={0} chief size={44} animated state={state(0)}/>{chief}
+                {visuals.get(0)?.label && <span className="text-xs text-muted-foreground">{visuals.get(0)?.label}</span>}
             </button>
         </div>
         <nav aria-label="助手联系人" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
@@ -46,16 +61,15 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                 const preview = previews.find(p => p.assistantId === assistant.id);
                 const unread = preview?.messageId && selected !== assistant.id &&
                     preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
-                return <button key={assistant.id} onClick={() => onSelect(assistant)} disabled={!ready}
+                return <button key={assistant.id} onClick={() => { acknowledge?.(assistant.id); setEntered(assistant.id); onSelect(assistant); }} disabled={!ready}
+                    onMouseEnter={() => setHovered(assistant.id)} onMouseLeave={() => setHovered(undefined)}
                     aria-pressed={selected === assistant.id} className="butler-contact">
-                    <ButlerAvatar id={assistant.id} />
+                    <ButlerAvatar id={assistant.id} animated state={state(assistant.id)} />
                     <span className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-medium">{assistant.name}</span>
-                        <span className="block truncate text-xs text-muted-foreground">{preview?.preview || "尚未对话"}</span>
+                        <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>
                     </span>
-                    {tasks.some(t => t.executor_assistant_id === assistant.id && t.has_pending_permission)
-                        ? <span className="text-xs text-muted-foreground">待审批</span>
-                        : unread ? <span aria-label="未读" className="size-2 rounded-full bg-primary"/> : null}
+                    {unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
                 </button>;
             })}
             {query && !filtered.length && <p className="p-2 text-xs text-muted-foreground">没有匹配的助手</p>}

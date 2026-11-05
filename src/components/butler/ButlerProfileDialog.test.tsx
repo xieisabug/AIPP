@@ -15,7 +15,10 @@ describe("Butler profile editor", () => {
         expect(onSave).not.toHaveBeenCalled();
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-        expect(onSave).toHaveBeenCalledWith("小管家", { shape: "aipp", left: "#CEF3DF", right: "#193B68" });
+        expect(onSave).toHaveBeenCalledWith("小管家", {
+            version: 2, shape: "aipp", colors: { primary: "#CEF3DF", secondary: "#193B68" },
+            accessories: { eyes: null, head: null }, motion: true,
+        });
     });
 
     it("should discard edits when cancelled and reject blank names", () => {
@@ -36,5 +39,21 @@ describe("Butler profile editor", () => {
         expect(await screen.findByRole("alert")).toHaveTextContent("database is locked");
         expect(screen.getByLabelText("助手名称")).toHaveValue("总管家");
         expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it("should retain accessories when changing shape and restoring colors", async () => {
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
+        fireEvent.click(screen.getByRole("button", { name: "佩戴眼镜" }));
+        fireEvent.click(screen.getByRole("button", { name: "佩戴帽子" }));
+        fireEvent.click(screen.getByRole("button", { name: "圆团" }));
+        fireEvent.click(screen.getByRole("button", { name: "脸部 · 亮色：蜜桃" }));
+        fireEvent.click(screen.getByRole("button", { name: "恢复黑白配色" }));
+        fireEvent.click(screen.getByRole("checkbox", { name: "播放动画" }));
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", {
+            version: 2, shape: "pebble", colors: { primary: "#FFFFFF", secondary: "#000000" },
+            accessories: { eyes: "round-glasses", head: "beret" }, motion: false,
+        }));
     });
 });

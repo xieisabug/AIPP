@@ -5,6 +5,7 @@ import { useForm } from "react-hook-form";
 import ButlerPeerActivity from "@/components/butler/ButlerPeerActivity";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
+import { useConversationAvatarState } from "@/components/avatar/useConversationAvatarState";
 import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
 import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import "@/components/butler/butlerDesktop.css";
@@ -590,6 +591,7 @@ function ButlerExperimentWindow() {
         });
     }
     const hasInlineInteraction = inlineInteractionItems.length > 0;
+    const avatarState = useConversationAvatarState(activeConversationId, hasInlineInteraction);
 
     const loadAssistants = useCallback(async () => {
         const request = ++rosterRequest.current;
@@ -1375,7 +1377,7 @@ function ButlerExperimentWindow() {
                     data-aipp-slot="butler-task-rail"
                 >
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
-                        ready={!!mainConversationId} previews={previews} tasks={tasks} plugins={pluginList}
+                        ready={!!mainConversationId} previews={previews} mainConversationId={mainConversationId} plugins={pluginList}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}/>
                     <div
                         className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border"
@@ -1580,7 +1582,7 @@ function ButlerExperimentWindow() {
                                     aria-label="修改助手名字与形象"
                                     onClick={() => setProfileTarget({ id: contact?.assistantId, name: activeAssistant?.name ?? butlerDisplayName })}
                                     title={contact ? "修改名字与形象" : `修改名字与形象 · ${mainModelDisplayName}`}>
-                                    <ButlerAvatar id={contact?.assistantId ?? 0} chief={!contact} size={22}/>
+                                    <ButlerAvatar key={activeConversationId} id={contact?.assistantId ?? 0} chief={!contact} size={22} animated state={avatarState}/>
                                     <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
                                 </button>
                                 <div className="flex min-w-0 items-center justify-end gap-1">

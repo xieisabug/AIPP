@@ -4,6 +4,7 @@ pub mod assistant_api;
 pub mod assistant_summary_api;
 pub mod attachment_api;
 pub mod butler_api;
+pub mod butler_contact_activity;
 pub mod butler_peer;
 pub mod conversation_api;
 pub mod copilot_api;
