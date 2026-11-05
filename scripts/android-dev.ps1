@@ -1,4 +1,22 @@
 # 自动获取本机局域网 IP 并启动 Android 开发环境
+# Gradle/Javac emit UTF-8; keep native output readable in Windows PowerShell.
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+# Prefer the Android build's standard JDK 17. An explicit override remains available.
+$androidJdk = $env:AIPP_ANDROID_JAVA_HOME
+if (-not $androidJdk) {
+    $jdkCandidates = @($env:JAVA_HOME) + @(Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE '.jdks') -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    $androidJdk = $jdkCandidates | Where-Object {
+        $_ -and (Test-Path (Join-Path $_ 'release')) -and
+        (Select-String -LiteralPath (Join-Path $_ 'release') -Pattern '^JAVA_VERSION="17[.\"]' -Quiet)
+    } | Select-Object -First 1
+}
+if ($androidJdk) {
+    if (-not (Test-Path (Join-Path $androidJdk 'bin/java.exe'))) {
+        throw "Invalid Android JDK directory: $androidJdk"
+    }
+    $env:JAVA_HOME = $androidJdk
+    Write-Host "Android JAVA_HOME: $androidJdk" -ForegroundColor Cyan
+}
 # 获取非虚拟网卡的 IPv4 地址（排除 WSL、Docker、VPN 等虚拟网卡）
 
 $physicalInterfaceIndexes = @(Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Select-Object -ExpandProperty ifIndex)
