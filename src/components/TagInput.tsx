@@ -129,7 +129,7 @@ const TagInput: React.FC<TagInputProps> = ({
                             <div
                                 ref={tagsContainerRef}
                                 className={`
-                                    flex flex-wrap gap-2 p-3 bg-muted rounded-lg border border-border 
+                                    ${showRequestModeToggle ? 'grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))]' : 'flex flex-wrap'} gap-2 p-3 bg-muted rounded-lg border border-border 
                                     transition-all duration-300 ease-in-out
                                     ${shouldShowExpandButton && !isExpanded
                                         ? 'max-h-[110px] overflow-hidden'
