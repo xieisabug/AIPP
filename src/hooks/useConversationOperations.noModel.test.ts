@@ -12,8 +12,9 @@ vi.mock("./useConversationManager", () => ({
     default: () => ({ deleteConversation: vi.fn(), updateConversationName: vi.fn() }),
 }));
 
-function setup() {
+function setup(quietRuntimeErrors = false) {
     const props: any = {
+        quietRuntimeErrors,
         conversation: null,
         selectedAssistant: 1,
         assistants: [{ id: 1, name: "快速使用助手", assistant_type: 0 }],
@@ -71,6 +72,17 @@ describe.each([
                 request: expect.objectContaining({ override_model_id: undefined, assistant_id: 1 }),
             }),
         );
+    });
+
+    it("should reset runtime state without a technical toast when compact mode is enabled", async () => {
+        mockInvokeHandler("ask_ai", () => ({
+            conversation_id: 42, request_prompt_result_with_context: "", error_message: NO_MODEL_CONFIGURED_MESSAGE,
+        }));
+        const { result, props } = setup(true);
+        await act(async () => { result.current.handleSend(); });
+        await waitFor(() => expect(props.setAiIsResponsing).toHaveBeenLastCalledWith(false));
+        expect(props.onChangeConversationId).toHaveBeenCalledWith("42");
+        expect(toastMock.error).not.toHaveBeenCalled();
     });
 
     it("keeps a normal response in the responding state", async () => {

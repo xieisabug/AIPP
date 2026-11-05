@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useContext } from "react";
+import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
 import McpToolCall from "@/components/McpToolCall";
 import { ToolReviewNotice } from "@/components/mcp-tool-components/ToolReviewNotice";
 import { useToolReview } from "@/hooks/toolReviewStore";
@@ -93,6 +94,13 @@ const renderDefaultMcpToolCall = (props: McpToolComponentProps) => (
 );
 
 const McpToolCallRenderer: React.FC<McpToolComponentProps> = (props) => {
+    // Gate before resolving registry components: custom and preview renderers can show
+    // transient execution UI even when their message is already marked complete.
+    const resultsOnly = useContext(ButlerResultsOnlyContext);
+    return resultsOnly ? null : <ExecutionToolCall {...props} />;
+};
+
+const ExecutionToolCall: React.FC<McpToolComponentProps> = (props) => {
     useMcpToolComponentRegistrySnapshot();
     const { config } = useDisplayConfig();
     const selectedComponentId = config?.mcp_tool_call_component_id || AUTO_MCP_TOOL_COMPONENT_ID;

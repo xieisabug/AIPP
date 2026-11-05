@@ -13,6 +13,10 @@ use tauri::Manager;
 use tracing::{debug, error, info, instrument, warn};
 
 pub mod assistant_db;
+pub mod butler_history;
+pub mod butler_peer;
+pub mod butler_timeline;
+pub mod butler_exchange_context;
 pub mod connection;
 pub(crate) mod cascade_delete;
 pub mod conversation_db;

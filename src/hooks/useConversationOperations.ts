@@ -35,6 +35,7 @@ export interface UseConversationOperationsProps {
     assistantTypePluginMap: Map<number, any>;
     assistantRunApi: any;
     busySendBehavior?: "queue" | "interrupt";
+    quietRuntimeErrors?: boolean;
     selectedAgentModel?: string;
     selectedAgentEffort?: string;
     selectedAgentApprovalPolicy?: string;
@@ -85,6 +86,7 @@ export function useConversationOperations({
     assistantTypePluginMap,
     assistantRunApi,
     busySendBehavior = "queue",
+    quietRuntimeErrors = false,
     selectedAgentModel = "",
     selectedAgentEffort = "",
     selectedAgentApprovalPolicy = "",
@@ -486,7 +488,8 @@ export function useConversationOperations({
                         if (res.error_message) {
                             setAiIsResponsing(false);
                             clearShiningMessages();
-                            toast.error(`${assistantData?.name ?? "Agent"} 运行失败`, {
+                            console.error("Ask AI preparation error:", {conversationId: res.conversation_id, error: res.error_message});
+                            if (!quietRuntimeErrors) toast.error(`${assistantData?.name ?? "Agent"} 运行失败`, {
                                 description: res.error_message,
                             });
                         } else if (isMobilePlatform) {
@@ -498,7 +501,7 @@ export function useConversationOperations({
                         setAiIsResponsing(false);
                         clearShiningMessages();
                         const assistantName = assistantData?.name ?? "Agent";
-                        toast.error(`${assistantName} 运行失败`, {
+                        if (!quietRuntimeErrors) toast.error(`${assistantName} 运行失败`, {
                             description: describeAskAiError(error),
                         });
                     });

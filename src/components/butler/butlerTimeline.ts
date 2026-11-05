@@ -1,0 +1,67 @@
+import type { Message } from "@/data/Conversation";
+import { butlerTranscript } from "./butlerTranscript";
+
+export interface PeerPost {
+    id: number;
+    anchor: number;
+    occurred_at: string;
+    outgoing: boolean;
+    peer: string;
+    peer_conversation: number;
+    peer_assistant: number | null;
+    text: string;
+    status: string;
+    error: string | null;
+    root?: number | null;
+    task_id?: number | null;
+    task_reply?: boolean;
+    /** The user asked the executing assistant to report directly; show its answer in full. */
+    direct?: boolean;
+}
+
+export function withPeerTimeline(messages: Message[], unpublished: Set<number>, posts: PeerPost[], conversationId: number): Message[] {
+    const visible = butlerTranscript(messages, unpublished);
+    if (!posts.length) return visible;
+    const positions = new Map(messages.map((m, i) => [m.id, i]));
+    const entries: Array<{ position: number; message?: Message; post?: PeerPost }> =
+        visible.map(message => ({ position: positions.get(message.id)!, message }));
+    for (const post of posts) {
+        const anchor = positions.get(post.anchor);
+        const time = new Date(post.occurred_at).getTime();
+        // A historical branch or a tool-only response can be absent from the displayed list.
+        const next = anchor === undefined ? messages.findIndex(m => new Date(m.created_time).getTime() > time) : -1;
+        entries.push({ position: anchor === undefined ? (next < 0 ? messages.length : next) - 0.5 : anchor + 0.25, post });
+    }
+    entries.sort((a, b) => a.position - b.position || Date.parse(a.post?.occurred_at ?? "") - Date.parse(b.post?.occurred_at ?? "") || (a.post?.id ?? 0) - (b.post?.id ?? 0));
+    const result: Message[] = [];
+    for (const { message, post } of entries) {
+        if (message) { result.push(message); continue; }
+        if (!post) continue;
+        const previous = result.at(-1)?.butler_posts;
+        if (previous && !post.task_id && !post.direct && previous.every(p => !p.direct) && previous.every(p => !p.task_id && p.root === post.root) && Math.abs(Date.parse(post.occurred_at) - Date.parse(previous[previous.length - 1].occurred_at)) < 600_000 &&
+            (previous.every(p => p.peer_conversation === post.peer_conversation) || (post.outgoing && previous.every(p => p.outgoing)))) {
+            previous.push(post);
+            continue;
+        }
+        result.push({
+            // Pending user inputs use small negative queue IDs. Timeline rows have a separate display-only range.
+            id: Number.MIN_SAFE_INTEGER + post.id, conversation_id: conversationId,
+            message_type: "butler_exchange", content: "", created_time: new Date(post.occurred_at),
+            llm_model_id: null, start_time: null, finish_time: null, token_count: 0, input_token_count: 0, output_token_count: 0,
+            regenerate: null, butler_posts: [post],
+        });
+    }
+    return result;
+}
+
+
+// Presentation-only row. Never inserted into messages or sent to the backend.
+export function withButlerProcessing(messages: Message[], conversationId: number, running: boolean): Message[] {
+    if (!running) return messages;
+    return [...messages, {
+        id: Number.MIN_SAFE_INTEGER, conversation_id: conversationId,
+        message_type: "butler_processing", content: "", created_time: new Date(),
+        llm_model_id: null, start_time: null, finish_time: null, token_count: 0,
+        input_token_count: 0, output_token_count: 0, regenerate: null,
+    }];
+}

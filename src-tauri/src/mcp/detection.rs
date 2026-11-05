@@ -198,11 +198,12 @@ pub async fn detect_and_process_mcp_calls(
                         if let Ok(repository) = conversation_db.conversation_repo() {
                             if let Ok(Some(conversation)) = repository.read(conversation_id) {
                                 if let Some(assistant_id) = conversation.assistant_id {
-                                    match crate::mcp::collect_mcp_info_for_assistant(
+                                    match crate::mcp::collect_mcp_info_for_conversation(
                                         app_handle,
                                         assistant_id,
                                         None,
                                         None,
+                                        Some(conversation_id),
                                     )
                                     .await
                                     {

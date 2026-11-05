@@ -53,7 +53,7 @@ use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::butler_api::{
     get_butler_task_detail, list_butler_tasks, list_butler_tasks_paginated,
-    load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
+    list_butler_contact_previews, get_butler_cache_activity, open_butler_contact, load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
@@ -894,6 +894,8 @@ pub fn run() {
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
             crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
+            #[cfg(desktop)]
+            crate::api::butler_peer::start(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );
@@ -1069,6 +1071,14 @@ pub fn run() {
             remove_assistant_workspace,
             list_conversations,
             search_conversations,
+            crate::api::butler_peer::list_butler_peer_exchanges,
+            crate::api::butler_peer::list_butler_peer_posts,
+            crate::api::butler_peer::get_butler_exchange_context,
+            crate::api::butler_peer::stop_butler_peer_exchange,
+            list_butler_contact_previews,
+            crate::api::butler_contact_activity::list_butler_contact_activity,
+            get_butler_cache_activity,
+            open_butler_contact,
             load_butler_main_conversation,
             list_butler_tasks,
             list_butler_tasks_paginated,

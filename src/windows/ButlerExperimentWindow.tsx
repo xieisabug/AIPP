@@ -2,18 +2,26 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, once } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
+import ButlerPeerActivity from "@/components/butler/ButlerPeerActivity";
+import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
+import ButlerAvatar from "@/components/butler/ButlerAvatar";
+import { useConversationAvatarState } from "@/components/avatar/useConversationAvatarState";
+import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
+import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
+import "@/components/butler/butlerDesktop.css";
 import { toast } from "sonner";
 import {
-    Bot,
     Check,
     ChevronDown,
     ChevronRight,
     Clock,
     ExternalLink,
     Loader2,
+    MessageSquareText,
     PauseCircle,
     Plus,
     RefreshCw,
+    ScrollText,
     Settings,
     X,
 } from "lucide-react";
@@ -66,10 +74,9 @@ import {
 import { ConversationStatsDialog } from "@/components/token-statistics";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
 import { buildButlerWorkspaceConfig } from "@/components/butler/butlerWorkspaceConfig";
-import { AssistantListItem } from "@/data/Assistant";
+import { AssistantListItem, type AssistantDetail } from "@/data/Assistant";
 import {
     ButlerMainLoadResponse,
-    ButlerNotificationEvent,
     ButlerTaskDetailResponse,
     ButlerTaskListItem,
     ButlerTaskResultAvailableEvent,
@@ -301,6 +308,108 @@ function ButlerExperimentWindow() {
     const [mainConversationId, setMainConversationId] = useState<string>("");
     const [mainModelDisplayName, setMainModelDisplayName] = useState<string>("");
     const [tasks, setTasks] = useState<ButlerTaskListItem[]>([]);
+    const [contact, setContact] = useState<{ assistantId: number; conversationId: number } | null>(null);
+    const contactRequest = useRef(0);
+    const [detailsConversation, setDetailsConversation] = useState<string | null>(null);
+    const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
+    const activeConversationId = contact ? String(contact.conversationId) : mainConversationId;
+    const activeAssistant = assistants.find(assistant => assistant.id === contact?.assistantId);
+    const [profileTarget, setProfileTarget] = useState<{ id?: number; name: string } | null>(null);
+    const saveProfile = async (name: string, appearance: ButlerAppearance) => {
+        if (!profileTarget) return;
+        const target = profileTarget;
+        let nameSaved = false;
+        try {
+            const latest = await loadFeatureConfig();
+            if (target.id === undefined) {
+                await saveFeatureConfig("experimental", {
+                    ...Object.fromEntries(latest.get("experimental") ?? []),
+                    butler_display_name: name,
+                });
+            } else if (name !== target.name) {
+                const detail = await invoke<AssistantDetail>("get_assistant", { assistantId: target.id });
+                await invoke("save_assistant", { assistantDetail: { ...detail, assistant: { ...detail.assistant, name } } });
+                setAssistants(previous => previous.map(assistant => assistant.id === target.id ? { ...assistant, name } : assistant));
+            }
+            nameSaved = true;
+            await saveFeatureConfig("butler_appearance", {
+                ...Object.fromEntries(latest.get("butler_appearance") ?? []),
+                [appearanceKey(target.id)]: JSON.stringify(appearance),
+            });
+            toast.success("名字与形象已保存");
+        } catch (error) {
+            throw new Error(`${nameSaved ? "名称已保存，但形象保存失败" : "保存助手名称失败"}（${target.id === undefined ? "总管家" : `助手 ${target.id}`}）：${error instanceof Error ? error.message : String(error)}`);
+        }
+    };
+    const [rosterError, setRosterError] = useState("");
+    const rosterRequest = useRef(0);
+    const [previews, setPreviews] = useState<ContactPreview[]>([]);
+    const restoreContact = useRef(true);
+    const previewRequest = useRef(0);
+    const loadPreviews = useCallback(async () => {
+        const request = ++previewRequest.current;
+        try {
+            const rows = await invoke<ContactPreview[]>("list_butler_contact_previews");
+            if (request === previewRequest.current) setPreviews(rows);
+        } catch (error) {
+            console.warn("读取联系人摘要失败", error);
+        }
+    }, []);
+    useEffect(() => {
+        if (!mainConversationId) return;
+        void loadPreviews();
+        window.addEventListener("focus", loadPreviews);
+        return () => window.removeEventListener("focus", loadPreviews);
+    }, [mainConversationId, loadPreviews]);
+    useEffect(() => {
+        let timer: ReturnType<typeof setTimeout>;
+        let disposed = false;
+        const schedule = () => {
+            if (disposed) return;
+            clearTimeout(timer);
+            timer = setTimeout(loadPreviews, 200);
+        };
+        const activity = listen<{ kind: string }>("conversation_list_activity", ({ payload }) => {
+            if (payload.kind === "stream_complete") schedule();
+        });
+        const peer = listen("butler_peer_changed", schedule);
+        const task = listen("butler_task_updated", schedule);
+        return () => {
+            disposed = true;
+            clearTimeout(timer);
+            for (const listener of [activity, peer, task]) void listener.then(stop => stop()).catch(console.warn);
+        };
+    }, [loadPreviews]);
+    const activePreview = previews.find(row => row.assistantId === contact?.assistantId);
+    useEffect(() => {
+        if (activePreview?.messageId) localStorage.setItem(`butler-read-${activePreview.conversationId}`, String(activePreview.messageId));
+    }, [activePreview]);
+    const selectContact = useCallback(async (assistant?: AssistantListItem) => {
+        restoreContact.current = false;
+        const request = ++contactRequest.current;
+        if (!assistant) {
+            localStorage.removeItem("butler-last-contact");
+            setContact(null);
+            return;
+        }
+        try {
+            const conversationId = await invoke<number>("open_butler_contact", { assistantId: assistant.id });
+            if (request === contactRequest.current) {
+                localStorage.setItem("butler-last-contact", String(assistant.id));
+                setContact({ assistantId: assistant.id, conversationId });
+                void loadPreviews();
+            }
+        } catch (error) {
+            if (request === contactRequest.current) toast.error(`无法打开${assistant.name}的私聊：${error}`);
+        }
+    }, [loadPreviews]);
+    useEffect(() => {
+        if (!restoreContact.current || !mainConversationId || !assistants.length) return;
+        restoreContact.current = false;
+        const lastId = Number(localStorage.getItem("butler-last-contact"));
+        const last = assistants.find(assistant => assistant.id === lastId);
+        if (last) void selectContact(last);
+    }, [assistants, mainConversationId, selectContact]);
     const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
     const [selectedTaskDetail, setSelectedTaskDetail] =
         useState<ButlerTaskDetailResponse | null>(null);
@@ -343,11 +452,13 @@ function ButlerExperimentWindow() {
         if (conversationIdNumber !== undefined) {
             ids.add(conversationIdNumber);
         }
+        if (contact) ids.add(contact.conversationId);
+        previews.forEach(row => ids.add(row.conversationId));
         tasks.forEach((task) => {
             ids.add(task.task_conversation_id);
         });
         return Array.from(ids);
-    }, [conversationIdNumber, tasks]);
+    }, [conversationIdNumber, contact, previews, tasks]);
 
     const filteredAvailableSkills = useMemo(() => {
         const query = taskSkillQuery.trim().toLowerCase();
@@ -376,7 +487,7 @@ function ButlerExperimentWindow() {
         isSubmitting,
         handleDecision,
     } = useOperationPermission({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
         conversationIds: permissionConversationIds,
     });
     const {
@@ -386,7 +497,7 @@ function ButlerExperimentWindow() {
         isSubmitting: isAcpSubmitting,
         handleDecision: handleAcpDecision,
     } = useAcpPermission({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
         conversationIds: permissionConversationIds,
     });
     const {
@@ -395,7 +506,7 @@ function ButlerExperimentWindow() {
         handleSubmit: handleElicitationSubmit,
         handleCancel: handleElicitationCancel,
     } = useAcpElicitation({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
         conversationIds: permissionConversationIds,
     });
     const {
@@ -409,7 +520,7 @@ function ButlerExperimentWindow() {
         handleSubmit: handleAskUserSubmit,
         handleCancel: handleAskUserCancel,
     } = useAskUserQuestion({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
     });
     const {
         pendingRequest: pendingPreviewFileRequest,
@@ -419,7 +530,7 @@ function ButlerExperimentWindow() {
         handleOpenChange: handlePreviewFileOpenChange,
         reopenPersistedPreview: reopenPersistedPreviewFile,
     } = usePreviewFile({
-        conversationId: conversationIdNumber,
+        conversationId: contact?.conversationId ?? conversationIdNumber,
     });
 
     const handlePreviewFileContextSelection = useCallback((selection: PreviewFileContextSelection) => {
@@ -480,16 +591,34 @@ function ButlerExperimentWindow() {
         });
     }
     const hasInlineInteraction = inlineInteractionItems.length > 0;
+    const avatarState = useConversationAvatarState(activeConversationId, hasInlineInteraction);
 
     const loadAssistants = useCallback(async () => {
+        const request = ++rosterRequest.current;
         try {
             const result = await invoke<AssistantListItem[]>("get_assistants");
+            if (rosterRequest.current !== request) return;
             setAssistants(result);
+            setRosterError("");
+            setContact(active => active && !result.some(a => a.id === active.assistantId) ? null : active);
         } catch (error) {
-            console.error("[ButlerExperimentWindow] Failed to load assistants:", error);
-            setAssistants([]);
+            if (rosterRequest.current === request) setRosterError(String(error));
         }
     }, []);
+
+    useEffect(() => {
+        let active = true;
+        const refresh = () => { if (active) void loadAssistants(); };
+        const listener = listen("assistant_list_changed", refresh);
+        void listener.then(refresh).catch(error => { if (active) setRosterError(String(error)); });
+        window.addEventListener("focus", refresh);
+        return () => {
+            active = false;
+            ++rosterRequest.current;
+            window.removeEventListener("focus", refresh);
+            void listener.then(stop => stop()).catch(console.warn);
+        };
+    }, [loadAssistants]);
 
     const loadAvailableSkills = useCallback(async () => {
         try {
@@ -577,13 +706,10 @@ function ButlerExperimentWindow() {
                 return;
             }
             const message =
-                error instanceof Error ? error.message : "无法加载总管家实验窗口";
+                error instanceof Error ? error.message : String(error);
             console.error("[ButlerExperimentWindow] Failed to load main conversation:", error);
             if (!silentError) {
                 setLoadError(message);
-            }
-            if (!silentError) {
-                toast.error(message);
             }
         } finally {
             if (showLoading && requestId === mainLoadRequestRef.current) {
@@ -776,9 +902,8 @@ function ButlerExperimentWindow() {
     );
 
     useEffect(() => {
-        void loadAssistants();
         void loadMainConversation({ showLoading: true });
-    }, [loadAssistants, loadMainConversation]);
+    }, [loadMainConversation]);
 
     useEffect(() => {
         void loadButlerScheduledTasks();
@@ -999,14 +1124,7 @@ function ButlerExperimentWindow() {
                     }
                 }
             ),
-            listen<ButlerNotificationEvent>("butler_notification_created", ({ payload }) => {
-                if (payload.butler_conversation_id !== conversationIdNumber) {
-                    return;
-                }
-                toast.message(payload.title, {
-                    description: payload.body,
-                });
-            }),
+
         ];
 
         return () => {
@@ -1125,7 +1243,6 @@ function ButlerExperimentWindow() {
                 },
             });
             console.log("[ButlerExperimentWindow] Spawn task response:", response);
-            toast.success("任务已派发");
             handleTaskDialogOpenChange(false);
         } catch (error) {
             console.error("[ButlerExperimentWindow] Failed to spawn task:", error);
@@ -1220,7 +1337,7 @@ function ButlerExperimentWindow() {
 
     useAppShortcuts("butler", {
         new: () => {
-            if (!mainConversationId || resettingMainConversation) {
+            if (contact || !mainConversationId || resettingMainConversation) {
                 return;
             }
             void handleResetMainConversation();
@@ -1248,6 +1365,7 @@ function ButlerExperimentWindow() {
         "";
 
     return (
+        <ButlerAppearanceContext.Provider value={featureConfig.get("butler_appearance") ?? new Map()}>
         <AntiLeakageProvider enabled={antiLeakageEnabled}>
             <div
                 className="flex h-screen bg-background text-foreground"
@@ -1255,64 +1373,22 @@ function ButlerExperimentWindow() {
                 data-aipp-slot="window-root"
             >
                 <div
-                    className="flex-none w-[320px] flex flex-col shadow-lg box-border rounded-r-xl mb-2 mr-2 bg-background overflow-hidden"
+                    className="flex-none w-[clamp(200px,23vw,260px)] flex flex-col border-r border-border bg-muted/30 overflow-hidden"
                     data-aipp-slot="butler-task-rail"
                 >
-                    <div
-                        className="flex items-start justify-between gap-3 px-5 py-4 border-b border-border"
-                        data-aipp-slot="butler-task-rail-header"
-                    >
-                        <div className="min-w-0">
-                            <div className="flex items-center gap-2 text-sm font-semibold">
-                                <Bot className="h-4 w-4" />
-                                任务台
-                            </div>
-                            {mainConversationId || showFeishuStatus ? (
-                                <div className="mt-2 flex flex-wrap items-center gap-2">
-                                    {mainModelDisplayName ? (
-                                        <Badge variant="outline" className="max-w-full">
-                                            <span className="truncate">
-                                                模型：{mainModelDisplayName}
-                                            </span>
-                                        </Badge>
-                                    ) : null}
-                                    {showFeishuStatus ? (
-                                        <Badge
-                                            variant={getFeishuStatusVariant(feishuStatus)}
-                                            className="gap-1"
-                                            title={feishuStatus?.status_text || "正在读取飞书连接状态"}
-                                        >
-                                            {getFeishuStatusIcon(
-                                                feishuStatus,
-                                                loadingFeishuStatus
-                                            )}
-                                            飞书
-                                        </Badge>
-                                    ) : null}
-                                    {!mainModelDisplayName && !showFeishuStatus ? (
-                                        <span className="text-xs text-muted-foreground">
-                                            总管家主会话已就绪
-                                        </span>
-                                    ) : null}
-                                </div>
-                            ) : (
-                                <p className="mt-1 text-xs text-muted-foreground">
-                                    {loadingMain
-                                        ? "正在准备总管家主会话..."
-                                        : "总管家主会话尚未初始化"}
-                                </p>
-                            )}
-                        </div>
-                        <Badge variant="secondary">{totalTasks}</Badge>
-                    </div>
-
+                    <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
+                        ready={!!mainConversationId} previews={previews} mainConversationId={mainConversationId} plugins={pluginList}
+                        error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}/>
                     <div
                         className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border"
                         data-aipp-slot="butler-task-rail-actions"
                     >
+                        <Button variant="outline" size="sm" onClick={() => setTaskDrawerOpen(true)}>
+                            任务 · {totalTasks}
+                        </Button>
                         <IconButton
                             icon={<Plus className="h-4 w-4 text-icon" />}
-                            onClick={() => setIsTaskDialogOpen(true)}
+                            onClick={() => { if (contact) setTaskAssistantId(String(contact.assistantId)); setIsTaskDialogOpen(true); }}
                             disabled={!mainConversationId}
                             border
                             title="派发任务"
@@ -1327,84 +1403,91 @@ function ButlerExperimentWindow() {
                         />
                     </div>
 
-                    <div className="min-h-0 flex-1 overflow-y-auto" data-aipp-slot="butler-task-list-scroll" onScroll={handleTaskListScroll}>
-                        <div className="space-y-2 p-3">
-                            {tasks.length === 0 ? (
-                                <div className="space-y-3 rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
-                                    <div>
-                                        {mainConversationId ? (
-                                            <>
-                                                暂无任务。你可以在主会话中调用
-                                                <code className="mx-1">
-                                                    spawn_task_conversation
-                                                </code>
-                                                ，或点击上方按钮手动派发。
-                                            </>
-                                        ) : (
-                                            "正在准备总管家任务台..."
-                                        )}
-                                    </div>
-                                    <Button
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={() => setIsTaskDialogOpen(true)}
-                                        disabled={!mainConversationId}
-                                    >
-                                        <Plus className="mr-2 h-4 w-4" />
-                                        新建第一个任务
-                                    </Button>
-                                </div>
-                            ) : null}
-                            {tasks.map((task) => (
-                                <button
-                                    key={task.task_conversation_id}
-                                    type="button"
-                                    className={`w-full rounded-xl p-3 text-left transition-colors ${isTaskDetailDialogOpen &&
-                                        selectedTaskId === task.task_conversation_id
-                                        ? "bg-primary/8 ring-1 ring-primary"
-                                        : "hover:bg-muted/40"
-                                        }`}
-                                    onClick={() =>
-                                        handleOpenTaskDetail(task.task_conversation_id)
-                                    }
-                                >
-                                    <div className="flex items-start justify-between gap-2">
-                                        <div className="min-w-0">
-                                            <div className="font-medium truncate">
-                                                {task.title}
+                    <Dialog open={taskDrawerOpen} onOpenChange={setTaskDrawerOpen}>
+                        <DialogContent className="flex max-h-[80vh] flex-col">
+                            <DialogHeader><DialogTitle>{activeAssistant ? activeAssistant.name + "的任务" : "全部任务"}</DialogTitle></DialogHeader>
+                            <div className="min-h-0 flex-1 overflow-y-auto" data-aipp-slot="butler-task-list-scroll" onScroll={handleTaskListScroll}>
+                                <div className="space-y-2 p-3">
+                                    {!tasks.some(task => !contact || task.executor_assistant_id === contact.assistantId) ? (
+                                        <div className="space-y-3 rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
+                                            <div>
+                                                {mainConversationId ? (
+                                                    <>
+                                                        暂无任务。你可以在主会话中调用
+                                                        <code className="mx-1">
+                                                            spawn_task_conversation
+                                                        </code>
+                                                        ，或点击上方按钮手动派发。
+                                                    </>
+                                                ) : (
+                                                    "正在准备总管家任务台..."
+                                                )}
                                             </div>
-                                            <div className="text-xs text-muted-foreground mt-1 truncate">
-                                                {task.executor_assistant_name}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={() => { if (contact) setTaskAssistantId(String(contact.assistantId)); setIsTaskDialogOpen(true); }}
+                                                disabled={!mainConversationId}
+                                            >
+                                                <Plus className="mr-2 h-4 w-4" />
+                                                新建第一个任务
+                                            </Button>
+                                        </div>
+                                    ) : null}
+                                    {tasks.filter(task => !contact || task.executor_assistant_id === contact.assistantId).map((task) => (
+                                        <button
+                                            key={task.task_conversation_id}
+                                            type="button"
+                                            className={`w-full rounded-xl p-3 text-left transition-colors ${isTaskDetailDialogOpen &&
+                                                selectedTaskId === task.task_conversation_id
+                                                ? "bg-primary/8 ring-1 ring-primary"
+                                                : "hover:bg-muted/40"
+                                                }`}
+                                            onClick={() =>
+                                                handleOpenTaskDetail(task.task_conversation_id)
+                                            }
+                                        >
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div className="min-w-0">
+                                                    <div className="font-medium truncate">
+                                                        {task.title}
+                                                    </div>
+                                                    <div className="text-xs text-muted-foreground mt-1 truncate">
+                                                        {task.executor_assistant_name}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    {task.has_pending_permission ? (
+                                                        <Badge variant="secondary">待审批</Badge>
+                                                    ) : null}
+                                                    <Badge variant={getStatusVariant(task.status)}>
+                                                        {getStatusLabel(task.status)}
+                                                    </Badge>
+                                                </div>
                                             </div>
+                                            <div className="mt-2 text-xs text-muted-foreground line-clamp-2">
+                                                {task.last_summary || task.goal}
+                                            </div>
+                                            <div className="mt-2 text-[11px] text-muted-foreground">
+                                                {task.is_finalized
+                                                    ? `完成于 ${formatTime(task.finalized_at)}`
+                                                    : "进行中"}
+                                            </div>
+                                        </button>
+                                    ))}
+                                    {loadingMoreTasks && (
+                                        <div className="flex items-center justify-center py-3">
+                                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                            <span className="ml-2 text-xs text-muted-foreground">加载更多…</span>
                                         </div>
-                                        <div className="flex items-center gap-2">
-                                            {task.has_pending_permission ? (
-                                                <Badge variant="secondary">待审批</Badge>
-                                            ) : null}
-                                            <Badge variant={getStatusVariant(task.status)}>
-                                                {getStatusLabel(task.status)}
-                                            </Badge>
-                                        </div>
-                                    </div>
-                                    <div className="mt-2 text-xs text-muted-foreground line-clamp-2">
-                                        {task.last_summary || task.goal}
-                                    </div>
-                                    <div className="mt-2 text-[11px] text-muted-foreground">
-                                        {task.is_finalized
-                                            ? `完成于 ${formatTime(task.finalized_at)}`
-                                            : "进行中"}
-                                    </div>
-                                </button>
-                            ))}
-                            {loadingMoreTasks && (
-                                <div className="flex items-center justify-center py-3">
-                                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                                    <span className="ml-2 text-xs text-muted-foreground">加载更多…</span>
+                                    )}
                                 </div>
-                            )}
-                        </div>
-                    </div>
+                            </div>
+
+                            {hasMoreTasks && <Button variant="ghost" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()}>加载更早任务</Button>}
+                        </DialogContent>
+                    </Dialog>
 
                     {scheduledTasks.length > 0 && (
                         <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
@@ -1459,7 +1542,7 @@ function ButlerExperimentWindow() {
                 </div>
 
                 <div
-                    className="flex flex-1 min-w-0 flex-col overflow-hidden rounded-xl bg-background shadow-lg m-2 ml-0"
+                    className="flex flex-1 min-w-0 flex-col overflow-hidden bg-background"
                     data-aipp-slot="butler-main-content"
                 >
                     {loadError ? (
@@ -1471,6 +1554,10 @@ function ButlerExperimentWindow() {
                                     </div>
                                     <p>{loadError}</p>
                                 </div>
+                                <Button type="button" variant="outline" disabled={loadingMain}
+                                    onClick={() => void loadMainConversation({ showLoading: true })}>
+                                    {loadingMain ? "正在重试…" : "重试"}
+                                </Button>
                                 <Button
                                     type="button"
                                     variant="outline"
@@ -1483,17 +1570,35 @@ function ButlerExperimentWindow() {
                     ) : mainConversationId ? (
                         <>
                             <div
-                                className="flex flex-none items-start justify-between gap-3 border-b border-border px-6 py-4"
+                                className="relative grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
                                 data-aipp-slot="butler-main-header"
                             >
-                                <div className="min-w-0">
-                                    <div className="text-base font-semibold">
-                                        {butlerDisplayName}
-                                    </div>
+                                <div className="flex min-w-0 items-center">
+                                    {showFeishuStatus && <Badge variant={getFeishuStatusVariant(feishuStatus)}>
+                                        {getFeishuStatusIcon(feishuStatus, loadingFeishuStatus)} 飞书
+                                    </Badge>}
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <button type="button" className="flex min-w-0 items-center gap-1.5 rounded-full border bg-background px-3 py-1 shadow-sm hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                                    aria-label="修改助手名字与形象"
+                                    onClick={() => setProfileTarget({ id: contact?.assistantId, name: activeAssistant?.name ?? butlerDisplayName })}
+                                    title={contact ? "修改名字与形象" : `修改名字与形象 · ${mainModelDisplayName}`}>
+                                    <ButlerAvatar key={activeConversationId} id={contact?.assistantId ?? 0} chief={!contact} size={22} animated state={avatarState}/>
+                                    <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
+                                </button>
+                                <div className="flex min-w-0 items-center justify-end gap-1">
+                                    <ButlerPeerActivity key={activeConversationId} conversationId={Number(activeConversationId)} />
+                                    <IconButton
+                                        icon={detailsConversation === activeConversationId
+                                            ? <MessageSquareText className="h-4 w-4 text-icon" />
+                                            : <ScrollText className="h-4 w-4 text-icon" />}
+                                        onClick={() => setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId)}
+                                        border
+                                        title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
+                                        dataAippSlot="butler-main-toggle-details"
+                                    />
                                     <ConversationStatsDialog
-                                        conversationId={mainConversationId}
+                                        showCacheActivity
+                                        conversationId={activeConversationId}
                                         externalOpen={isStatsDialogOpen}
                                         onExternalOpenChange={setIsStatsDialogOpen}
                                     />
@@ -1513,7 +1618,7 @@ function ButlerExperimentWindow() {
                                             )
                                         }
                                         onClick={() => void handleResetMainConversation()}
-                                        disabled={!mainConversationId || resettingMainConversation}
+                                        disabled={!!contact || !mainConversationId || resettingMainConversation}
                                         border
                                         title="重开新会话"
                                         dataAippSlot="butler-main-reset-conversation"
@@ -1522,9 +1627,9 @@ function ButlerExperimentWindow() {
                             </div>
                             <div className="min-h-0 flex-1">
                                 <ConversationUI
-                                    key={mainConversationId}
+                                    key={activeConversationId}
                                     ref={conversationUIRef}
-                                    conversationId={mainConversationId}
+                                    conversationId={activeConversationId}
                                     onChangeConversationId={() => undefined}
                                     pluginList={pluginList}
                                     hideHeader
@@ -1533,8 +1638,9 @@ function ButlerExperimentWindow() {
                                     inlineInteractionItems={inlineInteractionItems}
                                     inlineInteractionVisible={hasInlineInteraction}
                                     allowFeishuDebugResend={
-                                        showFeishuStatus && isMainConversationFeishuBound
+                                        !contact && showFeishuStatus && isMainConversationFeishuBound
                                     }
+                                    showExecutionDetails={detailsConversation === activeConversationId}
                                     windowLabel="butler_experiment"
                                     busySendBehavior="interrupt"
                                     onPreviewFileContextClick={handlePreviewFileContextSelection}
@@ -2036,7 +2142,12 @@ function ButlerExperimentWindow() {
                     </DialogContent>
                 </Dialog>
             </div>
+            {profileTarget && <ButlerProfileDialog
+                name={profileTarget.name}
+                appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(profileTarget.id)))}
+                onClose={() => setProfileTarget(null)} onSave={saveProfile} />}
         </AntiLeakageProvider>
+        </ButlerAppearanceContext.Provider>
     );
 }
 

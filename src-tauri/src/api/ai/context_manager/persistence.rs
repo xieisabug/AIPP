@@ -1,75 +1,69 @@
-use crate::db::conversation_db::{ConversationDatabase, Message};
+use crate::db::conversation_db::ConversationDatabase;
 use crate::errors::AppError;
-use chrono::Utc;
-use tracing::{debug, info};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+#[derive(Serialize, Deserialize)]
+struct CheckpointSource {
+    ids: Vec<i64>,
+    digest: String,
+}
+
+fn source_digest<'a>(messages: impl Iterator<Item = (&'a str, &'a str)>) -> String {
+    let mut hash = Sha256::new();
+    for (kind, text) in messages {
+        for value in [kind, text] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+    }
+    format!("{:x}", hash.finalize())
+}
+
+pub fn checkpoint_text(content: &str) -> &str {
+    content.split_once(" -->\n").map(|(_, text)| text).unwrap_or(content)
+}
+
+pub trait CheckpointStore: Sync {
+    fn save(&self, conversation_id: i64, header: &str, content: &str) -> Result<String, AppError>;
+}
+
+impl CheckpointStore for ConversationDatabase {
+    fn save(&self, conversation_id: i64, header: &str, content: &str) -> Result<String, AppError> {
+        Ok(self.message_repo()?.get_or_create_checkpoint(conversation_id, header, content)?)
+    }
+}
 
 /// Marker prefix for compaction summary content in the DB.
 pub const CONTEXT_SUMMARY_MARKER: &str = "<context_summary>";
 
 /// Insert a compaction summary message into the conversation.
 ///
-/// The summary replaces all messages between `first_compacted_id` and
-/// `last_compacted_id` (inclusive). The marker comment embedded in the
-/// content allows `is_compaction_summary` to recognize this message on
-/// subsequent loads.
+/// Keep original messages intact. Only the model request substitutes the recorded slice.
 pub fn store_compaction_summary(
-    db: &ConversationDatabase,
+    store: &dyn CheckpointStore,
     conversation_id: i64,
     summary_content: &str,
-    first_compacted_id: i64,
-    last_compacted_id: i64,
-) -> Result<i64, AppError> {
-    // Embed the compacted range as an HTML comment so it can be parsed later
-    let content = format!(
-        "<!-- compacted_range: {}..{} -->\n{}",
-        first_compacted_id, last_compacted_id, summary_content
-    );
+    source_ids: &[i64],
+    body: &[super::MessageTuple],
+) -> Result<String, AppError> {
+    let content = checkpoint_content(summary_content, source_ids, body);
+    let (header, _) = content.split_once('\n').expect("checkpoint header always ends with a newline");
+    let stored = store.save(conversation_id, header, &content)?;
+    Ok(checkpoint_text(&stored).to_owned())
+}
 
-    info!(
-        conversation_id,
-        first_compacted_id,
-        last_compacted_id,
-        summary_len = content.len(),
-        "storing compaction summary"
-    );
-
-    let message = Message {
-        id: 0, // auto-increment
-        parent_id: None,
-        conversation_id,
-        message_type: "system".to_string(),
-        content,
-        llm_model_id: None,
-        llm_model_name: None,
-        created_time: Utc::now(),
-        start_time: None,
-        finish_time: None,
-        token_count: 0,
-        input_token_count: 0,
-        output_token_count: 0,
-        generation_group_id: None,
-        parent_group_id: None,
-        tool_calls_json: None,
-        metadata_json: None,
-        first_token_time: None,
-        ttft_ms: None,
+fn checkpoint_content(summary_content: &str, source_ids: &[i64], body: &[super::MessageTuple]) -> String {
+    let source = CheckpointSource {
+        ids: source_ids.to_vec(),
+        digest: source_digest(body.iter().map(|(kind, text, _)| (kind.as_str(), text.as_str()))),
     };
-
-    let created = db
-        .message_repo()
-        .map_err(|e| AppError::UnknownError(format!("DB error: {}", e)))?
-        .create_without_touch_conversation(&message)
-        .map_err(|e| {
-            AppError::UnknownError(format!("Failed to store compaction summary: {}", e))
-        })?;
-
-    debug!(summary_message_id = created.id, "compaction summary stored");
-    Ok(created.id)
+    format!("<!-- compacted_ids: {} -->\n{}", serde_json::json!(source), summary_content)
 }
 
 /// Check if a message is a compaction summary by inspecting its content.
 pub fn is_compaction_summary(content: &str) -> bool {
-    content.contains(CONTEXT_SUMMARY_MARKER) && content.contains("<!-- compacted_range:")
+    content.contains(CONTEXT_SUMMARY_MARKER) && (content.starts_with("<!-- compacted_range:") || content.starts_with("<!-- compacted_ids:"))
 }
 
 /// Parse the compacted message ID range from a summary message.
@@ -97,32 +91,44 @@ pub fn parse_compacted_range(content: &str) -> Option<(i64, i64)> {
 pub fn apply_compaction_filter(
     messages_with_ids: &[(i64, String, String)], // (id, msg_type, content)
 ) -> Vec<usize> {
-    // Find all compaction summaries and collect their ranges
-    let mut compacted_ranges: Vec<(i64, i64)> = Vec::new();
-    for (_id, _msg_type, content) in messages_with_ids {
-        if is_compaction_summary(content) {
-            if let Some(range) = parse_compacted_range(content) {
-                compacted_ranges.push(range);
-            }
+    let mut kept: Vec<usize> = Vec::new();
+    for (index, (_, kind, content)) in messages_with_ids.iter().enumerate() {
+        if kind != "system" || !is_compaction_summary(content) {
+            kept.push(index);
+            continue;
+        }
+        let span = if let Some(encoded) = content.strip_prefix("<!-- compacted_ids: ")
+            .and_then(|text| text.split_once(" -->").map(|(ids, _)| ids))
+        {
+            let Ok(source) = serde_json::from_str::<CheckpointSource>(encoded) else { continue };
+            if source.ids.is_empty() { continue; }
+            kept.windows(source.ids.len()).position(|slice| {
+                slice.iter().zip(&source.ids).all(|(&at, id)| messages_with_ids[at].0 == *id)
+                    && source_digest(slice.iter().map(|&at| {
+                        let (_, kind, text) = &messages_with_ids[at];
+                        let text = if kind == "system" && is_compaction_summary(text) {
+                            checkpoint_text(text)
+                        } else { text };
+                        (kind.as_str(), text)
+                    })) == source.digest
+            }).map(|start| (start, start + source.ids.len()))
+        } else {
+            // Older installations stored an inclusive range rather than individual IDs.
+            parse_compacted_range(content).and_then(|(first, last)| {
+                let covered = |at: &usize| {
+                    let id = messages_with_ids[*at].0;
+                    id > 0 && (first..=last).contains(&id)
+                };
+                let start = kept.iter().position(covered)?;
+                let count = kept[start..].iter().take_while(|idx| covered(idx)).count();
+                Some((start, start + count))
+            })
+        };
+        if let Some((start, end)) = span {
+            kept.splice(start..end, [index]);
         }
     }
-
-    if compacted_ranges.is_empty() {
-        return (0..messages_with_ids.len()).collect();
-    }
-
-    // Keep messages whose IDs are NOT in any compacted range
-    messages_with_ids
-        .iter()
-        .enumerate()
-        .filter(|(_idx, (id, _, _))| {
-            if *id == 0 {
-                return true; // dynamic messages always kept
-            }
-            !compacted_ranges.iter().any(|(first, last)| *id >= *first && *id <= *last)
-        })
-        .map(|(idx, _)| idx)
-        .collect()
+    kept
 }
 
 #[cfg(test)]
@@ -189,3 +195,7 @@ mod tests {
         assert_eq!(kept, vec![0, 2]); // dynamic(0) + summary(2)
     }
 }
+
+#[cfg(test)]
+#[path = "persistence_tests.rs"]
+mod checkpoint_tests;

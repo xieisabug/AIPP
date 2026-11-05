@@ -56,6 +56,9 @@ import { useConversationDraft } from "@/hooks/useConversationDraft";
 import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
+import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
+import { withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
+import { useButlerPeerTimeline } from "@/components/butler/useButlerPeerTimeline";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
 import { useConversationOperations } from "@/hooks/useConversationOperations";
@@ -229,6 +232,8 @@ function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
     );
 }
 
+const EMPTY_STREAMS = new Map();
+
 interface ConversationUIProps {
     conversationId: string;
     onChangeConversationId: (conversationId: string) => void;
@@ -244,6 +249,7 @@ interface ConversationUIProps {
     headerExtraActions?: ReactNode;
     allowFeishuDebugResend?: boolean;
     windowLabel?: string;
+    showExecutionDetails?: boolean;
     busySendBehavior?: "queue" | "interrupt";
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
 }
@@ -309,11 +315,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             headerExtraActions,
             allowFeishuDebugResend = false,
             windowLabel = "chat_ui",
+            showExecutionDetails = false,
             busySendBehavior = "queue",
             onPreviewFileContextClick,
         },
         ref
     ) => {
+        const resultOnly = windowLabel === "butler_experiment" && !showExecutionDetails;
         // ============= 基础状态管理 =============
 
         // 当前对话信息和助手列表
@@ -372,6 +380,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // 常规消息列表
         const [messages, setMessages] = useState<Array<Message>>([]);
+        // The normal list intentionally materializes finished streams. Compact Butler must
+        // only publish an authoritative snapshot with the internal trigger's provenance.
+        const [persistedSnapshot, setPersistedSnapshot] = useState<ConversationWithMessages>();
+        const persistedSnapshotRevision = useRef(0);
+        const acceptPersistedSnapshot = useCallback((snapshot: ConversationWithMessages, revision: number) => {
+            if (revision === persistedSnapshotRevision.current) setPersistedSnapshot(snapshot);
+        }, []);
         const syncScrollPositionRef = useRef<{ conversationId: string; top: number } | null>(null);
         const [queuedMessages, setQueuedMessages] = useState<QueuedConversationMessage[]>([]);
         const streamingMessagesRef = useRef<Map<number, StreamEvent>>(new Map());
@@ -479,8 +494,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         const handleMessageAdd = useCallback(
             (messageAddData: any) => {
+                const snapshotRevision = ++persistedSnapshotRevision.current;
                 // 设置函数映射
-                setFunctionMapForMessage(messageAddData.message_id);
+                if (messageAddData.message_id != null) setFunctionMapForMessage(messageAddData.message_id);
 
                 // 发送新消息时，重置防泄露模式的临时显示状态
                 resetReveal();
@@ -490,6 +506,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     conversationId: +conversationId,
                 })
                     .then((updatedConversation) => {
+                        acceptPersistedSnapshot(updatedConversation, snapshotRevision);
                         setMessages((prevMessages) =>
                             mergeMessagesWithStreamingState(updatedConversation.messages, {
                                 conversationId: updatedConversation.conversation.id,
@@ -500,6 +517,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     })
                     .catch((error) => {
                         console.error("Failed to reload conversation after message_add:", error);
+                        if (windowLabel === "butler_experiment" || messageAddData.message_id == null) return;
 
                         // 降级处理：仍然添加基本的消息信息
                         const newMessage: Message = {
@@ -522,7 +540,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         setMessages((prevMessages) => [...prevMessages, newMessage]);
                     });
             },
-            [conversationId, resetReveal, setFunctionMapForMessage]
+            [conversationId, resetReveal, setFunctionMapForMessage, acceptPersistedSnapshot, windowLabel]
         );
 
         const handleGroupMerge = useCallback((groupMergeData: GroupMergeEvent) => {
@@ -575,6 +593,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 处理消息完成时的状态更新，确保消息在streamingMessages清理后仍能显示
         const handleMessageCompletion = useCallback(
             (streamEvent: StreamEvent) => {
+                if (windowLabel === "butler_experiment") handleMessageAdd(streamEvent);
                 const effectiveConversationId = conversation?.id ?? Number(conversationId || 0);
                 setMessages((prevMessages) =>
                     mergeMessagesWithStreamingState(prevMessages, {
@@ -585,7 +604,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     })
                 );
             },
-            [conversation?.id, conversationId]
+            [conversation?.id, conversationId, windowLabel, handleMessageAdd]
         );
 
         // 使用 useMemo 稳定 options 对象，避免频繁触发 useConversationEvents 内部的 useEffect
@@ -621,6 +640,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     cancelData: ConversationCancelEvent,
                     streamingSnapshot: ReadonlyMap<number, StreamEvent>
                 ) => {
+                    if (windowLabel === "butler_experiment") handleMessageAdd({});
                     if (streamingSnapshot.size === 0) {
                         return;
                     }
@@ -658,6 +678,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             upsertQueuedMessage,
             handleQueuedMessageRemove,
             conversation?.id,
+            windowLabel,
             // 移除 functionMap 依赖，改为在回调内部访问
         ]);
 
@@ -729,6 +750,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 }
 
                 acpConnectionErrorNoticeRef.current = noticeKey;
+                if (resultOnly) {
+                    console.error("[Butler] agent connection", {conversationId, assistantId, errorMessage});
+                    return;
+                }
                 const agentLabel = agentKind === "codex_app_server"
                     ? "Codex"
                     : agentKind === "claude_sdk"
@@ -739,7 +764,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     position: "bottom-right",
                 });
             },
-            [conversationId]
+            [conversationId, resultOnly]
         );
 
         useEffect(() => {
@@ -866,8 +891,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [queuedMessages]);
 
         const messagesWithQueued = useMemo(
-            () => [...messages, ...queuedDisplayMessages],
-            [messages, queuedDisplayMessages]
+            () => [...(resultOnly
+                ? persistedSnapshot?.conversation.id === Number(conversationId) ? persistedSnapshot.messages : []
+                : messages), ...queuedDisplayMessages],
+            [messages, queuedDisplayMessages, resultOnly, persistedSnapshot, conversationId]
         );
 
         // 当 functionMap 变化时更新事件处理器
@@ -881,7 +908,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 第一步：消息处理 - 获取合并的消息用于分组
         const { combinedMessagesForGrouping } = useMessageProcessing({
             messages: messagesWithQueued,
-            streamingMessages,
+            // Stream-only messages have no persisted origin yet; never publish them in compact mode.
+            streamingMessages: resultOnly ? EMPTY_STREAMS : streamingMessages,
             conversation,
             generationGroups: EMPTY_GENERATION_GROUPS,
             groupRootMessageIds: EMPTY_GROUP_ROOT_MESSAGE_IDS,
@@ -897,7 +925,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 第三步：基于分组信息与选择的版本，计算最终需要展示的消息列表
         const { allDisplayMessages } = useMessageProcessing({
             messages: messagesWithQueued,
-            streamingMessages,
+            // Stream-only messages have no persisted origin yet; never publish them in compact mode.
+            streamingMessages: resultOnly ? EMPTY_STREAMS : streamingMessages,
             conversation,
             generationGroups: messageGroupsData.generationGroups,
             groupRootMessageIds: messageGroupsData.groupRootMessageIds,
@@ -922,6 +951,25 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
             return combined;
         }, [agentActivities, allDisplayMessages]);
+        const transcriptActivities = useMemo(() => resultOnly
+            ? new Map<string, AgentActivityEvent>()
+            : displayAgentActivities, [resultOnly, displayAgentActivities]);
+        const peerTimeline = useButlerPeerTimeline(Number(conversationId), resultOnly);
+        const transcript = useMemo(() => {
+            if (!resultOnly) return allDisplayMessages;
+            const unpublished = new Set<number>();
+            if (effectiveAiIsResponsing) {
+                for (let index = allDisplayMessages.length - 1; index >= 0; index--) {
+                    const message = allDisplayMessages[index];
+                    if (message.message_type === "user") break;
+                    unpublished.add(message.id);
+                }
+            }
+            return withButlerProcessing(
+                withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId)),
+                Number(conversationId), effectiveAiIsResponsing,
+            );
+        }, [resultOnly, allDisplayMessages, effectiveAiIsResponsing, peerTimeline, conversationId]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -1096,6 +1144,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             openTitleEditDialog,
             closeTitleEditDialog,
         } = useConversationOperations({
+            quietRuntimeErrors: resultOnly,
             conversation,
             selectedAssistant,
             assistants,
@@ -1177,7 +1226,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 左侧对话轮次导航条：从当前展示的消息中抽取用户提问轮次
         const userTurns = useMemo(
             () =>
-                allDisplayMessages
+                transcript
                     .filter(
                         (m) =>
                             m.message_type === "user" &&
@@ -1188,7 +1237,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         id: m.id,
                         preview: makeTurnPreview(m.content),
                     })),
-            [allDisplayMessages],
+            [transcript],
         );
 
         // 智能聚焦逻辑 - 无延迟版本
@@ -1210,6 +1259,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // 注意：为避免 React StrictMode 下的双调用导致“取消”标记错误触发，使用 requestId 跳过过期请求
         useEffect(() => {
             const requestId = ++loadRequestIdRef.current;
+            const snapshotRevision = ++persistedSnapshotRevision.current;
             // 仅依赖 conversationId，保持函数引用稳定
             if (!conversationId) {
                 // 无对话 ID时，清理状态并加载助手列表
@@ -1262,6 +1312,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     console.log(`[PERF-FRONTEND] 后端返回数据耗时: ${backendDuration.toFixed(2)}ms, 消息数: ${res.messages.length}`);
 
                     const setStateStartTime = performance.now();
+                    acceptPersistedSnapshot(res, snapshotRevision);
                     setMessages(res.messages);
                     setConversation(res.conversation);
                     setRenderingConversationId(conversationId);
@@ -1295,10 +1346,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             refresh: async (isCurrent) => {
                 if (!conversationId) return;
                 const requestId = ++loadRequestIdRef.current;
+                const snapshotRevision = ++persistedSnapshotRevision.current;
                 const result = await invoke<ConversationWithMessages>("get_conversation_with_messages", {
                     conversationId: +conversationId,
                 });
                 if (!isCurrent() || requestId !== loadRequestIdRef.current) return;
+                acceptPersistedSnapshot(result, snapshotRevision);
                 setConversation(result.conversation);
                 const container = scrollContainerRef.current;
                 if (container) syncScrollPositionRef.current = { conversationId, top: container.scrollTop };
@@ -2070,17 +2123,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             data-aipp-slot="chat-conversation-scroll"
                             style={{ overflowAnchor: "none" }}
                         >
+                            <ButlerResultsOnlyContext.Provider value={resultOnly}>
                             <ConversationContent
                                 isMobile={isMobile}
                                 conversationId={conversationId}
                                 // MessageList props
-                                allDisplayMessages={allDisplayMessages}
-                                streamingMessages={streamingMessages}
+                                allDisplayMessages={transcript}
+                                streamingMessages={resultOnly ? EMPTY_STREAMS : streamingMessages}
                                 shiningMessageIds={shiningMessageIds}
                                 shiningMcpCallId={shiningMcpCallId}
                                 reasoningExpandStates={reasoningExpandStates}
                                 mcpToolCallStates={mcpToolCallStates}
-                                agentActivities={displayAgentActivities}
+                                agentActivities={transcriptActivities}
                                 generationGroups={messageGroupsData.generationGroups}
                                 selectedVersions={messageGroupsData.selectedVersions}
                                 getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
@@ -2116,9 +2170,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 selectedSandbox={selectedAgentSandbox}
                                 onAgentConfigChange={handleAgentConfigChange}
                             />
+                            </ButlerResultsOnlyContext.Provider>
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>
 
+                        {resultOnly && [...mcpToolCallStates.values()].some(call => call.status === "pending") &&
+                            <p role="status" className="px-6 py-1 text-xs text-muted-foreground">有操作等待确认，请查看执行记录。</p>}
                         {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
                         {isMobile && showBackToBottom && <Button variant="secondary" className="self-center min-h-11 shrink-0"

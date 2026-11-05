@@ -1637,6 +1637,31 @@ pub async fn execute_aipp_builtin_tool(
             let handler = AgentHandler::new(app_handle.clone());
 
             match tool_name.as_str() {
+                "search_own_history" if args["scope"] == "all_bots" => {
+                    let id = conversation_id.ok_or("此工具需要管家联系人会话")?;
+                    let result = crate::api::butler_peer::tool(&app_handle,id,"search_bot_history",&args).await
+                        .map_err(|e|format!("search_own_history conversation={id}: {e:#}"))?;
+                    serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
+                }
+                "message_bot" | "search_bot_history" | "read_bot_message_context"
+                | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" | "stop_assistant_exchange" => {
+                    let id = conversation_id.ok_or("此工具需要管家联系人会话")?;
+                    let result = crate::api::butler_peer::tool(&app_handle, id, &tool_name, &args)
+                        .await.map_err(|e| format!("{tool_name} conversation={id}: {e:#}"))?;
+                    serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
+                }
+                "search_own_history" => {
+                    let id = conversation_id.ok_or("search_own_history requires a current conversation")?;
+                    if !matches!(get_conversation_kind(&app_handle, id).as_deref(), Some("butler_main" | "butler_contact" | "butler_task")) {
+                        return Err(format!("search_own_history is limited to a Butler contact conversation (conversation={id})"));
+                    }
+                    let query = args.get("query").and_then(|v| v.as_str()).map(str::trim)
+                        .filter(|q| !q.is_empty()).ok_or("search_own_history requires a non-empty query")?;
+                    let db = crate::db::conversation_db::ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+                    let hits = db.message_repo().map_err(|e| e.to_string())?.search_own_history(id, query)
+                        .map_err(|e| format!("search_own_history conversation={id}: {e}"))?;
+                    serde_json::json!({"content":[{"type":"text","text":serde_json::to_string(&hits).map_err(|e| e.to_string())?}],"isError":false})
+                }
                 "load_skill" => {
                     let command = args
                         .get("command")
@@ -1817,10 +1842,13 @@ pub async fn execute_aipp_builtin_tool(
                             .get("handoff_contract_json")
                             .and_then(|v| v.as_str())
                             .map(|v| v.to_string()),
-                        result_handling_mode: args
-                            .get("result_handling_mode")
-                            .and_then(|v| v.as_str())
-                            .map(|v| v.to_string()),
+                        result_handling_mode: if args.get("report_to_user").and_then(|v| v.as_bool()) == Some(true) {
+                            Some(crate::api::butler_api::RESULT_MODE_DIRECT_REPORT.to_string())
+                        } else {
+                            args.get("result_handling_mode")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string())
+                        },
                         notification_policy: args
                             .get("notification_policy")
                             .and_then(|v| v.as_str())

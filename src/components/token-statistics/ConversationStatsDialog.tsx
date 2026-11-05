@@ -18,15 +18,19 @@ import { Badge } from "@/components/ui/badge";
 
 interface ConversationStatsDialogProps {
     conversationId: string;
+    showCacheActivity?: boolean;
     externalOpen?: boolean;
     onExternalOpenChange?: (open: boolean) => void;
 }
 
 export function ConversationStatsDialog({
     conversationId,
+    showCacheActivity = false,
     externalOpen,
     onExternalOpenChange,
 }: ConversationStatsDialogProps) {
+    const [activity, setActivity] = useState<Array<{ id: number; checkpoint: boolean; input: number; cached: number | null }>>([]);
+    const [activityError, setActivityError] = useState("");
     const [internalOpen, setInternalOpen] = useState(false);
     const open = externalOpen !== undefined ? externalOpen : internalOpen;
     const setOpen = onExternalOpenChange || setInternalOpen;
@@ -34,6 +38,17 @@ export function ConversationStatsDialog({
     const [acpSessionState, setAcpSessionState] = useState<AcpConversationSessionState | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!open || !showCacheActivity) return;
+        let current = true;
+        setActivity([]);
+        setActivityError("");
+        invoke<typeof activity>("get_butler_cache_activity", { conversationId: Number(conversationId) })
+            .then(rows => { if (current) setActivity(rows); })
+            .catch(error => { if (current) setActivityError(String(error)); });
+        return () => { current = false; };
+    }, [open, conversationId, showCacheActivity]);
 
     useEffect(() => {
         if (open && conversationId) {
@@ -164,6 +179,15 @@ export function ConversationStatsDialog({
                             )}
 
                             {/* Total Token Usage Display */}
+                            {showCacheActivity && <div className="mb-3 text-xs">
+                                <h3 className="mb-2 font-medium">最近请求的缓存命中</h3>
+                                {activityError || (!activity.length && "暂无请求记录")}
+                                <div className="max-h-40 overflow-y-auto space-y-1">
+                                    {activity.map(row => <div key={row.id}>
+                                        {row.checkpoint ? "上下文检查点" : `#${row.id} · ${row.cached == null ? "未提供命中量" : `${row.cached.toLocaleString()} / ${row.input.toLocaleString()} 输入 tokens（${(100 * row.cached / row.input).toFixed(1)}%）`}`}
+                                    </div>)}
+                                </div>
+                            </div>}
                             <TokenUsageDisplay
                                 total={stats.total_tokens}
                                 input={stats.input_tokens}

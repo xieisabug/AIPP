@@ -49,3 +49,7 @@
 -   Tool call creation/execution/state sync is handled in `mcp/execution_api.rs`
 -   Built-in MCP command suites: `aipp:agent`, `aipp:ui_interaction`, `aipp:search`, `aipp:operation`, `aipp:artifact`
 -   MCP auto-run should respect assistant/server/tool config (`is_auto_run` + overrides)
+
+## 角色动画扩展
+
+总管家形象、动作与眼镜/帽子装饰的注册、坐标约定和验证方式见 [角色动画与装饰扩展](./avatar-animation.md)。

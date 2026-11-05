@@ -46,7 +46,7 @@ use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::feishu::maybe_schedule_butler_feishu_relay_for_aipp_turn;
 use crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation;
-use crate::mcp::{collect_mcp_info_for_assistant, format_mcp_prompt, MCPInfoForAssistant};
+use crate::mcp::{collect_mcp_info_for_conversation, format_mcp_prompt, MCPInfoForAssistant};
 use crate::plugin::hook_bus::PluginHookBus;
 use crate::skills::{
     build_active_skill_attachments, collect_skills_info_for_assistant_with_additions,
@@ -303,6 +303,21 @@ async fn report_pre_request_error_in_conversation(
     );
 }
 
+async fn fit_chat_context(
+    app_handle: &tauri::AppHandle,
+    messages: Vec<context_manager::MessageTuple>,
+    budget: &ContextBudget,
+    token_counts: &[i32],
+    context: CompactionContext<'_>,
+) -> Result<context_manager::FitResult, AppError> {
+    let conversation_id = context.conversation_id;
+    let result = context_manager::fit_to_budget_with_compaction(messages, budget, token_counts, context).await;
+    if let Err(error) = &result {
+        report_pre_request_error_in_conversation(app_handle, conversation_id, &error.to_string()).await;
+    }
+    result
+}
+
 #[cfg(test)]
 mod ask_model_resolution_tests {
     use super::{
@@ -502,6 +517,11 @@ fn maybe_select_openai_responses_stateful_messages(
             "OpenAI Responses stateful continuation disabled because prompt cache key is enabled; using full history for prompt cache"
         );
         return (init_message_list.to_vec(), None, false, None);
+    }
+
+    // A checkpoint starts a new provider-side history prefix.
+    if init_message_list.iter().any(|(kind, text, _)| kind == "system" && text.starts_with("<context_summary>")) {
+        return (init_message_list.to_vec(), None, true, None);
     }
 
     if has_native_tools {
@@ -1034,6 +1054,7 @@ pub fn build_tools_with_mapping(
         }
     }
 
+    tools.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
     (tools, mapping)
 }
 
@@ -1053,17 +1074,14 @@ fn build_tool_config(
     }
 
     // Determine if this is a butler conversation for tool filtering
-    let is_butler = conversation_id
-        .and_then(|cid| {
-            ConversationDatabase::new(app_handle)
-                .ok()
-                .and_then(|db| db.conversation_repo().ok())
-                .and_then(|repo| repo.read(cid).ok().flatten())
-                .map(|c| is_butler_conversation_kind(&c.conversation_kind))
-        })
-        .unwrap_or(false);
+    let kind = conversation_id.and_then(|id| {
+        ConversationDatabase::new(app_handle).ok()?.conversation_repo().ok()?.read(id).ok()?
+            .map(|conversation| conversation.conversation_kind)
+    });
+    let is_butler = kind.as_deref().is_some_and(is_butler_conversation_kind);
+    let has_contact_history = is_butler;
 
-    let servers_for_injection = if mcp_info.dynamic_loading_enabled {
+    let mut servers_for_injection = if mcp_info.dynamic_loading_enabled {
         // Keep the tools array stable: always-available tools, loaders, and call_mcp_tool.
         // Loaded MCP tools stay out of tools; their descriptions come back from load_mcp_tool.
         let mut filtered = Vec::new();
@@ -1115,6 +1133,13 @@ fn build_tool_config(
         filtered
     };
 
+    if !has_contact_history {
+        for server in &mut servers_for_injection {
+            if server.command.as_deref() == Some("aipp:agent") {
+                server.tools.retain(|tool| !crate::api::butler_peer::is_peer_tool(&tool.name));
+            }
+        }
+    }
     let (tools, tool_name_mapping) = build_tools_with_mapping(&servers_for_injection);
     debug!(tools = ?tools, "injected MCP tools");
     Some(ToolConfig { tools, tool_name_mapping })
@@ -1154,8 +1179,12 @@ pub async fn ask_ai(
         .map_err(|e| AppError::UnknownError(format!("Failed to get assistants: {}", e)))?;
 
     // 处理 @assistant_name 提取和消息清理
-    let (actual_assistant_id, cleaned_prompt) =
-        extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?;
+    let peer_turn = relay_origin.as_deref().is_some_and(|s| s.starts_with("butler_peer/"));
+    let (actual_assistant_id, cleaned_prompt) = if peer_turn {
+        (request.assistant_id, request.prompt.clone())
+    } else {
+        extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?
+    };
     crate::api::mobile_capability::ensure_assistant_execution(
         &app_handle, actual_assistant_id, "send_preflight", &request.conversation_id,
     ).await.map_err(AppError::UnknownError)?;
@@ -1239,31 +1268,30 @@ pub async fn ask_ai(
         enforce_butler_mcp_override(&assistant_detail.assistant.name, override_mcp_config);
 
     // 收集 MCP 信息
-    let mcp_info = collect_mcp_info_for_assistant(
+    let mcp_info = collect_mcp_info_for_conversation(
         &app_handle,
         processed_request.assistant_id,
         override_mcp_config.as_ref(),
         None,
+        processed_request.conversation_id.parse::<i64>().ok(),
     )
     .await?;
+
+    let existing_conversation = processed_request.conversation_id.parse::<i64>().ok().and_then(|id| {
+        ConversationDatabase::new(&app_handle).ok()?.conversation_repo().ok()?.read(id).ok().flatten()
+    });
+    let contact_id = existing_conversation.as_ref().filter(|c| cfg!(desktop) &&
+        matches!(c.conversation_kind.as_str(), "butler_main" | "butler_contact")).map(|c| c.id);
+    if peer_turn && contact_id.is_none() {
+        return Err(AppError::UnknownError("协作目标不是有效的桌面管家联系人".into()));
+    }
 
     // Filter butler-only tools for non-butler conversations
     let mcp_info = {
         use crate::mcp::builtin_mcp::templates::{
             is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
         };
-        let is_butler = processed_request
-            .conversation_id
-            .parse::<i64>()
-            .ok()
-            .and_then(|cid| {
-                ConversationDatabase::new(&app_handle)
-                    .ok()
-                    .and_then(|db| db.conversation_repo().ok())
-                    .and_then(|repo| repo.read(cid).ok().flatten())
-                    .map(|c| is_butler_conversation_kind(&c.conversation_kind))
-            })
-            .unwrap_or(false);
+        let is_butler = existing_conversation.as_ref().is_some_and(|c| is_butler_conversation_kind(&c.conversation_kind));
         if is_butler {
             mcp_info
         } else {
@@ -1336,6 +1364,21 @@ pub async fn ask_ai(
         assistant_prompt_result
     };
 
+    // 管家模式：为联系人/任务成员追加团队协作约定（仅按会话判断，不修改助手原配置）
+    let assistant_prompt_result = match existing_conversation.as_ref() {
+        Some(conversation) => match crate::api::butler_api::build_butler_member_prompt(
+            &app_handle,
+            &conversation.conversation_kind,
+            &assistant_detail.assistant,
+        )
+        .await
+        {
+            Some(member_prompt) => format!("{}\n\n{}", assistant_prompt_result, member_prompt),
+            None => assistant_prompt_result,
+        },
+        None => assistant_prompt_result,
+    };
+
     let _need_generate_title = processed_request.conversation_id.is_empty();
     let request_prompt_result = compose_user_message_with_active_skills(
         &template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await,
@@ -1357,6 +1400,14 @@ pub async fn ask_ai(
     )?;
 
     let app_handle_clone = app_handle.clone();
+    let admission = if let Some(id) = contact_id {
+        let guard = crate::api::butler_peer::admit_turn(id).await;
+        if peer_turn && crate::api::butler_peer::defer_if_busy(&app_handle,id,relay_origin.as_deref().unwrap_or_default())
+            .await.map_err(|e|AppError::UnknownError(e.to_string()))? {
+            return Ok(AiResponse{ conversation_id:id, request_prompt_result_with_context:String::new(), error_message:None });
+        }
+        Some(guard)
+    } else { None };
     let (
         conversation_id,
         _new_message_id,
@@ -1374,8 +1425,13 @@ pub async fn ask_ai(
         runtime_prompt_result.clone(),
         override_prompt.clone(),
         active_skill_attachments,
+        relay_origin.as_deref(),
     )
     .await?;
+    if admission.is_some() {
+        activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
+    }
+    drop(admission);
     let initial_message_ids_for_after_response = init_message_ids.clone();
 
     let _ = PluginHookBus::new(app_handle.clone())
@@ -1391,14 +1447,14 @@ pub async fn ask_ai(
         )
         .await;
 
-    // 设置用户消息的活动状态（闪亮边框）
-    activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
-
+    if contact_id.is_none() {
+        activity_manager.set_user_pending(&app_handle, conversation_id, user_message_id).await;
+    }
     if let Err(error) = maybe_schedule_butler_feishu_relay_for_aipp_turn(
         &app_handle,
         conversation_id,
         user_message_id.saturating_sub(1),
-        relay_origin.as_deref(),
+        if peer_turn { Some("internal") } else { relay_origin.as_deref() },
     )
     .await
     {
@@ -1518,7 +1574,7 @@ pub async fn ask_ai(
             }
             // 与 ACP 通道一致：挂载助手绑定的 MCP 工具（桥接注入），payload 计入签名
             codex_config.selected_mcp_tools_payload =
-                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id)
+                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id, Some(conversation_id))
                     .map_err(AppError::UnknownError)?;
             refresh_codex_session_signature(&mut codex_config);
             let response_message = add_message(
@@ -1625,7 +1681,7 @@ pub async fn ask_ai(
                 }
             }
             config.selected_mcp_tools_payload =
-                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id)
+                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id, Some(conversation_id))
                     .map_err(AppError::UnknownError)?;
             refresh_claude_session_signature(&mut config);
             prepare_claude_mcp_bridge(&app_handle, conversation_id, &mut config)
@@ -1732,6 +1788,7 @@ pub async fn ask_ai(
         refresh_acp_selected_mcp_tools_payload(
             &app_handle,
             assistant_detail.assistant.id,
+            Some(conversation_id),
             &mut acp_config,
         )
         .map_err(AppError::UnknownError)?;
@@ -2085,7 +2142,7 @@ pub async fn ask_ai(
             client: &chat_config.client,
             model_name: &chat_config.model_name,
             conversation_id,
-            conversation_db: &conversation_db,
+            checkpoint_store: &conversation_db,
             is_butler,
             message_ids: init_message_ids,
         };
@@ -2097,13 +2154,14 @@ pub async fn ask_ai(
             &init_message_list,
         )
         .await;
-        let fit_result = context_manager::fit_to_budget_with_compaction(
+        let fit_result = fit_chat_context(
+            &app_handle_clone,
             init_message_list,
             &budget,
             &init_db_token_counts,
             compaction_ctx,
         )
-        .await;
+        .await?;
         emit_chat_context_event(
             &app_handle_clone,
             "chat.afterBuildContext",
@@ -2420,11 +2478,12 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
     // 收集 MCP 信息
-    let mcp_info = collect_mcp_info_for_assistant(
+    let mcp_info = collect_mcp_info_for_conversation(
         &app_handle,
         assistant_id,
         override_mcp_config.as_ref(),
         None,
+        Some(conversation_id_i64),
     )
     .await?;
 
@@ -2639,7 +2698,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         client: &chat_config.client,
         model_name: &chat_config.model_name,
         conversation_id: conversation_id_i64,
-        conversation_db: &conversation_db,
+        checkpoint_store: &conversation_db,
         is_butler: is_butler_cont,
         message_ids: init_metadata.message_ids,
     };
@@ -2651,13 +2710,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         &init_message_list,
     )
     .await;
-    let fit_result = context_manager::fit_to_budget_with_compaction(
+    let fit_result = fit_chat_context(
+        &app_handle,
         init_message_list,
         &budget,
         &init_metadata.db_token_counts,
         compaction_ctx,
     )
-    .await;
+    .await?;
     emit_chat_context_event(
         &app_handle,
         "chat.afterBuildContext",
@@ -2839,11 +2899,12 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let override_mcp_config = enforce_butler_mcp_override(&assistant_detail.assistant.name, None);
 
     // 收集 MCP 信息
-    let mcp_info = collect_mcp_info_for_assistant(
+    let mcp_info = collect_mcp_info_for_conversation(
         &app_handle,
         assistant_id,
         override_mcp_config.as_ref(),
         None,
+        Some(conversation_id),
     )
     .await?;
 
@@ -3047,7 +3108,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         client: &chat_config.client,
         model_name: &chat_config.model_name,
         conversation_id,
-        conversation_db: &conversation_db,
+        checkpoint_store: &conversation_db,
         is_butler: is_butler_batch,
         message_ids: init_metadata.message_ids,
     };
@@ -3059,13 +3120,14 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         &init_message_list,
     )
     .await;
-    let fit_result = context_manager::fit_to_budget_with_compaction(
+    let fit_result = fit_chat_context(
+        &app_handle,
         init_message_list,
         &budget,
         &init_metadata.db_token_counts,
         compaction_ctx,
     )
-    .await;
+    .await?;
     emit_chat_context_event(
         &app_handle,
         "chat.afterBuildContext",
@@ -3389,7 +3451,7 @@ pub async fn regenerate_ai(
 
     // 兼容 MCP：根据助手配置判断是否使用提供商原生 toolcall
     let mcp_info =
-        crate::mcp::collect_mcp_info_for_assistant(&app_handle, assistant_id, None, None).await?;
+        crate::mcp::collect_mcp_info_for_conversation(&app_handle, assistant_id, None, None, Some(conversation_id)).await?;
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // 在异步任务外获取模型详情（避免线程安全问题）
@@ -3585,7 +3647,7 @@ pub async fn regenerate_ai(
             client: &chat_config.client,
             model_name: &chat_config.model_name,
             conversation_id,
-            conversation_db: &conversation_db,
+            checkpoint_store: &conversation_db,
             is_butler: is_butler_regen,
             message_ids: init_metadata.message_ids,
         };
@@ -3603,7 +3665,7 @@ pub async fn regenerate_ai(
             &init_metadata.db_token_counts,
             compaction_ctx,
         )
-        .await;
+        .await?;
         emit_chat_context_event(
             &app_handle_clone,
             "chat.afterBuildContext",
@@ -3815,6 +3877,7 @@ async fn initialize_conversation(
     runtime_user_prompt: String,
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
+    origin: Option<&str>,
 ) -> Result<
     (
         i64,
@@ -3978,20 +4041,24 @@ async fn initialize_conversation(
         let runtime_user_prompt_with_context =
             build_prompt_with_attachment_context(&runtime_user_prompt, &context);
         // 添加用户消息
-        let user_message = add_message(
-            app_handle,
-            None,
-            conversation_id,
-            "user".to_string(),
-            display_user_prompt_with_context.clone(),
-            Some(assistant_detail.model[0].id),
-            Some(assistant_detail.model[0].model_code.clone()),
-            None,
-            None,
-            0,
-            None, // 用户消息不需要 generation_group_id
-            None, // 用户消息不需要 parent_group_id
-        )?;
+        let user_message = if let Some(peer) = origin.and_then(|s| s.strip_prefix("butler_peer/")) {
+            let (id, leg) = peer.split_once('/').ok_or_else(|| AppError::UnknownError("协作来源格式无效".into()))?;
+            let id = id.parse::<i64>().map_err(|e| AppError::UnknownError(e.to_string()))?;
+            let input = crate::db::butler_peer::write_input(&mut db.get_connection()?, id, leg,
+                conversation_id, &display_user_prompt_with_context, assistant_detail.model[0].id,
+                &assistant_detail.model[0].model_code)
+                .map_err(|e| AppError::UnknownError(format!("exchange={id} 写入协作消息失败：{e}")))?;
+            crate::api::butler_peer::updated(app_handle);
+            db.message_repo()?.read(input)?.ok_or_else(|| AppError::UnknownError(format!("协作触发消息 {input} 写入后丢失")))?
+        } else {
+            let message = add_message(app_handle, None, conversation_id, "user".to_string(),
+                display_user_prompt_with_context.clone(), Some(assistant_detail.model[0].id),
+                Some(assistant_detail.model[0].model_code.clone()), None, None, 0, None, None)?;
+            if origin == Some("internal") {
+                db.message_repo()?.update_metadata(message.id, Some(r#"{"origin":"internal"}"#))?;
+            }
+            message
+        };
 
         // 更新 attachment 的 message_id，关联到新创建的用户消息
         // 这确保后续查询时能正确获取 attachment（通过 LEFT JOIN message.id = ma.message_id）

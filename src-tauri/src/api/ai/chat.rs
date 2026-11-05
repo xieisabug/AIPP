@@ -225,7 +225,7 @@ fn merge_chat_response_metadata(
         .prompt_tokens_details
         .as_ref()
         .and_then(|details| details.cached_tokens)
-        .and_then(positive_token_count);
+        .filter(|value| *value >= 0);
     let cached_write_tokens = cache_creation_tokens_from_usage(usage);
 
     if thought_tokens.is_none() && cached_input_tokens.is_none() && cached_write_tokens.is_none() {
@@ -1863,7 +1863,7 @@ async fn setup_captured_tool_calls(
     {
         if let Some(assistant_id) = conv.and_then(|c| c.assistant_id) {
             let mcp_info =
-                crate::mcp::collect_mcp_info_for_assistant(app_handle, assistant_id, None, None)
+                crate::mcp::collect_mcp_info_for_conversation(app_handle, assistant_id, None, None, Some(conversation_id))
                     .await
                     .ok();
             let servers = mcp_info.as_ref().map(|info| info.enabled_servers.as_slice());

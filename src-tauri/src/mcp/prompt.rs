@@ -345,7 +345,7 @@ pub async fn format_mcp_prompt_with_filters(
 1. 只能调用系统已加载的工具，禁止虚构工具名或参数
 2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
 3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
-4. **Agent 工具和 UI 交互工具始终可用，直接调用；其他工具必须先 `load_mcp_tool`，再用 `call_mcp_tool` 调用**
+4. **Agent 工具、UI 交互工具和当前工具列表中的 SuperAdmin 工具始终可用，直接调用；其他工具必须先 `load_mcp_tool`，再用 `call_mcp_tool` 调用**
 5. 当用户明确要求使用某个 Skill / Agent 工作流时，应先调用 `load_skill` 读取该 Skill 的详细说明，再按说明执行
 
 ## 动态加载流程（必须按顺序执行）
@@ -366,7 +366,7 @@ pub async fn format_mcp_prompt_with_filters(
 2. 仅在有助于完成任务时调用；能靠自身知识完成时不调用
 3. 每条消息最多调用一个工具；如需多步骤，分多轮依次调用
 4. 工具调用必须放在消息的最末尾，调用之后禁止再输出任何文字
-5. **Agent 工具和 UI 交互工具始终可用，直接调用；其他工具必须先 `load_mcp_tool`，再用 `call_mcp_tool` 调用**
+5. **Agent 工具、UI 交互工具和当前工具列表中的 SuperAdmin 工具始终可用，直接调用；其他工具必须先 `load_mcp_tool`，再用 `call_mcp_tool` 调用**
 6. 当用户明确要求使用某个 Skill / Agent 工作流时，应先调用 `load_skill` 读取该 Skill 的详细说明，再按说明执行
 
 ## 输出格式（强制）
@@ -405,9 +405,10 @@ pub async fn format_mcp_prompt_with_filters(
         let mut has_load_tools = false;
         for server_details in &mcp_info.enabled_servers {
             let command = server_details.command.as_deref();
-            if !is_agent_server(command) && command != Some("aipp:ui_interaction") {
+            if !is_agent_server(command) && !matches!(command, Some("aipp:ui_interaction" | "aipp:superadmin")) {
                 continue;
             }
+            load_tools_info.push_str(&format!("### 工具集: {}（server_name: {}，直接调用）\n\n", server_details.name, server_details.name));
             for tool in &server_details.tools {
                 let description = if tool.description.trim().is_empty() {
                     "暂无描述"

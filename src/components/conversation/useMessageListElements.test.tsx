@@ -161,6 +161,16 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(screen.getByTestId("message-4")).toHaveAttribute("data-last-message", "true");
     });
 
+    it("should render the chat when a peer contacts an assistant before any human message", () => {
+        const posts = [{ id: 7, anchor: 10, occurred_at: "2026-11-04T12:00:00Z", outgoing: false,
+            peer: "研究助手", peer_assistant: 2, peer_conversation: 20, text: "请审核", status: "delivered", error: null }];
+        const { result } = renderHook(() => useMessageListElements(makeHookProps([
+            makeMessage({id: -7, message_type: "butler_exchange", butler_posts: posts}),
+            makeMessage({id: 11, content: "已审核"}),
+        ])));
+        expect(result.current.renderItems.map(item => item.messageId)).toEqual([-7, 11]);
+    });
+
     it("renders a Butler user message followed by an error message", () => {
         render(
             <Harness

@@ -125,9 +125,12 @@ pub async fn generate_summary(
 
     let summary = response.first_text().unwrap_or("").to_string();
 
+    if summary.trim().is_empty() {
+        return Err(AppError::UnknownError("上下文摘要模型返回了空文本".into()));
+    }
     // Ensure the summary is wrapped in <context_summary> tags
-    let summary = if summary.contains("<context_summary>") {
-        summary
+    let summary = if summary.trim().starts_with("<context_summary>") {
+        summary.trim().to_owned()
     } else {
         format!("<context_summary>\n{}\n</context_summary>", summary)
     };

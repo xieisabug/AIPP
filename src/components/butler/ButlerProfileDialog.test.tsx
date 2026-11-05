@@ -1,0 +1,59 @@
+import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import ButlerProfileDialog from "./ButlerProfileDialog";
+
+describe("Butler profile editor", () => {
+    afterEach(cleanup);
+
+    it("should save trimmed name and independent colors when confirming the preview", async () => {
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        const onClose = vi.fn();
+        render(<ButlerProfileDialog name="总管家" onSave={onSave} onClose={onClose} />);
+        fireEvent.change(screen.getByLabelText("助手名称"), { target: { value: " 小管家 " } });
+        fireEvent.click(screen.getByRole("button", { name: "左侧 · 亮色：薄荷绿" }));
+        fireEvent.click(screen.getByRole("button", { name: "右侧 · 深色：海军蓝" }));
+        expect(onSave).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+        expect(onSave).toHaveBeenCalledWith("小管家", {
+            version: 2, shape: "aipp", colors: { primary: "#CEF3DF", secondary: "#193B68" },
+            accessories: { eyes: null, head: null }, motion: true,
+        });
+    });
+
+    it("should discard edits when cancelled and reject blank names", () => {
+        const onSave = vi.fn();
+        const onClose = vi.fn();
+        render(<ButlerProfileDialog name="总管家" onSave={onSave} onClose={onClose} />);
+        fireEvent.change(screen.getByLabelText("助手名称"), { target: { value: "  " } });
+        expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
+        expect(onSave).not.toHaveBeenCalled();
+        expect(onClose).toHaveBeenCalledOnce();
+    });
+
+    it("should preserve draft and show the underlying error when saving fails", async () => {
+        const onClose = vi.fn();
+        render(<ButlerProfileDialog name="总管家" onSave={vi.fn().mockRejectedValue(new Error("配置写入失败：database is locked"))} onClose={onClose} />);
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent("database is locked");
+        expect(screen.getByLabelText("助手名称")).toHaveValue("总管家");
+        expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it("should retain accessories when changing shape and restoring colors", async () => {
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
+        fireEvent.click(screen.getByRole("button", { name: "佩戴眼镜" }));
+        fireEvent.click(screen.getByRole("button", { name: "佩戴帽子" }));
+        fireEvent.click(screen.getByRole("button", { name: "圆团" }));
+        fireEvent.click(screen.getByRole("button", { name: "脸部 · 亮色：蜜桃" }));
+        fireEvent.click(screen.getByRole("button", { name: "恢复黑白配色" }));
+        fireEvent.click(screen.getByRole("checkbox", { name: "播放动画" }));
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", {
+            version: 2, shape: "pebble", colors: { primary: "#FFFFFF", secondary: "#000000" },
+            accessories: { eyes: "round-glasses", head: "beret" }, motion: false,
+        }));
+    });
+});

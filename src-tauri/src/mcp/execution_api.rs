@@ -1907,10 +1907,11 @@ pub async fn create_mcp_tool_call(
     // 1. 精确匹配原始名称
     // 2. 匹配清理后的名称（用于处理大模型返回的 sanitized 名称）
     let servers = db.get_mcp_servers().map_err(|e| format!("获取MCP服务器列表失败: {}", e))?;
+    let kind = crate::mcp::butler_tools::conversation_kind(&app_handle, Some(conversation_id)).map_err(|e| e.to_string())?;
     let server = servers
         .iter()
         .find(|s| {
-            (s.is_enabled || s.command.as_deref() == Some("aipp:dynamic_mcp"))
+            (s.is_enabled || s.command.as_deref() == Some("aipp:dynamic_mcp") || crate::mcp::butler_tools::is_direct_tool(&kind, s.command.as_deref(), &tool_name))
                 && (s.name == server_name || sanitize_tool_name(&s.name) == server_name)
         })
         .ok_or_else(|| format!("服务器 '{}' 未找到或已禁用", server_name))?;
@@ -1966,19 +1967,11 @@ pub async fn create_mcp_tool_call(
         )
         .await;
 
-    if let Err(error) = crate::api::butler_api::emit_butler_task_pending_mcp_tool_attention(
+    crate::api::butler_api::schedule_butler_task_pending_mcp_tool_attention(
         &app_handle,
         result.conversation_id,
-    )
-    .await
-    {
-        debug!(
-            conversation_id = result.conversation_id,
-            call_id = result.id,
-            error = %error,
-            "failed to refresh Butler pending MCP tool attention"
-        );
-    }
+        result.id,
+    );
 
     Ok(result)
 }
@@ -2060,7 +2053,7 @@ pub async fn execute_mcp_tool_call(
     broadcast_mcp_tool_call_update(&app_handle, &tool_call);
 
     // 获取并验证服务器状态；前置校验失败也写入 failed/error，便于 UI 展示和错误续写
-    let server = match db.get_mcp_server(tool_call.server_id) {
+    let mut server = match db.get_mcp_server(tool_call.server_id) {
         Ok(server) => server,
         Err(e) => {
             return handle_tool_execution_result(
@@ -2077,6 +2070,15 @@ pub async fn execute_mcp_tool_call(
             .await;
         }
     };
+    let kind = match crate::mcp::butler_tools::conversation_kind(&app_handle, Some(tool_call.conversation_id)) {
+        Ok(kind) => kind,
+        Err(error) => return handle_tool_execution_result(
+            &app_handle, &state, &feature_config_state, &window, call_id, tool_call,
+            Err(format!("校验管家工具会话失败：{error}")), is_retry, trigger_continuation,
+        ).await,
+    };
+    let butler_direct = crate::mcp::butler_tools::is_direct_tool(&kind, server.command.as_deref(), &tool_call.tool_name);
+    if butler_direct { server.is_enabled = true; }
     if let Err(e) = validate_server_status(&server) {
         return handle_tool_execution_result(
             &app_handle,
@@ -2117,7 +2119,7 @@ pub async fn execute_mcp_tool_call(
                 .await;
             }
         };
-        if dynamic_mode_enabled {
+        if dynamic_mode_enabled && !butler_direct {
             if let Err(e) = db.refresh_conversation_loaded_tool_statuses(tool_call.conversation_id)
             {
                 return handle_tool_execution_result(
@@ -2280,6 +2282,7 @@ pub async fn execute_mcp_tool_call(
             Some(tool_call.conversation_id),
             Some(cancel_token.clone()),
         );
+        let exec_future = crate::api::butler_peer::TOOL_MESSAGE.scope(tool_call.message_id, exec_future);
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
             res = exec_future => res,
