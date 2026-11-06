@@ -86,7 +86,7 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                                 <FormItem>
                                     <FormLabel>名称</FormLabel>
                                     <FormControl>
-                                        <Input {...field} />
+                                        <Input {...field} enterKeyHint="done" autoCapitalize="none" />
                                     </FormControl>
                                     <FormMessage />
                                 </FormItem>
@@ -99,7 +99,7 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                                 <FormItem>
                                     <FormLabel>描述</FormLabel>
                                     <FormControl>
-                                        <Input {...field} />
+                                        <Input {...field} enterKeyHint="done" autoCapitalize="none" />
                                     </FormControl>
                                     <FormMessage />
                                 </FormItem>

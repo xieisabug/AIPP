@@ -81,7 +81,7 @@ const EditAssistantDialog: React.FC<EditAssistantDialogProps> = ({
                 <FormItem>
                   <FormLabel>名称:</FormLabel>
                   <FormControl>
-                    <Input {...field} />
+                    <Input {...field} enterKeyHint="done" autoCapitalize="none" />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -94,7 +94,7 @@ const EditAssistantDialog: React.FC<EditAssistantDialogProps> = ({
                 <FormItem>
                   <FormLabel>描述:</FormLabel>
                   <FormControl>
-                    <Input {...field} />
+                    <Input {...field} enterKeyHint="done" autoCapitalize="none" />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

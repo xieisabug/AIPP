@@ -71,7 +71,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" data-aipp-slot="legacy-modal">
             {/* 背景遮罩 */}
             <div
                 className="absolute inset-0 bg-black/50 backdrop-blur-sm"
@@ -79,7 +79,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
             />
 
             {/* 模态框内容 */}
-            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-200 scale-100">
+            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-200 scale-100" data-aipp-slot="legacy-modal-panel">
                 {/* 标题栏 */}
                 <div className="flex items-center justify-between p-6 border-b border-border">
                     <div className="flex items-center gap-3">
@@ -96,7 +96,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                 </div>
 
                 {/* 内容区域 */}
-                <div className="p-6">
+                <div className="p-6" data-aipp-slot="legacy-modal-body">
                     <div className="space-y-5">
                         {/* 分享码输入 */}
                         <div className="space-y-2">
@@ -179,7 +179,7 @@ const ImportDialog: React.FC<ImportDialogProps> = ({
                 </div>
 
                 {/* 按钮区域 */}
-                <div className="flex justify-end gap-3 p-6 pt-0">
+                <div className="flex justify-end gap-3 p-6 pt-0" data-aipp-slot="legacy-modal-actions">
                     <Button
                         variant="outline"
                         onClick={handleClose}
