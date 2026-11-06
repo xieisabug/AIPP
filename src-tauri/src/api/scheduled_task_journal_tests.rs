@@ -60,3 +60,22 @@ fn test_scheduled_journal_valid_fallback_protects_recoverable_outcome() {
     let status: String = conn.query_row("SELECT status FROM scheduled_task_run", [], |row| row.get(0)).unwrap();
     assert_eq!(status, "running");
 }
+
+#[test]
+fn test_scheduled_outcome_deserialization_does_not_borrow_input() {
+    fn require_owned<T: serde::de::DeserializeOwned>() {}
+    require_owned::<ScheduledRunOutcome>();
+    require_owned::<ScheduledOutcomeJournal>();
+    let recovered = {
+        let bytes = valid_journal(RUN_ID);
+        serde_json::from_slice::<ScheduledOutcomeJournal>(&bytes).unwrap()
+    };
+    assert_eq!(recovered.outcome.end_reason, "timeout");
+    assert_eq!(recovered.outcome.detail.as_deref(), Some("部分成果"));
+    let outcome = {
+        let payload = serde_json::to_string(&recovered.outcome).unwrap();
+        serde_json::from_str::<ScheduledRunOutcome>(&payload).unwrap()
+    };
+    assert_eq!(outcome.status, "failed");
+    assert_eq!(outcome.error.as_deref(), Some("运行超时"));
+}
