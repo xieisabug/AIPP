@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import type { ButlerAppearance } from "@/components/butler/butlerAppearance";
-import { avatarDefinitions, type AvatarState } from "./avatarDefinition";
-import { GlassesArtwork, HatArtwork } from "./AvatarAccessories";
+import { avatarDefinitions, type AvatarAction, type AvatarState } from "./avatarDefinition";
+import { BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "./AvatarAccessories";
 import { useAvatarMotion, type AvatarActionRequest } from "./useAvatarMotion";
 import { useAvatarPerformance } from "./useAvatarPerformance";
 import AvatarEye from "./AvatarEye";
+import { SvgPose } from "./SvgPose";
 import { ConfettiOverlay, MorphParts } from "./AvatarEffects";
 
 export interface AnimatedAvatarProps {
@@ -29,10 +30,12 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     const performance = useAvatarPerformance(action ? "idle" : state, active, !full, id);
     const v = performance.values;
     const m = performance.morph;
-    const glasses = appearance.accessories.eyes === "round-glasses" && definition.capabilities.includes("eyes");
-    const hat = appearance.accessories.head === "beret" && definition.capabilities.includes("headwear");
-    // 变形中心对齐可视区域中心：带帽/大尺寸的 viewBox 整体上移了 45 单位。
-    const morphCenterY = hat || full ? 210 : 255;
+    const faceItem = definition.capabilities.includes("eyes") ? appearance.accessories.eyes : null;
+    const headItem = definition.capabilities.includes("headwear") ? appearance.accessories.head : null;
+    const glasses = faceItem === "round-glasses";
+    const hat = headItem === "beret";
+    // 变形中心对齐可视区域中心：带头饰/大尺寸的 viewBox 整体上移了 45 单位。
+    const morphCenterY = headItem || full ? 210 : 255;
     // 身体原地缩成圆核；绕竖轴的转身用 cos(spin) 压缩横向，半程正好侧对观众。
     const bodyScaleX = useTransform(() => v.sx.get()*v.zoom.get()*Math.cos(v.yaw.get()*0.45*Math.PI/180)*m.scale.get()*m.sx.get()*Math.cos(m.spin.get()));
     const bodyScaleY = useTransform(() => v.sy.get()*v.zoom.get()*m.scale.get()*m.sy.get());
@@ -55,10 +58,18 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     // 转身起步时眼睛先往转向一侧滑，给出方向感（随后眼睛淡出）。
     const faceX = useTransform(() => Math.sin(v.yaw.get()*Math.PI/180)*28 + Math.sin(m.spin.get())*40 + gazeX.get() + v.gazeX.get());
     const faceY = useTransform(() => v.pitch.get()*0.55 + gazeY.get() + v.gazeY.get());
-    const smiling = action === "smile" || action === "glasses";
+    const performing = (name: AvatarAction, equipped: boolean) => active && full && equipped && action === name;
+    const takingGlasses = performing("glasses", glasses);
+    const tippingHat = performing("hat", hat);
+    const peering = performing("peer", faceItem === "sunglasses");
+    const blushing = performing("blush", faceItem === "blush");
+    const jingling = performing("jingle", headItem === "bow-bell");
+    const fluttering = performing("butterfly", headItem === "flower");
+    const smiling = action === "smile" || action === "glasses" || blushing || fluttering;
     const blinking = action === "blink";
-    const takingGlasses = active && full && glasses && action === "glasses";
-    const tippingHat = active && full && hat && action === "hat";
+    // 装饰动作带动整个身体：摇头晃铃铛、害羞地扭一扭。
+    const sway = jingling ? { rotate: [0, -11, 10, -9, 8, -5, 3, 0] } : blushing ? { rotate: [0, -5, 4, -4, 3, 0] } : { rotate: 0 };
+    const swayTransition = jingling ? { duration: 1.7, ease: "easeInOut" as const } : blushing ? { duration: 2, ease: "easeInOut" as const } : { duration: 0.25 };
     const face = definition.face;
     const coreColor = coreColorOf(appearance);
     const dock = definition.propDock;
@@ -79,7 +90,7 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
             targetX.set(Math.max(-9, Math.min(9, (event.clientX - rect.left - rect.width / 2) / rect.width * 18)));
             targetY.set(Math.max(-6, Math.min(6, (event.clientY - rect.top - rect.height / 2) / rect.height * 12)));
         }}>
-        <svg viewBox={hat || full ? "-55 -100 620 620" : "-12 -12 534 534"} className="h-full w-full overflow-visible" focusable="false">
+        <svg viewBox={headItem || full ? "-55 -100 620 620" : "-12 -12 534 534"} className="h-full w-full overflow-visible" focusable="false">
             <defs>
                 <linearGradient id={`${id}-primary`} x1="0" y1="0" x2="0.3" y2="1">
                     <stop stopColor="white" /><stop offset="0.4" stopColor="#F5F5F5" /><stop offset="1" stopColor="#1A2437" />
@@ -93,15 +104,22 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                     {performance.kind && <motion.g data-avatar-core="" style={{ opacity: discOpacity }}>
                         <circle r="250" fill={coreColor} />
                     </motion.g>}
-                    <motion.g style={{ opacity: logoOpacity }}><g transform="translate(-255 -255)">
+                    <motion.g style={{ opacity: logoOpacity }}><g transform="translate(0 140)">
+                    <SvgPose pose={sway} transition={swayTransition}><g transform="translate(-255 -395)">
                         {definition.parts.map(part => <g key={part.color}>
                             <path d={part.path} fill={appearance.colors[part.color]} />
                             <path d={part.path} fill={`url(#${id}-${part.color})`} opacity="0.2" />
                         </g>)}
                         <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}>
                             <motion.g style={{ x: faceX, y: faceY, opacity: eyeOpacity }}>
-                                {[-1, 1].map(side => <AvatarEye key={side} side={side} open={side < 0 ? v.left : v.right} happy={v.happy} sad={v.sad} yaw={v.yaw} tilt={v.tilt} blink={blinking} forceSmile={smiling} color={appearance.colors.primary} />)}
+                                {[-1, 1].map(side => <AvatarEye key={side} side={side} open={side < 0 ? v.left : v.right} happy={v.happy} sad={v.sad} yaw={v.yaw} tilt={v.tilt}
+                                    blink={blinking} forceSmile={smiling} squint={peering} squeeze={jingling} color={appearance.colors.primary} />)}
                             </motion.g>
+                            {faceItem === "blush" && <g data-avatar-accessory="blush"><BlushArtwork /></g>}
+                            {faceItem === "sunglasses" && <SvgPose data-avatar-accessory="sunglasses" pose={peering ? { y: [0, 0, -130, -130, 0], rotate: [0, 0, -5, -5, 0] } : { y: 0, rotate: 0 }}
+                                transition={peering ? { duration: 3, times: [0, 0.1, 0.3, 0.8, 0.95], ease: "easeInOut" } : { duration: 0.2 }}>
+                                <SunglassesArtwork />
+                            </SvgPose>}
                         </g>
                         <AnimatePresence initial={false}>
                         {glasses && <motion.g key="glasses" data-avatar-accessory="round-glasses"
@@ -119,6 +137,14 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                                 <HatArtwork />
                             </motion.g>
                         </g>}
+                        {headItem === "bow-bell" && <g data-avatar-accessory="bow-bell"
+                            transform={`translate(${definition.clip.x} ${definition.clip.y}) rotate(${definition.clip.rotation ?? 0}) scale(${definition.clip.scale})`}>
+                            <BowBellArtwork color={appearance.colors.primary} outline={coreColor} tilt={definition.clip.rotation} playing={jingling} />
+                        </g>}
+                        {headItem === "flower" && <g data-avatar-accessory="flower" transform={`translate(${definition.clip.x} ${definition.clip.y}) scale(${definition.clip.scale})`}>
+                            <FlowerArtwork playing={fluttering} />
+                        </g>}
+                    </g></SvgPose>
                     </g></motion.g>
                 </motion.g>
             </g>
