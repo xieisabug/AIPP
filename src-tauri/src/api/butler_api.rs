@@ -1157,7 +1157,16 @@ impl ButlerMainBusy {
 }
 
 pub(crate) fn is_butler_main_busy_error(error: &str) -> bool {
-    error.starts_with(BUTLER_MAIN_BUSY_MARKER)
+    error.contains(BUTLER_MAIN_BUSY_MARKER)
+}
+
+/// 内部续跑开工前的最终检查，在会话准入锁内调用：与用户消息的保存和运行状态发布互斥，
+/// 保证同一会话同一时间只有一轮开始执行，且用户消息优先。
+pub(crate) async fn internal_turn_busy_reason(app_handle: &AppHandle, conversation_id: i64) -> Option<String> {
+    let (ready, user_turn_pending) = butler_main_ready_for_internal_turn(app_handle, conversation_id).await;
+    (!ready).then(|| {
+        ButlerMainBusy { conversation_id, waited_secs: 0, user_turn_pending }.into_error_string()
+    })
 }
 
 pub(crate) async fn is_butler_main_running(app_handle: &AppHandle, conversation_id: i64) -> bool {
@@ -1176,27 +1185,48 @@ pub(crate) enum FollowupTurnProgress {
     Incomplete { attempts: usize },
 }
 
-fn is_internal_origin_message(message: &Message) -> bool {
-    message
-        .metadata_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .is_some_and(|meta| meta["origin"] == "internal")
+fn message_metadata(message: &Message) -> Option<serde_json::Value> {
+    message.metadata_json.as_deref().and_then(|raw| serde_json::from_str(raw).ok())
 }
 
-pub(crate) fn followup_turn_progress(messages: &[Message], anchor_message_id: i64) -> FollowupTurnProgress {
-    let mut started = false;
+fn is_internal_origin_message(message: &Message) -> bool {
+    message_metadata(message).is_some_and(|meta| meta["origin"] == "internal")
+}
+
+/// 续跑提示消息上记录它负责的回送（如 `task:12`、`run:<run_id>`），完成判断与重试次数只认本回送的提示。
+fn is_followup_prompt_for(message: &Message, key: &str) -> bool {
+    message.message_type == "user"
+        && message_metadata(message).is_some_and(|meta| {
+            meta["origin"] == "internal"
+                && meta["followup_keys"]
+                    .as_array()
+                    .is_some_and(|keys| keys.iter().any(|value| value.as_str() == Some(key)))
+        })
+}
+
+pub(crate) fn task_followup_key(task_conversation_id: i64) -> String {
+    format!("task:{task_conversation_id}")
+}
+
+/// 判断某个回送在注入消息之后的续跑进展：只看带有本回送标记的提示所开启的那一轮，
+/// 该轮（到下一条用户消息为止）出现自然完成、且不是工具调用中间态的回复才算完成。
+pub(crate) fn followup_turn_progress(
+    messages: &[Message],
+    anchor_message_id: i64,
+    key: &str,
+) -> FollowupTurnProgress {
     let mut attempts = 0usize;
+    let mut in_our_turn = false;
     for message in messages.iter().filter(|message| message.id > anchor_message_id) {
         match message.message_type.as_str() {
             "user" => {
-                started = true;
-                if is_internal_origin_message(message) {
+                in_our_turn = is_followup_prompt_for(message, key);
+                if in_our_turn {
                     attempts += 1;
                 }
             }
             "response" | "assistant"
-                if started
+                if in_our_turn
                     && is_naturally_completed_response(message)
                     && !message.content.contains("<!-- MCP_TOOL_CALL")
                     && message
@@ -1209,11 +1239,44 @@ pub(crate) fn followup_turn_progress(messages: &[Message], anchor_message_id: i6
             _ => {}
         }
     }
-    if started {
+    if attempts > 0 {
         FollowupTurnProgress::Incomplete { attempts }
     } else {
         FollowupTurnProgress::NotStarted
     }
+}
+
+pub(crate) fn latest_message_id(db: &ConversationDatabase, conversation_id: i64) -> Result<i64, String> {
+    Ok(db
+        .message_repo()
+        .map_err(|e| e.to_string())?
+        .list_by_conversation_id(conversation_id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|(message, _)| message.id)
+        .max()
+        .unwrap_or(0))
+}
+
+/// 给刚开始的续跑提示消息打上回送标记。调用方持有续跑锁，after_message_id 之后的第一条内部用户消息即本次提示。
+pub(crate) fn tag_followup_prompt(
+    db: &ConversationDatabase,
+    conversation_id: i64,
+    after_message_id: i64,
+    keys: &[String],
+) -> Result<(), String> {
+    let message_repo = db.message_repo().map_err(|e| e.to_string())?;
+    let prompt = message_repo
+        .list_by_conversation_id(conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(message, _)| message)
+        .filter(|message| message.id > after_message_id && message.message_type == "user")
+        .find(is_internal_origin_message)
+        .ok_or_else(|| format!("conversation_id={conversation_id}; 未找到本次续跑的提示消息，无法记录回送标记"))?;
+    let metadata = serde_json::json!({"origin": "internal", "followup_keys": keys}).to_string();
+    message_repo.update_metadata(prompt.id, Some(&metadata)).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 主会话是否可以开始一轮内部续跑：没有在运行，且没有排队中的用户消息（用户新消息优先）。
@@ -1534,6 +1597,11 @@ async fn enqueue_butler_main_followup(
         let prompt = build_batched_followup_prompt(&followup_batch);
 
         let window = resolve_or_create_butler_execution_window(&app_handle)?;
+        let before_prompt_id = latest_message_id(&db, butler_conversation_id)?;
+        let followup_keys: Vec<String> = followup_batch
+            .iter()
+            .map(|entry| task_followup_key(entry.task.task_conversation_id))
+            .collect();
         let ai_request = AiRequest {
             conversation_id: butler_conversation_id.to_string(),
             assistant_id,
@@ -1564,6 +1632,9 @@ async fn enqueue_butler_main_followup(
         )
         .await
         .map_err(|e| e.to_string())?;
+        if let Err(error) = tag_followup_prompt(&db, butler_conversation_id, before_prompt_id, &followup_keys) {
+            warn!(butler_conversation_id, error = %error, "failed to tag butler follow-up prompt");
+        }
 
         // ask_ai 只是开始了续跑；是否完成由对账在主会话空闲后按完成证据判定
         for entry in &followup_batch {
@@ -2989,7 +3060,11 @@ async fn ensure_butler_task_followup_if_needed(
         if is_butler_main_running(app_handle, definition.butler_conversation_id).await {
             return Ok(false);
         }
-        match followup_turn_progress(&main_messages, handoff_message_id) {
+        match followup_turn_progress(
+            &main_messages,
+            handoff_message_id,
+            &task_followup_key(task_conversation_id),
+        ) {
             FollowupTurnProgress::Completed => {
                 butler_repo
                     .update_task_result_followup_state(
@@ -3683,35 +3758,56 @@ mod tests {
         assert!(decision.summary.contains("取消请求后"));
     }
 
-    /// 续跑刚开始不算送达：只有注入结果之后出现自然完成的回复才算完成
+    /// 续跑完成与重试次数只认本回送标记的提示：其他聊天或其他任务的回复不算本任务完成
     #[test]
-    fn followup_turn_progress_requires_finished_reply_after_handoff() {
-        use super::{followup_turn_progress, FollowupTurnProgress};
-        let internal = Some(r#"{"origin":"internal"}"#);
+    fn followup_turn_progress_is_bound_to_its_own_prompt() {
+        use super::{followup_turn_progress, task_followup_key, FollowupTurnProgress};
+        let key = task_followup_key(7);
+        let ours = Some(r#"{"origin":"internal","followup_keys":["task:7","task:8"]}"#);
+        let other_task = Some(r#"{"origin":"internal","followup_keys":["task:9"]}"#);
         let handoff = build_message(10, "system", "<butler_task_result>", true);
-        let prompt = build_message_with_metadata(11, "user", "系统任务回流", true, internal);
 
-        assert_eq!(followup_turn_progress(&[handoff.clone()], 10), FollowupTurnProgress::NotStarted);
-        // 只有提示消息、回复写到一半：未完成
-        let partial = build_message(12, "response", "正在汇总", false);
-        assert_eq!(
-            followup_turn_progress(&[handoff.clone(), prompt.clone(), partial], 10),
-            FollowupTurnProgress::Incomplete { attempts: 1 }
-        );
-        // 工具调用中间态不算完成
-        let tool_step = build_message(12, "response", "<!-- MCP_TOOL_CALL:{} -->", true);
-        assert_eq!(
-            followup_turn_progress(&[handoff.clone(), prompt.clone(), tool_step], 10),
-            FollowupTurnProgress::Incomplete { attempts: 1 }
-        );
-        // 被中断的回复不算完成
-        let interrupted = build_message_with_metadata(12, "response", "半截", true, Some(r#"{"end_reason":"interrupted"}"#));
-        assert_eq!(
-            followup_turn_progress(&[handoff.clone(), prompt.clone(), interrupted], 10),
-            FollowupTurnProgress::Incomplete { attempts: 1 }
-        );
-        let done = build_message(12, "response", "[[NO_REPLY]]", true);
-        assert_eq!(followup_turn_progress(&[handoff, prompt, done], 10), FollowupTurnProgress::Completed);
+        // 用户普通聊天与其他任务的续跑完成，都不算本任务完成，也不计入重试
+        let user_chat = build_message(11, "user", "顺便问个问题", true);
+        let user_reply = build_message(12, "response", "回答", true);
+        let other_prompt = build_message_with_metadata(13, "user", "其他任务回流", true, other_task);
+        let other_reply = build_message(14, "response", "[[NO_REPLY]]", true);
+        let unrelated = vec![handoff.clone(), user_chat, user_reply, other_prompt, other_reply];
+        assert_eq!(followup_turn_progress(&unrelated, 10, &key), FollowupTurnProgress::NotStarted);
+
+        // 本任务提示开启的一轮：半截、工具中间态、被中断都不算完成
+        let prompt = build_message_with_metadata(15, "user", "系统任务回流", true, ours);
+        for unfinished in [
+            build_message(16, "response", "正在汇总", false),
+            build_message(16, "response", "<!-- MCP_TOOL_CALL:{} -->", true),
+            build_message_with_metadata(16, "response", "半截", true, Some(r#"{"end_reason":"interrupted"}"#)),
+        ] {
+            let mut messages = unrelated.clone();
+            messages.extend([prompt.clone(), unfinished]);
+            assert_eq!(followup_turn_progress(&messages, 10, &key), FollowupTurnProgress::Incomplete { attempts: 1 });
+        }
+        // 本轮之后用户插话得到的回复，不算本任务完成
+        let mut messages = unrelated.clone();
+        messages.extend([
+            prompt.clone(),
+            build_message(16, "response", "写到一半", false),
+            build_message(17, "user", "用户插话", true),
+            build_message(18, "response", "回答插话", true),
+        ]);
+        assert_eq!(followup_turn_progress(&messages, 10, &key), FollowupTurnProgress::Incomplete { attempts: 1 });
+
+        let mut done = unrelated;
+        done.extend([prompt, build_message(16, "response", "[[NO_REPLY]]", true)]);
+        assert_eq!(followup_turn_progress(&done, 10, &key), FollowupTurnProgress::Completed);
+        assert_eq!(followup_turn_progress(&done, 10, &task_followup_key(8)), FollowupTurnProgress::Completed, "批量提示覆盖多个任务");
+    }
+
+    #[test]
+    fn butler_busy_error_survives_app_error_prefix() {
+        let busy = super::ButlerMainBusy { conversation_id: 1, waited_secs: 0, user_turn_pending: true }.into_error_string();
+        let wrapped = crate::errors::AppError::UnknownError(busy).to_string();
+        assert!(super::is_butler_main_busy_error(&wrapped));
+        assert!(!super::is_butler_main_busy_error("未知错误: 模型配置错误"));
     }
 
     /// 提示词不能承诺运行时会拒绝的协作方式：收到协作请求的成员不能再派工

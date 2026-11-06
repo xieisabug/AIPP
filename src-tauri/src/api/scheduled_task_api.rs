@@ -24,8 +24,9 @@ use crate::api::assistant_api::get_assistant;
 use crate::api::butler_api::{
     active_butler_main_conversation_id, followup_turn_progress, get_butler_main_continuation_lock,
     is_butler_main_busy_error, is_butler_main_running, is_current_butler_main_conversation,
-    resolve_or_create_butler_execution_window, wait_for_butler_main_to_be_idle, ButlerMainBusy,
-    FollowupTurnProgress, FOLLOWUP_MAX_CONTINUATION_ATTEMPTS,
+    latest_message_id, resolve_or_create_butler_execution_window, tag_followup_prompt,
+    wait_for_butler_main_to_be_idle, ButlerMainBusy, FollowupTurnProgress,
+    FOLLOWUP_MAX_CONTINUATION_ATTEMPTS,
 };
 use crate::api::genai_client::create_client_with_config;
 use crate::db::assistant_db::AssistantDatabase;
@@ -1230,12 +1231,15 @@ fn update_task_run(
     summary: Option<&str>,
     error_message: Option<&str>,
     finished_time: Option<DateTime<Utc>>,
-) {
+) -> Result<(), String> {
     let finished_time_for_event = finished_time.clone();
     let result = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
         db.update_run_result(run_id, status, notify, summary, error_message, finished_time)
             .map_err(|e| e.to_string())
     });
+    if let Err(error) = &result {
+        error!(run_id, status, error = %error, "failed to persist scheduled task run result");
+    }
     if result.is_ok() {
         let event_payload = ScheduledTaskRunUpdateEvent {
             run_id: run_id.to_string(),
@@ -1247,6 +1251,7 @@ fn update_task_run(
         };
         let _ = app_handle.emit(SCHEDULED_TASK_RUN_UPDATED_EVENT, event_payload);
     }
+    result
 }
 
 fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> Result<(), String> {
@@ -1914,7 +1919,7 @@ pub async fn execute_scheduled_task(
             Ok(outcome) => outcome,
             Err(err) => ScheduledRunOutcome::failed("error", err, None),
         };
-        update_task_run(
+        let saved = update_task_run(
             app_handle,
             &run_id,
             outcome.status,
@@ -1925,7 +1930,11 @@ pub async fn execute_scheduled_task(
         );
         // 结果已入库后再注销本地运行登记（回报管家可能需要等待，不应继续显示为执行中）
         drop(registration);
-        if task.butler_conversation_id.is_some() {
+        if let Err(error) = &saved {
+            // 未入库时不回报，避免与记录不一致；记录仍为运行中，重启后按中断如实回报
+            log_task_message(app_handle, task.id, &run_id, "error",
+                format!("保存运行结果失败，暂不回报总管家（重启后按中断补报）: {error}"));
+        } else if task.butler_conversation_id.is_some() {
             // 回报可能需要长时间排队等待主会话空闲，放到后台，不占用调度
             spawn_scheduled_run_report(app_handle, task, &run_id, &outcome);
         }
@@ -2038,6 +2047,28 @@ pub(crate) fn outcome_from_recorded_run(run: &ScheduledTaskRun) -> ScheduledRunO
     }
 }
 
+/// 本进程正在回报的运行；同一运行只允许一个回报流程，启动补报不会与新任务的回报重叠。
+fn scheduled_reports_in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static IN_FLIGHT: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub(crate) struct ScheduledReportGuard(String);
+
+impl Drop for ScheduledReportGuard {
+    fn drop(&mut self) {
+        scheduled_reports_in_flight().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+pub(crate) fn claim_scheduled_report(run_id: &str) -> Option<ScheduledReportGuard> {
+    scheduled_reports_in_flight()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run_id.to_string())
+        .then(|| ScheduledReportGuard(run_id.to_string()))
+}
+
 fn spawn_scheduled_run_report(
     app_handle: &tauri::AppHandle,
     task: &ScheduledTask,
@@ -2048,7 +2079,12 @@ fn spawn_scheduled_run_report(
     let task = task.clone();
     let run_id = run_id.to_string();
     let outcome = outcome.clone();
+    let Some(guard) = claim_scheduled_report(&run_id) else {
+        debug!(run_id = %run_id, "scheduled run report already in flight");
+        return;
+    };
     tauri::async_runtime::spawn(async move {
+        let _guard = guard;
         report_scheduled_run_to_butler(&app_handle, &task, &run_id, &outcome).await;
     });
 }
@@ -2147,7 +2183,8 @@ async fn execute_scheduled_task_inner(
         .map_err(|e| format!("Failed to get assistant: {}", e))?;
     if assistant_detail.assistant.assistant_type.unwrap_or(0) != 0 {
         log_task_message(app_handle, task.id, run_id, "error", "只能选择普通对话助手");
-        update_task_run(
+        // 外层会统一写入最终结果
+        let _ = update_task_run(
             app_handle,
             run_id,
             "failed",
@@ -2160,7 +2197,8 @@ async fn execute_scheduled_task_inner(
     }
     if assistant_detail.model.is_empty() {
         log_task_message(app_handle, task.id, run_id, "error", "助手未配置模型");
-        update_task_run(
+        // 外层会统一写入最终结果
+        let _ = update_task_run(
             app_handle,
             run_id,
             "failed",
@@ -2643,7 +2681,7 @@ async fn enqueue_scheduled_task_butler_followup(
         .map(|(message, _)| message)
         .collect();
     if let Some(anchor) = find_scheduled_result_message_id(&main_messages, run_id) {
-        match followup_turn_progress(&main_messages, anchor) {
+        match followup_turn_progress(&main_messages, anchor, &scheduled_followup_key(run_id)) {
             FollowupTurnProgress::Completed => return Ok(ScheduledFollowupStep::Completed),
             FollowupTurnProgress::Incomplete { attempts } if attempts >= FOLLOWUP_MAX_CONTINUATION_ATTEMPTS => {
                 return Err(format!("结果已注入主会话（message_id={anchor}），但总管家续跑 {attempts} 次都未完成，停止自动重试"));
@@ -2672,6 +2710,7 @@ async fn enqueue_scheduled_task_butler_followup(
     }
 
     let prompt = build_butler_scheduled_task_followup_prompt(task, outcome);
+    let before_prompt_id = latest_message_id(&db, butler_conversation_id)?;
     let window = resolve_or_create_butler_execution_window(app_handle)?;
     let ai_request = AiRequest {
         conversation_id: butler_conversation_id.to_string(),
@@ -2703,6 +2742,13 @@ async fn enqueue_scheduled_task_butler_followup(
     )
     .await
     .map_err(|e| e.to_string())?;
+    if let Err(error) = tag_followup_prompt(&db, butler_conversation_id, before_prompt_id, &[scheduled_followup_key(run_id)]) {
+        log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("记录续跑标记失败: {error}"));
+    }
 
     Ok(ScheduledFollowupStep::Started)
+}
+
+pub(crate) fn scheduled_followup_key(run_id: &str) -> String {
+    format!("run:{run_id}")
 }

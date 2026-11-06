@@ -443,3 +443,22 @@ fn test_butler_peer_receipt_retries_until_limit_without_duplicates() {
     fail_receipt(&db, second.id).unwrap();
     assert_eq!(reread(&db, second.id).receipt_state.as_deref(), Some("delivered"), "已送达不会重发");
 }
+
+/// 旧版本遗留的未送达回执（unknown、首次失败即放弃的 failed）在启动时恢复为待送
+#[test]
+fn test_butler_peer_recover_requeues_legacy_undelivered_receipts() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let a = enqueue(&mut db, request("a", "一")).unwrap();
+    let b = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("b", "二") }).unwrap();
+    db.execute("UPDATE butler_peer_exchange SET state='failed',receipt_state='unknown' WHERE id=?1", [a.id]).unwrap();
+    db.execute("UPDATE butler_peer_exchange SET state='failed',receipt_state='failed',receipt_attempts=0 WHERE id=?1", [b.id]).unwrap();
+    recover(&db).unwrap();
+    assert_eq!(reread(&db, a.id).receipt_state.as_deref(), Some("pending"));
+    assert_eq!(reread(&db, b.id).receipt_state.as_deref(), Some("pending"));
+    // 新版本重试到上限的 failed 不再恢复
+    db.execute("UPDATE butler_peer_exchange SET receipt_state='failed',receipt_attempts=?2 WHERE id=?1",
+        params![b.id, MAX_RECEIPT_ATTEMPTS]).unwrap();
+    recover(&db).unwrap();
+    assert_eq!(reread(&db, b.id).receipt_state.as_deref(), Some("failed"));
+}

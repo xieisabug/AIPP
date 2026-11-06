@@ -386,6 +386,15 @@ mod run_outcome_tests {
     }
 
     #[test]
+    fn test_scheduled_report_runs_once_per_run_id() {
+        let first = claim_scheduled_report("run-dup").expect("first claim");
+        assert!(claim_scheduled_report("run-dup").is_none(), "同一运行不并行回报");
+        drop(first);
+        assert!(claim_scheduled_report("run-dup").is_some(), "结束后可再次回报");
+        assert_eq!(scheduled_followup_key("abc"), "run:abc");
+    }
+
+    #[test]
     fn test_outcome_from_recorded_run_keeps_real_status() {
         use crate::db::scheduled_task_db::ScheduledTaskRun;
         let run = ScheduledTaskRun {

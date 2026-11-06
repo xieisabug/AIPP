@@ -272,6 +272,12 @@ pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
         "UPDATE butler_peer_exchange SET receipt_state='pending' WHERE receipt_state='sending'",
         [],
     )?;
+    // 旧版本遗留：unknown（投递中退出）与首次失败即放弃的 failed（未记录重试次数）都未送达，恢复为待送
+    conn.execute(
+        "UPDATE butler_peer_exchange SET receipt_state='pending'
+         WHERE receipt_state='unknown' OR (receipt_state='failed' AND receipt_attempts=0)",
+        [],
+    )?;
     Ok(())
 }
 

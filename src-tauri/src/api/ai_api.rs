@@ -1416,6 +1416,14 @@ pub async fn ask_ai(
     let app_handle_clone = app_handle.clone();
     let admission = if let Some(id) = contact_id {
         let guard = crate::api::butler_peer::admit_turn(id).await;
+        // 内部续跑在准入锁内做最终检查：与用户消息互斥，避免同时开始执行
+        if relay_origin.as_deref() == Some("internal")
+            && existing_conversation.as_ref().is_some_and(|c| c.conversation_kind == "butler_main")
+        {
+            if let Some(reason) = crate::api::butler_api::internal_turn_busy_reason(&app_handle, id).await {
+                return Err(AppError::UnknownError(reason));
+            }
+        }
         if peer_turn && crate::api::butler_peer::defer_if_busy(&app_handle,id,relay_origin.as_deref().unwrap_or_default())
             .await.map_err(|e|AppError::UnknownError(e.to_string()))? {
             return Ok(AiResponse{ conversation_id:id, request_prompt_result_with_context:String::new(), error_message:None });
