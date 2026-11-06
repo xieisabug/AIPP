@@ -1,4 +1,23 @@
 use super::*;
+
+#[test]
+fn test_opencode_go_raw_billing_preserves_zero_across_response_formats() {
+    let usage = serde_json::json!({"cost":0,"opencode":{"billing_source":"go","allowance":0,"tokens":{"input":2,"output":3}}});
+    for body in [
+        serde_json::json!({"usage":usage}),
+        serde_json::json!({"usageMetadata":usage}),
+        serde_json::json!({"response":{"usage":usage}}),
+        serde_json::json!({"message":{"usage":usage}}),
+    ] {
+        let raw = raw_billing(&body);
+        let metadata = billing_metadata(&raw).unwrap();
+        assert_eq!(metadata["cost"], 0);
+        assert_eq!(metadata["allowance"], 0);
+        assert_eq!(normalize_usage(Default::default(), &raw).total_tokens, Some(5));
+        assert!(raw.get("response").is_none());
+    }
+    assert!(raw_billing(&serde_json::json!({"usage":{"total_tokens":5}})).is_null());
+}
 use rusqlite::Connection;
 
 #[test]
@@ -53,12 +72,12 @@ fn test_catalog_supersedes_stale_preferences() {
 
 #[test]
 fn test_opencode_go_normalizes_billed_tokens_without_double_counting_reasoning() {
-    let usage = serde_json::from_value(serde_json::json!({
+    let billing = serde_json::json!({
         "cost":0, "opencode":{"allowance":0,"tokens":{"input":11,"cache_read":28,"output":16,"reasoning":13}},
-    })).unwrap();
-    let usage = normalize_usage(usage);
+    });
+    let usage = normalize_usage(Default::default(), &billing);
     assert_eq!((usage.prompt_tokens,usage.completion_tokens,usage.total_tokens), (Some(39),Some(16),Some(55)));
-    let billing = billing_metadata(&usage).unwrap();
+    let billing = billing_metadata(&billing).unwrap();
     assert_eq!(billing["allowance"],0);
     assert_eq!(billing["cost"],0);
     assert_eq!(usage.completion_tokens_details.unwrap().reasoning_tokens,Some(13));

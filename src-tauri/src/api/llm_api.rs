@@ -300,7 +300,7 @@ pub async fn fetch_model_list(
 
     let adapter_kind = genai_client::infer_adapter_kind_simple(&llm_provider.api_type);
 
-    match client.all_models(adapter_kind).await {
+    match client.all_models(adapter_kind, ()).await {
         Ok(models) => {
             let mut result = Vec::new();
             for model in &models {
@@ -499,7 +499,7 @@ pub async fn preview_model_list(
     let adapter_kind = genai_client::infer_adapter_kind_simple(&llm_provider.api_type);
     tracing::info!(llm_provider_id, "preview_model_list with adapter_kind: {:?}", adapter_kind);
 
-    match client.all_models(adapter_kind).await {
+    match client.all_models(adapter_kind, ()).await {
         Ok(models) => {
             let mut available_models = Vec::new();
             let remote_model_codes: HashSet<String> =
