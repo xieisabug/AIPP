@@ -366,6 +366,39 @@ mod run_outcome_tests {
         assert!(!prompt.contains("执行成功"));
     }
 
+    #[test]
+    fn test_scheduled_result_message_found_by_exact_run_id() {
+        use crate::db::conversation_db::Message;
+        let outcome = ScheduledRunOutcome::failed("timeout", "执行超时".into(), None);
+        let content = build_butler_scheduled_task_result_message(&task("x"), "run-1", &outcome, "助手");
+        let now = Utc::now();
+        let message = |id: i64, content: String| Message {
+            id, parent_id: None, conversation_id: 1, message_type: "system".into(), content,
+            llm_model_id: None, llm_model_name: None, created_time: now, start_time: None,
+            finish_time: Some(now), token_count: 0, input_token_count: 0, output_token_count: 0,
+            generation_group_id: None, parent_group_id: None, tool_calls_json: None,
+            metadata_json: None, first_token_time: None, ttft_ms: None,
+        };
+        let messages = vec![message(5, content)];
+        assert_eq!(find_scheduled_result_message_id(&messages, "run-1"), Some(5));
+        assert_eq!(find_scheduled_result_message_id(&messages, "run-"), None, "不能前缀误配");
+        assert_eq!(find_scheduled_result_message_id(&messages, "run-2"), None);
+    }
+
+    #[test]
+    fn test_outcome_from_recorded_run_keeps_real_status() {
+        use crate::db::scheduled_task_db::ScheduledTaskRun;
+        let run = ScheduledTaskRun {
+            id: 1, task_id: 7, run_id: "r".into(), status: "success".into(), notify: true,
+            summary: Some("结论".into()), error_message: None, started_time: Utc::now(),
+            finished_time: Some(Utc::now()), butler_followup_status: Some("pending".into()),
+        };
+        let ok = outcome_from_recorded_run(&run);
+        assert_eq!((ok.status, ok.end_reason, ok.summary.as_deref()), ("success", "completed", Some("结论")));
+        let failed = outcome_from_recorded_run(&ScheduledTaskRun { status: "failed".into(), error_message: Some("超时".into()), ..run });
+        assert_eq!((failed.status, failed.error.as_deref()), ("failed", Some("超时")));
+    }
+
     #[tokio::test]
     async fn test_await_llm_or_stop_prefers_cancel_while_waiting_model() {
         let token = CancellationToken::new();

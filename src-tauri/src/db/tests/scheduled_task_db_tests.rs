@@ -47,3 +47,21 @@ fn test_mark_interrupted_runs_only_closes_orphan_running() {
     // 再次执行不会重复收尾
     assert!(db.mark_interrupted_runs(&["local".to_string()],"x",Utc::now()).unwrap().is_empty());
 }
+
+/// 回报前或续跑中退出的已结束运行，重启后需要补报
+#[test]
+fn test_list_runs_awaiting_butler_followup() {
+    let db=ScheduledTaskDatabase { conn: Connection::open_in_memory().unwrap(), write_lock: Arc::new(Mutex::new(())) };
+    db.create_tables().unwrap();
+    db.conn.execute_batch("INSERT INTO scheduled_task(id,name,schedule_type,assistant_id,task_prompt,notify_prompt)
+        VALUES(1,'t','once',1,'work','notify');").unwrap();
+    let base=ScheduledTaskRun { id:0,task_id:1,run_id:"a".into(),status:"success".into(),notify:false,summary:None,error_message:None,
+        started_time:Utc::now(),finished_time:Some(Utc::now()),butler_followup_status:Some("pending".into()) };
+    db.create_run(&base).unwrap();
+    db.create_run(&ScheduledTaskRun{run_id:"b".into(),status:"failed".into(),butler_followup_status:Some("continuing".into()),..base.clone()}).unwrap();
+    db.create_run(&ScheduledTaskRun{run_id:"c".into(),butler_followup_status:Some("done".into()),..base.clone()}).unwrap();
+    db.create_run(&ScheduledTaskRun{run_id:"d".into(),status:"running".into(),finished_time:None,..base.clone()}).unwrap();
+    db.create_run(&ScheduledTaskRun{run_id:"e".into(),butler_followup_status:None,..base.clone()}).unwrap();
+    let ids: Vec<String> = db.list_runs_awaiting_butler_followup().unwrap().into_iter().map(|r| r.run_id).collect();
+    assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+}

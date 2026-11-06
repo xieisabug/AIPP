@@ -22,9 +22,10 @@ use crate::api::ai_api::{
 };
 use crate::api::assistant_api::get_assistant;
 use crate::api::butler_api::{
-    active_butler_main_conversation_id, get_butler_main_continuation_lock,
-    is_current_butler_main_conversation,
-    resolve_or_create_butler_execution_window, wait_for_butler_main_to_be_idle,
+    active_butler_main_conversation_id, followup_turn_progress, get_butler_main_continuation_lock,
+    is_butler_main_busy_error, is_butler_main_running, is_current_butler_main_conversation,
+    resolve_or_create_butler_execution_window, wait_for_butler_main_to_be_idle, ButlerMainBusy,
+    FollowupTurnProgress, FOLLOWUP_MAX_CONTINUATION_ATTEMPTS,
 };
 use crate::api::genai_client::create_client_with_config;
 use crate::db::assistant_db::AssistantDatabase;
@@ -173,8 +174,9 @@ const AGENTIC_LOOP_MAX_ROUNDS: usize = 50;
 const AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS: u64 = 120;
 const AGENTIC_LOOP_TOTAL_TIMEOUT_SECS: u64 = 3000;
 const NOTIFY_DECISION_TIMEOUT_SECS: u64 = 300;
-const BUTLER_MAIN_BUSY_MARKER: &str = "[butler_main_busy] ";
-const SCHEDULED_FOLLOWUP_BUSY_ATTEMPTS: u32 = 4;
+const SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// 续跑开始后等待主会话空闲的上限；超过后保持 continuing，由下次启动补查。
+const SCHEDULED_FOLLOWUP_TURN_WAIT: Duration = Duration::from_secs(3600);
 const SCHEDULED_TASK_LOG_ADDED_EVENT: &str = "scheduled_task_log_added";
 const SCHEDULED_TASK_RUN_CREATED_EVENT: &str = "scheduled_task_run_created";
 const SCHEDULED_TASK_RUN_UPDATED_EVENT: &str = "scheduled_task_run_updated";
@@ -1924,7 +1926,8 @@ pub async fn execute_scheduled_task(
         // 结果已入库后再注销本地运行登记（回报管家可能需要等待，不应继续显示为执行中）
         drop(registration);
         if task.butler_conversation_id.is_some() {
-            report_scheduled_run_to_butler(app_handle, task, &run_id, &outcome).await;
+            // 回报可能需要长时间排队等待主会话空闲，放到后台，不占用调度
+            spawn_scheduled_run_report(app_handle, task, &run_id, &outcome);
         }
         if outcome.status == "success" {
             Ok(RunScheduledTaskResult {
@@ -1986,9 +1989,68 @@ pub async fn recover_interrupted_scheduled_runs(app_handle: &tauri::AppHandle) -
             run.error_message.clone().unwrap_or_default(),
             None,
         );
-        report_scheduled_run_to_butler(app_handle, &task, &run.run_id, &outcome).await;
+        spawn_scheduled_run_report(app_handle, &task, &run.run_id, &outcome);
+    }
+
+    // 已结束但回报未确认完成的运行（回报前退出、续跑中途退出）：补报
+    let awaiting = db
+        .list_runs_awaiting_butler_followup()
+        .map_err(|e| format!("读取待回报运行失败: {e}"))?;
+    for run in awaiting {
+        if interrupted.iter().any(|done| done.run_id == run.run_id) {
+            continue;
+        }
+        let task = match db.read_task(run.task_id) {
+            Ok(Some(task)) if task.butler_conversation_id.is_some() => task,
+            Ok(_) => continue,
+            Err(e) => {
+                log_task_message(app_handle, run.task_id, &run.run_id, "butler_followup_error", format!("读取任务失败，无法补报总管家: {e}"));
+                continue;
+            }
+        };
+        log_task_message(app_handle, run.task_id, &run.run_id, "butler_followup", "上次退出前回报未确认完成，重新回报总管家");
+        spawn_scheduled_run_report(app_handle, &task, &run.run_id, &outcome_from_recorded_run(&run));
     }
     Ok(interrupted.len())
+}
+
+/// 用已入库的运行记录重建回报内容（原始输出详情不在运行记录中，补报时不含详情摘录）。
+pub(crate) fn outcome_from_recorded_run(run: &ScheduledTaskRun) -> ScheduledRunOutcome {
+    if run.status == "success" {
+        ScheduledRunOutcome {
+            status: "success",
+            end_reason: "completed",
+            notify: run.notify,
+            summary: run.summary.clone(),
+            error: None,
+            detail: None,
+            judged_task_state: None,
+            notify_error: None,
+        }
+    } else {
+        ScheduledRunOutcome::failed(
+            "error",
+            run.error_message
+                .clone()
+                .unwrap_or_else(|| format!("run_id={} 记录为失败但缺少原因", run.run_id)),
+            None,
+        )
+    }
+}
+
+fn spawn_scheduled_run_report(
+    app_handle: &tauri::AppHandle,
+    task: &ScheduledTask,
+    run_id: &str,
+    outcome: &ScheduledRunOutcome,
+) {
+    let app_handle = app_handle.clone();
+    let task = task.clone();
+    let run_id = run_id.to_string();
+    let outcome = outcome.clone();
+    tauri::async_runtime::spawn(async move {
+        report_scheduled_run_to_butler(&app_handle, &task, &run_id, &outcome).await;
+    });
 }
 
 fn resolve_assistant_name(app_handle: &tauri::AppHandle, assistant_id: i64) -> String {
@@ -1998,7 +2060,31 @@ fn resolve_assistant_name(app_handle: &tauri::AppHandle, assistant_id: i64) -> S
     }
 }
 
+fn set_scheduled_followup_status(app_handle: &tauri::AppHandle, task: &ScheduledTask, run_id: &str, status: &str) {
+    let persisted = ScheduledTaskDatabase::new(app_handle)
+        .map_err(|e| e.to_string())
+        .and_then(|sdb| sdb.update_run_butler_followup_status(run_id, status).map_err(|e| e.to_string()));
+    if let Err(e) = persisted {
+        log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("记录回流状态 {status} 失败: {e}"));
+    }
+}
+
+/// 续跑开始后等待主会话本轮结束；超时返回 false。
+async fn wait_for_followup_turn_to_end(app_handle: &tauri::AppHandle, conversation_id: i64) -> bool {
+    let started = Instant::now();
+    // 给 ask_ai 留出登记运行状态的时间
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    while is_butler_main_running(app_handle, conversation_id).await {
+        if started.elapsed() > SCHEDULED_FOLLOWUP_TURN_WAIT {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    true
+}
+
 /// 把一次运行的真实结果回报给总管家主会话，并记录回报状态。
+/// 只有主会话对该结果出现自然完成的回复才记为 done；忙碌时持续排队，中途退出由启动补报。
 async fn report_scheduled_run_to_butler(
     app_handle: &tauri::AppHandle,
     task: &ScheduledTask,
@@ -2006,43 +2092,46 @@ async fn report_scheduled_run_to_butler(
     outcome: &ScheduledRunOutcome,
 ) {
     let assistant_name = resolve_assistant_name(app_handle, task.assistant_id);
-    let mut attempt = 0;
-    let backflow_result = loop {
-        attempt += 1;
-        let result = match active_butler_main_conversation_id(app_handle) {
-            Ok(Some(conversation_id)) => {
-                enqueue_scheduled_task_butler_followup(app_handle, conversation_id, task, run_id, outcome, &assistant_name).await
+    loop {
+        let conversation_id = match active_butler_main_conversation_id(app_handle) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                set_scheduled_followup_status(app_handle, task, run_id, "failed");
+                log_task_message(app_handle, task.id, run_id, "butler_followup_error", "回流总管家失败: 当前不存在总管家主会话");
+                return;
             }
-            Ok(None) => Err("当前不存在总管家主会话".to_string()),
-            Err(e) => Err(format!("读取总管家主会话失败: {e}")),
+            Err(e) => {
+                set_scheduled_followup_status(app_handle, task, run_id, "failed");
+                log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("回流总管家失败: 读取总管家主会话失败: {e}"));
+                return;
+            }
         };
-        match result {
-            // 主会话忙碌未获得执行权：保持排队并重试，不抢占会话
-            Err(e) if e.starts_with(BUTLER_MAIN_BUSY_MARKER) && attempt < SCHEDULED_FOLLOWUP_BUSY_ATTEMPTS => {
-                log_task_message(app_handle, task.id, run_id, "butler_followup_wait",
-                    format!("第 {attempt} 次回流等待超时，稍后重试: {}", &e[BUTLER_MAIN_BUSY_MARKER.len()..]));
+        match enqueue_scheduled_task_butler_followup(app_handle, conversation_id, task, run_id, outcome, &assistant_name).await {
+            Err(e) if is_butler_main_busy_error(&e) => {
+                // 主会话忙碌未获得执行权：保持排队，空闲后再回报，不抢占会话
+                log_task_message(app_handle, task.id, run_id, "butler_followup_wait", format!("回流等待主会话空闲，稍后重试: {e}"));
+                tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
             }
-            Err(e) => break Err(e.strip_prefix(BUTLER_MAIN_BUSY_MARKER).unwrap_or(&e).to_string()),
-            Ok(()) => break Ok(()),
+            Err(e) => {
+                set_scheduled_followup_status(app_handle, task, run_id, "failed");
+                log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("回流总管家失败: {e}"));
+                return;
+            }
+            Ok(ScheduledFollowupStep::Completed) => {
+                set_scheduled_followup_status(app_handle, task, run_id, "done");
+                log_task_message(app_handle, task.id, run_id, "butler_followup", "总管家已完成对该结果的处理");
+                return;
+            }
+            Ok(ScheduledFollowupStep::Started) => {
+                set_scheduled_followup_status(app_handle, task, run_id, "continuing");
+                log_task_message(app_handle, task.id, run_id, "butler_followup", "已回流至总管家主会话，等待续跑完成");
+                if !wait_for_followup_turn_to_end(app_handle, conversation_id).await {
+                    log_task_message(app_handle, task.id, run_id, "butler_followup_wait", "续跑长时间未结束，保持待确认，下次启动时补查");
+                    return;
+                }
+                // 回到循环开头按完成证据判定：完成则 done，否则在上限内重新续跑
+            }
         }
-    };
-    let followup_status = if backflow_result.is_ok() { "done" } else { "failed" };
-    let persist_error = ScheduledTaskDatabase::new(app_handle)
-        .map_err(|e| e.to_string())
-        .and_then(|sdb| sdb.update_run_butler_followup_status(run_id, followup_status).map_err(|e| e.to_string()))
-        .err();
-    match &backflow_result {
-        Ok(()) => log_task_message(app_handle, task.id, run_id, "butler_followup", "已回流至总管家主会话"),
-        Err(e) => log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("回流总管家失败: {e}")),
-    }
-    if let Some(e) = persist_error {
-        log_task_message(
-            app_handle,
-            task.id,
-            run_id,
-            "butler_followup_error",
-            format!("记录回流状态 {followup_status} 失败: {e}"),
-        );
     }
 }
 
@@ -2493,6 +2582,27 @@ pub(crate) fn build_butler_scheduled_task_followup_prompt(task: &ScheduledTask, 
     )
 }
 
+pub(crate) enum ScheduledFollowupStep {
+    /// 主会话已对该结果完成一轮自然结束的回复
+    Completed,
+    /// 已开始一轮续跑，需等待其结束后再判定
+    Started,
+}
+
+/// 主会话里注入过的该次运行结果消息（按 run_id 识别，避免重复注入）。
+pub(crate) fn find_scheduled_result_message_id(
+    messages: &[crate::db::conversation_db::Message],
+    run_id: &str,
+) -> Option<i64> {
+    let run_line = format!("run_id={run_id}");
+    messages.iter().rev().find_map(|message| {
+        (message.message_type == "system"
+            && message.content.contains("<butler_scheduled_task_result>")
+            && message.content.lines().any(|line| line == run_line))
+        .then_some(message.id)
+    })
+}
+
 async fn enqueue_scheduled_task_butler_followup(
     app_handle: &tauri::AppHandle,
     butler_conversation_id: i64,
@@ -2500,12 +2610,12 @@ async fn enqueue_scheduled_task_butler_followup(
     run_id: &str,
     outcome: &ScheduledRunOutcome,
     assistant_name: &str,
-) -> Result<(), String> {
+) -> Result<ScheduledFollowupStep, String> {
     let continuation_lock = get_butler_main_continuation_lock(butler_conversation_id).await;
     let _guard = continuation_lock.lock().await;
     wait_for_butler_main_to_be_idle(app_handle, butler_conversation_id)
         .await
-        .map_err(|busy| format!("{BUTLER_MAIN_BUSY_MARKER}{busy}"))?;
+        .map_err(ButlerMainBusy::into_error_string)?;
 
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -2524,24 +2634,42 @@ async fn enqueue_scheduled_task_butler_followup(
     let assistant_id =
         main_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
 
-    let system_message_content =
-        build_butler_scheduled_task_result_message(task, run_id, outcome, assistant_name);
-
-    add_message(
-        app_handle,
-        None,
-        butler_conversation_id,
-        "system".to_string(),
-        system_message_content,
-        None,
-        None,
-        None,
-        None,
-        0,
-        None,
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+    let main_messages: Vec<_> = db
+        .message_repo()
+        .map_err(|e| e.to_string())?
+        .list_by_conversation_id(butler_conversation_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(message, _)| message)
+        .collect();
+    if let Some(anchor) = find_scheduled_result_message_id(&main_messages, run_id) {
+        match followup_turn_progress(&main_messages, anchor) {
+            FollowupTurnProgress::Completed => return Ok(ScheduledFollowupStep::Completed),
+            FollowupTurnProgress::Incomplete { attempts } if attempts >= FOLLOWUP_MAX_CONTINUATION_ATTEMPTS => {
+                return Err(format!("结果已注入主会话（message_id={anchor}），但总管家续跑 {attempts} 次都未完成，停止自动重试"));
+            }
+            // 已注入但续跑未完成：不重复注入，只重新续跑
+            _ => {}
+        }
+    } else {
+        let system_message_content =
+            build_butler_scheduled_task_result_message(task, run_id, outcome, assistant_name);
+        add_message(
+            app_handle,
+            None,
+            butler_conversation_id,
+            "system".to_string(),
+            system_message_content,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     let prompt = build_butler_scheduled_task_followup_prompt(task, outcome);
     let window = resolve_or_create_butler_execution_window(app_handle)?;
@@ -2576,5 +2704,5 @@ async fn enqueue_scheduled_task_butler_followup(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(())
+    Ok(ScheduledFollowupStep::Started)
 }

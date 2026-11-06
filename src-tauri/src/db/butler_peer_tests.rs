@@ -402,7 +402,7 @@ fn test_butler_peer_failure_and_stop_send_single_receipt_to_owner() {
     assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("delivered"), "已失败的不再重复回执");
 }
 
-/// 投递中退出：结果标记为未知且不重复投递；回执投递中退出不重发
+/// 投递中退出：结果标记为未知且不重复投递；回执未写入时退回待送重发
 #[test]
 fn test_butler_peer_recover_marks_unknown_without_redelivery() {
     let mut db = database();
@@ -415,6 +415,31 @@ fn test_butler_peer_recover_marks_unknown_without_redelivery() {
     assert!(failed.error.as_deref().unwrap().contains("未知"));
     assert!(claim_receipt(&db, &failed).unwrap());
     recover(&db).unwrap();
-    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("unknown"));
-    assert!(pending_receipts(&db).unwrap().is_empty());
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("pending"), "回执未写入，重启后重发");
+    assert_eq!(pending_receipts(&db).unwrap().len(), 1);
+}
+
+/// 回执投递失败会重试，达到上限后停止；已送达后失败不会重发
+#[test]
+fn test_butler_peer_receipt_retries_until_limit_without_duplicates() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
+    fail(&db, ex.id, "接收方模型错误").unwrap();
+    for attempt in 1..MAX_RECEIPT_ATTEMPTS {
+        assert!(claim_receipt(&db, &reread(&db, ex.id)).unwrap(), "attempt {attempt}");
+        fail_receipt(&db, ex.id).unwrap();
+        assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("pending"));
+    }
+    assert!(claim_receipt(&db, &reread(&db, ex.id)).unwrap());
+    fail_receipt(&db, ex.id).unwrap();
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("failed"));
+
+    let second = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("r2", "改派") });
+    let second = second.unwrap();
+    fail(&db, second.id, "失败").unwrap();
+    assert!(claim_receipt(&db, &reread(&db, second.id)).unwrap());
+    write_input(&mut db, second.id, "receipt", 20, "回执", 1, "model").unwrap();
+    fail_receipt(&db, second.id).unwrap();
+    assert_eq!(reread(&db, second.id).receipt_state.as_deref(), Some("delivered"), "已送达不会重发");
 }

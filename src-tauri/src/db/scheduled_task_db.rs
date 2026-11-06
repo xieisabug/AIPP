@@ -493,6 +493,18 @@ impl ScheduledTaskDatabase {
         self.with_write_lock(|| mark_interrupted_runs_in_connection(&self.conn, skip_run_ids, error_message, now))
     }
 
+    /// 已结束但管家回报尚未确认完成的运行（pending / continuing）。
+    pub fn list_runs_awaiting_butler_followup(&self) -> Result<Vec<ScheduledTaskRun>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status
+             FROM scheduled_task_run
+             WHERE status != 'running' AND butler_followup_status IN ('pending', 'continuing')
+             ORDER BY started_time ASC",
+        )?;
+        let rows = stmt.query_map([], |row| scheduled_task_run_from_row(row))?;
+        rows.collect()
+    }
+
     /// Update the butler followup status for a run.
     #[instrument(level = "debug", skip(self), fields(run_id, status))]
     pub fn update_run_butler_followup_status(&self, run_id: &str, status: &str) -> Result<()> {

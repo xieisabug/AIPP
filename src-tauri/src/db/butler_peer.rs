@@ -26,12 +26,18 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_report_column {
         conn.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN report_to_user INTEGER NOT NULL DEFAULT 0")?;
     }
-    // 失败/停止回执：NULL 不需要；pending 待送；sending 投递中；delivered 已送达；failed 投递失败；unknown 投递中进程退出
+    // 失败/停止回执：NULL 不需要；pending 待送；sending 投递中；delivered 已送达；failed 多次投递失败
     let has_receipt_column: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_peer_exchange') WHERE name='receipt_state')",
         [], |r| r.get(0))?;
     if !has_receipt_column {
         conn.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN receipt_state TEXT")?;
+    }
+    let has_receipt_attempts: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_peer_exchange') WHERE name='receipt_attempts')",
+        [], |r| r.get(0))?;
+    if !has_receipt_attempts {
+        conn.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN receipt_attempts INTEGER NOT NULL DEFAULT 0")?;
     }
     super::butler_timeline::schema(conn)
 }
@@ -253,7 +259,8 @@ pub fn fail(conn: &Connection, id: i64, detail: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// 进程启动时收尾：投递中的协作结果未知（不重复投递），回执投递中的标记为未知（不重复发送）。
+/// 进程启动时收尾：投递中的协作结果未知（不重复投递）。
+/// 回执写入消息与标记 delivered 在同一事务，仍为 sending 说明回执消息尚未写入，退回待送可安全重发。
 pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE butler_peer_exchange SET state='failed',error='投递过程中应用退出，对方是否已收到并执行未知，未重复投递',
@@ -262,7 +269,7 @@ pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
     conn.execute(
-        "UPDATE butler_peer_exchange SET receipt_state='unknown' WHERE receipt_state='sending'",
+        "UPDATE butler_peer_exchange SET receipt_state='pending' WHERE receipt_state='sending'",
         [],
     )?;
     Ok(())
@@ -285,11 +292,16 @@ pub fn claim_receipt(conn: &Connection, ex: &Exchange) -> rusqlite::Result<bool>
     )? == 1)
 }
 
-/// 回执投递失败（消息尚未写入时）不再重发，避免重复回执。
+pub const MAX_RECEIPT_ATTEMPTS: i64 = 5;
+
+/// 回执投递失败：仍为 sending 说明消息未写入（写入与 delivered 同一事务），退回待送重试；
+/// 已 delivered 的不受影响，因此不会重复送达。超过上限后标记 failed。
 pub fn fail_receipt(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE butler_peer_exchange SET receipt_state='failed' WHERE id=?1 AND receipt_state='sending'",
-        [id],
+        "UPDATE butler_peer_exchange SET receipt_attempts=receipt_attempts+1,
+            receipt_state=CASE WHEN receipt_attempts+1>=?2 THEN 'failed' ELSE 'pending' END
+         WHERE id=?1 AND receipt_state='sending'",
+        params![id, MAX_RECEIPT_ATTEMPTS],
     )?;
     Ok(())
 }

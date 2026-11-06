@@ -545,7 +545,11 @@ fn test_stale_dispatching_followup_can_be_reclaimed_and_old_claim_is_fenced() {
     assert_eq!(result.followup_status.as_deref(), Some("dispatching"));
     assert_eq!(result.handoff_message_id, Some(77), "接手时保留已注入的结果消息，避免重复展示");
 
-    assert!(repo.update_task_result_followup_state_if_claimed(301, "enqueued", Some(77), "new").unwrap());
+    // 续跑开始只记为 continuing；中途退出后可被重新接手
+    assert!(repo.update_task_result_followup_state_if_claimed(301, "continuing", Some(77), "new").unwrap());
+    assert!(!repo.try_claim_task_result_followup(301, None, "x", false).unwrap());
+    assert!(repo.try_claim_task_result_followup(301, None, "resume", true).unwrap());
+    assert!(repo.update_task_result_followup_state_if_claimed(301, "enqueued", Some(77), "resume").unwrap());
     assert!(!repo.try_claim_task_result_followup(301, None, "late", true).unwrap(), "已送达不再领取");
 }
 

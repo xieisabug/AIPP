@@ -54,6 +54,11 @@ const FOLLOWUP_STATUS_PENDING: &str = "pending";
 const FOLLOWUP_STATUS_DISPATCHING: &str = "dispatching";
 const FOLLOWUP_STATUS_HANDOFF_INJECTED: &str = "handoff_injected";
 const FOLLOWUP_STATUS_ENQUEUED: &str = "enqueued";
+/// 续跑已开始但尚未确认完成；对账在主会话空闲后按完成证据判定送达或重跑。
+const FOLLOWUP_STATUS_CONTINUING: &str = "continuing";
+/// 多次续跑仍未完成，停止自动重试并通知用户。
+const FOLLOWUP_STATUS_FAILED: &str = "failed";
+pub(crate) const FOLLOWUP_MAX_CONTINUATION_ATTEMPTS: usize = 3;
 /// Minimum interval between attention followup injections for the same task.
 const ATTENTION_DEBOUNCE_SECS: i64 = 10;
 /// 子任务工具调用停在 pending 超过该时长才视为阻塞（自动运行的调用在此之前已开始执行）。
@@ -1142,6 +1147,75 @@ impl std::fmt::Display for ButlerMainBusy {
     }
 }
 
+/// 忙碌超时错误的标记前缀，调用方据此区分“稍后重试”与真正失败。
+pub(crate) const BUTLER_MAIN_BUSY_MARKER: &str = "[butler_main_busy] ";
+
+impl ButlerMainBusy {
+    pub(crate) fn into_error_string(self) -> String {
+        format!("{BUTLER_MAIN_BUSY_MARKER}{self}")
+    }
+}
+
+pub(crate) fn is_butler_main_busy_error(error: &str) -> bool {
+    error.starts_with(BUTLER_MAIN_BUSY_MARKER)
+}
+
+pub(crate) async fn is_butler_main_running(app_handle: &AppHandle, conversation_id: i64) -> bool {
+    app_handle
+        .state::<crate::state::activity_state::ConversationActivityManager>()
+        .get_runtime_state(conversation_id)
+        .await
+        .is_running
+}
+
+/// 注入结果后主会话续跑的进展：只有出现自然完成、且不是工具调用中间态的回复才算完成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowupTurnProgress {
+    NotStarted,
+    Completed,
+    Incomplete { attempts: usize },
+}
+
+fn is_internal_origin_message(message: &Message) -> bool {
+    message
+        .metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .is_some_and(|meta| meta["origin"] == "internal")
+}
+
+pub(crate) fn followup_turn_progress(messages: &[Message], anchor_message_id: i64) -> FollowupTurnProgress {
+    let mut started = false;
+    let mut attempts = 0usize;
+    for message in messages.iter().filter(|message| message.id > anchor_message_id) {
+        match message.message_type.as_str() {
+            "user" => {
+                started = true;
+                if is_internal_origin_message(message) {
+                    attempts += 1;
+                }
+            }
+            "response" | "assistant"
+                if started
+                    && is_naturally_completed_response(message)
+                    && !message.content.contains("<!-- MCP_TOOL_CALL")
+                    && message
+                        .tool_calls_json
+                        .as_deref()
+                        .is_none_or(|raw| matches!(raw.trim(), "" | "[]" | "null")) =>
+            {
+                return FollowupTurnProgress::Completed;
+            }
+            _ => {}
+        }
+    }
+    if started {
+        FollowupTurnProgress::Incomplete { attempts }
+    } else {
+        FollowupTurnProgress::NotStarted
+    }
+}
+
 /// 主会话是否可以开始一轮内部续跑：没有在运行，且没有排队中的用户消息（用户新消息优先）。
 async fn butler_main_ready_for_internal_turn(
     app_handle: &AppHandle,
@@ -1356,7 +1430,7 @@ async fn enqueue_butler_main_followup(
         {
             warn!(task_conversation_id = task.task_conversation_id, error = %requeue_error, "failed to requeue butler follow-up after busy wait");
         }
-        return Err(busy.to_string());
+        return Err(busy.into_error_string());
     }
 
     // 已注入过的结果消息不再重复注入（崩溃后重新接手时避免同一结果展示两次）
@@ -1491,11 +1565,12 @@ async fn enqueue_butler_main_followup(
         .await
         .map_err(|e| e.to_string())?;
 
+        // ask_ai 只是开始了续跑；是否完成由对账在主会话空闲后按完成证据判定
         for entry in &followup_batch {
             update_followup_state_claimed(
                 &butler_repo,
                 &entry.claim,
-                FOLLOWUP_STATUS_ENQUEUED,
+                FOLLOWUP_STATUS_CONTINUING,
                 entry.handoff_message_id,
             )?;
         }
@@ -2665,7 +2740,7 @@ async fn enqueue_butler_task_attention_followup(
     let _guard = continuation_lock.lock().await;
     wait_for_butler_main_to_be_idle(&app_handle, definition.butler_conversation_id)
         .await
-        .map_err(|busy| busy.to_string())?;
+        .map_err(ButlerMainBusy::into_error_string)?;
 
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -2792,6 +2867,16 @@ async fn enqueue_butler_task_attention_followup(
     Ok(())
 }
 
+const ATTENTION_BUSY_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+fn is_butler_task_finalized(app_handle: &AppHandle, task_conversation_id: i64) -> bool {
+    ConversationDatabase::new(app_handle)
+        .ok()
+        .and_then(|db| db.conversation_repo().ok())
+        .and_then(|repo| repo.read(task_conversation_id).ok().flatten())
+        .is_none_or(|conversation| conversation.butler_task_finalized_at.is_some())
+}
+
 fn spawn_butler_task_attention_followup(
     app_handle: &AppHandle,
     task: &ButlerTaskListItem,
@@ -2813,20 +2898,38 @@ fn spawn_butler_task_attention_followup(
             );
             return;
         }
-        if let Err(error) = enqueue_butler_task_attention_followup(
-            app_handle_clone,
-            task_clone.clone(),
-            definition_clone,
-            attention_kind.clone(),
-        )
-        .await
-        {
-            warn!(
-                task_conversation_id = task_clone.task_conversation_id,
-                attention_kind = %attention_kind,
-                error = %error,
-                "failed to enqueue butler task attention followup"
-            );
+        // 主会话忙碌超时不丢弃提醒：保持排队，空闲后再处理；任务已结束则不再提醒
+        loop {
+            match enqueue_butler_task_attention_followup(
+                app_handle_clone.clone(),
+                task_clone.clone(),
+                definition_clone.clone(),
+                attention_kind.clone(),
+            )
+            .await
+            {
+                Err(error) if is_butler_main_busy_error(&error) => {
+                    if is_butler_task_finalized(&app_handle_clone, task_clone.task_conversation_id) {
+                        break;
+                    }
+                    debug!(
+                        task_conversation_id = task_clone.task_conversation_id,
+                        attention_kind = %attention_kind,
+                        "butler main still busy, attention followup stays queued"
+                    );
+                    sleep(ATTENTION_BUSY_RETRY_DELAY).await;
+                }
+                Err(error) => {
+                    warn!(
+                        task_conversation_id = task_clone.task_conversation_id,
+                        attention_kind = %attention_kind,
+                        error = %error,
+                        "failed to enqueue butler task attention followup"
+                    );
+                    break;
+                }
+                Ok(()) => break,
+            }
         }
     });
 }
@@ -2858,11 +2961,14 @@ async fn ensure_butler_task_followup_if_needed(
         return Ok(false);
     };
     let followup_status = result.followup_status.as_deref().unwrap_or(FOLLOWUP_STATUS_ENQUEUED);
-    if followup_status == FOLLOWUP_STATUS_ENQUEUED {
+    if followup_status == FOLLOWUP_STATUS_ENQUEUED || followup_status == FOLLOWUP_STATUS_FAILED {
         return Ok(false);
     }
-    // 发送中：只有不属于本进程在途执行者（如上次进程在发送中崩溃）时才重新接手
-    let reclaim_stale_dispatching = followup_status == FOLLOWUP_STATUS_DISPATCHING;
+    // 发送中 / 续跑中：只有不属于本进程在途执行者（如上次进程中途崩溃）时才重新接手
+    let reclaim_stale_dispatching = matches!(
+        followup_status,
+        FOLLOWUP_STATUS_DISPATCHING | FOLLOWUP_STATUS_CONTINUING
+    );
     if reclaim_stale_dispatching && is_followup_in_flight(task_conversation_id) {
         return Ok(false);
     }
@@ -2879,15 +2985,44 @@ async fn ensure_butler_task_followup_if_needed(
     result.handoff_message_id = latest_handoff_message_id;
     let inject_system_message = latest_handoff_message_id.is_none();
     if let Some(handoff_message_id) = latest_handoff_message_id {
-        if has_non_system_message_after(&main_messages, handoff_message_id) {
-            butler_repo
-                .update_task_result_followup_state(
-                    task_conversation_id,
-                    FOLLOWUP_STATUS_ENQUEUED,
-                    Some(handoff_message_id),
-                )
-                .map_err(|e| e.to_string())?;
+        // 续跑仍在进行时不判定
+        if is_butler_main_running(app_handle, definition.butler_conversation_id).await {
             return Ok(false);
+        }
+        match followup_turn_progress(&main_messages, handoff_message_id) {
+            FollowupTurnProgress::Completed => {
+                butler_repo
+                    .update_task_result_followup_state(
+                        task_conversation_id,
+                        FOLLOWUP_STATUS_ENQUEUED,
+                        Some(handoff_message_id),
+                    )
+                    .map_err(|e| e.to_string())?;
+                return Ok(false);
+            }
+            FollowupTurnProgress::Incomplete { attempts }
+                if attempts >= FOLLOWUP_MAX_CONTINUATION_ATTEMPTS =>
+            {
+                butler_repo
+                    .update_task_result_followup_state(
+                        task_conversation_id,
+                        FOLLOWUP_STATUS_FAILED,
+                        Some(handoff_message_id),
+                    )
+                    .map_err(|e| e.to_string())?;
+                emit_butler_notification(
+                    app_handle,
+                    definition.butler_conversation_id,
+                    task_conversation_id,
+                    "task_followup_failed",
+                    format!("任务 {} 的结果已送达主会话，但总管家续跑 {attempts} 次都未完成", definition.title),
+                    "请在总管家主会话查看该任务结果并手动继续".to_string(),
+                    "medium",
+                );
+                return Ok(false);
+            }
+            // 尚未开始或中途结束：不重复注入结果，只重新续跑
+            _ => {}
         }
     }
 
@@ -3546,6 +3681,37 @@ mod tests {
         assert_eq!(decision.final_message_id, Some(2));
         assert!(decision.cancel_requested);
         assert!(decision.summary.contains("取消请求后"));
+    }
+
+    /// 续跑刚开始不算送达：只有注入结果之后出现自然完成的回复才算完成
+    #[test]
+    fn followup_turn_progress_requires_finished_reply_after_handoff() {
+        use super::{followup_turn_progress, FollowupTurnProgress};
+        let internal = Some(r#"{"origin":"internal"}"#);
+        let handoff = build_message(10, "system", "<butler_task_result>", true);
+        let prompt = build_message_with_metadata(11, "user", "系统任务回流", true, internal);
+
+        assert_eq!(followup_turn_progress(&[handoff.clone()], 10), FollowupTurnProgress::NotStarted);
+        // 只有提示消息、回复写到一半：未完成
+        let partial = build_message(12, "response", "正在汇总", false);
+        assert_eq!(
+            followup_turn_progress(&[handoff.clone(), prompt.clone(), partial], 10),
+            FollowupTurnProgress::Incomplete { attempts: 1 }
+        );
+        // 工具调用中间态不算完成
+        let tool_step = build_message(12, "response", "<!-- MCP_TOOL_CALL:{} -->", true);
+        assert_eq!(
+            followup_turn_progress(&[handoff.clone(), prompt.clone(), tool_step], 10),
+            FollowupTurnProgress::Incomplete { attempts: 1 }
+        );
+        // 被中断的回复不算完成
+        let interrupted = build_message_with_metadata(12, "response", "半截", true, Some(r#"{"end_reason":"interrupted"}"#));
+        assert_eq!(
+            followup_turn_progress(&[handoff.clone(), prompt.clone(), interrupted], 10),
+            FollowupTurnProgress::Incomplete { attempts: 1 }
+        );
+        let done = build_message(12, "response", "[[NO_REPLY]]", true);
+        assert_eq!(followup_turn_progress(&[handoff, prompt, done], 10), FollowupTurnProgress::Completed);
     }
 
     /// 提示词不能承诺运行时会拒绝的协作方式：收到协作请求的成员不能再派工

@@ -561,13 +561,13 @@ impl ConversationRepository {
         rows.collect()
     }
 
-    /// 处于发送中的回送；调用方需排除本进程仍在运行的执行者后才能接手。
+    /// 处于发送中或续跑中的回送；调用方需排除本进程仍在运行的执行者后才能接手。
     #[instrument(level = "debug", skip(self))]
     pub fn list_butler_task_conversation_ids_dispatching_followup(&self) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT task_conversation_id
              FROM butler_task_result
-             WHERE followup_status = 'dispatching'
+             WHERE followup_status IN ('dispatching', 'continuing')
              ORDER BY updated_time ASC, task_conversation_id ASC",
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
@@ -3414,7 +3414,7 @@ impl ButlerRepository {
                      updated_time = ?3
                  WHERE task_conversation_id = ?4
                    AND (COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')
-                        OR (?5 AND followup_status = 'dispatching'))",
+                        OR (?5 AND followup_status IN ('dispatching', 'continuing')))",
                 params![claim_id, handoff_message_id, now, task_conversation_id, reclaim_dispatching],
             )?;
             Ok(affected > 0)

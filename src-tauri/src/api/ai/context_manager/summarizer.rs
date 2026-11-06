@@ -1,6 +1,6 @@
 use super::MessageTuple;
 use crate::errors::AppError;
-use genai::chat::{ChatMessage, ChatRequest};
+use genai::chat::{ChatMessage, ChatRequest, StopReason};
 use genai::Client;
 use tracing::{debug, info};
 
@@ -124,6 +124,9 @@ pub async fn generate_summary(
         AppError::UnknownError(format!("context compaction LLM call failed: {}", e))
     })?;
 
+    if require_complete {
+        check_summary_stop_reason(response.stop_reason.as_ref())?;
+    }
     let raw = response.first_text().unwrap_or("").to_string();
     let summary = validate_summary(&raw, is_butler, require_complete)?;
 
@@ -136,6 +139,18 @@ const SUMMARY_OPEN_TAG: &str = "<context_summary>";
 const SUMMARY_CLOSE_TAG: &str = "</context_summary>";
 const REQUIRED_SECTIONS: &[&str] = &["## 用户目标", "## 用户消息记录", "## 待办", "## 下一步"];
 const BUTLER_REQUIRED_SECTIONS: &[&str] = &["## 子任务状态"];
+
+/// 模型异常结束（被截断、被过滤、转去调用工具或其他非正常原因）时，摘要不能采用。
+/// 未上报结束原因的适配器只依赖结构校验。
+pub(crate) fn check_summary_stop_reason(stop_reason: Option<&StopReason>) -> Result<(), AppError> {
+    match stop_reason {
+        None | Some(StopReason::Completed(_)) | Some(StopReason::StopSequence(_)) => Ok(()),
+        Some(reason) => Err(AppError::UnknownError(format!(
+            "上下文摘要模型未正常结束（stop_reason={}），已保留原记录",
+            reason.raw()
+        ))),
+    }
+}
 
 /// 校验摘要。`require_complete` 时（管家主会话、成员会话、任务会话）拒绝被截断或缺段的摘要，
 /// 不再自动补标签——补上的结束标签会把半截摘要伪装成完整摘要。调用方失败时保留原记录。
@@ -289,6 +304,16 @@ mod tests {
         // 标签外的多余文字被去掉
         let wrapped = format!("好的，摘要如下：\n{}\n以上。", complete_summary(""));
         assert_eq!(validate_summary(&wrapped, false, true).unwrap(), complete_summary(""));
+    }
+
+    #[test]
+    fn summary_stop_reason_rejects_abnormal_endings() {
+        assert!(check_summary_stop_reason(None).is_ok());
+        assert!(check_summary_stop_reason(Some(&StopReason::from("stop".to_string()))).is_ok());
+        for raw in ["length", "content_filter", "tool_calls", "error"] {
+            let err = check_summary_stop_reason(Some(&StopReason::from(raw.to_string()))).unwrap_err();
+            assert!(err.to_string().contains(raw), "{raw}");
+        }
     }
 
     #[test]
