@@ -26,7 +26,7 @@ vi.mock("@/hooks/useCodeTheme", () => ({
 
 describe("RustCodeBlock", () => {
     let notifyResize: (height: number) => void;
-    let notifyIntersection: (intersecting: boolean) => void;
+    let notifyIntersection: (entries: Array<[Element, boolean]>) => void;
     beforeEach(() => {
         platform.mobile = false;
         vi.stubGlobal("ResizeObserver", class {
@@ -40,27 +40,40 @@ describe("RustCodeBlock", () => {
         });
         vi.stubGlobal("IntersectionObserver", class {
             constructor(callback: IntersectionObserverCallback) {
-                notifyIntersection = intersecting => callback([{ isIntersecting: intersecting } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+                notifyIntersection = entries => callback(
+                    entries.map(([target, isIntersecting]) => ({ target, isIntersecting }) as IntersectionObserverEntry),
+                    this as unknown as IntersectionObserver,
+                );
             }
             observe() {}
             disconnect() {}
             unobserve() {}
         });
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 0; });
     });
 
     it("should float controls only when the code block has scrolled past its toolbar", () => {
         const { container } = render(<RustCodeBlock language="text">toolbar position</RustCodeBlock>);
         const root = container.firstElementChild as HTMLElement;
+        const sentinel = root.firstElementChild as HTMLElement;
         let bounds = { top: 900, bottom: 1100 };
         vi.spyOn(root, "getBoundingClientRect").mockImplementation(() => bounds as DOMRect);
         const toolbar = screen.getByRole("button", { name: "复制代码" }).parentElement!;
-        act(() => notifyIntersection(false));
+        act(() => notifyIntersection([[sentinel, false], [root, false]]));
         expect(toolbar).not.toHaveClass("fixed");
         bounds = { top: -100, bottom: 400 };
-        act(() => notifyIntersection(false));
+        act(() => notifyIntersection([[sentinel, false], [root, true]]));
         expect(toolbar).toHaveClass("fixed");
-        bounds = { top: -400, bottom: 0 };
-        act(() => notifyIntersection(false));
+        // 真实浏览器中 sentinel 已不在视口，不会再回调；只能靠滚动重新判断。
+        bounds = { top: -400, bottom: 100 };
+        act(() => { window.dispatchEvent(new Event("scroll")); });
+        expect(toolbar).not.toHaveClass("fixed");
+        bounds = { top: -100, bottom: 400 };
+        act(() => { window.dispatchEvent(new Event("scroll")); });
+        expect(toolbar).toHaveClass("fixed");
+        // 整个代码块离开视口时取消固定。
+        bounds = { top: -800, bottom: -300 };
+        act(() => notifyIntersection([[root, false]]));
         expect(toolbar).not.toHaveClass("fixed");
     });
 

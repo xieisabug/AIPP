@@ -206,37 +206,65 @@ const RustCodeBlock: React.FC<RustCodeBlockProps> = ({
         // 依赖 html 与 code，在代码或高亮结果变化时重新测量
     }, [html, code, renderCode, isStreaming, disableCollapse, shouldCollapseInitially]);
 
-    // 用 IntersectionObserver 判断是否需要 sticky 工具栏，避免 mouseenter/leave 改 state 触发重渲染清掉选区
+    // 用 IntersectionObserver 判断是否需要 sticky 工具栏，避免 mouseenter/leave 改 state 触发重渲染清掉选区。
+    // 只看 sentinel 不够：sentinel 滚出后不会再回调，代码块整体滚走时工具栏会残留在屏幕上。
+    // 因此同时观察容器，并且仅在「sentinel 已滚出、容器仍可见」期间监听滚动做几何判断。
     useEffect(() => {
         const sentinel = headerSentinelRef.current;
         const container = containerRef.current;
         if (!sentinel || !container) return;
 
-        const updateStickyGeometry = (shouldStick: boolean) => {
+        let sentinelVisible = true;
+        let containerVisible = false;
+        let frame = 0;
+
+        const update = () => {
+            frame = 0;
+            const rect = container.getBoundingClientRect();
+            const shouldStick = !sentinelVisible && containerVisible && rect.top < 80 && rect.bottom > 124;
             setIsSticky((prev) => {
                 if (prev === shouldStick) {
                     return prev;
                 }
                 if (shouldStick) {
-                    const rect = container.getBoundingClientRect();
                     setToolbarRight(window.innerWidth - rect.right + 8);
                 }
                 return shouldStick;
             });
         };
+        const onScroll = () => {
+            if (!frame) frame = window.requestAnimationFrame(update);
+        };
+        let listening = false;
+        const syncScrollListener = () => {
+            const shouldListen = !sentinelVisible && containerVisible;
+            if (shouldListen === listening) return;
+            listening = shouldListen;
+            if (shouldListen) {
+                window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+            } else {
+                window.removeEventListener("scroll", onScroll, { capture: true });
+            }
+        };
 
         const observer = new IntersectionObserver(
             (entries) => {
-                const entry = entries[0];
-                // 顶部 sentinel 滚出视口且代码块仍可见时，固定工具栏
-                const rect = container.getBoundingClientRect();
-                const stillVisible = rect.top < 80 && rect.bottom > 124;
-                updateStickyGeometry(!entry.isIntersecting && stillVisible);
+                for (const entry of entries) {
+                    if (entry.target === sentinel) sentinelVisible = entry.isIntersecting;
+                    else if (entry.target === container) containerVisible = entry.isIntersecting;
+                }
+                syncScrollListener();
+                update();
             },
             { root: null, rootMargin: "0px", threshold: [0, 1] },
         );
         observer.observe(sentinel);
-        return () => observer.disconnect();
+        observer.observe(container);
+        return () => {
+            observer.disconnect();
+            window.removeEventListener("scroll", onScroll, { capture: true });
+            if (frame) window.cancelAnimationFrame(frame);
+        };
     }, []);
 
     const handleCopy = useCallback(() => {
