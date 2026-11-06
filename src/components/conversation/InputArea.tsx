@@ -66,6 +66,7 @@ import AssistantCompletionList from "./AssistantCompletionList";
 import ArtifactCompletionList from "./ArtifactCompletionList";
 import SlashCompletionList from "./SlashCompletionList";
 import { useFileList } from "../../hooks/useFileList";
+import { MOBILE_TEXTAREA_MIN_HEIGHT, mobileTextareaMaxHeight } from "@/mobile/keyboardViewport";
 import { useAssistantListListener } from "../../hooks/useAssistantListListener";
 import PinyinFilter, { AssistantItem, FilteredAssistant, usePinyinReady } from "../../utils/pinyinFilter";
 import { ArtifactCollectionItem, FilteredArtifact } from "../../data/ArtifactCollection";
@@ -107,9 +108,6 @@ interface InputAreaProps {
     onPlanModeToggle?: () => void;
 }
 const IMAGE_AREA_HEIGHT = 80;
-// 移动端胶囊：48px border-box - 2*2 边框 = 44px 单行内容高度；多行最多约 30vh（≈6 行）后内部滚动
-const MOBILE_TEXTAREA_MIN_HEIGHT = 44;
-const MOBILE_TEXTAREA_MAX_VIEWPORT_RATIO = 0.3;
 export const COMPOSER_GROW_VAR = "--aipp-composer-grow";
 // 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
 const EMPTY_ACP_COMMANDS: AcpAvailableCommand[] = [];
@@ -473,6 +471,18 @@ const InputArea = React.memo(
             }, [inputText, initialHeight, fileInfoList, isFocused, isMobile]);
 
             useEffect(() => {
+                if (!isMobile || !window.visualViewport) return;
+                const viewport = window.visualViewport;
+                const onResize = () => adjustTextareaHeight();
+                viewport.addEventListener("resize", onResize);
+                viewport.addEventListener("scroll", onResize);
+                return () => {
+                    viewport.removeEventListener("resize", onResize);
+                    viewport.removeEventListener("scroll", onResize);
+                };
+            }, [isMobile]);
+
+            useEffect(() => {
                 if (!slashListVisible || !slashContext) {
                     return;
                 }
@@ -802,10 +812,7 @@ const InputArea = React.memo(
                 if (!textarea) return;
                 textarea.style.height = "auto";
                 const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-                const maxHeight = Math.max(
-                    MOBILE_TEXTAREA_MIN_HEIGHT,
-                    Math.round(viewportHeight * MOBILE_TEXTAREA_MAX_VIEWPORT_RATIO),
-                );
+                const maxHeight = mobileTextareaMaxHeight(window.innerHeight, viewportHeight);
                 const newHeight = Math.min(
                     Math.max(textarea.scrollHeight, MOBILE_TEXTAREA_MIN_HEIGHT),
                     maxHeight,

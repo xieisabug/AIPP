@@ -335,6 +335,8 @@ describe("InputArea mobile attachment tray", () => {
         expect(screen.getByText("附件 2")).toBeTruthy();
         expect(screen.getByText("notes.txt")).toBeTruthy();
         expect(screen.getByText("TXT")).toBeTruthy();
+        expect(screen.getByText("shot.png")).toBeTruthy();
+        expect(screen.getByText("IMG")).toBeTruthy();
 
         const capsule = container.querySelector('[data-aipp-slot="chat-input-area-container"]');
         expect(capsule?.querySelector('[data-aipp-slot="chat-input-attachments"]')).toBeNull();

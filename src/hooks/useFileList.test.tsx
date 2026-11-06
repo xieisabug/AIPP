@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AttachmentType, FileInfo } from "../data/Conversation";
-import { useFileList } from "./useFileList";
+import { middleEllipsis, useFileList } from "./useFileList";
 
 function Harness({
   files,
@@ -40,11 +40,27 @@ describe("useFileList attachment tray chips", () => {
 
     expect(screen.getByText("notes.txt")).toBeTruthy();
     expect(screen.getByText("TXT")).toBeTruthy();
+    expect(screen.getByText("shot.png")).toBeTruthy();
+    expect(screen.getByText("IMG")).toBeTruthy();
     expect(screen.getByAltText("shot.png")).toBeTruthy();
 
     const removes = screen.getAllByTitle(/移除/);
     expect(removes.length).toBe(2);
     fireEvent.click(removes[0]);
     expect(onDelete).toHaveBeenCalled();
+  });
+
+  it("keeps the differing tail of same-prefix names and expands the full name", () => {
+    const name = "aaaaa-report-final-version-2026-11-06-very-long-name.txt";
+    const copy = "aaaaa-report-final-version-2026-11-06-very-long-name-copy.txt";
+    expect(middleEllipsis(name)).not.toBe(middleEllipsis(copy));
+    expect(middleEllipsis(name).endsWith(".txt")).toBe(true);
+    expect(middleEllipsis("notes.txt")).toBe("notes.txt");
+
+    render(<Harness files={[{ id: 3, name, path: "/tmp/a.txt", type: AttachmentType.Text }]} />);
+    const short = screen.getByRole("button", { name: middleEllipsis(name) });
+    fireEvent.click(short);
+    expect(short).toHaveTextContent(name);
+    expect(short).toHaveAttribute("aria-expanded", "true");
   });
 });

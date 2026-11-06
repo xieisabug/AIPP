@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import LoadingScreen from "../components/LoadingScreen";
+import { isKeyboardCompact, isKeyboardOpen } from "./keyboardViewport";
 import { isMobileRoute, MobileRoute, MobilePreview, runMobileBackHandlers } from "./navigation";
 
 const Chat = lazy(() => import("../windows/ChatUIWindow"));
@@ -91,7 +92,7 @@ export default function MobileShell() {
         const shell = shellRef.current;
         if (!viewport || !shell) return;
         const update = () => {
-            const keyboardOpen = window.innerHeight - viewport.height > 150;
+            const keyboardOpen = isKeyboardOpen(window.innerHeight, viewport.height);
             shell.style.height = keyboardOpen ? `${viewport.height}px` : "";
             shell.style.transform = keyboardOpen ? `translateY(${viewport.offsetTop}px)` : "";
             if (keyboardOpen) {
@@ -100,6 +101,11 @@ export default function MobileShell() {
             } else {
                 shell.style.removeProperty("--aipp-keyboard-inset-bottom");
                 delete shell.dataset.aippShellKeyboardOffset;
+            }
+            if (isKeyboardCompact(window.innerHeight, viewport.height)) {
+                shell.dataset.aippKeyboardCompact = "true";
+            } else {
+                delete shell.dataset.aippKeyboardCompact;
             }
         };
         viewport.addEventListener("resize", update);
@@ -110,6 +116,7 @@ export default function MobileShell() {
             viewport.removeEventListener("scroll", update);
             shell.style.removeProperty("--aipp-keyboard-inset-bottom");
             delete shell.dataset.aippShellKeyboardOffset;
+            delete shell.dataset.aippKeyboardCompact;
         };
     }, []);
     const current = stack.at(-1);

@@ -87,8 +87,21 @@
     text-overflow: ellipsis;
     max-width: 96px;
     display: inline-block;
-    padding-left: 2px;
+    padding: 0 0 0 2px;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
     color: hsl(var(--foreground));
+}
+
+.input-area-attachment-name[aria-expanded="true"] {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+    max-width: none;
+    word-break: break-all;
 }
 
 .input-area-attachment-type {
@@ -130,12 +143,19 @@
     min-height: 44px;
     width: 44px;
     height: 44px;
-    top: -4px;
-    right: -4px;
+    /* 芯片含 1px 边框，按钮贴在 right/top: 0 会盖住右上圆角 */
+    top: 50%;
+    right: 4px;
+    transform: translateY(-50%);
     align-items: center;
     justify-content: center;
     background: hsl(var(--background) / 0.92);
     border-radius: 999px;
+}
+
+.input-area-img-wrapper .input-area-attachment-name,
+.input-area-img-wrapper .input-area-attachment-type {
+    display: none;
 }
 
 .input-area-img {
@@ -193,14 +213,66 @@
 .input-area.mobile.bottom .input-area-attachment-tray {
     position: relative;
     z-index: 11;
-    padding: 8px 12px 4px;
+    padding: 0;
     /* 独立托盘：不被 48px 胶囊 overflow 裁切 */
     max-height: min(36vh, 220px);
-    overflow-x: auto;
+    overflow-x: hidden;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     background: hsl(var(--background) / 0.96);
     border-top: 1px solid hsl(var(--border));
+}
+
+.input-area.mobile.bottom .input-area-attachment-tray-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 8px 12px 4px;
+    background: hsl(var(--background));
+}
+
+.input-area.mobile.bottom .input-area-attachment-tray .input-area-img-container {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 4px 12px 8px;
+}
+
+.input-area.mobile .input-area-img-wrapper,
+.input-area.mobile .input-area-text-wrapper,
+.aipp-mobile-platform .input-area-img-wrapper,
+.aipp-mobile-platform .input-area-text-wrapper {
+    border-color: hsl(var(--border));
+    overflow: visible;
+    width: 100%;
+    max-width: none;
+    height: auto;
+    min-width: 0;
+    /* 44px 热区再留出边框和 4px 内边距，避免圆角被按钮盖住 */
+    min-height: 52px;
+    padding: 4px 52px 4px 8px;
+    box-sizing: border-box;
+}
+
+.input-area.mobile .input-area-img-wrapper .input-area-attachment-name,
+.input-area.mobile .input-area-img-wrapper .input-area-attachment-type,
+.aipp-mobile-platform .input-area-img-wrapper .input-area-attachment-name,
+.aipp-mobile-platform .input-area-img-wrapper .input-area-attachment-type {
+    display: inline-block;
+}
+
+.input-area.mobile .input-area-attachment-name,
+.aipp-mobile-platform .input-area-attachment-name {
+    flex: 1;
+    max-width: none;
+    min-width: 0;
+}
+
+.input-area.mobile .input-area-img,
+.aipp-mobile-platform .input-area-img {
+    position: static;
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
 }
 
 .input-area.mobile.bottom .input-area-textarea-container {
@@ -264,6 +336,64 @@
     min-height: 44px !important;
     min-width: 44px !important;
     border-radius: 22px !important;
+}
+
+/* 键盘已经把壳体底边抬到输入法上方，不再叠加系统手势条。 */
+[data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom {
+    height: calc(72px + var(--aipp-composer-grow, 0px));
+    min-height: calc(72px + var(--aipp-composer-grow, 0px));
+}
+
+[data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom.has-attachments {
+    height: auto;
+    min-height: calc(72px + var(--aipp-composer-grow, 0px));
+    padding-bottom: calc(72px + var(--aipp-composer-grow, 0px));
+}
+
+[data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom .input-area-textarea-container {
+    bottom: 12px !important;
+}
+
+[data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom .input-area-send-button,
+[data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom .input-area-add-button {
+    bottom: 14px !important;
+}
+
+/* 横屏键盘：顶栏 44 + 输入 48 留在可视区内，托盘只占剩下的高度。 */
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom {
+    height: 48px;
+    min-height: 48px;
+}
+
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom.has-attachments {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    height: auto;
+    min-height: 48px;
+    max-height: 100%;
+    overflow: hidden;
+    padding-bottom: 48px;
+}
+
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom .input-area-attachment-tray {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 56px;
+}
+
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom .input-area-textarea-container {
+    bottom: 2px !important;
+    min-height: 44px !important;
+}
+
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom .input-area-send-button,
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom .input-area-add-button {
+    bottom: 2px !important;
+}
+
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile .input-area-textarea {
+    max-height: 44px;
 }
 
 /* 视觉圆环从 44px 缩为 40px，外层保留 44px 点击范围。 */

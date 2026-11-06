@@ -918,7 +918,7 @@ function ChatUIWindow() {
                     </div>
 
                     {/* 主内容区域 */}
-                    <div className="flex-1 overflow-hidden" data-aipp-slot="chat-main-content">
+                    <div className="flex-1 min-h-0 overflow-hidden" data-aipp-slot="chat-main-content">
                         <ConversationUI
                             ref={conversationUIRef}
                             pluginList={pluginList}
