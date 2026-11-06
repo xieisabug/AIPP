@@ -24,9 +24,8 @@ use crate::api::assistant_api::get_assistant;
 use crate::api::butler_api::{
     active_butler_main_conversation_id, followup_turn_progress, get_butler_main_continuation_lock,
     is_butler_main_busy_error, is_butler_main_running, is_current_butler_main_conversation,
-    latest_message_id, resolve_or_create_butler_execution_window, tag_followup_prompt,
-    wait_for_butler_main_to_be_idle, ButlerMainBusy, FollowupTurnProgress,
-    FOLLOWUP_MAX_CONTINUATION_ATTEMPTS,
+    resolve_or_create_butler_execution_window, wait_for_butler_main_to_be_idle, ButlerMainBusy,
+    FollowupTurnProgress, FOLLOWUP_KEYS, FOLLOWUP_MAX_CONTINUATION_ATTEMPTS,
 };
 use crate::api::genai_client::create_client_with_config;
 use crate::db::assistant_db::AssistantDatabase;
@@ -1930,11 +1929,18 @@ pub async fn execute_scheduled_task(
         );
         // 结果已入库后再注销本地运行登记（回报管家可能需要等待，不应继续显示为执行中）
         drop(registration);
-        if let Err(error) = &saved {
-            // 未入库时不回报，避免与记录不一致；记录仍为运行中，重启后按中断如实回报
+        if let Err(error) = saved {
+            // 未入库：向调用方返回错误；结果保留在后台继续重试保存，保存成功后再回报总管家。
+            // 若进程在此期间退出，记录仍为运行中，重启后按中断如实回报。
             log_task_message(app_handle, task.id, &run_id, "error",
-                format!("保存运行结果失败，暂不回报总管家（重启后按中断补报）: {error}"));
-        } else if task.butler_conversation_id.is_some() {
+                format!("保存运行结果失败，结果已保留并在后台重试保存: {error}"));
+            spawn_run_result_save_retry(app_handle, task, &run_id, &outcome);
+            return Err(format!(
+                "task_id={}; run_id={run_id}; 运行已结束（status={}, end_reason={}），但保存结果失败：{error}；结果已保留，正在后台重试保存",
+                task.id, outcome.status, outcome.end_reason
+            ));
+        }
+        if task.butler_conversation_id.is_some() {
             // 回报可能需要长时间排队等待主会话空闲，放到后台，不占用调度
             spawn_scheduled_run_report(app_handle, task, &run_id, &outcome);
         }
@@ -2045,6 +2051,46 @@ pub(crate) fn outcome_from_recorded_run(run: &ScheduledTaskRun) -> ScheduledRunO
             None,
         )
     }
+}
+
+const RUN_RESULT_SAVE_RETRY_DELAY: Duration = Duration::from_secs(5);
+const RUN_RESULT_SAVE_MAX_ATTEMPTS: u32 = 60;
+
+/// 结果保存失败后在后台重试；保存成功后才回报总管家，保证回报与记录一致。
+fn spawn_run_result_save_retry(
+    app_handle: &tauri::AppHandle,
+    task: &ScheduledTask,
+    run_id: &str,
+    outcome: &ScheduledRunOutcome,
+) {
+    let app_handle = app_handle.clone();
+    let task = task.clone();
+    let run_id = run_id.to_string();
+    let outcome = outcome.clone();
+    tauri::async_runtime::spawn(async move {
+        for attempt in 1..=RUN_RESULT_SAVE_MAX_ATTEMPTS {
+            tokio::time::sleep(RUN_RESULT_SAVE_RETRY_DELAY).await;
+            match update_task_run(
+                &app_handle,
+                &run_id,
+                outcome.status,
+                outcome.notify,
+                outcome.summary.as_deref(),
+                outcome.error.as_deref(),
+                Some(Utc::now()),
+            ) {
+                Ok(()) => {
+                    log_task_message(&app_handle, task.id, &run_id, "result_saved", format!("第 {attempt} 次重试保存运行结果成功"));
+                    if task.butler_conversation_id.is_some() {
+                        spawn_scheduled_run_report(&app_handle, &task, &run_id, &outcome);
+                    }
+                    return;
+                }
+                Err(error) => warn!(run_id = %run_id, attempt, error = %error, "retry saving scheduled run result failed"),
+            }
+        }
+        error!(run_id = %run_id, "scheduled run result still unsaved after retries; restart recovery will report it as interrupted");
+    });
 }
 
 /// 本进程正在回报的运行；同一运行只允许一个回报流程，启动补报不会与新任务的回报重叠。
@@ -2710,7 +2756,6 @@ async fn enqueue_scheduled_task_butler_followup(
     }
 
     let prompt = build_butler_scheduled_task_followup_prompt(task, outcome);
-    let before_prompt_id = latest_message_id(&db, butler_conversation_id)?;
     let window = resolve_or_create_butler_execution_window(app_handle)?;
     let ai_request = AiRequest {
         conversation_id: butler_conversation_id.to_string(),
@@ -2725,7 +2770,7 @@ async fn enqueue_scheduled_task_butler_followup(
         attachment_list: None,
     };
 
-    ask_ai(
+    FOLLOWUP_KEYS.scope(vec![scheduled_followup_key(run_id)], ask_ai(
         app_handle.clone(),
         app_handle.state::<crate::AppState>(),
         app_handle.state::<crate::AcpSessionState>(),
@@ -2739,12 +2784,9 @@ async fn enqueue_scheduled_task_butler_followup(
         None,
         None,
         Some("internal".to_string()),
-    )
+    ))
     .await
     .map_err(|e| e.to_string())?;
-    if let Err(error) = tag_followup_prompt(&db, butler_conversation_id, before_prompt_id, &[scheduled_followup_key(run_id)]) {
-        log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("记录续跑标记失败: {error}"));
-    }
 
     Ok(ScheduledFollowupStep::Started)
 }

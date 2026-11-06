@@ -3858,6 +3858,29 @@ pub(crate) fn add_message(
     generation_group_id: Option<String>,
     parent_group_id: Option<String>,
 ) -> Result<Message, AppError> {
+    add_message_with_metadata(
+        app_handle, parent_id, conversation_id, message_type, content, llm_model_id,
+        llm_model_name, start_time, finish_time, token_count, generation_group_id,
+        parent_group_id, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_message_with_metadata(
+    app_handle: &tauri::AppHandle,
+    parent_id: Option<i64>,
+    conversation_id: i64,
+    message_type: String,
+    content: String,
+    llm_model_id: Option<i64>,
+    llm_model_name: Option<String>,
+    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    finish_time: Option<chrono::DateTime<chrono::Utc>>,
+    token_count: i32,
+    generation_group_id: Option<String>,
+    parent_group_id: Option<String>,
+    metadata_json: Option<String>,
+) -> Result<Message, AppError> {
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
     let message = db
         .message_repo()?
@@ -3878,7 +3901,7 @@ pub(crate) fn add_message(
             generation_group_id,
             parent_group_id,
             tool_calls_json: None,
-            metadata_json: None,
+            metadata_json,
             first_token_time: None,
             ttft_ms: None,
         })
@@ -4077,12 +4100,11 @@ async fn initialize_conversation(
             crate::api::butler_peer::updated(app_handle);
             db.message_repo()?.read(input)?.ok_or_else(|| AppError::UnknownError(format!("协作触发消息 {input} 写入后丢失")))?
         } else {
-            let message = add_message(app_handle, None, conversation_id, "user".to_string(),
+            // 内部续跑的来源与回送标记随消息一次写入
+            let metadata = (origin == Some("internal")).then(crate::api::butler_api::internal_prompt_metadata);
+            let message = add_message_with_metadata(app_handle, None, conversation_id, "user".to_string(),
                 display_user_prompt_with_context.clone(), Some(assistant_detail.model[0].id),
-                Some(assistant_detail.model[0].model_code.clone()), None, None, 0, None, None)?;
-            if origin == Some("internal") {
-                db.message_repo()?.update_metadata(message.id, Some(r#"{"origin":"internal"}"#))?;
-            }
+                Some(assistant_detail.model[0].model_code.clone()), None, None, 0, None, None, metadata)?;
             message
         };
 

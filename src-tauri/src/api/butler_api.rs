@@ -1189,10 +1189,6 @@ fn message_metadata(message: &Message) -> Option<serde_json::Value> {
     message.metadata_json.as_deref().and_then(|raw| serde_json::from_str(raw).ok())
 }
 
-fn is_internal_origin_message(message: &Message) -> bool {
-    message_metadata(message).is_some_and(|meta| meta["origin"] == "internal")
-}
-
 /// 续跑提示消息上记录它负责的回送（如 `task:12`、`run:<run_id>`），完成判断与重试次数只认本回送的提示。
 fn is_followup_prompt_for(message: &Message, key: &str) -> bool {
     message.message_type == "user"
@@ -1246,37 +1242,19 @@ pub(crate) fn followup_turn_progress(
     }
 }
 
-pub(crate) fn latest_message_id(db: &ConversationDatabase, conversation_id: i64) -> Result<i64, String> {
-    Ok(db
-        .message_repo()
-        .map_err(|e| e.to_string())?
-        .list_by_conversation_id(conversation_id)
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|(message, _)| message.id)
-        .max()
-        .unwrap_or(0))
+tokio::task_local! {
+    /// 内部续跑负责的回送标记；ask_ai 保存续跑提示消息时把它与 origin 写进同一条记录。
+    pub(crate) static FOLLOWUP_KEYS: Vec<String>;
 }
 
-/// 给刚开始的续跑提示消息打上回送标记。调用方持有续跑锁，after_message_id 之后的第一条内部用户消息即本次提示。
-pub(crate) fn tag_followup_prompt(
-    db: &ConversationDatabase,
-    conversation_id: i64,
-    after_message_id: i64,
-    keys: &[String],
-) -> Result<(), String> {
-    let message_repo = db.message_repo().map_err(|e| e.to_string())?;
-    let prompt = message_repo
-        .list_by_conversation_id(conversation_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(message, _)| message)
-        .filter(|message| message.id > after_message_id && message.message_type == "user")
-        .find(is_internal_origin_message)
-        .ok_or_else(|| format!("conversation_id={conversation_id}; 未找到本次续跑的提示消息，无法记录回送标记"))?;
-    let metadata = serde_json::json!({"origin": "internal", "followup_keys": keys}).to_string();
-    message_repo.update_metadata(prompt.id, Some(&metadata)).map_err(|e| e.to_string())?;
-    Ok(())
+/// 内部续跑提示消息的元数据：在保存消息时一次写入，避免崩溃留下没有回送标记的提示。
+pub(crate) fn internal_prompt_metadata() -> String {
+    let keys = FOLLOWUP_KEYS.try_with(|keys| keys.clone()).unwrap_or_default();
+    if keys.is_empty() {
+        serde_json::json!({"origin": "internal"}).to_string()
+    } else {
+        serde_json::json!({"origin": "internal", "followup_keys": keys}).to_string()
+    }
 }
 
 /// 主会话是否可以开始一轮内部续跑：没有在运行，且没有排队中的用户消息（用户新消息优先）。
@@ -1597,7 +1575,6 @@ async fn enqueue_butler_main_followup(
         let prompt = build_batched_followup_prompt(&followup_batch);
 
         let window = resolve_or_create_butler_execution_window(&app_handle)?;
-        let before_prompt_id = latest_message_id(&db, butler_conversation_id)?;
         let followup_keys: Vec<String> = followup_batch
             .iter()
             .map(|entry| task_followup_key(entry.task.task_conversation_id))
@@ -1615,7 +1592,7 @@ async fn enqueue_butler_main_followup(
             attachment_list: None,
         };
 
-        ask_ai(
+        FOLLOWUP_KEYS.scope(followup_keys, ask_ai(
             app_handle.clone(),
             app_handle.state::<crate::AppState>(),
             app_handle.state::<crate::AcpSessionState>(),
@@ -1629,12 +1606,9 @@ async fn enqueue_butler_main_followup(
             None,
             None,
             Some("internal".to_string()),
-        )
+        ))
         .await
         .map_err(|e| e.to_string())?;
-        if let Err(error) = tag_followup_prompt(&db, butler_conversation_id, before_prompt_id, &followup_keys) {
-            warn!(butler_conversation_id, error = %error, "failed to tag butler follow-up prompt");
-        }
 
         // ask_ai 只是开始了续跑；是否完成由对账在主会话空闲后按完成证据判定
         for entry in &followup_batch {
@@ -2758,6 +2732,12 @@ fn find_latest_attention_message_id(
     })
 }
 
+/// 已注入但还没有任何后续处理的提醒；存在时沿用它开工，而不是重复注入或当作已处理。
+fn pending_attention_message_id(messages: &[Message], task_conversation_id: i64) -> Option<i64> {
+    find_latest_attention_message_id(messages, task_conversation_id)
+        .filter(|id| !has_non_system_message_after(messages, *id))
+}
+
 fn has_non_system_message_after(messages: &[Message], message_id: i64) -> bool {
     messages.iter().any(|message| message.id > message_id && message.message_type != "system")
 }
@@ -2835,14 +2815,9 @@ async fn enqueue_butler_task_attention_followup(
             .list_by_conversation_id(definition.butler_conversation_id)
             .map_err(|e| e.to_string())?,
     );
-    if let Some(existing_attention_message_id) =
-        find_latest_attention_message_id(&main_messages, task.task_conversation_id)
-    {
-        if !has_non_system_message_after(&main_messages, existing_attention_message_id) {
-            return Ok(());
-        }
-    }
-
+    // 已注入但还没有开始处理的提醒（例如上次开工前因忙碌被退回）：沿用它继续开工，不能当作已处理
+    let pending_attention = pending_attention_message_id(&main_messages, task.task_conversation_id);
+    if pending_attention.is_none() {
     let task_messages = dedupe_messages(
         message_repo
             .list_by_conversation_id(task.task_conversation_id)
@@ -2902,6 +2877,7 @@ async fn enqueue_butler_task_attention_followup(
         None,
     )
     .map_err(|e| e.to_string())?;
+    }
 
     let window = resolve_or_create_butler_execution_window(&app_handle)?;
     let ai_request = AiRequest {
@@ -3800,6 +3776,29 @@ mod tests {
         done.extend([prompt, build_message(16, "response", "[[NO_REPLY]]", true)]);
         assert_eq!(followup_turn_progress(&done, 10, &key), FollowupTurnProgress::Completed);
         assert_eq!(followup_turn_progress(&done, 10, &task_followup_key(8)), FollowupTurnProgress::Completed, "批量提示覆盖多个任务");
+    }
+
+    /// 回送标记与提示消息一起写入：只在续跑作用域内带上标记
+    #[test]
+    fn internal_prompt_metadata_carries_followup_keys_in_scope() {
+        use super::{internal_prompt_metadata, FOLLOWUP_KEYS};
+        assert_eq!(internal_prompt_metadata(), r#"{"origin":"internal"}"#);
+        let tagged = FOLLOWUP_KEYS.sync_scope(vec!["task:7".to_string()], internal_prompt_metadata);
+        let value: serde_json::Value = serde_json::from_str(&tagged).unwrap();
+        assert_eq!(value["origin"], "internal");
+        assert_eq!(value["followup_keys"][0], "task:7");
+    }
+
+    /// 忙碌退回后重试：已注入但未开工的提醒要继续处理，不能当作已处理
+    #[test]
+    fn pending_attention_is_resumed_until_a_turn_starts() {
+        let attention = build_message(20, "system", "<butler_task_attention>
+task_conversation_id=7
+</butler_task_attention>", true);
+        assert_eq!(super::pending_attention_message_id(&[attention.clone()], 7), Some(20));
+        assert_eq!(super::pending_attention_message_id(&[attention.clone()], 8), None);
+        let prompt = build_message_with_metadata(21, "user", "系统任务提醒", true, Some(r#"{"origin":"internal"}"#));
+        assert_eq!(super::pending_attention_message_id(&[attention, prompt], 7), None);
     }
 
     #[test]
