@@ -532,11 +532,13 @@ pub(crate) async fn await_llm_or_stop<F: std::future::Future>(
 }
 
 /// 一次运行的真实结束结果。执行状态只由执行本身决定，通知判定与管家回报的失败不会改写它。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScheduledRunOutcome {
     /// 入库状态：success / failed
+    #[serde(deserialize_with = "deserialize_run_status")]
     pub(crate) status: &'static str,
     /// 具体结束原因：completed / cancelled / timeout / max_rounds_reached / error / interrupted
+    #[serde(deserialize_with = "deserialize_run_end_reason")]
     pub(crate) end_reason: &'static str,
     pub(crate) notify: bool,
     pub(crate) summary: Option<String>,
@@ -546,6 +548,106 @@ pub(crate) struct ScheduledRunOutcome {
     pub(crate) judged_task_state: Option<String>,
     /// 通知判定失败原因（不改写执行状态）
     pub(crate) notify_error: Option<String>,
+}
+
+fn deserialize_run_status<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static str, D::Error> {
+    match String::deserialize(deserializer)?.as_str() {
+        "success" => Ok("success"),
+        "failed" => Ok("failed"),
+        other => Err(serde::de::Error::custom(format!("invalid scheduled outcome status: {other}"))),
+    }
+}
+
+fn deserialize_run_end_reason<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static str, D::Error> {
+    match String::deserialize(deserializer)?.as_str() {
+        "completed" => Ok("completed"),
+        "cancelled" => Ok("cancelled"),
+        "timeout" => Ok("timeout"),
+        "max_rounds_reached" => Ok("max_rounds_reached"),
+        "error" => Ok("error"),
+        "interrupted" => Ok("interrupted"),
+        other => Err(serde::de::Error::custom(format!("invalid scheduled outcome end reason: {other}"))),
+    }
+}
+
+// A separate, synced outbox survives a transient SQLite write failure. It is removed
+// only after the complete outcome and terminal run state commit together.
+#[derive(Serialize, Deserialize)]
+struct ScheduledOutcomeJournal {
+    task_id: i64,
+    run_id: String,
+    finished_time: DateTime<Utc>,
+    outcome: ScheduledRunOutcome,
+}
+
+fn scheduled_outbox_dir(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app_handle.path().app_data_dir()
+        .map(|path| path.join("scheduled-outcome-outbox"))
+        .map_err(|e| e.to_string())
+}
+
+fn scheduled_outbox_path(app_handle: &tauri::AppHandle, run_id: &str) -> Result<std::path::PathBuf, String> {
+    let id = Uuid::parse_str(run_id).map_err(|e| format!("invalid run_id: {e}"))?;
+    Ok(scheduled_outbox_dir(app_handle)?.join(format!("{id}.json")))
+}
+
+fn write_outcome_journal(app_handle: &tauri::AppHandle, entry: &ScheduledOutcomeJournal) -> Result<(), String> {
+    use std::io::Write;
+    let path = scheduled_outbox_path(app_handle, &entry.run_id)?;
+    let dir = path.parent().ok_or("outcome outbox has no parent")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // Each run has one final outcome. Never replace an already durable journal.
+    if path.exists() {
+        return Ok(());
+    }
+    let temporary = path.with_extension("tmp");
+    let bytes = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
+    let mut file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
+    file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    std::fs::File::open(dir).and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn remove_outcome_journal(app_handle: &tauri::AppHandle, run_id: &str) {
+    if let Ok(path) = scheduled_outbox_path(app_handle, run_id) {
+        for path in [path.clone(), path.with_extension("tmp")] {
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    warn!(run_id, error = %error, "failed to remove committed outcome journal");
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn scheduled_followup_needs_retry(status: Option<&str>) -> bool {
+    matches!(status, Some("pending" | "continuing" | "failed" | "retry"))
+}
+
+fn persist_scheduled_outcome(app_handle: &tauri::AppHandle, entry: &ScheduledOutcomeJournal) -> Result<(), String> {
+    let journal_error = write_outcome_journal(app_handle, entry).err();
+    let outcome = &entry.outcome;
+    let payload = serde_json::to_string(outcome).map_err(|e| e.to_string())?;
+    let saved = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
+        db.save_run_outcome(&entry.run_id, outcome.status, outcome.notify,
+            outcome.summary.as_deref(), outcome.error.as_deref(), Some(entry.finished_time), &payload)
+            .map_err(|e| e.to_string())
+    });
+    if let Err(error) = saved {
+        return Err(match journal_error {
+            Some(journal_error) => format!("SQLite: {error}; durable outbox also failed: {journal_error}; outcome retained only in memory"),
+            None => format!("SQLite: {error}; complete outcome retained in durable outbox"),
+        });
+    }
+    remove_outcome_journal(app_handle, &entry.run_id);
+    let _ = app_handle.emit(SCHEDULED_TASK_RUN_UPDATED_EVENT, ScheduledTaskRunUpdateEvent {
+        run_id: entry.run_id.clone(), status: outcome.status.to_string(), notify: outcome.notify,
+        summary: outcome.summary.clone(), error_message: outcome.error.clone(),
+        finished_time: Some(entry.finished_time.to_rfc3339()),
+    });
+    Ok(())
 }
 
 impl ScheduledRunOutcome {
@@ -1918,23 +2020,17 @@ pub async fn execute_scheduled_task(
             Ok(outcome) => outcome,
             Err(err) => ScheduledRunOutcome::failed("error", err, None),
         };
-        let saved = update_task_run(
-            app_handle,
-            &run_id,
-            outcome.status,
-            outcome.notify,
-            outcome.summary.as_deref(),
-            outcome.error.as_deref(),
-            Some(Utc::now()),
-        );
+        let entry = ScheduledOutcomeJournal {
+            task_id: task.id, run_id: run_id.clone(), finished_time: Utc::now(), outcome: outcome.clone(),
+        };
+        let saved = persist_scheduled_outcome(app_handle, &entry);
         // 结果已入库后再注销本地运行登记（回报管家可能需要等待，不应继续显示为执行中）
         drop(registration);
         if let Err(error) = saved {
-            // 未入库：向调用方返回错误；结果保留在后台继续重试保存，保存成功后再回报总管家。
-            // 若进程在此期间退出，记录仍为运行中，重启后按中断如实回报。
+            // SQLite 保存失败时保留持久化 outbox，后台及重启均继续保存完整结果。
             log_task_message(app_handle, task.id, &run_id, "error",
                 format!("保存运行结果失败，结果已保留并在后台重试保存: {error}"));
-            spawn_run_result_save_retry(app_handle, task, &run_id, &outcome);
+            spawn_run_result_save_retry(app_handle, task, entry);
             return Err(format!(
                 "task_id={}; run_id={run_id}; 运行已结束（status={}, end_reason={}），但保存结果失败：{error}；结果已保留，正在后台重试保存",
                 task.id, outcome.status, outcome.end_reason
@@ -1958,15 +2054,88 @@ pub async fn execute_scheduled_task(
     }
 }
 
+// Only a usable complete outcome can protect an old running record. A partial
+// .tmp file is crash evidence, not evidence that result recovery can finish.
+fn accept_scheduled_outcome_journal(
+    run_id: &str,
+    bytes: &[u8],
+    protected: &mut Vec<String>,
+) -> Result<ScheduledOutcomeJournal, String> {
+    let entry: ScheduledOutcomeJournal = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if entry.run_id != run_id {
+        return Err("outcome journal run_id does not match filename".to_string());
+    }
+    if !protected.iter().any(|id| id == run_id) {
+        protected.push(run_id.to_string());
+    }
+    Ok(entry)
+}
+
+#[cfg(test)]
+#[path = "scheduled_task_journal_tests.rs"]
+mod journal_tests;
+
+/// Replay the write-ahead outbox before deciding which old runs were interrupted.
+/// A valid outcome whose persistence fails remains protected; malformed journals
+/// do not prevent an abandoned running record from being marked interrupted.
+fn recover_scheduled_outcome_journals(app_handle: &tauri::AppHandle) -> Result<Vec<String>, String> {
+    let dir = scheduled_outbox_dir(app_handle)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("读取定时结果 outbox 失败: {error}")),
+    };
+    let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let mut protected = Vec::new();
+    let mut processed = Vec::new();
+    let mut paths = entries.map(|file| file.map(|file| file.path()))
+        .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    // Prefer the committed name, but allow a valid synced temporary file to
+    // rescue a corrupt journal instead of hiding it due to directory order.
+    paths.sort_by_key(|path| path.extension().and_then(|ext| ext.to_str()) != Some("json"));
+    for path in paths {
+        if !matches!(path.extension().and_then(|ext| ext.to_str()), Some("json" | "tmp")) {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str())
+            .and_then(|stem| Uuid::parse_str(stem).ok()).map(|id| id.to_string()) else {
+                warn!(path = %path.display(), "invalid outcome journal filename; retained for repair");
+                continue;
+            };
+        if processed.contains(&id) { continue; }
+        let entry = std::fs::read(&path).map_err(|e| e.to_string())
+            .and_then(|bytes| accept_scheduled_outcome_journal(&id, &bytes, &mut protected));
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn!(run_id = %id, error = %error, "cannot recover outcome journal; retained for repair, running record will be reconciled as interrupted unless a valid journal is found");
+                continue;
+            }
+        };
+        processed.push(id.clone());
+        let Some(task) = db.read_task(entry.task_id).map_err(|e| e.to_string())? else {
+            // The user removed the task. Do not recreate it or report deleted work.
+            remove_outcome_journal(app_handle, &id);
+            continue;
+        };
+        if let Err(error) = persist_scheduled_outcome(app_handle, &entry) {
+            warn!(run_id = %id, error = %error, "replaying outcome journal failed; retrying in background");
+            spawn_run_result_save_retry(app_handle, &task, entry);
+        }
+    }
+    Ok(protected)
+}
+
 /// 启动时核对上一个进程已启动但未结束的运行（含已停用的一次性任务）：
 /// 如实标记为中断（结果未知，不自动重跑），管家绑定的任务再回报总管家主会话。
 pub async fn recover_interrupted_scheduled_runs(app_handle: &tauri::AppHandle) -> Result<usize, String> {
-    let local_run_ids: Vec<String> = scheduled_run_cancel_registry()
+    let mut local_run_ids: Vec<String> = scheduled_run_cancel_registry()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .keys()
         .cloned()
         .collect();
+    local_run_ids.extend(recover_scheduled_outcome_journals(app_handle)?);
     let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| format!("打开运行记录数据库失败: {e}"))?;
     let interrupted = db
         .mark_interrupted_runs(
@@ -2024,12 +2193,22 @@ pub async fn recover_interrupted_scheduled_runs(app_handle: &tauri::AppHandle) -
             }
         };
         log_task_message(app_handle, run.task_id, &run.run_id, "butler_followup", "上次退出前回报未确认完成，重新回报总管家");
-        spawn_scheduled_run_report(app_handle, &task, &run.run_id, &outcome_from_recorded_run(&run));
+        let outcome = match db.read_run_outcome(&run.run_id).map_err(|e| e.to_string())? {
+            Some(payload) => match serde_json::from_str::<ScheduledRunOutcome>(&payload) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    log_task_message(app_handle, task.id, &run.run_id, "butler_followup_error", format!("无法恢复完整结果，保留原始记录待修复: {error}"));
+                    continue;
+                }
+            },
+            None => outcome_from_recorded_run(&run),
+        };
+        spawn_scheduled_run_report(app_handle, &task, &run.run_id, &outcome);
     }
     Ok(interrupted.len())
 }
 
-/// 用已入库的运行记录重建回报内容（原始输出详情不在运行记录中，补报时不含详情摘录）。
+/// 兼容旧版本未保存完整 outcome 的运行；新运行优先从 outcome 表恢复。
 pub(crate) fn outcome_from_recorded_run(run: &ScheduledTaskRun) -> ScheduledRunOutcome {
     if run.status == "success" {
         ScheduledRunOutcome {
@@ -2054,42 +2233,38 @@ pub(crate) fn outcome_from_recorded_run(run: &ScheduledTaskRun) -> ScheduledRunO
 }
 
 const RUN_RESULT_SAVE_RETRY_DELAY: Duration = Duration::from_secs(5);
-const RUN_RESULT_SAVE_MAX_ATTEMPTS: u32 = 60;
 
 /// 结果保存失败后在后台重试；保存成功后才回报总管家，保证回报与记录一致。
 fn spawn_run_result_save_retry(
     app_handle: &tauri::AppHandle,
     task: &ScheduledTask,
-    run_id: &str,
-    outcome: &ScheduledRunOutcome,
+    entry: ScheduledOutcomeJournal,
 ) {
+    let Some(guard) = claim_scheduled_report(&format!("save:{}", entry.run_id)) else { return; };
     let app_handle = app_handle.clone();
     let task = task.clone();
-    let run_id = run_id.to_string();
-    let outcome = outcome.clone();
     tauri::async_runtime::spawn(async move {
-        for attempt in 1..=RUN_RESULT_SAVE_MAX_ATTEMPTS {
+        let _guard = guard;
+        loop {
             tokio::time::sleep(RUN_RESULT_SAVE_RETRY_DELAY).await;
-            match update_task_run(
-                &app_handle,
-                &run_id,
-                outcome.status,
-                outcome.notify,
-                outcome.summary.as_deref(),
-                outcome.error.as_deref(),
-                Some(Utc::now()),
-            ) {
+            match ScheduledTaskDatabase::new(&app_handle).and_then(|db| {
+                Ok(db.read_task(task.id)?.is_some() && db.read_run(&entry.run_id)?.is_some())
+            }) {
+                Ok(false) => { remove_outcome_journal(&app_handle, &entry.run_id); return; }
+                Err(error) => { warn!(run_id = %entry.run_id, error = %error, "cannot check outcome ownership; retrying"); continue; }
+                Ok(true) => {}
+            }
+            match persist_scheduled_outcome(&app_handle, &entry) {
                 Ok(()) => {
-                    log_task_message(&app_handle, task.id, &run_id, "result_saved", format!("第 {attempt} 次重试保存运行结果成功"));
+                    log_task_message(&app_handle, task.id, &entry.run_id, "result_saved", "完整运行结果已保存");
                     if task.butler_conversation_id.is_some() {
-                        spawn_scheduled_run_report(&app_handle, &task, &run_id, &outcome);
+                        spawn_scheduled_run_report(&app_handle, &task, &entry.run_id, &entry.outcome);
                     }
                     return;
                 }
-                Err(error) => warn!(run_id = %run_id, attempt, error = %error, "retry saving scheduled run result failed"),
+                Err(error) => warn!(run_id = %entry.run_id, error = %error, "retry saving scheduled run result failed"),
             }
         }
-        error!(run_id = %run_id, "scheduled run result still unsaved after retries; restart recovery will report it as interrupted");
     });
 }
 
@@ -2142,12 +2317,21 @@ fn resolve_assistant_name(app_handle: &tauri::AppHandle, assistant_id: i64) -> S
     }
 }
 
-fn set_scheduled_followup_status(app_handle: &tauri::AppHandle, task: &ScheduledTask, run_id: &str, status: &str) {
+fn set_scheduled_followup_status(app_handle: &tauri::AppHandle, task: &ScheduledTask, run_id: &str, status: &str) -> Result<(), String> {
     let persisted = ScheduledTaskDatabase::new(app_handle)
         .map_err(|e| e.to_string())
         .and_then(|sdb| sdb.update_run_butler_followup_status(run_id, status).map_err(|e| e.to_string()));
-    if let Err(e) = persisted {
+    if let Err(e) = &persisted {
         log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("记录回流状态 {status} 失败: {e}"));
+    }
+    persisted
+}
+
+// Once a terminal delivery decision is known, retry only its state write. Never
+// redispatch another turn because SQLite temporarily cannot record completion.
+async fn persist_terminal_followup_status(app_handle: &tauri::AppHandle, task: &ScheduledTask, run_id: &str, status: &str) {
+    while set_scheduled_followup_status(app_handle, task, run_id, status).is_err() {
+        tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
     }
 }
 
@@ -2175,17 +2359,31 @@ async fn report_scheduled_run_to_butler(
 ) {
     let assistant_name = resolve_assistant_name(app_handle, task.assistant_id);
     loop {
+        match ScheduledTaskDatabase::new(app_handle).and_then(|db| {
+            if db.read_task(task.id)?.is_none() { return Ok(None); }
+            db.read_run(run_id)
+        }) {
+            Ok(Some(run)) if scheduled_followup_needs_retry(run.butler_followup_status.as_deref()) => {}
+            Ok(_) => return, // Deleted, completed or explicitly exhausted: never re-inject.
+            Err(error) => {
+                warn!(run_id, error = %error, "cannot read report state; retrying without dispatch");
+                tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
+                continue;
+            }
+        }
         let conversation_id = match active_butler_main_conversation_id(app_handle) {
             Ok(Some(id)) => id,
             Ok(None) => {
-                set_scheduled_followup_status(app_handle, task, run_id, "failed");
-                log_task_message(app_handle, task.id, run_id, "butler_followup_error", "回流总管家失败: 当前不存在总管家主会话");
-                return;
+                let _ = set_scheduled_followup_status(app_handle, task, run_id, "retry");
+                log_task_message(app_handle, task.id, run_id, "butler_followup_error", "当前不存在总管家主会话，保留结果等待重试");
+                tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
+                continue;
             }
             Err(e) => {
-                set_scheduled_followup_status(app_handle, task, run_id, "failed");
-                log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("回流总管家失败: 读取总管家主会话失败: {e}"));
-                return;
+                let _ = set_scheduled_followup_status(app_handle, task, run_id, "retry");
+                log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("读取总管家主会话失败，保留结果等待重试: {e}"));
+                tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
+                continue;
             }
         };
         match enqueue_scheduled_task_butler_followup(app_handle, conversation_id, task, run_id, outcome, &assistant_name).await {
@@ -2195,21 +2393,26 @@ async fn report_scheduled_run_to_butler(
                 tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
             }
             Err(e) => {
-                set_scheduled_followup_status(app_handle, task, run_id, "failed");
-                log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("回流总管家失败: {e}"));
+                let _ = set_scheduled_followup_status(app_handle, task, run_id, "retry");
+                log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("回流总管家失败，保留结果等待重试: {e}"));
+                tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
+            }
+            Ok(ScheduledFollowupStep::Exhausted(reason)) => {
+                persist_terminal_followup_status(app_handle, task, run_id, "exhausted").await;
+                log_task_message(app_handle, task.id, run_id, "butler_followup_error", reason);
                 return;
             }
             Ok(ScheduledFollowupStep::Completed) => {
-                set_scheduled_followup_status(app_handle, task, run_id, "done");
+                persist_terminal_followup_status(app_handle, task, run_id, "done").await;
                 log_task_message(app_handle, task.id, run_id, "butler_followup", "总管家已完成对该结果的处理");
                 return;
             }
             Ok(ScheduledFollowupStep::Started) => {
-                set_scheduled_followup_status(app_handle, task, run_id, "continuing");
+                let _ = set_scheduled_followup_status(app_handle, task, run_id, "continuing");
                 log_task_message(app_handle, task.id, run_id, "butler_followup", "已回流至总管家主会话，等待续跑完成");
                 if !wait_for_followup_turn_to_end(app_handle, conversation_id).await {
-                    log_task_message(app_handle, task.id, run_id, "butler_followup_wait", "续跑长时间未结束，保持待确认，下次启动时补查");
-                    return;
+                    log_task_message(app_handle, task.id, run_id, "butler_followup_wait", "续跑长时间未结束，保持待确认并继续检查");
+                    tokio::time::sleep(SCHEDULED_FOLLOWUP_BUSY_RETRY_DELAY).await;
                 }
                 // 回到循环开头按完成证据判定：完成则 done，否则在上限内重新续跑
             }
@@ -2452,10 +2655,19 @@ async fn execute_scheduled_task_inner(
         loop_result.tool_calls_failed,
     ) {
         log_task_message(app_handle, task.id, run_id, end_reason, &error);
-        if let Err(e) = cleanup_conversation(app_handle, conversation_id) {
-            log_task_message(app_handle, task.id, run_id, "cleanup_error", format!("清理对话记录失败: {e}"));
+        let outcome = ScheduledRunOutcome::failed(end_reason, error, detail);
+        let journal = ScheduledOutcomeJournal {
+            task_id: task.id, run_id: run_id.to_string(), finished_time: Utc::now(), outcome: outcome.clone(),
+        };
+        match write_outcome_journal(app_handle, &journal) {
+            Ok(()) => {
+                if let Err(e) = cleanup_conversation(app_handle, conversation_id) {
+                    log_task_message(app_handle, task.id, run_id, "cleanup_error", format!("清理对话记录失败: {e}"));
+                }
+            }
+            Err(e) => log_task_message(app_handle, task.id, run_id, "result_save_error", format!("持久化结果失败，保留原会话: {e}")),
         }
-        return Ok(ScheduledRunOutcome::failed(end_reason, error, detail));
+        return Ok(outcome);
     }
 
     // ── 7. 通知判定（失败只影响是否通知，不改写执行结果） ────────────────
@@ -2533,6 +2745,21 @@ async fn execute_scheduled_task_inner(
         }
     };
 
+    let outcome = ScheduledRunOutcome {
+        status: "success", end_reason: "completed", notify, summary: summary.clone(), error: None,
+        detail, judged_task_state, notify_error: notify_error.clone(),
+    };
+    let journal = ScheduledOutcomeJournal {
+        task_id: task.id, run_id: run_id.to_string(), finished_time: Utc::now(), outcome: outcome.clone(),
+    };
+    let journal_saved = match write_outcome_journal(app_handle, &journal) {
+        Ok(()) => true,
+        Err(e) => {
+            log_task_message(app_handle, task.id, run_id, "result_save_error", format!("持久化结果失败，保留原会话: {e}"));
+            false
+        }
+    };
+
     // ── 8. 通知或清理 ─────────────────────────────────────────────
     if notify {
         conversation.name = format!("计划任务: {}", task.name);
@@ -2559,8 +2786,8 @@ async fn execute_scheduled_task_inner(
             Ok(()) => log_task_message(app_handle, task.id, run_id, "notify", "已发送系统通知"),
             Err(e) => log_task_message(app_handle, task.id, run_id, "error", format!("发送系统通知失败: {e}")),
         }
-    } else if notify_error.is_some() {
-        // 通知判定失败时保留对话，方便用户查看执行结果
+    } else if notify_error.is_some() || !journal_saved {
+        // 通知判定或结果持久化失败时保留对话，方便用户查看执行结果
         log_task_message(app_handle, task.id, run_id, "cleanup", "通知判定失败，保留对话记录");
     } else {
         match cleanup_conversation(app_handle, conversation_id) {
@@ -2569,16 +2796,7 @@ async fn execute_scheduled_task_inner(
         }
     }
 
-    Ok(ScheduledRunOutcome {
-        status: "success",
-        end_reason: "completed",
-        notify,
-        summary,
-        error: None,
-        detail,
-        judged_task_state,
-        notify_error,
-    })
+    Ok(outcome)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -2671,6 +2889,8 @@ pub(crate) enum ScheduledFollowupStep {
     Completed,
     /// 已开始一轮续跑，需等待其结束后再判定
     Started,
+    /// 模型续跑已达到上限；保留结果，不自动重做可能有副作用的操作。
+    Exhausted(String),
 }
 
 /// 主会话里注入过的该次运行结果消息（按 run_id 识别，避免重复注入）。
@@ -2730,7 +2950,7 @@ async fn enqueue_scheduled_task_butler_followup(
         match followup_turn_progress(&main_messages, anchor, &scheduled_followup_key(run_id)) {
             FollowupTurnProgress::Completed => return Ok(ScheduledFollowupStep::Completed),
             FollowupTurnProgress::Incomplete { attempts } if attempts >= FOLLOWUP_MAX_CONTINUATION_ATTEMPTS => {
-                return Err(format!("结果已注入主会话（message_id={anchor}），但总管家续跑 {attempts} 次都未完成，停止自动重试"));
+                return Ok(ScheduledFollowupStep::Exhausted(format!("结果已注入主会话（message_id={anchor}），但总管家续跑 {attempts} 次都未完成，停止自动重试")));
             }
             // 已注入但续跑未完成：不重复注入，只重新续跑
             _ => {}

@@ -262,6 +262,23 @@ pub fn stop_butler_peer_exchange(
     Ok(())
 }
 
+#[tauri::command]
+pub fn retry_butler_peer_receipt(
+    app_handle: AppHandle,
+    conversation_id: i64,
+    exchange_id: i64,
+) -> Result<(), String> {
+    let conn = connection(&app_handle).map_err(|e| format!("重试协作 #{exchange_id} 回执失败：{e:#}"))?;
+    if !peer::retry_receipt(&conn, exchange_id, conversation_id)
+        .map_err(|e| format!("重试协作 #{exchange_id} 回执失败：{e}"))?
+    {
+        return Err(format!("协作 #{exchange_id} 不属于此联系人，或回执并未投递失败，未重复投递"));
+    }
+    updated(&app_handle);
+    WAKE.notify_one();
+    Ok(())
+}
+
 async fn busy(app: &AppHandle, id: i64) -> anyhow::Result<bool> {
     if app.state::<ConversationActivityManager>().get_runtime_state(id).await.is_running {
         return Ok(true);
