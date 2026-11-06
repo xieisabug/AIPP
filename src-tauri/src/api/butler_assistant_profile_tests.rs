@@ -55,5 +55,14 @@ fn test_butler_profile_repairs_partial_old_initialization_without_duplicates() {
     assert_eq!(db.get_assistant_prompt(id).unwrap()[0].id,first);
     assert!(db.get_assistant_prompt_params(id).unwrap().is_empty());
     assert_eq!(db.get_assistant_model(id).unwrap().len(),1);
-    assert_eq!(db.get_assistant_model_configs(id).unwrap().len(),5);
+    assert_eq!(db.get_assistant_model_configs(id).unwrap().len(),CONFIG.len());
+}
+
+#[test]
+fn test_butler_profile_uses_model_auto_review_for_tools() {
+    let db = database();
+    let assistant = sync(&db,&model("configured"),"prompt").unwrap();
+    let configs = db.get_assistant_model_configs(assistant.id).unwrap();
+    let mode = configs.iter().find(|c| c.name == "tool_review_mode").expect("tool_review_mode");
+    assert_eq!(mode.value.as_deref(), Some("auto_model"));
 }

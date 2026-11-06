@@ -58,7 +58,8 @@ import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
 import { hasPublishedReply, withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
-import { useLinger, useSettledFlag } from "@/hooks/useStablePresence";
+import { useLinger } from "@/hooks/useStablePresence";
+import ButlerHeldToolCalls from "@/components/butler/ButlerHeldToolCalls";
 import { useButlerPeerTimeline } from "@/components/butler/useButlerPeerTimeline";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
@@ -234,9 +235,8 @@ function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
 }
 
 const EMPTY_STREAMS = new Map();
-// 总管家简洁视图：吸收工具轮次间的短暂空闲 / 过滤自动执行工具的瞬时 pending。
+// 总管家简洁视图：吸收工具轮次间的短暂空闲。
 const BUTLER_IDLE_GAP_MS = 1200;
-const PENDING_TOOL_HINT_DELAY_MS = 1500;
 
 interface ConversationUIProps {
     conversationId: string;
@@ -960,9 +960,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             : displayAgentActivities, [resultOnly, displayAgentActivities]);
         const peerTimeline = useButlerPeerTimeline(Number(conversationId), resultOnly);
         const butlerRunningHeld = useLinger(resultOnly && effectiveAiIsResponsing, BUTLER_IDLE_GAP_MS, conversationId);
-        const hasPendingToolCall = resultOnly && [...mcpToolCallStates.values()].some(call => call.status === "pending");
-        // 所有工具调用都以 pending 创建，自动执行的调用会在毫秒级转为 executing；只有持续等待的才提示。
-        const showPendingToolHint = useSettledFlag(hasPendingToolCall, PENDING_TOOL_HINT_DELAY_MS);
         const transcript = useMemo(() => {
             if (!resultOnly) return allDisplayMessages;
             const unpublished = new Set<number>();
@@ -2182,8 +2179,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>
 
-                        {showPendingToolHint &&
-                            <p role="status" className="px-6 py-1 text-xs text-muted-foreground">有操作等待确认，请查看执行记录。</p>}
+                        {resultOnly &&
+                            <ButlerHeldToolCalls conversationId={Number(conversationId)} mcpToolCallStates={mcpToolCallStates}
+                                floating={!isMobile} />}
                         {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
                         {isMobile && showBackToBottom && <Button variant="secondary" className="self-center min-h-11 shrink-0"
