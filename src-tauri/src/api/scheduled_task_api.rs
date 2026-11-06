@@ -532,13 +532,11 @@ pub(crate) async fn await_llm_or_stop<F: std::future::Future>(
 }
 
 /// 一次运行的真实结束结果。执行状态只由执行本身决定，通知判定与管家回报的失败不会改写它。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ScheduledRunOutcome {
     /// 入库状态：success / failed
-    #[serde(deserialize_with = "deserialize_run_status")]
     pub(crate) status: &'static str,
     /// 具体结束原因：completed / cancelled / timeout / max_rounds_reached / error / interrupted
-    #[serde(deserialize_with = "deserialize_run_end_reason")]
     pub(crate) end_reason: &'static str,
     pub(crate) notify: bool,
     pub(crate) summary: Option<String>,
@@ -550,23 +548,42 @@ pub(crate) struct ScheduledRunOutcome {
     pub(crate) notify_error: Option<String>,
 }
 
-fn deserialize_run_status<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static str, D::Error> {
-    match String::deserialize(deserializer)?.as_str() {
-        "success" => Ok("success"),
-        "failed" => Ok("failed"),
-        other => Err(serde::de::Error::custom(format!("invalid scheduled outcome status: {other}"))),
-    }
-}
-
-fn deserialize_run_end_reason<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static str, D::Error> {
-    match String::deserialize(deserializer)?.as_str() {
-        "completed" => Ok("completed"),
-        "cancelled" => Ok("cancelled"),
-        "timeout" => Ok("timeout"),
-        "max_rounds_reached" => Ok("max_rounds_reached"),
-        "error" => Ok("error"),
-        "interrupted" => Ok("interrupted"),
-        other => Err(serde::de::Error::custom(format!("invalid scheduled outcome end reason: {other}"))),
+impl<'de> Deserialize<'de> for ScheduledRunOutcome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Persisted JSON owns its text. Decode into owned fields first, then map
+        // the validated discriminants to static literals without borrowing the
+        // input buffer (or leaking strings to manufacture a static lifetime).
+        #[derive(Deserialize)]
+        struct StoredOutcome {
+            status: String,
+            end_reason: String,
+            notify: bool,
+            summary: Option<String>,
+            error: Option<String>,
+            detail: Option<String>,
+            judged_task_state: Option<String>,
+            notify_error: Option<String>,
+        }
+        let stored = StoredOutcome::deserialize(deserializer)?;
+        let status = match stored.status.as_str() {
+            "success" => "success",
+            "failed" => "failed",
+            other => return Err(serde::de::Error::custom(format!("invalid scheduled outcome status: {other}"))),
+        };
+        let end_reason = match stored.end_reason.as_str() {
+            "completed" => "completed",
+            "cancelled" => "cancelled",
+            "timeout" => "timeout",
+            "max_rounds_reached" => "max_rounds_reached",
+            "error" => "error",
+            "interrupted" => "interrupted",
+            other => return Err(serde::de::Error::custom(format!("invalid scheduled outcome end reason: {other}"))),
+        };
+        Ok(Self {
+            status, end_reason, notify: stored.notify, summary: stored.summary,
+            error: stored.error, detail: stored.detail,
+            judged_task_state: stored.judged_task_state, notify_error: stored.notify_error,
+        })
     }
 }
 
