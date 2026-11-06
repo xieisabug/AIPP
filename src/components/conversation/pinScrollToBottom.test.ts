@@ -771,4 +771,200 @@ describe("pinScrollContainerToBottom", () => {
         expect(onComplete).not.toHaveBeenCalled();
         expect(container.scrollTop).toBe(80);
     });
+
+    it("reports each programmatic jump synchronously so callers can compensate visually", () => {
+        const flushRaf = queueAnimationFrames();
+        const { container, setScrollHeight } = makeContainer(1000);
+        container.scrollTop = 100;
+        const deltas: number[] = [];
+
+        pinScrollContainerToBottom({
+            container,
+            shouldContinue: () => true,
+            onScrollDelta: (delta) => deltas.push(delta),
+        });
+
+        // 首次调用同步跳到最终位置（落点可靠），并在同一任务里报告位移
+        expect(container.scrollTop).toBe(600);
+        expect(deltas).toEqual([500]);
+
+        setScrollHeight(1200);
+        flushRaf();
+        expect(container.scrollTop).toBe(800);
+        expect(deltas).toEqual([500, 200]);
+
+        // 没有移动时不报告
+        flushRaf();
+        expect(deltas).toEqual([500, 200]);
+    });
+
+    it("keeps pinning without counting stable frames while holdWhile is true", () => {
+        const flushRaf = queueAnimationFrames();
+        const { container } = makeContainer(1000);
+        const onComplete = vi.fn();
+        let holding = true;
+
+        pinScrollContainerToBottom({
+            container,
+            shouldContinue: () => true,
+            onComplete,
+            holdWhile: () => holding,
+            minFrameCount: 2,
+            stableFrameCount: 1,
+            maxFrameCount: 3,
+        });
+
+        for (let i = 0; i < 20; i += 1) {
+            flushRaf();
+        }
+        expect(onComplete).not.toHaveBeenCalled();
+
+        holding = false;
+        for (let i = 0; i < 5; i += 1) {
+            flushRaf();
+        }
+        expect(onComplete).toHaveBeenCalledTimes(1);
+    });
+
+    it("should release the pin on touchmove", () => {
+        const flushRaf = queueAnimationFrames();
+        const { container, setScrollHeight } = makeContainer(1000);
+        const onUserRelease = vi.fn();
+
+        pinScrollContainerToBottom({
+            container,
+            shouldContinue: () => true,
+            onUserRelease,
+        });
+
+        container.dispatchEvent(new Event("touchmove"));
+        container.scrollTop = 300;
+        setScrollHeight(1200);
+        triggerResize();
+        flushRaf();
+
+        expect(onUserRelease).toHaveBeenCalledTimes(1);
+        expect(container.scrollTop).toBe(300);
+    });
+});
+
+describe("followScrollContainerBottom resume / suspend", () => {
+    beforeEach(() => {
+        resizeCallbacks = [];
+        vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+    });
+
+    function setup(initialScrollHeight = 2000) {
+        const rafQueue: FrameRequestCallback[] = [];
+        vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+            rafQueue.push(cb);
+            return rafQueue.length;
+        });
+        vi.stubGlobal("cancelAnimationFrame", vi.fn());
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+        let now = 0;
+        vi.spyOn(performance, "now").mockImplementation(() => now);
+        const flushRaf = () => {
+            rafQueue.splice(0).forEach((cb) => cb(now));
+        };
+        const advance = (ms: number) => {
+            now += ms;
+            vi.advanceTimersByTime(ms);
+            flushRaf();
+        };
+        return { ...makeContainer(initialScrollHeight), flushRaf, advance };
+    }
+
+    it("should not resume from a small downward scroll that stays off the bottom", () => {
+        const { container, setScrollHeight, advance } = setup();
+        followScrollContainerBottom({ container, shouldContinue: () => true });
+
+        // 用户上滑 150px
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+        container.scrollTop = 1450;
+        container.dispatchEvent(new Event("scroll"));
+        advance(600); // 越过上滑锁
+
+        // Virtuoso 校正 / 惯性让 scrollTop 下移 50px：距底 100，仍在旧 240 阈值内
+        container.scrollTop = 1500;
+        container.dispatchEvent(new Event("scroll"));
+        setScrollHeight(2300);
+        advance(100);
+
+        expect(container.scrollTop).toBe(1500);
+    });
+
+    it("should resume once the user actually scrolls back to the bottom", () => {
+        const { container, setScrollHeight, advance } = setup();
+        followScrollContainerBottom({ container, shouldContinue: () => true });
+
+        container.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+        container.scrollTop = 1400;
+        container.dispatchEvent(new Event("scroll"));
+        advance(600);
+
+        container.scrollTop = 1590; // 距底 10px，向下
+        container.dispatchEvent(new Event("scroll"));
+        setScrollHeight(2500);
+        advance(100);
+
+        expect(container.scrollTop).toBe(2100);
+    });
+
+    it("should pause when a touch drags upward while content keeps growing", () => {
+        const { container, setScrollHeight, advance } = setup();
+        followScrollContainerBottom({ container, shouldContinue: () => true });
+
+        container.dispatchEvent(new Event("touchstart"));
+        setScrollHeight(2100);
+        container.scrollTop = 1500;
+        container.dispatchEvent(new Event("scroll"));
+        advance(100);
+        expect(container.scrollTop).toBe(1500);
+
+        // 松手后仍不在底部：保持暂停
+        window.dispatchEvent(new Event("touchend"));
+        setScrollHeight(2400);
+        advance(100);
+        expect(container.scrollTop).toBe(1500);
+    });
+
+    it("should hold pinning while suspended, then catch up", () => {
+        const { container, setScrollHeight, advance } = setup();
+        let suspended = true;
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+            suspendWhile: () => suspended,
+        });
+
+        container.scrollTop = 1200; // 动画中途位置
+        setScrollHeight(2200);
+        advance(100);
+        expect(container.scrollTop).toBe(1200);
+
+        suspended = false;
+        advance(16);
+        expect(container.scrollTop).toBe(1800);
+    });
+
+    it("should not pull the viewport down when started paused", () => {
+        const { container, setScrollHeight, advance } = setup();
+        container.scrollTop = 900;
+        followScrollContainerBottom({
+            container,
+            shouldContinue: () => true,
+            startPaused: true,
+        });
+
+        setScrollHeight(2600);
+        advance(200);
+        expect(container.scrollTop).toBe(900);
+    });
 });

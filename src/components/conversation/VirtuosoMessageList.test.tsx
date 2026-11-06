@@ -367,6 +367,53 @@ describe("VirtuosoMessageList row height reservation", () => {
         expect(smartScroll).not.toHaveBeenCalled();
     });
 
+    it("keeps the send pin alive when an assistant reply is appended right after sending", async () => {
+        const scrollContainer = document.createElement("div");
+        Object.defineProperty(scrollContainer, "scrollHeight", {
+            configurable: true,
+            value: 1000,
+        });
+        Object.defineProperty(scrollContainer, "clientHeight", {
+            configurable: true,
+            value: 400,
+        });
+        const baseMessages = [
+            makeMessage({ id: 1, message_type: "user", content: "user-1" }),
+            makeMessage({ id: 2, message_type: "response", content: "response-1" }),
+        ];
+        const renderWith = (messages: Message[]) => (
+            <VirtuosoMessageList
+                {...makeProps(messages)}
+                scrollContainerRef={{ current: scrollContainer }}
+            />
+        );
+
+        const { rerender } = render(renderWith(baseMessages));
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+
+        scrollContainer.scrollTop = 100;
+        const withUser = [
+            ...baseMessages,
+            makeMessage({ id: 3, message_type: "user", content: "user-2" }),
+        ];
+        rerender(renderWith(withUser));
+
+        // 滚动位置直接落到最终位置（视觉滑动由 transform 完成，不依赖逐帧 scrollTop）
+        expect(scrollContainer.scrollTop).toBe(600);
+
+        // 后端紧接着追加 assistant 占位：tail 不再是 user，effect 重跑
+        rerender(renderWith([
+            ...withUser,
+            makeMessage({ id: 4, message_type: "response", content: "" }),
+        ]));
+
+        await waitFor(() => {
+            expect(scrollContainer.scrollTop).toBe(600);
+        });
+    });
+
     it("includes live footer estimate in initial bottom alignment", () => {
         const scrollContainer = document.createElement("div");
         Object.defineProperty(scrollContainer, "scrollHeight", {

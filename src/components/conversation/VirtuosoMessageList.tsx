@@ -26,6 +26,8 @@ import {
     followScrollContainerBottom,
     pinScrollContainerToBottom,
 } from "./pinScrollToBottom";
+import { playSentBubbleAnimation } from "./sentBubbleAnimation";
+import { startSendSlide, type SendSlide } from "./sendSlideAnimation";
 import {
     findFirstLiveSuffixIndex,
     useMessageListElements,
@@ -277,6 +279,29 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     /** 打开后用户已用滚轮或滚动条上翻；效果重跑时不再钉底或跟滚。 */
     const userReleasedInitialScrollRef = useRef<string | null>(null);
     const lastPinnedUserMessageIdRef = useRef<number | null>(null);
+    /** 当前这次发送：视觉滑动 + 用户是否已接手；effect 重跑时沿用 */
+    const sendScrollStateRef = useRef<{
+        messageId: number;
+        releasedByUser: boolean;
+        slide: SendSlide | null;
+    } | null>(null);
+    /** live-only 分支已把本会话贴底展示过；之后长出 history 属于「发送」，不是重新打开 */
+    const liveOnlyShownConversationRef = useRef<string | null>(null);
+    /** 本会话已带消息渲染过（在 commit 之后写入），用来区分「打开会话」和「发送」 */
+    const renderedConversationRef = useRef<string | null>(null);
+    /** 正在进行的发送钉底 + 动画；不随 effect cleanup 停止 */
+    const sendScrollStopRef = useRef<(() => void) | null>(null);
+    const onScrollStateChangeRef = useRef(onScrollStateChange);
+    onScrollStateChangeRef.current = onScrollStateChange;
+    const stopSendScroll = useCallback(() => {
+        const stop = sendScrollStopRef.current;
+        sendScrollStopRef.current = null;
+        stop?.();
+    }, []);
+    const isSendScrollAnimating = useCallback(
+        () => sendScrollStateRef.current?.slide?.isActive() ?? false,
+        [],
+    );
     const tailUserMessageIdRef = useRef<number | null>(null);
     const streamingActiveRef = useRef(false);
     const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null);
@@ -378,7 +403,11 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     ]);
 
     useLayoutEffect(() => {
+        stopSendScroll();
+        renderedConversationRef.current = null;
         lastPinnedUserMessageIdRef.current = null;
+        sendScrollStateRef.current = null;
+        liveOnlyShownConversationRef.current = null;
         initialBottomConversationRef.current = null;
         initialBottomPinConversationRef.current = null;
         userReleasedInitialScrollRef.current = null;
@@ -457,6 +486,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
                 onUserPause: markInitialScrollReleased,
                 onUserResume: markInitialScrollResumed,
+                suspendWhile: isSendScrollAnimating,
             });
 
         // live-only 无 Virtuoso 贴底闪动：不 pin、不 hide，一次滚动贴底后继续跟随晚到增高。
@@ -470,12 +500,17 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             }
 
             setInitialBottomVisibleConversationId(conversationId);
-            if (!container.closest('[data-aipp-mobile-shell] [hidden]')) {
+            // 每个会话只在首次展示时瞬间贴底；之后的重跑（含发送动画进行中）不能再 snap
+            if (
+                liveOnlyShownConversationRef.current !== conversationId
+                && !container.closest('[data-aipp-mobile-shell] [hidden]')
+            ) {
                 container.scrollTop = Math.max(
                     0,
                     container.scrollHeight - container.clientHeight,
                 );
                 onScrollStateChange?.(container);
+                liveOnlyShownConversationRef.current = conversationId;
             }
             // live-only follow：cleanup 时 stop；shouldContinue 不依赖 pin-done ref
             const stopFollow = followScrollContainerBottom({
@@ -486,6 +521,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
                 maxDurationMs: INITIAL_BOTTOM_FOLLOW_MAX_DURATION_MS,
                 onUserPause: markInitialScrollReleased,
                 onUserResume: markInitialScrollResumed,
+                suspendWhile: isSendScrollAnimating,
             });
             return () => {
                 stopFollow();
@@ -498,6 +534,15 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             || initialBottomPinConversationRef.current === conversationId
         ) {
             return;
+        }
+
+        // 已以 live-only 贴底展示过：发送后首轮转入 history，交给发送滑动动画，
+        // 不能再走一次「隐藏 + 瞬间钉底」的打开流程。
+        if (
+            liveOnlyShownConversationRef.current === conversationId
+            && initialBottomConversationRef.current !== conversationId
+        ) {
+            initialBottomConversationRef.current = conversationId;
         }
 
         // 初始 pin 已完成：effect 因依赖变化 cleanup 后必须重新挂上 follow，
@@ -554,12 +599,17 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         hasCurrentConversationMessages,
         // 仅用是否存在 history 区分 live-only / virtuoso；避免 live 长度抖动反复 cancel pin
         historyItems.length > 0,
+        isSendScrollAnimating,
         onScrollStateChange,
         pendingScrollMessageId,
         effectiveScrollParent,
     ]);
 
-    // 发消息后：在列表内部用 ResizeObserver 钉底，避免外层 rAF 轮询过早退出
+    // 发消息后：缓动滑到底部（user 气泡贴近顶部），再用 ResizeObserver 钉底等布局稳定。
+    //
+    // 钉底的生命周期刻意不挂在 effect cleanup 上：发送后后端很快追加 assistant 消息，
+    // tailUserMessageId 立刻变回 null、liveItemKeys 也在变，effect 会反复重跑。
+    // 若随 cleanup 停止，动画会停在半路。这里只在用户接手 / 切会话 / 跳转 / 卸载时停止。
     useLayoutEffect(() => {
         const container = effectiveScrollParent;
         if (!container || !hasCurrentConversationMessages || tailUserMessageId === null) {
@@ -567,6 +617,7 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         }
 
         if (pendingScrollMessageId !== null) {
+            stopSendScroll();
             lastPinnedUserMessageIdRef.current = tailUserMessageId;
             return;
         }
@@ -579,29 +630,99 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             return;
         }
 
-        const pinningMessageId = tailUserMessageId;
+        // 本会话首次带消息渲染 = 打开会话，不是发送：交给初始贴底流程，不播动画
+        if (renderedConversationRef.current !== conversationId) {
+            lastPinnedUserMessageIdRef.current = tailUserMessageId;
+            return;
+        }
 
-        return pinScrollContainerToBottom({
+        if (
+            sendScrollStateRef.current?.messageId === tailUserMessageId
+            && sendScrollStopRef.current
+        ) {
+            return;
+        }
+
+        stopSendScroll();
+        const pinningMessageId = tailUserMessageId;
+        const sendState = {
+            messageId: pinningMessageId,
+            releasedByUser: false,
+            slide: null as SendSlide | null,
+        };
+        sendScrollStateRef.current = sendState;
+
+        // 每次钉底跳动都在绘制前同步回调：首次创建反向 transform，之后叠加补偿
+        const handleScrollDelta = (delta: number) => {
+            if (sendState.releasedByUser) {
+                return;
+            }
+            if (sendState.slide) {
+                sendState.slide.addOffset(delta);
+                return;
+            }
+            const wrapper = listWrapperRef.current;
+            const content = wrapper?.firstElementChild;
+            if (!wrapper || !(content instanceof HTMLElement)) {
+                return;
+            }
+            sendState.slide = startSendSlide(wrapper, content, delta);
+        };
+
+        const stopBubble = playSentBubbleAnimation(container, pinningMessageId);
+        let stopPin: (() => void) | null = null;
+        const finishPin = () => {
+            lastPinnedUserMessageIdRef.current = pinningMessageId;
+            if (sendScrollStopRef.current === stop) {
+                sendScrollStopRef.current = null;
+            }
+        };
+        const stop = () => {
+            stopPin?.();
+            stopBubble();
+            sendState.slide?.cancel();
+        };
+        sendScrollStopRef.current = stop;
+
+        stopPin = pinScrollContainerToBottom({
             container,
-            onScrollStateChange,
+            onScrollStateChange: (target) => onScrollStateChangeRef.current?.(target),
             shouldContinue: () => true,
-            onComplete: () => {
-                lastPinnedUserMessageIdRef.current = pinningMessageId;
-            },
+            onComplete: finishPin,
             onUserRelease: () => {
-                lastPinnedUserMessageIdRef.current = pinningMessageId;
+                sendState.releasedByUser = true;
+                finishPin();
             },
             observeMode: "tail",
+            onScrollDelta: handleScrollDelta,
+            holdWhile: () => sendState.slide?.isActive() ?? false,
         });
     }, [
         conversationId,
         hasCurrentConversationMessages,
         liveItemKeys,
-        onScrollStateChange,
         pendingScrollMessageId,
         effectiveScrollParent,
+        stopSendScroll,
         tailUserMessageId,
     ]);
+
+    // 记录「本会话已经带消息渲染过」：之后出现新的 tail user 消息才算发送
+    useEffect(() => {
+        if (
+            hasCurrentConversationMessages
+            || messageListProps.allDisplayMessages.length === 0
+        ) {
+            renderedConversationRef.current = conversationId;
+        }
+    }, [
+        conversationId,
+        hasCurrentConversationMessages,
+        messageListProps.allDisplayMessages.length,
+    ]);
+
+    // 换了滚动容器或卸载时停止发送滑动
+    useEffect(() => stopSendScroll, [effectiveScrollParent, stopSendScroll]);
 
     // 流式回复持续长高：follow 贴底；用户上滑暂停、滚回底部恢复（见 followScrollContainerBottom）。
     useLayoutEffect(() => {
@@ -626,10 +747,14 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
             onScrollStateChange,
             shouldContinue: () => streamingActiveRef.current,
             maxDurationMs: STREAM_FOLLOW_MAX_DURATION_MS,
+            suspendWhile: isSendScrollAnimating,
+            // 发送滑动途中用户已上滑：流式开始时不要再把人拽回底部
+            startPaused: sendScrollStateRef.current?.releasedByUser === true,
         });
     }, [
         conversationId,
         hasCurrentConversationMessages,
+        isSendScrollAnimating,
         onScrollStateChange,
         pendingScrollMessageId,
         effectiveScrollParent,
@@ -750,8 +875,14 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     ]);
 
     // live-only：不依赖 scrollParent，直接渲染（总管家短会话常见路径）
+    // 与 retainHistory 分支保持同一 DOM 结构（wrapper > footer）：首轮转入 history 时
+    // 不会整棵重挂载所有消息（那一下的主线程卡顿正好落在发送动画上），发送滑动也需要 wrapper。
     if (historyItems.length === 0) {
-        return <VirtuosoLiveFooter context={{ liveItems }} />;
+        return (
+            <div ref={listWrapperRef}>
+                <VirtuosoLiveFooter context={{ liveItems }} />
+            </div>
+        );
     }
 
     if (retainHistory) {

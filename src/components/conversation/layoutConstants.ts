@@ -18,13 +18,19 @@ export const LAST_REPLY_CONTAINER_MIN_HEIGHT = `var(${CHAT_SCROLL_LIVE_ONLY_VIEW
 
 export const LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX = 120;
 
+/**
+ * 发送后最后一轮贴底时，user 气泡距滚动视口顶部的固定距离。
+ * 桌面 / 移动端 padding 不同，必须用同一个常量反推 min-height，两端位置才一致。
+ */
+export const LAST_REPLY_TOP_OFFSET_PX = 8;
+
 // 滚动容器可视高度相对实际高度预留的缓冲，避免占位刚好等于视口导致临界抖动。
 const CHAT_SCROLL_VIEWPORT_HEIGHT_SAFETY_PX = 10;
 
 export interface ChatViewportHeights {
     // 完整可视高度（扣掉安全缓冲）
     viewportHeight: number;
-    // last-reply min-height：内容盒高度 − end-anchor，不扣 rowGap
+    // last-reply min-height：贴底时 user 气泡顶部固定距视口顶 LAST_REPLY_TOP_OFFSET_PX
     liveOnlyHeight: number;
     // 有历史时尾部占位高度：仅扣掉顶部 padding，把历史顶出屏幕又不切掉 user 消息
     historyTailHeight: number;
@@ -38,22 +44,13 @@ export function computeChatViewportHeights(
     const style = window.getComputedStyle(container);
     const paddingTop = Number.parseFloat(style.paddingTop) || 0;
     const paddingBottom = Number.parseFloat(style.paddingBottom) || 0;
-    const borderTop = Number.parseFloat(style.borderTopWidth) || 0;
-    const borderBottom = Number.parseFloat(style.borderBottomWidth) || 0;
-    // border-box 下 flex 子项可用高度 = clientHeight - 垂直 padding - border
-    const contentBoxHeight = Math.max(
-        0,
-        container.clientHeight
-            - paddingTop
-            - paddingBottom
-            - borderTop
-            - borderBottom,
-    );
     const endAnchor = container.querySelector(
         "[data-aipp-slot='chat-messages-end-anchor']",
     );
     const endAnchorHeight =
         endAnchor instanceof HTMLElement ? endAnchor.offsetHeight : 0;
+    // last-reply 与 end-anchor 之间的 flex 间距
+    const rowGap = Number.parseFloat(style.rowGap) || 0;
 
     const viewportHeight = Math.max(
         0,
@@ -62,10 +59,17 @@ export function computeChatViewportHeights(
 
     return {
         viewportHeight,
-        // last-reply min-height：内容区 − end-anchor。
-        // 不扣 rowGap：gap 由 flex 布局在子项外占用，再扣会少占约 16px，
-        // 贴底后 user 上方会多出一条空隙。
-        liveOnlyHeight: Math.max(0, contentBoxHeight - endAnchorHeight),
+        // clientHeight 已不含 border。贴底时 last-reply 顶部 = clientHeight − paddingBottom − rowGap − endAnchor − minHeight。
+        // 反推 minHeight 让顶部固定落在 LAST_REPLY_TOP_OFFSET_PX，而不是随 paddingTop 变化
+        //（旧算法得到 paddingTop − rowGap：桌面 8px，移动端 p-3 时为 −4px，被切掉一截）。
+        liveOnlyHeight: Math.max(
+            0,
+            container.clientHeight
+                - paddingBottom
+                - rowGap
+                - endAnchorHeight
+                - LAST_REPLY_TOP_OFFSET_PX,
+        ),
         historyTailHeight: Math.max(0, viewportHeight - paddingTop - 16),
     };
 }
