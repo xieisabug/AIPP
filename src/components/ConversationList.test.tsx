@@ -21,9 +21,17 @@ const show = (conversationId = "1") => {
 };
 const sync = () => act(async () => { await emit("conversation_data_changed"); });
 
-beforeEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
+beforeEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); mockInvokeHandler("get_all_feature_config", () => []); });
 
 describe("ConversationList remote invalidation", () => {
+    it("should open the shared actions without selecting a conversation when right-clicked", async () => {
+        mockInvokeHandler("list_conversations", () => [row(1)]);
+        const { onSelectConversation } = show();
+        fireEvent.contextMenu(await screen.findByText("Chat 1"));
+        expect(await screen.findByRole("menuitem", { name: "修改标题" })).toBeInTheDocument();
+        expect(screen.getByRole("menuitem", { name: "删除" })).toBeInTheDocument();
+        expect(onSelectConversation).not.toHaveBeenCalled();
+    });
     it("should refresh additions and titles without changing the selection when synced", async () => {
         let rows = [row(1, "Before")];
         mockInvokeHandler("list_conversations", () => rows);

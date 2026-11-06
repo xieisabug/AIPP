@@ -3,6 +3,7 @@ pub mod engine_manager;
 pub mod engines;
 pub mod fingerprint;
 pub mod handler;
+pub mod http_search;
 #[cfg(any(mobile, test))]
 mod mobile_http;
 pub mod types;

@@ -87,7 +87,7 @@ async fn capture_review_request(adapter: AdapterKind) -> serde_json::Value {
             model: genai::ModelIden::new(adapter, target.model.model_name),
         })
     });
-    let client = genai::Client::builder().with_service_target_resolver(resolver).build();
+    let client = genai::Client::builder().with_service_target_resolver(resolver).build().unwrap();
     let request = build_chat_request_from_messages(&[
         ("system".into(), REVIEW_SYSTEM_PROMPT.into(), Vec::new()),
         ("user".into(), build_review_user_prompt("fs", "read_file", r#"{"path":"notes.md"}"#, None), Vec::new()),
@@ -496,7 +496,7 @@ async fn run_review_output_fixture(mode: &str, remembered: bool, responses: Vec<
             model: genai::ModelIden::new(AdapterKind::OpenAI, target.model.model_name),
         })
     });
-    let client = genai::Client::builder().with_service_target_resolver(resolver).build();
+    let client = genai::Client::builder().with_service_target_resolver(resolver).build().unwrap();
     let request = build_chat_request_from_messages(&[
         ("system".into(), REVIEW_SYSTEM_PROMPT.into(), Vec::new()),
         ("user".into(), "审核只读调用".into(), Vec::new()),

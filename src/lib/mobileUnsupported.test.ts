@@ -82,9 +82,23 @@ describe("isMobileUnexecutableBuiltinTool", () => {
         const { isMobileUnexecutableBuiltinTool } = await import("./mobileUnsupported")
         expect(isMobileUnexecutableBuiltinTool("aipp:search", "search_web")).toBe(true)
         expect(isMobileUnexecutableBuiltinTool("aipp:search", "fetch_url")).toBe(false)
+        expect(isMobileUnexecutableBuiltinTool("aipp:search", "search_http")).toBe(false)
         expect(isMobileUnexecutableBuiltinTool("aipp:operation", "execute_bash")).toBe(true)
         expect(isMobileUnexecutableBuiltinTool("aipp:operation", "read_file")).toBe(false)
         expect(isMobileUnexecutableBuiltinTool("npx foo", "search_web")).toBe(false)
         expect(isMobileUnexecutableBuiltinTool(null, "search_web")).toBe(false)
     })
 })
+
+
+describe("visibleSearchTools", () => {
+    it("should hide desktop browser search only on mobile without changing saved tools", async () => {
+        const { visibleSearchTools } = await import("./mobileUnsupported");
+        const tools = ["search_web", "search_http", "fetch_url"].map(name => ({ name, is_enabled: true }));
+        expect(visibleSearchTools(tools, "aipp:search", true).map(t => t.name)).toEqual(["search_http", "fetch_url"]);
+        expect(visibleSearchTools(tools, "aipp:search", false)).toBe(tools);
+        expect(visibleSearchTools(tools, "external", true)).toBe(tools);
+        expect(tools).toHaveLength(3);
+        expect(visibleSearchTools([{ tool_name: "search_web" }], "aipp:search", true)).toEqual([]);
+    });
+});
