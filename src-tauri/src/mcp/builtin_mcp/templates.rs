@@ -373,7 +373,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
             BuiltinToolInfo {
                 name: "message_bot".into(),
-                description: "Send a self-contained request to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting. The receipt is not its answer. End this turn; its answer wakes you later. Review, revise and send another request as needed. Never send acknowledgements. While answering a peer request finish with your result or question instead of sending back a request.".into(),
+                description: "Send a self-contained request to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting. The receipt is not its answer. End this turn; its answer wakes you later. Review, revise and send another request as needed. Never send acknowledgements. While answering a peer request you cannot message any contact (the call is rejected): finish with your result or question, and name who else is needed so the requester can arrange it.".into(),
                 input_schema: serde_json::json!({"type":"object","required":["to","message","request_id"],"properties":{
                     "to":{"type":"string","description":"Exact contact name or #assistant_id"},
                     "message":{"type":"string","description":"Goal, relevant context and expected deliverable"},
@@ -653,8 +653,8 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "decision": {
                             "type": "string",
-                            "enum": ["allow", "allow_for_conversation", "allow_for_assistant", "allow_and_save", "deny"],
-                            "description": "Only for permission_confirm / operate_confirm."
+                            "enum": ["allow", "deny"],
+                            "description": "Only for permission_confirm / operate_confirm. Butler can only allow once or deny; conversation/assistant/whitelist grants must be decided by the user."
                         },
                         "option_id": {
                             "type": "string",

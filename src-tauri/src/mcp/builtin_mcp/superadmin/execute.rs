@@ -6,6 +6,21 @@ use super::registry::ActionRegistry;
 use super::types::*;
 use crate::db::conversation_db::ConversationDatabase;
 
+/// 管家执行高风险动作的统一决策：风险等级 >= 3 且需要用户批准、又不是预览时拒绝执行。
+/// SuperAdmin 与其他能执行同一动作的管家工具入口都必须复用这里，保证决策一致。
+pub(crate) fn approval_gate_error(meta: &ActionMeta, dry_run: bool) -> Option<String> {
+    if meta.risk_level.0 >= 3 && meta.requires_approval && !dry_run {
+        // For Phase 1 we reject high-risk actions outright; Phase 3 will add
+        // interactive approval via ask_user_question.
+        return Some(format!(
+            "Action '{}' has risk_level={} and requires user approval. \
+             Use dry_run=true to preview, or request approval through ask_user_question first.",
+            meta.action_id, meta.risk_level
+        ));
+    }
+    None
+}
+
 /// Handle the `superadmin_execute` tool call.
 #[instrument(skip(app_handle, registry))]
 pub async fn handle_execute(
@@ -35,16 +50,8 @@ pub async fn handle_execute(
     let meta = &registered.meta;
 
     // 2. Risk gate – high-risk actions require approval (not auto-executed)
-    if meta.risk_level.0 >= 3 && !request.dry_run {
-        let needs_approval = meta.requires_approval;
-        if needs_approval {
-            // For Phase 1 we reject high-risk actions outright; Phase 3 will add
-            // interactive approval via ask_user_question.
-            let err_msg = format!(
-                "Action '{}' has risk_level={} and requires user approval. \
-                 Use dry_run=true to preview, or request approval through ask_user_question first.",
-                request.action_id, meta.risk_level
-            );
+    {
+        if let Some(err_msg) = approval_gate_error(meta, request.dry_run) {
             log_audit(
                 app_handle,
                 &audit_id,

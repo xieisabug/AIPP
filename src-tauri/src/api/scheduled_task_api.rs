@@ -172,6 +172,9 @@ struct ScheduledTaskRunUpdateEvent {
 const AGENTIC_LOOP_MAX_ROUNDS: usize = 50;
 const AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS: u64 = 120;
 const AGENTIC_LOOP_TOTAL_TIMEOUT_SECS: u64 = 3000;
+const NOTIFY_DECISION_TIMEOUT_SECS: u64 = 300;
+const BUTLER_MAIN_BUSY_MARKER: &str = "[butler_main_busy] ";
+const SCHEDULED_FOLLOWUP_BUSY_ATTEMPTS: u32 = 4;
 const SCHEDULED_TASK_LOG_ADDED_EVENT: &str = "scheduled_task_log_added";
 const SCHEDULED_TASK_RUN_CREATED_EVENT: &str = "scheduled_task_run_created";
 const SCHEDULED_TASK_RUN_UPDATED_EVENT: &str = "scheduled_task_run_updated";
@@ -506,6 +509,90 @@ async fn execute_single_tool(
 /// 在循环内部控制整个流程，无需外部轮询或状态机。
 /// - LLM 返回 tool_calls → 执行工具 → 结果追加到消息 → 下一轮
 /// - LLM 返回纯文本 → 循环结束，final_text 就是最终结果
+pub(crate) enum LlmWait<T> {
+    Done(T),
+    Cancelled,
+    Timeout,
+}
+
+/// 等待模型回复时同时监听停止信号与总时限；停止优先，保证停止后不会再按完成处理。
+pub(crate) async fn await_llm_or_stop<F: std::future::Future>(
+    fut: F,
+    cancel_token: &CancellationToken,
+    deadline: Instant,
+) -> LlmWait<F::Output> {
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => LlmWait::Cancelled,
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => LlmWait::Timeout,
+        out = fut => LlmWait::Done(out),
+    }
+}
+
+/// 一次运行的真实结束结果。执行状态只由执行本身决定，通知判定与管家回报的失败不会改写它。
+#[derive(Debug, Clone)]
+pub(crate) struct ScheduledRunOutcome {
+    /// 入库状态：success / failed
+    pub(crate) status: &'static str,
+    /// 具体结束原因：completed / cancelled / timeout / max_rounds_reached / error / interrupted
+    pub(crate) end_reason: &'static str,
+    pub(crate) notify: bool,
+    pub(crate) summary: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) detail: Option<String>,
+    /// 通知判定模型给出的任务状态，仅作参考，不改写执行状态
+    pub(crate) judged_task_state: Option<String>,
+    /// 通知判定失败原因（不改写执行状态）
+    pub(crate) notify_error: Option<String>,
+}
+
+impl ScheduledRunOutcome {
+    pub(crate) fn failed(end_reason: &'static str, error: String, detail: Option<String>) -> Self {
+        Self {
+            status: "failed",
+            end_reason,
+            notify: false,
+            summary: None,
+            error: Some(error),
+            detail,
+            judged_task_state: None,
+            notify_error: None,
+        }
+    }
+}
+
+/// 将非正常结束的循环状态映射为失败结果；Completed 返回 None。
+pub(crate) fn loop_status_failure(
+    status: &AgenticLoopStatus,
+    rounds: usize,
+    tool_calls_success: usize,
+    tool_calls_failed: usize,
+) -> Option<(&'static str, String)> {
+    let executed = if tool_calls_success + tool_calls_failed > 0 {
+        format!(
+            "；停止前已执行工具 {} 次（成功 {}，失败 {}），已产生的外部操作无法撤回",
+            tool_calls_success + tool_calls_failed,
+            tool_calls_success,
+            tool_calls_failed
+        )
+    } else {
+        String::new()
+    };
+    match status {
+        AgenticLoopStatus::Completed => None,
+        AgenticLoopStatus::Cancelled => Some(("cancelled", format!("任务已手动停止（已进行 {rounds} 轮）{executed}"))),
+        AgenticLoopStatus::Timeout => Some((
+            "timeout",
+            format!("执行超时：超过总时限 {AGENTIC_LOOP_TOTAL_TIMEOUT_SECS}s，任务未完成（已进行 {rounds} 轮）{executed}"),
+        )),
+        AgenticLoopStatus::MaxRoundsReached => Some((
+            "max_rounds_reached",
+            format!("达到最大执行轮次 {AGENTIC_LOOP_MAX_ROUNDS}，任务未完成{executed}"),
+        )),
+        AgenticLoopStatus::Error(e) => Some(("error", format!("{e}（已进行 {rounds} 轮）{executed}"))),
+    }
+}
+
 async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResult {
     let mut messages: Vec<(String, String, Vec<MessageAttachment>)> = Vec::new();
     let mut round: usize = 0;
@@ -604,12 +691,34 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
         );
         let chat_request = build_result.chat_request;
 
-        // 调用 LLM
-        let chat_response = match ctx
-            .client
-            .exec_chat(ctx.model_name, chat_request, Some(ctx.chat_options))
-            .await
+        // 调用 LLM（与停止信号、总时限竞争，等待模型期间也能停止）
+        let stop_result = |status: AgenticLoopStatus| AgenticLoopResult {
+            final_text: String::new(),
+            rounds: round,
+            tool_calls_total,
+            tool_calls_success,
+            tool_calls_failed,
+            status,
+        };
+        let first_attempt = match await_llm_or_stop(
+            ctx.client.exec_chat(ctx.model_name, chat_request, Some(ctx.chat_options)),
+            &ctx.cancel_token,
+            deadline,
+        )
+        .await
         {
+            LlmWait::Done(result) => result,
+            LlmWait::Cancelled => {
+                log_task_message(ctx.app_handle, ctx.task_id, ctx.run_id, "cancel", "等待模型回复时任务已停止");
+                return stop_result(AgenticLoopStatus::Cancelled);
+            }
+            LlmWait::Timeout => {
+                log_task_message(ctx.app_handle, ctx.task_id, ctx.run_id, "timeout",
+                    format!("等待模型回复时达到总超时 ({}s)，已进入第 {} 轮", AGENTIC_LOOP_TOTAL_TIMEOUT_SECS, round));
+                return stop_result(AgenticLoopStatus::Timeout);
+            }
+        };
+        let chat_response = match first_attempt {
             Ok(resp) => resp,
             Err(e) => {
                 error!(task_id = ctx.task_id, round, error = %e, "LLM call failed in agentic loop");
@@ -626,11 +735,25 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
                     ctx.tool_call_strategy,
                     ctx.tool_config.clone(),
                 );
-                match ctx
-                    .client
-                    .exec_chat(ctx.model_name, retry_request.chat_request, Some(ctx.chat_options))
-                    .await
+                let retry_result = match await_llm_or_stop(
+                    ctx.client.exec_chat(ctx.model_name, retry_request.chat_request, Some(ctx.chat_options)),
+                    &ctx.cancel_token,
+                    deadline,
+                )
+                .await
                 {
+                    LlmWait::Done(result) => result,
+                    LlmWait::Cancelled => {
+                        log_task_message(ctx.app_handle, ctx.task_id, ctx.run_id, "cancel", "重试等待模型回复时任务已停止");
+                        return stop_result(AgenticLoopStatus::Cancelled);
+                    }
+                    LlmWait::Timeout => {
+                        log_task_message(ctx.app_handle, ctx.task_id, ctx.run_id, "timeout",
+                            format!("重试等待模型回复时达到总超时 ({}s)", AGENTIC_LOOP_TOTAL_TIMEOUT_SECS));
+                        return stop_result(AgenticLoopStatus::Timeout);
+                    }
+                };
+                match retry_result {
                     Ok(resp) => resp,
                     Err(e2) => {
                         return AgenticLoopResult {
@@ -696,9 +819,20 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
             }
         };
 
-        // 无工具调用 → 循环结束
+        // 无工具调用 → 循环结束（停止请求优先于完成，避免停止后仍报成功）
         if captured_tool_calls.is_empty() {
             final_text = response_text;
+            if ctx.cancel_token.is_cancelled() {
+                log_task_message(ctx.app_handle, ctx.task_id, ctx.run_id, "cancel", "模型已回复但任务已停止，不按完成处理");
+                return AgenticLoopResult {
+                    final_text,
+                    rounds: round,
+                    tool_calls_total,
+                    tool_calls_success,
+                    tool_calls_failed,
+                    status: AgenticLoopStatus::Cancelled,
+                };
+            }
             info!(task_id = ctx.task_id, round, "agentic loop completed (no tool calls)");
             return AgenticLoopResult {
                 final_text,
@@ -1757,8 +1891,9 @@ pub async fn execute_scheduled_task(
                 None
             },
         };
-        let created_run = create_scheduled_run_atomically(&mut log_db.conn, original, task, &running)?;
+        // 先登记本进程运行，再写入 running 记录，避免启动收尾把刚创建的运行误判为遗留
         let registration = register_scheduled_run_cancel_token(&run_id);
+        let created_run = create_scheduled_run_atomically(&mut log_db.conn, original, task, &running)?;
         let mut dto = run_to_dto(created_run);
         dto.local_running = true;
         let _ = app_handle.emit(SCHEDULED_TASK_RUN_CREATED_EVENT, dto);
@@ -1772,10 +1907,142 @@ pub async fn execute_scheduled_task(
             Err(error) => Err(format!("task_id={}; run_id={run_id}; {error}", task.id)),
         };
 
-        if let Err(err) = &run_result {
-            update_task_run(app_handle, &run_id, "failed", false, None, Some(err), Some(Utc::now()));
+        // 所有结束原因（含启动前置失败）统一在这里入库，再回报管家；回报失败不改写执行结果。
+        let outcome = match run_result {
+            Ok(outcome) => outcome,
+            Err(err) => ScheduledRunOutcome::failed("error", err, None),
+        };
+        update_task_run(
+            app_handle,
+            &run_id,
+            outcome.status,
+            outcome.notify,
+            outcome.summary.as_deref(),
+            outcome.error.as_deref(),
+            Some(Utc::now()),
+        );
+        // 结果已入库后再注销本地运行登记（回报管家可能需要等待，不应继续显示为执行中）
+        drop(registration);
+        if task.butler_conversation_id.is_some() {
+            report_scheduled_run_to_butler(app_handle, task, &run_id, &outcome).await;
         }
-        run_result
+        if outcome.status == "success" {
+            Ok(RunScheduledTaskResult {
+                task_id: task.id,
+                success: true,
+                notify: outcome.notify,
+                summary: if outcome.notify { outcome.summary } else { None },
+                error: None,
+            })
+        } else {
+            Err(outcome.error.unwrap_or_else(|| format!("task_id={}; run_id={run_id}; 执行失败但缺少底层原因", task.id)))
+        }
+    }
+}
+
+/// 启动时核对上一个进程已启动但未结束的运行（含已停用的一次性任务）：
+/// 如实标记为中断（结果未知，不自动重跑），管家绑定的任务再回报总管家主会话。
+pub async fn recover_interrupted_scheduled_runs(app_handle: &tauri::AppHandle) -> Result<usize, String> {
+    let local_run_ids: Vec<String> = scheduled_run_cancel_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .cloned()
+        .collect();
+    let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| format!("打开运行记录数据库失败: {e}"))?;
+    let interrupted = db
+        .mark_interrupted_runs(
+            &local_run_ids,
+            "应用在任务执行过程中退出，运行被中断，执行结果未知；未自动重新执行",
+            Utc::now(),
+        )
+        .map_err(|e| format!("收尾中断的运行记录失败: {e}"))?;
+    for run in &interrupted {
+        log_task_message(app_handle, run.task_id, &run.run_id, "interrupted", run.error_message.clone().unwrap_or_default());
+        let _ = app_handle.emit(
+            SCHEDULED_TASK_RUN_UPDATED_EVENT,
+            ScheduledTaskRunUpdateEvent {
+                run_id: run.run_id.clone(),
+                status: run.status.clone(),
+                notify: false,
+                summary: None,
+                error_message: run.error_message.clone(),
+                finished_time: run.finished_time.map(|t| t.to_rfc3339()),
+            },
+        );
+        if run.butler_followup_status.as_deref() != Some("pending") {
+            continue;
+        }
+        let task = match db.read_task(run.task_id) {
+            Ok(Some(task)) if task.butler_conversation_id.is_some() => task,
+            Ok(_) => continue,
+            Err(e) => {
+                log_task_message(app_handle, run.task_id, &run.run_id, "butler_followup_error", format!("读取任务失败，无法回报总管家: {e}"));
+                continue;
+            }
+        };
+        let outcome = ScheduledRunOutcome::failed(
+            "interrupted",
+            run.error_message.clone().unwrap_or_default(),
+            None,
+        );
+        report_scheduled_run_to_butler(app_handle, &task, &run.run_id, &outcome).await;
+    }
+    Ok(interrupted.len())
+}
+
+fn resolve_assistant_name(app_handle: &tauri::AppHandle, assistant_id: i64) -> String {
+    match get_assistant(app_handle.clone(), assistant_id) {
+        Ok(detail) => detail.assistant.name,
+        Err(e) => format!("assistant_id={assistant_id}（读取名称失败: {e}）"),
+    }
+}
+
+/// 把一次运行的真实结果回报给总管家主会话，并记录回报状态。
+async fn report_scheduled_run_to_butler(
+    app_handle: &tauri::AppHandle,
+    task: &ScheduledTask,
+    run_id: &str,
+    outcome: &ScheduledRunOutcome,
+) {
+    let assistant_name = resolve_assistant_name(app_handle, task.assistant_id);
+    let mut attempt = 0;
+    let backflow_result = loop {
+        attempt += 1;
+        let result = match active_butler_main_conversation_id(app_handle) {
+            Ok(Some(conversation_id)) => {
+                enqueue_scheduled_task_butler_followup(app_handle, conversation_id, task, run_id, outcome, &assistant_name).await
+            }
+            Ok(None) => Err("当前不存在总管家主会话".to_string()),
+            Err(e) => Err(format!("读取总管家主会话失败: {e}")),
+        };
+        match result {
+            // 主会话忙碌未获得执行权：保持排队并重试，不抢占会话
+            Err(e) if e.starts_with(BUTLER_MAIN_BUSY_MARKER) && attempt < SCHEDULED_FOLLOWUP_BUSY_ATTEMPTS => {
+                log_task_message(app_handle, task.id, run_id, "butler_followup_wait",
+                    format!("第 {attempt} 次回流等待超时，稍后重试: {}", &e[BUTLER_MAIN_BUSY_MARKER.len()..]));
+            }
+            Err(e) => break Err(e.strip_prefix(BUTLER_MAIN_BUSY_MARKER).unwrap_or(&e).to_string()),
+            Ok(()) => break Ok(()),
+        }
+    };
+    let followup_status = if backflow_result.is_ok() { "done" } else { "failed" };
+    let persist_error = ScheduledTaskDatabase::new(app_handle)
+        .map_err(|e| e.to_string())
+        .and_then(|sdb| sdb.update_run_butler_followup_status(run_id, followup_status).map_err(|e| e.to_string()))
+        .err();
+    match &backflow_result {
+        Ok(()) => log_task_message(app_handle, task.id, run_id, "butler_followup", "已回流至总管家主会话"),
+        Err(e) => log_task_message(app_handle, task.id, run_id, "butler_followup_error", format!("回流总管家失败: {e}")),
+    }
+    if let Some(e) = persist_error {
+        log_task_message(
+            app_handle,
+            task.id,
+            run_id,
+            "butler_followup_error",
+            format!("记录回流状态 {followup_status} 失败: {e}"),
+        );
     }
 }
 
@@ -1785,7 +2052,7 @@ async fn execute_scheduled_task_inner(
     task: &ScheduledTask,
     run_id: &str,
     run_cancel_token: CancellationToken,
-) -> Result<RunScheduledTaskResult, String> {
+) -> Result<ScheduledRunOutcome, String> {
     // ── 1. 验证助手配置 ──────────────────────────────────────────────
     let assistant_detail = get_assistant(app_handle.clone(), task.assistant_id)
         .map_err(|e| format!("Failed to get assistant: {}", e))?;
@@ -2003,32 +2270,22 @@ async fn execute_scheduled_task_inner(
         log_task_message(app_handle, task.id, run_id, "response", task_result.clone());
     }
 
-    // 非正常结束直接标记失败
-    match &loop_result.status {
-        AgenticLoopStatus::Error(e) => {
-            update_task_run(app_handle, run_id, "failed", false, None, Some(e), Some(Utc::now()));
-            let _ = cleanup_conversation(app_handle, conversation_id);
-            return Err(e.clone());
+    // 非正常结束（错误 / 停止 / 超时 / 轮次耗尽）直接按真实原因判失败，不再进入通知判定
+    let detail = (!task_result.trim().is_empty()).then(|| task_result.clone());
+    if let Some((end_reason, error)) = loop_status_failure(
+        &loop_result.status,
+        loop_result.rounds,
+        loop_result.tool_calls_success,
+        loop_result.tool_calls_failed,
+    ) {
+        log_task_message(app_handle, task.id, run_id, end_reason, &error);
+        if let Err(e) = cleanup_conversation(app_handle, conversation_id) {
+            log_task_message(app_handle, task.id, run_id, "cleanup_error", format!("清理对话记录失败: {e}"));
         }
-        AgenticLoopStatus::Cancelled => {
-            let cancelled_error = "任务已手动停止".to_string();
-            log_task_message(app_handle, task.id, run_id, "cancel", &cancelled_error);
-            update_task_run(
-                app_handle,
-                run_id,
-                "failed",
-                false,
-                None,
-                Some(&cancelled_error),
-                Some(Utc::now()),
-            );
-            let _ = cleanup_conversation(app_handle, conversation_id);
-            return Err(cancelled_error);
-        }
-        _ => {}
+        return Ok(ScheduledRunOutcome::failed(end_reason, error, detail));
     }
 
-    // ── 7. 通知判定 ──────────────────────────────────────────────────
+    // ── 7. 通知判定（失败只影响是否通知，不改写执行结果） ────────────────
     let execution_report = format!(
         "执行状态: {}\n执行轮次: {}\n工具调用: 总计 {}, 成功 {}, 失败 {}\n\n最终输出:\n{}",
         status_str,
@@ -2060,160 +2317,94 @@ async fn execute_scheduled_task_inner(
     .chat_request;
 
     let notify_options = chat_options.clone().with_capture_tool_calls(false);
-    let notify_response = client
-        .exec_chat(&model_name, notify_request, Some(&notify_options))
-        .await
-        .map_err(|e| {
+    let notify_decision: Result<NotifyDecision, String> = match await_llm_or_stop(
+        client.exec_chat(&model_name, notify_request, Some(&notify_options)),
+        &run_cancel_token,
+        Instant::now() + Duration::from_secs(NOTIFY_DECISION_TIMEOUT_SECS),
+    )
+    .await
+    {
+        LlmWait::Done(Ok(response)) => {
+            let notify_text = response.content.into_joined_texts().unwrap_or_default();
+            log_task_message(app_handle, task.id, run_id, "notify_raw", notify_text.clone());
+            parse_notify_decision(&notify_text).map_err(|e| {
+                error!(error = %e, raw = %notify_text, "invalid notify decision payload");
+                format!("通知判定返回不合法: {}", e)
+            })
+        }
+        LlmWait::Done(Err(e)) => Err(format!("通知判定执行失败: {}", e)),
+        LlmWait::Cancelled => Err("通知判定期间收到停止请求，已跳过通知判定（任务主体已完成）".to_string()),
+        LlmWait::Timeout => Err(format!("通知判定超时（{}s）", NOTIFY_DECISION_TIMEOUT_SECS)),
+    };
+
+    let (notify, summary, judged_task_state, notify_error) = match notify_decision {
+        Ok(decision) => {
             log_task_message(
                 app_handle,
                 task.id,
                 run_id,
-                "error",
-                format!("通知判定执行失败: {}", e),
+                "notify_result",
+                format!(
+                    "task_state={}, notify={}, summary={}, reason={}",
+                    decision.task_state.clone().unwrap_or_else(|| "unknown".to_string()),
+                    decision.notify,
+                    decision.summary.clone().unwrap_or_default(),
+                    decision.reason.clone().unwrap_or_default()
+                ),
             );
-            update_task_run(
-                app_handle,
-                run_id,
-                "failed",
-                false,
-                None,
-                Some(&format!("通知判定执行失败: {}", e)),
-                Some(Utc::now()),
-            );
-            format!("通知判定执行失败: {}", e)
-        })?;
-    let notify_text = notify_response.content.into_joined_texts().unwrap_or_default();
-    log_task_message(app_handle, task.id, run_id, "notify_raw", notify_text.clone());
-
-    let notify_decision = parse_notify_decision(&notify_text).map_err(|e| {
-        error!(error = %e, raw = %notify_text, "invalid notify decision payload");
-        log_task_message(
-            app_handle,
-            task.id,
-            run_id,
-            "error",
-            format!("通知判定返回不合法: {}", e),
-        );
-        update_task_run(
-            app_handle,
-            run_id,
-            "failed",
-            false,
-            None,
-            Some(&format!("通知判定返回不合法: {}", e)),
-            Some(Utc::now()),
-        );
-        format!("通知判定返回不合法: {}", e)
-    })?;
-    let notify = notify_decision.notify;
-    let summary = notify_decision.summary.clone();
-    log_task_message(
-        app_handle,
-        task.id,
-        run_id,
-        "notify_result",
-        format!(
-            "task_state={}, notify={}, summary={}, reason={}",
-            notify_decision.task_state.unwrap_or_else(|| "unknown".to_string()),
-            notify,
-            summary.clone().unwrap_or_default(),
-            notify_decision.reason.unwrap_or_default()
-        ),
-    );
+            (decision.notify, decision.summary, decision.task_state, None)
+        }
+        Err(e) => {
+            log_task_message(app_handle, task.id, run_id, "error", &e);
+            (false, None, None, Some(e))
+        }
+    };
 
     // ── 8. 通知或清理 ─────────────────────────────────────────────
     if notify {
         conversation.name = format!("计划任务: {}", task.name);
-        let _ =
-            conversation_db.conversation_repo().map_err(|e| e.to_string())?.update(&conversation);
+        if let Err(e) = conversation_db
+            .conversation_repo()
+            .map_err(|e| e.to_string())
+            .and_then(|repo| repo.update(&conversation).map_err(|e| e.to_string()))
+        {
+            log_task_message(app_handle, task.id, run_id, "error", format!("更新对话名称失败: {e}"));
+        }
         if let Some(cache_state) = app_handle.try_state::<NameCacheState>() {
             let mut assistant_name_cache = cache_state.assistant_names.lock().await;
             assistant_name_cache.insert(task.assistant_id, assistant_detail.assistant.name.clone());
         }
         let _ = app_handle.emit("conversation_created", conversation.id);
 
-        let _ = app_handle
+        match app_handle
             .notification()
             .builder()
             .title("定时任务完成")
             .body("定时任务完成，请查看对话")
-            .show();
-        log_task_message(app_handle, task.id, run_id, "notify", "已发送系统通知");
-        update_task_run(
-            app_handle,
-            run_id,
-            "success",
-            notify,
-            summary.as_deref(),
-            None,
-            Some(Utc::now()),
-        );
+            .show()
+        {
+            Ok(()) => log_task_message(app_handle, task.id, run_id, "notify", "已发送系统通知"),
+            Err(e) => log_task_message(app_handle, task.id, run_id, "error", format!("发送系统通知失败: {e}")),
+        }
+    } else if notify_error.is_some() {
+        // 通知判定失败时保留对话，方便用户查看执行结果
+        log_task_message(app_handle, task.id, run_id, "cleanup", "通知判定失败，保留对话记录");
     } else {
-        cleanup_conversation(app_handle, conversation_id)?;
-        log_task_message(app_handle, task.id, run_id, "cleanup", "未通知，已清理对话记录");
-        update_task_run(
-            app_handle,
-            run_id,
-            "success",
-            notify,
-            summary.as_deref(),
-            None,
-            Some(Utc::now()),
-        );
-    }
-
-    // ── 9. Butler 结果回流 ─────────────────────────────────────────
-    if task.butler_conversation_id.is_some() {
-        let backflow_result = match active_butler_main_conversation_id(app_handle)? {
-            Some(conversation_id) => {
-                enqueue_scheduled_task_butler_followup(
-                    app_handle,
-                    conversation_id,
-                    task,
-                    run_id,
-                    notify,
-                    summary.as_deref(),
-                    Some(task_result.as_str()),
-                    &assistant_detail.assistant.name,
-                )
-                .await
-            }
-            None => Err("当前不存在总管家主会话".to_string()),
-        };
-        match &backflow_result {
-            Ok(()) => {
-                log_task_message(
-                    app_handle,
-                    task.id,
-                    run_id,
-                    "butler_followup",
-                    "已回流至总管家主会话",
-                );
-                if let Ok(sdb) = ScheduledTaskDatabase::new(app_handle) {
-                    let _ = sdb.update_run_butler_followup_status(run_id, "done");
-                }
-            }
-            Err(e) => {
-                if let Ok(sdb) = ScheduledTaskDatabase::new(app_handle) {
-                    let _ = sdb.update_run_butler_followup_status(run_id, "failed");
-                }
-                log_task_message(
-                    app_handle,
-                    task.id,
-                    run_id,
-                    "butler_followup_error",
-                    format!("回流总管家失败: {}", e),
-                );
-            }
+        match cleanup_conversation(app_handle, conversation_id) {
+            Ok(()) => log_task_message(app_handle, task.id, run_id, "cleanup", "未通知，已清理对话记录"),
+            Err(e) => log_task_message(app_handle, task.id, run_id, "cleanup_error", format!("清理对话记录失败: {e}")),
         }
     }
 
-    Ok(RunScheduledTaskResult {
-        task_id: task.id,
-        success: true,
+    Ok(ScheduledRunOutcome {
+        status: "success",
+        end_reason: "completed",
         notify,
-        summary: if notify { summary } else { None },
+        summary,
         error: None,
+        detail,
+        judged_task_state,
+        notify_error,
     })
 }
 
@@ -2223,54 +2414,82 @@ async fn execute_scheduled_task_inner(
 
 const SCHEDULED_TASK_RESULT_DETAIL_LIMIT: usize = 4000;
 
-fn build_butler_scheduled_task_result_message(
+fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut cut = max_bytes;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &text[..cut]
+}
+
+pub(crate) fn build_butler_scheduled_task_result_message(
     task: &ScheduledTask,
     run_id: &str,
-    status: &str,
-    notify: bool,
-    summary: Option<&str>,
-    detail: Option<&str>,
+    outcome: &ScheduledRunOutcome,
     assistant_name: &str,
 ) -> String {
-    let summary_text = summary.filter(|s| !s.trim().is_empty()).unwrap_or("无");
-    let detail_text = detail
+    let summary_text = outcome.summary.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("无");
+    let detail_text = outcome
+        .detail
+        .as_deref()
         .filter(|d| !d.trim().is_empty())
         .map(|d| {
-            if d.len() > SCHEDULED_TASK_RESULT_DETAIL_LIMIT {
-                format!("{}…(truncated)", &d[..SCHEDULED_TASK_RESULT_DETAIL_LIMIT])
-            } else {
-                d.to_string()
-            }
+            let cut = truncate_at_char_boundary(d, SCHEDULED_TASK_RESULT_DETAIL_LIMIT);
+            if cut.len() < d.len() { format!("{cut}…(truncated)") } else { d.to_string() }
         })
         .unwrap_or_else(|| "无".to_string());
+    let task_prompt = {
+        let cut = truncate_at_char_boundary(&task.task_prompt, 200);
+        if cut.len() < task.task_prompt.len() { format!("{cut}…") } else { task.task_prompt.clone() }
+    };
 
     format!(
-        "<butler_scheduled_task_result>\nstatus={status}\nscheduled_task_id={task_id}\nscheduled_task_name={name}\nrun_id={run_id}\nassistant_name={assistant_name}\ntask_prompt={task_prompt}\nnotify_decision={notify}\nsummary={summary}\ndetail_excerpt={detail}\n</butler_scheduled_task_result>",
-        status = status,
+        "<butler_scheduled_task_result>
+status={status}
+end_reason={end_reason}
+error={error}
+scheduled_task_id={task_id}
+scheduled_task_name={name}
+run_id={run_id}
+assistant_name={assistant_name}
+task_prompt={task_prompt}
+notify_decision={notify}
+judged_task_state={judged}
+notify_error={notify_error}
+summary={summary}
+detail_excerpt={detail}
+</butler_scheduled_task_result>",
+        status = outcome.status,
+        end_reason = outcome.end_reason,
+        error = outcome.error.as_deref().unwrap_or("无"),
         task_id = task.id,
         name = task.name,
         run_id = run_id,
         assistant_name = assistant_name,
-        task_prompt = if task.task_prompt.len() > 200 {
-            format!("{}…", &task.task_prompt[..200])
-        } else {
-            task.task_prompt.clone()
-        },
-        notify = notify,
+        task_prompt = task_prompt,
+        notify = outcome.notify,
+        judged = outcome.judged_task_state.as_deref().unwrap_or("无"),
+        notify_error = outcome.notify_error.as_deref().unwrap_or("无"),
         summary = summary_text,
         detail = detail_text,
     )
 }
 
-fn build_butler_scheduled_task_followup_prompt(task: &ScheduledTask, status: &str) -> String {
+pub(crate) fn build_butler_scheduled_task_followup_prompt(task: &ScheduledTask, outcome: &ScheduledRunOutcome) -> String {
+    let status_desc = match (outcome.status, outcome.end_reason) {
+        ("success", _) => "成功".to_string(),
+        (_, "cancelled") => "已被停止".to_string(),
+        (_, "timeout") => "超时未完成".to_string(),
+        (_, "max_rounds_reached") => "达到最大轮次未完成".to_string(),
+        (_, "interrupted") => "因应用退出而中断，结果未知".to_string(),
+        _ => "失败".to_string(),
+    };
     format!(
-        "系统定时任务回流：定时任务《{name}》执行{status_desc}。这不是终端用户的新需求，而是你之前安排的定时任务执行回调。请基于最新注入的 <butler_scheduled_task_result> 信息判断下一步：如果结果重要则向用户汇报，否则简要确认即可。",
+        "系统定时任务回流：定时任务《{name}》执行{status_desc}。这不是终端用户的新需求，而是你之前安排的定时任务执行回调。请基于最新注入的 <butler_scheduled_task_result> 信息判断下一步：成功且结果重要时向用户汇报；失败、停止、超时或中断时如实告知用户原因与已完成部分，不要把未完成的任务说成已完成，也不要自动重做可能已产生外部影响的操作。",
         name = task.name,
-        status_desc = match status {
-            "success" => "成功",
-            "failed" => "失败",
-            _ => status,
-        },
     )
 }
 
@@ -2279,14 +2498,14 @@ async fn enqueue_scheduled_task_butler_followup(
     butler_conversation_id: i64,
     task: &ScheduledTask,
     run_id: &str,
-    notify: bool,
-    summary: Option<&str>,
-    detail: Option<&str>,
+    outcome: &ScheduledRunOutcome,
     assistant_name: &str,
 ) -> Result<(), String> {
     let continuation_lock = get_butler_main_continuation_lock(butler_conversation_id).await;
     let _guard = continuation_lock.lock().await;
-    wait_for_butler_main_to_be_idle(app_handle, butler_conversation_id).await;
+    wait_for_butler_main_to_be_idle(app_handle, butler_conversation_id)
+        .await
+        .map_err(|busy| format!("{BUTLER_MAIN_BUSY_MARKER}{busy}"))?;
 
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -2305,16 +2524,8 @@ async fn enqueue_scheduled_task_butler_followup(
     let assistant_id =
         main_conversation.assistant_id.ok_or_else(|| "总管家主会话缺少 assistant".to_string())?;
 
-    let status = "success";
-    let system_message_content = build_butler_scheduled_task_result_message(
-        task,
-        run_id,
-        status,
-        notify,
-        summary,
-        detail,
-        assistant_name,
-    );
+    let system_message_content =
+        build_butler_scheduled_task_result_message(task, run_id, outcome, assistant_name);
 
     add_message(
         app_handle,
@@ -2332,7 +2543,7 @@ async fn enqueue_scheduled_task_butler_followup(
     )
     .map_err(|e| e.to_string())?;
 
-    let prompt = build_butler_scheduled_task_followup_prompt(task, status);
+    let prompt = build_butler_scheduled_task_followup_prompt(task, outcome);
     let window = resolve_or_create_butler_execution_window(app_handle)?;
     let ai_request = AiRequest {
         conversation_id: butler_conversation_id.to_string(),

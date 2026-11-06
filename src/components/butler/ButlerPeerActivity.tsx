@@ -46,7 +46,7 @@ export default function ButlerPeerActivity({ conversationId }: {conversationId: 
             </DialogHeader>
             {error && <p role="alert">{error}</p>}
             {rows.map(ex => <article key={ex.id} className="space-y-2 border-t py-3 text-sm">
-                <p className="font-medium">{ex.sender} → {ex.recipient} · 第 {ex.round_no}/{ex.max_rounds} 轮 · {labels[ex.state]}{ex.stop_requested && ex.state !== "stopped" ? "（后续已停止）" : ""}</p>
+                <p className="font-medium">{ex.sender} → {ex.recipient} · 第 {ex.round_no}/{ex.max_rounds} 轮 · {labels[ex.state]}{ex.stop_requested && ex.state !== "stopped" ? "（已停止后续协作，本轮可能仍会完成）" : ""}</p>
                 <p className="whitespace-pre-wrap break-words">{ex.body}</p>
                 {ex.reply && <div className="whitespace-pre-wrap break-words rounded bg-muted p-2">{ex.reply}</div>}
                 {ex.error && <p role="alert" className="break-words text-destructive">{ex.error}</p>}

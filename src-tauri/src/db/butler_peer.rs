@@ -26,6 +26,13 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_report_column {
         conn.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN report_to_user INTEGER NOT NULL DEFAULT 0")?;
     }
+    // 失败/停止回执：NULL 不需要；pending 待送；sending 投递中；delivered 已送达；failed 投递失败；unknown 投递中进程退出
+    let has_receipt_column: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_peer_exchange') WHERE name='receipt_state')",
+        [], |r| r.get(0))?;
+    if !has_receipt_column {
+        conn.execute_batch("ALTER TABLE butler_peer_exchange ADD COLUMN receipt_state TEXT")?;
+    }
     super::butler_timeline::schema(conn)
 }
 
@@ -46,9 +53,10 @@ pub struct Exchange {
     pub max_rounds: i64,
     pub stop_requested: bool,
     pub report_to_user: bool,
+    pub receipt_state: Option<String>,
 }
-const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user FROM butler_peer_exchange";
-const SUMMARY: &str = "SELECT id,root,owner,target,sender,recipient,'',state,input_id,NULL,error,round_no,max_rounds,stop_requested,report_to_user FROM butler_peer_exchange";
+const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state FROM butler_peer_exchange";
+const SUMMARY: &str = "SELECT id,root,owner,target,sender,recipient,'',state,input_id,NULL,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state FROM butler_peer_exchange";
 fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
     Ok(Exchange {
         id: r.get(0)?,
@@ -66,6 +74,7 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
         max_rounds: r.get(12)?,
         stop_requested: r.get(13)?,
         report_to_user: r.get(14)?,
+        receipt_state: r.get(15)?,
     })
 }
 pub fn list(
@@ -109,7 +118,7 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
         meta.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or_default();
     let root = if meta["origin"] == "butler_peer" {
         anyhow::ensure!(
-            meta["leg"] == "reply",
+            meta["leg"] == "reply" || meta["leg"] == "receipt",
             "请直接结束本轮并给出意见或问题，回复会自动回到发起助手"
         );
         meta["root"].as_i64().ok_or_else(|| anyhow::anyhow!("协作消息缺少 root"))?
@@ -191,7 +200,24 @@ pub fn write_input(
 ) -> anyhow::Result<i64> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ex = tx.query_row(&format!("{SELECT} WHERE id=?1"), [id], row)?;
-    anyhow::ensure!(matches!(leg, "request" | "reply"), "未知投递方向 {leg}");
+    anyhow::ensure!(matches!(leg, "request" | "reply" | "receipt"), "未知投递方向 {leg}");
+    if leg == "receipt" {
+        anyhow::ensure!(
+            ex.owner == conversation && ex.receipt_state.as_deref() == Some("sending"),
+            "exchange={id} 回执投递已处理或归属不符"
+        );
+        let meta = serde_json::json!({"origin":"butler_peer","exchange_id":id,"root":ex.root,"leg":"receipt","sender_bot":ex.recipient});
+        let now = chrono::Utc::now();
+        tx.execute("INSERT INTO message(conversation_id,message_type,content,created_time,llm_model_id,llm_model_name,
+            token_count,input_token_count,output_token_count,metadata_json) VALUES (?1,'user',?2,?3,?4,?5,0,0,0,?6)",
+            params![conversation,text,now,model_id,model,meta.to_string()])?;
+        let message = tx.last_insert_rowid();
+        tx.execute("UPDATE conversation SET updated_time=?1 WHERE id=?2", params![now, conversation])?;
+        tx.execute("DELETE FROM conversation_summary WHERE conversation_id=?1", [conversation])?;
+        tx.execute("UPDATE butler_peer_exchange SET receipt_state='delivered' WHERE id=?1", [id])?;
+        tx.commit()?;
+        return Ok(message);
+    }
     let request = leg == "request";
     let (expected, dest, speaker) = if request {
         ("sending", ex.target, ex.sender)
@@ -217,10 +243,53 @@ pub fn write_input(
     Ok(message)
 }
 
+/// 标记失败并排队一次回执给发起方，避免发起方无限等待。
 pub fn fail(conn: &Connection, id: i64, detail: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE butler_peer_exchange SET state='failed',error=?1 WHERE id=?2 AND state!='stopped'",
+        "UPDATE butler_peer_exchange SET state='failed',error=?1,receipt_state=coalesce(receipt_state,'pending')
+         WHERE id=?2 AND state!='stopped'",
         params![detail, id],
+    )?;
+    Ok(())
+}
+
+/// 进程启动时收尾：投递中的协作结果未知（不重复投递），回执投递中的标记为未知（不重复发送）。
+pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE butler_peer_exchange SET state='failed',error='投递过程中应用退出，对方是否已收到并执行未知，未重复投递',
+            receipt_state=coalesce(receipt_state,'pending')
+         WHERE state IN ('sending','reply_sending')",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE butler_peer_exchange SET receipt_state='unknown' WHERE receipt_state='sending'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// 待送达的失败/停止回执。
+pub fn pending_receipts(conn: &Connection) -> rusqlite::Result<Vec<Exchange>> {
+    let mut stmt = conn.prepare(&format!("{SELECT} WHERE receipt_state='pending' ORDER BY id"))?;
+    let rows = stmt.query_map([], row)?;
+    rows.collect()
+}
+
+/// 领取一次回执投递；同一发起会话同时只投递一条。
+pub fn claim_receipt(conn: &Connection, ex: &Exchange) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE butler_peer_exchange SET receipt_state='sending' WHERE id=?1 AND receipt_state='pending' AND NOT EXISTS (
+            SELECT 1 FROM butler_peer_exchange WHERE id!=?1 AND owner=?2
+              AND (state='reply_sending' OR receipt_state='sending'))",
+        params![ex.id, ex.owner],
+    )? == 1)
+}
+
+/// 回执投递失败（消息尚未写入时）不再重发，避免重复回执。
+pub fn fail_receipt(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE butler_peer_exchange SET receipt_state='failed' WHERE id=?1 AND receipt_state='sending'",
+        [id],
     )?;
     Ok(())
 }
@@ -283,8 +352,12 @@ pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Res
 }
 
 pub fn stop(conn: &Connection, root: i64, conversation: i64) -> rusqlite::Result<usize> {
+    // 被停止的进行中协作也给发起方一次回执；已送达或已失败的保持原状。
     conn.execute(
-        "UPDATE butler_peer_exchange SET stop_requested=1, state=CASE WHEN state IN ('delivered','failed') THEN state ELSE 'stopped' END WHERE root=?1 AND EXISTS
+        "UPDATE butler_peer_exchange SET stop_requested=1,
+            receipt_state=CASE WHEN state IN ('delivered','failed','stopped') THEN receipt_state ELSE coalesce(receipt_state,'pending') END,
+            state=CASE WHEN state IN ('delivered','failed') THEN state ELSE 'stopped' END
+         WHERE root=?1 AND EXISTS
         (SELECT 1 FROM butler_peer_exchange WHERE root=?1 AND (owner=?2 OR target=?2))",
         params![root, conversation],
     )

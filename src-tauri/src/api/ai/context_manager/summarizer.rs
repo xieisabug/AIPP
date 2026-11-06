@@ -90,6 +90,7 @@ pub async fn generate_summary(
     model_name: &str,
     body_messages: &[MessageTuple],
     is_butler: bool,
+    require_complete: bool,
 ) -> Result<String, AppError> {
     let body_text = format_messages_for_summary(body_messages);
     let body_token_hint = body_text.len() / 3; // rough estimate
@@ -123,21 +124,79 @@ pub async fn generate_summary(
         AppError::UnknownError(format!("context compaction LLM call failed: {}", e))
     })?;
 
-    let summary = response.first_text().unwrap_or("").to_string();
-
-    if summary.trim().is_empty() {
-        return Err(AppError::UnknownError("上下文摘要模型返回了空文本".into()));
-    }
-    // Ensure the summary is wrapped in <context_summary> tags
-    let summary = if summary.trim().starts_with("<context_summary>") {
-        summary.trim().to_owned()
-    } else {
-        format!("<context_summary>\n{}\n</context_summary>", summary)
-    };
+    let raw = response.first_text().unwrap_or("").to_string();
+    let summary = validate_summary(&raw, is_butler, require_complete)?;
 
     debug!(summary_len = summary.len(), "context compaction summary generated");
 
     Ok(summary)
+}
+
+const SUMMARY_OPEN_TAG: &str = "<context_summary>";
+const SUMMARY_CLOSE_TAG: &str = "</context_summary>";
+const REQUIRED_SECTIONS: &[&str] = &["## 用户目标", "## 用户消息记录", "## 待办", "## 下一步"];
+const BUTLER_REQUIRED_SECTIONS: &[&str] = &["## 子任务状态"];
+
+/// 校验摘要。`require_complete` 时（管家主会话、成员会话、任务会话）拒绝被截断或缺段的摘要，
+/// 不再自动补标签——补上的结束标签会把半截摘要伪装成完整摘要。调用方失败时保留原记录。
+pub(crate) fn validate_summary(
+    raw: &str,
+    is_butler: bool,
+    require_complete: bool,
+) -> Result<String, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::UnknownError("上下文摘要模型返回了空文本".into()));
+    }
+    if !require_complete {
+        // 普通会话保持原有兼容行为
+        return Ok(if trimmed.starts_with(SUMMARY_OPEN_TAG) {
+            trimmed.to_owned()
+        } else {
+            format!("{SUMMARY_OPEN_TAG}\n{}\n{SUMMARY_CLOSE_TAG}", raw)
+        });
+    }
+    let start = trimmed.find(SUMMARY_OPEN_TAG).ok_or_else(|| {
+        AppError::UnknownError(format!("上下文摘要不完整：缺少开始标签 {SUMMARY_OPEN_TAG}，已保留原记录"))
+    })?;
+    let end = trimmed[start..].find(SUMMARY_CLOSE_TAG).map(|i| start + i).ok_or_else(|| {
+        AppError::UnknownError(format!(
+            "上下文摘要不完整：缺少结束标签 {SUMMARY_CLOSE_TAG}（摘要可能被截断，长度 {} 字节），已保留原记录",
+            trimmed.len()
+        ))
+    })?;
+    let summary = &trimmed[start..end + SUMMARY_CLOSE_TAG.len()];
+    let missing: Vec<&str> = REQUIRED_SECTIONS
+        .iter()
+        .chain(if is_butler { BUTLER_REQUIRED_SECTIONS } else { &[] })
+        .filter(|section| !summary.contains(**section))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        return Err(AppError::UnknownError(format!(
+            "上下文摘要不完整：缺少段落 {}，已保留原记录",
+            missing.join("、")
+        )));
+    }
+    Ok(summary.to_owned())
+}
+
+const MESSAGE_PREVIEW_LIMIT: usize = 8000;
+const USER_HEAD_BYTES: usize = 5000;
+const USER_TAIL_BYTES: usize = 3000;
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 /// Format messages into a readable text block for the summarization prompt.
@@ -153,15 +212,21 @@ fn format_messages_for_summary(messages: &[MessageTuple]) -> String {
             _ => "[其他]",
         };
         // Limit individual message preview to avoid blowing up the summarization prompt itself
-        let truncated = if content.len() > 8000 {
-            // Find a safe char boundary near 8000
-            let mut end = 8000;
-            while end > 0 && !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...（内容过长，已截取前部分）", &content[..end])
-        } else {
+        let truncated = if content.len() <= MESSAGE_PREVIEW_LIMIT {
             content.clone()
+        } else if msg_type == "user" {
+            // 用户长指令的末尾常是限制条件，保留开头与结尾
+            let head_end = floor_char_boundary(content, USER_HEAD_BYTES);
+            let tail_start = ceil_char_boundary(content, content.len() - USER_TAIL_BYTES);
+            format!(
+                "{}\n…（中间省略约 {} 字节，已保留开头与结尾）…\n{}",
+                &content[..head_end],
+                tail_start - head_end,
+                &content[tail_start..]
+            )
+        } else {
+            let end = floor_char_boundary(content, MESSAGE_PREVIEW_LIMIT);
+            format!("{}...（内容过长，已截取前部分）", &content[..end])
         };
         parts.push(format!("{} {}", role_label, truncated));
     }
@@ -189,10 +254,48 @@ mod tests {
     #[test]
     fn format_messages_truncates_long_content() {
         let long_content = "a".repeat(10000);
-        let msgs: Vec<MessageTuple> = vec![("user".into(), long_content, vec![])];
+        let msgs: Vec<MessageTuple> = vec![("response".into(), long_content, vec![])];
         let result = format_messages_for_summary(&msgs);
         assert!(result.contains("已截取前部分"));
         assert!(result.len() < 9000);
+    }
+
+    #[test]
+    fn format_messages_keeps_tail_constraints_of_long_user_message() {
+        let long_instruction = format!("{}最后注意：不要修改数据库结构", "需求说明。".repeat(1200));
+        let msgs: Vec<MessageTuple> = vec![("user".into(), long_instruction, vec![])];
+        let result = format_messages_for_summary(&msgs);
+        assert!(result.contains("最后注意：不要修改数据库结构"));
+        assert!(result.contains("已保留开头与结尾"));
+        assert!(result.len() < 9000);
+    }
+
+    fn complete_summary(extra: &str) -> String {
+        format!("<context_summary>\n## 用户目标\n写报告\n## 用户消息记录\n- 不要改库\n## 待办\n- 无\n## 下一步\n继续{extra}\n</context_summary>")
+    }
+
+    #[test]
+    fn validate_summary_rejects_truncated_or_incomplete_for_butler_sessions() {
+        let truncated = "<context_summary>\n## 用户目标\n写报告\n## 用户消息记";
+        let err = validate_summary(truncated, false, true).unwrap_err().to_string();
+        assert!(err.contains("结束标签"));
+        assert!(validate_summary("## 用户目标 只有正文", false, true).is_err());
+        let missing = "<context_summary>\n## 用户目标\nx\n</context_summary>";
+        assert!(validate_summary(missing, false, true).unwrap_err().to_string().contains("用户消息记录"));
+        // 总管家主会话还要求子任务状态
+        assert!(validate_summary(&complete_summary(""), true, true).unwrap_err().to_string().contains("子任务状态"));
+        let butler = complete_summary("\n## 子任务状态\n| 1 | 报告 | RUNNING | 写作 | - |");
+        assert!(validate_summary(&butler, true, true).is_ok());
+        // 标签外的多余文字被去掉
+        let wrapped = format!("好的，摘要如下：\n{}\n以上。", complete_summary(""));
+        assert_eq!(validate_summary(&wrapped, false, true).unwrap(), complete_summary(""));
+    }
+
+    #[test]
+    fn validate_summary_keeps_legacy_behavior_for_normal_chat() {
+        assert!(validate_summary("   ", false, false).is_err());
+        let wrapped = validate_summary("纯文本摘要", false, false).unwrap();
+        assert!(wrapped.starts_with("<context_summary>") && wrapped.ends_with("</context_summary>"));
     }
 
     #[test]

@@ -482,6 +482,17 @@ impl ScheduledTaskDatabase {
         rows.collect()
     }
 
+    /// 启动时收尾上一个进程遗留的 running 记录：标为失败并返回被收尾的记录（状态已更新）。
+    /// `skip_run_ids` 为本进程仍在执行的 run，不会被改写。
+    pub fn mark_interrupted_runs(
+        &self,
+        skip_run_ids: &[String],
+        error_message: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ScheduledTaskRun>> {
+        self.with_write_lock(|| mark_interrupted_runs_in_connection(&self.conn, skip_run_ids, error_message, now))
+    }
+
     /// Update the butler followup status for a run.
     #[instrument(level = "debug", skip(self), fields(run_id, status))]
     pub fn update_run_butler_followup_status(&self, run_id: &str, status: &str) -> Result<()> {
@@ -494,6 +505,50 @@ impl ScheduledTaskDatabase {
         })
     }
 }
+
+pub(crate) fn mark_interrupted_runs_in_connection(
+    conn: &Connection,
+    skip_run_ids: &[String],
+    error_message: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<ScheduledTaskRun>> {
+    let tx = conn.unchecked_transaction()?;
+    let candidates: Vec<ScheduledTaskRun> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status
+             FROM scheduled_task_run WHERE status = 'running' AND finished_time IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| scheduled_task_run_from_row(row))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    let mut interrupted = Vec::new();
+    for run in candidates {
+        if skip_run_ids.iter().any(|id| id == &run.run_id) {
+            continue;
+        }
+        let message = format!(
+            "{error_message}（run_id={}，开始于 {}）",
+            run.run_id,
+            run.started_time.to_rfc3339()
+        );
+        let changed = tx.execute(
+            "UPDATE scheduled_task_run SET status = 'failed', error_message = ?1, finished_time = ?2
+             WHERE run_id = ?3 AND status = 'running'",
+            params![message, now, run.run_id],
+        )?;
+        if changed == 1 {
+            interrupted.push(ScheduledTaskRun {
+                status: "failed".to_string(),
+                error_message: Some(message),
+                finished_time: Some(now),
+                ..run
+            });
+        }
+    }
+    tx.commit()?;
+    Ok(interrupted)
+}
+
 
 /// Rebuild only the known legacy status constraint, retaining the table's other schema,
 /// columns, explicit indexes, triggers and AUTOINCREMENT high-water mark.

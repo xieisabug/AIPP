@@ -180,6 +180,7 @@ pub fn create_test_db() -> Connection {
             followup_status TEXT DEFAULT 'enqueued',
             handoff_message_id INTEGER,
             final_message_id INTEGER,
+            followup_claim_id TEXT,
             created_time TEXT NOT NULL,
             updated_time TEXT NOT NULL
         )",

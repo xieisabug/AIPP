@@ -561,6 +561,19 @@ impl ConversationRepository {
         rows.collect()
     }
 
+    /// 处于发送中的回送；调用方需排除本进程仍在运行的执行者后才能接手。
+    #[instrument(level = "debug", skip(self))]
+    pub fn list_butler_task_conversation_ids_dispatching_followup(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_conversation_id
+             FROM butler_task_result
+             WHERE followup_status = 'dispatching'
+             ORDER BY updated_time ASC, task_conversation_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn update_assistant_id(
         &self,
         origin_assistant_id: i64,
@@ -1436,6 +1449,22 @@ impl QueuedConversationMessageRepository {
         rows.collect()
     }
 
+    /// 是否有等待派发（或刚开始派发）的用户消息。内部续跑要让用户新消息优先。
+    /// 只把最近 30 秒内进入 dispatching 的记录算作在途，避免崩溃遗留记录永久阻塞。
+    #[instrument(level = "debug", skip(self), fields(conversation_id))]
+    pub fn has_pending_user_turn(&self, conversation_id: i64) -> Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM queued_conversation_message
+                WHERE conversation_id = ?1
+                  AND (status = 'queued'
+                       OR (status = 'dispatching' AND updated_time >= datetime('now', '-30 seconds')))
+            )",
+            params![conversation_id],
+            |row| row.get(0),
+        )
+    }
+
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn promote_to_interrupt(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
         self.with_serialized_write(|conn| {
@@ -2067,6 +2096,8 @@ impl ConversationDatabase {
             "TEXT DEFAULT 'enqueued'",
         )?;
         ensure_column_exists(&conn, "butler_task_result", "handoff_message_id", "INTEGER")?;
+        // 回送领取标识：只有持有当前领取的执行者才能推进回送状态
+        ensure_column_exists(&conn, "butler_task_result", "followup_claim_id", "TEXT")?;
         super::butler_peer::schema(&conn)?;
 
         Ok(())
@@ -3227,9 +3258,8 @@ impl ButlerRepository {
         })
     }
 
-    #[instrument(level = "debug", skip(self, result), fields(task_conversation_id = result.task_conversation_id))]
-    pub fn upsert_task_result(&self, result: &ButlerTaskResult) -> Result<ButlerTaskResult> {
-        self.with_serialized_write(|conn| {
+    fn upsert_task_result_with_conn(conn: &Connection, result: &ButlerTaskResult) -> Result<ButlerTaskResult> {
+        {
             conn.execute(
                 "INSERT INTO butler_task_result (
                     task_conversation_id,
@@ -3257,6 +3287,7 @@ impl ButlerRepository {
                     followup_status = excluded.followup_status,
                     handoff_message_id = excluded.handoff_message_id,
                     final_message_id = excluded.final_message_id,
+                    followup_claim_id = NULL,
                     updated_time = excluded.updated_time",
                 params![
                     result.task_conversation_id,
@@ -3301,7 +3332,7 @@ impl ButlerRepository {
                     })
                 },
             )
-        })
+        }
     }
 
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
@@ -3358,24 +3389,82 @@ impl ButlerRepository {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn conn_for_tests(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// 领取一次结果回送。`reclaim_dispatching=true` 表示调用方已确认当前 dispatching 不属于
+    /// 本进程仍在运行的执行者（例如上次进程在发送中崩溃），允许重新接手。
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
-    pub fn try_mark_task_result_followup_dispatching(
+    pub fn try_claim_task_result_followup(
         &self,
         task_conversation_id: i64,
         handoff_message_id: Option<i64>,
+        claim_id: &str,
+        reclaim_dispatching: bool,
     ) -> Result<bool> {
         let now = Utc::now();
         self.with_serialized_write(|conn| {
             let affected = conn.execute(
                 "UPDATE butler_task_result
                  SET followup_status = 'dispatching',
-                     handoff_message_id = COALESCE(?1, handoff_message_id),
-                     updated_time = ?2
-                 WHERE task_conversation_id = ?3
-                   AND COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')",
-                params![handoff_message_id, now, task_conversation_id],
+                     followup_claim_id = ?1,
+                     handoff_message_id = COALESCE(?2, handoff_message_id),
+                     updated_time = ?3
+                 WHERE task_conversation_id = ?4
+                   AND (COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')
+                        OR (?5 AND followup_status = 'dispatching'))",
+                params![claim_id, handoff_message_id, now, task_conversation_id, reclaim_dispatching],
             )?;
             Ok(affected > 0)
+        })
+    }
+
+    /// 仅当仍持有领取时推进回送状态；被新执行者接手后，旧执行者的写入不会生效。
+    #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id, followup_status = followup_status))]
+    pub fn update_task_result_followup_state_if_claimed(
+        &self,
+        task_conversation_id: i64,
+        followup_status: &str,
+        handoff_message_id: Option<i64>,
+        claim_id: &str,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        self.with_serialized_write(|conn| {
+            let affected = conn.execute(
+                "UPDATE butler_task_result
+                 SET followup_status = ?1,
+                     handoff_message_id = ?2,
+                     updated_time = ?3
+                 WHERE task_conversation_id = ?4 AND followup_claim_id = ?5",
+                params![followup_status, handoff_message_id, now, task_conversation_id, claim_id],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    /// 在同一事务中保存任务结果与任务结束状态，避免崩溃后只写入一半。
+    #[instrument(level = "debug", skip(self, result, summary), fields(task_conversation_id = result.task_conversation_id, status = status))]
+    pub fn save_terminal_task_result(
+        &self,
+        result: &ButlerTaskResult,
+        status: &str,
+        summary: Option<&str>,
+        finalized_at: Option<DateTime<Utc>>,
+    ) -> Result<ButlerTaskResult> {
+        self.with_serialized_write(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let saved = Self::upsert_task_result_with_conn(&tx, result)?;
+            Self::update_task_conversation_state_with_conn(
+                &tx,
+                result.task_conversation_id,
+                status,
+                summary,
+                finalized_at,
+            )?;
+            tx.commit()?;
+            Ok(saved)
         })
     }
 
@@ -3387,18 +3476,28 @@ impl ButlerRepository {
         summary: Option<&str>,
         finalized_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        let now = Utc::now();
         self.with_serialized_write(|conn| {
-            conn.execute(
-                "UPDATE conversation
-                 SET butler_task_status = ?1,
-                     butler_task_summary = COALESCE(?2, butler_task_summary),
-                     butler_task_finalized_at = COALESCE(?3, butler_task_finalized_at),
-                     updated_time = ?4
-                 WHERE id = ?5",
-                params![status, summary, finalized_at, now, task_conversation_id],
-            )?;
-            Ok(())
+            Self::update_task_conversation_state_with_conn(conn, task_conversation_id, status, summary, finalized_at)
         })
+    }
+
+    fn update_task_conversation_state_with_conn(
+        conn: &Connection,
+        task_conversation_id: i64,
+        status: &str,
+        summary: Option<&str>,
+        finalized_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        conn.execute(
+            "UPDATE conversation
+             SET butler_task_status = ?1,
+                 butler_task_summary = COALESCE(?2, butler_task_summary),
+                 butler_task_finalized_at = COALESCE(?3, butler_task_finalized_at),
+                 updated_time = ?4
+             WHERE id = ?5",
+            params![status, summary, finalized_at, now, task_conversation_id],
+        )?;
+        Ok(())
     }
 }

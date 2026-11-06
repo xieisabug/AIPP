@@ -360,3 +360,61 @@ fn test_butler_peer_report_to_user_persists_and_is_part_of_idempotency() {
     // 迁移可重复执行。
     schema(&db).unwrap();
 }
+
+/// 成员失败或被停止后，发起方收到且只收到一次回执；回执后发起方可继续处理
+#[test]
+fn test_butler_peer_failure_and_stop_send_single_receipt_to_owner() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
+    assert!(claim(&db, &ex).unwrap());
+    write_input(&mut db, ex.id, "request", 30, "稿件", 1, "model").unwrap();
+    db.execute(
+        "INSERT INTO message(conversation_id,message_type,content,finish_time) VALUES (30,'error','模型认证失败',CURRENT_TIMESTAMP)",
+        [],
+    )
+    .unwrap();
+    settle(&db, &reread(&db, ex.id), false).unwrap();
+    let failed = reread(&db, ex.id);
+    assert_eq!(failed.state, "failed");
+    assert!(failed.error.as_deref().unwrap().contains("认证失败"), "保留失败原因");
+    assert_eq!(failed.receipt_state.as_deref(), Some("pending"));
+
+    let pending = pending_receipts(&db).unwrap();
+    assert_eq!(pending.iter().map(|e| e.id).collect::<Vec<_>>(), vec![ex.id]);
+    assert!(claim_receipt(&db, &failed).unwrap());
+    assert!(!claim_receipt(&db, &failed).unwrap(), "同一回执只领取一次");
+    assert!(write_input(&mut db, ex.id, "receipt", 30, "回执", 1, "model").is_err(), "回执只能送到发起方");
+    write_input(&mut db, ex.id, "receipt", 20, "回执", 1, "model").unwrap();
+    assert!(write_input(&mut db, ex.id, "receipt", 20, "回执", 1, "model").is_err(), "不会重复送达");
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("delivered"));
+    assert!(pending_receipts(&db).unwrap().is_empty());
+
+    // 收到回执后发起方可以继续发起下一轮（例如改派），不会被当作收件人派工拦截
+    let next = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("r2", "改派") }).unwrap();
+    assert_eq!(next.round_no, 2);
+
+    // 进行中的协作被停止：同样回执一次
+    assert!(claim(&db, &next).unwrap());
+    assert_eq!(stop(&db, next.root, 20).unwrap(), 2);
+    let stopped = reread(&db, next.id);
+    assert_eq!((stopped.state.as_str(), stopped.receipt_state.as_deref()), ("stopped", Some("pending")));
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("delivered"), "已失败的不再重复回执");
+}
+
+/// 投递中退出：结果标记为未知且不重复投递；回执投递中退出不重发
+#[test]
+fn test_butler_peer_recover_marks_unknown_without_redelivery() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
+    assert!(claim(&db, &ex).unwrap());
+    recover(&db).unwrap();
+    let failed = reread(&db, ex.id);
+    assert_eq!(failed.state, "failed");
+    assert!(failed.error.as_deref().unwrap().contains("未知"));
+    assert!(claim_receipt(&db, &failed).unwrap());
+    recover(&db).unwrap();
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("unknown"));
+    assert!(pending_receipts(&db).unwrap().is_empty());
+}

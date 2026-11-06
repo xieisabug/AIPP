@@ -496,7 +496,7 @@ fn test_list_butler_task_conversation_ids_pending_followup_only_returns_pending_
 }
 
 #[test]
-fn test_try_mark_task_result_followup_dispatching_only_claims_once() {
+fn test_try_claim_task_result_followup_only_claims_once() {
     let conn = create_test_db();
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -510,12 +510,93 @@ fn test_try_mark_task_result_followup_dispatching_only_claims_once() {
     .unwrap();
 
     let repo = ButlerRepository::new(conn);
-    assert!(repo.try_mark_task_result_followup_dispatching(201, Some(9101)).unwrap());
-    assert!(!repo.try_mark_task_result_followup_dispatching(201, Some(9102)).unwrap());
+    assert!(repo.try_claim_task_result_followup(201, Some(9101), "claim-a", false).unwrap());
+    assert!(!repo.try_claim_task_result_followup(201, Some(9102), "claim-b", false).unwrap());
 
     let result = repo.get_task_result(201).unwrap().unwrap();
     assert_eq!(result.followup_status.as_deref(), Some("dispatching"));
     assert_eq!(result.handoff_message_id, Some(9101));
+}
+
+/// 发送中崩溃后：遗留的 dispatching 可被重新接手，旧执行者不能再覆盖新状态
+#[test]
+fn test_stale_dispatching_followup_can_be_reclaimed_and_old_claim_is_fenced() {
+    let conn = create_test_db();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO butler_task_result (
+            task_conversation_id, followup_status, handoff_message_id, created_time, updated_time
+         ) VALUES (?1, 'pending', NULL, ?2, ?2)",
+        (301, &now),
+    )
+    .unwrap();
+    let repo = ButlerRepository::new(conn);
+    assert!(repo.try_claim_task_result_followup(301, None, "old", false).unwrap());
+    // 旧执行者已注入结果消息后崩溃
+    assert!(repo.update_task_result_followup_state_if_claimed(301, "handoff_injected", Some(77), "old").unwrap());
+    assert!(repo.try_claim_task_result_followup(301, None, "old-2", false).unwrap(), "handoff_injected 可领取");
+    // 模拟 dispatching 遗留：普通领取拒绝，确认非本进程在途后可接手
+    assert!(!repo.try_claim_task_result_followup(301, None, "new", false).unwrap());
+    assert!(repo.try_claim_task_result_followup(301, None, "new", true).unwrap());
+
+    // 旧执行者的写入被拒绝
+    assert!(!repo.update_task_result_followup_state_if_claimed(301, "pending", None, "old-2").unwrap());
+    let result = repo.get_task_result(301).unwrap().unwrap();
+    assert_eq!(result.followup_status.as_deref(), Some("dispatching"));
+    assert_eq!(result.handoff_message_id, Some(77), "接手时保留已注入的结果消息，避免重复展示");
+
+    assert!(repo.update_task_result_followup_state_if_claimed(301, "enqueued", Some(77), "new").unwrap());
+    assert!(!repo.try_claim_task_result_followup(301, None, "late", true).unwrap(), "已送达不再领取");
+}
+
+/// 结果与任务结束状态一起保存：任一步失败都整体回滚
+#[test]
+fn test_save_terminal_task_result_is_atomic() {
+    let conn = create_test_db();
+    let now = Utc::now();
+    conn.execute(
+        "INSERT INTO conversation (id, name, conversation_kind, butler_task_status, created_time, updated_time)
+         VALUES (401, 'task', 'butler_task', 'running', ?1, ?1)",
+        [&now],
+    )
+    .unwrap();
+    let repo = ButlerRepository::new(conn);
+    let result = ButlerTaskResult {
+        id: 0,
+        task_conversation_id: 401,
+        handoff_mode: None,
+        payload_json: None,
+        summary: Some("done".into()),
+        structured_output_json: None,
+        evidence_json: None,
+        artifact_refs_json: None,
+        followup_suggestions_json: None,
+        followup_status: Some("pending".into()),
+        handoff_message_id: None,
+        final_message_id: None,
+        created_time: now,
+        updated_time: now,
+    };
+    repo.save_terminal_task_result(&result, "succeeded", Some("done"), Some(now)).unwrap();
+    assert!(repo.get_task_result(401).unwrap().is_some());
+    let status: String = repo
+        .conn_for_tests()
+        .query_row("SELECT butler_task_status FROM conversation WHERE id = 401", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "succeeded");
+
+    // 第二步失败（更新任务状态被拒绝）时，结果也不能单独写入
+    repo.conn_for_tests()
+        .execute_batch(
+            "INSERT INTO conversation (id, name, conversation_kind, butler_task_status, created_time, updated_time)
+               VALUES (402, 'task2', 'butler_task', 'running', '2026-11-06T00:00:00Z', '2026-11-06T00:00:00Z');
+             CREATE TRIGGER reject_402 BEFORE UPDATE ON conversation WHEN NEW.id = 402
+             BEGIN SELECT RAISE(ABORT, 'reject'); END;",
+        )
+        .unwrap();
+    let second = ButlerTaskResult { task_conversation_id: 402, ..result };
+    assert!(repo.save_terminal_task_result(&second, "failed", None, Some(now)).is_err());
+    assert!(repo.get_task_result(402).unwrap().is_none());
 }
 
 /// 测试旧版 conversation 表升级时不会使用 SQLite 不支持的非静态默认值

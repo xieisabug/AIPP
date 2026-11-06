@@ -946,6 +946,20 @@ fn get_butler_task_temporary_skill_identifiers(
         .unwrap_or_default())
 }
 
+/// 管家主会话、成员会话与任务会话压缩时要求完整摘要（读取失败时按要求完整处理，宁可不压缩也不用半截摘要）。
+fn requires_complete_context_summary(conversation_db: &ConversationDatabase, conversation_id: i64) -> bool {
+    match conversation_db.conversation_repo().and_then(|repo| Ok(repo.read(conversation_id)?)) {
+        Ok(Some(conversation)) => {
+            crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind)
+        }
+        Ok(None) => false,
+        Err(error) => {
+            warn!(conversation_id, error = %error, "failed to read conversation kind for context compaction");
+            true
+        }
+    }
+}
+
 /// 工具名称映射表，用于在 sanitized 名称和原始名称之间进行转换
 /// key: sanitized 工具名称 (如 "h1234abcd__search_web")
 /// value: (原始服务器名称, 原始工具名称) (如 ("搜索服务", "网页搜索"))
@@ -2144,6 +2158,7 @@ pub async fn ask_ai(
             conversation_id,
             checkpoint_store: &conversation_db,
             is_butler,
+            require_complete_summary: is_butler || requires_complete_context_summary(&conversation_db, conversation_id),
             message_ids: init_message_ids,
         };
         emit_chat_context_event(
@@ -2700,6 +2715,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         conversation_id: conversation_id_i64,
         checkpoint_store: &conversation_db,
         is_butler: is_butler_cont,
+        require_complete_summary: is_butler_cont || requires_complete_context_summary(&conversation_db, conversation_id_i64),
         message_ids: init_metadata.message_ids,
     };
     emit_chat_context_event(
@@ -3110,6 +3126,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         conversation_id,
         checkpoint_store: &conversation_db,
         is_butler: is_butler_batch,
+        require_complete_summary: is_butler_batch || requires_complete_context_summary(&conversation_db, conversation_id),
         message_ids: init_metadata.message_ids,
     };
     emit_chat_context_event(
@@ -3649,6 +3666,7 @@ pub async fn regenerate_ai(
             conversation_id,
             checkpoint_store: &conversation_db,
             is_butler: is_butler_regen,
+            require_complete_summary: is_butler_regen || requires_complete_context_summary(&conversation_db, conversation_id),
             message_ids: init_metadata.message_ids,
         };
         emit_chat_context_event(

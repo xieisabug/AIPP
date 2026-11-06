@@ -34,8 +34,8 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([user,peer,answer,user,answer])).toEqual([user,user,answer]);
     });
 
-    it("should retain the current assistant's final summary after a peer reply or task callback", () => {
-        for (const metadata of [{origin:"butler_peer",leg:"reply"},{origin:"internal"}]) {
+    it("should retain the current assistant's final summary after a peer reply, receipt or task callback", () => {
+        for (const metadata of [{origin:"butler_peer",leg:"reply"},{origin:"butler_peer",leg:"receipt"},{origin:"internal"}]) {
             const callback = message(2,"user","内部回流",{metadata_json:JSON.stringify(metadata)});
             const summary = message(3,"response","审稿已完成，结论如下");
             expect(butlerTranscript([history[0],callback,summary])).toEqual([history[0],summary]);

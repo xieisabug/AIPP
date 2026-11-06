@@ -318,3 +318,70 @@ mod tests {
         assert!(err.contains("interval_unit='week'"));
     }
 }
+
+#[cfg(test)]
+mod run_outcome_tests {
+    use crate::api::scheduled_task_api::*;
+    use crate::db::scheduled_task_db::ScheduledTask;
+    use chrono::Utc;
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    fn task(prompt: &str) -> ScheduledTask {
+        ScheduledTask {
+            id: 7, name: "日报".into(), is_enabled: false, schedule_type: "once".into(),
+            interval_value: None, interval_unit: None, start_time: None, week_days: None,
+            month_days: None, run_at: None, next_run_at: None, last_run_at: None,
+            assistant_id: 1, task_prompt: prompt.into(), notify_prompt: String::new(),
+            butler_conversation_id: Some(1), created_time: Utc::now(), updated_time: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_loop_status_failure_maps_every_unfinished_reason() {
+        assert!(loop_status_failure(&AgenticLoopStatus::Completed, 3, 1, 0).is_none());
+        let (reason, msg) = loop_status_failure(&AgenticLoopStatus::Timeout, 4, 2, 1).unwrap();
+        assert_eq!(reason, "timeout");
+        assert!(msg.contains("超时") && msg.contains("无法撤回"));
+        assert_eq!(loop_status_failure(&AgenticLoopStatus::MaxRoundsReached, 50, 0, 0).unwrap().0, "max_rounds_reached");
+        let (reason, msg) = loop_status_failure(&AgenticLoopStatus::Cancelled, 1, 0, 0).unwrap();
+        assert_eq!(reason, "cancelled");
+        assert!(!msg.contains("无法撤回"));
+        let (reason, msg) = loop_status_failure(&AgenticLoopStatus::Error("LLM 调用失败: 502".into()), 2, 0, 0).unwrap();
+        assert_eq!(reason, "error");
+        assert!(msg.contains("502"));
+    }
+
+    #[test]
+    fn test_butler_result_message_reports_real_status_and_is_char_safe() {
+        let long_cn = "测".repeat(3000); // 9000 字节，截断点落在多字节字符中间
+        let outcome = ScheduledRunOutcome::failed("timeout", "执行超时".into(), Some(long_cn.clone()));
+        let msg = build_butler_scheduled_task_result_message(&task(&"任".repeat(100)), "run-1", &outcome, "助手");
+        assert!(msg.contains("status=failed"));
+        assert!(msg.contains("end_reason=timeout"));
+        assert!(msg.contains("error=执行超时"));
+        assert!(msg.contains("…(truncated)"));
+        let prompt = build_butler_scheduled_task_followup_prompt(&task("x"), &outcome);
+        assert!(prompt.contains("超时未完成"));
+        assert!(!prompt.contains("执行成功"));
+    }
+
+    #[tokio::test]
+    async fn test_await_llm_or_stop_prefers_cancel_while_waiting_model() {
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel.cancel();
+        });
+        let never = std::future::pending::<()>();
+        let result = await_llm_or_stop(never, &token, Instant::now() + Duration::from_secs(30)).await;
+        assert!(matches!(result, LlmWait::Cancelled));
+
+        let fresh = CancellationToken::new();
+        let result = await_llm_or_stop(std::future::pending::<()>(), &fresh, Instant::now() + Duration::from_millis(10)).await;
+        assert!(matches!(result, LlmWait::Timeout));
+        let result = await_llm_or_stop(async { 5 }, &fresh, Instant::now() + Duration::from_secs(1)).await;
+        assert!(matches!(result, LlmWait::Done(5)));
+    }
+}

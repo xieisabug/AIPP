@@ -220,6 +220,17 @@ fn contains_manual_review_command_keyword(value: &str) -> bool {
         .any(|token| matches!(token, "rm" | "rmdir"))
 }
 
+/// 管家代批只允许一次性决定：长期授权或会扩大到上级目录的选项必须由用户决定。
+pub(crate) fn butler_proxy_permission_decision_error(decision: &str) -> Option<String> {
+    match decision {
+        "allow" | "deny" => None,
+        "allow_for_conversation" | "allow_for_assistant" | "allow_and_save" => Some(format!(
+            "总管家代批只能选择 allow（仅本次允许）或 deny；{decision} 会保存长期授权或把授权扩大到上级目录，必须由用户决定"
+        )),
+        other => Some(format!("未知的权限决定 {other}，总管家代批只能选择 allow 或 deny")),
+    }
+}
+
 fn operation_permission_manual_review_reason(
     snapshot: &PermissionRequestSnapshot,
 ) -> Option<String> {
@@ -2076,12 +2087,9 @@ pub async fn execute_aipp_builtin_tool(
                                 .ok_or_else(|| {
                                     "Pending operation permission request not found".to_string()
                                 })?;
-                            if decision == "allow_and_save" {
+                            if let Some(reason) = butler_proxy_permission_decision_error(decision) {
                                 serde_json::json!({
-                                    "content": [{
-                                        "type": "text",
-                                        "text": "Butler cannot use allow_and_save automatically. Persistent whitelist grants require explicit user review."
-                                    }],
+                                    "content": [{"type": "text", "text": reason}],
                                     "isError": true
                                 })
                             } else if let Some(reason) =
@@ -2560,6 +2568,16 @@ pub async fn execute_aipp_builtin_tool(
                                 Some(id) => id,
                                 None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
                             };
+                            // 与 superadmin 的 schedule.delete 采用同一风险决策
+                            if let Some(reason) =
+                                superadmin::action_approval_gate("schedule.delete", false)
+                            {
+                                return Ok(serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("删除定时任务 {} 需要用户批准，未执行：{}", task_id, reason)}],
+                                    "isError": true
+                                })
+                                .to_string());
+                            }
                             match delete_scheduled_task(app_handle.clone(), task_id).await {
                                 Ok(()) => serde_json::json!({
                                     "content": [{"type": "text", "text": format!("定时任务 {} 已删除", task_id)}],
@@ -2654,6 +2672,26 @@ mod tests {
     };
     use crate::db::mcp_db::MCPToolCall;
     use crate::mcp::builtin_mcp::operation::types::PermissionRequestEvent;
+
+    /// 管家代批不能扩大长期权限：只允许一次性允许或拒绝
+    #[test]
+    fn butler_proxy_permission_only_allows_once_or_deny() {
+        assert!(butler_proxy_permission_decision_error("allow").is_none());
+        assert!(butler_proxy_permission_decision_error("deny").is_none());
+        for widening in ["allow_for_conversation", "allow_for_assistant", "allow_and_save", "always"] {
+            assert!(butler_proxy_permission_decision_error(widening).is_some(), "{widening}");
+        }
+    }
+
+    /// 管家删除定时任务：schedule_task 与 superadmin 的 schedule.delete 采用同一决策
+    #[test]
+    fn schedule_delete_entries_share_superadmin_risk_gate() {
+        let gate = superadmin::action_approval_gate("schedule.delete", false);
+        assert!(gate.as_deref().is_some_and(|e| e.contains("requires user approval")));
+        assert!(superadmin::action_approval_gate("schedule.delete", true).is_none(), "预览不执行");
+        assert!(superadmin::action_approval_gate("schedule.list", false).is_none());
+        assert!(superadmin::action_approval_gate("no.such.action", false).is_some());
+    }
 
     #[test]
     fn dynamic_mcp_server_payload_is_compact() {
