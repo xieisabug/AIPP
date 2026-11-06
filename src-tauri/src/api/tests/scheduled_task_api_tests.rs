@@ -2,6 +2,54 @@
 mod tests {
     use crate::api::scheduled_task_api::*;
 
+    #[test]
+    fn test_scheduled_outcome_roundtrip_preserves_complete_result() {
+        let outcome = ScheduledRunOutcome {
+            status: "success", end_reason: "completed", notify: false,
+            summary: Some("简要结论".into()), error: None,
+            detail: Some("完整成果\n".repeat(3000)),
+            judged_task_state: Some("done".into()),
+            notify_error: Some("通知模型暂不可用".into()),
+        };
+        let saved = serde_json::to_string(&outcome).unwrap();
+        let recovered: ScheduledRunOutcome = serde_json::from_str(&saved).unwrap();
+        assert_eq!(serde_json::to_value(&outcome).unwrap(), serde_json::to_value(&recovered).unwrap());
+        assert_eq!(recovered.detail.as_ref().unwrap().len(), outcome.detail.unwrap().len());
+    }
+
+    #[test]
+    fn test_scheduled_outcome_roundtrip_preserves_failure_reasons() {
+        for reason in ["cancelled", "timeout", "max_rounds_reached", "error", "interrupted"] {
+            let outcome = ScheduledRunOutcome::failed(reason, "底层错误".into(), Some("部分成果".into()));
+            let recovered: ScheduledRunOutcome = serde_json::from_str(&serde_json::to_string(&outcome).unwrap()).unwrap();
+            assert_eq!(recovered.status, "failed");
+            assert_eq!(recovered.end_reason, reason);
+            assert_eq!(recovered.error.as_deref(), Some("底层错误"));
+            assert_eq!(recovered.detail.as_deref(), Some("部分成果"));
+        }
+    }
+
+    #[test]
+    fn test_scheduled_outcome_rejects_invalid_persisted_state() {
+        let outcome = ScheduledRunOutcome::failed("error", "failure".into(), None);
+        let mut value = serde_json::to_value(&outcome).unwrap();
+        value["status"] = serde_json::json!("running");
+        assert!(serde_json::from_value::<ScheduledRunOutcome>(value.clone()).is_err());
+        value["status"] = serde_json::json!("failed");
+        value["end_reason"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<ScheduledRunOutcome>(value).is_err());
+    }
+
+    #[test]
+    fn test_scheduled_followup_retry_preserves_terminal_states() {
+        for state in ["pending", "continuing", "failed", "retry"] {
+            assert!(scheduled_followup_needs_retry(Some(state)));
+        }
+        for state in [None, Some("done"), Some("exhausted")] {
+            assert!(!scheduled_followup_needs_retry(state));
+        }
+    }
+
     // ── normalize_tool_arguments ─────────────────────────────────────
 
     #[test]

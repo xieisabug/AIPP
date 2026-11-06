@@ -312,6 +312,16 @@ pub fn fail_receipt(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 用户显式重试已放弃的回执。只重置通知投递，不重排可能已执行的原协作。
+pub fn retry_receipt(conn: &Connection, id: i64, conversation: i64) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE butler_peer_exchange SET receipt_state='pending',receipt_attempts=0
+         WHERE id=?1 AND (owner=?2 OR target=?2)
+           AND state IN ('failed','stopped') AND receipt_state='failed'",
+        params![id, conversation],
+    )? == 1)
+}
+
 struct ReplyCandidate {
     id: i64,
     role: String,
