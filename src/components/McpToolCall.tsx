@@ -55,7 +55,8 @@ export const JsonDisplay: React.FC<{ content: string; maxHeight?: string; classN
     }, [content]);
 
     return (
-        <div className={`${className} overflow-auto`} style={{ maxHeight: maxHeight }}>
+        // overscroll-contain：触控滚到参数底部时不把滚动传给外层消息列表
+        <div className={`${className} overflow-auto overscroll-contain`} style={{ maxHeight: maxHeight }}>
             <pre className="text-xs font-mono p-2 whitespace-pre-wrap break-words mt-0 mb-0 bg-muted text-foreground rounded-md">{formattedJson}</pre>
         </div>
     );
@@ -556,7 +557,7 @@ const McpToolCall: React.FC<McpToolCallProps> = ({
             <div className="flex items-start justify-between gap-2">
                 <button
                     type="button"
-                    className="flex min-w-0 flex-1 items-start gap-2 rounded-md p-1 text-left text-sm hover:bg-muted/60"
+                    className="flex min-h-11 min-w-0 flex-1 items-start gap-2 rounded-md p-1 text-left text-sm hover:bg-muted/60"
                     title={isExpanded ? "收起完整工具名与参数" : "展开完整工具名与参数"}
                     aria-expanded={isExpanded}
                     data-aipp-slot="mcp-tool-call-header"
