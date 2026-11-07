@@ -90,6 +90,56 @@ describe("followScrollContainerBottom", () => {
         vi.unstubAllGlobals();
     });
 
+    it.each([false, true])("preserves follow intent across a zero-size hidden preview (paused=%s)", (paused) => {
+        vi.useFakeTimers();
+        const shell = document.createElement("div");
+        shell.setAttribute("data-aipp-mobile-shell", "");
+        const page = document.createElement("div");
+        const container = document.createElement("div");
+        shell.append(page); page.append(container); document.body.append(shell);
+        let height = 2000;
+        let top = 1600;
+        Object.defineProperties(container, {
+            scrollHeight: { get: () => page.hidden ? 0 : height },
+            clientHeight: { get: () => page.hidden ? 0 : 400 },
+            scrollTop: { get: () => page.hidden ? 0 : top, set: value => { top = value; } },
+        });
+        const onUserResume = vi.fn();
+        const stop = followScrollContainerBottom({ container, shouldContinue: () => true, onUserResume });
+        try {
+            if (paused) {
+                container.dispatchEvent(new Event("touchstart"));
+                container.scrollTop = 900;
+                container.dispatchEvent(new Event("scroll"));
+                window.dispatchEvent(new Event("touchend"));
+            }
+            page.hidden = true;
+            container.dispatchEvent(new Event("scroll"));
+            height = 2400;
+            triggerResize();
+            vi.advanceTimersByTime(1000);
+            expect(onUserResume).not.toHaveBeenCalled();
+            page.hidden = false;
+            container.dispatchEvent(new Event("scroll"));
+            triggerResize();
+            vi.advanceTimersByTime(200);
+            expect(container.scrollTop).toBe(paused ? 900 : 2000);
+            if (paused) {
+                container.dispatchEvent(new Event("touchstart"));
+                container.scrollTop = 2000;
+                container.dispatchEvent(new Event("scroll"));
+                window.dispatchEvent(new Event("touchend"));
+                height = 2600;
+                triggerResize();
+                vi.advanceTimersByTime(200);
+                expect(container.scrollTop).toBe(2200);
+                expect(onUserResume).toHaveBeenCalledTimes(1);
+            }
+        } finally {
+            stop(); shell.remove(); vi.useRealTimers();
+        }
+    });
+
     it("does not follow stream growth while the mobile page is hidden", () => {
         const { container, setScrollHeight } = makeContainer(1000);
         const shell = document.createElement("div");

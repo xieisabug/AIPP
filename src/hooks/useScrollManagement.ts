@@ -211,7 +211,7 @@ export function useScrollManagement(
 
     const syncScrollState = useCallback((container?: HTMLDivElement | null) => {
         const target = container ?? scrollContainerRef.current;
-        if (!target) {
+        if (!target || target.closest('[data-aipp-mobile-shell] [hidden]')) {
             return;
         }
 
@@ -386,7 +386,7 @@ export function useScrollManagement(
             return;
         }
         const container = scrollContainerRef.current;
-        if (!container) {
+        if (!container || container.closest('[data-aipp-mobile-shell] [hidden]')) {
             return;
         }
 
