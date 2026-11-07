@@ -458,10 +458,14 @@ fn given_regeneration_then_continue_when_latest_branch_then_keeps_new_tail() {
 #[test]
 fn given_empty_reply_notice_when_build_message_list_then_notice_not_sent_to_model() {
     let t1 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut notice = make_message(2, "response", t1 + Duration::seconds(1), Some("g1"), None, "");
+    // Local notices are identified by persisted provenance, never by their text.
+    notice.metadata_json = crate::api::ai::chat::prepare_empty_model_reply(
+        &mut notice.content, "", 0, 0, None,
+    );
     let messages = vec![
         wrap(make_message(1, "user", t1, None, None, "第一个问题")),
-        wrap(make_message(2, "response", t1 + Duration::seconds(1), Some("g1"), None,
-            crate::api::ai::chat::EMPTY_MODEL_REPLY_NOTICE)),
+        wrap(notice),
         wrap(make_message(3, "user", t1 + Duration::seconds(2), None, None, "再问一次")),
     ];
 
