@@ -58,7 +58,7 @@ export function shouldFlushStreamingMessageImmediately(content: string): boolean
         && messageContainsPreviewCode(content);
 }
 
-function normalizeAcpSessionState(state: any): AcpConversationSessionState | null {
+export function normalizeAcpSessionState(state: any): AcpConversationSessionState | null {
     if (!state) {
         return null;
     }
@@ -71,6 +71,7 @@ function normalizeAcpSessionState(state: any): AcpConversationSessionState | nul
         ...state,
         conversation_id: state.conversation_id ?? state.conversationId,
         agent_kind: state.agent_kind ?? state.agentKind ?? "acp",
+        agent_capabilities: state.agent_capabilities ?? state.agentCapabilities ?? null,
         session_id: state.session_id ?? state.sessionId ?? null,
         updated_at: state.updated_at ?? state.updatedAt ?? null,
         load_session_supported: state.load_session_supported ?? state.loadSessionSupported ?? false,

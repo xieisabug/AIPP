@@ -43,6 +43,7 @@ import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { AssistantListItem } from "@/data/Assistant";
 import { claimAgentConnectionEvent } from "./conversation/agentSessionNotice";
 import { agentSupportsPlanToggle } from "@/utils/agentPlanMode";
+import { agentAllowsConfigMutation } from "@/utils/agentCapabilities";
 
 interface AgentRuntimeInfo {
     agent_kind: string;
@@ -1490,6 +1491,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     return false;
                 }
 
+                if (!agentAllowsConfigMutation(acpSessionState?.agent_capabilities)) {
+                    toast.error("当前 Agent 会话不支持修改配置", { position: "bottom-right" });
+                    return false;
+                }
+
                 setAcpMutationKey(`config:${option.id}`);
                 try {
                     await invoke("set_acp_session_config_option", {
@@ -1508,7 +1514,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     setAcpMutationKey(null);
                 }
             },
-            [conversationId]
+            [conversationId, acpSessionState?.agent_capabilities]
         );
 
         const planModeOption = useMemo(
@@ -1869,7 +1875,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     ) : null}
                     <AcpConfigSelect
                         option={option}
-                        disabled={Boolean(acpMutationKey)}
+                        disabled={Boolean(acpMutationKey) || !agentAllowsConfigMutation(acpSessionState?.agent_capabilities)}
                         onChange={(option, value) => void handleAcpConfigChange(option, value)}
                     />
                 </div>

@@ -65,6 +65,7 @@ impl AgentSessionKind {
         }
     }
 
+    #[cfg(test)]
     fn validate_attachments(self, attachment_count: usize, message_id: i64) -> Result<(), AppError> {
         if attachment_count > 0 && !self.capabilities().structured_attachments {
             return Err(AppError::ProviderError(format!(
@@ -76,61 +77,94 @@ impl AgentSessionKind {
     }
 }
 
+/// Native controls obtain a desktop window only when their transport needs it.
+/// A headless extension can consume the prompt without creating a UI runtime.
+pub trait AgentPromptContext: Send + Sync {
+    fn window(&self) -> Result<tauri::Window, AppError>;
+}
+impl AgentPromptContext for tauri::Window {
+    fn window(&self) -> Result<tauri::Window, AppError> { Ok(self.clone()) }
+}
+
+/// Object-safe command adapter. Extensions implement this contract without
+/// changing a central transport enum or owning another session/process pool.
+#[async_trait::async_trait]
+pub trait AgentSessionControl: Send + Sync {
+    fn metadata(&self) -> super::registry::AgentDriverMetadata;
+    fn send_prompt(&self, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError>;
+    async fn cancel_current_prompt(&self) -> Result<(), AppError>;
+    async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError>;
+}
+
 #[derive(Clone)]
-pub enum AgentSessionHandle {
-    Acp(AcpSessionHandle),
-    Codex(CodexSessionHandle),
-    Claude(ClaudeSessionHandle),
+pub struct AgentSessionHandle {
+    control: std::sync::Arc<dyn AgentSessionControl>,
+    run_id: String,
 }
 
 impl AgentSessionHandle {
-    pub fn kind(&self) -> AgentSessionKind {
-        match self {
-            Self::Acp(_) => AgentSessionKind::Acp,
-            Self::Codex(_) => AgentSessionKind::Codex,
-            Self::Claude(_) => AgentSessionKind::Claude,
+    pub fn new(control: impl AgentSessionControl + 'static, run_id: String) -> Self {
+        Self { control: std::sync::Arc::new(control), run_id }
+    }
+
+    pub fn metadata(&self) -> super::registry::AgentDriverMetadata { self.control.metadata() }
+    pub fn run_id(&self) -> &str { &self.run_id }
+    pub fn capabilities(&self) -> AgentSessionCapabilities { self.metadata().operations }
+
+    pub fn send_prompt(&self, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, window: tauri::Window) -> Result<(), AppError> {
+        self.send_prompt_with_context(message_id, prompt, attachments, &window)
+    }
+
+    pub fn send_prompt_with_context(&self, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
+        if !attachments.is_empty() && !self.capabilities().structured_attachments {
+            return Err(AppError::ProviderError(format!(
+                "{} send_prompt failed [message_id={}]: the native session handle does not accept structured attachments (received {}); attachments must be prepared in the runtime prompt before dispatch",
+                self.metadata().id, message_id, attachments.len()
+            )));
         }
+        self.control.send_prompt(message_id, prompt, attachments, context)
     }
 
-    pub fn capabilities(&self) -> AgentSessionCapabilities {
-        self.kind().capabilities()
-    }
-
-    /// Queue a prompt on exactly the selected actor. Native Codex/Claude callers
-    /// pass an empty attachment vector after preparing their runtime prompt;
-    /// silently dropping structured attachments here would lose user input.
-    pub fn send_prompt(
-        &self,
-        message_id: i64,
-        prompt: String,
-        attachments: Vec<MessageAttachment>,
-        window: tauri::Window,
-    ) -> Result<(), AppError> {
-        self.kind().validate_attachments(attachments.len(), message_id)?;
-        match self {
-            Self::Acp(handle) => handle.send_prompt(message_id, prompt, attachments, window),
-            Self::Codex(handle) => handle.send_prompt(message_id, prompt, window),
-            Self::Claude(handle) => handle.send_prompt(message_id, prompt, window),
-        }
-    }
-
-    /// Interrupt the current turn without replacing or deleting its session.
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
-        match self {
-            Self::Acp(handle) => handle.cancel_current_prompt().await,
-            Self::Codex(handle) => handle.cancel_current_prompt().await,
-            Self::Claude(handle) => handle.cancel_current_prompt().await,
+        if !self.capabilities().cancel_prompt {
+            return Err(AppError::ProviderError(format!("driver '{}' does not support cancelling a prompt", self.metadata().id)));
         }
+        self.control.cancel_current_prompt().await
     }
 
     pub async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError> {
-        match self {
-            Self::Acp(handle) => handle.set_config_option(config_id, value).await,
-            Self::Codex(handle) => handle.set_config_option(config_id, value).await,
-            Self::Claude(handle) => handle.set_config_option(config_id, value).await,
+        if !self.capabilities().set_config_option {
+            return Err(AppError::ProviderError(format!("driver '{}' does not support setting session configuration", self.metadata().id)));
         }
+        self.control.set_config_option(config_id, value).await
     }
 }
+
+#[async_trait::async_trait]
+impl AgentSessionControl for AcpSessionHandle {
+    fn metadata(&self) -> super::registry::AgentDriverMetadata { AgentSessionKind::Acp.into() }
+    fn send_prompt(&self, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
+        AcpSessionHandle::send_prompt(self, message_id, prompt, attachments, context.window()?)
+    }
+    async fn cancel_current_prompt(&self) -> Result<(), AppError> { AcpSessionHandle::cancel_current_prompt(self).await }
+    async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError> { AcpSessionHandle::set_config_option(self, config_id, value).await }
+}
+
+macro_rules! native_text_session {
+    ($handle:ty, $kind:expr) => {
+        #[async_trait::async_trait]
+        impl AgentSessionControl for $handle {
+            fn metadata(&self) -> super::registry::AgentDriverMetadata { $kind.into() }
+            fn send_prompt(&self, message_id: i64, prompt: String, _attachments: Vec<MessageAttachment>, context: &dyn AgentPromptContext) -> Result<(), AppError> {
+                <$handle>::send_prompt(self, message_id, prompt, context.window()?)
+            }
+            async fn cancel_current_prompt(&self) -> Result<(), AppError> { <$handle>::cancel_current_prompt(self).await }
+            async fn set_config_option(&self, config_id: String, value: String) -> Result<(), AppError> { <$handle>::set_config_option(self, config_id, value).await }
+        }
+    };
+}
+native_text_session!(CodexSessionHandle, AgentSessionKind::Codex);
+native_text_session!(ClaudeSessionHandle, AgentSessionKind::Claude);
 
 #[cfg(test)]
 #[path = "session_tests.rs"]

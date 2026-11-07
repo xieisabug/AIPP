@@ -80,15 +80,15 @@ fn control_fixture(
     match kind {
         AgentSessionKind::Acp => {
             let (handle, receiver) = AcpSessionHandle::driver_test_channel();
-            (AgentSessionHandle::Acp(handle), receiver)
+            (AgentSessionHandle::new(handle, "driver-test-run".into()), receiver)
         }
         AgentSessionKind::Codex => {
             let (handle, receiver) = CodexSessionHandle::driver_test_channel();
-            (AgentSessionHandle::Codex(handle), receiver)
+            (AgentSessionHandle::new(handle, "driver-test-run".into()), receiver)
         }
         AgentSessionKind::Claude => {
             let (handle, receiver) = ClaudeSessionHandle::driver_test_channel();
-            (AgentSessionHandle::Claude(handle), receiver)
+            (AgentSessionHandle::new(handle, "driver-test-run".into()), receiver)
         }
     }
 }
@@ -97,7 +97,7 @@ fn control_fixture(
 async fn test_driver_cancel_delegates_and_preserves_native_error() {
     for kind in [AgentSessionKind::Acp, AgentSessionKind::Codex, AgentSessionKind::Claude] {
         let (handle, mut receiver) = control_fixture(kind);
-        assert_eq!(handle.kind(), kind);
+        assert_eq!(handle.metadata().id, kind.api_type());
         assert_eq!(handle.capabilities(), kind.capabilities());
         let native_error = format!("{} interrupt rejected [session=test-session]", kind.api_type());
         let expected_error = native_error.clone();

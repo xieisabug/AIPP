@@ -56,9 +56,9 @@ done
 fn session() -> (AgentSessionHandle, mpsc::UnboundedReceiver<SessionCommand>, watch::Receiver<u64>) {
     let (sender, commands) = mpsc::unbounded_channel();
     let (cancel_signal, cancellation) = watch::channel(0);
-    (AgentSessionHandle::Claude(ClaudeSessionHandle {
+    (AgentSessionHandle::new(ClaudeSessionHandle {
         sender, cancel_signal, run_id: "fixture-run".into(),
-    }), commands, cancellation)
+    }, "fixture-run".into()), commands, cancellation)
 }
 
 async fn bounded(future: impl std::future::Future<Output = ()>) {

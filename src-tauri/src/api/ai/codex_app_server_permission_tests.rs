@@ -101,12 +101,13 @@ async fn test_codex_unified_cancel_unblocks_permission_wait_without_cancelling_p
     let state = AcpPermissionState::new();
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let cancellation = watch::channel(0).0;
-    let context = CodexRequestCancellation { signal: cancellation.clone(), generation: 0, run_id: "old-run".into() };
+    let context = CodexRequestCancellation { instance_id: None, signal: cancellation.clone(), generation: 0, run_id: "old-run".into() };
     let native = CodexSessionHandle {
         sender, cancellation, run_id: context.run_id.clone(),
         failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
-    let handle = AgentSessionHandle::Codex(native);
+    let run_id = native.run_id().to_string();
+    let handle = AgentSessionHandle::new(native, run_id);
     let request_id = "codex:41:old-run:9";
     let rx = pending_native_permission(&state, request_id, 41).await;
     let mut replacement_rx = pending_native_permission(&state, "codex:41:new-run:9", 41).await;
@@ -139,7 +140,7 @@ async fn test_codex_unified_cancel_unblocks_permission_wait_without_cancelling_p
 async fn test_codex_permission_cancellation_is_latched_before_subscribe_and_beats_late_allow() {
     let state = AcpPermissionState::new();
     let cancellation = watch::channel(0).0;
-    let context = CodexRequestCancellation { signal: cancellation.clone(), generation: 0, run_id: "run".into() };
+    let context = CodexRequestCancellation { instance_id: None, signal: cancellation.clone(), generation: 0, run_id: "run".into() };
     for allow_already_ready in [false, true] {
         let request_id = format!("codex:41:run:{allow_already_ready}");
         let rx = pending_native_permission(&state, &request_id, 41).await;
@@ -163,7 +164,7 @@ async fn test_codex_permission_new_prompt_generation_preserves_normal_decisions_
     let cancellation = watch::channel(0).0;
     // An earlier idle cancel is part of the new prompt's enqueue-time baseline.
     cancellation.send_modify(|generation| *generation += 1);
-    let context = CodexRequestCancellation {
+    let context = CodexRequestCancellation { instance_id: None,
         signal: cancellation.clone(), generation: *cancellation.borrow(), run_id: "run".into(),
     };
     for option in ["accept", "acceptForSession", "decline", "cancel"] {
@@ -195,7 +196,7 @@ async fn test_codex_user_input_wait_cancels_and_drops_only_its_pending_future() 
     let peer_dropped = Arc::new(AtomicBool::new(false));
     let _peer = DropMarker(peer_dropped.clone());
     let cancellation = watch::channel(0).0;
-    let context = CodexRequestCancellation { signal: cancellation.clone(), generation: 0, run_id: "run".into() };
+    let context = CodexRequestCancellation { instance_id: None, signal: cancellation.clone(), generation: 0, run_id: "run".into() };
     let interaction = async {
         let _cleanup = DropMarker(dropped.clone());
         std::future::pending::<Result<HashMap<String, String>, String>>().await

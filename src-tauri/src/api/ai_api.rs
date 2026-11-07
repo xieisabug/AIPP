@@ -46,7 +46,7 @@ use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::build_template_engine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
-use crate::{AcpSessionState, AppState, ClaudeSessionState, CodexSessionState, FeatureConfigState};
+use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
 use genai::chat::Tool;
 use std::collections::HashMap;
@@ -2859,30 +2859,15 @@ pub async fn tool_result_continue_ask_ai(
 pub async fn cancel_ai(
     app_handle: tauri::AppHandle,
     feature_config_state: State<'_, FeatureConfigState>,
-    acp_session_state: State<'_, AcpSessionState>,
+    _acp_session_state: State<'_, AcpSessionState>,
     message_token_manager: State<'_, MessageTokenManager>,
     window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
-    let codex_session_state = app_handle.state::<CodexSessionState>();
-    let claude_session_state = app_handle.state::<ClaudeSessionState>();
-    let acp_session_handle = {
-        let sessions = acp_session_state.sessions.lock().await;
-        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
-    };
-
-    let codex_session_handle = {
-        let sessions = codex_session_state.sessions.lock().await;
-        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
-    };
-    let claude_session_handle = { let sessions = claude_session_state.sessions.lock().await; sessions.get(&conversation_id).map(|entry| entry.handle.clone()) };
-
-    use crate::api::ai::agent_driver::session::AgentSessionHandle;
-    let agent_handle = claude_session_handle.map(AgentSessionHandle::Claude)
-        .or_else(|| codex_session_handle.map(AgentSessionHandle::Codex))
-        .or_else(|| acp_session_handle.map(AgentSessionHandle::Acp));
-    if let Some(handle) = agent_handle {
-        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
+    let selected = crate::api::ai::agent_driver::lifecycle::lookup_session(&app_handle, conversation_id)
+        .await.map_err(|error| error.to_string())?;
+    if let Some(session) = selected {
+        session.handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
     } else {
         message_token_manager.cancel_request(conversation_id).await;
     }

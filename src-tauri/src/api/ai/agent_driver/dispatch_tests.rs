@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::ai::agent_driver::session::AgentSessionKind;
 use crate::api::ai::agent_driver::failure::{failure_events, persist_failure_message};
 use crate::db::conversation_db::{AttachmentType, MessageRepository, Repository};
 use std::sync::Mutex;
@@ -42,9 +43,9 @@ impl TurnEffects for RecordingEffects {
     type Prepared = (i64, AgentSessionKind);
     type Handle = i64;
 
-    fn create_response(&self, conversation_id: i64, kind: AgentSessionKind) -> Result<Message, AppError> {
+    fn create_response(&self, conversation_id: i64, metadata: AgentDriverMetadata) -> Result<Message, AppError> {
         self.actions.lock().unwrap().push(format!("persist:{conversation_id}"));
-        self.repo.lock().unwrap().create(&response_message(conversation_id, kind)).map_err(AppError::from)
+        self.repo.lock().unwrap().create(&response_message(conversation_id, metadata)).map_err(AppError::from)
     }
 
     fn emit(&self, conversation_id: i64, event: ConversationEvent) {
@@ -52,11 +53,11 @@ impl TurnEffects for RecordingEffects {
         self.events.lock().unwrap().push((conversation_id, event));
     }
 
-    async fn acquire(&self, prepared: Self::Prepared, conversation_id: i64) -> i64 {
+    async fn acquire(&self, prepared: Self::Prepared, conversation_id: i64) -> Result<i64, AppError> {
         assert_eq!(prepared.0, conversation_id);
         self.actions.lock().unwrap().push(format!("acquire:{conversation_id}"));
         if let Some(barrier) = &self.acquire_barrier { barrier.wait().await; }
-        conversation_id
+        Ok(conversation_id)
     }
 
     fn submit(&self, handle: &i64, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>) -> Result<(), AppError> {
@@ -72,14 +73,18 @@ impl TurnEffects for RecordingEffects {
         }
     }
 
-    async fn fail(&self, conversation_id: i64, message_id: i64, kind: AgentSessionKind, detail: &str) {
-        let content = format!("{} 运行失败：{detail}", provider_name(kind));
+    async fn fail(&self, conversation_id: i64, message_id: i64, metadata: AgentDriverMetadata, detail: &str) {
+        let content = format!("{} 运行失败：{detail}", metadata.display_name);
         persist_failure_message(&self.repo.lock().unwrap(), message_id, &content).unwrap();
         for event in failure_events(conversation_id, message_id, content, detail) {
             self.emit(conversation_id, event);
         }
         self.actions.lock().unwrap().push(format!("clear_focus:{conversation_id}"));
     }
+    async fn clear_focus(&self, conversation_id: i64) {
+        self.actions.lock().unwrap().push(format!("clear_focus:{conversation_id}"));
+    }
+
 }
 
 fn attachment(id: i64, content: &str) -> MessageAttachment {
@@ -128,7 +133,7 @@ async fn test_dispatch_write_failure_has_no_session_or_event_side_effects() {
         effects.repo = Mutex::new(MessageRepository::new(conn));
         let error = dispatch_prepared(&effects, (42, kind), kind, input(42, &[])).await.err().unwrap();
         assert!(error.to_string().contains("SQLite write failure"));
-        assert_eq!(*effects.actions.lock().unwrap(), ["persist:42"]);
+        assert_eq!(*effects.actions.lock().unwrap(), ["persist:42", "clear_focus:42"]);
         assert!(effects.events.lock().unwrap().is_empty());
         assert!(effects.submitted.lock().unwrap().is_empty());
     }
@@ -207,4 +212,30 @@ async fn test_dispatch_concurrent_conversations_keep_prompt_message_and_attachme
         assert_eq!(item.prompt, if item.conversation_id == 10 { "runtime prompt A" } else { "runtime prompt B" });
         assert_eq!(item.attachments[0].id, if item.conversation_id == 10 { 1 } else { 2 });
     }
+}
+
+#[tokio::test]
+async fn test_dispatch_preparation_rejection_persists_and_finishes_once_without_actor() {
+    let effects = RecordingEffects::new();
+    let result = reject_preparation(&effects, AgentSessionKind::Codex.into(), 42, "display".into(), AppError::ProviderError("invalid selected mode".into())).await.unwrap();
+    assert_eq!(result.conversation_id, 42);
+    assert!(result.error_message.as_deref().unwrap().contains("invalid selected mode"));
+    assert!(effects.submitted.lock().unwrap().is_empty());
+    assert_eq!(*effects.actions.lock().unwrap(), ["persist:42", "message_add:42", "message_update:42", "stream_complete:42", "clear_focus:42"]);
+    let events = effects.events.lock().unwrap();
+    let message_id = events[0].1.data["message_id"].as_i64().unwrap();
+    let row = effects.repo.lock().unwrap().read(message_id).unwrap().unwrap();
+    assert_eq!(row.message_type, "error"); assert!(row.finish_time.is_some());
+}
+
+#[tokio::test]
+async fn test_dispatch_preparation_persistence_failure_clears_focus_without_phantom_event() {
+    let mut effects = RecordingEffects::new();
+    let conn = database_fixture::create_test_db();
+    conn.execute_batch("CREATE TRIGGER reject_response BEFORE INSERT ON message BEGIN SELECT RAISE(ABORT, 'injected SQLite write failure'); END;").unwrap();
+    effects.repo = Mutex::new(MessageRepository::new(conn));
+    let error = reject_preparation(&effects, AgentSessionKind::Claude.into(), 42, "display".into(), AppError::ProviderError("bad preparation".into())).await.err().unwrap().to_string();
+    assert!(error.contains("bad preparation")); assert!(error.contains("SQLite write failure"));
+    assert_eq!(*effects.actions.lock().unwrap(), ["persist:42", "clear_focus:42"]);
+    assert!(effects.events.lock().unwrap().is_empty()); assert!(effects.submitted.lock().unwrap().is_empty());
 }

@@ -1,5 +1,7 @@
 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::agent_plan::AgentPlanMessage;
+use crate::api::ai::agent_driver::events::{AgentEventIdentity, emit_to_window, emit_to_chat_windows};
+use crate::api::ai::agent_driver::failure::{AgentFailure, AgentFailureStage, AgentProcessDiagnostics, emit_normalized_failure_to_window};
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::api::ai::acp::{
     resolve_acp_cli_path, AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
@@ -18,7 +20,7 @@ use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::mcp::builtin_mcp::interaction::{
-    request_ask_user_question, AskUserQuestionItem, AskUserQuestionMetadata,
+    request_ask_user_question_scoped, AskUserQuestionItem, AskUserQuestionMetadata,
     AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
 };
 use crate::state::activity_state::ConversationActivityManager;
@@ -28,7 +30,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -38,6 +40,8 @@ pub const CODEX_APP_SERVER_API_TYPE: &str = "codex_app_server";
 
 #[derive(Debug, Clone)]
 pub struct CodexAppServerConfig {
+    /// Provider-row identity captured when this native runtime is prepared.
+    pub instance_id: Option<i64>,
     pub cli_command: String,
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
@@ -90,11 +94,6 @@ pub struct CodexSessionConfigChoice {
     pub name: String,
     pub description: Option<String>,
     pub group_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexSessionStateSnapshotEvent {
-    state: Option<CodexConversationSessionState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +418,7 @@ pub fn extract_codex_app_server_config(
         }
     }
     let mut config = CodexAppServerConfig {
+        instance_id: None,
         cli_command,
         working_directory,
         env_vars,
@@ -438,6 +438,7 @@ pub fn extract_codex_app_server_config(
 
 fn codex_config_signature(config: &CodexAppServerConfig) -> String {
     serde_json::to_string(&json!({
+        "instance_id": config.instance_id,
         "cli": config.cli_command,
         "cwd": config.working_directory,
         "args": config.additional_args,
@@ -458,28 +459,37 @@ pub fn refresh_codex_session_signature(config: &mut CodexAppServerConfig) {
 }
 
 async fn emit_session_snapshot(
+    identity: &AgentEventIdentity,
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     state: Option<CodexConversationSessionState>,
 ) {
-    if let (Some(codex_state), Some(state_for_cache)) = (
-        app_handle.try_state::<crate::CodexSessionState>(),
-        state.clone(),
-    ) {
-        if let Some(entry) = codex_state.sessions.lock().await.get_mut(&conversation_id) {
-            entry.snapshot = state_for_cache;
-            entry.touch();
-        }
+    let native_state = app_handle.try_state::<crate::CodexSessionState>();
+    let mut sessions = if let Some(native) = native_state.as_ref() { Some(native.sessions.lock().await) } else { None };
+    let current_run = sessions.as_ref().and_then(|sessions| sessions.get(&conversation_id)).map(|entry| entry.run_id.as_str());
+    if !super::agent_driver::events::can_publish_native_snapshot(current_run, identity.run_id.as_deref(), state.is_some()) { return; }
+    if let Some(entry) = sessions.as_mut().and_then(|sessions| sessions.get_mut(&conversation_id)) {
+        if let Some(state_for_cache) = &state { entry.snapshot = state_for_cache.clone(); entry.touch(); }
     }
+    let data = match super::agent_driver::capabilities::snapshot_event_payload(
+        CODEX_APP_SERVER_API_TYPE, super::agent_driver::capabilities::AgentCapabilityDeclaration::codex(), state.as_ref(),
+    ) {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::error!(conversation_id, error = %error, "Codex capability snapshot emission failed");
+            return;
+        }
+    };
     let event = ConversationEvent {
         r#type: "acp_session_state_snapshot".to_string(),
-        data: serde_json::to_value(CodexSessionStateSnapshotEvent { state }).unwrap(),
+        data,
     };
-    let _ = crate::utils::window_utils::send_conversation_event_to_chat_windows(
-        app_handle,
-        conversation_id,
-        event,
-    );
+    let mut identity = identity.clone();
+    if let Some(state) = &state {
+        identity.native_session_id = state.session_id.clone();
+        identity.turn_id = state.current_turn_id.clone();
+    }
+    let _ = emit_to_chat_windows(app_handle, identity, event);
 }
 
 fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
@@ -612,6 +622,7 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
 /// Cancellation generations belong to the prompt at enqueue time, so an idle
 /// Stop cannot cancel a later prompt, and Stop during startup is not lost.
 struct CodexRequestCancellation {
+    instance_id: Option<i64>,
     signal: watch::Sender<u64>,
     generation: u64,
     run_id: String,
@@ -718,7 +729,13 @@ async fn handle_approval_request(
     };
     let (decision_tx, decision_rx) = oneshot::channel();
     let permission_state = app_handle.state::<AcpPermissionState>();
-    permission_state.store_request(event.clone(), decision_tx).await;
+    let scope = crate::api::ai::agent_driver::approval::AgentRequestScope {
+        driver_id: Some(CODEX_APP_SERVER_API_TYPE.into()),
+        instance_id: cancellation.and_then(|context| context.instance_id),
+        conversation_id: Some(conversation_id),
+        run_id: cancellation.map(|context| context.run_id.clone()),
+    };
+    permission_state.store_request_scoped(event.clone(), decision_tx, scope).await?;
     if let Err(error) = emit_permission_request_event(
         app_handle,
         ACP_PERMISSION_REQUEST_EVENT,
@@ -1300,11 +1317,17 @@ async fn handle_server_request(
     let interaction_state = app_handle.state::<InteractionState>();
     // Dropping the request future invokes its existing exact-request cleanup
     // guard; do not clear all conversation questions or consume control commands.
-    let result = match wait_codex_interaction(request_ask_user_question(
+    let result = match wait_codex_interaction(request_ask_user_question_scoped(
         app_handle,
         &interaction_state,
         Some(conversation_id),
         request,
+        Some(crate::api::ai::agent_driver::approval::AgentRequestScope {
+            driver_id: Some(CODEX_APP_SERVER_API_TYPE.into()),
+            instance_id: cancellation.and_then(|context| context.instance_id),
+            conversation_id: Some(conversation_id),
+            run_id: cancellation.map(|context| context.run_id.clone()),
+        }),
     ), cancellation).await
     {
         Ok(answers) => codex_user_input_response(&mappings, &answers),
@@ -1634,6 +1657,7 @@ fn activity_content_offset(
 }
 
 fn emit_activity(
+    identity: &AgentEventIdentity,
     window: &tauri::Window,
     conversation_id: i64,
     response_message_id: i64,
@@ -1672,7 +1696,7 @@ fn emit_activity(
         data: serde_json::to_value(&activity).unwrap(),
     };
     persist_activity(window.app_handle(), response_message_id, &activity);
-    let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+    let _ = emit_to_window(window, identity.clone(), event);
 }
 
 fn persist_activity(app_handle: &tauri::AppHandle, message_id: i64, activity: &AgentActivityEvent) {
@@ -1749,17 +1773,6 @@ fn persist_response(
     }
 }
 
-pub(crate) fn emit_codex_failure(
-    app_handle: &tauri::AppHandle,
-    conversation_id: i64,
-    message_id: i64,
-    window: &tauri::Window,
-    error: &str,
-) {
-    crate::api::ai::agent_driver::failure::emit_agent_failure(
-        app_handle, conversation_id, message_id, window, error, "Codex",
-    );
-}
 
 fn persist_codex_timing(
     app_handle: &tauri::AppHandle,
@@ -1798,7 +1811,7 @@ fn persist_codex_reasoning(
 /// 记录一行 Codex stderr：先剥离 ANSI 转义，再过滤 tracing 的 TRACE/DEBUG/INFO 噪音，
 /// 让缓冲只保留对用户诊断有意义的行。返回 true 表示该行已记入缓冲。
 fn record_codex_stderr(buffer: &CodexStderrBuffer, line: String) -> bool {
-    let cleaned = strip_ansi_escapes(&line);
+    let cleaned = super::agent_driver::failure::redact_agent_diagnostic(&strip_ansi_escapes(&line), &[]);
     if cleaned.trim().is_empty() || is_tracing_noise(&cleaned) {
         return false;
     }
@@ -1887,13 +1900,14 @@ async fn spawn_process(
     let stdin = child.stdin.take().ok_or("Codex app-server stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Codex app-server stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("Codex app-server stderr unavailable")?;
+    let diagnostic_redactions = super::agent_driver::failure::AgentDiagnosticBuffer::for_environment(&config.env_vars);
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     // 缓冲只保留清洗后的关键行；被过滤的噪音行降级到 debug 日志，原文仍可查
-                    if record_codex_stderr(&stderr_buffer, line.clone()) {
+                    if record_codex_stderr(&stderr_buffer, diagnostic_redactions.sanitize(&line)) {
                         error!(target = "codex_app_server", "{line}");
                     } else {
                         debug!(target = "codex_app_server", "{line}");
@@ -1937,8 +1951,14 @@ pub fn spawn_codex_session_task(
     let failure_context = std::sync::Arc::new(std::sync::Mutex::new(None));
     let task_failure_context = failure_context.clone();
     let task_run_id = run_id.clone();
+    let request_scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native(
+        CODEX_APP_SERVER_API_TYPE, config.instance_id, conversation_id, task_run_id.clone(),
+    );
     tauri::async_runtime::spawn(async move {
         let stderr_buffer = CodexStderrBuffer::default();
+        let mut event_identity = AgentEventIdentity::new(CODEX_APP_SERVER_API_TYPE, conversation_id).with_run(task_run_id.clone());
+        event_identity.instance_id = config.instance_id.map(|id| id.to_string());
+        let mut failure_stage = AgentFailureStage::Process;
         let session_result = run_session(
             app_handle.clone(),
             conversation_id,
@@ -1948,6 +1968,8 @@ pub fn spawn_codex_session_task(
             &task_run_id,
             stderr_buffer.clone(),
             task_cancellation,
+            &mut event_identity,
+            &mut failure_stage,
         )
         .await;
         let failed_prompt = {
@@ -1965,9 +1987,17 @@ pub fn spawn_codex_session_task(
             );
             error!(conversation_id, error = %error, "Codex app-server session exited");
             if let Some((message_id, window)) = failed_prompt {
-                emit_codex_failure(&app_handle, conversation_id, message_id, &window, &error);
+                let stderr = stderr_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().cloned().collect::<Vec<_>>().join("\n");
+                let failure = AgentFailure::new(event_identity.clone().with_response_message(message_id), failure_stage, &error)
+                    .with_process_diagnostics(AgentProcessDiagnostics {
+                        stderr: (!stderr.is_empty()).then_some(stderr), exit_status: None, protocol_error: None,
+                        unavailable_reason: Some("The native actor did not return a separate process exit status; its protocol cause and retained stderr are included".into()),
+                    });
+                if let Err(publication_error) = emit_normalized_failure_to_window(&app_handle, &window, failure, "Codex") {
+                    error!(conversation_id, message_id, error = %publication_error, "Codex failure publication incomplete");
+                }
                 if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
-                    manager.clear_focus(&app_handle, conversation_id).await;
+                    manager.clear_agent_focus(&app_handle, &event_identity, false).await;
                 }
             }
         } else if let Some((message_id, window)) = failed_prompt {
@@ -1978,11 +2008,22 @@ pub fn spawn_codex_session_task(
                 &stderr_buffer,
             );
             error!(conversation_id, error, "Codex app-server session stopped with an active prompt");
-            emit_codex_failure(&app_handle, conversation_id, message_id, &window, &error);
+            let stderr = stderr_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().cloned().collect::<Vec<_>>().join("\n");
+                let failure = AgentFailure::new(event_identity.clone().with_response_message(message_id), failure_stage, &error)
+                    .with_process_diagnostics(AgentProcessDiagnostics {
+                        stderr: (!stderr.is_empty()).then_some(stderr), exit_status: None, protocol_error: None,
+                        unavailable_reason: Some("The native actor did not return a separate process exit status; its protocol cause and retained stderr are included".into()),
+                    });
+                if let Err(publication_error) = emit_normalized_failure_to_window(&app_handle, &window, failure, "Codex") {
+                    error!(conversation_id, message_id, error = %publication_error, "Codex failure publication incomplete");
+                }
             if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
-                manager.clear_focus(&app_handle, conversation_id).await;
+                manager.clear_agent_focus(&app_handle, &event_identity, false).await;
             }
         }
+        crate::api::ai::agent_driver::approval::cancel_app_requests_for_scope(
+            &app_handle, &request_scope,
+        ).await;
         let removed_current_entry = if let Some(state) = app_handle.try_state::<crate::CodexSessionState>() {
             let mut sessions = state.sessions.lock().await;
             remove_codex_session_for_run(&mut sessions, conversation_id, &task_run_id)
@@ -1990,7 +2031,7 @@ pub fn spawn_codex_session_task(
             false
         };
         if removed_current_entry {
-            emit_session_snapshot(&app_handle, conversation_id, None).await;
+            emit_session_snapshot(&event_identity, &app_handle, conversation_id, None).await;
         }
     });
     CodexSessionHandle { sender, run_id, cancellation, failure_context }
@@ -2005,28 +2046,31 @@ async fn run_session(
     run_id: &str,
     stderr_buffer: CodexStderrBuffer,
     cancellation: watch::Sender<u64>,
+    event_identity: &mut AgentEventIdentity,
+    failure_stage: &mut AgentFailureStage,
 ) -> Result<(), String> {
     let mut request_cancellation = CodexRequestCancellation {
-        signal: cancellation, generation: 0, run_id: run_id.to_string(),
+        signal: cancellation, generation: 0, run_id: run_id.to_string(), instance_id: config.instance_id,
     };
     let (_child, mut stdin, mut lines) = spawn_process(&config, stderr_buffer).await?;
     let mut pending_notifications = VecDeque::new();
     let requests = DesktopCodexServerRequests {
         app_handle: &app_handle, conversation_id, cancellation: Some(&request_cancellation),
     };
+    *failure_stage = AgentFailureStage::Initialize;
     initialize_codex_transport(&requests, conversation_id, "aipp", &mut stdin, &mut lines, &mut pending_notifications).await?;
 
+    *failure_stage = AgentFailureStage::Persistence;
     let stored_thread = ConversationDatabase::new(&app_handle)
-        .ok()
-        .and_then(|db| {
-            db.get_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE)
-                .ok()
-                .flatten()
-        });
+        .map_err(|error| format!("Codex restore database unavailable: {error}"))?
+        .get_agent_session_id_for_instance(conversation_id, CODEX_APP_SERVER_API_TYPE, config.instance_id)
+        .map_err(|error| format!("Codex persisted session lookup failed: {error}"))?;
     let mut request_id = 2_u64;
+    *failure_stage = AgentFailureStage::Mcp;
     let mcp_config_overrides = codex_mcp_bridge_overrides(&app_handle, conversation_id, &config)
         .await
         .map_err(|error| format!("Codex MCP bridge 初始化失败：{error}"))?;
+    *failure_stage = if stored_thread.is_some() { AgentFailureStage::Resume } else { AgentFailureStage::Initialize };
     let thread_result = open_codex_thread(
         &requests, conversation_id, &config, stored_thread.as_deref(), mcp_config_overrides,
         request_id, &mut stdin, &mut lines, &mut pending_notifications,
@@ -2037,6 +2081,8 @@ async fn run_session(
         .map(|method| format!("{run_id}:{method}"));
     let thread_id = thread_id_from_result(&thread_result)
         .ok_or_else(|| format!("Codex thread response missing thread id: {thread_result}"))?;
+    event_identity.native_session_id = Some(thread_id.clone());
+    *failure_stage = AgentFailureStage::Configuration;
     request_id += 1;
     let (model_catalog, supported_efforts) = {
         write_frame(&mut stdin, &json_rpc_request(request_id, "model/list", json!({}))).await?;
@@ -2071,10 +2117,8 @@ async fn run_session(
     .await
     .map_err(|error| format!("Codex collaborationMode/list 失败：{error}"))?;
     let plan_mode_supported = codex_supports_plan_mode(&collaboration_modes);
-    ConversationDatabase::new(&app_handle)
-        .map_err(|error| error.to_string())?
-        .upsert_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE, &thread_id)
-        .map_err(|error| error.to_string())?;
+    // Save only after the first Prompt is submitted: eager startup can finish
+    // before acquisition registers the native handle and provider binding.
     let mut snapshot = CodexConversationSessionState {
         conversation_id,
         agent_kind: CODEX_APP_SERVER_API_TYPE.to_string(),
@@ -2174,14 +2218,14 @@ async fn run_session(
         }
         apply_codex_config_option(&mut snapshot, &model_catalog, "model", model)?;
     }
-    emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+    emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
 
     while let Some(command) = receiver.recv().await {
         match command {
             CodexSessionCommand::SetConfigOption { config_id, value, response } => {
                 match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                     Ok(()) => {
-                        emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                        emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                         let _ = response.send(Ok(()));
                     }
                     Err(error) => {
@@ -2197,6 +2241,16 @@ async fn run_session(
                 return Ok(());
             }
             CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation } => {
+                event_identity.response_message_id = Some(message_id);
+                event_identity.turn_id = None;
+                *failure_stage = AgentFailureStage::Persistence;
+                {
+                    let state = app_handle.state::<crate::CodexSessionState>();
+                    let sessions = state.sessions.lock().await;
+                    super::agent_driver::persistence::persist_session_id(&app_handle, event_identity,
+                        sessions.get(&conversation_id).map(|entry| entry.run_id.as_str()), &thread_id)?;
+                }
+                *failure_stage = AgentFailureStage::SendPrompt;
                 request_cancellation.generation = cancellation_generation;
                 let turn_start_time = chrono::Utc::now();
                 request_id += 1;
@@ -2225,8 +2279,10 @@ async fn run_session(
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 snapshot.current_turn_id = turn_id.clone();
+                event_identity.turn_id = turn_id.clone();
+                *failure_stage = AgentFailureStage::Stream;
                 snapshot.has_active_prompt = true;
-                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                 let mut content = String::new();
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
@@ -2258,7 +2314,7 @@ async fn run_session(
                                 Some(CodexSessionCommand::SetConfigOption { config_id, value, response }) => {
                                     match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                                         Ok(()) => {
-                                            emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                                            emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                                             let _ = response.send(Ok(()));
                                         }
                                         Err(error) => {
@@ -2328,6 +2384,7 @@ async fn run_session(
                                 "turn/started" => {
                                     turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string).or(turn_id);
                                     snapshot.current_turn_id = turn_id.clone();
+                                    event_identity.turn_id = turn_id.clone();
                                 }
                                 "item/agentMessage/delta" => {
                                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
@@ -2337,8 +2394,8 @@ async fn run_session(
                                         content.push_str(delta);
                                         persist_response(&app_handle, message_id, &content, false, None);
                                         let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
-                                        let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
-                                        if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await; }
+                                        let _ = emit_to_window(&window, event_identity.clone(), event);
+                                        if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.set_agent_streaming(&app_handle, &event_identity, message_id).await; }
                                     }
                                 }
                                 "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
@@ -2367,7 +2424,7 @@ async fn run_session(
                                                     r#type: "message_add".to_string(),
                                                     data: json!({"message_id":message.id,"message_type":"reasoning"}),
                                                 };
-                                                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), add_event);
+                                                let _ = emit_to_window(&window, event_identity.clone(), add_event);
                                             }
                                         }
                                         if let Some(reasoning_id) = reasoning_message_id {
@@ -2386,7 +2443,7 @@ async fn run_session(
                                                     tps: None,
                                                 }).unwrap(),
                                             };
-                                            let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+                                            let _ = emit_to_window(&window, event_identity.clone(), event);
                                         }
                                     }
                                 }
@@ -2400,7 +2457,7 @@ async fn run_session(
                                                 let authoritative_text = item.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
                                                 if !authoritative_text.is_empty() {
                                                     if !plan_messages.contains_key(&item_id) {
-                                                        let plan_message = AgentPlanMessage::create(
+                                                        let plan_message = AgentPlanMessage::create_with_identity(
                                                             &app_handle,
                                                             &window,
                                                             conversation_id,
@@ -2408,8 +2465,7 @@ async fn run_session(
                                                             CODEX_APP_SERVER_API_TYPE,
                                                             Some(&thread_id),
                                                             turn_id.as_deref(),
-                                                            Some(&item_id),
-                                                        )?;
+                                                            Some(&item_id), event_identity.clone())?;
                                                         plan_messages.insert(item_id.clone(), plan_message);
                                                     }
                                                     if let Some(plan_message) = plan_messages.get_mut(&item_id) {
@@ -2425,7 +2481,7 @@ async fn run_session(
                                             }
                                         } else {
                                             let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                            emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
+                                            emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
                                         }
                                     }
                                 }
@@ -2435,7 +2491,7 @@ async fn run_session(
                                         params.get("delta").and_then(Value::as_str),
                                     ) {
                                         if !plan_messages.contains_key(item_id) {
-                                            let plan_message = AgentPlanMessage::create(
+                                            let plan_message = AgentPlanMessage::create_with_identity(
                                                 &app_handle,
                                                 &window,
                                                 conversation_id,
@@ -2443,8 +2499,7 @@ async fn run_session(
                                                 CODEX_APP_SERVER_API_TYPE,
                                                 Some(&thread_id),
                                                 params.get("turnId").and_then(Value::as_str).or(turn_id.as_deref()),
-                                                Some(item_id),
-                                            )?;
+                                                Some(item_id), event_identity.clone())?;
                                             plan_messages.insert(item_id.to_string(), plan_message);
                                         }
                                         if let Some(plan_message) = plan_messages.get_mut(item_id) {
@@ -2456,7 +2511,7 @@ async fn run_session(
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
                                     }
                                 }
                                 "turn/plan/updated" => {
@@ -2465,7 +2520,7 @@ async fn run_session(
                                         .get("explanation")
                                         .and_then(Value::as_str)
                                         .map(str::to_string);
-                                    emit_session_snapshot(
+                                    emit_session_snapshot(event_identity,
                                         &app_handle,
                                         conversation_id,
                                         Some(snapshot.clone()),
@@ -2508,7 +2563,7 @@ async fn run_session(
                                     if let Some(item) = generic_item_notification(method, &params) {
                                         sequence += 1;
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
                                     } else if !method.is_empty() {
                                         warn!(conversation_id, method, "Unhandled Codex notification");
                                     }
@@ -2536,8 +2591,8 @@ async fn run_session(
                 persist_response(&app_handle, message_id, &content, true, turn_usage);
                 if let Some(reasoning_id) = reasoning_message_id {
                     persist_codex_reasoning(&app_handle, reasoning_id, &reasoning);
-                    let _ = window.emit(
-                        format!("conversation_event_{conversation_id}").as_str(),
+                    let _ = emit_to_window(
+                        &window, event_identity.clone(),
                         ConversationEvent {
                             r#type: "message_update".to_string(),
                             data: serde_json::to_value(MessageUpdateEvent {
@@ -2563,19 +2618,19 @@ async fn run_session(
                     (output_tokens > 0 && duration_ms > 0).then(|| output_tokens as f64 * 1000.0 / duration_ms as f64)
                 });
                 let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(turn_usage.map(|usage| usage.total_tokens).unwrap_or(estimated_output_tokens)), input_token_count: turn_usage.map(|usage| usage.input_tokens), output_token_count: Some(output_tokens), ttft_ms, tps }).unwrap() };
-                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), done_event);
+                let _ = emit_to_window(&window, event_identity.clone(), done_event);
                 let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"has_plan":!plan_messages.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
-                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), complete_event);
+                let _ = emit_to_window(&window, event_identity.clone(), complete_event);
                 let success_content = if content.is_empty() {
                     plan_messages.values().max_by_key(|plan| plan.message_id).map(|plan| plan.content.as_str()).unwrap_or_default()
                 } else {
                     content.as_str()
                 };
                 handle_agent_success(&app_handle, &window, conversation_id, success_content, AgentKind::Codex).await;
-                if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_focus(&app_handle, conversation_id).await; }
+                if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_agent_focus(&app_handle, &event_identity, false).await; }
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;
-                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                 failure_context
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3097,6 +3152,7 @@ mod tests {
 
     fn codex_test_config() -> CodexAppServerConfig {
         CodexAppServerConfig {
+            instance_id: None,
             cli_command: "codex".to_string(),
             working_directory: PathBuf::from("/tmp/work"),
             env_vars: HashMap::new(),

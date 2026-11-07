@@ -8,6 +8,22 @@ Codex app-server、Claude Code CLI 与 ACP 共用 AIPP 的 Agent 驱动入口，
 
 发送时若会话控制通道已经关闭，当前响应会显示失败并保留错误原因，不会自动新建会话后重新发送。
 
+### 驱动扩展与提供商实例
+
+- 现有 conversation 和原生会话继续使用原来的存储与 actor。注册表负责按提供商配置选择驱动，并按 conversation、provider ID、driver 和 run 记录活动实例归属。
+- 新驱动通过 Rust 代码实现 `AgentDriver`、`PreparedAgentSession`、`AgentSessionControl` 并注册，提供自己的配置 schema、能力发现和原生运行逻辑。扩展不要求向公共 prompt/cancel/config 分发代码增加新的类型分支。
+- 实例复用已有提供商 ID，同一种驱动可以有多份独立配置。未知驱动、无效配置、歧义选路或跨实例控制会报错，不自动改用其他提供商。
+- 当前没有新增运行时插件装载器或“在配置 UI 安装任意驱动”的入口；代码扩展仍需随应用编译。现有配置界面继续管理已支持的提供商与模型。
+
+### 能力声明与发现
+
+- 每个注册驱动声明本地实现支持的操作；实际会话快照另提供 `agent_capabilities`，区分 `supported`、`unsupported` 和 `unknown`，并标记依据来自本地适配器还是当前会话。尚未连接不等于不支持。
+- 取消、配置修改、审批响应、附件输入和原生会话恢复分别声明，不把 ACP、Codex、Claude Code 视为能力相同的通道。扩展驱动可覆盖自己的会话能力发现，不需要增加核心分发分支。
+- 模型、思考强度、审批策略等选项继续使用当前原生会话的 `config_options`。ID 和值原样保留，包括厂商扩展值；不同提供商实例不共享缓存的配置目录。
+- ACP 从实际协商结果读取图片、嵌入上下文、load/resume 能力。未收到配置目录，或目录含客户端尚不能表示的扩展类型时，目录保持“不完整”，不会凭空推断扩展项不受支持。
+- 能力声明只覆盖 AIPP 已实现的输入路径：ACP 图片需服务端协商支持；音频当前没有附件编码路径，因此不会声明可用。Codex 和 Claude Code 的会话句柄接收整理后的文本，不声明结构化图片或音频输入。
+- 会话状态读取与实时事件使用同一份能力结构；旧会话字段保持兼容。配置 UI 仅在明确不支持修改时禁用，未知状态仍交由原生协议返回具体结果。
+
 ---
 
 ## ACP 会话管理
@@ -24,7 +40,7 @@ Codex app-server、Claude Code CLI 与 ACP 共用 AIPP 的 Agent 驱动入口，
 - ACP 启动连接、提示、取消、配置项更新都通过会话句柄路由到后台任务
 - 用户打开 ACP 对话时会自动建立 session 连接，用于提前获取 `configOptions`、Plan 和可用命令
 - 自动连接不会创建空消息，也不会向 Agent 发送 prompt
-- ACP session 空闲 15 分钟且没有活跃 prompt 时会自动释放，之后再次打开对话或发送消息时重新连接
+- ACP session 空闲 15 分钟且没有活跃 prompt 时会自动释放；已绑定的实例释放后，下一次发送按显式选择重新建立连接，自动打开页面不会用助手默认 provider 覆盖之前的实例选择
 
 ### 会话任务运行时
 - ACP 会话任务是普通的 `tokio::spawn` 任务
@@ -40,14 +56,16 @@ Codex app-server、Claude Code CLI 与 ACP 共用 AIPP 的 Agent 驱动入口，
 
 ### session_id 存储
 - `session_id` 存储在 `conversation.db` 的 `acp_session` 表中
-- 按 `conversation_id` 键值存储
-- 会话创建/加载时更新
+- 按 `(conversation_id, agent_kind)` 保存每种驱动的最新 session 映射，并记录可空的 `provider_instance_id`
+- 已记录实例归属的 session 只供同一提供商实例恢复；切换实例后保存新的最新映射，不保留各 provider 的完整恢复历史
+- 旧记录没有可追溯的实例归属时，首次恢复保留兼容行为；单纯读取不会认领归属，成功建立会话并保存后才补写当前 provider 实例
+- 会话创建/加载时更新。应用聊天记录保持不变；跨 provider/驱动的新原生上下文不等于自动重放所有旧历史，Codex/Claude 本轮未新增跨实例历史迁移。
 
 ### 会话加载逻辑
 - ACP 启动时检查 `initialize` capabilities
 - 如果 `sessionCapabilities.resume` 能力支持且存在存储的 `session_id`，优先调用 `session/resume`
-- 如果不支持 `session/resume` 或 resume 失败，但支持 `loadSession`，再调用 `session/load`
-- 两种恢复能力都不支持或恢复失败时，回退到 `session/new` 创建新会话，并用 AIPP 本地 conversation 历史构建一次 history fallback prompt
+- 如果不支持 `session/resume`，但支持 `loadSession`，调用 `session/load`
+- 实际 `session/resume` 或 `session/load` 请求失败时立即报错并保留原因，不尝试替代恢复或新会话。只有未声明两种恢复能力的既有兼容路径，才创建 `session/new` 并用 AIPP 本地 conversation 历史构建一次 history fallback prompt
 - `claude-code-acp` 不支持旧的 `loadSession`，但可通过 `session/resume` 恢复已有 session
 - 恢复成功后，前端会提示本次使用的是 `session/resume` 还是 `session/load`
 
@@ -114,6 +132,8 @@ Codex app-server、Claude Code CLI 与 ACP 共用 AIPP 的 Agent 驱动入口，
 
 ### 权限请求审批
 - ACP 权限请求会通过现有审批流发到前端
+- 后端 `confirm_agent_interaction` 统一处理 Agent 权限、elicitation 和提问回复，并检查请求创建时的 driver、provider 实例、conversation 与 run 归属；已有 pending store 仍是请求的唯一来源
+- 当前前端继续使用 `confirm_acp_permission`、`confirm_codex_permission`、`confirm_acp_elicitation` 等兼容命令，这些入口在后端转到同一回复校验流程；审批卡片格式保持兼容
 - Butler/Feishu 场景下也会同步转发
 - 当用户取消当前 ACP prompt 时，未完成的 ACP 权限请求会被一起取消
 
