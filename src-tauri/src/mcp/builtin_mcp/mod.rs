@@ -1848,6 +1848,7 @@ pub async fn execute_aipp_builtin_tool(
                         .ok_or_else(|| "Missing required parameter: goal".to_string())?;
 
                     let request = SpawnButlerTaskRequest {
+                        request_key: None,
                         butler_conversation_id,
                         title: title.to_string(),
                         goal: goal.to_string(),
@@ -1988,6 +1989,8 @@ pub async fn execute_aipp_builtin_tool(
                                             stream: Some(true),
                                             attachment_list: None,
                                             quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
                                         };
                                         match ask_ai(
                                         app_handle_clone.clone(),

@@ -832,10 +832,30 @@ impl MessageRepository {
             };
             Ok((message, attachment))
         })?;
-        rows.collect()
+        let mut messages=rows.collect::<Result<Vec<_>>>()?;
+        let has_goal:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='butler_goal')",[],|r|r.get(0))?;
+        if has_goal {
+            let snapshot=crate::db::butler_goal::prompt(&self.conn,conversation_id).map_err(|e|rusqlite::Error::InvalidParameterName(e.to_string()))?;
+            messages.retain(|(m,_)| m.message_type != "system" || !(m.content.starts_with("<!-- compacted_ids:") || m.content.starts_with("<!-- compacted_range:")) || crate::db::butler_goal::checkpoint_is_current(&m.content,snapshot.as_deref()));
+            for (message,_) in &mut messages {
+                let stale:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_goal_stale_message WHERE message_id=?1)",[message.id],|r|r.get(0))?;
+                if stale {
+                    let mut metadata:serde_json::Value=message.metadata_json.as_deref().and_then(|v|serde_json::from_str(v).ok()).unwrap_or_else(||serde_json::json!({}));
+                    if !metadata.is_object() {metadata=serde_json::json!({});}
+                    metadata["butler_goal_stale"]=serde_json::json!(true);
+                    message.metadata_json=Some(metadata.to_string());
+                }
+            }
+        }
+        Ok(messages)
     }
 
     fn insert_message(&self, message: &Message, touch_conversation: bool) -> Result<Message> {
+        let mut anchored = message.clone();
+        if anchored.parent_id.is_none() && matches!(anchored.message_type.as_str(),"response"|"assistant"|"reasoning") {
+            anchored.parent_id = super::butler_goal::OUTPUT_SOURCE.try_with(|id|*id).ok().flatten();
+        }
+        let message=&anchored;
         self.with_serialized_write(|conn| {
             conn.execute(
                 "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, metadata_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
@@ -867,6 +887,10 @@ impl MessageRepository {
                 )?;
             }
             let id = conn.last_insert_rowid();
+            if matches!(message.message_type.as_str(), "response" | "assistant" | "reasoning") {
+                super::butler_goal::bind_output(conn, message.conversation_id, id)?;
+                super::butler_goal::mark_obsolete_output(conn, id)?;
+            }
             Ok(Message {
                 id,
                 parent_id: message.parent_id,
@@ -906,6 +930,7 @@ impl MessageRepository {
                 "UPDATE message SET finish_time = ?1 WHERE id = ?2",
                 rusqlite::params![now, id],
             )?;
+            super::butler_goal::mark_obsolete_output(conn, id)?;
             Ok(())
         })
     }
@@ -1036,6 +1061,7 @@ impl MessageRepository {
     pub fn update_content(&self, id: i64, content: &str) -> Result<()> {
         self.with_serialized_write(|conn| {
             conn.execute("UPDATE message SET content = ?1 WHERE id = ?2", (content, id))?;
+            super::butler_goal::mark_obsolete_output(conn, id)?;
             Ok(())
         })
     }
@@ -1179,6 +1205,10 @@ pub(crate) fn merge_message_end_reason_metadata(
 impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
     fn create(&self, message: &Message) -> Result<Message> {
+        if matches!(message.message_type.as_str(), "response" | "assistant") {
+            super::butler_goal::assert_message_current(&self.conn,message.conversation_id,message.parent_id)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        }
         self.insert_message(message, true)
     }
 
@@ -1213,6 +1243,10 @@ impl Repository<Message> for MessageRepository {
 
     #[instrument(level = "debug", skip(self, message), fields(id = message.id))]
     fn update(&self, message: &Message) -> Result<()> {
+        if matches!(message.message_type.as_str(), "response" | "assistant") {
+            super::butler_goal::assert_message_current(&self.conn,message.conversation_id,Some(message.id))
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        }
         self.with_serialized_write(|conn| {
             conn.execute(
                 "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9, metadata_json = ?10, first_token_time = ?11, ttft_ms = ?12, start_time = ?13, finish_time = ?14 WHERE id = ?15",
@@ -1234,6 +1268,7 @@ impl Repository<Message> for MessageRepository {
                     &message.id,
                 ],
             )?;
+            super::butler_goal::mark_obsolete_output(conn, message.id)?;
             Ok(())
         })
     }

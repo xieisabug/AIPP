@@ -175,6 +175,9 @@ pub(crate) async fn resolve_app_reply(
     let permissions = app.try_state::<AcpPermissionState>().ok_or("AcpPermissionState not found")?;
     let elicitations = app.try_state::<AcpElicitationState>().ok_or("AcpElicitationState not found")?;
     let questions = app.try_state::<InteractionState>().ok_or("InteractionState not found")?;
+    if matches!(&reply, AgentInteractionReply::Permission(AgentPermissionReply::Select { .. })) {
+        permissions.validate_butler_reply(app, &target.request_id).await?;
+    }
     resolve_reply(AgentInteractionStores {
         permissions: &permissions, elicitations: &elicitations, questions: &questions,
     }, target, reply).await

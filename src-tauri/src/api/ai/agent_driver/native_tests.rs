@@ -33,7 +33,7 @@ impl Fixture {
     }
 
     fn request(&self) -> AgentTurnRequest<'_> {
-        AgentTurnRequest {
+        AgentTurnRequest { source_message_id: None,
             assistant: &self.assistant, conversation_id: 42,
             prompt: "runtime".into(), display_prompt: "display".into(),
             override_model_id: self.override_model_id.clone(), overrides: &self.overrides,

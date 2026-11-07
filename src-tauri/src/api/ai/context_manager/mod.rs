@@ -166,13 +166,16 @@ pub async fn fit_to_budget_with_compaction(
         "compacting conversation context via LLM summary"
     );
 
+    let goal_snapshot=ctx.checkpoint_store.goal_snapshot(ctx.conversation_id)?;
     let body_messages = &messages[head_count..body_end];
 
     // Generate summary via LLM
     let source_ids = ctx.message_ids.get(head_count..body_end)
         .filter(|ids| ids.iter().all(|id| *id > 0))
         .ok_or_else(|| crate::errors::AppError::UnknownError(format!("会话 {} 无法定位完整的压缩来源", ctx.conversation_id)))?;
-    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, body_messages, ctx.is_butler, ctx.require_complete_summary)
+    let mut summary_input=body_messages.to_vec();
+    if let Some(goal)=&goal_snapshot {summary_input.push(("system".into(),goal.clone(),vec![]));}
+    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.is_butler, ctx.require_complete_summary)
         .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
 
     // Assemble compacted message list: Head + Summary + Tail
@@ -200,7 +203,7 @@ pub async fn fit_to_budget_with_compaction(
     if compacted_tokens >= estimated_tokens || compacted_tokens > budget.effective_input_limit() {
         return Err(crate::errors::AppError::UnknownError(format!("会话 {} 压缩后预计 {} tokens（原 {}，输入预算 {}）", ctx.conversation_id, compacted_tokens, estimated_tokens, budget.effective_input_limit())));
     }
-    let persisted = persistence::store_compaction_summary(ctx.checkpoint_store, ctx.conversation_id, &summary, source_ids, body_messages)
+    let persisted = persistence::store_goal_compaction_summary(ctx.checkpoint_store, ctx.conversation_id, &summary, source_ids, body_messages, goal_snapshot.as_deref())
         .map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 保存上下文检查点失败：{}", ctx.conversation_id, e)))?;
     compacted[head_count].1 = persisted;
     let estimated_tokens = estimate_total(&compacted, &[]);

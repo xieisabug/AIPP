@@ -1,3 +1,4 @@
+import ButlerCheckPolicy from "./ButlerCheckPolicy";
 import { memo, useState } from "react";
 import { Bell, Calendar, Clock, MoreHorizontal, Pencil, Play, RefreshCw, Square, Trash2, User } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -126,6 +127,7 @@ function ScheduleTaskDetail({
     return (
         // 最小高度兜底：窗口很矮时退回外层整页滚动，而不是把两栏压扁
         <div className="flex h-full min-h-[760px] flex-col gap-4" data-aipp-slot="schedule-task-detail">
+            {task.butlerConversationId && <ButlerCheckPolicy taskId={task.id} />}
             <section className="shrink-0 space-y-5 rounded-lg border border-border p-5" data-aipp-slot="schedule-detail-overview">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
@@ -147,7 +149,7 @@ function ScheduleTaskDetail({
                     <div className="flex shrink-0 items-center gap-2">
                         <label className="flex items-center gap-2 text-xs text-muted-foreground">
                             启用
-                            <Switch checked={task.isEnabled} onCheckedChange={onToggleEnabled} aria-label="启用任务" />
+                            <Switch disabled={!!task.butlerConversationId} checked={task.isEnabled} onCheckedChange={onToggleEnabled} aria-label="启用任务" />
                         </label>
                         {runningRun ? (
                             <Button variant="outline" size="sm" onClick={onStop} disabled={isStopping}>

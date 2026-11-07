@@ -157,3 +157,18 @@ pub struct ConversationListActivityEvent {
 pub const TITLE_CHANGE_EVENT: &str = "title_change";
 pub const ERROR_NOTIFICATION_EVENT: &str = "conversation-window-error-notification";
 pub const CONVERSATION_LIST_ACTIVITY_EVENT: &str = "conversation_list_activity";
+
+/// Final and incremental output share the same goal check across all drivers.
+/// A stale stream still closes normally, but is visibly historical, not success.
+pub(crate) fn guard_goal_event(app:&tauri::AppHandle, conversation:i64, mut event:ConversationEvent)->ConversationEvent {
+    let id=event.data.get("message_id").or_else(||event.data.get("response_message_id")).and_then(serde_json::Value::as_i64);
+    if id.is_some() && !output_goal_current(app,conversation,id) {
+        event.data["end_reason"]=serde_json::json!("goal_superseded");
+
+    }
+    event
+}
+pub(crate) fn output_goal_current(app:&tauri::AppHandle,conversation:i64,message:Option<i64>)->bool {
+    crate::db::conversation_db::ConversationDatabase::new(app).and_then(|db|db.get_connection())
+        .map(|conn|crate::db::butler_goal::assert_message_current(&conn,conversation,message).is_ok()).unwrap_or(false)
+}

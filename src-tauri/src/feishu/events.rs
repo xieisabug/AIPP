@@ -746,6 +746,8 @@ async fn process_incoming_text_message(
             stream: Some(true),
             attachment_list: None,
             quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
         };
         ask_ai(
             app_handle.clone(),

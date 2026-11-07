@@ -66,4 +66,10 @@ describe("Butler exchange context", () => {
         expect(await screen.findByText("本次对话未完成")).toBeVisible();
         expect(screen.queryByText(/401/)).not.toBeInTheDocument();
     });
+    it("keeps direct failure delivery visible rather than hiding it in an exchange", () => {
+        const view=render(<ButlerExchangeRow conversationId={20} posts={[{...post,direct:true,task_id:30,status:"failed",text:"",error:"资料无法读取，请补充来源"}]}/>);
+        expect(view.container).toHaveTextContent("资料无法读取，请补充来源");
+        expect(view.container.querySelector('[data-aipp-slot="butler-direct-report"]')).toBeTruthy();
+    });
+
 });
