@@ -928,6 +928,7 @@ function ChatUIWindow() {
                             onConversationChange={handleConversationChange}
                             inlineInteractionItems={inlineInteractionItems}
                             inlineInteractionVisible={hasInlineInteraction}
+                            previewFileOpen={isPreviewFileDialogOpen}
                             onPreviewFileContextClick={handlePreviewFileContextSelection}
                         />
                     </div>

@@ -112,7 +112,7 @@ A 类不是零工作，而是避免重复建设已有业务逻辑。每项仍需
 | Butler、定时任务和飞书前台能力 | 移动任务页、审批、状态和可执行助手过滤；任务的移动端新建与编辑见 MOB-18 |
 | 离线与网络失败 | 需要新增 online/offline 状态层和发送前阻断，见 MOB-14 |
 | 回复期保活与通知跳转 | 需要 WakeLock、运行时通知权限和 intent extras 处理，见 MOB-15 |
-| 会话详情面板 | ChatSidebar 在移动端整体不渲染，需新面板，见 MOB-16 |
+| 会话详情面板 | 移动全宽 Sheet 复用 ChatSidebar 四区块，需保持触控、返回和预览恢复行为，见 MOB-16 |
 | Android 原生入口 | 分享接收、拍照、快捷方式、预测性返回等，见 MOB-17 和 MOB-13 |
 | 会话手势与轮次跳转 | 长按菜单、左滑删除、按轮次跳转，见 MOB-19 |
 | 搜索、抓取、PDF、React/Vue 预览和图片复制 | 需要新的移动实现，不是只改界面 |
@@ -347,9 +347,9 @@ Android 13+ 真机验证权限请求与拒绝路径；回复中切后台再回�
 
 ### MOB-16：移动端会话详情面板（P1，M2，leaderai #252）
 
-**现状**
+**当前实现**
 
-`src/components/ConversationUI.tsx:2126` 的渲染条件是 `!isMobile && !hideSidebar && conversationId && !sidebarWindowOpen`，移动端整块 `ChatSidebar` 不渲染，`sidebarTodos`、`contextItems`、`pluginList`、`artifacts` 在移动端没有任何入口。
+移动端采用全宽右侧 Sheet，复用 `ChatSidebarContent` 展示规划、制品、上下文和插件视图，继续使用单 WebView。移动触控目标至少 44px，插件空态和失败原因可读，插件仅使用通过移动命令校验的能力。制品预览返回及上下文文件预览关闭后恢复详情和滚动位置，切换会话不恢复旧详情；桌面侧栏保持原实现。
 
 **要求**
 

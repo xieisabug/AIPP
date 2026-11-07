@@ -16,6 +16,7 @@ interface ChatSidebarContentProps {
     pluginList?: LoadedPlugin[];
     conversationId?: string;
     className?: string;
+    mobile?: boolean;
     focusedContextId?: string | null;
     selectedContextId?: string | null;
     onArtifactClick?: (artifact: CodeArtifact) => void;
@@ -40,6 +41,7 @@ interface CollapsibleSectionProps {
     title: string;
     count: number;
     isOpen: boolean;
+    mobile?: boolean;
     onOpenChange: (open: boolean) => void;
     children: React.ReactNode;
 }
@@ -48,6 +50,7 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
     title,
     count,
     isOpen,
+    mobile = false,
     onOpenChange,
     children,
 }) => {
@@ -62,7 +65,10 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
                 isOpen && openCount > 0 && "flex-1"
             )}
         >
-            <CollapsibleTrigger className="flex items-center justify-between w-full p-2 hover:bg-muted/50 rounded-md transition-colors flex-shrink-0">
+            <CollapsibleTrigger className={cn(
+                "flex items-center justify-between w-full p-2 hover:bg-muted/50 rounded-md transition-colors flex-shrink-0",
+                mobile && "min-h-11"
+            )}>
                 <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{title}</span>
                     {count > 0 && (
@@ -94,6 +100,7 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     pluginList = [],
     conversationId,
     className,
+    mobile = false,
     focusedContextId,
     selectedContextId,
     onArtifactClick,
@@ -132,7 +139,7 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
             ),
         [pluginList]
     );
-    const [pluginViewsOpen, setPluginViewsOpen] = React.useState(sidebarPluginViews.length > 0);
+    const [pluginViewsOpen, setPluginViewsOpen] = React.useState(mobile || sidebarPluginViews.length > 0);
 
     React.useEffect(() => {
         if (sidebarPluginViews.length > 0 && !pluginViewsOpen) setPluginViewsOpen(true);
@@ -155,6 +162,7 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                     title="规划"
                     count={todos.length}
                     isOpen={todoOpen}
+                    mobile={mobile}
                     onOpenChange={setTodoOpen}
                 >
                     <TodoList todos={todos} />
@@ -165,9 +173,10 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                     title="Artifact" 
                     count={artifacts.length} 
                     isOpen={artifactOpen}
+                    mobile={mobile}
                     onOpenChange={setArtifactOpen}
                 >
-                    <ArtifactList artifacts={artifacts} onArtifactClick={onArtifactClick} />
+                    <ArtifactList artifacts={artifacts} mobile={mobile} onArtifactClick={onArtifactClick} />
                 </CollapsibleSection>
 
                 {/* Context Section */}
@@ -175,10 +184,12 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                     title="上下文" 
                     count={contextItems.length} 
                     isOpen={contextOpen}
+                    mobile={mobile}
                     onOpenChange={setContextOpen}
                 >
                     <ContextList
                         items={contextItems}
+                        mobile={mobile}
                         focusedItemId={focusedContextId}
                         selectedItemId={selectedContextId}
                         onItemClick={onContextClick}
@@ -186,11 +197,12 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                     />
                 </CollapsibleSection>
 
-                {sidebarPluginViews.length > 0 && (
+                {(mobile || sidebarPluginViews.length > 0) && (
                     <CollapsibleSection
                         title="插件视图"
                         count={sidebarPluginViews.length}
                         isOpen={pluginViewsOpen}
+                        mobile={mobile}
                         onOpenChange={setPluginViewsOpen}
                     >
                         <div className="p-2">
@@ -198,7 +210,7 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
                                 pluginList={pluginList}
                                 location="conversation.sidebar"
                                 context={{ conversationId }}
-                                emptyDescription="当前没有侧边栏插件视图。"
+                                emptyDescription="当前没有插件提供会话侧栏视图。插件仅可使用已通过移动校验的能力；加载或执行失败会在此显示原因。"
                             />
                         </div>
                     </CollapsibleSection>

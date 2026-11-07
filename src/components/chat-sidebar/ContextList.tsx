@@ -9,6 +9,7 @@ import MCP from '@/assets/mcp.svg?react';
 interface ContextListProps {
     items: ContextItem[];
     className?: string;
+    mobile?: boolean;
     focusedItemId?: string | null;
     selectedItemId?: string | null;
     onItemClick?: (item: ContextItem) => void;
@@ -109,6 +110,7 @@ const getItemTimestamp = (timestamp?: Date): number | null => {
 const ContextList: React.FC<ContextListProps> = ({
     items,
     className,
+    mobile = false,
     focusedItemId,
     selectedItemId,
     onItemClick,
@@ -370,6 +372,7 @@ const ContextList: React.FC<ContextListProps> = ({
                                         isContextItemActionable(item, onItemClick, onPreviewFileClick)
                                             ? "hover:bg-muted/40 cursor-pointer"
                                             : "cursor-default",
+                                        mobile && "min-h-11",
                                         item.id === selectedItemId && "bg-muted/50 border-primary/30",
                                         item.id === focusedItemId && "ring-2 ring-primary/60 bg-muted/60 border-primary/40",
                                     )}
@@ -398,7 +401,10 @@ const ContextList: React.FC<ContextListProps> = ({
                                     {item.type === 'search' && item.searchResults && item.searchResults.length > 0 && (
                                         <button
                                             type="button"
-                                            className="h-6 w-6 flex items-center justify-center text-muted-foreground hover:text-foreground"
+                                            className={cn(
+                                                "flex items-center justify-center text-muted-foreground hover:text-foreground",
+                                                mobile ? "h-11 w-11 shrink-0" : "h-6 w-6"
+                                            )}
                                             onClick={(event) => {
                                                 event.stopPropagation();
                                                 toggleSearchExpansion(item.id);
@@ -421,7 +427,10 @@ const ContextList: React.FC<ContextListProps> = ({
                                             <button
                                                 key={`${item.id}-${result.url}-${index}`}
                                                 type="button"
-                                                className="text-left px-2 py-1.5 rounded-md transition-colors hover:bg-muted/40"
+                                                className={cn(
+                                                    "text-left px-2 py-1.5 rounded-md transition-colors hover:bg-muted/40",
+                                                    mobile && "min-h-11"
+                                                )}
                                                 onClick={(event) => {
                                                     event.stopPropagation();
                                                     handleOpenUrl(result.url);

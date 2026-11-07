@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 interface ArtifactListProps {
     artifacts: CodeArtifact[];
     className?: string;
+    mobile?: boolean;
     onArtifactClick?: (artifact: CodeArtifact) => void;
 }
 
@@ -54,7 +55,7 @@ const getLanguageColor = (language: string): string => {
     return colors[lang] || 'text-muted-foreground';
 };
 
-const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, onArtifactClick }) => {
+const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobile = false, onArtifactClick }) => {
     const handleCopy = useCallback(async (code: string, e: React.MouseEvent) => {
         e.stopPropagation();
         try {
@@ -80,7 +81,8 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, onArt
                     key={artifact.id}
                     className={cn(
                         "flex items-center gap-2 p-2 rounded-md transition-colors",
-                        "hover:bg-muted/50 cursor-pointer group"
+                        "hover:bg-muted/50 cursor-pointer group",
+                        mobile && "min-h-11"
                     )}
                     onClick={() => onArtifactClick?.(artifact)}
                 >
@@ -91,11 +93,15 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, onArt
                         <p className="text-sm truncate">{artifact.title}</p>
                         <p className="text-xs text-muted-foreground">{artifact.language}</p>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className={cn(
+                        "flex items-center gap-1 transition-opacity",
+                        !mobile && "opacity-0 group-hover:opacity-100"
+                    )}>
                         <Button
                             variant="ghost"
                             size="icon"
-                            className="h-6 w-6"
+                            className={mobile ? "h-11 w-11" : "h-6 w-6"}
+                            aria-label={`复制 ${artifact.title}`}
                             onClick={(e) => handleCopy(artifact.code, e)}
                         >
                             <Copy className="h-3 w-3" />

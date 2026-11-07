@@ -50,6 +50,7 @@ GitHub Actions 的 Release 工作流为 ARM64 手机生成 `AIPP-<tag>-android-a
 - 使用 `src/mobile/navigation.ts` 的 `navigateMobile` / `previewMobile`，仅注册已适配的页面；不要创建额外 WebView。
 - Android `MainActivity` 先收起 IME，再调用 `__aippMobileBack` 关闭面板或弹出返回栈，根页退后台。禁止调用 WebView.goBack。
 - 返回顺序（`window.__aippMobileBack`）：先对最上层打开的面板（`role=dialog/alertdialog/menu/listbox` 且 `data-state=open`，或 `[data-mobile-panel]`）派发 Escape；再调用当前页通过 `registerMobileBackHandler(route, fn)` 注册的处理器（返回 true 即消费）；最后弹出页面栈。设置页不记录分区历史，返回（系统返回与顶栏图标一致）直接退出设置页，离开前经过 `configLeaveGuard`（确认后用 `popMobile()` 出栈）。
+- 会话详情使用全宽右侧 Sheet，复用 `ChatSidebarContent` 四区块，不创建 WebView。制品预览返回和上下文文件预览关闭后恢复详情及滚动位置；切换会话清除待恢复状态。插件仅使用通过移动命令校验的能力，空态和原始失败原因在面板内展示。
 - `handleBackNavigation=false` 禁用 Wry 后注册的默认返回回调。原生 IPC 在 `setContentView` 边界替换为校验主框架与来源的 WebMessageListener：Wry 的 `onWebViewCreate` 早于旧 IPC 注册，不能在该早期回调中完成替换。
 - 受限预览契约见 `docs/product/20-移动导航与预览.md`。预览 runtime 以独立 bundle 运行在不含 allow-same-origin 的 iframe 中，不得添加 Tauri 或宿主凭据桥接。
 

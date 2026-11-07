@@ -82,7 +82,7 @@ import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Bot, Check, ChevronDown, LoaderCircle } from "lucide-react";
+import { Bot, Check, ChevronDown, LoaderCircle, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/utils/utils";
 
@@ -96,6 +96,7 @@ import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { useMobileConversationDetails } from "@/hooks/useMobileConversationDetails";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -249,6 +250,7 @@ interface ConversationUIProps {
     onConversationChange?: (conversation?: Conversation) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     inlineInteractionVisible?: boolean;
+    previewFileOpen?: boolean;
     allowRename?: boolean;
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
@@ -315,6 +317,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onConversationChange,
             inlineInteractionItems,
             inlineInteractionVisible = false,
+            previewFileOpen = false,
             allowRename = true,
             allowDelete = true,
             headerExtraActions,
@@ -1200,7 +1203,17 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 初始化和生命周期逻辑 =============
 
         // 移动端：会话详情面板（桌面由右侧 ChatSidebar 承担；轮次导航由 MobileTurnScrubber 承担）
-        const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
+        const {
+            detailsOpen: mobileDetailsOpen,
+            setDetailsOpen: setMobileDetailsOpen,
+            detailsScrollRef,
+            openDetails,
+            suspendDetails,
+        } = useMobileConversationDetails({
+            conversationId,
+            enabled: mobilePlatform,
+            previewFileOpen,
+        });
 
         // 暴露给外部的方法
         useImperativeHandle(
@@ -1237,11 +1250,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 openTitleEdit: () => {
                     if (conversationId && allowRename) openTitleEditDialog();
                 },
-                openDetails: () => {
-                    if (conversationId) setMobileDetailsOpen(true);
-                },
+                openDetails,
             }),
-            [conversationId, handleOpenSidebarWindow, allowRename, openTitleEditDialog]
+            [conversationId, handleOpenSidebarWindow, allowRename, openTitleEditDialog, openDetails]
         );
 
         // 左侧对话轮次导航条：从当前展示的消息中抽取用户提问轮次
@@ -2258,9 +2269,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 className="w-full max-w-none gap-0 p-0 sm:max-w-none safe-top safe-bottom"
                                 aria-describedby={undefined}
                                 data-aipp-slot="chat-mobile-details-sheet"
+                                hideCloseButton
                             >
-                                <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border px-4 py-2 pr-12">
-                                    <SheetTitle className="text-sm font-medium">会话详情</SheetTitle>
+                                <div className="flex min-h-11 items-center gap-2 border-b border-border px-2 py-1">
+                                    <SheetTitle className="min-w-0 flex-1 px-2 text-sm font-medium">会话详情</SheetTitle>
                                     <Button
                                         type="button"
                                         variant="outline"
@@ -2273,13 +2285,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     >
                                         导出对话
                                     </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="min-h-11 min-w-11"
+                                        aria-label="关闭会话详情"
+                                        onClick={() => setMobileDetailsOpen(false)}
+                                    >
+                                        <X className="h-5 w-5" />
+                                    </Button>
                                 </div>
-                                <div className="min-h-0 flex-1 overflow-y-auto">
-                                    {sidebarTodos.length === 0 && artifacts.length === 0 && contextItems.length === 0 ? (
-                                        <div className="px-4 py-6 text-sm text-muted-foreground">当前会话暂无待办、上下文或制品</div>
-                                    ) : null}
+                                <div ref={detailsScrollRef} className="min-h-0 flex-1 overflow-y-auto">
                                     <ChatSidebarContent
                                         className="h-full"
+                                        mobile
                                         todos={sidebarTodos}
                                         artifacts={artifacts}
                                         contextItems={contextItems}
@@ -2287,11 +2307,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         conversationId={conversationId}
                                         focusedContextId={focusedContextId}
                                         onArtifactClick={(artifact) => {
-                                            setMobileDetailsOpen(false);
+                                            if (mobilePlatform) suspendDetails("artifact");
+                                            else setMobileDetailsOpen(false);
                                             handleArtifact(artifact.language, artifact.code);
                                         }}
                                         onPreviewFileClick={(item) => {
-                                            setMobileDetailsOpen(false);
+                                            if (mobilePlatform) suspendDetails("context");
+                                            else setMobileDetailsOpen(false);
                                             handlePreviewFileContextClick(item);
                                         }}
                                     />
