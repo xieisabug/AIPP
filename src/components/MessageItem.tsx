@@ -3,7 +3,8 @@ import { ButlerMessageQuoteLabel } from "./butler/ButlerQuote";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import ReasoningMessage from "./ReasoningMessage";
 import ErrorMessage from "./message-item/ErrorMessage";
-import MessageActionButtons from "./message-item/MessageActionButtons";
+import MessageActionButtons, { type MessageActionButtonsProps } from "./message-item/MessageActionButtons";
+import MessageContextMenu from "./message-item/MessageContextMenu";
 import ImageAttachments from "./message-item/ImageAttachments";
 import RawTextRenderer from "./RawTextRenderer";
 import { ShineBorder } from "./magicui/shine-border";
@@ -539,7 +540,23 @@ const MessageItem = React.memo<MessageItemProps>(
             );
         }
 
+        const actionProps: MessageActionButtonsProps = {
+            messageId: message.id,
+            messageType: message.message_type,
+            isUserMessage,
+            copyIconState,
+            onCopy: handleCopy,
+            onEdit: onMessageEdit,
+            onRegenerate: onMessageRegenerate,
+            onFork: onMessageFork,
+            onResendToFeishuDebug: canResendToFeishuDebug ? handleFeishuDebugResend : undefined,
+            isResendToFeishuDebugPending: isFeishuDebugSending,
+            messageContent: message.content,
+            pluginActions: messageActions,
+        };
+
         const bubbleElement = (
+            <MessageContextMenu actions={actionProps}>
             <div
                 className={`group relative inline-block ${isMobilePlatform ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3 py-2" : "max-w-[65%] px-5 py-4"} rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}
             >
@@ -591,21 +608,9 @@ const MessageItem = React.memo<MessageItemProps>(
                     messageId={message.id}
                 />
 
-                <MessageActionButtons
-                    messageId={message.id}
-                    messageType={message.message_type}
-                    isUserMessage={isUserMessage}
-                    copyIconState={copyIconState}
-                    onCopy={handleCopy}
-                    onEdit={onMessageEdit}
-                    onRegenerate={onMessageRegenerate}
-                    onFork={onMessageFork}
-                    onResendToFeishuDebug={canResendToFeishuDebug ? handleFeishuDebugResend : undefined}
-                    isResendToFeishuDebugPending={isFeishuDebugSending}
-                    messageContent={message.content}
-                    pluginActions={messageActions}
-                />
+                <MessageActionButtons {...actionProps} />
             </div>
+            </MessageContextMenu>
         );
 
         return (

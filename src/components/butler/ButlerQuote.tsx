@@ -1,6 +1,7 @@
 import { createContext, useContext } from "react";
 import { Quote, X } from "lucide-react";
 import type { Message } from "@/data/Conversation";
+import IconButton from "@/components/IconButton";
 
 /** 聊天式引用回复的对象：后台按 kind + id（稳定身份）关联原工作，不靠文字或时间猜测。 */
 export interface ButlerQuoteTarget {
@@ -49,9 +50,17 @@ export function readMessageQuote(message: Message): { label: string; unavailable
     }
 }
 
-export function ButlerQuoteButton({ target }: { target: ButlerQuoteTarget }) {
+/**
+ * `toolbar`：放在消息悬浮操作条里，与复制/重新生成等按钮同尺寸同颜色（IconButton + text-icon）。
+ * `inline`：放在小号文字行（如直接交付行的标题）里，跟随行内文字颜色。
+ */
+export function ButlerQuoteButton({ target, variant = "inline" }: { target: ButlerQuoteTarget; variant?: "inline" | "toolbar" }) {
     const state = useButlerQuote();
     if (!state) return null;
+    if (variant === "toolbar") {
+        return <IconButton icon={<Quote size={16} className="text-icon" />} title="引用回复"
+            dataAippSlot="butler-quote-reply" onClick={() => state.setQuote(target)} />;
+    }
     return <button type="button" title="引用回复" aria-label="引用回复" data-aipp-slot="butler-quote-reply"
         onClick={() => state.setQuote(target)}
         className="inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground">

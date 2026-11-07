@@ -29,6 +29,13 @@ describe("Butler exchange context", () => {
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
         expect(view.container).not.toHaveTextContent(post.text);
     });
+    it("should collapse a reply the assistant already gave the user directly when viewed by the requester", () => {
+        const answered = {...post,task_reply:true,to_user:true,text:"早安！祝你今天顺利。"};
+        const view = render(<ButlerExchangeRow conversationId={10} posts={[answered]}/>);
+        expect(view.container).not.toHaveTextContent(answered.text);
+        expect(screen.getByRole("button",{name:/审稿已直接答复你/})).toBeVisible();
+        expect(view.container.querySelector('[data-aipp-slot="butler-direct-report"]')).toBeNull();
+    });
     it("should show a direct report in full under the reporting assistant's name", () => {
         const view = render(<ButlerExchangeRow conversationId={10} posts={[{...post,direct:true,text:"核查结论：未发现 6.2"}]}/>);
         expect(view.container).toHaveTextContent("审稿");

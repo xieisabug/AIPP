@@ -56,6 +56,8 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
         : incomingRequest ? (posts.every(p => p.to_user) ? "接手工作，来自" : posts.every(p => p.to_user === false) ? "协助请求来自" : "消息来自")
         : incoming ? "消息来自" : `${posts.length} 条消息往来`;
     const directReport = posts.length === 1 && first.direct && !first.error && first.text.trim() !== "";
+    // 受托助手已在自己的会话里直接答复用户：发起方（总管家）只留一行事件，正文不重复展示。
+    const answeredUser = !incomplete && incoming && posts.every(p => p.task_reply && p.to_user && p.status === "delivered");
     const speaker = first.speaker ?? first.peer;
     const speakerAvatar = first.speaker_assistant ?? first.peer_assistant ?? first.peer_conversation;
     // 直接交付可引用回复：任务结果按任务身份，助手委托按协作身份。
@@ -90,9 +92,10 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
             <div className="mt-2 flex justify-center">
                 <DialogTrigger asChild>
                     <button type="button" className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground">
-                        {label}
+                        {!answeredUser && label}
                         <span className="flex -space-x-1">{people.slice(0, 4).map(p => <ButlerAvatar key={p.peer_conversation} id={p.peer_assistant ?? p.peer_conversation} size={17}/>)}</span>
                         {people.length === 1 ? first.peer : `${people.length} 个 Bot`}{incomplete ? "的对话" : ""}
+                        {answeredUser && (first.task_id ? "已直接向你交付任务结果" : "已直接答复你")}
                     </button>
                 </DialogTrigger>
             </div>

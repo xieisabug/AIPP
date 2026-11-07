@@ -49,7 +49,7 @@ pub struct Post {
     pub(super) id:i64, pub(super) anchor:i64, pub(super) occurred_at:DateTime<Utc>, pub(super) outgoing:bool, pub(super) peer:String,
     pub(super) peer_conversation:i64, pub(super) peer_assistant:Option<i64>, pub(super) text:String, pub(super) status:String, pub(super) error:Option<String>,
     pub(super) task_id:Option<i64>, pub(super) task_reply:bool, pub(super) root:Option<i64>,
-    /// 执行助手直接交付给用户：以执行助手的名义完整展示答复（发起方会话与执行助手自己的会话都可见）。
+    /// 执行助手直接交付给用户：在执行助手自己的会话里以其名义完整展示答复；发起方会话不重复展示正文。
     pub(super) direct:bool,
     /// 这项协作面向用户（受托助手直接答复用户）；false 为助手之间的内部协作。
     pub(super) to_user:bool,
@@ -65,13 +65,15 @@ pub fn list(conn:&Connection,conversation:i64)->rusqlite::Result<Vec<Post>> {
     let mut stmt=conn.prepare("SELECT p.id,p.anchor,p.occurred_at,p.outgoing,
         CASE WHEN p.conversation_id=e.owner THEN e.recipient ELSE e.sender END,c.id,c.assistant_id,
         CASE p.leg WHEN 'request' THEN e.body ELSE e.reply END,e.state,e.error,e.root,
-        p.leg='reply' AND p.conversation_id=e.owner AND e.report_to_user=1,e.report_to_user,e.parent,e.id
+        p.leg='reply',e.report_to_user,e.parent,e.id
         FROM butler_peer_post p JOIN butler_peer_exchange e ON e.id=p.exchange_id JOIN conversation c ON c.id=
         CASE WHEN p.conversation_id=e.owner THEN e.target ELSE e.owner END
         WHERE p.conversation_id=?1 ORDER BY p.id")?;
     let rows=stmt.query_map([conversation],|r| Ok(Post{id:r.get(0)?,anchor:r.get(1)?,occurred_at:r.get(2)?,
         outgoing:r.get(3)?,peer:r.get(4)?,peer_conversation:r.get(5)?,peer_assistant:r.get(6)?,
-        text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:false,root:r.get(10)?,direct:r.get(11)?,
+        text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:r.get(11)?,root:r.get(10)?,
+        // 受托助手的答复本就是它自己会话里的真实消息；发起方（如总管家）只显示一行事件，不重复展示正文。
+        direct:false,
         to_user:r.get(12)?,parent:r.get(13)?,speaker:None,speaker_assistant:None,exchange_id:r.get(14)?}))?;
     rows.collect()
 }
@@ -171,8 +173,9 @@ pub fn task_posts(
                 task_id: Some(task),
                 root: None,
                 task_reply: true,
-                // 谁接手谁交付：直接交付的结果在执行助手自己的会话里同样以其身份完整展示。
-                direct: direct_report && status == "delivered",
+                // 谁接手谁交付：直接交付的结果只在执行助手自己的会话里以其身份完整展示；
+                // 发起方（总管家）会话只保留一行交付事件，避免同一答复出现两次。
+                direct: direct_report && status == "delivered" && !owner_view,
                 to_user: direct_report,
                 parent: None,
                 speaker: (!owner_view).then(|| names.get(&executor).cloned()

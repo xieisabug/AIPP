@@ -61,7 +61,7 @@ fn test_butler_task_timeline_reports_auth_failure_without_inventing_reply() {
 }
 
 #[test]
-fn test_butler_task_timeline_shows_direct_delivery_in_both_views_with_executor_identity() {
+fn test_butler_task_timeline_shows_direct_delivery_only_in_executor_view() {
     let conn = task_fixture();
     conn.execute_batch("
         UPDATE butler_task_definition SET result_handling_mode='direct_report' WHERE id=1;
@@ -71,8 +71,9 @@ fn test_butler_task_timeline_shows_direct_delivery_in_both_views_with_executor_i
     ").unwrap();
     let owner = posts(&conn,10);
     assert_eq!(owner[0]["direct"],false);
-    assert_eq!(owner[1]["direct"],true);
-    assert_eq!(owner[1]["text"],"核查结论：官网未发布 6.2");
+    assert_eq!(owner[1]["direct"],false, "发起方（总管家）会话只保留交付事件，不重复展示正文");
+    assert_eq!(owner[1]["to_user"],true);
+    assert_eq!(owner[1]["task_reply"],true);
     assert_eq!(owner[1]["speaker"],Value::Null, "发起方视图中 peer 就是执行助手");
     let own = posts(&conn,20);
     assert_eq!(own[1]["direct"],true, "执行助手自己的会话里也展示交付");
@@ -116,4 +117,23 @@ fn test_butler_task_timeline_hides_history_from_reset_main_conversation() {
     assert_eq!(result.as_array().unwrap().len(),1, "result finished after reset is still delivered");
     assert_eq!(result[0]["task_reply"],true);
     assert_eq!(result[0]["text"],"迟到的结果");
+}
+
+#[test]
+fn test_butler_peer_timeline_keeps_direct_reply_out_of_requester_view() {
+    let conn = task_fixture();
+    crate::db::butler_peer::schema(&conn).unwrap();
+    conn.execute_batch("INSERT INTO butler_peer_exchange(id,root,owner,target,sender,recipient,request_key,body,state,reply,round_no,max_rounds,report_to_user) VALUES
+        (1,1,10,20,'总管家','问候助手','a','请直接答复用户','delivered','早安！',1,1,1);").unwrap();
+    record(&conn,1,10,"request",true,1).unwrap();
+    record(&conn,1,20,"reply",true,1).unwrap();
+    record(&conn,1,10,"reply",false,1).unwrap();
+    let requester = serde_json::to_value(list(&conn,10).unwrap()).unwrap();
+    assert_eq!(requester.as_array().unwrap().len(),2);
+    assert_eq!(requester[1]["task_reply"],true, "发起方能区分这是答复而非新请求");
+    assert_eq!(requester[1]["to_user"],true);
+    assert_eq!(requester[1]["direct"],false, "答复正文已在受托助手会话中，发起方不重复展示");
+    let receiver = serde_json::to_value(list(&conn,20).unwrap()).unwrap();
+    assert_eq!(receiver[0]["task_reply"],true);
+    assert_eq!(receiver[0]["outgoing"],true);
 }

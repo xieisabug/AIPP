@@ -1790,7 +1790,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             const cache = quoteActionCacheRef.current;
             const cached = cache.get(message.id);
             if (cached && cached.plugin === plugin && cached.content === message.content) return cached.rendered;
-            const rendered = <>{plugin}<ButlerQuoteButton target={{
+            const rendered = <>{plugin}<ButlerQuoteButton variant="toolbar" target={{
                 kind: "message", id: message.id, label: "引用回复", excerpt: quoteExcerpt(message.content),
             }} /></>;
             if (cache.size > MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES) cache.clear();

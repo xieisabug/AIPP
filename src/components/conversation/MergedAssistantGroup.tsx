@@ -3,7 +3,8 @@ import React, { useEffect, useRef } from "react";
 import type { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
 import { ShineBorder } from "../magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
-import MessageActionButtons from "../message-item/MessageActionButtons";
+import MessageActionButtons, { type MessageActionButtonsProps } from "../message-item/MessageActionButtons";
+import MessageContextMenu from "../message-item/MessageContextMenu";
 import MessageItem from "../MessageItem";
 import { useIsMobilePlatform } from "../../hooks/use-platform";
 import type { InlineInteractionItem } from "../ConversationUI";
@@ -205,7 +206,8 @@ function MergedGroupParts({
     );
 }
 
-function MergedGroupToolbar({ props }: { props: MergedAssistantGroupProps }) {
+/** 合并气泡的操作参数：悬浮操作条与右键菜单共用，保证两处功能一致。 */
+function mergedGroupActions(props: MergedAssistantGroupProps): MessageActionButtonsProps | null {
     const {
         groupMessages,
         allowFeishuDebugResend,
@@ -224,34 +226,32 @@ function MergedGroupToolbar({ props }: { props: MergedAssistantGroupProps }) {
         return null;
     }
 
-    return (
-        <MessageActionButtons
-            messageId={toolbarMessage.id}
-            messageType={lastResponse ? "response" : toolbarMessage.message_type}
-            isUserMessage={false}
-            copyIconState="copy"
-            onCopy={() => {
-                const preferred = collectPreferredRetryCopyContent(groupMessages);
-                const content = preferred || toolbarMessage.content;
-                navigator.clipboard.writeText(content);
-            }}
-            onRegenerate={lastResponse ? () => onMessageRegenerate(lastResponse.id) : undefined}
-            onFork={lastResponse ? () => onMessageFork(lastResponse.id) : undefined}
-            onResendToFeishuDebug={
-                allowFeishuDebugResend && resendTargetMessage
-                    ? () => void resendMessageToFeishuDebug(resendTargetMessage.id)
-                    : undefined
-            }
-            isResendToFeishuDebugPending={pendingMessageId === resendTargetMessage?.id}
-            messageContent={toolbarMessage.content}
-            pluginActions={renderMessageActions?.(toolbarMessage)}
-        />
-    );
+    return {
+        messageId: toolbarMessage.id,
+        messageType: lastResponse ? "response" : toolbarMessage.message_type,
+        isUserMessage: false,
+        copyIconState: "copy",
+        onCopy: () => {
+            const preferred = collectPreferredRetryCopyContent(groupMessages);
+            const content = preferred || toolbarMessage.content;
+            navigator.clipboard.writeText(content);
+        },
+        onRegenerate: lastResponse ? () => onMessageRegenerate(lastResponse.id) : undefined,
+        onFork: lastResponse ? () => onMessageFork(lastResponse.id) : undefined,
+        onResendToFeishuDebug:
+            allowFeishuDebugResend && resendTargetMessage
+                ? () => void resendMessageToFeishuDebug(resendTargetMessage.id)
+                : undefined,
+        isResendToFeishuDebugPending: pendingMessageId === resendTargetMessage?.id,
+        messageContent: toolbarMessage.content,
+        pluginActions: renderMessageActions?.(toolbarMessage),
+    };
 }
 
 function MergedAssistantGroup(props: MergedAssistantGroupProps) {
     const { groupMessages, anyShining } = props;
     const lastMsg = groupMessages[groupMessages.length - 1];
+    const actions = mergedGroupActions(props);
     // 手机上 65% 太窄（宽表格/错误卡片被挤压）；仅移动平台放宽
     const bubbleMaxWidthClass = useIsMobilePlatform()
         ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3 py-2"
@@ -264,6 +264,7 @@ function MergedAssistantGroup(props: MergedAssistantGroupProps) {
             data-message-id={lastMsg.id}
             data-message-type="merged"
         >
+            <MessageContextMenu actions={actions}>
             <div className={`group relative inline-block ${bubbleMaxWidthClass} self-start rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}>
                 {anyShining && (
                     <ShineBorder
@@ -273,8 +274,9 @@ function MergedAssistantGroup(props: MergedAssistantGroupProps) {
                     />
                 )}
                 <MergedGroupParts messages={groupMessages} props={props} />
-                <MergedGroupToolbar props={props} />
+                {actions && <MessageActionButtons {...actions} />}
             </div>
+            </MessageContextMenu>
         </div>
     );
 }
@@ -291,6 +293,8 @@ function MergedAssistantGroupSegmentComponent(props: MergedAssistantGroupSegment
     const groupWidth = useMergedGroupWidth(groupKey);
     const isMobilePlatform = useIsMobilePlatform();
     const maxWidthPercent = isMobilePlatform ? "92%" : "65%";
+    // 每段都接管右键（菜单作用于整组），操作条只挂在最后一段。
+    const actions = mergedGroupActions(props);
 
     useEffect(() => {
         const content = contentRef.current;
@@ -322,6 +326,7 @@ function MergedAssistantGroupSegmentComponent(props: MergedAssistantGroupSegment
             data-message-type="merged"
             data-merged-segment={isFirstSegment ? "first" : isLastSegment ? "last" : "middle"}
         >
+            <MessageContextMenu actions={actions}>
             <div
                 className={`relative ${isMobilePlatform ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3" : "max-w-[65%] px-5"} self-start border-x border-border bg-background text-foreground ${chromeClassName}`}
                 style={groupWidth > 0 ? { minWidth: `min(${groupWidth}px, ${maxWidthPercent})` } : undefined}
@@ -336,8 +341,9 @@ function MergedAssistantGroupSegmentComponent(props: MergedAssistantGroupSegment
                 <div ref={contentRef} className="w-fit max-w-full">
                     <MergedGroupParts messages={segmentMessages} props={props} />
                 </div>
-                {isLastSegment && <MergedGroupToolbar props={props} />}
+                {isLastSegment && actions && <MessageActionButtons {...actions} />}
             </div>
+            </MessageContextMenu>
         </div>
     );
 }
