@@ -13,7 +13,6 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/components/common";
@@ -25,68 +24,15 @@ import {
     consumePendingScheduleFocus,
     type ScheduleFocusTaskPayload,
 } from "@/lib/scheduleTaskFocus";
-import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell, HelpCircle, Square } from "lucide-react";
-
-interface ScheduledTask {
-    id: number;
-    name: string;
-    isEnabled: boolean;
-    scheduleType: "once" | "interval";
-    intervalValue?: number | null;
-    intervalUnit?: string | null;
-    startTime?: string | null;
-    weekDays?: number[] | null;
-    monthDays?: number[] | null;
-    runAt?: string | null;
-    nextRunAt?: string | null;
-    lastRunAt?: string | null;
-    assistantId: number;
-    taskPrompt: string;
-    notifyPrompt: string;
-    butlerConversationId?: number | null;
-    createdTime: string;
-    updatedTime: string;
-}
-
-interface ScheduledTaskLog {
-    id: number;
-    taskId: number;
-    runId: string;
-    messageType: string;
-    content: string;
-    createdTime: string;
-}
-
-interface ScheduledTaskRun {
-    id: number;
-    taskId: number;
-    runId: string;
-    status: "running" | "success" | "failed";
-    notify: boolean;
-    summary?: string | null;
-    errorMessage?: string | null;
-    startedTime: string;
-    finishedTime?: string | null;
-    butlerFollowupStatus?: string | null;
-}
-
-interface ScheduledTaskRunUpdateEvent {
-    runId: string;
-    status: "running" | "success" | "failed";
-    notify: boolean;
-    summary?: string | null;
-    errorMessage?: string | null;
-    finishedTime?: string | null;
-}
-
-interface ScheduledTaskToolLogPayload {
-    callId?: string;
-    serverName?: string;
-    toolName?: string;
-    success?: boolean;
-    parameters?: unknown;
-    result?: unknown;
-}
+import ScheduleTaskDetail from "@/components/schedule/ScheduleTaskDetail";
+import { formatShortDateTime, parseToolLogPayload } from "@/components/schedule/scheduleFormat";
+import type {
+    ScheduledTask,
+    ScheduledTaskLog,
+    ScheduledTaskRun,
+    ScheduledTaskRunUpdateEvent,
+} from "@/components/schedule/scheduleTypes";
+import { Calendar, Clock, Plus, RefreshCw, HelpCircle } from "lucide-react";
 
 interface ScheduledTaskFormValues {
     name: string;
@@ -134,27 +80,6 @@ const weekDayLabels: Record<number, string> = {
     4: "周四",
     5: "周五",
     6: "周六",
-};
-
-const logTypeLabels: Record<string, string> = {
-    start: "开始",
-    task_prompt: "任务指令",
-    assistant: "助手信息",
-    tool_round: "工具轮次",
-    tool_call: "工具调用",
-    tool_result: "工具结果",
-    loop_done: "执行完成",
-    llm_retry: "重试",
-    timeout: "超时",
-    max_rounds: "达到轮次上限",
-    cancel_request: "停止请求",
-    cancel: "已停止",
-    response: "任务输出",
-    notify_raw: "通知判定原文",
-    notify_result: "通知判定结果",
-    notify: "系统通知",
-    cleanup: "清理",
-    error: "错误",
 };
 
 const toLocalDatetimeInput = (value?: string | null) => {
@@ -360,6 +285,7 @@ export default function ScheduleWindow() {
     const [runEntries, setRunEntries] = useState<ScheduledTaskRun[]>([]);
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
     const [logEntries, setLogEntries] = useState<ScheduledTaskLog[]>([]);
+    const [isRunsLoading, setIsRunsLoading] = useState(false);
     const [isLogLoading, setIsLogLoading] = useState(false);
     const [selectedToolLog, setSelectedToolLog] = useState<ScheduledTaskLog | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<ScheduledTask | null>(null);
@@ -491,7 +417,7 @@ export default function ScheduleWindow() {
             }
             const silent = options?.silent ?? false;
             if (!silent) {
-                setIsLogLoading(true);
+                setIsRunsLoading(true);
             }
             try {
                 const result = await invoke<{ runs: ScheduledTaskRun[] }>("list_scheduled_task_runs", {
@@ -511,7 +437,7 @@ export default function ScheduleWindow() {
                 setSelectedRunId(null);
             } finally {
                 if (!silent) {
-                    setIsLogLoading(false);
+                    setIsRunsLoading(false);
                 }
             }
         },
@@ -854,32 +780,17 @@ export default function ScheduleWindow() {
         }
     }, [loadLogs, loadRuns, runningRun, selectedTask, toast]);
 
-    const parseToolLogPayload = useCallback((log: ScheduledTaskLog): ScheduledTaskToolLogPayload | null => {
-        if (log.messageType !== "tool_call" && log.messageType !== "tool_result") {
-            return null;
-        }
-        try {
-            const parsed = JSON.parse(log.content) as ScheduledTaskToolLogPayload;
-            if (!parsed || typeof parsed !== "object") {
-                return null;
-            }
-            return parsed;
-        } catch {
-            return null;
-        }
-    }, []);
-
     const selectedToolPayload = useMemo(() => {
         if (!selectedToolLog) {
             return null;
         }
         return parseToolLogPayload(selectedToolLog);
-    }, [parseToolLogPayload, selectedToolLog]);
+    }, [selectedToolLog]);
 
     const scheduleDescription = useMemo(() => {
         if (!selectedTask) return "";
         if (selectedTask.scheduleType === "once") {
-            return selectedTask.runAt ? `执行时间: ${new Date(selectedTask.runAt).toLocaleString()}` : "未设置时间";
+            return selectedTask.runAt ? `单次 · ${formatShortDateTime(selectedTask.runAt)} 执行` : "未设置时间";
         }
         const value = selectedTask.intervalValue ?? 1;
         const unit = intervalUnitLabels[selectedTask.intervalUnit ?? "hour"] ?? selectedTask.intervalUnit ?? "";
@@ -898,10 +809,6 @@ export default function ScheduleWindow() {
         }
 
         return desc + " 执行";
-    }, [selectedTask]);
-
-    const hasDetailPrompts = useMemo(() => {
-        return Boolean(selectedTask?.taskPrompt || selectedTask?.notifyPrompt);
     }, [selectedTask]);
 
     const assistantName = useMemo(() => {
@@ -994,7 +901,7 @@ export default function ScheduleWindow() {
                                             {task.nextRunAt && (
                                                 <div className={`text-xs mt-1 flex items-center gap-1 ${subTextClass}`}>
                                                     <Clock className="h-3 w-3" />
-                                                    下次: {new Date(task.nextRunAt).toLocaleString()}
+                                                    下次 {formatShortDateTime(task.nextRunAt)}
                                                 </div>
                                             )}
                                         </div>
@@ -1008,31 +915,6 @@ export default function ScheduleWindow() {
         ),
         [addButton, tasks, isLoading, activeTaskId]
     );
-
-    const renderLogTag = useCallback((messageType: string) => {
-        const label = logTypeLabels[messageType] ?? messageType;
-        const isError = messageType === "error";
-        return (
-            <span
-                className={`text-xs px-2 py-0.5 rounded-full border ${isError
-                    ? "border-destructive/40 text-destructive"
-                    : "border-muted-foreground/30 text-muted-foreground"
-                    }`}
-            >
-                {label}
-            </span>
-        );
-    }, []);
-
-    const renderRunStatus = useCallback((status: ScheduledTaskRun["status"]) => {
-        if (status === "failed") {
-            return "text-destructive border-destructive/40";
-        }
-        if (status === "running") {
-            return "text-amber-500 border-amber-300/60";
-        }
-        return "text-emerald-600 border-emerald-300/60";
-    }, []);
 
     const emptyState = useMemo(
         () => (
@@ -1053,229 +935,27 @@ export default function ScheduleWindow() {
     const content = useMemo(
         () =>
             selectedTask ? (
-                <Card className="shadow-none">
-                    <CardHeader className="pb-3">
-                        <div className="flex items-start justify-between gap-4">
-                            <div>
-                                <CardTitle className="text-base">{selectedTask.name}</CardTitle>
-                                <p className="text-xs text-muted-foreground mt-1">{scheduleDescription}</p>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <span>启用</span>
-                                    <Switch
-                                        checked={selectedTask.isEnabled}
-                                        onCheckedChange={(value) => handleToggleEnabled(selectedTask, value)}
-                                    />
-                                </div>
-                                <Button variant="outline" size="icon" onClick={() => openEditDialog(selectedTask)} title="编辑">
-                                    <Pencil className="h-4 w-4" />
-                                </Button>
-                                <Button
-                                    variant="outline"
-                                    size="icon"
-                                    onClick={() => handleRunNow(selectedTask)}
-                                    disabled={isRunning}
-                                    title="执行"
-                                >
-                                    <Play className="h-4 w-4" />
-                                </Button>
-                                {runningRun && (
-                                    <Button
-                                        variant="outline"
-                                        size="icon"
-                                        onClick={handleStopRun}
-                                        disabled={isStopping}
-                                        title="停止当前执行"
-                                    >
-                                        <Square className="h-4 w-4" />
-                                    </Button>
-                                )}
-                                <Button
-                                    variant="destructive"
-                                    size="icon"
-                                    onClick={() => setDeleteTarget(selectedTask)}
-                                    title="删除"
-                                >
-                                    <Trash2 className="h-4 w-4" />
-                                </Button>
-                            </div>
-                        </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3 pt-0">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                            <div className="flex items-center gap-2">
-                                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">下次执行:</span>
-                                <span>
-                                    {selectedTask.nextRunAt
-                                        ? new Date(selectedTask.nextRunAt).toLocaleString()
-                                        : "未设置"}
-                                </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">上次执行:</span>
-                                <span>
-                                    {selectedTask.lastRunAt
-                                        ? new Date(selectedTask.lastRunAt).toLocaleString()
-                                        : "未执行"}
-                                </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <Bell className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">执行助手:</span>
-                                <span>{assistantName || "未选择"}</span>
-                            </div>
-                        </div>
-
-                        <div className="space-y-1.5">
-                            <div className="text-xs font-semibold">任务指令</div>
-                            <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-24 overflow-y-auto">
-                                {selectedTask.taskPrompt || (hasDetailPrompts ? "未设置" : "暂无数据")}
-                            </div>
-                        </div>
-
-                        <div className="space-y-1.5">
-                            <div className="text-xs font-semibold">通知判定规则</div>
-                            <div className="rounded bg-muted/30 border p-2 text-xs whitespace-pre-wrap max-h-20 overflow-y-auto">
-                                {selectedTask.notifyPrompt || "默认规则：有重要信息时通知"}
-                            </div>
-                        </div>
-
-                        <div className="space-y-1.5">
-                            <div className="flex items-center justify-between">
-                                <div className="text-xs font-semibold">运行记录</div>
-                                <Button
-                                    variant="outline"
-                                    size="icon"
-                                    onClick={() => loadRuns(selectedTask.id)}
-                                    disabled={isLogLoading}
-                                    title="刷新"
-                                >
-                                    <RefreshCw className={isLogLoading ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} />
-                                </Button>
-                            </div>
-                            <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[200px] overflow-y-auto">
-                                {isLogLoading ? (
-                                    <div className="text-xs text-muted-foreground flex items-center">
-                                        <RefreshCw className="h-3 w-3 animate-spin mr-2" />
-                                        加载记录...
-                                    </div>
-                                ) : runEntries.length === 0 ? (
-                                    <div className="text-xs text-muted-foreground">暂无运行记录</div>
-                                ) : (
-                                    runEntries.map((run) => (
-                                        <Button
-                                            key={run.id}
-                                            type="button"
-                                            variant="outline"
-                                            onClick={() => setSelectedRunId(run.runId)}
-                                            className={`w-full text-left justify-start h-auto p-2 space-y-1 transition-colors ${selectedRunId === run.runId
-                                                ? "border-primary bg-muted/40"
-                                                : "border-muted-foreground/20 hover:bg-muted/30"
-                                                }`}
-                                        >
-                                            <div className="flex items-center justify-between gap-2 w-full">
-                                                <div className="flex items-center gap-2">
-                                                    <span
-                                                        className={`text-[11px] px-2 py-0.5 rounded-full border ${renderRunStatus(
-                                                            run.status
-                                                        )}`}
-                                                    >
-                                                        {run.status === "running"
-                                                            ? "运行中"
-                                                            : run.status === "failed"
-                                                                ? "失败"
-                                                                : "完成"}
-                                                    </span>
-                                                    <span className="text-xs text-muted-foreground">
-                                                        {new Date(run.startedTime).toLocaleString()}
-                                                    </span>
-                                                    {run.notify && (
-                                                        <span className="text-[11px] px-2 py-0.5 rounded-full border border-emerald-300/60 text-emerald-600">
-                                                            已通知
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <span className="text-[10px] text-muted-foreground font-mono truncate">
-                                                    {run.runId.slice(0, 8)}
-                                                </span>
-                                            </div>
-                                            <div className="text-[11px] whitespace-pre-wrap break-words text-muted-foreground line-clamp-2">
-                                                {run.errorMessage || run.summary || "无摘要"}
-                                            </div>
-                                        </Button>
-                                    ))
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="space-y-1.5">
-                            <div className="text-xs font-semibold">运行日志详情</div>
-                            <div className="rounded border bg-muted/10 p-2 space-y-2 max-h-[240px] overflow-y-auto">
-                                {selectedRunId ? (
-                                    isLogLoading ? (
-                                        <div className="text-xs text-muted-foreground flex items-center">
-                                            <RefreshCw className="h-3 w-3 animate-spin mr-2" />
-                                            加载日志...
-                                        </div>
-                                    ) : logEntries.length === 0 ? (
-                                        <div className="text-xs text-muted-foreground">暂无日志详情</div>
-                                    ) : (
-                                        logEntries.map((log) => (
-                                            <div key={log.id} className="border border-muted-foreground/20 rounded-md p-1.5 space-y-0.5">
-                                                <div className="flex items-center justify-between gap-2">
-                                                    <div className="flex items-center gap-1.5">
-                                                        {renderLogTag(log.messageType)}
-                                                        <span className="text-[10px] text-muted-foreground">
-                                                            {new Date(log.createdTime).toLocaleString()}
-                                                        </span>
-                                                    </div>
-                                                    <span className="text-[10px] text-muted-foreground font-mono truncate">
-                                                        {log.runId.slice(0, 8)}
-                                                    </span>
-                                                </div>
-                                                {(() => {
-                                                    const toolPayload = parseToolLogPayload(log);
-                                                    if (!toolPayload) {
-                                                        return (
-                                                            <div className="text-[11px] whitespace-pre-wrap break-words">
-                                                                {log.content}
-                                                            </div>
-                                                        );
-                                                    }
-                                                    const toolText = `${toolPayload.serverName ?? "-"} / ${toolPayload.toolName ?? "-"}`;
-                                                    const statusText =
-                                                        log.messageType === "tool_result"
-                                                            ? (toolPayload.success ? "执行成功" : "执行失败")
-                                                            : "准备执行";
-                                                    return (
-                                                        <div className="space-y-1">
-                                                            <div className="text-[11px] whitespace-pre-wrap break-words">
-                                                                {statusText}：{toolText}
-                                                            </div>
-                                                            <Button
-                                                                type="button"
-                                                                variant="link"
-                                                                className="h-auto p-0 text-[11px]"
-                                                                onClick={() => setSelectedToolLog(log)}
-                                                            >
-                                                                查看工具详情（参数/返回）
-                                                            </Button>
-                                                        </div>
-                                                    );
-                                                })()}
-                                            </div>
-                                        ))
-                                    )
-                                ) : (
-                                    <div className="text-xs text-muted-foreground">请选择一条运行记录查看详情</div>
-                                )}
-                            </div>
-                        </div>
-                    </CardContent>
-                </Card>
+                <ScheduleTaskDetail
+                    task={selectedTask}
+                    scheduleDescription={scheduleDescription}
+                    assistantName={assistantName}
+                    runs={runEntries}
+                    selectedRunId={selectedRunId}
+                    isRunsLoading={isRunsLoading}
+                    logs={logEntries}
+                    isLogsLoading={isLogLoading}
+                    runningRun={runningRun}
+                    isRunning={isRunning}
+                    isStopping={isStopping}
+                    onSelectRun={setSelectedRunId}
+                    onRefreshRuns={() => loadRuns(selectedTask.id)}
+                    onToggleEnabled={(value) => handleToggleEnabled(selectedTask, value)}
+                    onEdit={() => openEditDialog(selectedTask)}
+                    onRunNow={() => handleRunNow(selectedTask)}
+                    onStop={handleStopRun}
+                    onDelete={() => setDeleteTarget(selectedTask)}
+                    onOpenToolLog={setSelectedToolLog}
+                />
             ) : (
                 <EmptyState
                     icon={<Calendar className="h-8 w-8 text-muted-foreground" />}
@@ -1292,17 +972,15 @@ export default function ScheduleWindow() {
             assistantName,
             handleRunNow,
             handleStopRun,
-            hasDetailPrompts,
+            handleToggleEnabled,
             isLogLoading,
             isRunning,
+            isRunsLoading,
             isStopping,
             loadRuns,
             logEntries,
             openCreateDialog,
             openEditDialog,
-            parseToolLogPayload,
-            renderLogTag,
-            renderRunStatus,
             runningRun,
             runEntries,
             scheduleDescription,
