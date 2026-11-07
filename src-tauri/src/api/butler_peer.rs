@@ -429,7 +429,7 @@ pub(crate) fn build_delivery_prompt(
 }
 
 /// 协作可以投递到联系人私聊、当前总管家主会话，或仍在执行的独立任务会话（任务发起的协作在这里回送）。
-fn accepts_peer_turn(kind: &str, task_status: Option<&str>, finalized: bool, current_main: bool) -> bool {
+pub(crate) fn accepts_peer_turn(kind: &str, task_status: Option<&str>, finalized: bool, current_main: bool) -> bool {
     match kind {
         "butler_contact" => true,
         "butler_main" => current_main,
@@ -773,13 +773,18 @@ fn finish_stop(app: &AppHandle, ids: &[i64], note: &str) -> anyhow::Result<()> {
 
 /// 停止整项工作（整条协作链）：停止链上全部协作与关联的独立任务，并实际打断属于这项工作的执行。
 pub(crate) async fn stop_chain_work(app: &AppHandle, chain: i64, exclude: Option<i64>) -> anyhow::Result<String> {
+    let admission = super::butler_work::execution_gate().await;
     let conn = connection(app)?;
     let ids = peer::chain_ids(&conn, chain)?;
     let roots = peer::chain_roots(&conn, chain)?;
     let conversations = peer::chain_conversations(&conn, chain)?;
-    let tasks = peer::linked_tasks(&conn, chain)?;
+    let mut tasks = peer::linked_tasks(&conn, chain)?;
+    for task in crate::db::butler_work::stop_chain_followups(&conn, chain)? {
+        if !tasks.contains(&task) { tasks.push(task); }
+    }
     peer::stop_chain(&conn, chain)?;
     drop(conn);
+    drop(admission);
     let note = halt_work(app, conversations, HaltScope::Roots(roots), tasks, exclude).await?;
     finish_stop(app, &ids, &note)?;
     Ok(note)
@@ -787,12 +792,28 @@ pub(crate) async fn stop_chain_work(app: &AppHandle, chain: i64, exclude: Option
 
 /// 停止某项委托及其下级（例如用户停止了受托助手的这一轮）；不影响同一轮里并行的其他协作。
 pub(crate) async fn stop_exchange_work(app: &AppHandle, exchange: i64, exclude: Option<i64>) -> anyhow::Result<String> {
+    let admission = super::butler_work::execution_gate().await;
     let conn = connection(app)?;
     let subtree = peer::subtree(&conn, exchange)?;
     let conversations: Vec<i64> = subtree.iter().flat_map(|e| [e.owner, e.target]).collect();
+    let exchange_ids: Vec<i64> = subtree.iter().map(|e| e.id).collect();
+    let inplace = crate::db::butler_work::exchange_followup_inputs(&conn, &exchange_ids)?;
+    let tasks = crate::db::butler_work::stop_exchange_followups(&conn, &exchange_ids)?;
     let ids = peer::stop_subtree(&conn, exchange)?;
     drop(conn);
-    let note = halt_work(app, conversations, HaltScope::Exchanges(ids.clone()), Vec::new(), exclude).await?;
+    let mut inplace_notes = Vec::new();
+    for (task,input) in inplace {
+        // Lock order matches followup admission: global followup gate, then this task.
+        // Ordinary task-window sends use this lock too.
+        let _task_admission = admit_turn(task).await;
+        if Some(task) != exclude && busy(app,task).await?
+            && crate::db::butler_work::followup_input_is_current(&connection(app)?,task,input)? {
+            inplace_notes.push(halt_turn(app,task,format!("任务 #{task}")).await?.describe());
+        }
+    }
+    drop(admission);
+    let mut note = halt_work(app, conversations, HaltScope::Exchanges(ids.clone()), tasks, exclude).await?;
+    if !inplace_notes.is_empty() { note = format!("{}；{note}",inplace_notes.join("；")); }
     finish_stop(app, &ids, &note)?;
     Ok(note)
 }
@@ -807,7 +828,8 @@ pub(crate) async fn stop_turn_work(app: &AppHandle, conversation: i64) -> anyhow
         return Ok(Some(stop_exchange_work(app, exchange, Some(conversation)).await?));
     }
     let chain = peer::chain_of(&conn, work.root, conversation)?;
-    let has_work = !peer::active_in_chain(&conn, chain)?.is_empty() || !peer::linked_tasks(&conn, chain)?.is_empty();
+    let has_followups: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_work_followup WHERE chain=?1 AND state IN ('queued','sending','spawned','uncertain'))", [chain], |r| r.get(0))?;
+    let has_work = has_followups || !peer::active_in_chain(&conn, chain)?.is_empty() || !peer::linked_tasks(&conn, chain)?.is_empty();
     drop(conn);
     if !has_work {
         return Ok(None);
@@ -817,12 +839,21 @@ pub(crate) async fn stop_turn_work(app: &AppHandle, conversation: i64) -> anyhow
 
 /// 取消独立任务：停止任务发起的协作及其下级，实际打断属于它们的执行；不影响该助手的其他会话。
 pub(crate) async fn stop_task_work(app: &AppHandle, task: i64) -> anyhow::Result<Option<String>> {
+    let admission = super::butler_work::execution_gate().await;
     let conn = connection(app)?;
+    let lineage = crate::db::butler_work::lineage_tasks(&conn, task)?;
+    let descendants: Vec<i64> = lineage.into_iter().skip_while(|id| *id != task).skip(1).collect();
     let snapshot: Vec<Exchange> = peer::active_in_owner(&conn, task)?;
     let ids = peer::stop_owned(&conn, task)?;
     drop(conn);
-    if ids.is_empty() {
-        return Ok(None);
+    drop(admission);
+    // cancel_ai may have cancelled the old token before waiting for admission. Stop the
+    // newly admitted current task again after the fence, without recursively marking it.
+    let own_report = if busy(app, task).await? {
+        Some(halt_turn(app, task, format!("任务 #{task}")).await?.describe())
+    } else { None };
+    if ids.is_empty() && descendants.is_empty() {
+        return Ok(own_report);
     }
     let mut conversations: Vec<i64> = snapshot.iter().map(|e| e.target).collect();
     for id in &ids {
@@ -830,7 +861,8 @@ pub(crate) async fn stop_task_work(app: &AppHandle, task: i64) -> anyhow::Result
             conversations.extend([ex.owner, ex.target]);
         }
     }
-    let note = halt_work(app, conversations, HaltScope::Exchanges(ids.clone()), Vec::new(), Some(task)).await?;
+    let mut note = halt_work(app, conversations, HaltScope::Exchanges(ids.clone()), descendants, Some(task)).await?;
+    if let Some(own) = own_report { note = format!("{own}；{note}"); }
     finish_stop(app, &ids, &note)?;
     Ok(Some(note))
 }
@@ -933,3 +965,7 @@ mod receipt_prompt_tests {
         assert!(!accepts_peer_turn("normal", None, false, true));
     }
 }
+
+#[cfg(test)]
+#[path = "butler_peer_tests.rs"]
+mod admission_tests;

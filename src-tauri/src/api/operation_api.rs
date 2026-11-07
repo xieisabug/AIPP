@@ -180,7 +180,53 @@ pub(crate) async fn resolve_agent_interaction_response(
     target: AgentReplyTarget,
     reply: AgentInteractionReply,
 ) -> Result<bool, String> {
+    // Serialize only the short reply handoff, never the task/model execution. The persisted
+    // intent and actual reply must describe the same answer when two windows submit together.
+    static QUESTION_REPLY_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _question_guard = if matches!(&reply, AgentInteractionReply::AskUserQuestion(_)) {
+        Some(QUESTION_REPLY_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await)
+    } else { None };
+    let mut history_key = None;
+    if let AgentInteractionReply::AskUserQuestion(ref decision) = reply {
+        let state = app_handle.state::<crate::mcp::builtin_mcp::interaction::InteractionState>();
+        let request = state.get_ask_user_request(&target.request_id).await
+            .ok_or("问题已结束或已回答，请刷新后重试")?;
+        let scope = state.ask_user_request_scope(&target.request_id).await.ok_or("问题已结束")?;
+        target.scope.validate(&scope, &target.request_id)?;
+        let (answers, cancelled) = match decision {
+            crate::api::ai::agent_driver::approval::AgentQuestionReply::Answer { answers } => {
+                if answers.is_empty() { return Err("Answers cannot be empty".into()); }
+                (answers.clone(), false)
+            },
+            crate::api::ai::agent_driver::approval::AgentQuestionReply::Cancel => (std::collections::HashMap::new(), true),
+        };
+        if let Some(task) = request.conversation_id {
+            let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle)
+                .and_then(|db| db.get_connection()).map_err(|e| format!("保存问答记录前读取失败，尚未提交：{e}"))?;
+            let is_task: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM butler_task_definition WHERE task_conversation_id=?1)", [task], |r| r.get(0),
+            ).map_err(|e| format!("读取任务归属失败，尚未提交：{e}"))?;
+            if is_task {
+                let key = format!("request:{}", request.request_id);
+                crate::db::butler_question_history::save(&conn, task, crate::db::butler_question_history::AnswerRecord {
+                    key: key.clone(), questions: serde_json::to_value(request.questions).map_err(|e| e.to_string())?,
+                    metadata: serde_json::to_value(request.metadata).map_err(|e| e.to_string())?, answers, cancelled,
+                    delivery_status: "pending".into(),
+                }).map_err(|e| format!("保存问答记录失败，尚未提交：{e:#}"))?;
+                history_key = Some((task, key));
+            }
+        }
+    }
     let resolution = resolve_app_reply(app_handle, target, reply).await?;
+    if resolution.delivered {
+        if let Some((task, key)) = history_key {
+            let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle)
+                .and_then(|db| db.get_connection()).map_err(|e| format!("回复已送达，但记录状态未确认，请勿重复提交：{e}"))?;
+            crate::db::butler_question_history::finish_delivery(&conn, task, &key)
+                .map_err(|e| format!("回复已送达，但记录状态未确认，请勿重复提交：{e:#}"))?;
+            crate::api::butler_peer::updated(app_handle);
+        }
+    }
     let event_name = match resolution.kind {
         AgentInteractionKind::Permission => Some(ACP_PERMISSION_RESOLVED_EVENT),
         AgentInteractionKind::Elicitation => Some(ACP_ELICITATION_RESOLVED_EVENT),

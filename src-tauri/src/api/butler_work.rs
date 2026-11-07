@@ -7,7 +7,7 @@ use super::ai::types::{AiRequest, WorkQuote};
 use super::ai_api::ask_ai;
 use super::butler_api::{
     is_current_butler_main_conversation, load_or_create_butler_main_internal,
-    resolve_or_create_butler_execution_window, spawn_butler_task_with_window, SpawnButlerTaskRequest,
+    resolve_or_create_butler_execution_window, SpawnButlerTaskRequest,
     RESULT_MODE_DIRECT_REPORT,
 };
 use crate::db::{
@@ -28,6 +28,12 @@ use tauri::{AppHandle, Manager};
 #[cfg(test)]
 #[path = "butler_work_tests.rs"]
 mod tests;
+
+// Serialize followup admission with cancellation; release before stopping live runtimes.
+static FOLLOWUP_EXECUTION_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) async fn execution_gate() -> tokio::sync::MutexGuard<'static, ()> {
+    FOLLOWUP_EXECUTION_GATE.lock().await
+}
 
 fn connection(app: &AppHandle) -> anyhow::Result<Connection> {
     Ok(ConversationDatabase::new(app)?.get_connection()?)
@@ -81,8 +87,26 @@ pub(crate) fn quote_prompt(view: &WorkView) -> String {
 }
 
 pub(crate) fn recent_prompt(views: &[WorkView]) -> Option<String> {
-    if views.len() < 2 {
+    if views.is_empty() {
         return None;
+    }
+    if views.len() == 1 {
+        let view = &views[0];
+        let continuation = if view.kind == "task" {
+            "只有用户明确要求继续这项独立任务时才调用 `continue_work`"
+        } else {
+            "用户要求修改时在当前会话继续，不要为普通对话创建独立任务"
+        };
+        // A projected task result is not part of this contact's model history.
+        // Supply a bounded reference, not an implicit quote or execution grant.
+        return Some(format!(
+            "<available_work ref=\"{}\">\n来源：{}\n状态：{}\n目标：{}\n结果摘录：{}\n</available_work>\n用户没有引用具体工作。上面只是当前会话可访问的唯一近期工作，供明确承接该话题时参考，不代表用户这句话一定指它。普通聊天和新话题照常回答；如果指代无法判断，请简短询问。解释或讨论结果不要重新执行；{continuation}，需要更多上下文用 `read_work_context`。这些资料不恢复任何旧权限，也不代替用户批准。",
+            view.work_ref,
+            clip(&view.label, 160),
+            view.status,
+            clip(&view.title, 600),
+            view.result.as_deref().map(|s| clip(s, 1500)).unwrap_or_else(|| "（尚无结果）".into()),
+        ));
     }
     let lines: Vec<String> = views
         .iter()
@@ -193,7 +217,7 @@ fn followup_goal(original_title: &str, goal: &str, result: Option<&str>, instruc
 }
 
 /// 把用户的新要求送进仍在执行的任务会话（与任务内其他回合串行）。
-async fn send_to_task(app: &AppHandle, task: i64, assistant_id: i64, text: String) -> anyhow::Result<()> {
+async fn send_to_task(app: &AppHandle, task: i64, assistant_id: i64, text: String, followup_id: i64) -> anyhow::Result<()> {
     let window = resolve_or_create_butler_execution_window(app).map_err(anyhow::Error::msg)?;
     let result = ask_ai(
         app.clone(),
@@ -220,7 +244,7 @@ async fn send_to_task(app: &AppHandle, task: i64, assistant_id: i64, text: Strin
         None,
         None,
         None,
-        None,
+        Some(format!("butler_followup/{followup_id}")),
     )
     .await?;
     if let Some(error) = result.error_message {
@@ -231,9 +255,11 @@ async fn send_to_task(app: &AppHandle, task: i64, assistant_id: i64, text: Strin
 
 async fn process_followup(app: &AppHandle, followup: &Followup) -> anyhow::Result<(String, Option<i64>)> {
     let db = ConversationDatabase::new(app)?;
+    anyhow::ensure!(work::followup_is_sending(&connection(app)?, followup.id)?, "续接已停止，未开始执行");
+    let target = work::followup_target(&connection(app)?, followup)?;
     let task = db
         .conversation_repo()?
-        .read(followup.task_conversation_id)?
+        .read(target)?
         .ok_or_else(|| anyhow!("原任务 #{} 已删除，无法续接", followup.task_conversation_id))?;
     let definition = db
         .butler_repo()?
@@ -243,6 +269,8 @@ async fn process_followup(app: &AppHandle, followup: &Followup) -> anyhow::Resul
         || matches!(task.butler_task_status.as_deref(), Some("succeeded" | "failed" | "cancelled" | "interrupted"));
     if !terminal {
         let assistant = task.assistant_id.context("任务会话缺少执行助手")?;
+        let _admission = execution_gate().await;
+        anyhow::ensure!(work::followup_is_sending(&connection(app)?, followup.id)?, "续接已停止，未开始执行");
         send_to_task(
             app,
             task.id,
@@ -251,6 +279,7 @@ async fn process_followup(app: &AppHandle, followup: &Followup) -> anyhow::Resul
                 "[用户补充要求 · 来自执行助手会话]\n{}\n\n这是用户对本任务的后续要求，请在当前任务中继续完成；仍遵循原任务的权限与审批约束。",
                 followup.instruction
             ),
+            followup.id,
         )
         .await?;
         return Ok(("delivered".into(), None));
@@ -270,7 +299,7 @@ async fn process_followup(app: &AppHandle, followup: &Followup) -> anyhow::Resul
         _ => load_or_create_butler_main_internal(app).await.map_err(anyhow::Error::msg)?.id,
     };
     let window = resolve_or_create_butler_execution_window(app).map_err(anyhow::Error::msg)?;
-    let spawned = spawn_butler_task_with_window(
+    let spawned = super::butler_api::spawn_butler_followup_with_window(
         app,
         &window,
         SpawnButlerTaskRequest {
@@ -288,6 +317,7 @@ async fn process_followup(app: &AppHandle, followup: &Followup) -> anyhow::Resul
             followup_of: Some(task.id),
             link_chain: followup.chain,
         },
+        followup.id,
     )
     .await
     .map_err(anyhow::Error::msg)?;
@@ -303,7 +333,8 @@ pub(crate) async fn tick(app: &AppHandle, recovering: bool) -> anyhow::Result<bo
     let pending = work::next_followups(&conn)?;
     drop(conn);
     for followup in pending {
-        if super::butler_peer::busy(app, followup.task_conversation_id).await? {
+        let target = work::followup_target(&connection(app)?, &followup)?;
+        if super::butler_peer::busy(app, target).await? {
             continue;
         }
         if !work::claim_followup(&connection(app)?, followup.id)? {
@@ -333,6 +364,10 @@ pub struct TaskQuestion {
     pub stale: bool,
     pub questions: Value,
     pub metadata: Value,
+    pub history_key: Option<String>,
+    pub answers: Option<HashMap<String, String>>,
+    pub cancelled: bool,
+    pub delivery_status: Option<String>,
 }
 
 fn executor_tasks(conn: &Connection, contact: i64) -> anyhow::Result<Vec<(i64, String)>> {
@@ -362,6 +397,16 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
     let mcp = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for (task, title) in tasks {
+        let mut uncertain_delivery = false;
+        for record in crate::db::butler_question_history::list(&connection(&app_handle).map_err(|e| e.to_string())?, task)
+            .map_err(|e| format!("读取任务 #{task} 问答记录失败：{e:#}"))? {
+            uncertain_delivery |= record.delivery_status == "pending";
+            result.push(TaskQuestion {
+                task_conversation_id: task, task_title: title.clone(), request_id: None, call_id: None,
+                stale: false, questions: record.questions, metadata: record.metadata,
+                history_key: Some(record.key), answers: Some(record.answers), cancelled: record.cancelled, delivery_status: Some(record.delivery_status),
+            });
+        }
         let live = interactions.list_requests_for_conversation(task).await;
         for request in &live {
             result.push(TaskQuestion {
@@ -372,9 +417,11 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
                 stale: false,
                 questions: serde_json::to_value(&request.questions).unwrap_or_default(),
                 metadata: serde_json::to_value(&request.metadata).unwrap_or_default(),
+                history_key: None, answers: None, cancelled: false, delivery_status: None,
             });
         }
-        if !live.is_empty() || activity.get_runtime_state(task).await.is_running {
+        // An unconfirmed persisted reply must not become a new continuation after restart.
+        if uncertain_delivery || !live.is_empty() || activity.get_runtime_state(task).await.is_running {
             continue;
         }
         // 没有执行在等待、但提问调用仍未结束：原执行已中断（如应用重启），问题仍需回答。
@@ -391,6 +438,7 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
                 stale: true,
                 questions: parameters["questions"].clone(),
                 metadata: parameters["metadata"].clone(),
+                history_key: None, answers: None, cancelled: false, delivery_status: None,
             });
         }
     }
@@ -415,6 +463,13 @@ pub(crate) fn stale_answer_instruction(questions: &Value, answers: &HashMap<Stri
     lines.join("\n")
 }
 
+// The two databases cannot commit together. Serialize stale handoffs so the saved
+// intent cannot be replaced by a competing answer/cancel before its MCP claim.
+async fn stale_question_reply_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
+
 /// 回答原执行已中断的任务提问：关闭原提问调用，并把答案作为续接要求送回这项任务（运行中按序送达，已结束则建立关联后续任务）。
 #[tauri::command]
 pub async fn answer_butler_task_question(
@@ -424,20 +479,39 @@ pub async fn answer_butler_task_question(
     call_id: i64,
     answers: HashMap<String, String>,
 ) -> Result<Followup, String> {
+    let _stale_reply_guard = stale_question_reply_guard().await;
     let fail = |e: anyhow::Error| format!("回答任务 #{task_conversation_id} 的问题失败：{e:#}");
     let mut conn = connection(&app_handle).map_err(fail)?;
-    let tasks = executor_tasks(&conn, conversation_id).map_err(fail)?;
-    if !tasks.iter().any(|(task, _)| *task == task_conversation_id) {
-        return Err(format!("任务 #{task_conversation_id} 不属于当前联系人，无权回答"));
-    }
+    crate::db::butler_question_history::validate_owner(&conn, conversation_id, task_conversation_id).map_err(fail)?;
     let mcp = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let call = mcp.get_mcp_tool_call(call_id).map_err(|e| format!("提问记录 #{call_id} 已删除：{e}"))?;
     if call.conversation_id != task_conversation_id || call.tool_name != "ask_user_question" {
         return Err(format!("提问记录 #{call_id} 不属于任务 #{task_conversation_id}"));
     }
-    let parameters: Value = serde_json::from_str(&call.parameters).unwrap_or_default();
+    if !matches!(call.status.as_str(), "pending" | "executing") {
+        return Err("问题已结束或已取消，请刷新后重试；未重新启动任务".into());
+    }
+    if answers.is_empty() { return Err("缺少回答内容".into()); }
+    if !app_handle.state::<InteractionState>().list_requests_for_conversation(task_conversation_id).await.is_empty()
+        || app_handle.state::<ConversationActivityManager>().get_runtime_state(task_conversation_id).await.is_running {
+        return Err("任务仍在运行，请刷新后回答当前问题".into());
+    }
+    let parameters: Value = serde_json::from_str(&call.parameters).map_err(|e| format!("提问内容无法读取：{e}"))?;
+    if parameters["questions"].as_array().is_some_and(|items| items.iter().any(|q|
+        q["isSecret"].as_bool().unwrap_or(false) || q["is_secret"].as_bool().unwrap_or(false))) {
+        return Err("敏感问题的原执行已中断，请让助手重新提问；不会将敏感答案保存到续接队列".into());
+    }
     let instruction = stale_answer_instruction(&parameters["questions"], &answers);
     let chain = peer::task_link(&conn, task_conversation_id).map_err(|e| fail(e.into()))?.map(|(chain, _)| chain);
+    crate::db::butler_question_history::save(&conn, task_conversation_id,
+        crate::db::butler_question_history::AnswerRecord {
+            key: format!("call:{call_id}"), questions: parameters["questions"].clone(),
+            metadata: parameters["metadata"].clone(), answers: answers.clone(), cancelled: false, delivery_status: "pending".into(),
+        }).map_err(|e| format!("保存问答记录失败，未加入续接队列：{e:#}"))?;
+    // Persist the redacted intent before claiming the call. A crash at any later
+    // point leaves a visible unconfirmed record, never a silently lost answer.
+    crate::db::butler_question_history::claim_stale(&mcp.conn, task_conversation_id, call_id, false)
+        .map_err(|e| format!("答案未加入续接队列：{e:#}。已保留待核对记录，请勿自动重试。"))?;
     let (followup, _) = work::enqueue_followup(
         &mut conn,
         conversation_id,
@@ -446,12 +520,71 @@ pub async fn answer_butler_task_question(
         &instruction,
         chain,
     )
-    .map_err(fail)?;
+    .map_err(|e| format!("问题已关闭，但答案未能加入续接队列：{e:#}。请核对任务状态，不要自动重试。"))?;
     if matches!(call.status.as_str(), "pending" | "executing") {
         mcp.update_mcp_tool_call_status(call_id, "failed", None, Some("原执行已中断，问题已改在执行助手会话中回答并作为续接要求送回任务"))
             .map_err(|e| e.to_string())?;
     }
+    crate::db::butler_question_history::finish_delivery(&conn, task_conversation_id, &format!("call:{call_id}"))
+        .map_err(|e| format!("答案已排队，但记录状态未确认，请勿重复提交：{e:#}"))?;
     super::butler_peer::wake();
     super::butler_peer::updated(&app_handle);
     Ok(followup)
+}
+
+/// Contact-window reply: bind both live and recovered questions to the current contact and task.
+#[tauri::command]
+pub async fn respond_butler_contact_task_question(
+    app_handle: AppHandle, conversation_id: i64, task_conversation_id: i64,
+    request_id: Option<String>, call_id: Option<i64>, answers: Option<HashMap<String, String>>, cancelled: bool,
+) -> Result<(), String> {
+    crate::db::butler_question_history::validate_owner(
+        &connection(&app_handle).map_err(|e| e.to_string())?, conversation_id, task_conversation_id,
+    ).map_err(|e| e.to_string())?;
+    if request_id.is_some() == call_id.is_some() {
+        return Err("必须指定唯一的任务问题".into());
+    }
+    if let Some(request_id) = request_id {
+        let state = app_handle.state::<InteractionState>();
+        let request = state.get_ask_user_request(&request_id).await.ok_or("问题已结束或已失效，请刷新后重试")?;
+        if request.conversation_id != Some(task_conversation_id) {
+            return Err("问题不属于当前任务，未提交答案".into());
+        }
+        let delivered = crate::mcp::builtin_mcp::interaction::resolve_ask_user_question_response(
+            &app_handle, &request_id, answers.clone(), cancelled,
+        ).await?;
+        if !delivered { return Err("原执行已结束，答案未送达".into()); }
+    } else if let Some(call_id) = call_id {
+        if !cancelled {
+            answer_butler_task_question(app_handle.clone(), conversation_id, task_conversation_id, call_id,
+                answers.ok_or("缺少回答内容")?).await?;
+        } else {
+            let _stale_reply_guard = stale_question_reply_guard().await;
+            if !app_handle.state::<InteractionState>().list_requests_for_conversation(task_conversation_id).await.is_empty()
+                || app_handle.state::<ConversationActivityManager>().get_runtime_state(task_conversation_id).await.is_running {
+                return Err("任务仍在运行，请刷新后取消当前问题".into());
+            }
+            let mcp = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+            let call = mcp.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
+            if call.conversation_id != task_conversation_id || call.tool_name != "ask_user_question" {
+                return Err("问题不属于当前任务，未取消".into());
+            }
+            if !matches!(call.status.as_str(), "pending" | "executing") {
+                return Err("问题已结束，请刷新后重试".into());
+            }
+            let params: Value = serde_json::from_str(&call.parameters).map_err(|e| e.to_string())?;
+            let conn = connection(&app_handle).map_err(|e| e.to_string())?;
+            crate::db::butler_question_history::save(&conn, task_conversation_id,
+                crate::db::butler_question_history::AnswerRecord {
+                    key: format!("call:{call_id}"), questions: params["questions"].clone(), metadata: params["metadata"].clone(),
+                    answers: HashMap::new(), cancelled: true, delivery_status: "pending".into(),
+                }).map_err(|e| format!("保存取消记录失败，尚未取消：{e:#}"))?;
+            crate::db::butler_question_history::claim_stale(&mcp.conn, task_conversation_id, call_id, true)
+                .map_err(|e| format!("未取消问题：{e:#}。已保留待核对记录。"))?;
+            crate::db::butler_question_history::finish_delivery(&conn, task_conversation_id, &format!("call:{call_id}"))
+                .map_err(|e| format!("问题已取消，但记录状态未确认，请勿重复提交：{e:#}"))?;
+        }
+    }
+    super::butler_peer::updated(&app_handle);
+    Ok(())
 }

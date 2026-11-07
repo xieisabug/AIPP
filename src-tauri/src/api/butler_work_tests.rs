@@ -45,12 +45,16 @@ fn test_unavailable_quote_is_reported_without_inventing_content() {
 }
 
 #[test]
-fn test_unquoted_turn_lists_recent_work_only_when_ambiguous_and_only_in_butler_chats() {
+fn test_unquoted_turn_provides_single_result_context_without_assuming_intent_and_only_in_butler_chats() {
     let conn = fixture();
     let prefix = turn_context_with(&conn, 20, None).unwrap().prefix.unwrap();
     assert!(prefix.contains("task:41") && prefix.contains("task:42") && prefix.contains("一句话请用户选择"));
     conn.execute("DELETE FROM butler_task_definition WHERE id=2", []).unwrap();
-    assert_eq!(turn_context_with(&conn, 20, None).unwrap(), TurnContext::default(), "只有一项工作时自然承接");
+    let context = turn_context_with(&conn, 20, None).unwrap();
+    let prefix = context.prefix.unwrap();
+    assert!(prefix.contains("task:41") && prefix.contains("周报正文"), "投影的唯一结果需要提供给模型");
+    assert!(prefix.contains("不代表用户这句话一定指它") && prefix.contains("不恢复任何旧权限"));
+    assert!(context.metadata.is_none(), "不能把未引用的消息自动关联成任务回复");
     assert_eq!(turn_context_with(&conn, 50, Some(&WorkQuote { kind: "task".into(), id: 41 })).unwrap(), TurnContext::default());
 }
 
@@ -61,6 +65,38 @@ fn test_quote_prompt_only_offers_continue_work_for_tasks() {
         excerpt: None, task_conversation_id: None, finished: true };
     let text = quote_prompt(&view);
     assert!(!text.contains("调用 `continue_work`") && text.contains("当前会话里基于这项工作继续"));
+    let unquoted = recent_prompt(&[view]).unwrap();
+    assert!(!unquoted.contains("`continue_work`"));
+    assert!(unquoted.contains("不要为普通对话创建独立任务"));
+}
+
+#[test]
+fn test_single_recent_context_is_bounded_and_empty_or_inaccessible_history_is_omitted() {
+    let conn = fixture();
+    conn.execute("DELETE FROM butler_task_definition WHERE id=2", []).unwrap();
+    conn.execute("UPDATE message SET content=?1 WHERE id=2", ["长".repeat(12000)]).unwrap();
+    let prefix = turn_context_with(&conn, 20, None).unwrap().prefix.unwrap();
+    assert!(prefix.contains("已截断") && prefix.chars().count() < 2500);
+    assert!(recent_prompt(&[]).is_none());
+    conn.execute("UPDATE conversation SET assistant_id=3 WHERE id=20", []).unwrap();
+    assert_eq!(turn_context_with(&conn, 20, None).unwrap(), TurnContext::default());
+}
+
+#[test]
+fn test_requoted_message_persists_canonical_task_identity_with_new_message_reference() {
+    let conn = fixture();
+    conn.execute_batch(r#"
+        INSERT INTO message(id,conversation_id,message_type,content,metadata_json) VALUES
+        (100,20,'user','解释一下','{"quote":{"ref":"task:41","kind":"task","id":41}}'),
+        (101,20,'response','解释正文',NULL);
+    "#).unwrap();
+    let context = turn_context_with(&conn, 20, Some(&WorkQuote {kind: "message".into(), id: 101})).unwrap();
+    let prefix = context.prefix.unwrap();
+    assert!(prefix.contains("ref=\"task:41\"") && prefix.contains("解释正文"));
+    let quote = context.metadata.unwrap()["quote"].clone();
+    assert_eq!(quote["ref"], "task:41");
+    assert_eq!(quote["kind"], "message");
+    assert_eq!(quote["id"], 101);
 }
 
 #[test]
