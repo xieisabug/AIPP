@@ -2,6 +2,12 @@
 
 ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互，每个对话运行一个独立的 ACP 进程。
 
+## 统一 Agent 调用
+
+Codex app-server、Claude Code CLI 与 ACP 共用 AIPP 的 Agent 驱动入口，继续使用各自原生协议和已有会话。模型、权限、MCP 与可用配置仍由对应 Agent 决定，不会因为统一入口而假设三种通道支持相同能力。
+
+发送时若会话控制通道已经关闭，当前响应会显示失败并保留错误原因，不会自动新建会话后重新发送。
+
 ---
 
 ## ACP 会话管理

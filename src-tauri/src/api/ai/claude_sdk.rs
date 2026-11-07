@@ -184,6 +184,34 @@ impl ClaudeSessionEntry {
 }
 
 impl ClaudeSessionHandle {
+    #[cfg(test)]
+    pub(crate) fn driver_test_channel() -> (
+        Self,
+        mpsc::UnboundedReceiver<super::agent_driver::session::TestSessionCommand>,
+    ) {
+        use super::agent_driver::session::TestSessionCommand;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (observed, observations) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                let command = match command {
+                    SessionCommand::Cancel { response } => TestSessionCommand::Cancel { response },
+                    SessionCommand::SetConfig { config_id, value, response } => {
+                        TestSessionCommand::SetConfig { config_id, value, response }
+                    }
+                    _ => panic!("unexpected command in driver control test"),
+                };
+                if observed.send(command).is_err() {
+                    break;
+                }
+            }
+        });
+        (Self {
+            sender,
+            run_id: "driver-test-run".into(),
+        }, observations)
+    }
+
     pub fn send_prompt(
         &self,
         message_id: i64,
@@ -665,46 +693,8 @@ pub(crate) fn emit_claude_failure(
     window: &tauri::Window,
     error: &str,
 ) {
-    let content = format!("Claude Code 运行失败：{error}");
-    if let Ok(db) = ConversationDatabase::new(app) {
-        if let Ok(repo) = db.message_repo() {
-            if let Ok(Some(mut message)) = repo.read(message_id) {
-                message.message_type = "error".to_string();
-                message.content = content.clone();
-                message.finish_time = Some(chrono::Utc::now());
-                let _ = repo.update(&message);
-            }
-        }
-    }
-    let _ = window.emit(
-        &format!("conversation_event_{conversation_id}"),
-        ConversationEvent {
-            r#type: "message_update".into(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id,
-                message_type: "error".into(),
-                content,
-                is_done: true,
-                token_count: Some(0),
-                input_token_count: Some(0),
-                output_token_count: Some(0),
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        },
-    );
-    let _ = window.emit(
-        &format!("conversation_event_{conversation_id}"),
-        ConversationEvent {
-            r#type: "stream_complete".into(),
-            data: json!({
-                "conversation_id": conversation_id,
-                "response_message_id": message_id,
-                "has_response": false,
-                "error": error,
-            }),
-        },
+    crate::api::ai::agent_driver::failure::emit_agent_failure(
+        app, conversation_id, message_id, window, error, "Claude Code",
     );
 }
 

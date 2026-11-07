@@ -196,6 +196,35 @@ pub struct CodexSessionHandle {
 }
 
 impl CodexSessionHandle {
+    #[cfg(test)]
+    pub(crate) fn driver_test_channel() -> (
+        Self,
+        mpsc::UnboundedReceiver<super::agent_driver::session::TestSessionCommand>,
+    ) {
+        use super::agent_driver::session::TestSessionCommand;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (observed, observations) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                let command = match command {
+                    CodexSessionCommand::CancelCurrentPrompt { response } => TestSessionCommand::Cancel { response },
+                    CodexSessionCommand::SetConfigOption { config_id, value, response } => {
+                        TestSessionCommand::SetConfig { config_id, value, response }
+                    }
+                    _ => panic!("unexpected command in driver control test"),
+                };
+                if observed.send(command).is_err() {
+                    break;
+                }
+            }
+        });
+        (Self {
+            sender,
+            run_id: "driver-test-run".into(),
+            failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }, observations)
+    }
+
     pub(crate) fn run_id(&self) -> &str {
         &self.run_id
     }
@@ -1545,46 +1574,8 @@ pub(crate) fn emit_codex_failure(
     window: &tauri::Window,
     error: &str,
 ) {
-    let content = format!("Codex 运行失败：{error}");
-    if let Ok(db) = ConversationDatabase::new(app_handle) {
-        if let Ok(repo) = db.message_repo() {
-            if let Ok(Some(mut message)) = repo.read(message_id) {
-                message.message_type = "error".to_string();
-                message.content = content.clone();
-                message.finish_time = Some(chrono::Utc::now());
-                let _ = repo.update(&message);
-            }
-        }
-    }
-    let _ = window.emit(
-        format!("conversation_event_{conversation_id}").as_str(),
-        ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id,
-                message_type: "error".to_string(),
-                content,
-                is_done: true,
-                token_count: Some(0),
-                input_token_count: Some(0),
-                output_token_count: Some(0),
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        },
-    );
-    let _ = window.emit(
-        format!("conversation_event_{conversation_id}").as_str(),
-        ConversationEvent {
-            r#type: "stream_complete".to_string(),
-            data: json!({
-                "conversation_id": conversation_id,
-                "response_message_id": message_id,
-                "has_response": false,
-                "error": error,
-            }),
-        },
+    crate::api::ai::agent_driver::failure::emit_agent_failure(
+        app_handle, conversation_id, message_id, window, error, "Codex",
     );
 }
 

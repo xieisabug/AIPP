@@ -880,6 +880,34 @@ pub struct AcpSessionHandle {
 }
 
 impl AcpSessionHandle {
+    #[cfg(test)]
+    pub(crate) fn driver_test_channel() -> (
+        Self,
+        mpsc::UnboundedReceiver<super::agent_driver::session::TestSessionCommand>,
+    ) {
+        use super::agent_driver::session::TestSessionCommand;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (observed, observations) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                let command = match command {
+                    AcpSessionCommand::CancelCurrentPrompt { response } => TestSessionCommand::Cancel { response },
+                    AcpSessionCommand::SetConfigOption { config_id, value, response } => {
+                        TestSessionCommand::SetConfig { config_id, value, response }
+                    }
+                    _ => panic!("unexpected command in driver control test"),
+                };
+                if observed.send(command).is_err() {
+                    break;
+                }
+            }
+        });
+        (Self {
+            sender,
+            run_id: "driver-test-run".into(),
+        }, observations)
+    }
+
     pub async fn start(&self, window: tauri::Window) -> Result<(), AppError> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -5645,12 +5673,13 @@ pub async fn set_acp_session_config_option(
     config_id: String,
     value: String,
 ) -> Result<(), String> {
+    use crate::api::ai::agent_driver::session::AgentSessionHandle;
     let codex_state = app_handle.state::<crate::CodexSessionState>();
     if let Some(handle) = {
         let sessions = codex_state.sessions.lock().await;
         sessions.get(&conversation_id).map(|entry| entry.handle.clone())
     } {
-        handle.set_config_option(config_id, value).await.map_err(|error| error.to_string())?;
+        AgentSessionHandle::Codex(handle).set_config_option(config_id, value).await.map_err(|error| error.to_string())?;
         return Ok(());
     }
 
@@ -5659,7 +5688,7 @@ pub async fn set_acp_session_config_option(
         let sessions = claude_state.sessions.lock().await;
         sessions.get(&conversation_id).map(|entry| entry.handle.clone())
     } {
-        handle.set_config_option(config_id, value).await.map_err(|error| error.to_string())?;
+        AgentSessionHandle::Claude(handle).set_config_option(config_id, value).await.map_err(|error| error.to_string())?;
         return Ok(());
     }
     let handle = {
@@ -5671,7 +5700,7 @@ pub async fn set_acp_session_config_option(
     }
     .ok_or_else(|| "ACP session not found".to_string())?;
 
-    handle
+    AgentSessionHandle::Acp(handle)
         .set_config_option(config_id, value)
         .await
         .map_err(|error| error.to_string())?;
