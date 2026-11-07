@@ -5,7 +5,7 @@ use super::*;
 
 fn handle_channel(run_id: &str) -> (ClaudeSessionHandle, mpsc::UnboundedReceiver<SessionCommand>) {
     let (sender, receiver) = mpsc::unbounded_channel();
-    (ClaudeSessionHandle { sender, run_id: run_id.into() }, receiver)
+    (ClaudeSessionHandle { sender, cancel_signal: watch::channel(0).0, run_id: run_id.into() }, receiver)
 }
 
 fn entry(id: i64, run_id: &str) -> ClaudeSessionEntry {

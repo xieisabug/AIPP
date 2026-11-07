@@ -6,7 +6,8 @@ use crate::api::ai::acp::{
     AcpPermissionState, AcpPlanEntryPayload,
 };
 use crate::api::operation_api::{
-    emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT,
+    emit_permission_request_event, emit_permission_resolved_event, PermissionResolvedEvent,
+    ACP_PERMISSION_REQUEST_EVENT, ACP_PERMISSION_RESOLVED_EVENT,
 };
 use crate::acp_mcp_bridge::{
     ensure_proxy_server, AcpMcpProxyConfig, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
@@ -30,7 +31,7 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 pub const CODEX_APP_SERVER_API_TYPE: &str = "codex_app_server";
@@ -117,7 +118,7 @@ pub struct AgentActivityEvent {
 }
 
 enum CodexSessionCommand {
-    Prompt { message_id: i64, prompt: String, window: tauri::Window },
+    Prompt { message_id: i64, prompt: String, window: tauri::Window, cancellation_generation: u64 },
     CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
     SetConfigOption { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
     Shutdown { reason: String },
@@ -192,6 +193,7 @@ fn is_tracing_noise(line: &str) -> bool {
 pub struct CodexSessionHandle {
     sender: mpsc::UnboundedSender<CodexSessionCommand>,
     run_id: String,
+    cancellation: watch::Sender<u64>,
     failure_context: std::sync::Arc<std::sync::Mutex<Option<(i64, tauri::Window)>>>,
 }
 
@@ -221,6 +223,7 @@ impl CodexSessionHandle {
         (Self {
             sender,
             run_id: "driver-test-run".into(),
+            cancellation: watch::channel(0).0,
             failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }, observations)
     }
@@ -239,7 +242,7 @@ impl CodexSessionHandle {
             Some((message_id, window.clone()));
         if self
             .sender
-            .send(CodexSessionCommand::Prompt { message_id, prompt, window })
+            .send(CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation: *self.cancellation.borrow() })
             .is_err()
         {
             self.failure_context
@@ -257,6 +260,7 @@ impl CodexSessionHandle {
     }
 
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
+        self.cancellation.send_modify(|generation| *generation = generation.wrapping_add(1));
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(CodexSessionCommand::CancelCurrentPrompt { response: tx })
@@ -605,11 +609,67 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
     }
 }
 
+/// Cancellation generations belong to the prompt at enqueue time, so an idle
+/// Stop cannot cancel a later prompt, and Stop during startup is not lost.
+struct CodexRequestCancellation {
+    signal: watch::Sender<u64>,
+    generation: u64,
+    run_id: String,
+}
+
+impl CodexRequestCancellation {
+    async fn cancelled(&self) {
+        let mut receiver = self.signal.subscribe();
+        loop {
+            if *receiver.borrow_and_update() != self.generation {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+async fn wait_codex_interaction<T>(
+    interaction: impl std::future::Future<Output = Result<T, String>>,
+    cancellation: Option<&CodexRequestCancellation>,
+) -> Result<T, String> {
+    match cancellation {
+        Some(cancellation) => tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err("Codex interaction cancelled by Stop".to_string()),
+            result = interaction => result,
+        },
+        None => interaction.await,
+    }
+}
+
+async fn wait_codex_approval_decision(
+    permission_state: &AcpPermissionState,
+    request_id: &str,
+    decision_rx: oneshot::Receiver<AcpPermissionDecision>,
+    cancellation: Option<&CodexRequestCancellation>,
+) -> (AcpPermissionDecision, bool) {
+    let result = wait_codex_interaction(async {
+        Ok(decision_rx.await.unwrap_or(AcpPermissionDecision::Cancelled))
+    }, cancellation).await;
+    match result {
+        Ok(decision) => (decision, false),
+        Err(_) => {
+            // IDs contain the run identity: never clear another run/conversation.
+            let _ = permission_state.resolve_request(request_id, AcpPermissionDecision::Cancelled).await;
+            (AcpPermissionDecision::Cancelled, true)
+        }
+    }
+}
+
 async fn handle_approval_request(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     stdin: &mut tokio::process::ChildStdin,
     frame: &Value,
+    cancellation: Option<&CodexRequestCancellation>,
 ) -> Result<bool, String> {
     let Some(method) = frame.get("method").and_then(Value::as_str) else {
         return Ok(false);
@@ -629,7 +689,10 @@ async fn handle_approval_request(
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let request_id = format!("codex:{conversation_id}:{}", rpc_id_key(&rpc_id));
+    let request_id = match cancellation {
+        Some(context) => format!("codex:{conversation_id}:{}:{}", context.run_id, rpc_id_key(&rpc_id)),
+        None => format!("codex:{conversation_id}:{}", rpc_id_key(&rpc_id)),
+    };
     let title = params
         .get("command")
         .and_then(Value::as_str)
@@ -665,9 +728,15 @@ async fn handle_approval_request(
         permission_state.remove_request(&request_id).await;
         return Err(error);
     }
-    let decision = decision_rx
-        .await
-        .unwrap_or(AcpPermissionDecision::Cancelled);
+    let (decision, cancelled_by_control) = wait_codex_approval_decision(
+        &permission_state, &request_id, decision_rx, cancellation,
+    ).await;
+    if cancelled_by_control {
+        let _ = emit_permission_resolved_event(
+            app_handle, ACP_PERMISSION_RESOLVED_EVENT,
+            &PermissionResolvedEvent { request_id, conversation_id: Some(conversation_id) },
+        );
+    }
     let result = codex_approval_response(method, &params, decision);
     write_frame(stdin, &json!({"jsonrpc":"2.0","id":rpc_id,"result":result})).await?;
     Ok(true)
@@ -774,28 +843,8 @@ pub async fn probe_codex_model_options(
         let (_child, mut stdin, mut lines) =
             spawn_process(config, stderr_buffer.clone()).await?;
         let mut pending_notifications = VecDeque::new();
-        write_frame(
-            &mut stdin,
-            &json_rpc_request(
-                1,
-                "initialize",
-                json!({
-                    "clientInfo":{"name":"aipp-model-probe","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
-                    "capabilities":{"experimentalApi":true}
-                }),
-            ),
-        )
-        .await?;
-        read_rpc_response_with_approvals(
-            app_handle,
-            -1,
-            &mut stdin,
-            &mut lines,
-            1,
-            &mut pending_notifications,
-        )
-        .await?;
-        write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
+        let requests = DesktopCodexServerRequests { app_handle, conversation_id: -1, cancellation: None };
+        initialize_codex_transport(&requests, -1, "aipp-model-probe", &mut stdin, &mut lines, &mut pending_notifications).await?;
         write_frame(
             &mut stdin,
             &json_rpc_request(
@@ -815,6 +864,7 @@ pub async fn probe_codex_model_options(
             &mut lines,
             2,
             &mut pending_notifications,
+            None,
         )
         .await
         .map_err(|error| format!("Codex config/read 失败：{error}"))?;
@@ -828,6 +878,7 @@ pub async fn probe_codex_model_options(
             &mut lines,
             3,
             &mut pending_notifications,
+            None,
         )
         .await
         .map_err(|error| format!("Codex model/list 失败：{error}"))?;
@@ -1235,8 +1286,9 @@ async fn handle_server_request(
     conversation_id: i64,
     stdin: &mut tokio::process::ChildStdin,
     frame: &Value,
+    cancellation: Option<&CodexRequestCancellation>,
 ) -> Result<bool, String> {
-    if handle_approval_request(app_handle, conversation_id, stdin, frame).await? {
+    if handle_approval_request(app_handle, conversation_id, stdin, frame, cancellation).await? {
         return Ok(true);
     }
     if frame.get("method").and_then(Value::as_str) != Some("item/tool/requestUserInput") {
@@ -1246,13 +1298,14 @@ async fn handle_server_request(
     let params = frame.get("params").cloned().unwrap_or(Value::Null);
     let (request, mappings) = codex_user_input_request(&params)?;
     let interaction_state = app_handle.state::<InteractionState>();
-    let result = match request_ask_user_question(
+    // Dropping the request future invokes its existing exact-request cleanup
+    // guard; do not clear all conversation questions or consume control commands.
+    let result = match wait_codex_interaction(request_ask_user_question(
         app_handle,
         &interaction_state,
         Some(conversation_id),
         request,
-    )
-    .await
+    ), cancellation).await
     {
         Ok(answers) => codex_user_input_response(&mappings, &answers),
         Err(error) => {
@@ -1278,8 +1331,42 @@ async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> R
         .map_err(|error| format!("刷新 Codex app-server stdin 失败：{error}"))
 }
 
+/// Only the desktop interaction boundary is substituted in protocol tests.
+/// The JSON-RPC reader, handshake and native thread RPCs below are shared with
+/// run_session; tests do not implement a second driver/session loop.
+#[async_trait::async_trait]
+trait CodexServerRequests: Sync {
+    async fn handle(&self, stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<bool, String>;
+}
+
+struct DesktopCodexServerRequests<'a> {
+    app_handle: &'a tauri::AppHandle,
+    conversation_id: i64,
+    cancellation: Option<&'a CodexRequestCancellation>,
+}
+
+#[async_trait::async_trait]
+impl CodexServerRequests for DesktopCodexServerRequests<'_> {
+    async fn handle(&self, stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<bool, String> {
+        handle_server_request(self.app_handle, self.conversation_id, stdin, frame, self.cancellation).await
+    }
+}
+
 async fn read_rpc_response_with_approvals(
     app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    expected_id: u64,
+    pending_notifications: &mut VecDeque<Value>,
+    cancellation: Option<&CodexRequestCancellation>,
+) -> Result<Value, String> {
+    let requests = DesktopCodexServerRequests { app_handle, conversation_id, cancellation };
+    read_codex_rpc_response(&requests, conversation_id, stdin, lines, expected_id, pending_notifications).await
+}
+
+async fn read_codex_rpc_response(
+    requests: &impl CodexServerRequests,
     conversation_id: i64,
     stdin: &mut tokio::process::ChildStdin,
     lines: &mut Lines<BufReader<ChildStdout>>,
@@ -1294,7 +1381,7 @@ async fn read_rpc_response_with_approvals(
         let frame: Value = serde_json::from_str(&line)
             .map_err(|error| format!("Invalid Codex app-server JSON: {error}: {line}"))?;
         if frame.get("method").is_some() && frame.get("id").is_some() {
-            if !handle_server_request(app_handle, conversation_id, stdin, &frame).await? {
+            if !requests.handle(stdin, &frame).await? {
                 warn!(
                     conversation_id,
                     method = frame.get("method").and_then(|value| value.as_str()).unwrap_or("unknown"),
@@ -1325,6 +1412,78 @@ async fn read_rpc_response_with_approvals(
     Err(format!(
         "Codex app-server stdout 在等待 JSON-RPC 响应 id={expected_id} 时关闭；进程未返回 JSON-RPC error，底层原因只能从附带的 Codex stderr 诊断"
     ))
+}
+
+async fn initialize_codex_transport(
+    requests: &impl CodexServerRequests,
+    conversation_id: i64,
+    client_name: &str,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    pending_notifications: &mut VecDeque<Value>,
+) -> Result<(), String> {
+    write_frame(stdin, &json_rpc_request(1, "initialize", json!({
+        "clientInfo":{"name":client_name,"title":"AIPP","version":env!("CARGO_PKG_VERSION")},
+        "capabilities":{"experimentalApi":true}
+    }))).await?;
+    read_codex_rpc_response(requests, conversation_id, stdin, lines, 1, pending_notifications).await?;
+    write_frame(stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await
+}
+
+async fn open_codex_thread(
+    requests: &impl CodexServerRequests,
+    conversation_id: i64,
+    config: &CodexAppServerConfig,
+    stored_thread: Option<&str>,
+    mcp_config_overrides: Option<serde_json::Map<String, Value>>,
+    request_id: u64,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    pending_notifications: &mut VecDeque<Value>,
+) -> Result<Value, String> {
+    let (method, params) = if let Some(thread_id) = stored_thread {
+        ("thread/resume", json!({
+            "threadId": thread_id,
+            "approvalPolicy": config.approval_policy,
+            "sandbox": config.sandbox,
+            "approvalsReviewer": config.approvals_reviewer,
+            "config": mcp_config_overrides,
+        }))
+    } else {
+        ("thread/start", json!({
+            "model": config.model,
+            "reasoningEffort": config.reasoning_effort,
+            "cwd": config.working_directory,
+            "approvalPolicy": config.approval_policy,
+            "sandbox": config.sandbox,
+            "approvalsReviewer": config.approvals_reviewer,
+            "config": mcp_config_overrides,
+        }))
+    };
+    write_frame(stdin, &json_rpc_request(request_id, method, params)).await?;
+    read_codex_rpc_response(requests, conversation_id, stdin, lines, request_id, pending_notifications)
+        .await.map_err(|error| {
+            if stored_thread.is_some() {
+                format!("Codex thread 恢复失败：{error}")
+            } else {
+                format!("Codex thread 启动失败：{error}")
+            }
+        })
+}
+
+/// Reject only explicitly foreign identities. Some legitimate session-wide or
+/// older-protocol notifications have no turn/thread ID and remain supported.
+fn codex_notification_matches_turn(frame: &Value, thread_id: &str, turn_id: Option<&str>) -> bool {
+    let params = &frame["params"];
+    if params.get("threadId").and_then(Value::as_str).is_some_and(|id| id != thread_id) {
+        return false;
+    }
+    let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
+    let event_turn_id = params.get("turnId").and_then(Value::as_str).or_else(|| {
+        matches!(method, "turn/started" | "turn/completed")
+            .then(|| params.pointer("/turn/id").and_then(Value::as_str)).flatten()
+    });
+    !matches!((turn_id, event_turn_id), (Some(active), Some(event)) if active != event)
 }
 
 fn thread_id_from_result(result: &Value) -> Option<String> {
@@ -1773,6 +1932,8 @@ pub fn spawn_codex_session_task(
 ) -> CodexSessionHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
     let run_id = uuid::Uuid::new_v4().to_string();
+    let cancellation = watch::channel(0).0;
+    let task_cancellation = cancellation.clone();
     let failure_context = std::sync::Arc::new(std::sync::Mutex::new(None));
     let task_failure_context = failure_context.clone();
     let task_run_id = run_id.clone();
@@ -1786,6 +1947,7 @@ pub fn spawn_codex_session_task(
             task_failure_context.clone(),
             &task_run_id,
             stderr_buffer.clone(),
+            task_cancellation,
         )
         .await;
         let failed_prompt = {
@@ -1831,7 +1993,7 @@ pub fn spawn_codex_session_task(
             emit_session_snapshot(&app_handle, conversation_id, None).await;
         }
     });
-    CodexSessionHandle { sender, run_id, failure_context }
+    CodexSessionHandle { sender, run_id, cancellation, failure_context }
 }
 
 async fn run_session(
@@ -1842,31 +2004,17 @@ async fn run_session(
     failure_context: std::sync::Arc<std::sync::Mutex<Option<(i64, tauri::Window)>>>,
     run_id: &str,
     stderr_buffer: CodexStderrBuffer,
+    cancellation: watch::Sender<u64>,
 ) -> Result<(), String> {
+    let mut request_cancellation = CodexRequestCancellation {
+        signal: cancellation, generation: 0, run_id: run_id.to_string(),
+    };
     let (_child, mut stdin, mut lines) = spawn_process(&config, stderr_buffer).await?;
     let mut pending_notifications = VecDeque::new();
-    write_frame(
-        &mut stdin,
-        &json_rpc_request(
-            1,
-            "initialize",
-            json!({
-                "clientInfo":{"name":"aipp","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
-                "capabilities":{"experimentalApi":true}
-            }),
-        ),
-    )
-    .await?;
-    read_rpc_response_with_approvals(
-        &app_handle,
-        conversation_id,
-        &mut stdin,
-        &mut lines,
-        1,
-        &mut pending_notifications,
-    )
-    .await?;
-    write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
+    let requests = DesktopCodexServerRequests {
+        app_handle: &app_handle, conversation_id, cancellation: Some(&request_cancellation),
+    };
+    initialize_codex_transport(&requests, conversation_id, "aipp", &mut stdin, &mut lines, &mut pending_notifications).await?;
 
     let stored_thread = ConversationDatabase::new(&app_handle)
         .ok()
@@ -1879,44 +2027,10 @@ async fn run_session(
     let mcp_config_overrides = codex_mcp_bridge_overrides(&app_handle, conversation_id, &config)
         .await
         .map_err(|error| format!("Codex MCP bridge 初始化失败：{error}"))?;
-    let thread_params = json!({
-        "model": config.model,
-        "reasoningEffort": config.reasoning_effort,
-        "cwd": config.working_directory,
-        "approvalPolicy": config.approval_policy,
-        "sandbox": config.sandbox,
-        "approvalsReviewer": config.approvals_reviewer,
-        "config": mcp_config_overrides.clone(),
-    });
-    let (thread_method, params) = if let Some(thread_id) = stored_thread.as_deref() {
-        // thread/resume 也支持 approvalPolicy/sandbox 覆盖，否则恢复历史线程时新配置不生效
-        ("thread/resume", json!({
-            "threadId": thread_id,
-            "approvalPolicy": config.approval_policy,
-            "sandbox": config.sandbox,
-            "approvalsReviewer": config.approvals_reviewer,
-            "config": mcp_config_overrides,
-        }))
-    } else {
-        ("thread/start", thread_params.clone())
-    };
-    write_frame(&mut stdin, &json_rpc_request(request_id, thread_method, params)).await?;
-    let thread_result = read_rpc_response_with_approvals(
-        &app_handle,
-        conversation_id,
-        &mut stdin,
-        &mut lines,
-        request_id,
-        &mut pending_notifications,
-    )
-    .await
-        .map_err(|error| {
-            if stored_thread.is_some() {
-                format!("Codex thread 恢复失败：{error}")
-            } else {
-                format!("Codex thread 启动失败：{error}")
-            }
-        })?;
+    let thread_result = open_codex_thread(
+        &requests, conversation_id, &config, stored_thread.as_deref(), mcp_config_overrides,
+        request_id, &mut stdin, &mut lines, &mut pending_notifications,
+    ).await?;
     let restored_session_method = stored_thread.as_ref().map(|_| "resume".to_string());
     let connection_event_id = restored_session_method
         .as_ref()
@@ -1927,7 +2041,7 @@ async fn run_session(
     let (model_catalog, supported_efforts) = {
         write_frame(&mut stdin, &json_rpc_request(request_id, "model/list", json!({}))).await?;
         let result = read_rpc_response_with_approvals(
-            &app_handle, conversation_id, &mut stdin, &mut lines, request_id, &mut pending_notifications,
+            &app_handle, conversation_id, &mut stdin, &mut lines, request_id, &mut pending_notifications, Some(&request_cancellation),
         ).await.map_err(|error| format!("Codex model/list 失败：{error}"))?;
         let catalog = model_catalog(&result);
         if catalog.is_empty() {
@@ -1952,6 +2066,7 @@ async fn run_session(
         &mut lines,
         request_id,
         &mut pending_notifications,
+        Some(&request_cancellation),
     )
     .await
     .map_err(|error| format!("Codex collaborationMode/list 失败：{error}"))?;
@@ -2081,7 +2196,8 @@ async fn run_session(
                 info!(conversation_id, run_id, reason, "Codex session shutdown requested");
                 return Ok(());
             }
-            CodexSessionCommand::Prompt { message_id, prompt, window } => {
+            CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation } => {
+                request_cancellation.generation = cancellation_generation;
                 let turn_start_time = chrono::Utc::now();
                 request_id += 1;
                 write_frame(
@@ -2100,6 +2216,7 @@ async fn run_session(
                     &mut lines,
                     request_id,
                     &mut pending_notifications,
+                    Some(&request_cancellation),
                 )
                 .await?;
                 let mut turn_id = turn_result
@@ -2181,6 +2298,7 @@ async fn run_session(
                             conversation_id,
                             &mut stdin,
                             &frame,
+                            Some(&request_cancellation),
                         )
                         .await? {
                             warn!(
@@ -2198,6 +2316,10 @@ async fn run_session(
                             )
                             .await?;
                         }
+                        continue;
+                    }
+                    if !codex_notification_matches_turn(&frame, &thread_id, turn_id.as_deref()) {
+                        debug!(conversation_id, thread_id, turn_id = ?turn_id, "Ignoring Codex notification for another thread or turn");
                         continue;
                     }
                     let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
@@ -2546,6 +2668,7 @@ mod tests {
         let handle = CodexSessionHandle {
             sender,
             run_id: "old-run".to_string(),
+            cancellation: watch::channel(0).0,
             failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         handle.shutdown("auto-connect attempted replacement".to_string());
@@ -3062,3 +3185,7 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "codex_app_server_permission_tests.rs"]
 mod permission_tests;
+
+#[cfg(all(test, unix))]
+#[path = "codex_app_server_protocol_tests.rs"]
+mod protocol_tests;

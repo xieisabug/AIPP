@@ -3971,16 +3971,7 @@ impl AcpTauriClient {
             );
         }
 
-        match rx.await {
-            Ok(AcpPermissionDecision::Selected(option_id)) => {
-                Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Selected(
-                    acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id)),
-                )))
-            }
-            Ok(AcpPermissionDecision::Cancelled) | Err(_) => {
-                Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled))
-            }
-        }
+        Ok(wait_for_acp_permission_decision(rx).await)
     }
 
     /// ACP elicitation（结构化提问）：仅支持 form 模式 + session 作用域。
@@ -4274,13 +4265,40 @@ impl AcpTauriClient {
         Fut: std::future::Future<Output = acp::Result<Resp>> + Send + 'static,
     {
         let client = self.clone();
-        cx.spawn(async move {
-            match handler(client, request).await {
-                Ok(response) => responder.respond(response),
-                Err(error) => responder.respond_with_error(error),
-            }
-        })
+        spawn_acp_request_task(cx, responder, async move { handler(client, request).await })
     }
+}
+
+/// Keep long-running client requests outside the SDK dispatch loop. This is
+/// shared by every production request handler, including permission prompts.
+fn spawn_acp_request_task<Resp, Fut>(
+    cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    responder: agent_client_protocol::Responder<Resp>,
+    handler: Fut,
+) -> acp::Result<()>
+where
+    Resp: agent_client_protocol::JsonRpcResponse,
+    Fut: std::future::Future<Output = acp::Result<Resp>> + Send + 'static,
+{
+    cx.spawn(async move {
+        match handler.await {
+            Ok(response) => responder.respond(response),
+            Err(error) => responder.respond_with_error(error),
+        }
+    })
+}
+
+/// Preserve the protocol's fail-closed outcome when an approval waiter closes.
+async fn wait_for_acp_permission_decision(
+    receiver: oneshot::Receiver<AcpPermissionDecision>,
+) -> acp::RequestPermissionResponse {
+    let outcome = match receiver.await {
+        Ok(AcpPermissionDecision::Selected(option_id)) => acp::RequestPermissionOutcome::Selected(
+            acp::SelectedPermissionOutcome::new(acp::PermissionOptionId::new(option_id)),
+        ),
+        Ok(AcpPermissionDecision::Cancelled) | Err(_) => acp::RequestPermissionOutcome::Cancelled,
+    };
+    acp::RequestPermissionResponse::new(outcome)
 }
 
 /// 注册一个 agent→client 请求处理器，实际处理通过 `AcpTauriClient::spawn_request_task`
@@ -6842,3 +6860,7 @@ mod acp_permission_tests;
 #[cfg(test)]
 #[path = "acp_session_tests.rs"]
 mod acp_session_tests;
+
+#[cfg(test)]
+#[path = "acp_protocol_tests.rs"]
+mod acp_protocol_tests;

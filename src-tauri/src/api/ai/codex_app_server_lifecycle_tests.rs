@@ -5,7 +5,7 @@ use super::*;
 
 fn handle_channel(run_id: &str) -> (CodexSessionHandle, mpsc::UnboundedReceiver<CodexSessionCommand>) {
     let (sender, receiver) = mpsc::unbounded_channel();
-    (CodexSessionHandle { sender, run_id: run_id.into(), failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)) }, receiver)
+    (CodexSessionHandle { sender, cancellation: watch::channel(0).0, run_id: run_id.into(), failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)) }, receiver)
 }
 
 fn entry(id: i64, run_id: &str) -> CodexSessionEntry {

@@ -2,9 +2,9 @@
 //! Session ownership, persistence, events and protocol implementations stay in the
 //! existing native adapters. There is deliberately no second process/session pool.
 use super::session::{AgentSessionHandle, AgentSessionKind};
-use crate::api::ai::acp::{AcpConfig, apply_network_proxy_to_env_vars, build_selected_mcp_tools_payload, extract_acp_config, refresh_acp_config_signature, refresh_acp_selected_mcp_tools_payload, spawn_agent_idle_reaper_once, spawn_acp_session_task};
+use crate::api::ai::acp::{AcpConfig, AcpSessionConfigChoicePayload, apply_network_proxy_to_env_vars, build_selected_mcp_tools_payload, extract_acp_config, refresh_acp_config_signature, spawn_agent_idle_reaper_once, spawn_acp_session_task};
 use crate::api::ai::codex_app_server::{CodexAppServerConfig, extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task, CodexSessionEntry, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES};
-use crate::api::ai::claude_sdk::{ClaudeSdkConfig, claude_model_choices, extract_claude_sdk_config, is_claude_code_provider, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry};
+use crate::api::ai::claude_sdk::{ClaudeSdkConfig, claude_model_choices, extract_claude_sdk_config, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry};
 use crate::api::ai::config::get_network_proxy_from_config;
 use crate::api::ai::events::ConversationEvent;
 use crate::api::ai::types::AiResponse;
@@ -12,7 +12,7 @@ use crate::api::ai_api::parse_agent_model_override;
 use crate::api::assistant_api::{AssistantDetail, resolve_acp_provider_id, CLAUDE_CODE_DEFAULT_MODEL};
 use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment, Repository};
 use super::dispatch::{dispatch_prepared, response_message, provider_name, TurnEffects, TurnInput};
-use crate::db::llm_db::LLMDatabase;
+use crate::db::llm_db::{LLMDatabase, LLMProviderConfig};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
 use crate::state::activity_state::ConversationActivityManager;
@@ -38,7 +38,6 @@ async fn prepare_config(
 ) -> Result<PreparedAgentSession, AppError> {
     let assistant_detail = request.assistant;
     let conversation_id = request.conversation_id;
-    let override_model_config = request.overrides;
     info!("Agent assistant detected (type=4), preparing native driver");
 
     // 移动端不支持本机 CLI Agent；禁止静默换模型/通道
@@ -50,29 +49,10 @@ async fn prepare_config(
         ));
     }
 
-    // 获取 provider 配置
-    // ACP 配置可能在 llm_provider_config 表中（如 acp_cli_command）
-    let agent_provider_id = resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs);
-    let override_provider_id = request
-        .override_model_id
-        .as_deref()
-        .and_then(parse_agent_model_override)
-        .map(|(_, provider_id)| provider_id);
-    let routing_provider_id = override_provider_id.or(agent_provider_id);
-    if let Some(provider_id) = override_provider_id {
-        info!(
-            default_provider_id = ?agent_provider_id,
-            override_provider_id = provider_id,
-            "Agent model override selects provider for routing"
-        );
-    }
-    let (provider_api_type, provider_configs) = if let Some(provider_id) = routing_provider_id {
-        debug!("ACP: Getting provider config for provider_id={}", provider_id);
-
+    let selected = load_agent_provider(assistant_detail, request.override_model_id.as_deref(), |provider_id| {
         let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
             AppError::UnknownError(format!("Failed to open LLM database: {}", e))
         })?;
-
         let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
             rusqlite::Error::QueryReturnedNoRows => AppError::UnknownError(format!(
                 "Agent 助手 {} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商",
@@ -80,34 +60,111 @@ async fn prepare_config(
             )),
             other => AppError::from(other),
         })?;
-        let configs = llm_db
-            .get_llm_provider_config(provider_id)
-            .map_err(AppError::from)?;
-        (provider.api_type, configs)
+        let configs = llm_db.get_llm_provider_config(provider_id).map_err(AppError::from)?;
+        Ok((provider.api_type, configs))
+    })?;
+    let model_choices = if selected.kind == AgentSessionKind::Claude {
+        let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
+        claude_model_choices(
+            &llm_db.get_llm_models(selected.provider_id.to_string())
+                .map_err(|e| AppError::UnknownError(e.to_string()))?,
+        )
     } else {
-        return Err(AppError::UnknownError(
-            "Agent 助手尚未配置模型提供商".to_string(),
-        ));
+        Vec::new()
     };
+    let mut prepared = prepare_selected_config(request, &selected, model_choices)?;
+    let selected_mcp_tools_payload = build_selected_mcp_tools_payload(
+        &app_handle, assistant_detail.assistant.id, Some(conversation_id),
+    ).map_err(AppError::UnknownError)?;
+    prepared.finalize_mcp_tools(selected_mcp_tools_payload);
+    if let PreparedAgentSession::Claude(config) = &mut prepared {
+        prepare_claude_mcp_bridge(&app_handle, conversation_id, config)
+            .await
+            .map_err(|error| AppError::UnknownError(format!("Claude Code MCP bridge 初始化失败：{error}")))?;
+        info!(
+            conversation_id,
+            provider_id = selected.provider_id,
+            model = ?config.model,
+            cli = %config.cli_command,
+            "Claude Code provider selected; starting stream-json session"
+        );
+    }
+    Ok(prepared)
+}
 
-    let driver = AgentSessionKind::from_provider(&provider_api_type, &provider_configs)?;
+struct SelectedAgentProvider {
+    provider_id: i64,
+    kind: AgentSessionKind,
+    model_override: Option<String>,
+    configs: Vec<LLMProviderConfig>,
+}
 
+/// Validate the explicit selection before opening the provider database. A
+/// nonblank malformed override must never become a request for the assistant's
+/// default. Blank values retain the existing no-override compatibility behavior.
+fn load_agent_provider(
+    assistant: &AssistantDetail,
+    override_model_id: Option<&str>,
+    load: impl FnOnce(i64) -> Result<(String, Vec<LLMProviderConfig>), AppError>,
+) -> Result<SelectedAgentProvider, AppError> {
+    let model_override = override_model_id
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| parse_agent_model_override(value).ok_or_else(|| {
+            AppError::UnknownError(format!(
+                "Agent 所选模型 ID「{value}」格式无效，预期为 model%%provider_id 且提供商 ID 必须大于 0；请重新选择模型，未回退到默认配置"
+            ))
+        }))
+        .transpose()?;
+    let default_provider_id = resolve_acp_provider_id(&assistant.model, &assistant.model_configs);
+    let provider_id = model_override.map(|(_, id)| id).or(default_provider_id)
+        .ok_or_else(|| AppError::UnknownError("Agent 助手尚未配置模型提供商".to_string()))?;
+    if model_override.is_some() {
+        info!(
+            default_provider_id = ?default_provider_id,
+            override_provider_id = provider_id,
+            "Agent model override selects provider for routing"
+        );
+    }
+    let (api_type, configs) = load(provider_id)?;
+    let kind = AgentSessionKind::from_provider(&api_type, &configs)?;
+    // Preserve the existing Claude requirement for a configured assistant.
+    if kind == AgentSessionKind::Claude && default_provider_id.is_none() {
+        return Err(AppError::UnknownError("Claude Code 助手没有配置模型提供商".to_string()));
+    }
     debug!(
-        provider_api_type = %provider_api_type,
-        config_names = ?provider_configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
+        provider_id,
+        provider_api_type = %api_type,
+        config_names = ?configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
         "Agent provider configuration loaded"
     );
+    Ok(SelectedAgentProvider {
+        provider_id, kind, model_override: model_override.map(|(model, _)| model.to_string()), configs,
+    })
+}
+
+/// The production preparation boundary after provider reads and before MCP or
+/// actor I/O. Uses the native extractors, not a parallel test implementation.
+fn prepare_selected_config(
+    request: &AgentTurnRequest<'_>,
+    selected: &SelectedAgentProvider,
+    model_choices: Vec<AcpSessionConfigChoicePayload>,
+) -> Result<PreparedAgentSession, AppError> {
+    let assistant_detail = request.assistant;
+    let conversation_id = request.conversation_id;
+    let override_model_config = request.overrides;
+    let provider_configs = &selected.configs;
+    let driver = selected.kind;
 
     if driver == AgentSessionKind::Codex {
         info!(conversation_id, "Codex app-server provider detected");
         let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
         let mut codex_config = extract_codex_app_server_config(
             &assistant_detail.model_configs,
-            &provider_configs,
+            provider_configs,
             model_code,
         )?;
-        if let Some((model, _)) = request.override_model_id.as_deref().and_then(parse_agent_model_override) {
-            codex_config.model = Some(model.to_string());
+        if let Some(model) = &selected.model_override {
+            codex_config.model = Some(model.clone());
         }
         if let Some(config) = override_model_config.as_ref() {
             if let Some(effort) = config.get("reasoning_effort").and_then(|value| value.as_str()) { codex_config.reasoning_effort = Some(effort.to_string()); }
@@ -125,47 +182,15 @@ async fn prepare_config(
                 codex_config.collaboration_mode = Some(mode.to_string());
             }
         }
-        // 与 ACP 通道一致：挂载助手绑定的 MCP 工具（桥接注入），payload 计入签名
-        codex_config.selected_mcp_tools_payload =
-            build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id, Some(conversation_id))
-                .map_err(AppError::UnknownError)?;
-        refresh_codex_session_signature(&mut codex_config);
         return Ok(PreparedAgentSession::Codex(codex_config));
     }
 
     if driver == AgentSessionKind::Claude {
         info!(conversation_id, "Entering Claude Code stream-json provider branch");
-        let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
         let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
-        let default_provider_id = agent_provider_id.ok_or_else(|| {
-            AppError::UnknownError("Claude Code 助手没有配置模型提供商".to_string())
-        })?;
-        let selected_provider_id = request.override_model_id.as_deref()
-            .and_then(parse_agent_model_override)
-            .map(|(_, provider_id)| provider_id)
-            .unwrap_or(default_provider_id);
-        let selected_provider_configs = llm_db.get_llm_provider_config(selected_provider_id).map_err(AppError::from)?;
-        let selected_provider = llm_db.get_llm_provider(selected_provider_id).map_err(AppError::from)?;
-        if !is_claude_code_provider(&selected_provider.api_type, &selected_provider_configs) {
-            return Err(AppError::UnknownError("Claude Code 只能使用 Claude Code 默认配置或 Anthropic Provider".into()));
-        }
-        debug!(
-            provider_id = selected_provider_id,
-            config_names = ?selected_provider_configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
-            "Loaded Claude Code provider configs"
-        );
-        let model_choices = claude_model_choices(
-            &llm_db.get_llm_models(selected_provider_id.to_string()).map_err(|e| AppError::UnknownError(e.to_string()))?,
-        );
-        let selected_model = request.override_model_id.as_deref()
-            .and_then(parse_agent_model_override)
-            .map(|(model, _)| model.to_string())
-            .or(model_code);
+        let selected_model = selected.model_override.clone().or(model_code);
         let selected_model = selected_model.filter(|model| model != CLAUDE_CODE_DEFAULT_MODEL);
-        let mut config = extract_claude_sdk_config(&assistant_detail.model_configs, &selected_provider_configs, selected_model, model_choices)?;
-        if let Some((model, _)) = request.override_model_id.as_deref().and_then(parse_agent_model_override) {
-            config.model = (model != CLAUDE_CODE_DEFAULT_MODEL).then(|| model.to_string());
-        }
+        let mut config = extract_claude_sdk_config(&assistant_detail.model_configs, provider_configs, selected_model, model_choices)?;
         if let Some(overrides) = override_model_config.as_ref() {
             if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
             if let Some(mode) = overrides.get("permission_mode").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
@@ -173,20 +198,6 @@ async fn prepare_config(
                 config.permission_mode = Some(mode.to_string());
             }
         }
-        config.selected_mcp_tools_payload =
-            build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id, Some(conversation_id))
-                .map_err(AppError::UnknownError)?;
-        refresh_claude_session_signature(&mut config);
-        prepare_claude_mcp_bridge(&app_handle, conversation_id, &mut config)
-            .await
-            .map_err(|error| AppError::UnknownError(format!("Claude Code MCP bridge 初始化失败：{error}")))?;
-        info!(
-            conversation_id,
-            provider_id = selected_provider_id,
-            model = ?config.model,
-            cli = %config.cli_command,
-            "Claude Code provider selected; starting stream-json session"
-        );
         return Ok(PreparedAgentSession::Claude(config));
     }
 
@@ -199,12 +210,8 @@ async fn prepare_config(
     let network_proxy =
         proxy_enabled.then(|| get_network_proxy_from_config(request.feature_configs)).flatten();
     let mut acp_config =
-        extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
-    acp_config.model = request
-        .override_model_id
-        .as_deref()
-        .and_then(parse_agent_model_override)
-        .map(|(model, _)| model.to_string())
+        extract_acp_config(&assistant_detail.model_configs, provider_configs)?;
+    acp_config.model = selected.model_override.clone()
         .or_else(|| {
             assistant_detail
                 .model
@@ -231,14 +238,6 @@ async fn prepare_config(
             "ACP proxy env vars applied"
         );
     }
-    refresh_acp_selected_mcp_tools_payload(
-        &app_handle,
-        assistant_detail.assistant.id,
-        Some(conversation_id),
-        &mut acp_config,
-    )
-    .map_err(AppError::UnknownError)?;
-    refresh_acp_config_signature(&mut acp_config);
     info!(
         "ACP config: cli_command={}, working_directory={}, env_vars={}, additional_args={}",
         acp_config.cli_command,
@@ -262,6 +261,25 @@ impl PreparedAgentSession {
             Self::Codex(_) => AgentSessionKind::Codex,
             Self::Claude(_) => AgentSessionKind::Claude,
             Self::Acp(_) => AgentSessionKind::Acp,
+        }
+    }
+
+    /// MCP selection is part of native actor reuse identity. Refresh only after
+    /// all turn overrides and the current tool payload have been applied.
+    fn finalize_mcp_tools(&mut self, payload: String) {
+        match self {
+            Self::Codex(config) => {
+                config.selected_mcp_tools_payload = payload;
+                refresh_codex_session_signature(config);
+            }
+            Self::Claude(config) => {
+                config.selected_mcp_tools_payload = payload;
+                refresh_claude_session_signature(config);
+            }
+            Self::Acp(config) => {
+                config.selected_mcp_tools_payload = payload;
+                refresh_acp_config_signature(config);
+            }
         }
     }
 
@@ -413,3 +431,7 @@ impl TurnEffects for DesktopTurnEffects {
             .clear_focus(&self.app_handle, conversation_id).await;
     }
 }
+
+#[cfg(test)]
+#[path = "turn_tests.rs"]
+mod tests;

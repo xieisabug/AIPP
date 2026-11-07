@@ -122,19 +122,20 @@ async fn test_driver_cancel_delegates_and_preserves_native_error() {
 async fn test_driver_config_forwards_exact_values_and_preserves_result() {
     for kind in [AgentSessionKind::Acp, AgentSessionKind::Codex, AgentSessionKind::Claude] {
         let (handle, mut receiver) = control_fixture(kind);
+        for (config_id, value) in [("model", "configured-model"), ("vendor/opaque-option", ""), ("future-config", " exact value ")] {
         for native_result in [Ok(()), Err("unsupported native model selection".to_string())] {
             let expected_result = native_result.clone();
             let operation = async {
                 let (result, ()) = tokio::join!(
-                    handle.set_config_option("model".into(), "configured-model".into()),
+                    handle.set_config_option(config_id.into(), value.into()),
                     async {
-                        let Some(TestSessionCommand::SetConfig { config_id, value, response }) =
+                        let Some(TestSessionCommand::SetConfig { config_id: actual_id, value: actual_value, response }) =
                             receiver.recv().await
                         else {
                             panic!("expected config command");
                         };
-                        assert_eq!(config_id, "model");
-                        assert_eq!(value, "configured-model");
+                        assert_eq!(actual_id, config_id);
+                        assert_eq!(actual_value, value);
                         response.send(native_result).unwrap();
                     }
                 );
@@ -146,6 +147,7 @@ async fn test_driver_config_forwards_exact_values_and_preserves_result() {
                 assert!(receiver.try_recv().is_err());
             };
             tokio::time::timeout(std::time::Duration::from_secs(2), operation).await.unwrap();
+        }
         }
     }
 }

@@ -2,7 +2,33 @@
 
 本轮按场景参考 t3code，不按测试数量宣称等价。参考版本固定为 [`d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4`](https://github.com/pingdotgg/t3code/tree/d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4)。没有复制上游代码。
 
-## 新增覆盖
+## 范围与统计口径
+
+本次按用户最新要求，重点是 **AIPP 的统一 Agent 使用层**：provider/config 选择、统一 prompt/cancel/config 入口、共享落库与事件顺序，以及这些操作依赖的现有协议边界。不为对齐数字移植 t3 的 fork/rollback、原生子代理、goal、共享进程池或 MCP-app 等专属功能。
+
+上游三个 adapter 文件有 **356 个静态测试注册点**（Claude 198、Codex 81、ACP 77）。这不是实测运行 case 数；`each`、内部循环和条件执行不能与 Rust 测试函数数量直接比较。此次没有执行 t3 测试。以下逐项表保留源标题、固定版本位置、参数化说明和 AIPP 证据，明确区分已证明的边界、适用但尚缺完整验证、以及范围外功能：
+
+- [Claude 198 项](testing/claude-t3-scenarios.md)
+- [Codex 81 项](testing/codex-t3-scenarios.md)
+- [ACP 77 项](testing/acp-t3-scenarios.md)
+
+表中部分覆盖不代表整个上游测试场景等价通过；新测试也不声称运行了完整 Tauri 桌面 actor。
+
+## 本次追加：真实统一入口和协议边界
+
+- 配置准备：`agent_driver/turn_tests.rs` 调用生产 provider 加载/选路、原生配置提取、MCP payload 签名收尾。非空非法 override 在查询 provider 前明确失败，不悄悄回默认；保留 None/空白兼容。验证合法跨 provider/model 覆盖、权限/模式限制、Claude sentinel、环境/proxy 与 MCP 签名。
+- 配置透传：统一 facade 保留空默认值、不透明 config ID 和带空白值，由原生通道判断支持性。
+- ACP：真实 SDK duplex 两端经过生产 request dispatch 和 permission reply，验证挂起审批不阻塞通知/另一 RPC、精确 option 回复、取消后迟到选择无效、两个连接隔离、waiter 丢失 fail-closed。不是 OS 子进程或完整 ACP actor。
+- Claude：真实本地假 stream-json 子进程，统一 handle 经过生产 read/select 边界写出 interrupt；验证配置失败不损坏控制通道、审批等待取消、迟到回复隔离、关闭/EOF/nonzero 和多会话隔离。审批测试组合真实生产 wait 与 reader，不包含桌面 card 发送与 DB 终态。
+- Codex：审批等待取消回归先在旧生产 wait 上实际运行失败（500ms 超时），再修复；取消仅解除本 run 的请求，保留替代 run 和其他会话。协议帧归属与读写边界覆盖见逐项表。
+
+### 测试发现并修复
+
+1. Claude/Codex 主循环内等待审批时无法读取 Cancel 命令。使用每个 native handle 的取消 generation 解除等待，让原控制循环继续处理已排队的 Cancel；活动 turn 仍在时发送 interrupt。不新增 actor/进程池。旧 idle cancel 不应取消下一轮，run-scoped 请求 ID 避免误撤销替代 run。
+2. 非空无效的模型/provider override 原会被忽略，落回默认。现在在统一准备入口明确报错，正常空值兼容不变。
+3. Codex 带明确标识的迟到通知有 turn/thread 归属保护，避免已知旧 turn 完成通知结束新轮；无标识通知和 server request 仍遵循既有兼容路径，不宣称全部迟到帧隔离。具体协议兼容边界以 Codex 场景表为准。
+
+## 已有统一层回归基础
 
 | 场景 | AIPP 测试与实际边界 | t3 参考 |
 | --- | --- | --- |
@@ -38,9 +64,9 @@
 - 原生恢复协议 replay、进程崩溃后的完整持久化/重连路径、真实多进程运行及进程树终止。
 - 真实 CLI 登录、MCP server 交互、桌面 Wry 窗口、Windows/macOS/Linux 安装包 E2E。
 
-既有实现的待核查点：Codex 恢复返回 thread ID 尚无与请求 ID 比对的保护；Claude 提前 EOF 的诊断没有完整退出状态/stderr/run 关联。本轮未为凑通过数改写或掩盖这些行为，也未把格式化诊断的单元测试说成真实退出链路测试。
+既有实现的待核查点：Codex 恢复返回 thread ID 尚无与请求 ID 比对的保护；Claude 提前 EOF 的诊断没有完整退出状态/stderr/run 关联。配置准备失败时前端 catch 会清理局部等待，但后台 user_pending 活动状态可能残留；ACP 启动失败的消息终态、resume/load 失败后新建与历史回填、旧 run 按 conversation 清审批等也未由本轮改写。它们是已存在的原生/桌面生命周期边界，不能用统一 dispatch 或 helper 测试充当已验证。本轮不为凑数字扩大会话架构改造。
 
-## 本轮验证结果
+## 首轮场景补强的历史验证（提交 e3aa0b7）
 
 在 Linux 容器中实际完成：
 
@@ -50,3 +76,18 @@
 - 以上 Rust 范围不重叠，共 130 项，包含已有测试；本轮新增 50 个测试函数，连同初版 7 个，共新增 57 个。函数内部遍历不同 provider/输入不会额外计数。
 - `npm run build`：通过；Agent 活动、Plan、会话提示及配置工具相关 6 个前端测试文件：25 项通过。
 - 独立 review 与 `git diff --check`：通过。验证没有启动已登录的 Agent CLI，也未运行全仓库测试套件。
+
+## 最终追加验证
+
+最终源码在 Linux 容器中运行，范围互不重叠：
+
+- `cargo check --manifest-path src-tauri/Cargo.toml`：通过（仍有编译警告，未执行无关清理）。
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib agent_driver`：28 项通过。
+- 同命令过滤 `api::ai::acp::`：41 项；`api::ai::codex_app_server::`：58 项；`api::ai::claude_sdk`：39 项；`agent_session_lifecycle_tests`：3 项，全部通过。
+- 共 **169 项 Rust 测试通过**，包含已有回归。本次追加 39 个测试函数；加上前两轮，PR 累计新增 96 个。函数内部的参数循环不另计运行函数数量。
+- `npm run build` 通过；相同 6 个 Agent 前端测试文件的 25 项通过。
+- 独立 review、356 项来源登记核对与 `git diff --check` 通过。
+
+Codex 权限等待取消的回归先用旧 production wait 实际执行，因 500ms 内不能解除等待而失败，再在修复后通过。最终 resume happy-path fixture保持原 native thread ID，不把不同ID恢复成功固定为契约。
+
+这些是精确范围结果，不是全仓库、真实登录 Agent、完整桌面 UI、打包或跨平台 E2E 的通过声明。Codex Python/Claude shell 子进程 fixture 仅在 Unix 运行；没有为测试安装或登录 Agent CLI。

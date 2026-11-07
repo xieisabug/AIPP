@@ -36,7 +36,7 @@ use tauri::{Emitter, Manager};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
 
 pub const CLAUDE_SDK_API_TYPE: &str = "claude_sdk";
@@ -117,7 +117,7 @@ pub struct ClaudeConversationSessionState {
 }
 
 enum SessionCommand {
-    Prompt { message_id: i64, prompt: String, window: tauri::Window },
+    Prompt { message_id: i64, prompt: String, window: tauri::Window, cancel_generation: u64 },
     Cancel { response: oneshot::Sender<Result<(), String>> },
     SetConfig { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
 }
@@ -125,6 +125,7 @@ enum SessionCommand {
 #[derive(Clone)]
 pub struct ClaudeSessionHandle {
     sender: mpsc::UnboundedSender<SessionCommand>,
+    cancel_signal: watch::Sender<u64>,
     run_id: String,
 }
 
@@ -216,6 +217,7 @@ impl ClaudeSessionHandle {
         });
         (Self {
             sender,
+            cancel_signal: watch::channel(0).0,
             run_id: "driver-test-run".into(),
         }, observations)
     }
@@ -227,10 +229,15 @@ impl ClaudeSessionHandle {
         window: tauri::Window,
     ) -> Result<(), AppError> {
         self.sender
-            .send(SessionCommand::Prompt { message_id, prompt, window })
+            .send(SessionCommand::Prompt {
+                message_id, prompt, window, cancel_generation: *self.cancel_signal.borrow(),
+            })
             .map_err(|_| AppError::UnknownError("Claude Code session closed".into()))
     }
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
+        // Wake a blocked approval without consuming/reordering actor commands.
+        // The native actor still acknowledges only after writing the interrupt.
+        self.cancel_signal.send_modify(|generation| *generation = generation.wrapping_add(1));
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(SessionCommand::Cancel { response: tx })
@@ -526,13 +533,18 @@ async fn handle_ask_user_question(
     request: &Value,
     request_id: &str,
     stdin: &mut tokio::process::ChildStdin,
+    cancellation: &mut watch::Receiver<u64>,
+    cancel_generation: u64,
 ) -> Result<(), String> {
     let input = request.get("input").cloned().unwrap_or(Value::Null);
     let interaction_state = app.state::<InteractionState>();
     let result = match claude_ask_user_question_payload(&input) {
         Ok(payload) => {
-            request_ask_user_question(app, &interaction_state, Some(conversation_id), payload)
-                .await
+            wait_claude_decision(
+                request_ask_user_question(app, &interaction_state, Some(conversation_id), payload),
+                cancellation,
+                cancel_generation,
+            ).await.unwrap_or_else(|| Err("Claude Code prompt was cancelled".into()))
         }
         Err(error) => Err(error),
     };
@@ -563,17 +575,22 @@ async fn handle_permission(
     app: &tauri::AppHandle,
     conversation_id: i64,
     frame: &Value,
+    run_id: &str,
     stdin: &mut tokio::process::ChildStdin,
+    cancellation: &mut watch::Receiver<u64>,
+    cancel_generation: u64,
 ) -> Result<(), String> {
     let request_id =
         frame.get("request_id").and_then(Value::as_str).unwrap_or("unknown").to_string();
     let request = frame.get("request").cloned().unwrap_or(Value::Null);
     let tool_name = request.get("tool_name").and_then(Value::as_str).unwrap_or("Claude Code tool");
     if tool_name == "AskUserQuestion" {
-        return handle_ask_user_question(app, conversation_id, &request, &request_id, stdin).await;
+        return handle_ask_user_question(
+            app, conversation_id, &request, &request_id, stdin, cancellation, cancel_generation,
+        ).await;
     }
     let event = AcpPermissionRequestEvent {
-        request_id: format!("claude:{conversation_id}:{request_id}"),
+        request_id: format!("claude:{conversation_id}:{run_id}:{request_id}"),
         conversation_id: Some(conversation_id),
         agent_kind: Some(CLAUDE_SDK_API_TYPE.into()),
         tool_call_id: request
@@ -608,7 +625,19 @@ async fn handle_permission(
         Some(conversation_id),
         &event,
     )?;
-    let decision = rx.await.unwrap_or(AcpPermissionDecision::Cancelled);
+    let (decision, cancelled_resolution) = wait_claude_permission_decision(
+        &state, &event.request_id, rx, cancellation, cancel_generation,
+    ).await;
+    if let Some(resolution) = cancelled_resolution {
+        let _ = crate::api::operation_api::emit_permission_resolved_event(
+            app,
+            crate::api::operation_api::ACP_PERMISSION_RESOLVED_EVENT,
+            &crate::api::operation_api::PermissionResolvedEvent {
+                request_id: event.request_id.clone(),
+                conversation_id: resolution.conversation_id,
+            },
+        );
+    }
     let (behavior, message) = match decision {
         AcpPermissionDecision::Selected(value) if value == "allow" => ("allow", Value::Null),
         _ => ("deny", json!({"message":"Permission denied by user"})),
@@ -957,6 +986,93 @@ pub(crate) fn confirm_claude_resume(
     Ok(Some(("resume".into(), format!("{run_id}:resume"))))
 }
 
+/// Approval waits observe cancellation independently of the actor command queue.
+/// The generation belongs to the enqueued prompt, so an old idle cancellation
+/// cannot cancel a later prompt, and a queued/startup cancellation is not lost.
+async fn wait_claude_decision<F: std::future::Future>(
+    decision: F,
+    cancellation: &mut watch::Receiver<u64>,
+    expected_generation: u64,
+) -> Option<F::Output> {
+    tokio::pin!(decision);
+    loop {
+        if *cancellation.borrow() != expected_generation {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            changed = cancellation.changed() => {
+                if changed.is_err() {
+                    return None;
+                }
+            }
+            result = &mut decision => return Some(result),
+        }
+    }
+}
+
+async fn wait_claude_permission_decision(
+    state: &AcpPermissionState,
+    request_id: &str,
+    decision: oneshot::Receiver<AcpPermissionDecision>,
+    cancellation: &mut watch::Receiver<u64>,
+    expected_generation: u64,
+) -> (AcpPermissionDecision, Option<super::acp::AcpPermissionResolution>) {
+    match wait_claude_decision(decision, cancellation, expected_generation).await {
+        Some(result) => (result.unwrap_or(AcpPermissionDecision::Cancelled), None),
+        None => {
+            // The run-scoped ID avoids touching a replacement actor's request.
+            let resolution = state.resolve_request(request_id, AcpPermissionDecision::Cancelled)
+                .await.ok().flatten();
+            (AcpPermissionDecision::Cancelled, resolution)
+        }
+    }
+}
+
+/// One step of the production active-turn transport loop. Keeping this boundary
+/// independent of desktop event delivery lets protocol tests exercise the actual
+/// native command receiver and child pipes, rather than reimplementing controls.
+enum ClaudePromptInput {
+    Frame(Value),
+    Interrupted,
+}
+
+async fn read_claude_prompt_input(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+) -> Result<ClaudePromptInput, String> {
+    loop {
+        let line = tokio::select! {
+            next = lines.next_line() => match next {
+                Ok(Some(line)) => line,
+                Ok(None) => return Err("Claude Code 进程提前退出".into()),
+                Err(error) => return Err(format!("读取 Claude Code 输出失败：{error}")),
+            },
+            command = commands.recv() => match command {
+                Some(SessionCommand::Cancel { response }) => {
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    let interrupt = json!({"type":"control_request","request_id":request_id,"request":{"subtype":"interrupt"}});
+                    let result = stdin.write_all(format!("{interrupt}\n").as_bytes()).await;
+                    let _ = stdin.flush().await;
+                    let _ = response.send(result.map_err(|error| error.to_string()));
+                    return Ok(ClaudePromptInput::Interrupted);
+                }
+                Some(SessionCommand::Prompt { .. }) => continue,
+                Some(SessionCommand::SetConfig { response, .. }) => {
+                    let _ = response.send(Err("Claude Code 配置将在下一次会话启动时生效".into()));
+                    continue;
+                }
+                None => return Err("Claude Code 会话在完成当前请求前已关闭".into()),
+            }
+        };
+        // Preserve the CLI's existing tolerance of non-JSON diagnostic lines.
+        if let Ok(frame) = serde_json::from_str::<Value>(&line) {
+            return Ok(ClaudePromptInput::Frame(frame));
+        }
+    }
+}
+
 pub fn spawn_claude_session_task(
     app: tauri::AppHandle,
     _conversation_id: i64,
@@ -965,7 +1081,8 @@ pub fn spawn_claude_session_task(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let run_id = uuid::Uuid::new_v4().to_string();
     let task_run_id = run_id.clone();
-    let handle = ClaudeSessionHandle { sender: tx, run_id };
+    let (cancel_signal, mut cancellation) = watch::channel(0);
+    let handle = ClaudeSessionHandle { sender: tx, cancel_signal, run_id };
     tauri::async_runtime::spawn(async move {
         let stored_session: Option<String> = ConversationDatabase::new(&app)
             .ok()
@@ -1076,7 +1193,7 @@ pub fn spawn_claude_session_task(
                     )
                     .await;
                 }
-                SessionCommand::Prompt { message_id, prompt, window } => {
+                SessionCommand::Prompt { message_id, prompt, window, cancel_generation } => {
                     let input = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":prompt}]},"session_id":session_id});
                     if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {
                         emit_claude_failure(
@@ -1127,42 +1244,19 @@ pub fn spawn_claude_session_task(
                     let mut usage = Value::Null;
                     let mut stream_error: Option<String> = None;
                     loop {
-                        let line = tokio::select! {
-                            next = lines.next_line() => match next {
-                                Ok(Some(line)) => line,
-                                Ok(None) => {
-                                    stream_error = Some("Claude Code 进程提前退出".into());
-                                    break;
+                        let frame = match read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await {
+                            Ok(ClaudePromptInput::Frame(frame)) => frame,
+                            Ok(ClaudePromptInput::Interrupted) => {
+                                if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                                    manager.clear_focus(&app, _conversation_id).await;
                                 }
-                                Err(error) => {
-                                    stream_error = Some(format!("读取 Claude Code 输出失败：{error}"));
-                                    break;
-                                }
-                            },
-                            command = rx.recv() => match command {
-                                Some(SessionCommand::Cancel { response }) => {
-                                    let request_id = uuid::Uuid::new_v4().to_string();
-                                    let interrupt = json!({"type":"control_request","request_id":request_id,"request":{"subtype":"interrupt"}});
-                                    let result = stdin.write_all(format!("{interrupt}\n").as_bytes()).await.and_then(|_| std::io::Result::Ok(()));
-                                    let _ = stdin.flush().await;
-                                    let _ = response.send(result.map_err(|error| error.to_string()));
-                                    if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                                        manager.clear_focus(&app, _conversation_id).await;
-                                    }
-                                    continue;
-                                }
-                                Some(SessionCommand::Prompt { .. }) => continue,
-                                Some(SessionCommand::SetConfig { response, .. }) => {
-                                    let _ = response.send(Err("Claude Code 配置将在下一次会话启动时生效".into()));
-                                    continue;
-                                }
-                                None => {
-                                    stream_error = Some("Claude Code 会话在完成当前请求前已关闭".into());
-                                    break;
-                                },
+                                continue;
+                            }
+                            Err(error) => {
+                                stream_error = Some(error);
+                                break;
                             }
                         };
-                        let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
                         if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
                             match confirm_claude_resume(
                                 pending_resume_session_id.as_deref(),
@@ -1347,8 +1441,10 @@ pub fn spawn_claude_session_task(
                             }
                             "control_request" => {
                                 if let Err(error) =
-                                    handle_permission(&app, _conversation_id, &frame, &mut stdin)
-                                        .await
+                                    handle_permission(
+                                        &app, _conversation_id, &frame, &task_run_id, &mut stdin,
+                                        &mut cancellation, cancel_generation,
+                                    ).await
                                 {
                                     stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
                                     break;
@@ -1763,3 +1859,7 @@ mod tests {
 #[cfg(test)]
 #[path = "claude_sdk_lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(all(test, unix))]
+#[path = "claude_sdk_protocol_tests.rs"]
+mod protocol_tests;
