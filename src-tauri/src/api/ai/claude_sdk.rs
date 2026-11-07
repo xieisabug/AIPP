@@ -170,6 +170,14 @@ impl ClaudeSessionEntry {
         }
     }
 
+    pub(crate) fn reuse_handle(&mut self, config_signature: &str) -> Option<ClaudeSessionHandle> {
+        if self.config_signature != config_signature {
+            return None;
+        }
+        self.touch();
+        Some(self.handle.clone())
+    }
+
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
     }
@@ -655,6 +663,19 @@ async fn emit_snapshot(
     );
 }
 
+fn remove_claude_session_for_run(
+    sessions: &mut HashMap<i64, ClaudeSessionEntry>,
+    conversation_id: i64,
+    run_id: &str,
+) -> bool {
+    if sessions.get(&conversation_id).is_some_and(|entry| entry.run_id == run_id) {
+        sessions.remove(&conversation_id);
+        true
+    } else {
+        false
+    }
+}
+
 async fn cleanup_claude_session(
     app: &tauri::AppHandle,
     conversation_id: i64,
@@ -662,15 +683,7 @@ async fn cleanup_claude_session(
 ) {
     let removed_current_entry = if let Some(state) = app.try_state::<crate::ClaudeSessionState>() {
         let mut sessions = state.sessions.lock().await;
-        if sessions
-            .get(&conversation_id)
-            .is_some_and(|entry| entry.run_id == run_id)
-        {
-            sessions.remove(&conversation_id);
-            true
-        } else {
-            false
-        }
+        remove_claude_session_for_run(&mut sessions, conversation_id, run_id)
     } else {
         false
     };
@@ -913,6 +926,19 @@ fn build_claude_command(
     if let Some(effort) = &config.effort { command.args(["--effort", effort]); }
     command.current_dir(&config.working_directory).envs(&config.env_vars).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     (command, resolved)
+}
+
+fn claude_result_error(frame: &Value) -> Option<String> {
+    if frame.get("is_error").and_then(Value::as_bool) == Some(true)
+        || frame.get("subtype").and_then(Value::as_str) == Some("error")
+        || frame.get("error").is_some_and(|value| !value.is_null())
+    {
+        Some(frame.get("error").and_then(Value::as_str)
+            .or_else(|| frame.get("result").and_then(Value::as_str))
+            .unwrap_or("Claude Code 返回错误").to_string())
+    } else {
+        None
+    }
 }
 
 pub(crate) fn confirm_claude_resume(
@@ -1329,18 +1355,8 @@ pub fn spawn_claude_session_task(
                                 }
                             }
                             "result" => {
-                                if frame.get("is_error").and_then(Value::as_bool) == Some(true)
-                                    || frame.get("subtype").and_then(Value::as_str) == Some("error")
-                                    || frame.get("error").is_some_and(|value| !value.is_null())
-                                {
-                                    stream_error = Some(
-                                        frame
-                                            .get("error")
-                                            .and_then(Value::as_str)
-                                            .or_else(|| frame.get("result").and_then(Value::as_str))
-                                            .unwrap_or("Claude Code 返回错误")
-                                            .to_string(),
-                                    );
+                                if let Some(error) = claude_result_error(&frame) {
+                                    stream_error = Some(error);
                                     break;
                                 }
                                 if content.is_empty() {
@@ -1743,3 +1759,7 @@ mod tests {
         assert!(updated.get("questions").is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "claude_sdk_lifecycle_tests.rs"]
+mod lifecycle_tests;

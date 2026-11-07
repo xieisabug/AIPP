@@ -6,11 +6,12 @@ use crate::api::ai::acp::{AcpConfig, apply_network_proxy_to_env_vars, build_sele
 use crate::api::ai::codex_app_server::{CodexAppServerConfig, extract_codex_app_server_config, refresh_codex_session_signature, spawn_codex_session_task, CodexSessionEntry, CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES};
 use crate::api::ai::claude_sdk::{ClaudeSdkConfig, claude_model_choices, extract_claude_sdk_config, is_claude_code_provider, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry};
 use crate::api::ai::config::get_network_proxy_from_config;
-use crate::api::ai::events::{ConversationEvent, MessageAddEvent};
+use crate::api::ai::events::ConversationEvent;
 use crate::api::ai::types::AiResponse;
-use crate::api::ai_api::{add_message, parse_agent_model_override};
+use crate::api::ai_api::parse_agent_model_override;
 use crate::api::assistant_api::{AssistantDetail, resolve_acp_provider_id, CLAUDE_CODE_DEFAULT_MODEL};
-use crate::db::conversation_db::MessageAttachment;
+use crate::db::conversation_db::{ConversationDatabase, Message, MessageAttachment, Repository};
+use super::dispatch::{dispatch_prepared, response_message, provider_name, TurnEffects, TurnInput};
 use crate::db::llm_db::LLMDatabase;
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
@@ -249,7 +250,7 @@ async fn prepare_config(
     Ok(PreparedAgentSession::Acp(acp_config))
 }
 
-enum PreparedAgentSession {
+pub(super) enum PreparedAgentSession {
     Codex(CodexAppServerConfig),
     Claude(ClaudeSdkConfig),
     Acp(AcpConfig),
@@ -273,10 +274,9 @@ impl PreparedAgentSession {
                 let codex_session_state = app_handle.state::<CodexSessionState>();
                 let handle = {
                     let mut sessions = codex_session_state.sessions.lock().await;
-                    if sessions.get(&conversation_id).is_some_and(|entry| entry.config_signature == codex_config.session_signature) {
-                        let entry = sessions.get_mut(&conversation_id).expect("checked above");
-                        entry.touch();
-                        entry.handle.clone()
+                    if let Some(handle) = sessions.get_mut(&conversation_id)
+                        .and_then(|entry| entry.reuse_handle(&codex_config.session_signature)) {
+                        handle
                     } else {
                         let handle = spawn_codex_session_task(app_handle.clone(), conversation_id, codex_config.clone());
                         if let Some(previous) = sessions.get(&conversation_id) {
@@ -298,13 +298,9 @@ impl PreparedAgentSession {
                 let claude_state = app_handle.state::<ClaudeSessionState>();
                 let handle = {
                     let mut sessions = claude_state.sessions.lock().await;
-                    if sessions
-                        .get(&conversation_id)
-                        .is_some_and(|entry| entry.config_signature == config.session_signature)
-                    {
-                        let entry = sessions.get_mut(&conversation_id).expect("checked above");
-                        entry.touch();
-                        entry.handle.clone()
+                    if let Some(handle) = sessions.get_mut(&conversation_id)
+                        .and_then(|entry| entry.reuse_handle(&config.session_signature)) {
+                        handle
                     } else {
                         let handle = spawn_claude_session_task(app_handle.clone(), conversation_id, config.clone());
                         sessions.insert(
@@ -327,13 +323,9 @@ impl PreparedAgentSession {
                 let acp_session_state = app_handle.state::<AcpSessionState>();
                 let session_handle = {
                     let mut sessions = acp_session_state.sessions.lock().await;
-                    if sessions
-                        .get(&conversation_id)
-                        .is_some_and(|entry| entry.config_signature == acp_config.session_signature)
-                    {
-                        let entry = sessions.get_mut(&conversation_id).expect("checked above");
-                        entry.touch();
-                        entry.handle.clone()
+                    if let Some(handle) = sessions.get_mut(&conversation_id)
+                        .and_then(|entry| entry.reuse_handle(&acp_config.session_signature)) {
+                        handle
                     } else {
                         if sessions.contains_key(&conversation_id) {
                             info!(
@@ -373,53 +365,51 @@ pub(crate) async fn send_turn(
 ) -> Result<AiResponse, AppError> {
     let prepared = prepare_config(app_handle.clone(), &request).await?;
     let kind = prepared.kind();
-    let (model_code, provider_name) = match kind {
-        AgentSessionKind::Codex => ("codex-app-server", "Codex"),
-        AgentSessionKind::Claude => ("claude-code", "Claude Code"),
-        AgentSessionKind::Acp => ("acp", "ACP"),
-    };
-    let conversation_id = request.conversation_id;
-    let response_message = add_message(
-        &app_handle, None, conversation_id, "response".into(), String::new(),
-        Some(0), Some(model_code.into()), Some(chrono::Utc::now()), None, 0, None, None,
-    )?;
-    let _ = window.emit(
-        format!("conversation_event_{conversation_id}").as_str(),
-        ConversationEvent {
-            r#type: "message_add".into(),
-            data: serde_json::to_value(MessageAddEvent {
-                message_id: response_message.id,
-                message_type: "response".into(),
-            }).unwrap(),
+    dispatch_prepared(
+        &DesktopTurnEffects { app_handle, window }, prepared, kind,
+        TurnInput {
+            conversation_id: request.conversation_id,
+            prompt: request.prompt,
+            display_prompt: request.display_prompt,
+            messages: request.messages,
         },
-    );
-    let handle = prepared.acquire(&app_handle, conversation_id).await;
-    // Native Codex/Claude already receive attachment text in the prepared
-    // runtime prompt. Only ACP's native handle accepts structured attachments.
-    let attachments = if handle.capabilities().structured_attachments {
-        request.messages.iter().rev()
-            .find(|(message_type, _, _)| message_type == "user")
-            .map(|(_, _, attachments)| attachments.clone())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    if let Err(error) = handle.send_prompt(
-        response_message.id, request.prompt, attachments, window.clone(),
-    ) {
-        let detail = format!(
-            "{} prompt dispatch failed [conversation_id={}, message_id={}]: {}; no replacement session was started; process exit diagnostics are unavailable at the command dispatch layer",
-            kind.api_type(), conversation_id, response_message.id, error,
-        );
-        super::failure::emit_agent_failure(
-            &app_handle, conversation_id, response_message.id, &window, &detail, provider_name,
-        );
-        app_handle.state::<ConversationActivityManager>().clear_focus(&app_handle, conversation_id).await;
-        return Err(AppError::UnknownError(detail));
+    ).await
+}
+
+struct DesktopTurnEffects {
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+}
+
+#[async_trait::async_trait]
+impl TurnEffects for DesktopTurnEffects {
+    type Prepared = PreparedAgentSession;
+    type Handle = AgentSessionHandle;
+
+    fn create_response(&self, conversation_id: i64, kind: AgentSessionKind) -> Result<Message, AppError> {
+        // This is the same response-only repository write as add_message. User
+        // message summary invalidation is deliberately not part of this path.
+        ConversationDatabase::new(&self.app_handle)?
+            .message_repo()?.create(&response_message(conversation_id, kind)).map_err(AppError::from)
     }
-    Ok(AiResponse {
-        conversation_id,
-        request_prompt_result_with_context: request.display_prompt,
-        error_message: None,
-    })
+
+    fn emit(&self, conversation_id: i64, event: ConversationEvent) {
+        let _ = self.window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+    }
+
+    async fn acquire(&self, prepared: PreparedAgentSession, conversation_id: i64) -> AgentSessionHandle {
+        prepared.acquire(&self.app_handle, conversation_id).await
+    }
+
+    fn submit(&self, handle: &AgentSessionHandle, message_id: i64, prompt: String, attachments: Vec<MessageAttachment>) -> Result<(), AppError> {
+        handle.send_prompt(message_id, prompt, attachments, self.window.clone())
+    }
+
+    async fn fail(&self, conversation_id: i64, message_id: i64, kind: AgentSessionKind, detail: &str) {
+        super::failure::emit_agent_failure(
+            &self.app_handle, conversation_id, message_id, &self.window, detail, provider_name(kind),
+        );
+        self.app_handle.state::<ConversationActivityManager>()
+            .clear_focus(&self.app_handle, conversation_id).await;
+    }
 }

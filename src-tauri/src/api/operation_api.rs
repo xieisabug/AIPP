@@ -183,7 +183,7 @@ pub async fn confirm_acp_permission(
         return Err("Invalid ACP permission decision".to_string());
     };
 
-    let resolved = state.resolve_request(&request_id, decision).await;
+    let resolved = state.resolve_request(&request_id, decision).await?;
 
     if let Some(resolution) = resolved {
         if let Err(error) = emit_permission_resolved_event(
@@ -295,7 +295,7 @@ pub async fn confirm_codex_permission(
     } else {
         return Err("Invalid Codex permission decision".to_string());
     };
-    let resolved = state.resolve_request(&request_id, decision).await;
+    let resolved = state.resolve_request(&request_id, decision).await?;
     if let Some(resolution) = resolved {
         let _ = emit_permission_resolved_event(
             &app_handle,

@@ -446,12 +446,22 @@ impl AcpPermissionState {
         &self,
         request_id: &str,
         decision: AcpPermissionDecision,
-    ) -> Option<AcpPermissionResolution> {
+    ) -> Result<Option<AcpPermissionResolution>, String> {
         let mut pending = self.pending_requests.lock().await;
-        pending.remove(request_id).map(|request| AcpPermissionResolution {
+        if let AcpPermissionDecision::Selected(option_id) = &decision {
+            if let Some(request) = pending.get(request_id) {
+                if !request.event.options.iter().any(|option| option.option_id == *option_id) {
+                    return Err(format!(
+                        "Invalid permission option ID '{}' for request '{}': option was not advertised",
+                        option_id, request_id
+                    ));
+                }
+            }
+        }
+        Ok(pending.remove(request_id).map(|request| AcpPermissionResolution {
             conversation_id: request.conversation_id,
             delivered: request.sender.send(decision).is_ok(),
-        })
+        }))
     }
 
     pub async fn remove_request(&self, request_id: &str) {
@@ -549,7 +559,7 @@ impl AcpPermissionState {
 
         let mut resolutions = Vec::new();
         for request_id in request_ids {
-            if let Some(resolution) =
+            if let Ok(Some(resolution)) =
                 self.resolve_request(&request_id, AcpPermissionDecision::Cancelled).await
             {
                 resolutions.push((request_id, resolution));
@@ -978,6 +988,14 @@ impl AcpSessionEntry {
             config_signature: config_signature.into(),
             run_id,
         }
+    }
+
+    pub(crate) fn reuse_handle(&mut self, config_signature: &str) -> Option<AcpSessionHandle> {
+        if self.config_signature != config_signature {
+            return None;
+        }
+        self.touch();
+        Some(self.handle.clone())
     }
 
     pub fn touch(&mut self) {
@@ -6816,3 +6834,11 @@ mod tests {
         assert_eq!(parsed["cached_write_tokens"], 2);
     }
 }
+
+#[cfg(test)]
+#[path = "acp_permission_tests.rs"]
+mod acp_permission_tests;
+
+#[cfg(test)]
+#[path = "acp_session_tests.rs"]
+mod acp_session_tests;

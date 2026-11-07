@@ -167,3 +167,5 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 参考 t3code 的类型化 provider adapter 边界与可控命令通道测试方法，固定版本为 [`d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4`](https://github.com/pingdotgg/t3code/tree/d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4)，主要参考 `packages/provider-core/src/server/ProviderAdapter.ts`、`adapterDriver.ts` 和 `packages/provider-testing`。上游为 MIT（©2026 T3 Tools Inc.）；本实现未复制上游源码或引入其 Effect 编排框架。
 
 Claude 当前保持 Rust 启动 CLI stream-json。Anthropic [官方 Agent SDK 文档](https://code.claude.com/docs/en/agent-sdk/overview)列出 TypeScript/Python，并建议其他语言使用 CLI 子进程；本次不引入额外语言运行时或 sidecar。
+
+Agent 驱动的测试场景、上游参考及明确未覆盖的边界见 [Agent 驱动测试场景对照](./agent-driver-testing.md)。

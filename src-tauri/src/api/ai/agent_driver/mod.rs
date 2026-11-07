@@ -4,3 +4,4 @@ pub(crate) mod session;
 mod turn;
 pub(crate) use turn::{send_turn, AgentTurnRequest};
 pub(crate) mod failure;
+mod dispatch;

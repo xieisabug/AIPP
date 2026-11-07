@@ -314,6 +314,14 @@ impl CodexSessionEntry {
         }
     }
 
+    pub(crate) fn reuse_handle(&mut self, config_signature: &str) -> Option<CodexSessionHandle> {
+        if self.config_signature != config_signature {
+            return None;
+        }
+        self.touch();
+        Some(self.handle.clone())
+    }
+
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
     }
@@ -578,6 +586,21 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
             json!({"permissions": {}})
         }
     } else {
+        // Native command/file approvals support these string variants. Command
+        // policy amendments are structured objects, which Selected(String) and
+        // the current permission UI cannot represent. Never forward an arbitrary
+        // string (including serialized amendment JSON) as a native decision.
+        // `cancel` denies the action and interrupts the turn in both protocols.
+        let supported_method = matches!(method,
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval");
+        let selected = if supported_method
+            && matches!(selected.as_str(), "accept" | "acceptForSession" | "decline" | "cancel")
+        {
+            selected.as_str()
+        } else {
+            warn!(method, decision = %selected, "Unsupported Codex approval decision; cancelling request");
+            "cancel"
+        };
         json!({"decision": selected})
     }
 }
@@ -1730,6 +1753,19 @@ async fn spawn_process(
     Ok((child, stdin, BufReader::new(stdout).lines()))
 }
 
+fn remove_codex_session_for_run(
+    sessions: &mut HashMap<i64, CodexSessionEntry>,
+    conversation_id: i64,
+    run_id: &str,
+) -> bool {
+    if sessions.get(&conversation_id).is_some_and(|entry| entry.run_id == run_id) {
+        sessions.remove(&conversation_id);
+        true
+    } else {
+        false
+    }
+}
+
 pub fn spawn_codex_session_task(
     app_handle: tauri::AppHandle,
     conversation_id: i64,
@@ -1787,12 +1823,7 @@ pub fn spawn_codex_session_task(
         }
         let removed_current_entry = if let Some(state) = app_handle.try_state::<crate::CodexSessionState>() {
             let mut sessions = state.sessions.lock().await;
-            if sessions.get(&conversation_id).is_some_and(|entry| entry.run_id == task_run_id) {
-                sessions.remove(&conversation_id);
-                true
-            } else {
-                false
-            }
+            remove_codex_session_for_run(&mut sessions, conversation_id, &task_run_id)
         } else {
             false
         };
@@ -3023,3 +3054,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "codex_app_server_lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "codex_app_server_permission_tests.rs"]
+mod permission_tests;
