@@ -920,6 +920,10 @@ pub(crate) async fn request_ask_user_question_scoped(
         metadata: request.metadata,
     };
 
+    if let Some(id)=conversation_id {
+        let conn=crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+        crate::db::butler_goal::save_question(&conn,id,&request_id,&serde_json::to_string(&event).map_err(|e|e.to_string())?,crate::api::butler_peer::TOOL_MESSAGE.try_with(|id|*id).ok().flatten(),chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+    }
     let (tx, rx) = oneshot::channel::<AskUserQuestionDecision>();
     let scope = scope.unwrap_or_else(|| AgentRequestScope::application(conversation_id));
     interaction_state.store_ask_user_request_scoped(event.clone(), tx, scope).await?;
@@ -1200,6 +1204,9 @@ pub(crate) async fn resolve_ask_user_question_response(
         .try_state::<InteractionState>()
         .ok_or_else(|| "InteractionState not found".to_string())?;
 
+    let conn=crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+    crate::db::butler_goal::validate_question(&conn,request_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+    drop(conn);
     let decision = if cancelled {
         AgentQuestionReply::Cancel
     } else {
@@ -1257,6 +1264,25 @@ pub async fn submit_ask_user_question_response(
     answers: Option<HashMap<String, String>>,
     cancelled: Option<bool>,
 ) -> Result<bool, String> {
+    if app_handle.state::<InteractionState>().get_ask_user_request(&request_id).await.is_none() {
+        let mut conn=crate::db::conversation_db::ConversationDatabase::new(&app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+        let id=crate::db::butler_goal::validate_question(&conn,&request_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?.ok_or("问题已失效")?;
+        if app_handle.state::<crate::state::activity_state::ConversationActivityManager>().get_runtime_state(id).await.is_running {
+            return Err("当前会话仍在运行，请稍后再回答恢复的问题".into());
+        }
+        // A crashed external operation has an unknown outcome. Never resume it automatically.
+        let calls=crate::db::mcp_db::MCPDatabase::new(&app_handle).and_then(|db|db.get_mcp_tool_calls_by_conversation(id)).map_err(|e|e.to_string())?;
+        if !cancelled.unwrap_or(false) && calls.iter().any(|call|call.tool_name != "ask_user_question" && matches!(call.status.as_str(),"pending"|"executing")) {
+            return Err("原执行还有结果不明的工具操作，请先核对操作结果，再重新提出要求；未自动续接".into());
+        }
+        crate::db::butler_goal::recover_answer(&mut conn,&request_id,&answers.clone().unwrap_or_default(),cancelled.unwrap_or(false),chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+        drop(conn);
+        if !cancelled.unwrap_or(false) {
+            let window=crate::api::butler_api::resolve_or_create_butler_execution_window(&app_handle)?;
+            crate::api::ai_api::try_dispatch_queued_message_after_completion(&app_handle,&window,id).await;
+        }
+        return Ok(true);
+    }
     resolve_ask_user_question_response(
         &app_handle,
         &request_id,
@@ -1433,4 +1459,11 @@ mod tests {
         assert!(!is_allowed_preview_relay_origin("https://127.0.0.1.attacker.tld"));
         assert!(!is_allowed_preview_relay_origin("http://tauri.localhost.evil.com"));
     }
+}
+
+#[tauri::command]
+pub async fn list_recoverable_butler_questions(app_handle:AppHandle,conversation_id:i64)->Result<Vec<AskUserQuestionRequestEvent>,String> {
+    let conn=crate::db::conversation_db::ConversationDatabase::new(&app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+    crate::db::butler_goal::waiting_questions(&conn,conversation_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?
+        .into_iter().map(|raw|serde_json::from_str(&raw).map_err(|e|e.to_string())).collect()
 }

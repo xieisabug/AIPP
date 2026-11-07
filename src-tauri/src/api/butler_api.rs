@@ -238,6 +238,8 @@ pub(crate) struct ButlerWorkspaceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ButlerTaskListItem {
+    #[serde(default)]
+    pub progress: crate::db::butler_progress::Progress,
     pub butler_conversation_id: i64,
     pub task_conversation_id: i64,
     pub title: String,
@@ -280,6 +282,8 @@ pub struct PaginatedButlerTasksResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnButlerTaskRequest {
+    #[serde(default)]
+    pub request_key: Option<String>,
     pub butler_conversation_id: i64,
     pub title: String,
     pub goal: String,
@@ -1210,7 +1214,7 @@ fn is_followup_prompt_for(message: &Message, key: &str) -> bool {
 }
 
 pub(crate) fn task_followup_key(task_conversation_id: i64) -> String {
-    format!("task:{task_conversation_id}")
+    crate::db::butler_execution::Identity::task(task_conversation_id).request_key
 }
 
 /// 判断某个回送在注入消息之后的续跑进展：只看带有本回送标记的提示所开启的那一轮，
@@ -1622,6 +1626,8 @@ async fn enqueue_butler_main_followup(
             stream: Some(true),
             attachment_list: None,
             quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
         };
 
         FOLLOWUP_KEYS.scope(followup_keys, ask_ai(
@@ -1743,6 +1749,7 @@ fn try_build_followup_batch_entry(
         is_finalized: conversation.butler_task_finalized_at.is_some(),
         has_pending_permission: false,
         is_running: false,
+        progress: Default::default(),
     };
     let existing_handoff = result
         .handoff_message_id
@@ -1925,6 +1932,17 @@ fn emit_butler_notification(
     body: String,
     importance: &str,
 ) {
+    if let Ok(db) = ConversationDatabase::new(app_handle) {
+        if let Ok(conn) = db.get_connection() {
+            let policy = db.butler_repo().ok().and_then(|r| r.get_task_definition_by_task_conversation_id(task_conversation_id).ok().flatten()).and_then(|d| d.notification_policy);
+            let important = matches!(importance, "medium" | "high") || notification_type == "permission_requested" || notification_type.contains("question") || notification_type.contains("failed");
+            match crate::db::butler_progress::claim_notification(&conn, task_conversation_id, notification_type, &title, &body, important, policy.as_deref()) {
+                Ok(false) => return,
+                Ok(true) => {},
+                Err(error) => tracing::warn!(%error, "通知去重保存失败，保留通知"),
+            }
+        }
+    }
     let payload = ButlerNotificationEvent {
         butler_conversation_id,
         task_conversation_id,
@@ -2165,7 +2183,13 @@ async fn build_task_list_item(
         operation_state.has_pending_permission_for_conversation(conversation.id).await
             || acp_permission_state.has_pending_permission_for_conversation(conversation.id).await;
 
+    let progress_db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let progress_conn = progress_db.get_connection().map_err(|e| e.to_string())?;
+    let question_waiting = crate::db::mcp_db::MCPDatabase::new(app_handle).ok()
+        .and_then(|db| db.conn.query_row("SELECT EXISTS(SELECT 1 FROM mcp_tool_call WHERE conversation_id=?1 AND tool_name='ask_user_question' AND status IN ('pending','executing'))", [conversation.id], |r| r.get::<_,bool>(0)).ok()).unwrap_or(false);
+    let progress = crate::db::butler_progress::read(&progress_conn, conversation.id, &status, has_pending_permission, question_waiting).map_err(|e| e.to_string())?;
     Ok(ButlerTaskListItem {
+        progress,
         butler_conversation_id: definition.butler_conversation_id,
         task_conversation_id: conversation.id,
         title: definition.title.clone(),
@@ -2373,6 +2397,10 @@ async fn record_terminal_task_state(
     cancel_requested: bool,
 ) -> Result<ButlerTaskListItem, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    if status == STATUS_SUCCEEDED {
+        crate::db::butler_goal::assert_message_current(&db.get_connection().map_err(|e|e.to_string())?,
+            task_conversation_id,final_message_id).map_err(|e|e.to_string())?;
+    }
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
     let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
     let conversation = conversation_repo
@@ -2392,6 +2420,11 @@ async fn record_terminal_task_state(
         "final_message_id": final_message_id,
         "cancel_requested": cancel_requested,
     });
+    payload["execution"] = serde_json::to_value(crate::db::butler_execution::Outcome::finish(
+        crate::db::butler_execution::Identity::task(task_conversation_id), status, status,
+        final_message_id.map(|id| format!("message:{id}")),
+        status == STATUS_SUCCEEDED && final_message_id.is_some(), "pending"
+    )).map_err(|e| e.to_string())?;
     // completed / cancelled / interrupted 分记时间戳，便于 UI 与回流区分终态来源。
     match status {
         STATUS_SUCCEEDED => {
@@ -2425,6 +2458,9 @@ async fn record_terminal_task_state(
     if let Some(interrupted_at) = payload.get("interrupted_at") {
         structured["interrupted_at"] = interrupted_at.clone();
     }
+    let (evidence, artifacts) = crate::db::butler_progress::result_references(
+        &db.get_connection().map_err(|e| e.to_string())?, task_conversation_id, final_message_id,
+    ).map_err(|e| format!("保存成果引用失败: {e}"))?;
     let result = ButlerTaskResult {
         id: existing_result.as_ref().map(|value| value.id).unwrap_or(0),
         task_conversation_id,
@@ -2432,8 +2468,8 @@ async fn record_terminal_task_state(
         payload_json: Some(payload.to_string()),
         summary: Some(summary.clone()),
         structured_output_json: Some(structured.to_string()),
-        evidence_json: Some("[]".to_string()),
-        artifact_refs_json: Some("[]".to_string()),
+        evidence_json: Some(serde_json::to_string(&evidence).map_err(|e| e.to_string())?),
+        artifact_refs_json: Some(serde_json::to_string(&artifacts).map_err(|e| e.to_string())?),
         followup_suggestions_json: Some("[]".to_string()),
         followup_status: Some(FOLLOWUP_STATUS_PENDING.to_string()),
         handoff_message_id: None,
@@ -2730,6 +2766,12 @@ pub(crate) async fn finalize_butler_task_if_ready(
         return Ok(None);
     };
 
+    // The old turn may finish after a replacement was queued. Retain it as history,
+    // and let the current goal run; it must not finalize the work as succeeded.
+    if decision.status == STATUS_SUCCEEDED && crate::db::butler_goal::assert_message_current(
+        &db.get_connection().map_err(|e|e.to_string())?,task_conversation_id,decision.final_message_id).is_err() {
+        return Ok(None);
+    }
     record_terminal_task_state(
         app_handle,
         task_conversation_id,
@@ -2961,6 +3003,8 @@ async fn enqueue_butler_task_attention_followup(
         stream: Some(true),
         attachment_list: None,
         quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
     };
 
     ask_ai(
@@ -3324,6 +3368,7 @@ async fn spawn_butler_task_inner(
     followup_id: Option<i64>,
 ) -> Result<SpawnButlerTaskResponse, String> {
     ensure_butler_enabled(app_handle).await?;
+    super::butler_capabilities::ensure_enabled(app_handle, super::butler_capabilities::ButlerCapability::TaskDispatch).await?;
 
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -3359,6 +3404,18 @@ async fn spawn_butler_task_inner(
         &request.butler_conversation_id.to_string(),
     ).await?;
     let _ = ensure_butler_system_assistant(app_handle).await?;
+
+    let dispatch_key = request.request_key.clone().filter(|s| !s.trim().is_empty()).or_else(|| {
+        crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten()
+            .map(|id| format!("message:{id}:{}", serde_json::to_string(&request).unwrap_or_default()))
+    });
+    if let Some(key) = dispatch_key.as_deref() {
+        let conn=db.get_connection().map_err(|e|e.to_string())?;
+        if let Some(response)=crate::db::butler_execution::reserve_dispatch(&conn,request.butler_conversation_id,key,
+            &serde_json::to_string(&request).map_err(|e|e.to_string())?).map_err(|e|e.to_string())? {
+            return serde_json::from_str(&response).map_err(|e|e.to_string());
+        }
+    }
 
     // Tasks also appear in the executor's contact timeline.
     conversation_repo.open_butler_contact(executor_assistant.id, &executor_assistant.name)
@@ -3432,6 +3489,15 @@ async fn spawn_butler_task_inner(
         }
     }
 
+    if let Some(key)=dispatch_key.as_deref() {
+        let response=SpawnButlerTaskResponse{butler_conversation_id:request.butler_conversation_id,
+            task_conversation_id:created_task.id,title:definition.title.clone(),status:STATUS_ACCEPTED.to_string(),
+            executor_assistant_id:executor_assistant.id,executor_assistant_name:executor_assistant.name.clone()};
+        let conn=db.get_connection().map_err(|e|e.to_string())?;
+        crate::db::butler_execution::bind_dispatch(&conn,request.butler_conversation_id,key,
+            &serde_json::to_string(&response).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    }
+
     let accepted_task =
         build_task_list_item(app_handle, created_task.clone(), &definition, None).await?;
     let _ = app_handle.emit("butler_task_created", accepted_task.clone());
@@ -3478,6 +3544,8 @@ async fn spawn_butler_task_inner(
         stream: Some(true),
         attachment_list: None,
         quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
     };
 
     let updated_conversation = conversation_repo
@@ -3507,6 +3575,11 @@ async fn spawn_butler_task_inner(
                     "SELECT EXISTS(SELECT 1 FROM butler_work_followup WHERE id=?1 AND state IN ('sending','spawned') AND result_task=?2)",
                     rusqlite::params![followup_id, task_id], |r| r.get(0)).map_err(|e| e.to_string())?;
                 if !allowed { return Err("续接在启动前已停止，未调用模型".into()); }
+            }
+            // A capability may have been disabled while this spawn waited for admission.
+            super::butler_capabilities::ensure_enabled(&app_handle_clone, super::butler_capabilities::ButlerCapability::TaskDispatch).await?;
+            if followup_id.is_some() {
+                super::butler_capabilities::ensure_enabled(&app_handle_clone, super::butler_capabilities::ButlerCapability::WorkContinuation).await?;
             }
             match ask_ai(
                 app_handle_clone.clone(),
@@ -4325,6 +4398,7 @@ task_conversation_id=7
     ) -> ButlerTaskListItem {
         let now = Utc::now();
         ButlerTaskListItem {
+            progress: Default::default(),
             butler_conversation_id: 100,
             task_conversation_id,
             title: title.to_string(),

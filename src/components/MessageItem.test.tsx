@@ -406,3 +406,22 @@ describe('MessageItem render stability', () => {
         expect(getMessageItemRenderCount(21)).toBeGreaterThan(renders);
     });
 });
+
+it('labels obsolete goal output without rewriting the answer', () => {
+    const message = createMessage({content: '原始资料', metadata_json: JSON.stringify({end_reason: 'goal_superseded'})});
+    render(<MessageItem message={message} />);
+    expect(screen.getByRole('note')).toHaveTextContent('旧目标的历史回复，不是当前结果');
+    expect(message.content).toBe('原始资料');
+});
+it('labels a late streamed old-goal answer before reload', () => {
+    render(<MessageItem message={createMessage()} streamEvent={{message_id: 1, message_type: 'response', content: '旧结果', is_done: true, end_reason: 'goal_superseded'}} />);
+    expect(screen.getByRole('note')).toHaveTextContent('旧目标的历史回复，不是当前结果');
+});
+it('updates the old-goal label even when stream text has not changed', () => {
+    const message = createMessage();
+    const streamEvent = {message_id: 1, message_type: 'response' as const, content: '资料', is_done: false};
+    const {rerender} = render(<MessageItem message={message} streamEvent={streamEvent} />);
+    expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    rerender(<MessageItem message={message} streamEvent={{...streamEvent, end_reason: 'goal_superseded'}} />);
+    expect(screen.getByRole('note')).toBeInTheDocument();
+});

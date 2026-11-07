@@ -35,6 +35,7 @@ export interface UseConversationOperationsProps {
     assistantTypePluginMap: Map<number, any>;
     assistantRunApi: any;
     busySendBehavior?: "queue" | "interrupt";
+    butlerIntent?: "supplement" | "replace" | "aside" | "stop";
     quietRuntimeErrors?: boolean;
     selectedAgentModel?: string;
     selectedAgentEffort?: string;
@@ -89,6 +90,7 @@ export function useConversationOperations({
     assistantTypePluginMap,
     assistantRunApi,
     busySendBehavior = "queue",
+    butlerIntent,
     quietRuntimeErrors = false,
     selectedAgentModel = "",
     selectedAgentEffort = "",
@@ -261,6 +263,16 @@ export function useConversationOperations({
 
     // 发送消息的主要处理函数，使用节流防止频繁点击
     const handleSend = throttle(async () => {
+        if (butlerIntent === "stop" && conversation?.id) {
+            try {
+                await invoke("enqueue_conversation_message", { request: { conversation_id: String(conversation.id),
+                    assistant_id: conversation.assistant_id ?? selectedAssistant, prompt: inputText.trim() || "停止当前工作",
+                    butler_intent: "stop" }, queueKind: "interrupt" });
+                await invoke("cancel_ai", { conversationId: conversation.id });
+                setInputText("");
+            } catch (error) { toast.error("停止失败：" + error); }
+            return;
+        }
         if (aiIsResponsing) {
             if (inputText.trim() !== "" && conversation?.id) {
                 let assistantId = conversation.assistant_id ?? selectedAssistant;
@@ -288,6 +300,7 @@ export function useConversationOperations({
                         assistant_id: parsedAssistantId,
                         attachment_list: fileInfoList?.map((i) => i.id),
                         quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
+                        butler_intent: butlerIntent,
                     },
                     queueKind: busySendBehavior === "interrupt" ? "interrupt" : "normal",
                 })
@@ -482,6 +495,7 @@ export function useConversationOperations({
                         attachment_list: fileInfoList?.map((i) => i.id),
                         override_model_id: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,
                         quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
+                        butler_intent: butlerIntent,
                     },
                     override_model_config: Object.keys(agentOverrideConfig).length > 0
                         ? agentOverrideConfig

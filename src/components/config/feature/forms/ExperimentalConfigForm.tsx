@@ -1054,6 +1054,12 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
 
                         {butlerEnabled && (
                             <>
+                                <SettingsGroup title="管家能力开关" description="发生异常时可单独关闭新执行，保留记录、结果查看与停止操作。关闭不会撤销已发生的外部操作；重新开启后，未过期的排队工作可以继续。">
+                                    {renderToggleRow("butler_task_dispatch_enabled", "新建独立任务", "允许管家派发需要独立上下文的工作。")}
+                                    {renderToggleRow("butler_peer_collaboration_enabled", "发起成员协作", "关闭后不启动新的协作请求；已有答复与失败回执仍可返回。")}
+                                    {renderToggleRow("butler_work_continuation_enabled", "继续执行已有工作", "关闭后保留排队的续接要求，不再启动后续执行。")}
+                                    {renderToggleRow("butler_background_checks_enabled", "后台检查", "关闭后不启动管家绑定的检查，不影响普通定时任务。")}
+                                </SettingsGroup>
                                 <SettingsGroup title="基础">
                                     <Controller
                                         control={form.control}

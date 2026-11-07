@@ -1,3 +1,4 @@
+import ButlerProgressCard from "@/components/butler/ButlerProgressCard";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -973,6 +974,7 @@ function ButlerExperimentWindow() {
                         ready={!!mainConversationId} previews={previews} mainConversationId={mainConversationId} plugins={pluginList}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
                         onSearch={() => setSearchOpen(true)}/>
+                    {tasks.length > 0 && <details className="border-t p-2 max-h-80 overflow-auto"><summary className="cursor-pointer text-xs py-2">工作进展（{tasks.length}）</summary><div className="space-y-2">{tasks.map(task=><ButlerProgressCard key={task.task_conversation_id} task={task}/>)}</div></details>}
                     {scheduledTasks.length > 0 && (
                         <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
                             <button

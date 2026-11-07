@@ -595,6 +595,19 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
         void refreshPersistedState();
     }, [refreshPersistedState]);
 
+    // Durable Butler questions retain their stable ID after process restart.
+    useEffect(() => {
+        let active = true;
+        if (conversationId !== undefined) void invoke<AskUserQuestionRequest[]>("list_recoverable_butler_questions", { conversationId })
+            .then((requests) => { if (!active || !Array.isArray(requests)) return;
+                setRequestQueue((previous) => {
+                    const next = [...previous, ...requests.filter((r) => !previous.some((p) => p.request_id === r.request_id))];
+                    setPendingRequest(next[0] ?? null); setIsDialogOpen(next.length > 0); return next;
+                });
+            }).catch((error) => console.error("恢复待答问题失败", error));
+        return () => { active = false; };
+    }, [conversationId]);
+
     // Drop a stale local summary once a newer in-flight ask exists in persistence.
     useEffect(() => {
         if (!submittedSummary || !persistedState) return;

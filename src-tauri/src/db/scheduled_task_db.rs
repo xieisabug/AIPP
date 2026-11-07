@@ -336,6 +336,21 @@ impl ScheduledTaskDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn delete_approved_task(&self, id: i64, expected: &serde_json::Value) -> Result<()> {
+        self.with_write_lock(|| {
+            let tx = self.conn.unchecked_transaction()?;
+            // Acquire the write reservation before reading the approval snapshot.
+            tx.execute("UPDATE scheduled_task SET id=id WHERE id=?1", [id])?;
+            let task = self.read_task(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let current = serde_json::to_value(task).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            if &current != expected {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other("定时任务已变化，请重新批准"))));
+            }
+            super::cascade_delete::delete(&tx, "scheduled_task", id)?;
+            tx.commit()
+        })
+    }
+
     pub fn delete_task(&self, id: i64) -> Result<()> {
         self.with_write_lock(|| super::cascade_delete::delete(&self.conn, "scheduled_task", id))
     }
@@ -771,6 +786,20 @@ mod tests {
             created_time: now,
             updated_time: now,
         }
+    }
+
+    #[test]
+    fn approved_delete_rejects_modified_resource_and_consumes_once() {
+        let db=build_test_db();
+        let task=db.create_task(&build_task("original",Some(10))).unwrap();
+        let snapshot=serde_json::to_value(db.read_task(task.id).unwrap().unwrap()).unwrap();
+        db.conn.execute("UPDATE scheduled_task SET task_prompt='different recipient' WHERE id=?1",[task.id]).unwrap();
+        assert!(db.delete_approved_task(task.id,&snapshot).is_err());
+        assert!(db.read_task(task.id).unwrap().is_some());
+        let current=serde_json::to_value(db.read_task(task.id).unwrap().unwrap()).unwrap();
+        db.delete_approved_task(task.id,&current).unwrap();
+        assert!(db.read_task(task.id).unwrap().is_none());
+        assert!(db.delete_approved_task(task.id,&current).is_err());
     }
 
     #[test]

@@ -335,7 +335,9 @@ pub fn enqueue_followup(
         );
         return Ok((old, false));
     }
+    super::butler_control::ensure_delegation(&tx, conversation)?;
     for member in lineage_tasks(&tx, task)? {
+        super::butler_control::ensure_delegation(&tx, member)?;
         let stopped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_work_stop WHERE task=?1)", [member], |r| r.get(0))?;
         let cancelled: bool = tx.query_row("SELECT coalesce(butler_task_status,'')='cancelled' FROM conversation WHERE id=?1", [member], |r| r.get(0)).optional()?.unwrap_or(false);
         anyhow::ensure!(!stopped && !cancelled, "原工作已停止；请明确发起新工作，不会自动恢复已停止的续接");
@@ -426,6 +428,8 @@ pub fn claim_followup(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
     let tx = conn.unchecked_transaction()?;
     let candidate = tx.query_row(&format!("{FOLLOWUP} WHERE id=?1"), [id], followup_row).optional()?;
     let Some(candidate) = candidate else { return Ok(false); };
+    let control=super::butler_control::get(&tx,candidate.task_conversation_id)?;
+    if control.paused || control.cancelled { return Ok(false); }
     if !eligible(&tx, &candidate)? { return Ok(false); }
     let changed = tx.execute("UPDATE butler_work_followup SET state='sending' WHERE id=?1 AND state='queued'", [id])?;
     tx.commit()?;

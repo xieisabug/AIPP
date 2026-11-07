@@ -217,7 +217,16 @@ pub(crate) async fn resolve_agent_interaction_response(
             }
         }
     }
+    let resolved_question_id=if matches!(&reply,AgentInteractionReply::AskUserQuestion(_)) {Some(target.request_id.clone())} else {None};
+    if let Some(id)=&resolved_question_id {
+        let conn=crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+        crate::db::butler_goal::validate_question(&conn,id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+    }
     let resolution = resolve_app_reply(app_handle, target, reply).await?;
+    if let Some(id)=resolved_question_id {
+        let conn=crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+        crate::db::butler_goal::finish_question(&conn,&id).map_err(|e|e.to_string())?;
+    }
     if resolution.delivered {
         if let Some((task, key)) = history_key {
             let conn = crate::db::conversation_db::ConversationDatabase::new(app_handle)

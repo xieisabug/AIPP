@@ -1,9 +1,11 @@
+pub mod butler_control;
 pub mod ai;
 pub mod ai_api;
 pub mod assistant_api;
 pub mod assistant_summary_api;
 pub mod attachment_api;
 pub mod butler_api;
+pub(crate) mod butler_capabilities;
 pub mod butler_contact_activity;
 pub mod butler_progress;
 pub mod butler_peer;

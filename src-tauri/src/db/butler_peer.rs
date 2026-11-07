@@ -309,6 +309,7 @@ pub struct NewRequest<'a> {
 pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exchange> {
     anyhow::ensure!(req.owner != req.target, "不能向同一个联系人派发协作请求");
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    super::butler_control::ensure_delegation(&tx, req.owner)?;
     let (turn, meta): (i64, Option<String>) = tx.query_row(
         "SELECT id,metadata_json FROM message WHERE conversation_id=?1 AND message_type='user'
            AND (?2 IS NULL OR id<=?2) ORDER BY id DESC LIMIT 1",
@@ -439,9 +440,14 @@ pub fn claim(conn: &Connection, ex: &Exchange) -> rusqlite::Result<bool> {
     }
     let (destination, next) =
         if ex.state == "queued" { (ex.target, "sending") } else { (ex.owner, "reply_sending") };
+    super::butler_control::schema(conn)?;
+
     // 受托方等待下级答复时，它正在处理的上级委托仍是 waiting；下级答复必须能送回去，不能被上级挡住。
     Ok(conn.execute(
-        "UPDATE butler_peer_exchange SET state=?1 WHERE id=?2 AND state=?3 AND stop_requested=0 AND NOT EXISTS (
+        "UPDATE butler_peer_exchange SET state=?1 WHERE id=?2 AND state=?3 AND stop_requested=0
+        AND NOT EXISTS(SELECT 1 FROM butler_task_control c WHERE c.conversation_id=?4 AND (c.paused=1 OR c.cancelled=1))
+        AND (?3!='queued' OR NOT EXISTS(SELECT 1 FROM butler_task_control c WHERE c.conversation_id=butler_peer_exchange.owner AND (c.paused=1 OR c.delegation_stopped=1 OR c.cancelled=1)))
+        AND NOT EXISTS (
         SELECT 1 FROM butler_peer_exchange WHERE id!=?2 AND id IS NOT ?5 AND
         ((target=?4 AND state IN ('sending','waiting')) OR (owner=?4 AND state='reply_sending')))",
         params![next, ex.id, ex.state, destination, ex.parent],
@@ -481,6 +487,11 @@ pub fn write_input(
         return Ok(message);
     }
     let request = leg == "request";
+    // Claiming and delivery are separate: controls may change while a request waits
+    // for runtime admission. Never turn a queued delegation into work after stopping it.
+    if request { super::butler_control::ensure_delegation(&tx, ex.owner)?; }
+    super::butler_control::ensure_turn(&tx, conversation)?;
+
     let (expected, dest, speaker) = if request {
         ("sending", ex.target, ex.sender)
     } else {
@@ -490,7 +501,7 @@ pub fn write_input(
         dest == conversation && ex.state == expected,
         "exchange={id} {leg} 投递已停止或归属不符"
     );
-    let meta = serde_json::json!({"origin":"butler_peer","exchange_id":id,"root":ex.root,"leg":leg,"sender_bot":speaker,
+    let meta = serde_json::json!({"execution_identity":super::butler_execution::Identity::peer(ex.chain,id),"origin":"butler_peer","exchange_id":id,"root":ex.root,"leg":leg,"sender_bot":speaker,
         "audience":audience,"parent":ex.parent});
     let now = chrono::Utc::now();
     tx.execute("INSERT INTO message(conversation_id,message_type,content,created_time,llm_model_id,llm_model_name,
@@ -664,6 +675,10 @@ pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Res
     if let Some(ReplyCandidate { id: reply_id, role: kind, body, finished, metadata: meta, tool_calls: calls }) =
         last
     {
+        if super::butler_goal::assert_message_current(conn,ex.target,Some(reply_id)).is_err() {
+            fail(conn,ex.id,"接收方目标已变更，旧回复仅保留为记录，不作为本次协作结果")?;
+            return Ok(true);
+        }
         let meta = meta
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .unwrap_or_default();
@@ -673,13 +688,7 @@ pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Res
             fail(conn, ex.id, &format!("接收方回合终止：{kind} {body}"))?;
             return Ok(true);
         }
-        if finished
-            && kind != "tool_result"
-            && !body.trim().is_empty()
-            && body.trim() != "[[NO_REPLY]]"
-            && !body.contains("<!-- MCP_TOOL_CALL")
-            && !body.contains("<mcp_tool_call>")
-            && calls.as_deref().is_none_or(|v| matches!(v.trim(), "" | "[]" | "null"))
+        if super::butler_execution::is_completed_content(&kind,&body,finished,calls.as_deref())
         {
             let tx=conn.unchecked_transaction()?;
             let changed=tx.execute("UPDATE butler_peer_exchange SET state='returning',reply=?1 WHERE id=?2 AND state='waiting'",

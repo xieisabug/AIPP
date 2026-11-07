@@ -364,6 +364,15 @@ impl ActionHandler for ScheduleDeleteHandler {
         }))
     }
 
+    async fn execute_approved(&self, app_handle: &AppHandle, args: serde_json::Value,
+        snapshot: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+        let id = args.get("task_id").and_then(|v|v.as_i64()).ok_or("缺少任务编号")?;
+        let expected = snapshot.and_then(|v|v.get("approved_resource")).ok_or("缺少批准对象快照")?;
+        let db = ScheduledTaskDatabase::new(app_handle).map_err(|e|e.to_string())?;
+        db.delete_approved_task(id,expected).map_err(|e|e.to_string())?;
+        Ok(json!({"task_id":id,"deleted":true}))
+    }
+
     async fn snapshot_before(
         &self,
         app_handle: &AppHandle,
@@ -374,6 +383,7 @@ impl ActionHandler for ScheduleDeleteHandler {
         let task = db.read_task(task_id).ok()??;
         Some(json!({
             "_type": "schedule.delete",
+            "approved_resource": serde_json::to_value(&task).ok()?,
             "task_id": task.id,
             "name": task.name,
             "is_enabled": task.is_enabled,

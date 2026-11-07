@@ -64,6 +64,7 @@ interface AcpPermissionDialogProps {
 }
 
 const operationLabels: Record<string, string> = {
+    superadmin_execute: "管理操作（仅本次批准）",
     read_file: "读取文件",
     write_file: "写入文件",
     edit_file: "编辑文件",
@@ -98,6 +99,7 @@ export function OperationPermissionDialog({
     if (!request) return null;
 
     const operationLabel = operationLabels[request.operation] || request.operation;
+    const oneTimeOnly = request.operation === "superadmin_execute";
 
     const handleDeny = () => {
         onDecision(request.request_id, 'deny');
@@ -136,14 +138,14 @@ export function OperationPermissionDialog({
                                     <span className="min-w-0 text-muted-foreground">{operationLabel}</span>
                                 </div>
                                 <div className="flex items-start gap-2 text-sm">
-                                    <span className="shrink-0 font-medium text-foreground">路径:</span>
+                                    <span className="shrink-0 font-medium text-foreground">{oneTimeOnly ? "操作详情:" : "路径:"}</span>
                                     <span className="min-w-0 break-all font-mono text-xs text-foreground">
                                         {request.path}
                                     </span>
                                 </div>
                             </div>
                             <p className="text-xs text-muted-foreground">
-                                该路径不在允许访问的目录白名单中，请选择是否授权此操作。
+                                {oneTimeOnly ? "批准只对上述具体参数和当前工作有效，5分钟后失效；目标或参数变化需重新批准。" : "该路径不在允许访问的目录白名单中，请选择是否授权此操作。"}
                             </p>
                             {errorMessage ? (
                                 <p className="text-xs text-destructive">{errorMessage}</p>
@@ -171,6 +173,7 @@ export function OperationPermissionDialog({
                             <Shield className="h-4 w-4 shrink-0" />
                             仅本次允许
                         </Button>
+                        {!oneTimeOnly && <>
                         <Button
                             variant="outline"
                             onClick={handleAllowForConversation}
@@ -197,6 +200,7 @@ export function OperationPermissionDialog({
                             <ShieldCheck className="h-4 w-4 shrink-0" />
                             允许并加入全局白名单
                         </Button>
+                        </>}
                     </div>
                 </AlertDialogFooter>
             </AlertDialogContent>

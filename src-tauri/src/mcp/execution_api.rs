@@ -2024,6 +2024,11 @@ pub async fn execute_mcp_tool_call(
     let mut tool_call =
         db.get_mcp_tool_call(call_id).map_err(|e| format!("获取工具调用信息失败: {}", e))?;
     debug!(tool_call_name=%tool_call.tool_name, tool_call_server=%tool_call.server_name, tool_call_params=%tool_call.parameters, "准备调用的mcp工具");
+    let goal_conn=ConversationDatabase::new(&app_handle).map_err(|e|e.to_string())?.get_connection().map_err(|e|e.to_string())?;
+    crate::db::butler_goal::assert_message_current(&goal_conn,tool_call.conversation_id,
+        tool_call.assistant_message_id.or(tool_call.message_id)).map_err(|e|e.to_string())?;
+    drop(goal_conn);
+
 
     if is_acp_tool_call_record(&app_handle, &tool_call).map_err(|e| e.to_string())? {
         return Err(
@@ -2273,6 +2278,13 @@ pub async fn execute_mcp_tool_call(
         }
     }
 
+    // Recheck after asynchronous hooks and immediately before committing an operation.
+    let goal_conn=ConversationDatabase::new(&app_handle).map_err(|e|e.to_string())?.get_connection().map_err(|e|e.to_string())?;
+    let current=crate::db::butler_goal::assert_message_current(&goal_conn,tool_call.conversation_id,tool_call.assistant_message_id.or(tool_call.message_id));
+    drop(goal_conn);
+    if let Err(error)=current {
+        return handle_tool_execution_result(&app_handle,&state,&feature_config_state,&window,call_id,tool_call,Err(error.to_string()),is_retry,false).await;
+    }
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;
     let execution_result = {
@@ -2285,7 +2297,7 @@ pub async fn execute_mcp_tool_call(
             Some(tool_call.conversation_id),
             Some(cancel_token.clone()),
         );
-        let exec_future = crate::api::butler_peer::TOOL_MESSAGE.scope(tool_call.message_id, exec_future);
+        let exec_future = crate::api::butler_peer::TOOL_MESSAGE.scope(tool_call.assistant_message_id.or(tool_call.message_id), exec_future);
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
             res = exec_future => res,
@@ -2751,6 +2763,7 @@ async fn trigger_conversation_continuation(
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
+    let source_message_id=tool_call.assistant_message_id.or(tool_call.message_id);
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
             // 使用会话级锁保证续写串行，避免同一会话并发触发续写
@@ -2764,6 +2777,7 @@ async fn trigger_conversation_continuation(
                 assistant_id,
                 tool_call_id,
                 continuation_result,
+                source_message_id,
             )
             .await
             {
@@ -2885,6 +2899,7 @@ async fn trigger_conversation_continuation_with_error(
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
+    let source_message_id=tool_call.assistant_message_id.or(tool_call.message_id);
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
             // 使用会话级锁保证续写串行，避免同一会话并发触发续写
@@ -2898,6 +2913,7 @@ async fn trigger_conversation_continuation_with_error(
                 assistant_id,
                 tool_call_id,
                 error_result,
+                source_message_id,
             )
             .await
             {
@@ -2989,6 +3005,7 @@ async fn run_batch_continuation_once(
         window,
         conversation_id,
         assistant_id,
+        anchor_message_id,
     )
     .await
     {
@@ -3203,6 +3220,12 @@ pub async fn execute_tool_by_transport(
     conversation_id: Option<i64>,
     cancel_token: Option<CancellationToken>,
 ) -> std::result::Result<String, String> {
+    // Recheck at the tool boundary, not only when a model turn starts.
+    if let Some(id) = conversation_id {
+        let db = crate::db::conversation_db::ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let conn = db.get_connection().map_err(|e| e.to_string())?;
+        crate::db::butler_control::ensure_turn(&conn, id).map_err(|e| e.to_string())?;
+    }
     // 如果没有提供 cancel_token，创建一个永远不会取消的令牌
     if cfg!(mobile) {
         if let Some(issue) = crate::api::mobile_capability::tool_issue(

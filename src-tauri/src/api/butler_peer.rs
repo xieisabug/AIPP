@@ -145,6 +145,7 @@ pub async fn tool(
             .await?
         }
         "message_bot" => {
+            super::butler_capabilities::ensure_enabled(app, super::butler_capabilities::ButlerCapability::PeerCollaboration).await.map_err(anyhow::Error::msg)?;
             if owner.conversation_kind == "butler_main" {
                 ensure!(
                     super::butler_api::is_current_butler_main_conversation(app, &owner)
@@ -448,6 +449,9 @@ async fn send_peer_turn(
     exchange_id: i64,
     content: String,
 ) -> anyhow::Result<()> {
+    if leg == "request" {
+        super::butler_capabilities::ensure_enabled(app, super::butler_capabilities::ButlerCapability::PeerCollaboration).await.map_err(anyhow::Error::msg)?;
+    }
     let conv = ConversationDatabase::new(app)?
         .conversation_repo()?
         .read(dest)?
@@ -486,6 +490,8 @@ async fn send_peer_turn(
             stream: Some(true),
             attachment_list: None,
             quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
         },
         None,
         None,
@@ -535,6 +541,10 @@ async fn tick(
         if ex.state == "queued" && peer::expire(&conn, &ex, now)? {
             changed = true;
             idle.remove(&ex.id);
+            continue;
+        }
+        if ex.state == "queued" && !super::butler_capabilities::enabled(app, super::butler_capabilities::ButlerCapability::PeerCollaboration).await {
+            // Rollback pauses only new requests; existing answers/receipts still settle.
             continue;
         }
         if dest_busy {

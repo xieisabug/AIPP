@@ -376,6 +376,7 @@ pub enum AcpPermissionDecision {
 }
 
 struct PendingAcpPermissionRequest {
+    butler_guard: Option<crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard>,
     sender: oneshot::Sender<AcpPermissionDecision>,
     conversation_id: Option<i64>,
     event: AcpPermissionRequestEvent,
@@ -443,6 +444,14 @@ impl AcpPermissionState {
         sender: oneshot::Sender<AcpPermissionDecision>,
         scope: crate::api::ai::agent_driver::approval::AgentRequestScope,
     ) -> Result<(), String> {
+        self.store_request_guarded(event, sender, scope, None).await
+    }
+
+    pub(crate) async fn store_request_guarded(
+        &self, event: AcpPermissionRequestEvent, sender: oneshot::Sender<AcpPermissionDecision>,
+        scope: crate::api::ai::agent_driver::approval::AgentRequestScope,
+        butler_guard: Option<crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard>,
+    ) -> Result<(), String> {
         scope.validate_conversation(event.conversation_id)?;
         if event.agent_kind != scope.driver_id {
             return Err("Permission request driver does not match its scope".into());
@@ -454,10 +463,16 @@ impl AcpPermissionState {
             return Err(format!("Permission request '{request_id}' is already pending"));
         }
         pending.insert(request_id.clone(), PendingAcpPermissionRequest {
-            sender, conversation_id, event, scope,
+            sender, conversation_id, event, scope, butler_guard,
             review_code: Self::build_review_code(&request_id),
             feishu_message_id: None, allowed_open_id: None, allowed_chat_id: None,
         });
+        Ok(())
+    }
+
+    pub(crate) async fn validate_butler_reply(&self, app: &tauri::AppHandle, request_id: &str) -> Result<(), String> {
+        let guard = self.pending_requests.lock().await.get(request_id).and_then(|r| r.butler_guard.clone());
+        if let Some(guard) = guard { guard.validate(app)?; }
         Ok(())
     }
 
@@ -4010,8 +4025,12 @@ impl AcpTauriClient {
         };
 
         let state = self.app_handle.state::<AcpPermissionState>();
-        state.store_request_scoped(event.clone(), tx,
-            crate::api::ai::agent_driver::approval::AgentRequestScope::native("acp", self.instance_id, self.conversation_id, self.run_id.clone()))
+        let butler_guard = crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard::capture(
+            &self.app_handle, self.conversation_id, Some(*self.message_id.lock().await),
+            "acp.permission", serde_json::to_value(&event).map_err(|e| acp::Error::internal_error().data(e.to_string()))?,
+        ).map_err(|e| acp::Error::internal_error().data(e))?;
+        state.store_request_guarded(event.clone(), tx,
+            crate::api::ai::agent_driver::approval::AgentRequestScope::native("acp", self.instance_id, self.conversation_id, self.run_id.clone()), butler_guard.clone())
             .await.map_err(|error| acp::Error::internal_error().data(serde_json::json!(error)))?;
 
         let delivered_to_feishu = match state.get_request(&request_id).await {
@@ -4073,7 +4092,14 @@ impl AcpTauriClient {
             );
         }
 
-        Ok(wait_for_acp_permission_decision(rx).await)
+        let response = wait_for_acp_permission_decision(rx).await;
+        if let Some(guard) = butler_guard {
+            if let Err(error) = guard.validate(&self.app_handle) {
+                warn!(%error, "Butler native approval invalidated before ACP execution");
+                return Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled));
+            }
+        }
+        Ok(response)
     }
 
     /// ACP elicitation（结构化提问）：仅支持 form 模式 + session 作用域。
@@ -4553,6 +4579,7 @@ async fn process_acp_prompt(
             &completion_window,
             conversation_id,
             &final_content,
+            message_id,
             AgentKind::Acp,
         )
         .await;
