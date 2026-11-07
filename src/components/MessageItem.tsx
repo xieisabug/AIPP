@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
+import { ButlerMessageQuoteLabel } from "./butler/ButlerQuote";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import ReasoningMessage from "./ReasoningMessage";
 import ErrorMessage from "./message-item/ErrorMessage";
@@ -550,6 +551,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     />
                 )}
 
+                {isUserMessage && <ButlerMessageQuoteLabel message={message} />}
                 {speakerLabel && (
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
                         {speakerLabel}

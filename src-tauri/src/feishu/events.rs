@@ -745,6 +745,7 @@ async fn process_incoming_text_message(
             max_tokens: None,
             stream: Some(true),
             attachment_list: None,
+            quote: None,
         };
         ask_ai(
             app_handle.clone(),

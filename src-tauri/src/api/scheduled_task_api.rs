@@ -3005,6 +3005,7 @@ async fn enqueue_scheduled_task_butler_followup(
         max_tokens: None,
         stream: Some(true),
         attachment_list: None,
+        quote: None,
     };
 
     FOLLOWUP_KEYS.scope(vec![scheduled_followup_key(run_id)], ask_ai(

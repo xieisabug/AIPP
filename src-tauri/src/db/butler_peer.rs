@@ -45,6 +45,10 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
         ("parent", "ALTER TABLE butler_peer_exchange ADD COLUMN parent INTEGER"),
         ("depth", "ALTER TABLE butler_peer_exchange ADD COLUMN depth INTEGER NOT NULL DEFAULT 1"),
         ("expires_at", "ALTER TABLE butler_peer_exchange ADD COLUMN expires_at TEXT"),
+        // 整条协作链（同一项工作）的标识：轮数预算、有效期、停止都按链计算；独立任务发起的协作挂到派出该任务的工作上。
+        ("chain", "ALTER TABLE butler_peer_exchange ADD COLUMN chain INTEGER"),
+        // 停止时实际打断了什么、哪些无法确认已停止，供回执与界面如实说明。
+        ("stop_note", "ALTER TABLE butler_peer_exchange ADD COLUMN stop_note TEXT"),
     ] {
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_peer_exchange') WHERE name=?1)",
@@ -53,7 +57,14 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch(ddl)?;
         }
     }
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_butler_peer_parent ON butler_peer_exchange(parent)")?;
+    conn.execute_batch("UPDATE butler_peer_exchange SET chain=root WHERE chain IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_butler_peer_parent ON butler_peer_exchange(parent);
+        CREATE INDEX IF NOT EXISTS idx_butler_peer_chain ON butler_peer_exchange(chain);
+        -- 独立任务属于哪项工作（派出它的那一轮所在的协作链），以及它是否是某个任务的关联后续执行。
+        CREATE TABLE IF NOT EXISTS butler_task_link(
+            task_conversation_id INTEGER PRIMARY KEY, chain INTEGER NOT NULL, followup_of INTEGER,
+            created_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE INDEX IF NOT EXISTS idx_butler_task_link_chain ON butler_task_link(chain);")?;
     super::butler_timeline::schema(conn)
 }
 
@@ -81,9 +92,12 @@ pub struct Exchange {
     pub parent: Option<i64>,
     pub depth: i64,
     pub expires_at: Option<DateTime<Utc>>,
+    /// 所属工作（协作链）标识。
+    pub chain: i64,
+    pub stop_note: Option<String>,
 }
-const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at FROM butler_peer_exchange";
-const SUMMARY: &str = "SELECT id,root,owner,target,sender,recipient,'',state,input_id,NULL,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at FROM butler_peer_exchange";
+const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at,coalesce(chain,root),stop_note FROM butler_peer_exchange";
+const SUMMARY: &str = "SELECT id,root,owner,target,sender,recipient,'',state,input_id,NULL,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at,coalesce(chain,root),stop_note FROM butler_peer_exchange";
 /// 仍在进行、尚未交付的协作状态。
 const ACTIVE: &str = "('queued','sending','waiting','returning','reply_sending')";
 /// 协作链最多层数：总管家→甲→乙→丙。
@@ -111,7 +125,146 @@ fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
         parent: r.get(16)?,
         depth: r.get(17)?,
         expires_at: r.get(18)?,
+        chain: r.get(19)?,
+        stop_note: r.get(20)?,
     })
+}
+
+/// 会话当前（或某条消息之前）这一轮属于哪项工作：协作投递触发的回合沿用其 root，否则就是该用户消息本身。
+pub fn current_root(conn: &Connection, conversation: i64, before: Option<i64>) -> rusqlite::Result<Option<i64>> {
+    let latest: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT id,metadata_json FROM message WHERE conversation_id=?1 AND message_type='user'
+               AND (?2 IS NULL OR id<=?2) ORDER BY id DESC LIMIT 1",
+            params![conversation, before],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(latest.map(|(id, meta)| {
+        let meta = meta
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .unwrap_or_default();
+        if meta["origin"] == "butler_peer" { meta["root"].as_i64().unwrap_or(id) } else { id }
+    }))
+}
+
+/// 会话当前这一轮在做哪项工作：root 为所属一轮；exchange 为受托处理的那项协作
+/// （请求方向即该协作；答复/回执方向是接收方继续处理的上级协作；None 表示会话自己发起的工作）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnWork {
+    pub root: i64,
+    pub exchange: Option<i64>,
+}
+
+pub fn turn_work(conn: &Connection, conversation: i64) -> rusqlite::Result<Option<TurnWork>> {
+    let latest: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT id,metadata_json FROM message WHERE conversation_id=?1 AND message_type='user' ORDER BY id DESC LIMIT 1",
+            [conversation],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, meta)) = latest else { return Ok(None) };
+    let meta = meta.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or_default();
+    if meta["origin"] != "butler_peer" {
+        return Ok(Some(TurnWork { root: id, exchange: None }));
+    }
+    let root = meta["root"].as_i64().unwrap_or(id);
+    let Some(via) = meta["exchange_id"].as_i64() else { return Ok(Some(TurnWork { root, exchange: None })) };
+    let exchange = if meta["leg"] == "request" {
+        Some(via)
+    } else {
+        conn.query_row("SELECT parent FROM butler_peer_exchange WHERE id=?1", [via], |r| r.get::<_, Option<i64>>(0))
+            .optional()?
+            .flatten()
+    };
+    Ok(Some(TurnWork { root, exchange }))
+}
+
+/// 某项协作及其全部下级协作。
+pub fn subtree(conn: &Connection, id: i64) -> rusqlite::Result<Vec<Exchange>> {
+    conn.prepare(&format!(
+        "WITH RECURSIVE sub(id) AS (SELECT ?1 UNION SELECT e.id FROM butler_peer_exchange e JOIN sub ON e.parent=sub.id)
+         {SELECT} WHERE id IN (SELECT id FROM sub) ORDER BY id"
+    ))?
+    .query_map([id], row)?
+    .collect()
+}
+
+/// 停止一项协作及其下级（不影响同一轮里并行的其他协作）。返回涉及的协作 ID。
+pub fn stop_subtree(conn: &Connection, id: i64) -> rusqlite::Result<Vec<i64>> {
+    let ids: Vec<i64> = subtree(conn, id)?.into_iter().map(|e| e.id).collect();
+    for id in &ids {
+        stop_rows(conn, "id=?1", *id)?;
+    }
+    Ok(ids)
+}
+
+/// 某一轮（root）所属的工作链：已有协作沿用其链；独立任务里的新一轮挂到派出该任务的工作上。
+pub fn chain_of(conn: &Connection, root: i64, owner: i64) -> rusqlite::Result<i64> {
+    if let Some(chain) = conn
+        .query_row("SELECT coalesce(chain,root) FROM butler_peer_exchange WHERE root=?1 LIMIT 1", [root], |r| r.get(0))
+        .optional()?
+    {
+        return Ok(chain);
+    }
+    Ok(conn
+        .query_row("SELECT chain FROM butler_task_link WHERE task_conversation_id=?1", [owner], |r| r.get(0))
+        .optional()?
+        .unwrap_or(root))
+}
+
+/// 记录独立任务所属的工作（派出它时所在的协作链）及其关联的原任务（续接执行时）。
+pub fn link_task(conn: &Connection, task: i64, chain: i64, followup_of: Option<i64>) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO butler_task_link(task_conversation_id,chain,followup_of) VALUES (?1,?2,?3)
+         ON CONFLICT(task_conversation_id) DO NOTHING",
+        params![task, chain, followup_of],
+    )?;
+    Ok(())
+}
+
+pub fn task_link(conn: &Connection, task: i64) -> rusqlite::Result<Option<(i64, Option<i64>)>> {
+    conn.query_row(
+        "SELECT chain,followup_of FROM butler_task_link WHERE task_conversation_id=?1",
+        [task],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
+/// 属于该工作链的独立任务。
+pub fn linked_tasks(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<i64>> {
+    conn.prepare("SELECT task_conversation_id FROM butler_task_link WHERE chain=?1 ORDER BY task_conversation_id")?
+        .query_map([chain], |r| r.get(0))?
+        .collect()
+}
+
+/// 该工作链涉及的各轮 root（含链本身），用于判断某个会话当前这一轮是否属于这项工作。
+pub fn chain_roots(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut roots: Vec<i64> = conn
+        .prepare("SELECT DISTINCT root FROM butler_peer_exchange WHERE coalesce(chain,root)=?1")?
+        .query_map([chain], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !roots.contains(&chain) {
+        roots.push(chain);
+    }
+    Ok(roots)
+}
+
+/// 工作链涉及的会话（发起方与接收方）。
+pub fn chain_conversations(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<i64>> {
+    conn.prepare("SELECT owner FROM butler_peer_exchange WHERE coalesce(chain,root)=?1
+                  UNION SELECT target FROM butler_peer_exchange WHERE coalesce(chain,root)=?1")?
+        .query_map([chain], |r| r.get(0))?
+        .collect()
+}
+
+fn assistant_of(conn: &Connection, conversation: i64) -> rusqlite::Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT assistant_id FROM conversation WHERE id=?1", [conversation], |r| r.get::<_, Option<i64>>(0))
+        .optional()?
+        .flatten())
 }
 
 fn read(conn: &Connection, id: i64) -> rusqlite::Result<Exchange> {
@@ -184,6 +337,10 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
         (turn, None)
     };
     let report_to_user = req.report_to_user.unwrap_or(parent.is_none());
+    let chain = match &parent {
+        Some(p) => p.chain,
+        None => chain_of(&tx, root, req.owner)?,
+    };
     if let Some(old) = tx
         .query_row(
             &format!("{SELECT} WHERE root=?1 AND request_key=?2"),
@@ -215,22 +372,34 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
             p.depth < MAX_DEPTH,
             "协作已达到 {MAX_DEPTH} 层上限，不能继续转派；请自行完成，或在答复中写明还需要谁协助"
         );
-        // 循环保护：协作链上已出现的助手不能再被拉回来，否则会互相等待。
+        // 循环保护按助手身份判断：协作链上已出现的助手（无论在联系人、任务还是主会话里）不能再被拉回来。
+        let target_assistant = assistant_of(&tx, req.target)?;
         let mut cursor = Some(p.clone());
         while let Some(ancestor) = cursor {
+            let mut seen = vec![ancestor.owner, ancestor.target];
+            let same_identity = match target_assistant {
+                Some(assistant) => [ancestor.owner, ancestor.target]
+                    .into_iter()
+                    .map(|conversation| assistant_of(&tx, conversation))
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .contains(&Some(assistant)),
+                None => false,
+            };
+            seen.retain(|conversation| *conversation == req.target);
             anyhow::ensure!(
-                ancestor.owner != req.target && ancestor.target != req.target,
+                seen.is_empty() && !same_identity,
                 "{} 已在本条协作链中，不能形成循环协作；需要对方补充信息时请在答复中直接提出",
                 req.recipient
             );
             cursor = ancestor.parent.map(|id| read(&tx, id)).transpose()?;
         }
     }
-    let (count, limit, stopped): (i64, Option<i64>, i64) = tx.query_row(
-        "SELECT count(*),min(max_rounds),count(CASE WHEN stop_requested=1 THEN 1 END)
-         FROM butler_peer_exchange WHERE root=?1",
-        [root],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    // 轮数预算与停止状态按整条工作链计算，不能靠切换会话或新一轮重新计数。
+    let (count, limit, stopped, chain_expiry): (i64, Option<i64>, i64, Option<DateTime<Utc>>) = tx.query_row(
+        "SELECT count(*),min(max_rounds),count(CASE WHEN stop_requested=1 THEN 1 END),min(expires_at)
+         FROM butler_peer_exchange WHERE coalesce(chain,root)=?1",
+        [chain],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     let limit = limit.unwrap_or(req.limit);
     anyhow::ensure!(stopped == 0, "该协作已停止，请向用户汇报现有结果");
@@ -242,14 +411,16 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
     )?;
     anyhow::ensure!(!busy, "与该助手的上一轮仍在进行，收到回复后可继续发送");
     let depth = parent.as_ref().map_or(1, |p| p.depth + 1);
+    // 有效期由整条链首次发起时确定，后续轮次与下级继承，不重新计时。
     let expires_at = parent
         .as_ref()
         .and_then(|p| p.expires_at)
+        .or(chain_expiry)
         .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(TTL_MINUTES));
-    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds,report_to_user,parent,depth,expires_at)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?10,?11,?12,?13)",
+    tx.execute("INSERT INTO butler_peer_exchange(root,owner,target,sender,recipient,request_key,body,state,round_no,max_rounds,report_to_user,parent,depth,expires_at,chain)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',?8,?9,?10,?11,?12,?13,?14)",
         params![root,req.owner,req.target,req.sender,req.recipient,req.key,req.body,count+1,limit,report_to_user,
-            parent.as_ref().map(|p| p.id),depth,expires_at])?;
+            parent.as_ref().map(|p| p.id),depth,expires_at,chain])?;
     let ex = read(&tx, tx.last_insert_rowid())?;
     let anchor = match req.tool_message_id {
         Some(id) => id,
@@ -523,17 +694,19 @@ pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Res
     Ok(false)
 }
 
-/// 停止某会话（如被取消的独立任务）发起的全部进行中协作，连同其下级分工。
-pub fn stop_owned(conn: &Connection, conversation: i64) -> rusqlite::Result<usize> {
-    let roots: Vec<i64> = conn
-        .prepare(&format!(
-            "SELECT DISTINCT root FROM butler_peer_exchange WHERE owner=?1 AND state IN {ACTIVE}"
-        ))?
+/// 停止某会话（如被取消的独立任务）发起的全部进行中协作，连同其下级分工。返回涉及的协作 ID。
+pub fn stop_owned(conn: &Connection, conversation: i64) -> rusqlite::Result<Vec<i64>> {
+    let owned: Vec<i64> = conn
+        .prepare(&format!("SELECT id FROM butler_peer_exchange WHERE owner=?1 AND state IN {ACTIVE} ORDER BY id"))?
         .query_map([conversation], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut changed = 0;
-    for root in roots {
-        changed += stop(conn, root, conversation)?;
+    let mut stopped = Vec::new();
+    for id in owned {
+        for id in stop_subtree(conn, id)? {
+            if !stopped.contains(&id) {
+                stopped.push(id);
+            }
+        }
     }
     // 被整项停止的一方就是发起方本身，不再给它回执；下级成员仍各收到一次停止回执。
     conn.execute(
@@ -541,17 +714,69 @@ pub fn stop_owned(conn: &Connection, conversation: i64) -> rusqlite::Result<usiz
          WHERE owner=?1 AND state='stopped' AND receipt_state='pending'",
         [conversation],
     )?;
-    Ok(changed)
+    Ok(stopped)
 }
 
-pub fn stop(conn: &Connection, root: i64, conversation: i64) -> rusqlite::Result<usize> {
+fn stop_rows(conn: &Connection, filter: &str, key: i64) -> rusqlite::Result<usize> {
     // 被停止的进行中协作也给发起方一次回执；已送达或已失败的保持原状。
     conn.execute(
-        "UPDATE butler_peer_exchange SET stop_requested=1,
+        &format!("UPDATE butler_peer_exchange SET stop_requested=1,
             receipt_state=CASE WHEN state IN ('delivered','failed','stopped') THEN receipt_state ELSE coalesce(receipt_state,'pending') END,
             state=CASE WHEN state IN ('delivered','failed') THEN state ELSE 'stopped' END
-         WHERE root=?1 AND EXISTS
-        (SELECT 1 FROM butler_peer_exchange WHERE root=?1 AND (owner=?2 OR target=?2))",
-        params![root, conversation],
+         WHERE {filter}"),
+        [key],
     )
+}
+
+/// 某会话发起、仍在进行的协作。
+pub fn active_in_owner(conn: &Connection, owner: i64) -> rusqlite::Result<Vec<Exchange>> {
+    conn.prepare(&format!("{SELECT} WHERE owner=?1 AND state IN {ACTIVE} ORDER BY id"))?
+        .query_map([owner], row)?
+        .collect()
+}
+
+/// 进行中的协作（停止前快照），用于停止后判断哪些执行需要实际打断。
+pub fn active_in_chain(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<Exchange>> {
+    conn.prepare(&format!("{SELECT} WHERE coalesce(chain,root)=?1 AND state IN {ACTIVE} ORDER BY id"))?
+        .query_map([chain], row)?
+        .collect()
+}
+
+/// 停止整项工作（整条协作链）。
+pub fn stop_chain(conn: &Connection, chain: i64) -> rusqlite::Result<usize> {
+    stop_rows(conn, "coalesce(chain,root)=?1", chain)
+}
+
+/// 记录停止时实际发生了什么（已打断、无法确认、未打断的原因），只写给本次停止的协作。
+pub fn set_stop_note(conn: &Connection, ids: &[i64], note: &str) -> rusqlite::Result<()> {
+    for id in ids {
+        conn.execute(
+            "UPDATE butler_peer_exchange SET stop_note=?2 WHERE id=?1 AND state='stopped' AND stop_note IS NULL",
+            params![id, note],
+        )?;
+    }
+    Ok(())
+}
+
+/// 工作链上全部协作 ID。
+pub fn chain_ids(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<i64>> {
+    conn.prepare("SELECT id FROM butler_peer_exchange WHERE coalesce(chain,root)=?1 ORDER BY id")?
+        .query_map([chain], |r| r.get(0))?
+        .collect()
+}
+
+/// 参与方停止某一轮所在的整项工作：整条协作链（含下级、续接的后续轮次）一起停止。
+pub fn stop(conn: &Connection, root: i64, conversation: i64) -> rusqlite::Result<usize> {
+    let Some(chain) = conn
+        .query_row(
+            "SELECT coalesce(chain,root) FROM butler_peer_exchange WHERE root=?1
+               AND EXISTS(SELECT 1 FROM butler_peer_exchange WHERE root=?1 AND (owner=?2 OR target=?2)) LIMIT 1",
+            params![root, conversation],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(0);
+    };
+    stop_chain(conn, chain)
 }

@@ -15,6 +15,7 @@ use tracing::{debug, error, info, instrument, warn};
 pub mod assistant_db;
 pub mod butler_history;
 pub mod butler_peer;
+pub mod butler_work;
 pub mod butler_timeline;
 pub mod butler_exchange_context;
 pub mod connection;

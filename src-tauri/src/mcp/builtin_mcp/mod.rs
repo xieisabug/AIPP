@@ -1869,6 +1869,8 @@ pub async fn execute_aipp_builtin_tool(
                             &args,
                             "temporary_skill_identifiers",
                         )?,
+                        followup_of: None,
+                        link_chain: None,
                     };
 
                     let window = resolve_butler_spawn_window(&app_handle)?;
@@ -1979,6 +1981,7 @@ pub async fn execute_aipp_builtin_tool(
                                             max_tokens: None,
                                             stream: Some(true),
                                             attachment_list: None,
+                                            quote: None,
                                         };
                                         match ask_ai(
                                         app_handle_clone.clone(),

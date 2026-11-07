@@ -384,6 +384,22 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 }}),
             },
             BuiltinToolInfo {
+                name: "read_work_context".into(),
+                description: "Read the goal, status and result of a piece of Butler work by its stable reference (task:<id>, exchange:<id> or turn:<id>) as listed in <quoted_work> or <recent_work>. Access is checked against the current conversation; deleted or inaccessible records return an error you must report honestly.".into(),
+                input_schema: serde_json::json!({"type":"object","required":["work_ref"],"properties":{
+                    "work_ref":{"type":"string","description":"Reference such as task:12"}
+                }}),
+            },
+            BuiltinToolInfo {
+                name: "continue_work".into(),
+                description: "Continue an independent task the user referred to, only when the user explicitly asks to keep executing or revise it (not for discussing its result). If the original task is still running the instruction is delivered to the same execution in order; if it has ended a linked follow-up task is created by the same assistant without restoring the original temporary permissions. Retries with the same request_id never run twice. End this turn afterwards; the result is delivered under the executing assistant's name.".into(),
+                input_schema: serde_json::json!({"type":"object","required":["work_ref","instruction","request_id"],"properties":{
+                    "work_ref":{"type":"string","description":"task:<task conversation id> from <quoted_work> or <recent_work>"},
+                    "instruction":{"type":"string","description":"The user's new requirement, self-contained"},
+                    "request_id":{"type":"string","description":"Stable key; reuse on retry"}
+                }}),
+            },
+            BuiltinToolInfo {
                 name: "search_bot_history".into(),
                 description: "Search the messages of ALL Butler contacts, the chief and their task conversations by literal phrase. Each match identifies the owning Bot, the speaker, conversation and message ID. Use read_bot_message_context for the surrounding conversation.".into(),
                 input_schema: serde_json::json!({"type":"object","required":["query"],"properties":{

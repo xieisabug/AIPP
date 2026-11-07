@@ -663,8 +663,88 @@ fn test_butler_peer_task_owned_exchanges_block_finalize_and_stop_with_task() {
     assert!(ex.report_to_user, "任务直接发起的协作同样默认由对方答复用户，可显式改为 sender");
     assert!(has_open_owned(&db, 40).unwrap());
     assert!(!has_open_owned(&db, 20).unwrap());
-    assert_eq!(stop_owned(&db, 40).unwrap(), 1);
+    assert_eq!(stop_owned(&db, 40).unwrap(), vec![ex.id]);
     let stopped = reread(&db, ex.id);
     assert_eq!((stopped.state.as_str(), stopped.receipt_state), ("stopped", None));
     assert!(!has_open_owned(&db, 40).unwrap());
+}
+
+/// 同一助手从独立任务会话绕到联系人会话也构成循环：按助手身份判断，而不只比较会话 ID。
+#[test]
+fn test_butler_peer_loop_is_detected_by_assistant_identity_across_conversations() {
+    let mut db = chain_database();
+    // 任务会话 40 的执行助手是 3（审稿），联系人 30 也是审稿助手 3。
+    message(&db, 40, "user", "任务说明：核对资料");
+    let from_task = enqueue(&mut db, delegate(40, 60, "ask", "请提供资料")).unwrap();
+    assert!(claim(&db, &from_task).unwrap());
+    write_input(&mut db, from_task.id, "request", 60, "请提供资料", 1, "model").unwrap();
+    let error = enqueue(&mut db, NewRequest { recipient: "审稿", ..delegate(60, 30, "back", "回头问审稿") })
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("循环"), "{error}");
+    // 链外的其他助手仍可协助。
+    assert!(enqueue(&mut db, delegate(60, 70, "other", "请排版")).is_ok());
+}
+
+/// 同一条链的后续轮次沿用首次确定的有效期；独立任务发起的协作挂到派出它的工作上，共享预算与有效期。
+#[test]
+fn test_butler_peer_chain_expiry_and_budget_are_inherited_not_restarted() {
+    let mut db = chain_database();
+    let root = message(&db, 10, "user", "多轮工作");
+    let first = enqueue(&mut db, NewRequest { limit: 3, ..delegate(10, 20, "r1", "第一轮") }).unwrap();
+    // 模拟时间流逝：首轮有效期较早。
+    let early = Utc::now() + chrono::Duration::minutes(5);
+    db.execute("UPDATE butler_peer_exchange SET expires_at=?1 WHERE id=?2", params![early, first.id]).unwrap();
+    assert!(claim(&db, &first).unwrap());
+    write_input(&mut db, first.id, "request", 20, "第一轮", 1, "model").unwrap();
+    message(&db, 20, "response", "第一轮结果");
+    settle(&db, &reread(&db, first.id), false).unwrap();
+    let back = reread(&db, first.id);
+    assert!(claim(&db, &back).unwrap());
+    write_input(&mut db, first.id, "reply", 10, "第一轮结果", 1, "model").unwrap();
+    let second = enqueue(&mut db, delegate(10, 30, "r2", "第二轮")).unwrap();
+    assert_eq!(second.chain, root);
+    assert_eq!(second.expires_at, Some(early), "后续轮次不能重新计时");
+    // 派出的独立任务属于同一项工作：任务里发起的协作计入同一条链的预算与有效期。
+    link_task(&db, 40, root, None).unwrap();
+    message(&db, 40, "user", "任务说明");
+    let from_task = enqueue(&mut db, delegate(40, 60, "t1", "任务里请资料")).unwrap();
+    assert_eq!((from_task.chain, from_task.expires_at, from_task.round_no), (root, Some(early), 3));
+    let over = enqueue(&mut db, delegate(40, 70, "t2", "超出预算")).unwrap_err().to_string();
+    assert!(over.contains("3 轮"), "{over}");
+    assert_eq!(linked_tasks(&db, root).unwrap(), vec![40]);
+}
+
+/// 当前这一轮属于哪项工作：请求方向是该协作，回送方向是继续处理的上级协作；只停止某项委托及其下级，不误停并行工作。
+#[test]
+fn test_butler_peer_turn_work_and_subtree_stop_spare_parallel_work() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "同时交给写作和审稿");
+    let to_writer = enqueue(&mut db, delegate(10, 20, "w", "写稿")).unwrap();
+    let to_reviewer = enqueue(&mut db, delegate(10, 30, "r", "审另一份")).unwrap();
+    for ex in [&to_writer, &to_reviewer] {
+        assert!(claim(&db, ex).unwrap());
+        write_input(&mut db, ex.id, "request", ex.target, "开始", 1, "model").unwrap();
+    }
+    assert_eq!(turn_work(&db, 20).unwrap(), Some(TurnWork { root: to_writer.root, exchange: Some(to_writer.id) }));
+    let help = enqueue(&mut db, delegate(20, 60, "h", "请资料")).unwrap();
+    assert!(claim(&db, &help).unwrap());
+    write_input(&mut db, help.id, "request", 60, "请资料", 1, "model").unwrap();
+    message(&db, 60, "response", "资料");
+    settle(&db, &reread(&db, help.id), false).unwrap();
+    assert!(claim(&db, &reread(&db, help.id)).unwrap());
+    write_input(&mut db, help.id, "reply", 20, "资料", 1, "model").unwrap();
+    assert_eq!(turn_work(&db, 20).unwrap().unwrap().exchange, Some(to_writer.id), "回送后仍在处理上级委托");
+
+    let stopped = stop_subtree(&db, to_writer.id).unwrap();
+    assert_eq!(stopped, vec![to_writer.id, help.id]);
+    assert_eq!(reread(&db, to_writer.id).state, "stopped");
+    assert_eq!(reread(&db, to_reviewer.id).state, "waiting", "同一轮并行交给审稿的工作不受影响");
+    set_stop_note(&db, &stopped, "写作：已停止正在进行的回合").unwrap();
+    assert_eq!(reread(&db, to_writer.id).stop_note.as_deref(), Some("写作：已停止正在进行的回合"));
+    assert!(reread(&db, to_reviewer.id).stop_note.is_none());
+    assert_eq!(chain_roots(&db, to_writer.chain).unwrap(), vec![to_writer.root]);
+    let mut conversations = chain_conversations(&db, to_writer.chain).unwrap();
+    conversations.sort();
+    assert_eq!(conversations, vec![10, 20, 30, 60]);
 }

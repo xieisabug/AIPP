@@ -1239,6 +1239,23 @@ pub async fn ask_ai(
         &app_handle, processed_request.assistant_id, "after_send_hook", &processed_request.conversation_id,
     ).await.map_err(AppError::UnknownError)?;
 
+    // 管家会话的用户消息：引用了某份结果时带入对应工作的必要上下文；未引用时提供近期工作清单以便判断指代。
+    // 只作为本轮运行时前缀发给模型，不写进用户可见的消息正文。
+    let work_context = match (peer_turn || relay_origin.as_deref() == Some("internal"), processed_request.conversation_id.parse::<i64>()) {
+        (false, Ok(id)) => crate::api::butler_work::turn_context(&app_handle, id, processed_request.quote.as_ref())
+            .unwrap_or_else(|error| {
+                warn!(conversation_id = id, error = %format!("{error:#}"), "failed to build butler work context");
+                Default::default()
+            }),
+        _ => Default::default(),
+    };
+    if let Some(prefix) = work_context.prefix.as_deref() {
+        runtime_user_prompt_prefix = Some(match runtime_user_prompt_prefix.take() {
+            Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{prefix}"),
+            _ => prefix.to_string(),
+        });
+    }
+
     let template_engine = build_template_engine(&app_handle)
         .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
     let mut template_context = HashMap::new();
@@ -1436,6 +1453,7 @@ pub async fn ask_ai(
         override_prompt.clone(),
         active_skill_attachments,
         relay_origin.as_deref(),
+        work_context.metadata.as_ref().map(|value| value.to_string()),
     )
     .await?;
     if admission.is_some() {
@@ -2924,6 +2942,17 @@ pub async fn cancel_ai(
 
     send_conversation_event_to_chat_windows(&app_handle, conversation_id, cancel_event);
 
+    // 管家会话：停止这一轮所属的工作时，连同其下级协作与关联任务一起实际停止（不影响同一助手的其他工作）。
+    let butler_kind = crate::mcp::butler_tools::conversation_kind(&app_handle, Some(conversation_id))
+        .unwrap_or_default();
+    if matches!(butler_kind.as_str(), "butler_contact" | "butler_main") {
+        match crate::api::butler_peer::stop_turn_work(&app_handle, conversation_id).await {
+            Ok(Some(note)) => info!(conversation_id, note = %note, "stopped butler work with its sub-work"),
+            Ok(None) => {}
+            Err(error) => warn!(conversation_id, error = %format!("{error:#}"), "failed to stop butler sub-work on cancel"),
+        }
+    }
+
     if let Err(error) = mark_butler_task_cancelled(&app_handle, conversation_id).await {
         warn!(conversation_id, error = %error, "failed to finalize butler task on cancel");
     }
@@ -3483,6 +3512,7 @@ async fn initialize_conversation(
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
     origin: Option<&str>,
+    user_metadata: Option<String>,
 ) -> Result<
     (
         i64,
@@ -3657,7 +3687,8 @@ async fn initialize_conversation(
             db.message_repo()?.read(input)?.ok_or_else(|| AppError::UnknownError(format!("协作触发消息 {input} 写入后丢失")))?
         } else {
             // 内部续跑的来源与回送标记随消息一次写入
-            let metadata = (origin == Some("internal")).then(crate::api::butler_api::internal_prompt_metadata);
+            // 内部续跑标记；管家会话的引用身份（引用回复）随用户消息保存，重进或重启后仍可追溯。
+            let metadata = (origin == Some("internal")).then(crate::api::butler_api::internal_prompt_metadata).or(user_metadata);
             let message = add_message_with_metadata(app_handle, None, conversation_id, "user".to_string(),
                 display_user_prompt_with_context.clone(), Some(assistant_detail.model[0].id),
                 Some(assistant_detail.model[0].model_code.clone()), None, None, 0, None, None, metadata)?;

@@ -106,8 +106,11 @@ interface InputAreaProps {
     planMode?: boolean;
     planModeSwitching?: boolean;
     onPlanModeToggle?: () => void;
+    /** 输入框顶部的附加条（如管家引用回复的引用对象），仅桌面端展示 */
+    topChip?: ReactNode;
 }
 const IMAGE_AREA_HEIGHT = 80;
+const TOP_CHIP_HEIGHT = 30;
 export const COMPOSER_GROW_VAR = "--aipp-composer-grow";
 // 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
 const EMPTY_ACP_COMMANDS: AcpAvailableCommand[] = [];
@@ -134,6 +137,7 @@ const InputArea = React.memo(
                 planMode = false,
                 planModeSwitching = false,
                 onPlanModeToggle,
+                topChip,
             },
             ref
         ) => {
@@ -469,6 +473,15 @@ const InputArea = React.memo(
                     adjustTextareaHeight();
                 }
             }, [inputText, initialHeight, fileInfoList, isFocused, isMobile]);
+
+            // 引用条出现或消失时同步输入框高度（未聚焦时按初始高度计算）
+            const hasTopChip = !!topChip;
+            useEffect(() => {
+                if (isMobile) return;
+                if (isFocused) adjustTextareaHeight();
+                else restoreInitialHeight();
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [hasTopChip]);
 
             useEffect(() => {
                 if (!isMobile || !window.visualViewport) return;
@@ -835,7 +848,7 @@ const InputArea = React.memo(
                     const maxHeight = document.documentElement.clientHeight * 0.35;
                     const newHeight = Math.min(Math.max(textarea.scrollHeight, initialHeight), maxHeight);
                     textarea.style.height = `${newHeight}px`;
-                    const filePad = fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0;
+                    const filePad = (fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0) + (topChip ? TOP_CHIP_HEIGHT : 0);
                     textarea.parentElement!.style.height = `${newHeight + filePad}px`;
                 }
             };
@@ -849,7 +862,7 @@ const InputArea = React.memo(
                 const textarea = textareaRef.current;
                 if (textarea && initialHeight) {
                     textarea.style.height = `${initialHeight}px`;
-                    const filePad = fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0;
+                    const filePad = (fileInfoList?.length ? IMAGE_AREA_HEIGHT : 0) + (topChip ? TOP_CHIP_HEIGHT : 0);
                     textarea.parentElement!.style.height = `${initialHeight + filePad}px`;
                 }
             };
@@ -1369,6 +1382,11 @@ const InputArea = React.memo(
                         data-theme-slot="input-area-container"
                         data-aipp-slot="chat-input-area-container"
                     >
+                        {!isMobile && topChip ? (
+                            <div className="flex min-w-0 items-center pt-1.5" style={{ height: TOP_CHIP_HEIGHT }} data-aipp-slot="chat-input-top-chip">
+                                {topChip}
+                            </div>
+                        ) : null}
                         {!isMobile ? (
                             <div className="input-area-img-container" onClick={handleImageContainerClick} data-aipp-slot="chat-input-attachments">
                                 {renderFiles()}

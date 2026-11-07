@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import ButlerAvatar from "./ButlerAvatar";
 import type { PeerPost } from "./butlerTimeline";
+import { ButlerQuoteButton, quoteExcerpt, type ButlerQuoteTarget } from "./ButlerQuote";
 
 interface Episode {
     prompt: string | null;
@@ -57,6 +58,12 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
     const directReport = posts.length === 1 && first.direct && !first.error && first.text.trim() !== "";
     const speaker = first.speaker ?? first.peer;
     const speakerAvatar = first.speaker_assistant ?? first.peer_assistant ?? first.peer_conversation;
+    // 直接交付可引用回复：任务结果按任务身份，助手委托按协作身份。
+    const quoteTarget: ButlerQuoteTarget | null = first.task_id
+        ? { kind: "task", id: first.task_id, label: `${speaker} 的任务结果`, excerpt: quoteExcerpt(first.text) }
+        : first.exchange_id
+            ? { kind: "exchange", id: first.exchange_id, label: `${speaker} 的答复`, excerpt: quoteExcerpt(first.text) }
+            : null;
     return <Dialog open={open} onOpenChange={setOpen}>
         {directReport ? <div className="butler-exchange" data-aipp-slot="butler-direct-report">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -66,9 +73,12 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
                 <time dateTime={first.occurred_at}>
                     {new Date(first.occurred_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                 </time>
-                <DialogTrigger asChild>
-                    <button type="button" className="ml-auto rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground">查看往来</button>
-                </DialogTrigger>
+                <span className="ml-auto flex items-center gap-1">
+                    {quoteTarget && <ButlerQuoteButton target={quoteTarget} />}
+                    <DialogTrigger asChild>
+                        <button type="button" className="rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground">查看往来</button>
+                    </DialogTrigger>
+                </span>
             </div>
             <div className="butler-peer-bubble mt-1.5 max-w-full">
                 <UnifiedMarkdown>{first.text}</UnifiedMarkdown>

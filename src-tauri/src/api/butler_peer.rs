@@ -59,11 +59,16 @@ const MAX_ROUNDS_LIMIT: i64 = 12;
 fn connection(app: &AppHandle) -> anyhow::Result<Connection> {
     Ok(ConversationDatabase::new(app)?.get_connection()?)
 }
+/// 唤醒协作投递循环（新协作、续接或回执待送时）。
+pub(crate) fn wake() {
+    WAKE.notify_one();
+}
+
 pub(super) fn updated(app: &AppHandle) {
     let _ = app.emit("butler_peer_changed", ());
 }
 pub fn is_peer_tool(name: &str) -> bool {
-    super::butler_assistant_tools::is_tool(name) || matches!(
+    super::butler_assistant_tools::is_tool(name) || super::butler_work::is_tool(name) || matches!(
         name,
         "message_bot" | "search_own_history" | "search_bot_history" | "read_bot_message_context"
     )
@@ -100,6 +105,9 @@ pub async fn tool(
     );
     if super::butler_assistant_tools::is_tool(name) {
         return super::butler_assistant_tools::tool(app,current,name,args).await;
+    }
+    if super::butler_work::is_tool(name) {
+        return super::butler_work::tool(app, current, name, args).await;
     }
     let names = bot_names(app).await?;
     match name {
@@ -259,18 +267,25 @@ pub fn list_butler_peer_exchanges(
         .and_then(|conn| Ok(peer::list(&conn, Some(conversation_id), include_details)?))
         .map_err(|e| e.to_string())
 }
+/// 停止整项工作：停止该协作链上的全部协作和关联任务，实际打断属于这项工作的执行，返回停止情况说明。
 #[tauri::command]
-pub fn stop_butler_peer_exchange(
+pub async fn stop_butler_peer_exchange(
     app_handle: AppHandle,
     conversation_id: i64,
     root: i64,
-) -> Result<(), String> {
-    let conn = connection(&app_handle).map_err(|e| e.to_string())?;
-    if peer::stop(&conn, root, conversation_id).map_err(|e| e.to_string())? == 0 {
-        return Err("没有属于此联系人的协作".into());
-    }
-    updated(&app_handle);
-    Ok(())
+) -> Result<String, String> {
+    let chain = {
+        let conn = connection(&app_handle).map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT coalesce(chain,root) FROM butler_peer_exchange WHERE root=?1 AND (owner=?2 OR target=?2) LIMIT 1",
+            rusqlite::params![root, conversation_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|_| "没有属于此联系人的协作".to_string())?
+    };
+    stop_chain_work(&app_handle, chain, None)
+        .await
+        .map_err(|e| format!("停止协作 root={root} 失败：{e:#}"))
 }
 
 #[tauri::command]
@@ -290,7 +305,7 @@ pub fn retry_butler_peer_receipt(
     Ok(())
 }
 
-async fn busy(app: &AppHandle, id: i64) -> anyhow::Result<bool> {
+pub(super) async fn busy(app: &AppHandle, id: i64) -> anyhow::Result<bool> {
     if app.state::<ConversationActivityManager>().get_runtime_state(id).await.is_running {
         return Ok(true);
     }
@@ -325,7 +340,10 @@ pub(crate) fn build_receipt_prompt(ex: &Exchange, parent: Option<&Exchange>) -> 
     let (status, reason, guidance) = if stopped {
         (
             "已停止",
-            "用户停止了这项协作".to_string(),
+            match ex.stop_note.as_deref() {
+                Some(note) => format!("这项工作已被停止；停止情况：{note}"),
+                None => "这项工作已被停止".to_string(),
+            },
             "不要重新派发该协作。对方可能已完成部分工作，是否已产生影响需以对方会话为准。请简要说明协作已停止及已知进展。",
         )
     } else {
@@ -467,6 +485,7 @@ async fn send_peer_turn(
             max_tokens: None,
             stream: Some(true),
             attachment_list: None,
+            quote: None,
         },
         None,
         None,
@@ -490,11 +509,19 @@ async fn tick(
     if recovering {
         peer::recover(&conn)?;
     }
+    // 续接请求（引用结果后要求继续执行）与协作共用投递循环。
+    let followups_active = match super::butler_work::tick(app, recovering).await {
+        Ok(active) => active,
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "Butler work follow-up delivery");
+            true
+        }
+    };
     let exchanges = peer::list(&conn, None, true)?;
     idle.retain(|id, _| exchanges.iter().any(|ex| ex.id == *id && ex.state == "waiting"));
     let receipts = peer::pending_receipts(&conn)?;
     if exchanges.is_empty() && receipts.is_empty() {
-        return Ok(false);
+        return Ok(followups_active);
     }
     if ensure_butler_enabled(app).await.is_err() {
         return Ok(false);
@@ -557,13 +584,255 @@ async fn tick(
 }
 
 /// 整项停止（如取消独立任务）时，连同该会话发起的协作及其下级分工一起停止，并各给发起方一次回执。
-pub(crate) fn stop_owned_exchanges(app: &AppHandle, conversation: i64) -> anyhow::Result<usize> {
-    let changed = peer::stop_owned(&connection(app)?, conversation)?;
-    if changed > 0 {
-        updated(app);
-        WAKE.notify_one();
+/// 一次实际打断的结果：哪些执行确实停下了，哪些只能发出取消但无法确认。
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub(crate) struct HaltReport {
+    pub conversation_id: i64,
+    pub assistant: String,
+    pub model_cancelled: bool,
+    pub pending_tools_cancelled: usize,
+    pub executing_tools_unconfirmed: usize,
+    pub questions_cancelled: usize,
+    pub permissions_denied: usize,
+}
+
+impl HaltReport {
+    pub(crate) fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.model_cancelled {
+            parts.push("已停止正在进行的回合".to_string());
+        }
+        if self.pending_tools_cancelled > 0 {
+            parts.push(format!("取消 {} 个待执行工具调用", self.pending_tools_cancelled));
+        }
+        if self.questions_cancelled > 0 {
+            parts.push(format!("撤回 {} 个待答问题", self.questions_cancelled));
+        }
+        if self.permissions_denied > 0 {
+            parts.push(format!("拒绝 {} 个待审批请求", self.permissions_denied));
+        }
+        if parts.is_empty() {
+            parts.push("没有正在运行的执行".to_string());
+        }
+        let mut text = format!("{}：{}", self.assistant, parts.join("，"));
+        if self.executing_tools_unconfirmed > 0 {
+            text.push_str(&format!(
+                "；{} 个工具调用已在执行中，已发出取消，但无法确认外部操作是否已停止或已经生效",
+                self.executing_tools_unconfirmed
+            ));
+        }
+        text
     }
-    Ok(changed)
+}
+
+/// 实际打断会话当前的执行：模型回合、待执行/执行中的工具、待答问题与待审批请求。
+/// 只做打断，不改会话以外的状态；调用方负责先确认这一轮属于被停止的工作。
+pub(crate) async fn halt_turn(app: &AppHandle, conversation: i64, assistant: String) -> anyhow::Result<HaltReport> {
+    use crate::mcp::builtin_mcp::{interaction::InteractionState, OperationState};
+    let mut report = HaltReport { conversation_id: conversation, assistant, ..Default::default() };
+    report.model_cancelled = app.state::<ConversationActivityManager>().get_runtime_state(conversation).await.is_running;
+    let interactions = app.state::<InteractionState>();
+    for request in interactions.list_requests_for_conversation(conversation).await {
+        if interactions.resolve_ask_user_request(&request.request_id, Err("所属工作已停止".into())).await {
+            report.questions_cancelled += 1;
+        }
+    }
+    let operations = app.state::<OperationState>();
+    for request in operations.list_permission_requests_for_conversation(conversation).await {
+        if operations
+            .resolve_permission_request(&request.event.request_id, crate::mcp::builtin_mcp::operation::types::PermissionDecision::Deny)
+            .await
+            .is_some()
+        {
+            report.permissions_denied += 1;
+        }
+    }
+    let acp = app.state::<crate::api::ai::acp::AcpPermissionState>();
+    for request in acp.list_requests_for_conversation(conversation).await {
+        if acp
+            .resolve_request(&request.event.request_id, crate::api::ai::acp::AcpPermissionDecision::Cancelled)
+            .await
+            .map_err(anyhow::Error::msg)?
+            .is_some()
+        {
+            report.permissions_denied += 1;
+        }
+    }
+    for call in MCPDatabase::new(app)?.get_mcp_tool_calls_by_conversation(conversation)? {
+        match call.status.as_str() {
+            "pending" => report.pending_tools_cancelled += 1,
+            "executing" => report.executing_tools_unconfirmed += 1,
+            _ => {}
+        }
+    }
+    if let Some(session) = crate::api::ai::agent_driver::lifecycle::lookup_session(app, conversation).await? {
+        session.handle.cancel_current_prompt().await.map_err(|e| anyhow!(e.to_string()))?;
+    } else {
+        app.state::<crate::state::message_token::MessageTokenManager>().cancel_request(conversation).await;
+    }
+    crate::mcp::execution_api::cancel_mcp_tool_calls_by_conversation(app, conversation)
+        .await
+        .map_err(|e| anyhow!("取消会话 {conversation} 的工具调用失败：{e}"))?;
+    ConversationDatabase::new(app)?.message_repo()?.finish_pending_messages(conversation)?;
+    app.state::<ConversationActivityManager>().clear_focus(app, conversation).await;
+    crate::utils::window_utils::send_conversation_event_to_chat_windows(
+        app,
+        conversation,
+        crate::api::ai::events::ConversationEvent {
+            r#type: "conversation_cancel".to_string(),
+            data: json!({"conversation_id": conversation, "cancelled_at": chrono::Utc::now()}),
+        },
+    );
+    Ok(report)
+}
+
+/// 被停止工作的范围：按工作链（整项工作）或按具体协作（某项委托及其下级）。
+pub(crate) enum HaltScope {
+    Roots(Vec<i64>),
+    Exchanges(Vec<i64>),
+}
+
+/// 会话当前这一轮是否属于被停止的工作：整项停止看这一轮的 root；停止某项委托只看它正在处理的那项协作，
+/// 因此同一轮里并行交给其他助手的工作、以及同一助手后来接手的其他工作都不会被误停。
+pub(crate) fn turn_in_scope(scope: &HaltScope, work: Option<&peer::TurnWork>) -> bool {
+    match (scope, work) {
+        (HaltScope::Roots(roots), Some(work)) => roots.contains(&work.root),
+        (HaltScope::Exchanges(ids), Some(work)) => work.exchange.is_some_and(|id| ids.contains(&id)),
+        (_, None) => false,
+    }
+}
+
+async fn assistant_label(app: &AppHandle, names: &HashMap<i64, String>, conversation: i64) -> String {
+    ConversationDatabase::new(app)
+        .ok()
+        .and_then(|db| db.conversation_repo().ok())
+        .and_then(|repo| repo.read(conversation).ok().flatten())
+        .and_then(|c| c.assistant_id)
+        .and_then(|id| names.get(&id).cloned())
+        .unwrap_or_else(|| format!("会话 #{conversation}"))
+}
+
+/// 打断属于被停止工作的执行，并说明结果。只打断“当前这一轮正属于该工作”的会话；
+/// 同一助手正在处理其他工作时不打断，并写明原因。
+async fn halt_work(
+    app: &AppHandle,
+    conversations: Vec<i64>,
+    scope: HaltScope,
+    tasks: Vec<i64>,
+    exclude: Option<i64>,
+) -> anyhow::Result<String> {
+    let names = bot_names(app).await?;
+    let mut lines = Vec::new();
+    let mut seen = Vec::new();
+    for conversation in conversations {
+        if Some(conversation) == exclude || seen.contains(&conversation) || tasks.contains(&conversation) {
+            continue;
+        }
+        seen.push(conversation);
+        if !busy(app, conversation).await? {
+            continue;
+        }
+        let work = peer::turn_work(&connection(app)?, conversation)?;
+        let belongs = turn_in_scope(&scope, work.as_ref());
+        let label = assistant_label(app, &names, conversation).await;
+        if belongs {
+            lines.push(halt_turn(app, conversation, label).await?.describe());
+        } else {
+            lines.push(format!("{label}：正在处理其他工作，未打断"));
+        }
+    }
+    for task in tasks {
+        if Some(task) == exclude {
+            continue;
+        }
+        let Some(conv) = ConversationDatabase::new(app)?.conversation_repo()?.read(task)? else {
+            lines.push(format!("任务 #{task}：记录已删除，无法确认是否仍在执行"));
+            continue;
+        };
+        if conv.butler_task_finalized_at.is_some() {
+            continue;
+        }
+        let label = assistant_label(app, &names, task).await;
+        let report = if busy(app, task).await? { Some(halt_turn(app, task, label.clone()).await?) } else { None };
+        // 取消任务会再停止任务自己发起的协作（stop_task_work → halt_work），装箱以打断异步递归。
+        Box::pin(super::butler_api::mark_butler_task_cancelled(app, task)).await.map_err(anyhow::Error::msg)?;
+        lines.push(match report {
+            Some(report) => format!("任务《{}》已取消；{}", conv.name, report.describe()),
+            None => format!("任务《{}》已取消（未在执行）", conv.name),
+        });
+    }
+    Ok(if lines.is_empty() { "下级没有正在运行的执行，已阻止后续投递".to_string() } else { lines.join("；") })
+}
+
+fn finish_stop(app: &AppHandle, ids: &[i64], note: &str) -> anyhow::Result<()> {
+    peer::set_stop_note(&connection(app)?, ids, note)?;
+    updated(app);
+    WAKE.notify_one();
+    Ok(())
+}
+
+/// 停止整项工作（整条协作链）：停止链上全部协作与关联的独立任务，并实际打断属于这项工作的执行。
+pub(crate) async fn stop_chain_work(app: &AppHandle, chain: i64, exclude: Option<i64>) -> anyhow::Result<String> {
+    let conn = connection(app)?;
+    let ids = peer::chain_ids(&conn, chain)?;
+    let roots = peer::chain_roots(&conn, chain)?;
+    let conversations = peer::chain_conversations(&conn, chain)?;
+    let tasks = peer::linked_tasks(&conn, chain)?;
+    peer::stop_chain(&conn, chain)?;
+    drop(conn);
+    let note = halt_work(app, conversations, HaltScope::Roots(roots), tasks, exclude).await?;
+    finish_stop(app, &ids, &note)?;
+    Ok(note)
+}
+
+/// 停止某项委托及其下级（例如用户停止了受托助手的这一轮）；不影响同一轮里并行的其他协作。
+pub(crate) async fn stop_exchange_work(app: &AppHandle, exchange: i64, exclude: Option<i64>) -> anyhow::Result<String> {
+    let conn = connection(app)?;
+    let subtree = peer::subtree(&conn, exchange)?;
+    let conversations: Vec<i64> = subtree.iter().flat_map(|e| [e.owner, e.target]).collect();
+    let ids = peer::stop_subtree(&conn, exchange)?;
+    drop(conn);
+    let note = halt_work(app, conversations, HaltScope::Exchanges(ids.clone()), Vec::new(), exclude).await?;
+    finish_stop(app, &ids, &note)?;
+    Ok(note)
+}
+
+/// 用户停止某个管家会话的当前回合：受托处理的那项委托及其下级一起停止；
+/// 若这一轮是它自己发起的工作（上级），整条协作链及关联任务一起停止。
+pub(crate) async fn stop_turn_work(app: &AppHandle, conversation: i64) -> anyhow::Result<Option<String>> {
+    let conn = connection(app)?;
+    let Some(work) = peer::turn_work(&conn, conversation)? else { return Ok(None) };
+    if let Some(exchange) = work.exchange {
+        drop(conn);
+        return Ok(Some(stop_exchange_work(app, exchange, Some(conversation)).await?));
+    }
+    let chain = peer::chain_of(&conn, work.root, conversation)?;
+    let has_work = !peer::active_in_chain(&conn, chain)?.is_empty() || !peer::linked_tasks(&conn, chain)?.is_empty();
+    drop(conn);
+    if !has_work {
+        return Ok(None);
+    }
+    Ok(Some(stop_chain_work(app, chain, Some(conversation)).await?))
+}
+
+/// 取消独立任务：停止任务发起的协作及其下级，实际打断属于它们的执行；不影响该助手的其他会话。
+pub(crate) async fn stop_task_work(app: &AppHandle, task: i64) -> anyhow::Result<Option<String>> {
+    let conn = connection(app)?;
+    let snapshot: Vec<Exchange> = peer::active_in_owner(&conn, task)?;
+    let ids = peer::stop_owned(&conn, task)?;
+    drop(conn);
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let mut conversations: Vec<i64> = snapshot.iter().map(|e| e.target).collect();
+    for id in &ids {
+        if let Some(ex) = peer::get(&connection(app)?, *id)? {
+            conversations.extend([ex.owner, ex.target]);
+        }
+    }
+    let note = halt_work(app, conversations, HaltScope::Exchanges(ids.clone()), Vec::new(), Some(task)).await?;
+    finish_stop(app, &ids, &note)?;
+    Ok(Some(note))
 }
 
 /// 独立任务发起的协作是否仍未闭环（任务据此暂缓收尾）。
@@ -606,7 +875,7 @@ mod receipt_prompt_tests {
             body: "请审稿".into(), state: state.into(), input_id: None, reply: None,
             error: error.map(str::to_string), round_no: 1, max_rounds: 6, stop_requested,
             report_to_user: false, receipt_state: Some("sending".into()),
-            parent: None, depth: 1, expires_at: None,
+            parent: None, depth: 1, expires_at: None, chain: 1, stop_note: None,
         }
     }
 
@@ -634,6 +903,23 @@ mod receipt_prompt_tests {
         let help = Exchange { reply: Some("意见".into()), parent: Some(1), ..exchange("returning", false, None) };
         let back = build_delivery_prompt(&help, false, Some(&parent)).unwrap();
         assert!(back.contains("总管家 交给你的工作") && back.contains("展示给用户"));
+    }
+
+    #[test]
+    fn test_turn_in_scope_only_halts_turns_of_the_stopped_work() {
+        use super::{turn_in_scope, HaltScope};
+        use crate::db::butler_peer::TurnWork;
+        let writer = TurnWork { root: 1, exchange: Some(5) };
+        let parallel = TurnWork { root: 1, exchange: Some(6) };
+        let later = TurnWork { root: 9, exchange: None };
+        let stopped = HaltScope::Exchanges(vec![5, 7]);
+        assert!(turn_in_scope(&stopped, Some(&writer)));
+        assert!(!turn_in_scope(&stopped, Some(&parallel)), "同一轮并行的其他委托不打断");
+        assert!(!turn_in_scope(&stopped, Some(&later)), "同一助手后来接手的工作不打断");
+        let whole = HaltScope::Roots(vec![1]);
+        assert!(turn_in_scope(&whole, Some(&parallel)));
+        assert!(!turn_in_scope(&whole, Some(&later)));
+        assert!(!turn_in_scope(&whole, None));
     }
 
     #[test]

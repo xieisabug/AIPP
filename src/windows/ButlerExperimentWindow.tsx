@@ -64,6 +64,8 @@ import {
 } from "@/components/config/feature/forms/experimentalConfigShared";
 import { ConversationStatsDialog } from "@/components/token-statistics";
 import { ButlerOnboardingWizard } from "@/components/butler/ButlerOnboardingWizard";
+import { ButlerQuoteContext, type ButlerQuoteTarget } from "@/components/butler/ButlerQuote";
+import { taskQuestionItems, useButlerTaskQuestions } from "@/components/butler/butlerTaskQuestions";
 import { buildButlerWorkspaceConfig } from "@/components/butler/butlerWorkspaceConfig";
 import { AssistantListItem, type AssistantDetail } from "@/data/Assistant";
 import {
@@ -448,6 +450,12 @@ function ButlerExperimentWindow() {
         reopenPersistedPreviewFile(selection.callId);
     }, [reopenPersistedPreviewFile]);
 
+    const { questions: taskQuestions, submit: submitTaskQuestion, cancel: cancelTaskQuestion } =
+        useButlerTaskQuestions(historyView ? null : contact?.conversationId ?? null);
+    // 聊天式引用回复：切换会话时清除，避免把引用带到另一位助手。
+    const [quote, setQuote] = useState<ButlerQuoteTarget | null>(null);
+    useEffect(() => setQuote(null), [activeConversationId]);
+    const quoteState = useMemo(() => ({ quote, setQuote }), [quote]);
     const inlineInteractionItems: InlineInteractionItem[] = [];
     if (isAskUserDialogOpen && pendingAskUserRequest) {
         inlineInteractionItems.push({
@@ -498,6 +506,8 @@ function ButlerExperimentWindow() {
             ),
         });
     }
+    // 执行助手在独立任务里提出的问题，显示在它自己的联系人窗口，答案回到原问题与原执行。
+    inlineInteractionItems.push(...taskQuestionItems(taskQuestions, activeAssistant?.name ?? "助手", submitTaskQuestion, cancelTaskQuestion));
     const hasInlineInteraction = inlineInteractionItems.length > 0;
     const avatarState = useConversationAvatarState(activeConversationId, hasInlineInteraction);
     // 顶部头像保持静止，运行状态改用副标题文字呈现；工具轮次间的短暂空闲不切回模型名。
@@ -1146,6 +1156,7 @@ function ButlerExperimentWindow() {
                             </div>
                             )}
                             <div className="min-h-0 flex-1">
+                                <ButlerQuoteContext.Provider value={historyView ? null : quoteState}>
                                 <ConversationUI
                                     key={activeConversationId}
                                     ref={conversationUIRef}
@@ -1166,6 +1177,7 @@ function ButlerExperimentWindow() {
                                     busySendBehavior="interrupt"
                                     onPreviewFileContextClick={handlePreviewFileContextSelection}
                                 />
+                                </ButlerQuoteContext.Provider>
                             </div>
                         </>
                     ) : (

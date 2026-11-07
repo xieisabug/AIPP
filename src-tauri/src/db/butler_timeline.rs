@@ -58,19 +58,21 @@ pub struct Post {
     /// 直接交付行的发言者（与 peer 不同时给出，例如执行助手自己会话中的任务交付）。
     pub(super) speaker:Option<String>,
     pub(super) speaker_assistant:Option<i64>,
+    /// 协作记录身份（引用回复用）；任务事件为空。
+    pub(super) exchange_id:Option<i64>,
 }
 pub fn list(conn:&Connection,conversation:i64)->rusqlite::Result<Vec<Post>> {
     let mut stmt=conn.prepare("SELECT p.id,p.anchor,p.occurred_at,p.outgoing,
         CASE WHEN p.conversation_id=e.owner THEN e.recipient ELSE e.sender END,c.id,c.assistant_id,
         CASE p.leg WHEN 'request' THEN e.body ELSE e.reply END,e.state,e.error,e.root,
-        p.leg='reply' AND p.conversation_id=e.owner AND e.report_to_user=1,e.report_to_user,e.parent
+        p.leg='reply' AND p.conversation_id=e.owner AND e.report_to_user=1,e.report_to_user,e.parent,e.id
         FROM butler_peer_post p JOIN butler_peer_exchange e ON e.id=p.exchange_id JOIN conversation c ON c.id=
         CASE WHEN p.conversation_id=e.owner THEN e.target ELSE e.owner END
         WHERE p.conversation_id=?1 ORDER BY p.id")?;
     let rows=stmt.query_map([conversation],|r| Ok(Post{id:r.get(0)?,anchor:r.get(1)?,occurred_at:r.get(2)?,
         outgoing:r.get(3)?,peer:r.get(4)?,peer_conversation:r.get(5)?,peer_assistant:r.get(6)?,
         text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:false,root:r.get(10)?,direct:r.get(11)?,
-        to_user:r.get(12)?,parent:r.get(13)?,speaker:None,speaker_assistant:None}))?;
+        to_user:r.get(12)?,parent:r.get(13)?,speaker:None,speaker_assistant:None,exchange_id:r.get(14)?}))?;
     rows.collect()
 }
 
@@ -148,6 +150,7 @@ pub fn task_posts(
             parent: None,
             speaker: None,
             speaker_assistant: None,
+            exchange_id: None,
         };
         let mut posts = Vec::new();
         if after_since(&request.occurred_at) { posts.push(request); }
@@ -175,6 +178,7 @@ pub fn task_posts(
                 speaker: (!owner_view).then(|| names.get(&executor).cloned()
                     .unwrap_or_else(|| format!("助手 #{executor}"))),
                 speaker_assistant: (!owner_view).then_some(executor),
+                exchange_id: None,
             });
         }
         Ok(posts)

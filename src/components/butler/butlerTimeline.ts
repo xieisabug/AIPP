@@ -24,6 +24,8 @@ export interface PeerPost {
     /** Speaker of a direct delivery when it differs from `peer` (e.g. a task result shown in the executor's own chat). */
     speaker?: string | null;
     speaker_assistant?: number | null;
+    /** Exchange identity for quote replies; absent for task events. */
+    exchange_id?: number | null;
 }
 
 export function withPeerTimeline(messages: Message[], unpublished: Set<number>, posts: PeerPost[], conversationId: number): Message[] {

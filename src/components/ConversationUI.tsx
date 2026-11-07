@@ -58,6 +58,7 @@ import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
+import { ButlerQuoteButton, ButlerQuoteChip, isQuotableMessage, quoteExcerpt, useButlerQuote } from "./butler/ButlerQuote";
 import { hasPublishedReply, withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
 import { useLinger } from "@/hooks/useStablePresence";
 import ButlerHeldToolCalls from "@/components/butler/ButlerHeldToolCalls";
@@ -413,6 +414,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         const [showBackToBottom, setShowBackToBottom] = useState(false);
         const inputAreaRef = useRef<InputAreaRef>(null);
+        // 管家会话的引用回复状态（普通聊天没有 Provider，为 null）
+        const butlerQuote = useButlerQuote();
+        const butlerQuoteAvailable = !!butlerQuote;
+        const setButlerQuote = butlerQuote?.setQuote;
+        const clearButlerQuote = useCallback(() => setButlerQuote?.(null), [setButlerQuote]);
         // 加载请求标识，避免旧请求覆盖最新状态（StrictMode 双调用等场景）
         const loadRequestIdRef = useRef<number>(0);
 
@@ -1178,6 +1184,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             openTitleEditDialog,
             closeTitleEditDialog,
         } = useConversationOperations({
+            quote: butlerQuote?.quote ?? null,
+            clearQuote: clearButlerQuote,
             quietRuntimeErrors: resultOnly,
             conversation,
             selectedAssistant,
@@ -1774,6 +1782,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
             return rendered;
         }, [pluginList]);
+        // 管家会话：助手回复可“引用回复”。按消息缓存渲染结果，保持历史消息的 messageActions 引用稳定。
+        const quoteActionCacheRef = useRef(new Map<number, { plugin: React.ReactNode; content: string; rendered: React.ReactNode }>());
+        const renderMessageActionsWithQuote = useCallback((message: Message) => {
+            const plugin = renderPluginMessageActions(message);
+            if (!butlerQuoteAvailable || readOnly || !isQuotableMessage(message)) return plugin;
+            const cache = quoteActionCacheRef.current;
+            const cached = cache.get(message.id);
+            if (cached && cached.plugin === plugin && cached.content === message.content) return cached.rendered;
+            const rendered = <>{plugin}<ButlerQuoteButton target={{
+                kind: "message", id: message.id, label: "引用回复", excerpt: quoteExcerpt(message.content),
+            }} /></>;
+            if (cache.size > MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES) cache.clear();
+            cache.set(message.id, { plugin, content: message.content, rendered });
+            return rendered;
+        }, [butlerQuoteAvailable, readOnly, renderPluginMessageActions]);
 
         const sendButtonSlotContext = useMemo(
             () => ({
@@ -2195,7 +2218,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 onToggleReasoningExpand={toggleReasoningExpand}
                                 inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}
-                                renderMessageActions={renderPluginMessageActions}
+                                renderMessageActions={renderMessageActionsWithQuote}
                                 actionableAgentPlanMessageId={actionableAgentPlanMessageId}
                                 agentPlanModeSwitching={planModeSwitching}
                                 onContinueAgentPlan={readOnly ? undefined : handleContinueAgentPlan}
@@ -2252,6 +2275,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             planModeSwitching={planModeSwitching}
                             onPlanModeToggle={showPlanModeToggle
                                 ? () => void setAgentPlanMode(!isPlanMode)
+                                : undefined}
+                            topChip={butlerQuote?.quote
+                                ? <ButlerQuoteChip quote={butlerQuote.quote} onClear={clearButlerQuote} />
                                 : undefined}
                         />}
                     </div>
