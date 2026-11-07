@@ -61,7 +61,7 @@ fn test_butler_task_timeline_reports_auth_failure_without_inventing_reply() {
 }
 
 #[test]
-fn test_butler_task_timeline_marks_direct_report_only_in_owner_view() {
+fn test_butler_task_timeline_shows_direct_delivery_in_both_views_with_executor_identity() {
     let conn = task_fixture();
     conn.execute_batch("
         UPDATE butler_task_definition SET result_handling_mode='direct_report' WHERE id=1;
@@ -73,7 +73,28 @@ fn test_butler_task_timeline_marks_direct_report_only_in_owner_view() {
     assert_eq!(owner[0]["direct"],false);
     assert_eq!(owner[1]["direct"],true);
     assert_eq!(owner[1]["text"],"核查结论：官网未发布 6.2");
-    assert_eq!(posts(&conn,20)[1]["direct"],false);
+    assert_eq!(owner[1]["speaker"],Value::Null, "发起方视图中 peer 就是执行助手");
+    let own = posts(&conn,20);
+    assert_eq!(own[1]["direct"],true, "执行助手自己的会话里也展示交付");
+    assert_eq!(own[1]["speaker"],"问候助手");
+    assert_eq!(own[1]["speaker_assistant"],2);
+    assert_eq!(own[1]["text"],"核查结论：官网未发布 6.2");
+}
+
+#[test]
+fn test_butler_task_timeline_keeps_sender_only_results_collapsed() {
+    let conn = task_fixture();
+    conn.execute_batch("
+        UPDATE butler_task_definition SET result_handling_mode='notify_only' WHERE id=1;
+        INSERT INTO message VALUES(2,30,'2026-11-05 01:00:10','供汇总的材料');
+        INSERT INTO butler_task_result VALUES(30,'2026-11-05 01:00:11',NULL,'短摘要',2,NULL);
+        UPDATE conversation SET butler_task_status='succeeded' WHERE id=30;
+    ").unwrap();
+    for conv in [10,20] {
+        let result = posts(&conn,conv);
+        assert_eq!(result[1]["direct"],false);
+        assert_eq!(result[1]["to_user"],false);
+    }
 }
 
 #[test]

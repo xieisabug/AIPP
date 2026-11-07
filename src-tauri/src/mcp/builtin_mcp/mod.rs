@@ -1853,13 +1853,10 @@ pub async fn execute_aipp_builtin_tool(
                             .get("handoff_contract_json")
                             .and_then(|v| v.as_str())
                             .map(|v| v.to_string()),
-                        result_handling_mode: if args.get("report_to_user").and_then(|v| v.as_bool()) == Some(true) {
-                            Some(crate::api::butler_api::RESULT_MODE_DIRECT_REPORT.to_string())
-                        } else {
-                            args.get("result_handling_mode")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string())
-                        },
+                        result_handling_mode: Some(
+                            crate::api::butler_api::resolve_task_result_mode(&args)
+                                .map_err(|e| format!("spawn_task_conversation: {e}"))?,
+                        ),
                         notification_policy: args
                             .get("notification_policy")
                             .and_then(|v| v.as_str())

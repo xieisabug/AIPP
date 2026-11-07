@@ -7,7 +7,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 - 测试框架与编写规范：[docs/testing-guidelines.md](./docs/testing-guidelines.md)
 - 各功能用户向文档：[docs/product/](./docs/product/README.md)（ACP 集成细节见 `docs/product/11-ACP集成.md`）
 
-**桌面管家**：联系人长期私聊、总管家主会话和派发任务会话独立。助手间协作须保留发送方和请求归属；团队历史检索只覆盖管家会话。聊天正文的简洁展示与模型工作上下文分别处理。管家模式全部助手直接注入 SuperAdmin 与 assistant 查询/协作工具，不受原助手 MCP 动态加载配置影响；普通聊天不继承该权限。见 [Butler 任务系统](./docs/product/18-Butler任务系统.md)。
+**桌面管家**：联系人长期私聊、总管家主会话和派发任务会话独立。谁接手工作谁和用户沟通：受托助手默认在自己的会话里直接交付/提问（`deliver_to=user`），总管家只协调，要求整体汇总时才收回（`deliver_to=sender`）。受托助手可再请协助（有界多层：parent/depth/有效期/循环保护，见 `db/butler_peer.rs`），独立任务也可发起并接收协作回送。助手间协作须保留发送方和请求归属；团队历史检索只覆盖管家会话。聊天正文的简洁展示与模型工作上下文分别处理。管家模式全部助手直接注入 SuperAdmin 与 assistant 查询/协作工具，不受原助手 MCP 动态加载配置影响；普通聊天不继承该权限。见 [Butler 任务系统](./docs/product/18-Butler任务系统.md)。
 
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
 

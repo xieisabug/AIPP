@@ -16,6 +16,8 @@ pub fn is_direct_tool(kind: &str, command: Option<&str>, tool: &str) -> bool {
     cfg!(desktop) && is_butler_conversation_kind(kind) && match command {
         Some("aipp:superadmin") => matches!(tool,"superadmin_catalog"|"superadmin_inspect"|"superadmin_execute"|"superadmin_batch"|"superadmin_undo"|"superadmin_audit_query"),
         Some("aipp:agent") => crate::api::butler_peer::is_peer_tool(tool),
+        // 受托助手在自己的会话里向用户提问，问题绑定当前回合（即当前这项委托或任务）。
+        Some("aipp:ui_interaction") => tool == "ask_user_question",
         _ => false,
     }
 }
@@ -55,7 +57,7 @@ pub fn inject(app: &tauri::AppHandle, servers: &mut Vec<MCPServerWithTools>, kin
     if cfg!(desktop) && is_butler_conversation_kind(kind) {
         let db = MCPDatabase::new(app)?;
         let stored = db.get_mcp_servers()?;
-        for command in ["aipp:agent", "aipp:superadmin"] {
+        for command in ["aipp:agent", "aipp:superadmin", "aipp:ui_interaction"] {
             let server = stored.iter().find(|s| s.is_builtin && s.command.as_deref() == Some(command))
                 .ok_or_else(|| AppError::UnknownError(format!("管家工具注入失败：内置工具集 {command} 未初始化")))?;
             let definitions = get_builtin_tools_for_command(command);

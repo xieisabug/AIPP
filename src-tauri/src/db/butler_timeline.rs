@@ -49,20 +49,28 @@ pub struct Post {
     pub(super) id:i64, pub(super) anchor:i64, pub(super) occurred_at:DateTime<Utc>, pub(super) outgoing:bool, pub(super) peer:String,
     pub(super) peer_conversation:i64, pub(super) peer_assistant:Option<i64>, pub(super) text:String, pub(super) status:String, pub(super) error:Option<String>,
     pub(super) task_id:Option<i64>, pub(super) task_reply:bool, pub(super) root:Option<i64>,
-    /// 用户要求执行助手直接汇报：在发起方会话里以执行助手的名义完整展示答复。
+    /// 执行助手直接交付给用户：以执行助手的名义完整展示答复（发起方会话与执行助手自己的会话都可见）。
     pub(super) direct:bool,
+    /// 这项协作面向用户（受托助手直接答复用户）；false 为助手之间的内部协作。
+    pub(super) to_user:bool,
+    /// 多层协作中的上级协作。
+    pub(super) parent:Option<i64>,
+    /// 直接交付行的发言者（与 peer 不同时给出，例如执行助手自己会话中的任务交付）。
+    pub(super) speaker:Option<String>,
+    pub(super) speaker_assistant:Option<i64>,
 }
 pub fn list(conn:&Connection,conversation:i64)->rusqlite::Result<Vec<Post>> {
     let mut stmt=conn.prepare("SELECT p.id,p.anchor,p.occurred_at,p.outgoing,
         CASE WHEN p.conversation_id=e.owner THEN e.recipient ELSE e.sender END,c.id,c.assistant_id,
         CASE p.leg WHEN 'request' THEN e.body ELSE e.reply END,e.state,e.error,e.root,
-        p.leg='reply' AND p.conversation_id=e.owner AND e.report_to_user=1
+        p.leg='reply' AND p.conversation_id=e.owner AND e.report_to_user=1,e.report_to_user,e.parent
         FROM butler_peer_post p JOIN butler_peer_exchange e ON e.id=p.exchange_id JOIN conversation c ON c.id=
         CASE WHEN p.conversation_id=e.owner THEN e.target ELSE e.owner END
         WHERE p.conversation_id=?1 ORDER BY p.id")?;
     let rows=stmt.query_map([conversation],|r| Ok(Post{id:r.get(0)?,anchor:r.get(1)?,occurred_at:r.get(2)?,
         outgoing:r.get(3)?,peer:r.get(4)?,peer_conversation:r.get(5)?,peer_assistant:r.get(6)?,
-        text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:false,root:r.get(10)?,direct:r.get(11)?}))?;
+        text:r.get(7)?,status:r.get(8)?,error:r.get(9)?,task_id:None,task_reply:false,root:r.get(10)?,direct:r.get(11)?,
+        to_user:r.get(12)?,parent:r.get(13)?,speaker:None,speaker_assistant:None}))?;
     rows.collect()
 }
 
@@ -136,6 +144,10 @@ pub fn task_posts(
             root: None,
             task_reply: false,
             direct: false,
+            to_user: direct_report,
+            parent: None,
+            speaker: None,
+            speaker_assistant: None,
         };
         let mut posts = Vec::new();
         if after_since(&request.occurred_at) { posts.push(request); }
@@ -154,9 +166,15 @@ pub fn task_posts(
                 status: status.into(),
                 error,
                 task_id: Some(task),
-            root: None,
+                root: None,
                 task_reply: true,
-                direct: owner_view && direct_report && status == "delivered",
+                // 谁接手谁交付：直接交付的结果在执行助手自己的会话里同样以其身份完整展示。
+                direct: direct_report && status == "delivered",
+                to_user: direct_report,
+                parent: None,
+                speaker: (!owner_view).then(|| names.get(&executor).cloned()
+                    .unwrap_or_else(|| format!("助手 #{executor}"))),
+                speaker_assistant: (!owner_view).then_some(executor),
             });
         }
         Ok(posts)

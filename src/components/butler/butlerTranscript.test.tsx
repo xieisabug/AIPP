@@ -34,6 +34,22 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([user,peer,answer,user,answer])).toEqual([user,user,answer]);
     });
 
+    it("should show the delegate's own answer and question when the work was handed over to it", () => {
+        const handed = message(2, "user", "[助手协作请求 · 来自 总管家]", {metadata_json:'{"origin":"butler_peer","leg":"request","audience":"user"}'});
+        const answer = message(3, "response", "这是我写好的稿子");
+        expect(butlerTranscript([handed, answer])).toEqual([answer]);
+    });
+
+    it("should keep internal help hidden, including the continuation after a nested reply", () => {
+        const help = message(2, "user", "[助手协作请求 · 内部协作]", {metadata_json:'{"origin":"butler_peer","leg":"request","audience":"peer"}'});
+        const material = message(3, "response", "给写作的资料");
+        const nested = message(4, "user", "[助手协作答复]", {metadata_json:'{"origin":"butler_peer","leg":"reply","audience":"peer","parent":7}'});
+        const forPeer = message(5, "response", "整理后回给写作");
+        const user = message(6, "user", "用户的新问题");
+        const reply = message(7, "response", "直接回答用户");
+        expect(butlerTranscript([help, material, nested, forPeer, user, reply])).toEqual([user, reply]);
+    });
+
     it("should retain the current assistant's final summary after a peer reply, receipt or task callback", () => {
         for (const metadata of [{origin:"butler_peer",leg:"reply"},{origin:"butler_peer",leg:"receipt"},{origin:"internal"}]) {
             const callback = message(2,"user","内部回流",{metadata_json:JSON.stringify(metadata)});

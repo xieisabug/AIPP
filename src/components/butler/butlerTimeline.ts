@@ -15,8 +15,15 @@ export interface PeerPost {
     root?: number | null;
     task_id?: number | null;
     task_reply?: boolean;
-    /** The user asked the executing assistant to report directly; show its answer in full. */
+    /** The executing assistant delivered directly to the user; show its answer in full under its own name. */
     direct?: boolean;
+    /** The work was handed over for the receiver to answer the user itself (false: internal help between assistants). */
+    to_user?: boolean;
+    /** Parent exchange in a nested collaboration chain. */
+    parent?: number | null;
+    /** Speaker of a direct delivery when it differs from `peer` (e.g. a task result shown in the executor's own chat). */
+    speaker?: string | null;
+    speaker_assistant?: number | null;
 }
 
 export function withPeerTimeline(messages: Message[], unpublished: Set<number>, posts: PeerPost[], conversationId: number): Message[] {

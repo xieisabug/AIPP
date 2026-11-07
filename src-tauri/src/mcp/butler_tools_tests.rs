@@ -13,11 +13,13 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
     for kind in ["butler_main","butler_contact","butler_task"] {
         for dynamic in [false,true] {
             let mut configured=Vec::new();
-            merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin")],kind);
+            merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin"),server(3,"aipp:ui_interaction")],kind);
             let names:Vec<_>=configured.iter().flat_map(|s|s.tools.iter().filter(move |t|
                 !dynamic || super::super::builtin_mcp::templates::is_dynamic_loading_fixed_tool(s.command.as_deref(),&t.name,true)))
                 .map(|t|t.name.as_str()).collect();
-            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","superadmin_execute","superadmin_undo"] {
+            // 受托助手可在自己的会话里向用户提问；其余界面交互工具仍按助手自身配置。
+            assert!(!names.contains(&"preview_code"),"{kind} should not force preview tools");
+            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","superadmin_execute","superadmin_undo","ask_user_question"] {
                 assert!(names.contains(&expected),"{kind} dynamic={dynamic} missing {expected}");
             }
             assert!(configured.iter().all(|s|s.is_enabled&&s.tools.iter().all(|t|t.is_enabled)));

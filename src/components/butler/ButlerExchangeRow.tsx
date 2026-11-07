@@ -50,14 +50,19 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
     const sent = posts.every(p => p.outgoing);
     const incoming = posts.every(p => !p.outgoing);
     const incomplete = posts.some(p => ["failed", "stopped"].includes(p.status));
-    const label = incomplete ? "与" : sent ? (first.task_reply ? "已回复" : posts.some(p => ["queued", "sending"].includes(p.status)) ? "正在联系" : "已发消息给") : incoming ? "消息来自" : `${posts.length} 条消息往来`;
+    const incomingRequest = incoming && posts.every(p => !p.task_reply);
+    const label = incomplete ? "与" : sent ? (first.task_reply ? "已回复" : posts.some(p => ["queued", "sending"].includes(p.status)) ? "正在联系" : "已发消息给")
+        : incomingRequest ? (posts.every(p => p.to_user) ? "接手工作，来自" : posts.every(p => p.to_user === false) ? "协助请求来自" : "消息来自")
+        : incoming ? "消息来自" : `${posts.length} 条消息往来`;
     const directReport = posts.length === 1 && first.direct && !first.error && first.text.trim() !== "";
+    const speaker = first.speaker ?? first.peer;
+    const speakerAvatar = first.speaker_assistant ?? first.peer_assistant ?? first.peer_conversation;
     return <Dialog open={open} onOpenChange={setOpen}>
         {directReport ? <div className="butler-exchange" data-aipp-slot="butler-direct-report">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <ButlerAvatar id={first.peer_assistant ?? first.peer_conversation} size={20}/>
-                <span className="font-medium text-foreground">{first.peer}</span>
-                <span>直接汇报</span>
+                <ButlerAvatar id={speakerAvatar} size={20}/>
+                <span className="font-medium text-foreground">{speaker}</span>
+                <span>{first.task_id ? "交付任务结果" : "直接答复"}</span>
                 <time dateTime={first.occurred_at}>
                     {new Date(first.occurred_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                 </time>

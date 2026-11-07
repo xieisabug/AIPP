@@ -373,13 +373,14 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
             BuiltinToolInfo {
                 name: "message_bot".into(),
-                description: "Send a self-contained request to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting. The receipt is not its answer. End this turn; its answer wakes you later. Review, revise and send another request as needed. Never send acknowledgements. While answering a peer request you cannot message any contact (the call is rejected): finish with your result or question, and name who else is needed so the requester can arrange it.".into(),
+                description: "Send a self-contained request (goal, materials, expected result) to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting, or when you need another member's help for your current work. The receipt is not its answer. End this turn; its answer wakes you later. Never send acknowledgements. deliver_to decides who receives the answer: \"user\" means the receiver delivers results or asks questions to the user in its own conversation under its own name and you must not restate it; \"sender\" means the answer comes back only to you as material for your own work or for a summary the user asked for. Default: \"user\" when you act on a user message; \"sender\" while you are handling another assistant's request. Chains are limited in depth, rounds and lifetime, and assistants already in the chain cannot be messaged again (loop).".into(),
                 input_schema: serde_json::json!({"type":"object","required":["to","message","request_id"],"properties":{
                     "to":{"type":"string","description":"Exact contact name or #assistant_id"},
                     "message":{"type":"string","description":"Goal, relevant context and expected deliverable"},
                     "request_id":{"type":"string","description":"Reuse on retry; use a new key for a new round"},
-                    "max_rounds":{"type":"integer","minimum":1,"maximum":6,"description":"Budget for the entire user instruction, set on first request"},
-                    "report_to_user":{"type":"boolean","description":"Set true when the user wants this assistant to report to them directly. Its answer is then shown to the user under its own name and you must not restate it."}
+                    "max_rounds":{"type":"integer","minimum":1,"maximum":12,"description":"Budget for the entire user instruction including nested help, set on first request (default 6)"},
+                    "deliver_to":{"type":"string","enum":["user","sender"],"description":"Who receives the answer. See tool description for the default."},
+                    "report_to_user":{"type":"boolean","description":"Deprecated alias: true equals deliver_to=user, false equals deliver_to=sender."}
                 }}),
             },
             BuiltinToolInfo {
@@ -578,13 +579,18 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                             "type": "string",
                             "description": "Optional JSON string describing handoff constraints or expected deliverables."
                         },
+                        "deliver_to": {
+                            "type": "string",
+                            "enum": ["user", "sender"],
+                            "description": "Who receives the final result. user (default): the executing assistant delivers to the user under its own name and you must not restate it. sender: the result only comes back to you, use it when the user asked for an overall summary or you must merge several members' results."
+                        },
                         "result_handling_mode": {
                             "type": "string",
-                            "description": "Optional result handling mode: notify_only (default) or direct_report."
+                            "description": "Optional low-level mode: direct_report (same as deliver_to=user) or notify_only (same as deliver_to=sender)."
                         },
                         "report_to_user": {
                             "type": "boolean",
-                            "description": "Set true when the user wants the executing assistant to report to them directly. Its final result is shown to the user under its own name and you must not restate it."
+                            "description": "Deprecated alias: true equals deliver_to=user, false equals deliver_to=sender."
                         },
                         "notification_policy": {
                             "type": "string",

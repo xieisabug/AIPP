@@ -28,7 +28,7 @@ pub(super) fn request<'a>(key: &'a str, body: &'a str) -> NewRequest<'a> {
         body,
         tool_message_id: None,
         limit: 2,
-        report_to_user: false,
+        report_to_user: Some(false),
     }
 }
 fn reread(conn: &Connection, id: i64) -> Exchange {
@@ -351,7 +351,7 @@ async fn test_live_peer_review_history() {
 fn test_butler_peer_report_to_user_persists_and_is_part_of_idempotency() {
     let mut db = database();
     message(&db, 20, "user", "让审稿查完直接告诉我");
-    let direct = NewRequest { report_to_user: true, ..request("direct", "核查并直接汇报") };
+    let direct = NewRequest { report_to_user: Some(true), ..request("direct", "核查并直接汇报") };
     let ex = enqueue(&mut db, direct).unwrap();
     assert!(ex.report_to_user);
     assert!(reread(&db, ex.id).report_to_user);
@@ -544,4 +544,127 @@ fn test_butler_peer_retry_receipt_requires_matching_conversation_and_failed_rece
         "SELECT receipt_attempts FROM butler_peer_exchange WHERE id=?1", [ex.id], |r| r.get(0),
     ).unwrap();
     assert_eq!(attempts, MAX_RECEIPT_ATTEMPTS);
+}
+
+fn meta(conn: &Connection, id: i64) -> serde_json::Value {
+    let raw: String = conn.query_row("SELECT metadata_json FROM message WHERE id=?1", [id], |r| r.get(0)).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn chain_database() -> Connection {
+    let db = database();
+    db.execute_batch("INSERT INTO conversation VALUES (60,4,'资料','butler_contact',NULL),(70,5,'排版','butler_contact',NULL);").unwrap();
+    db
+}
+
+fn delegate<'a>(owner: i64, target: i64, key: &'a str, body: &'a str) -> NewRequest<'a> {
+    NewRequest { owner, target, limit: 6, report_to_user: None, ..request(key, body) }
+}
+
+/// 总管家派给甲（默认由甲直接答复用户）；甲在受托回合里请乙协助（默认内部协作），乙答复回到甲，
+/// 甲继续工作后交付，上级协作才结束。
+#[test]
+fn test_butler_peer_delegate_requests_help_and_continues_after_reply() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "让写作写一篇稿子");
+    let top = enqueue(&mut db, delegate(10, 20, "write", "写稿")).unwrap();
+    assert!(top.report_to_user, "直接受用户委托的工作默认由受托助手答复用户");
+    assert_eq!((top.depth, top.parent), (1, None));
+    assert!(top.expires_at.is_some());
+    assert!(claim(&db, &top).unwrap());
+    let input = write_input(&mut db, top.id, "request", 20, "写稿", 1, "model").unwrap();
+    assert_eq!(meta(&db, input)["audience"], "user");
+
+    let help = enqueue(&mut db, delegate(20, 30, "review", "请审稿")).unwrap();
+    assert_eq!((help.parent, help.depth, help.root), (Some(top.id), 2, top.root));
+    assert!(!help.report_to_user, "受托期间请来的协助默认是内部协作");
+    assert_eq!(help.expires_at, top.expires_at, "下级沿用整条协作链的有效期");
+    message(&db, 20, "response", "已请审稿协助");
+    assert!(!settle(&db, &reread(&db, top.id), false).unwrap(), "下级未返回时上级不能结束");
+    assert_eq!(reread(&db, top.id).state, "waiting");
+
+    assert!(claim(&db, &help).unwrap());
+    let inbound = write_input(&mut db, help.id, "request", 30, "请审稿", 1, "model").unwrap();
+    assert_eq!(meta(&db, inbound)["audience"], "peer");
+    message(&db, 30, "response", "意见：补充数据来源");
+    assert!(settle(&db, &reread(&db, help.id), false).unwrap());
+    let returning = reread(&db, help.id);
+    assert!(claim(&db, &returning).unwrap(), "上级仍在等待时，下级答复也能送回受托方");
+    let back = write_input(&mut db, help.id, "reply", 20, "意见", 1, "model").unwrap();
+    assert_eq!(meta(&db, back)["audience"], "user", "甲继续的是面向用户的工作");
+    assert_eq!(meta(&db, back)["parent"], top.id);
+
+    message(&db, 20, "response", "终稿（已补充数据来源）");
+    assert!(settle(&db, &reread(&db, top.id), false).unwrap());
+    let done = reread(&db, top.id);
+    assert_eq!((done.state.as_str(), done.reply.as_deref()), ("returning", Some("终稿（已补充数据来源）")));
+}
+
+#[test]
+fn test_butler_peer_rejects_loops_depth_overflow_and_stopped_parent() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "多层协作");
+    let mut hops = Vec::new();
+    for (owner, target, key) in [(10, 20, "a"), (20, 30, "b"), (30, 60, "c")] {
+        let ex = enqueue(&mut db, delegate(owner, target, key, key)).unwrap();
+        assert!(claim(&db, &ex).unwrap());
+        write_input(&mut db, ex.id, "request", target, key, 1, "model").unwrap();
+        hops.push(ex);
+    }
+    assert_eq!(hops[2].depth, MAX_DEPTH);
+    let deep = enqueue(&mut db, delegate(60, 70, "d", "再转派")).unwrap_err().to_string();
+    assert!(deep.contains("层上限"), "{deep}");
+    // 协作链上已有的助手（含总管家）不能被拉回来。
+    for target in [10, 20] {
+        let looped = enqueue(&mut db, NewRequest { recipient: "链上助手", ..delegate(30, target, "loop", "回头问") })
+            .unwrap_err().to_string();
+        assert!(looped.contains("循环"), "{looped}");
+    }
+    // 停止整条协作后，受托方不能再为它联系其他助手。
+    stop(&db, hops[0].root, 10).unwrap();
+    assert!(enqueue(&mut db, delegate(30, 70, "late", "迟到的协助")).is_err());
+}
+
+#[test]
+fn test_butler_peer_silent_reply_is_not_a_delivery() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "任务");
+    let ex = enqueue(&mut db, delegate(10, 20, "w", "写")).unwrap();
+    claim(&db, &ex).unwrap();
+    write_input(&mut db, ex.id, "request", 20, "写", 1, "model").unwrap();
+    message(&db, 20, "response", "[[NO_REPLY]]");
+    assert!(!settle(&db, &reread(&db, ex.id), false).unwrap());
+    assert!(settle(&db, &reread(&db, ex.id), true).unwrap());
+    assert_eq!(reread(&db, ex.id).state, "failed", "没有可确认的最终答复");
+}
+
+#[test]
+fn test_butler_peer_expiry_fails_waiting_work_once_with_receipt() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "任务");
+    let ex = enqueue(&mut db, delegate(10, 20, "w", "写")).unwrap();
+    let now = Utc::now();
+    assert!(!expire(&db, &ex, now).unwrap(), "未到有效期");
+    let later = now + chrono::Duration::minutes(TTL_MINUTES + 1);
+    assert!(expire(&db, &ex, later).unwrap());
+    let failed = reread(&db, ex.id);
+    assert_eq!((failed.state.as_str(), failed.receipt_state.as_deref()), ("failed", Some("pending")));
+    assert!(failed.error.unwrap().contains("有效期"));
+    assert!(!expire(&db, &reread(&db, ex.id), later).unwrap(), "只失败一次");
+}
+
+/// 独立任务发起协作：未闭环时任务不收尾；整项停止只停本任务的协作，不给被取消的任务自己回执。
+#[test]
+fn test_butler_peer_task_owned_exchanges_block_finalize_and_stop_with_task() {
+    let mut db = chain_database();
+    message(&db, 40, "user", "任务说明：整理资料");
+    message(&db, 20, "user", "与任务无关的私聊");
+    let ex = enqueue(&mut db, delegate(40, 60, "help", "请提供资料")).unwrap();
+    assert!(ex.report_to_user, "任务直接发起的协作同样默认由对方答复用户，可显式改为 sender");
+    assert!(has_open_owned(&db, 40).unwrap());
+    assert!(!has_open_owned(&db, 20).unwrap());
+    assert_eq!(stop_owned(&db, 40).unwrap(), 1);
+    let stopped = reread(&db, ex.id);
+    assert_eq!((stopped.state.as_str(), stopped.receipt_state), ("stopped", None));
+    assert!(!has_open_owned(&db, 40).unwrap());
 }
