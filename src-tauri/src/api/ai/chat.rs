@@ -52,6 +52,23 @@ fn positive_token_count(value: i32) -> Option<i32> {
 
 /// LeaderAI #161: normal stop/DONE with zero assistant body.
 pub(crate) const EMPTY_MODEL_REPLY_NOTICE: &str = "模型返回了空内容";
+/// 只有推理、没有正文时的说明（与真正的空输出区分）。
+pub(crate) const REASONING_ONLY_MODEL_REPLY_NOTICE: &str = "模型只返回了思考过程，没有给出正文";
+
+/// 空回复说明是本地写入的系统说明，不是模型的回答：
+/// 构建后续请求上下文时整条排除，避免把它当作助手说过的话发回给模型。
+pub(crate) fn is_empty_model_reply_notice(message_type: &str, content: &str) -> bool {
+    message_type == "response"
+        && matches!(content, EMPTY_MODEL_REPLY_NOTICE | REASONING_ONLY_MODEL_REPLY_NOTICE)
+}
+
+pub(crate) fn empty_model_reply_notice(reasoning_content: &str) -> &'static str {
+    if reasoning_content.trim().is_empty() {
+        EMPTY_MODEL_REPLY_NOTICE
+    } else {
+        REASONING_ONLY_MODEL_REPLY_NOTICE
+    }
+}
 
 pub(crate) fn should_announce_empty_model_reply(
     response_content: &str,
@@ -3601,7 +3618,8 @@ async fn attempt_stream_chat(
                             captured_tool_calls.len(),
                             captured_binary_count,
                         ) {
-                            response_content = EMPTY_MODEL_REPLY_NOTICE.to_string();
+                            let notice = empty_model_reply_notice(&reasoning_content);
+                            response_content = notice.to_string();
                             if response_message_id.is_none() {
                                 let now = chrono::Utc::now();
                                 response_start_time.get_or_insert(now);
@@ -3610,7 +3628,7 @@ async fn attempt_stream_chat(
                                     &window,
                                     conversation_id,
                                     "response",
-                                    EMPTY_MODEL_REPLY_NOTICE,
+                                    notice,
                                     llm_model_id,
                                     &llm_model_name,
                                     &generation_group_id,
@@ -4681,7 +4699,26 @@ mod pr40_error_handling_tests {
 
 #[cfg(test)]
 mod empty_model_reply_tests {
-    use super::{should_announce_empty_model_reply, EMPTY_MODEL_REPLY_NOTICE};
+    use super::{
+        empty_model_reply_notice, is_empty_model_reply_notice, should_announce_empty_model_reply,
+        EMPTY_MODEL_REPLY_NOTICE, REASONING_ONLY_MODEL_REPLY_NOTICE,
+    };
+
+    #[test]
+    fn reasoning_only_reply_gets_its_own_notice() {
+        assert_eq!(empty_model_reply_notice(""), EMPTY_MODEL_REPLY_NOTICE);
+        assert_eq!(empty_model_reply_notice("  
+"), EMPTY_MODEL_REPLY_NOTICE);
+        assert_eq!(empty_model_reply_notice("先想一想"), REASONING_ONLY_MODEL_REPLY_NOTICE);
+    }
+
+    #[test]
+    fn notices_are_recognised_only_as_response_messages() {
+        assert!(is_empty_model_reply_notice("response", EMPTY_MODEL_REPLY_NOTICE));
+        assert!(is_empty_model_reply_notice("response", REASONING_ONLY_MODEL_REPLY_NOTICE));
+        assert!(!is_empty_model_reply_notice("user", EMPTY_MODEL_REPLY_NOTICE));
+        assert!(!is_empty_model_reply_notice("response", "模型返回了空内容。还有别的"));
+    }
 
     #[test]
     fn announces_only_when_body_tools_and_binaries_are_all_empty() {
