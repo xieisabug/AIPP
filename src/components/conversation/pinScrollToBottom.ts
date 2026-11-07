@@ -153,7 +153,7 @@ export function pinScrollContainerToBottom({
     };
 
     const handlePinnedScroll = () => {
-        if (completed || isPinningScroll || !shouldContinue()) {
+        if (completed || isPinningScroll || !shouldContinue() || isHiddenMobileConversation(container)) {
             return;
         }
 
@@ -435,7 +435,7 @@ export function followScrollContainerBottom({
     };
 
     const resumeFollow = (_reason: string, opts?: { force?: boolean }) => {
-        if (stopped || !pausedByUser) {
+        if (stopped || !pausedByUser || isHiddenMobileConversation(container)) {
             return;
         }
         if (!opts?.force && performance.now() < resumeLockedUntil) {
@@ -479,7 +479,7 @@ export function followScrollContainerBottom({
     // 高度收缩时 Virtuoso / 浏览器滚动锚定会补偿 scrollTop，且可能过量补偿到远离底部。
     // 高度没变却往上走是滚动条或键盘翻页，必须暂停；其余偏离视为程序触发并重新贴底。
     const handleScroll = () => {
-        if (stopped || isPinningScroll) {
+        if (stopped || isPinningScroll || isHiddenMobileConversation(container)) {
             return;
         }
 
@@ -523,7 +523,7 @@ export function followScrollContainerBottom({
     };
 
     const handleUserIntent = (event: Event) => {
-        if (stopped || isPinningScroll) {
+        if (stopped || isPinningScroll || isHiddenMobileConversation(container)) {
             return;
         }
         // End：明确回底。PageDown / ArrowDown / Space：仅在已接近底部时恢复跟滚，
@@ -615,7 +615,7 @@ export function followScrollContainerBottom({
             return;
         }
         touching = false;
-        if (pausedByUser && isAtBottom()) {
+        if (pausedByUser && !isHiddenMobileConversation(container) && isAtBottom()) {
             resumeFollow("touch-release", { force: true });
         }
     };
@@ -625,7 +625,7 @@ export function followScrollContainerBottom({
             return;
         }
         scrollbarDragging = false;
-        if (pausedByUser && isAtBottom()) {
+        if (pausedByUser && !isHiddenMobileConversation(container) && isAtBottom()) {
             resumeFollow("scrollbar-release", { force: true });
         }
     };
@@ -675,6 +675,10 @@ export function followScrollContainerBottom({
         }
         if (!shouldContinue()) {
             stop();
+            return;
+        }
+        // A hidden mobile route reports zero geometry, not a user return to the bottom.
+        if (isHiddenMobileConversation(container)) {
             return;
         }
         // 暂停中若确实贴底（End 键等可能不触发 scroll）→ 恢复。

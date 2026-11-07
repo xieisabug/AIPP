@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { registerMobileBackHandler } from "@/mobile/navigation";
+import { CHAT_SIDEBAR_SECTION_IDS, type ChatSidebarViewState } from "@/components/chat-sidebar/types";
 
 type DetailsPreview = "artifact" | "context";
 
@@ -7,6 +8,7 @@ interface SuspendedDetails {
     conversationId: string;
     preview: DetailsPreview;
     scrollTop: number;
+    sections: ChatSidebarViewState;
 }
 
 interface MobileConversationDetailsOptions {
@@ -21,6 +23,7 @@ export function useMobileConversationDetails({
     previewFileOpen = false,
 }: MobileConversationDetailsOptions) {
     const [detailsOpen, setDetailsOpen] = useState(false);
+    const [detailsRestoreState, setDetailsRestoreState] = useState<ChatSidebarViewState | null>(null);
     const scrollerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollRef = useRef<number | null>(null);
     const conversationIdRef = useRef(conversationId);
@@ -46,13 +49,24 @@ export function useMobileConversationDetails({
         suspendedRef.current = null;
         contextPreviewSeenOpenRef.current = false;
         pendingScrollRef.current = null;
+        setDetailsRestoreState(null);
         setDetailsOpen(true);
     }, []);
 
     const suspendDetails = useCallback((preview: DetailsPreview) => {
         const currentConversationId = conversationIdRef.current;
         if (!currentConversationId) return;
+        const sections: ChatSidebarViewState = {};
+        for (const id of CHAT_SIDEBAR_SECTION_IDS) {
+            const section = scrollerRef.current?.querySelector<HTMLElement>(`[data-chat-sidebar-section="${id}"]`);
+            if (!section) continue;
+            sections[id] = {
+                isOpen: section.dataset.state === "open",
+                scrollTop: section.querySelector<HTMLElement>("[data-chat-sidebar-scroll]")?.scrollTop ?? 0,
+            };
+        }
         suspendedRef.current = {
+            sections,
             conversationId: currentConversationId,
             preview,
             scrollTop: scrollerRef.current?.scrollTop ?? 0,
@@ -67,6 +81,7 @@ export function useMobileConversationDetails({
         suspendedRef.current = null;
         if (suspended.conversationId !== conversationIdRef.current) return;
         pendingScrollRef.current = suspended.scrollTop;
+        setDetailsRestoreState(suspended.sections);
         setDetailsOpen(true);
     }, []);
 
@@ -98,6 +113,7 @@ export function useMobileConversationDetails({
         suspendedRef.current = null;
         contextPreviewSeenOpenRef.current = false;
         pendingScrollRef.current = null;
+        setDetailsRestoreState(null);
         setDetailsOpen(false);
     }, [conversationId, enabled]);
 
@@ -105,6 +121,7 @@ export function useMobileConversationDetails({
         detailsOpen,
         setDetailsOpen,
         detailsScrollRef,
+        detailsRestoreState,
         openDetails,
         suspendDetails,
     };
