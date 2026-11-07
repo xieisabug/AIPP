@@ -1301,8 +1301,16 @@ pub async fn ask_ai(
     });
     let contact_id = existing_conversation.as_ref().filter(|c| cfg!(desktop) &&
         matches!(c.conversation_kind.as_str(), "butler_main" | "butler_contact")).map(|c| c.id);
-    if peer_turn && contact_id.is_none() {
-        return Err(AppError::UnknownError("协作目标不是有效的桌面管家联系人".into()));
+    if peer_turn {
+        let current_main = existing_conversation.as_ref().filter(|c| c.conversation_kind == "butler_main")
+            .map(|c| crate::api::butler_api::is_current_butler_main_conversation(&app_handle,c))
+            .transpose().map_err(AppError::UnknownError)?.unwrap_or(false);
+        let accepted = cfg!(desktop) && existing_conversation.as_ref().is_some_and(|c|
+            crate::api::butler_peer::accepts_peer_turn(&c.conversation_kind,c.butler_task_status.as_deref(),
+                c.butler_task_finalized_at.is_some(),current_main));
+        if !accepted {
+            return Err(AppError::UnknownError("协作目标不是有效的桌面管家会话，或任务已结束".into()));
+        }
     }
 
     // Filter butler-only tools for non-butler conversations
@@ -1419,6 +1427,26 @@ pub async fn ask_ai(
     )?;
 
     let app_handle_clone = app_handle.clone();
+    // A task window can also send ordinary messages, not only followups. Hold the same
+    // task admission lock used by scoped cancellation until token/runtime publication
+    // finishes, so an old input cannot cancel a newly admitted task-window turn.
+    let _task_admission = if let Some(task) = existing_conversation.as_ref()
+        .filter(|c| c.conversation_kind == "butler_task") {
+        Some(crate::api::butler_peer::admit_turn(task.id).await)
+    } else { None };
+    if peer_turn && _task_admission.is_some() {
+        let id = existing_conversation.as_ref().unwrap().id;
+        let current = ConversationDatabase::new(&app_handle)?.conversation_repo()?.read(id)?
+            .ok_or_else(|| AppError::UnknownError("协作目标任务已删除".into()))?;
+        if !crate::api::butler_peer::accepts_peer_turn(&current.conversation_kind,
+            current.butler_task_status.as_deref(),current.butler_task_finalized_at.is_some(),false) {
+            return Err(AppError::UnknownError("协作目标任务已结束，未继续投递".into()));
+        }
+        if crate::api::butler_peer::defer_if_busy(&app_handle,id,relay_origin.as_deref().unwrap_or_default())
+            .await.map_err(|e|AppError::UnknownError(e.to_string()))? {
+            return Ok(AiResponse {conversation_id:id,request_prompt_result_with_context:String::new(),error_message:None});
+        }
+    }
     let admission = if let Some(id) = contact_id {
         let guard = crate::api::butler_peer::admit_turn(id).await;
         // 内部续跑在准入锁内做最终检查：与用户消息互斥，避免同时开始执行
@@ -3694,6 +3722,13 @@ async fn initialize_conversation(
                 Some(assistant_detail.model[0].model_code.clone()), None, None, 0, None, None, metadata)?;
             message
         };
+
+        if let Some(followup) = origin.and_then(|s| s.strip_prefix("butler_followup/")) {
+            let id = followup.parse::<i64>().map_err(|e| AppError::UnknownError(format!("续接来源无效：{e}")))?;
+            if !crate::db::butler_work::bind_followup_input(&db.get_connection()?, id, conversation_id, user_message.id)? {
+                return Err(AppError::UnknownError("续接已停止，未调用模型".into()));
+            }
+        }
 
         // 更新 attachment 的 message_id，关联到新创建的用户消息
         // 这确保后续查询时能正确获取 attachment（通过 LEFT JOIN message.id = ma.message_id）

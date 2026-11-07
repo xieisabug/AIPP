@@ -105,7 +105,128 @@ fn test_butler_work_followups_are_deduplicated_ordered_and_not_rerun_after_resta
     assert!(claim_followup(&conn, other.id).unwrap());
     assert_eq!(recover_followups(&conn).unwrap(), 1);
     let lost = conn.query_row(&format!("{FOLLOWUP} WHERE id=?1"), [other.id], followup_row).unwrap();
-    assert_eq!(lost.state, "failed");
+    assert_eq!(lost.state, "uncertain");
     assert!(lost.error.unwrap().contains("未重复执行"));
     schema(&conn).unwrap();
+}
+
+#[test]
+fn test_butler_followup_waits_for_spawned_execution_and_uses_latest_result() {
+    let mut conn = fixture();
+    let (first, _) = enqueue_followup(&mut conn,20,41,"one","first change",None).unwrap();
+    let (second, _) = enqueue_followup(&mut conn,20,41,"two","second change",None).unwrap();
+    assert!(claim_followup(&conn,first.id).unwrap());
+    conn.execute("INSERT INTO conversation(id,assistant_id,conversation_kind,butler_task_status) VALUES (43,2,'butler_task','running')",[]).unwrap();
+    assert!(bind_followup_task(&conn,first.id,43).unwrap());
+    finish_followup(&conn,first.id,"spawned",Some(43),None).unwrap();
+    assert!(next_followups(&conn).unwrap().is_empty());
+    assert!(!claim_followup(&conn,second.id).unwrap());
+    let (third,_) = enqueue_followup(&mut conn,20,43,"three","quote child",None).unwrap();
+    assert!(!claim_followup(&conn,third.id).unwrap());
+    conn.execute("UPDATE conversation SET butler_task_status='succeeded' WHERE id=43",[]).unwrap();
+    assert_eq!(next_followups(&conn).unwrap().iter().map(|f| f.id).collect::<Vec<_>>(),vec![second.id]);
+    assert_eq!(followup_target(&conn,&second).unwrap(),43);
+    assert!(claim_followup(&conn,second.id).unwrap());
+    assert!(!claim_followup(&conn,third.id).unwrap());
+}
+
+#[test]
+fn test_butler_followup_cancellation_fences_claim_bind_and_late_finish() {
+    let mut conn = fixture();
+    let (first,_) = enqueue_followup(&mut conn,20,41,"one","change",Some(7)).unwrap();
+    let (second,_) = enqueue_followup(&mut conn,20,41,"two","again",Some(7)).unwrap();
+    let (unrelated,_) = enqueue_followup(&mut conn,20,42,"other","unrelated",Some(8)).unwrap();
+    assert!(claim_followup(&conn,first.id).unwrap());
+    crate::db::butler_peer::stop_chain(&conn,7).unwrap();
+    assert!(!followup_is_sending(&conn,first.id).unwrap());
+    assert!(!bind_followup_task(&conn,first.id,43).unwrap());
+    finish_followup(&conn,first.id,"spawned",Some(43),None).unwrap();
+    assert!(!claim_followup(&conn,second.id).unwrap());
+    assert_eq!(next_followups(&conn).unwrap().iter().map(|f| f.id).collect::<Vec<_>>(),vec![unrelated.id]);
+}
+
+#[test]
+fn test_butler_followup_cancel_after_binding_stops_descendant_queue() {
+    let mut conn = fixture();
+    let (first,_) = enqueue_followup(&mut conn,20,41,"one","change",None).unwrap();
+    assert!(claim_followup(&conn,first.id).unwrap());
+    conn.execute("INSERT INTO conversation(id,assistant_id,conversation_kind,butler_task_status) VALUES (43,2,'butler_task','accepted')",[]).unwrap();
+    assert!(bind_followup_task(&conn,first.id,43).unwrap());
+    let (child,_) = enqueue_followup(&mut conn,20,43,"two","again",None).unwrap();
+    crate::db::butler_peer::stop_owned(&conn,41).unwrap();
+    assert_eq!(lineage_tasks(&conn,43).unwrap(),vec![41,43]);
+    assert!(!followup_is_sending(&conn,first.id).unwrap());
+    assert!(!claim_followup(&conn,child.id).unwrap());
+    finish_followup(&conn,first.id,"spawned",Some(43),None).unwrap();
+    assert!(next_followups(&conn).unwrap().is_empty());
+}
+
+#[test]
+fn test_butler_followup_restart_keeps_known_child_and_blocks_unknown_admission() {
+    let mut conn = fixture();
+    let (first,_) = enqueue_followup(&mut conn,20,41,"one","change",None).unwrap();
+    let (second,_) = enqueue_followup(&mut conn,20,41,"two","again",None).unwrap();
+    assert!(claim_followup(&conn,first.id).unwrap());
+    assert_eq!(recover_followups(&conn).unwrap(),1);
+    assert!(!claim_followup(&conn,second.id).unwrap(),"unknown admission must not restart work automatically");
+    stop_task_followups(&conn,41).unwrap();
+    let (known,_) = enqueue_followup(&mut conn,20,42,"known","change",None).unwrap();
+    assert!(claim_followup(&conn,known.id).unwrap());
+    conn.execute("INSERT INTO conversation(id,assistant_id,conversation_kind,butler_task_status) VALUES (44,2,'butler_task','running')",[]).unwrap();
+    assert!(bind_followup_task(&conn,known.id,44).unwrap());
+    recover_followups(&conn).unwrap();
+    let (later,_) = enqueue_followup(&mut conn,20,42,"later","again",None).unwrap();
+    assert!(!claim_followup(&conn,later.id).unwrap());
+    conn.execute("UPDATE conversation SET butler_task_status='succeeded' WHERE id=44",[]).unwrap();
+    assert!(claim_followup(&conn,later.id).unwrap());
+    assert_eq!(followup_target(&conn,&later).unwrap(),44);
+}
+
+#[test]
+fn test_butler_followup_late_enqueue_after_stop_is_rejected() {
+    let mut conn = fixture();
+    crate::db::butler_peer::stop_owned(&conn,42).unwrap();
+    assert!(enqueue_followup(&mut conn,20,42,"late-answer","answer",None).unwrap_err().to_string().contains("已停止"));
+    assert!(enqueue_followup(&mut conn,20,41,"other","unrelated",None).is_ok());
+}
+
+#[test]
+fn test_butler_followup_subtree_stop_preserves_sibling_requests() {
+    let mut conn = fixture();
+    conn.execute("INSERT INTO message(id,conversation_id,message_type,content) VALUES (100,10,'user','parallel help')",[]).unwrap();
+    let a = crate::db::butler_peer::enqueue(&mut conn, crate::db::butler_peer::NewRequest {
+        owner:10,target:20,sender:"总管家",recipient:"写作",key:"a",body:"change weekly",limit:6,tool_message_id:None,report_to_user:None
+    }).unwrap();
+    assert!(crate::db::butler_peer::claim(&conn,&a).unwrap());
+    crate::db::butler_peer::write_input(&mut conn,a.id,"request",20,"change weekly",1,"m").unwrap();
+    let (first,_) = enqueue_followup(&mut conn,20,41,"a","change weekly",Some(100)).unwrap();
+    let b = crate::db::butler_peer::enqueue(&mut conn, crate::db::butler_peer::NewRequest {
+        owner:10,target:30,sender:"总管家",recipient:"审稿",key:"b",body:"change monthly",limit:6,tool_message_id:None,report_to_user:None
+    }).unwrap();
+    assert!(crate::db::butler_peer::claim(&conn,&b).unwrap());
+    crate::db::butler_peer::write_input(&mut conn,b.id,"request",30,"change monthly",1,"m").unwrap();
+    let (sibling,_) = enqueue_followup(&mut conn,30,42,"b","change monthly",Some(100)).unwrap();
+    crate::db::butler_peer::stop_subtree(&conn,a.id).unwrap();
+    assert!(!claim_followup(&conn,first.id).unwrap());
+    assert!(claim_followup(&conn,sibling.id).unwrap(),"parallel sibling must remain usable");
+    conn.execute("UPDATE message SET metadata_json=?1 WHERE id=(SELECT max(id) FROM message WHERE conversation_id=20 AND message_type='user')",
+        [format!("{{\"origin\":\"butler_peer\",\"root\":100,\"exchange_id\":{},\"leg\":\"request\"}}",a.id)]).unwrap();
+    assert!(enqueue_followup(&mut conn,20,41,"late","late request",Some(100)).is_err());
+}
+
+#[test]
+fn test_butler_followup_inplace_stop_tracks_exact_turn_not_later_task_work() {
+    let mut conn = fixture();
+    let (first,_) = enqueue_followup(&mut conn,20,42,"inplace","change",None).unwrap();
+    conn.execute("UPDATE butler_work_followup SET origin_exchange=7 WHERE id=?1",[first.id]).unwrap();
+    assert!(claim_followup(&conn,first.id).unwrap());
+    conn.execute("INSERT INTO message(id,conversation_id,message_type,content) VALUES (300,42,'user','change')",[]).unwrap();
+    assert!(bind_followup_input(&conn,first.id,42,300).unwrap());
+    finish_followup(&conn,first.id,"delivered",None,None).unwrap();
+    assert_eq!(exchange_followup_inputs(&conn,&[7]).unwrap(),vec![(42,300)]);
+    conn.execute("INSERT INTO message(id,conversation_id,message_type,content) VALUES (301,42,'user','unrelated newer turn')",[]).unwrap();
+    assert!(exchange_followup_inputs(&conn,&[7]).unwrap().is_empty(),"do not halt newer task activity");
+    assert!(!followup_input_is_current(&conn,42,300).unwrap());
+    stop_exchange_followups(&conn,&[7]).unwrap();
+    assert!(!bind_followup_input(&conn,first.id,42,302).unwrap());
 }

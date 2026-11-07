@@ -1,3 +1,4 @@
+pub mod butler_question_history;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 

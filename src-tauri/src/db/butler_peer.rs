@@ -65,6 +65,7 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
             task_conversation_id INTEGER PRIMARY KEY, chain INTEGER NOT NULL, followup_of INTEGER,
             created_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS idx_butler_task_link_chain ON butler_task_link(chain);")?;
+    super::butler_work::schema(conn)?;
     super::butler_timeline::schema(conn)
 }
 
@@ -194,6 +195,7 @@ pub fn subtree(conn: &Connection, id: i64) -> rusqlite::Result<Vec<Exchange>> {
 /// 停止一项协作及其下级（不影响同一轮里并行的其他协作）。返回涉及的协作 ID。
 pub fn stop_subtree(conn: &Connection, id: i64) -> rusqlite::Result<Vec<i64>> {
     let ids: Vec<i64> = subtree(conn, id)?.into_iter().map(|e| e.id).collect();
+    super::butler_work::stop_exchange_followups(conn, &ids)?;
     for id in &ids {
         stop_rows(conn, "id=?1", *id)?;
     }
@@ -696,6 +698,7 @@ pub fn settle(conn: &Connection, ex: &Exchange, recovering: bool) -> anyhow::Res
 
 /// 停止某会话（如被取消的独立任务）发起的全部进行中协作，连同其下级分工。返回涉及的协作 ID。
 pub fn stop_owned(conn: &Connection, conversation: i64) -> rusqlite::Result<Vec<i64>> {
+    super::butler_work::stop_task_followups(conn, conversation)?;
     let owned: Vec<i64> = conn
         .prepare(&format!("SELECT id FROM butler_peer_exchange WHERE owner=?1 AND state IN {ACTIVE} ORDER BY id"))?
         .query_map([conversation], |r| r.get(0))?
@@ -744,6 +747,7 @@ pub fn active_in_chain(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<Ex
 
 /// 停止整项工作（整条协作链）。
 pub fn stop_chain(conn: &Connection, chain: i64) -> rusqlite::Result<usize> {
+    super::butler_work::stop_chain_followups(conn, chain)?;
     stop_rows(conn, "coalesce(chain,root)=?1", chain)
 }
 

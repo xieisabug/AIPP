@@ -7,6 +7,10 @@ use serde::Serialize;
 #[path = "butler_work_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "butler_work_quote_tests.rs"]
+mod quote_tests;
+
 pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS butler_work_followup(
@@ -15,8 +19,16 @@ pub fn schema(conn: &Connection) -> rusqlite::Result<()> {
             instruction TEXT NOT NULL, chain INTEGER, state TEXT NOT NULL,
             result_task INTEGER, error TEXT, created_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(work_ref, request_key));
-         CREATE INDEX IF NOT EXISTS idx_butler_work_followup_state ON butler_work_followup(state,task_conversation_id,id);",
-    )
+         CREATE INDEX IF NOT EXISTS idx_butler_work_followup_state ON butler_work_followup(state,task_conversation_id,id);
+         CREATE TABLE IF NOT EXISTS butler_work_stop(task INTEGER PRIMARY KEY);",
+    )?;
+    let has_origin: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_work_followup') WHERE name='origin_exchange')", [], |r| r.get(0))?;
+    if !has_origin { conn.execute_batch("ALTER TABLE butler_work_followup ADD COLUMN origin_exchange INTEGER")?; }
+    for column in ["execution_task", "execution_input_id"] {
+        let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('butler_work_followup') WHERE name=?1)", [column], |r| r.get(0))?;
+        if !exists { conn.execute_batch(&format!("ALTER TABLE butler_work_followup ADD COLUMN {column} INTEGER"))?; }
+    }
+    Ok(())
 }
 
 /// 一项可被引用的工作。`work_ref` 是稳定身份：`task:<任务会话>`、`exchange:<协作>`、`turn:<用户消息>`。
@@ -188,7 +200,16 @@ fn resolve_message(conn: &Connection, conversation: i64, id: i64) -> anyhow::Res
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("找不到消息 #{id} 所属的那一轮"))?;
     let meta = meta.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or_default();
-    let mut view = if meta["origin"] == "butler_peer" {
+    let mut view = if let Some(quote) = meta.get("quote") {
+        // The quoted reply belongs to the work explicitly selected for that turn,
+        // not to a new contact-chat turn. Use only the server-resolved canonical
+        // identity, and recheck access/deletion on every hop. Never recursively
+        // follow client-supplied message IDs or trust the persisted label/content.
+        anyhow::ensure!(quote.get("unavailable").is_none(), "原引用已不可用，请重新选择工作");
+        let work_ref = quote["ref"].as_str().ok_or_else(|| anyhow::anyhow!("原引用缺少有效工作身份，请重新选择工作"))?;
+        let (kind, work_id) = parse_ref(work_ref)?;
+        resolve(conn, conversation, kind, work_id)?
+    } else if meta["origin"] == "butler_peer" {
         let via = meta["exchange_id"].as_i64().ok_or_else(|| anyhow::anyhow!("协作消息缺少 exchange_id"))?;
         let work = if meta["leg"] == "request" {
             Some(via)
@@ -314,33 +335,171 @@ pub fn enqueue_followup(
         );
         return Ok((old, false));
     }
+    for member in lineage_tasks(&tx, task)? {
+        let stopped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_work_stop WHERE task=?1)", [member], |r| r.get(0))?;
+        let cancelled: bool = tx.query_row("SELECT coalesce(butler_task_status,'')='cancelled' FROM conversation WHERE id=?1", [member], |r| r.get(0)).optional()?.unwrap_or(false);
+        anyhow::ensure!(!stopped && !cancelled, "原工作已停止；请明确发起新工作，不会自动恢复已停止的续接");
+    }
+    let origin = super::butler_peer::turn_work(&tx, conversation)?.and_then(|turn| turn.exchange);
+    if let Some(origin) = origin {
+        let stopped: bool = tx.query_row("SELECT stop_requested FROM butler_peer_exchange WHERE id=?1", [origin], |r| r.get(0)).optional()?.unwrap_or(true);
+        anyhow::ensure!(!stopped, "发起这次续接的协作已停止，未继续执行");
+    }
     tx.execute(
-        "INSERT INTO butler_work_followup(work_ref,request_key,conversation_id,task_conversation_id,instruction,chain,state)
-         VALUES (?1,?2,?3,?4,?5,?6,'queued')",
-        params![work_ref, request_key, conversation, task, instruction, chain],
+        "INSERT INTO butler_work_followup(work_ref,request_key,conversation_id,task_conversation_id,instruction,chain,state,origin_exchange)
+         VALUES (?1,?2,?3,?4,?5,?6,'queued',?7)",
+        params![work_ref, request_key, conversation, task, instruction, chain, origin],
     )?;
     let created = tx.query_row(&format!("{FOLLOWUP} WHERE id=?1"), [tx.last_insert_rowid()], followup_row)?;
     tx.commit()?;
     Ok((created, true))
 }
 
-/// 每个任务最早的一条待送续接（同一任务严格按顺序，前一条处理完才轮到下一条）。
+/// Followup results retain the logical work identity across newly created task conversations.
+pub fn lineage_tasks(conn: &Connection, task: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut root = task;
+    let mut seen = Vec::new();
+    while !seen.contains(&root) {
+        seen.push(root);
+        let parent: Option<i64> = conn.query_row(
+            "SELECT task_conversation_id FROM butler_work_followup WHERE result_task=?1 ORDER BY id LIMIT 1",
+            [root], |r| r.get(0)).optional()?;
+        match parent { Some(parent) => root = parent, None => break }
+    }
+    let mut tasks = vec![root];
+    let mut cursor = 0;
+    while cursor < tasks.len() {
+        let children: Vec<i64> = conn.prepare(
+            "SELECT result_task FROM butler_work_followup WHERE task_conversation_id=?1 AND result_task IS NOT NULL ORDER BY id")?
+            .query_map([tasks[cursor]], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        for child in children { if !tasks.contains(&child) { tasks.push(child); } }
+        cursor += 1;
+    }
+    Ok(tasks)
+}
+
+fn task_finished(conn: &Connection, task: i64) -> rusqlite::Result<bool> {
+    // A missing task is not evidence of completed execution. Keep it blocked rather than duplicate work.
+    Ok(conn.query_row("SELECT butler_task_finalized_at IS NOT NULL OR coalesce(butler_task_status,'') IN
+        ('succeeded','failed','cancelled','interrupted') FROM conversation WHERE id=?1", [task], |r| r.get(0))
+        .optional()?.unwrap_or(false))
+}
+
+/// Resolve the most recent execution, not the originally quoted (possibly completed) result.
+pub fn followup_target(conn: &Connection, followup: &Followup) -> rusqlite::Result<i64> {
+    let tasks = lineage_tasks(conn, followup.task_conversation_id)?;
+    let entries = conn.prepare("SELECT task_conversation_id,result_task FROM butler_work_followup WHERE result_task IS NOT NULL ORDER BY id DESC")?
+        .query_map([], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(entries.into_iter().find(|(parent,_)| tasks.contains(parent)).map(|(_,task)| task).unwrap_or(followup.task_conversation_id))
+}
+
+fn eligible(conn: &Connection, candidate: &Followup) -> rusqlite::Result<bool> {
+    if candidate.state != "queued" { return Ok(false); }
+    let tasks = lineage_tasks(conn, candidate.task_conversation_id)?;
+    for task in &tasks {
+        let stopped: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_work_stop WHERE task=?1)", [task], |r| r.get(0))?;
+        if stopped { return Ok(false); }
+    }
+    let entries = conn.prepare(&format!("{FOLLOWUP} ORDER BY id"))?
+        .query_map([], followup_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for entry in entries {
+        if entry.id == candidate.id || !tasks.contains(&entry.task_conversation_id) { continue; }
+        if entry.state == "sending" || entry.state == "uncertain"
+            || (entry.state == "queued" && entry.id < candidate.id) { return Ok(false); }
+        if entry.state == "spawned" && entry.result_task.map(|task| task_finished(conn, task)).transpose()?.unwrap_or(false) == false {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// One queued request per logical work; a spawned child continues to hold its place until it finishes.
 pub fn next_followups(conn: &Connection) -> rusqlite::Result<Vec<Followup>> {
-    conn.prepare(&format!(
-        "{FOLLOWUP} WHERE state='queued' AND id IN (SELECT min(id) FROM butler_work_followup
-            WHERE state IN ('queued','sending') GROUP BY task_conversation_id) ORDER BY id"
-    ))?
-    .query_map([], followup_row)?
-    .collect()
+    let candidates = conn.prepare(&format!("{FOLLOWUP} WHERE state='queued' ORDER BY id"))?
+        .query_map([], followup_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut ready = Vec::new();
+    for candidate in candidates { if eligible(conn, &candidate)? { ready.push(candidate); } }
+    Ok(ready)
 }
 
 pub fn claim_followup(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
-    Ok(conn.execute(
-        "UPDATE butler_work_followup SET state='sending' WHERE id=?1 AND state='queued' AND NOT EXISTS(
-            SELECT 1 FROM butler_work_followup o WHERE o.task_conversation_id=
-              (SELECT task_conversation_id FROM butler_work_followup WHERE id=?1) AND o.state='sending')",
-        [id],
-    )? == 1)
+    let tx = conn.unchecked_transaction()?;
+    let candidate = tx.query_row(&format!("{FOLLOWUP} WHERE id=?1"), [id], followup_row).optional()?;
+    let Some(candidate) = candidate else { return Ok(false); };
+    if !eligible(&tx, &candidate)? { return Ok(false); }
+    let changed = tx.execute("UPDATE butler_work_followup SET state='sending' WHERE id=?1 AND state='queued'", [id])?;
+    tx.commit()?;
+    Ok(changed == 1)
+}
+
+pub fn followup_is_sending(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_work_followup WHERE id=?1 AND state='sending')", [id], |r| r.get(0))
+}
+
+/// Persist the child before launching it, so cancellation cannot lose a newly created execution.
+pub fn bind_followup_task(conn: &Connection, id: i64, task: i64) -> rusqlite::Result<bool> {
+    Ok(conn.execute("UPDATE butler_work_followup SET result_task=?2 WHERE id=?1 AND state='sending' AND result_task IS NULL",
+        params![id,task])? == 1)
+}
+
+/// Stop all already queued requests for this logical work, including requests quoting an older result.
+pub fn stop_task_followups(conn: &Connection, task: i64) -> rusqlite::Result<Vec<i64>> {
+    let tasks = lineage_tasks(conn, task)?;
+    for task in &tasks {
+        conn.execute("INSERT OR IGNORE INTO butler_work_stop(task) VALUES (?1)", [task])?;
+        conn.execute("UPDATE butler_work_followup SET state='stopped',error='用户已停止这项工作，未继续执行'
+            WHERE task_conversation_id=?1 AND state IN ('queued','sending','spawned','uncertain')", [task])?;
+    }
+    Ok(tasks)
+}
+
+pub fn stop_chain_followups(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<i64>> {
+    let tasks = conn.prepare("SELECT task_conversation_id FROM butler_work_followup WHERE chain=?1
+        UNION SELECT task_conversation_id FROM butler_task_link WHERE chain=?1")?
+        .query_map([chain], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+    let mut stopped = Vec::new();
+    for task in tasks { for task in stop_task_followups(conn, task)? { if !stopped.contains(&task) { stopped.push(task); } } }
+    Ok(stopped)
+}
+
+/// Bind an in-place continuation to its exact persisted input, not just its reusable conversation.
+pub fn bind_followup_input(conn: &Connection, id: i64, task: i64, input: i64) -> rusqlite::Result<bool> {
+    Ok(conn.execute("UPDATE butler_work_followup SET execution_task=?2,execution_input_id=?3
+        WHERE id=?1 AND state='sending'", params![id,task,input])? == 1)
+}
+
+pub fn followup_input_is_current(conn: &Connection, task: i64, input: i64) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT coalesce((SELECT max(id) FROM message WHERE conversation_id=?1 AND message_type='user'),-1)=?2",
+        params![task,input], |r| r.get(0))
+}
+
+/// Snapshot delivered in-place turns before changing their state to stopped.
+pub fn exchange_followup_inputs(conn: &Connection, exchanges: &[i64]) -> rusqlite::Result<Vec<(i64,i64)>> {
+    let mut result = Vec::new();
+    for exchange in exchanges {
+        let inputs = conn.prepare("SELECT execution_task,execution_input_id FROM butler_work_followup
+            WHERE origin_exchange=?1 AND execution_task IS NOT NULL AND execution_input_id IS NOT NULL
+            AND state IN ('sending','delivered')")?
+            .query_map([exchange], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (task,input) in inputs {
+            if followup_input_is_current(conn,task,input)? && !result.contains(&(task,input)) { result.push((task,input)); }
+        }
+    }
+    Ok(result)
+}
+
+/// Stop only followups issued by these received exchanges, not siblings in their shared chain.
+pub fn stop_exchange_followups(conn: &Connection, exchanges: &[i64]) -> rusqlite::Result<Vec<i64>> {
+    let mut tasks = Vec::new();
+    for exchange in exchanges {
+        let children = conn.prepare("SELECT result_task FROM butler_work_followup WHERE origin_exchange=?1
+            AND result_task IS NOT NULL AND state IN ('sending','spawned')")?
+            .query_map([exchange], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        for child in children { if !tasks.contains(&child) { tasks.push(child); } }
+        conn.execute("UPDATE butler_work_followup SET state='stopped',error='发起这次续接的协作已停止'
+            WHERE origin_exchange=?1 AND state IN ('queued','sending','delivered','spawned','uncertain')", [exchange])?;
+    }
+    Ok(tasks)
 }
 
 pub fn finish_followup(conn: &Connection, id: i64, state: &str, result_task: Option<i64>, error: Option<&str>) -> rusqlite::Result<()> {
@@ -354,7 +513,7 @@ pub fn finish_followup(conn: &Connection, id: i64, state: &str, result_task: Opt
 /// 启动收尾：投递中退出的续接结果未知，不重复执行。
 pub fn recover_followups(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute(
-        "UPDATE butler_work_followup SET state='failed',
+        "UPDATE butler_work_followup SET state=CASE WHEN result_task IS NOT NULL THEN 'spawned' ELSE 'uncertain' END,
             error='送达过程中应用退出，是否已开始执行未知，未重复执行；如需继续请重新发起'
          WHERE state='sending'",
         [],

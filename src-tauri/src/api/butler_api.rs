@@ -3297,6 +3297,24 @@ pub(crate) async fn spawn_butler_task_with_window(
     window: &Window,
     request: SpawnButlerTaskRequest,
 ) -> Result<SpawnButlerTaskResponse, String> {
+    spawn_butler_task_inner(app_handle, window, request, None).await
+}
+
+pub(crate) async fn spawn_butler_followup_with_window(
+    app_handle: &AppHandle,
+    window: &Window,
+    request: SpawnButlerTaskRequest,
+    followup_id: i64,
+) -> Result<SpawnButlerTaskResponse, String> {
+    spawn_butler_task_inner(app_handle, window, request, Some(followup_id)).await
+}
+
+async fn spawn_butler_task_inner(
+    app_handle: &AppHandle,
+    window: &Window,
+    request: SpawnButlerTaskRequest,
+    followup_id: Option<i64>,
+) -> Result<SpawnButlerTaskResponse, String> {
     ensure_butler_enabled(app_handle).await?;
 
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
@@ -3394,6 +3412,18 @@ pub(crate) async fn spawn_butler_task_with_window(
         }
     }
 
+    // Register before any execution begins. Cancellation can now locate this child even if
+    // the caller has not yet received the spawn result.
+    if let Some(followup_id) = followup_id {
+        let conn = db.get_connection().map_err(|e| e.to_string())?;
+        if !crate::db::butler_work::bind_followup_task(&conn, followup_id, created_task.id)
+            .map_err(|e| e.to_string())? {
+            butler_repo.update_task_conversation_state(created_task.id, STATUS_CANCELLED,
+                Some("续接在开始前已停止，未执行"), None).map_err(|e| e.to_string())?;
+            return Err("续接在开始前已停止，未执行".into());
+        }
+    }
+
     let accepted_task =
         build_task_list_item(app_handle, created_task.clone(), &definition, None).await?;
     let _ = app_handle.emit("butler_task_created", accepted_task.clone());
@@ -3407,9 +3437,17 @@ pub(crate) async fn spawn_butler_task_with_window(
         "light",
     );
 
-    butler_repo
-        .update_task_conversation_state(created_task.id, STATUS_RUNNING, None, None)
-        .map_err(|e| e.to_string())?;
+    if let Some(followup_id) = followup_id {
+        let conn = db.get_connection().map_err(|e| e.to_string())?;
+        let changed = conn.execute("UPDATE conversation SET butler_task_status='running'
+            WHERE id=?1 AND coalesce(butler_task_status,'')!='cancelled'
+            AND EXISTS(SELECT 1 FROM butler_work_followup WHERE id=?2 AND state='sending' AND result_task=?1)",
+            rusqlite::params![created_task.id, followup_id]).map_err(|e| e.to_string())?;
+        if changed == 0 { return Err("续接在启动前已停止，未执行".into()); }
+    } else {
+        butler_repo.update_task_conversation_state(created_task.id, STATUS_RUNNING, None, None)
+            .map_err(|e| e.to_string())?;
+    }
 
     let ai_request = AiRequest {
         conversation_id: created_task.id.to_string(),
@@ -3451,6 +3489,17 @@ pub(crate) async fn spawn_butler_task_with_window(
     let executor_assistant_name = executor_assistant.name.clone();
     std::thread::spawn(move || {
         let thread_result: Result<(), String> = tauri::async_runtime::block_on(async move {
+            let _admission = if followup_id.is_some() {
+                Some(super::butler_work::execution_gate().await)
+            } else { None };
+            if let Some(followup_id) = followup_id {
+                let db = ConversationDatabase::new(&app_handle_clone).map_err(|e| e.to_string())?;
+                let conn = db.get_connection().map_err(|e| e.to_string())?;
+                let allowed: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM butler_work_followup WHERE id=?1 AND state IN ('sending','spawned') AND result_task=?2)",
+                    rusqlite::params![followup_id, task_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+                if !allowed { return Err("续接在启动前已停止，未调用模型".into()); }
+            }
             match ask_ai(
                 app_handle_clone.clone(),
                 app_handle_clone.state::<crate::AppState>(),
