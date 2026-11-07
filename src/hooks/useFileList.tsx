@@ -71,14 +71,21 @@ const FileListRenderer: React.FC<FileListRendererProps> = ({ fileInfo, onOpen })
   if (fileInfo.type === AttachmentType.Image) {
     return (
       <>
-        <img
-          onClick={() => {
-            onOpen && onOpen(fileInfo.id);
+        <button
+          type="button"
+          className="input-area-image-preview-button"
+          aria-label={`预览 ${fileInfo.name || "图片"}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen?.(fileInfo.id);
           }}
-          src={fileInfo.thumbnail}
-          alt={fileInfo.name || "缩略图"}
-          className="input-area-img"
-        />
+        >
+          <img
+            src={fileInfo.thumbnail}
+            alt={fileInfo.name || "缩略图"}
+            className="input-area-img"
+          />
+        </button>
         {name}
         {type}
       </>

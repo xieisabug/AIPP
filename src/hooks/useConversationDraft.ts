@@ -4,6 +4,7 @@ import {
     draftAttachmentsToFileInfo,
     draftMissingAttachments,
     MobileDraftDto,
+    DraftRestoreOptions,
     MobileDraftMissingAttachmentDto,
     useMobileDraftPersistence,
 } from "./useMobileDraftPersistence";
@@ -26,9 +27,11 @@ export function useConversationDraft(
 
     const { saveContent, saveAttachmentIds } = useMobileDraftPersistence(
         conversationId,
-        (draft: MobileDraftDto) => {
+        (draft: MobileDraftDto, options?: DraftRestoreOptions) => {
             drafts.current.set(conversationId, draft.content);
-            restoreAttachments.current?.(draftAttachmentsToFileInfo(draft.attachments));
+            if (!options?.preserveAttachments) {
+                restoreAttachments.current?.(draftAttachmentsToFileInfo(draft.attachments));
+            }
             const missing = draftMissingAttachments(draft);
             if (missing.length > 0) missingAttachments.current?.(missing);
             redraw((version) => version + 1);

@@ -210,3 +210,89 @@ describe("AssistantConfig leave guard", () => {
         expect(screen.getByLabelText("prompt")).toHaveValue("will-fail-save");
     });
 });
+
+describe("AssistantConfig concurrent save protection", () => {
+    afterEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
+
+    function setupPendingSave() {
+        setup();
+        let resolveSave!: () => void;
+        let rejectSave!: (reason: Error) => void;
+        const gate = new Promise<void>((resolve, reject) => { resolveSave = resolve; rejectSave = reject; });
+        const save = vi.fn((_args?: Record<string, unknown>) => gate);
+        mockInvokeHandler("save_assistant", save);
+        mockInvokeHandler("set_plugin_assistant_config", () => undefined);
+        return { save, resolveSave, rejectSave };
+    }
+
+    it("should retain edits made during a save as dirty when the submitted snapshot completes", async () => {
+        const state = setupPendingSave();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "submitted" } });
+        fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "newer edit" } });
+        await act(async () => { state.resolveSave(); });
+        expect(state.save).toHaveBeenCalledTimes(1);
+        expect((state.save.mock.calls[0][0]?.assistantDetail as AssistantDetail).prompts[0].prompt).toBe("submitted");
+        expect(screen.getByLabelText("prompt")).toHaveValue("newer edit");
+        const leave = vi.fn();
+        act(() => requestConfigLeave(leave));
+        expect(leave).not.toHaveBeenCalled();
+        expect(screen.getByText("有未保存的助手配置")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "放弃" }));
+        expect(screen.getByLabelText("prompt")).toHaveValue("submitted");
+    });
+
+    it("should send only one request when save is invoked repeatedly before completion", async () => {
+        const state = setupPendingSave();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "submitted" } });
+        const saveButton = screen.getByRole("button", { name: "保存配置" });
+        fireEvent.click(saveButton);
+        fireEvent.click(saveButton);
+        expect(state.save).toHaveBeenCalledTimes(1);
+        await act(async () => { state.resolveSave(); });
+    });
+
+    it("should stay on the current assistant when newer edits exist after leave-save", async () => {
+        const state = setupPendingSave();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "submitted" } });
+        fireEvent.click(screen.getByRole("button", { name: "assistant-3" }));
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "newer edit" } });
+        await act(async () => { state.resolveSave(); });
+        expect(screen.getByTestId("selected")).toHaveTextContent("1");
+        expect(screen.getByText("有未保存的助手配置")).toBeInTheDocument();
+        expect(screen.getByLabelText("prompt")).toHaveValue("newer edit");
+    });
+
+    it("should cancel pending leave navigation when a slow save is still running", async () => {
+        const state = setupPendingSave();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "submitted" } });
+        const leave = vi.fn();
+        act(() => requestConfigLeave(leave));
+        fireEvent.click(screen.getByRole("button", { name: "保存" }));
+        expect(state.save).toHaveBeenCalledTimes(1);
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
+        expect(screen.queryByText("有未保存的助手配置")).toBeNull();
+        await act(async () => { state.resolveSave(); });
+        expect(leave).not.toHaveBeenCalled();
+        expect(screen.getByTestId("selected")).toHaveTextContent("1");
+        expect(screen.getByLabelText("prompt")).toHaveValue("submitted");
+    });
+
+    it("should allow retry after a rejected save without dropping edits", async () => {
+        const state = setupPendingSave();
+        await waitFor(() => expect(screen.getByLabelText("prompt")).toHaveValue("prompt-1"));
+        fireEvent.change(screen.getByLabelText("prompt"), { target: { value: "submitted" } });
+        fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+        await act(async () => { state.rejectSave(new Error("save failed")); });
+        expect(screen.getByLabelText("prompt")).toHaveValue("submitted");
+        const retry = vi.fn(() => undefined);
+        mockInvokeHandler("save_assistant", retry);
+        fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
+        await waitFor(() => expect(retry).toHaveBeenCalledTimes(1));
+    });
+});

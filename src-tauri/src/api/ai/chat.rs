@@ -57,9 +57,42 @@ pub(crate) const REASONING_ONLY_MODEL_REPLY_NOTICE: &str = "模型只返回了�
 
 /// 空回复说明是本地写入的系统说明，不是模型的回答：
 /// 构建后续请求上下文时整条排除，避免把它当作助手说过的话发回给模型。
-pub(crate) fn is_empty_model_reply_notice(message_type: &str, content: &str) -> bool {
-    message_type == "response"
-        && matches!(content, EMPTY_MODEL_REPLY_NOTICE | REASONING_ONLY_MODEL_REPLY_NOTICE)
+pub(crate) fn is_empty_model_reply_notice(message: &Message) -> bool {
+    message.message_type == "response"
+        && message.metadata_json.as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|metadata| metadata.get("local_reply_notice").cloned())
+            .is_some_and(|notice| {
+                notice.get("source").and_then(|v| v.as_str()) == Some("aipp")
+                    && matches!(notice.get("kind").and_then(|v| v.as_str()),
+                        Some("empty_model_reply" | "reasoning_only_model_reply"))
+            })
+}
+
+/// Classify both streaming and non-streaming successful responses identically.
+/// Provenance is stored separately from visible text: a genuine model response
+/// which happens to repeat our notice remains part of the conversation context.
+pub(crate) fn prepare_empty_model_reply(
+    content: &mut String,
+    reasoning: &str,
+    tool_call_count: usize,
+    binary_count: usize,
+    metadata: Option<String>,
+) -> Option<String> {
+    if !should_announce_empty_model_reply(content, tool_call_count, binary_count) {
+        return metadata;
+    }
+    *content = empty_model_reply_notice(reasoning).to_string();
+    let mut map = metadata_object_from_raw(metadata.as_deref());
+    map.insert("local_reply_notice".into(), serde_json::json!({
+        "source": "aipp",
+        "kind": if reasoning.trim().is_empty() {
+            "empty_model_reply"
+        } else {
+            "reasoning_only_model_reply"
+        },
+    }));
+    Some(serde_json::Value::Object(map).to_string())
 }
 
 pub(crate) fn empty_model_reply_notice(reasoning_content: &str) -> &'static str {
@@ -3648,8 +3681,20 @@ async fn attempt_stream_chat(
                                 }
                             }
                             if let Some(msg_id) = response_message_id {
+                                // Persist provenance before publishing the local notice as complete.
+                                let repo = conversation_db.message_repo()
+                                    .context(StreamMessageWrite(conversation_id))?;
+                                let existing = repo.read(msg_id)
+                                    .context(StreamMessageWrite(conversation_id))?
+                                    .context("empty reply notice message missing")?;
+                                let mut empty_body = String::new();
+                                let metadata = prepare_empty_model_reply(
+                                    &mut empty_body, &reasoning_content, 0, 0, existing.metadata_json,
+                                );
+                                repo.update_metadata(msg_id, metadata.as_deref())
+                                    .context(StreamMessageWrite(conversation_id))?;
                                 // 立刻落库并标记完成，覆盖仅有 reasoning / None 等收尾分支漏掉 response 的情况。
-                                let _ = persist_and_emit_update(
+                                persist_and_emit_update(
                                     &conversation_db,
                                     &window,
                                     conversation_id,
@@ -3657,7 +3702,7 @@ async fn attempt_stream_chat(
                                     "response",
                                     &response_content,
                                     true,
-                                );
+                                )?;
                                 if let Ok(repo) = conversation_db.message_repo() {
                                     let _ = repo.update_finish_time(msg_id);
                                 }
@@ -4072,7 +4117,9 @@ pub async fn handle_non_stream_chat(
     let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
 
     // 非流式：强制捕获工具调用，便于将工具以 UI 注释形式插入
-    let non_stream_options = chat_options.clone().with_capture_tool_calls(true);
+    let non_stream_options = chat_options.clone()
+        .with_capture_tool_calls(true)
+        .with_capture_reasoning_content(true);
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
@@ -4195,7 +4242,7 @@ pub async fn handle_non_stream_chat(
             // 在创建新的 response 消息前，如果上一条是错误消息，则清理
             let _ = cleanup_last_error_message(conversation_db, conversation_id).await;
 
-            let mut content = chat_response.first_text().unwrap_or("").to_string();
+            let mut content = chat_response.texts().join("");
             let response_binaries = chat_response.content.clone().into_binaries();
 
             // Extract token usage data
@@ -4204,6 +4251,13 @@ pub async fn handle_non_stream_chat(
             let input_tokens = usage.prompt_tokens.unwrap_or(0);
             let output_tokens = usage.completion_tokens.unwrap_or(0);
             let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
+            let response_metadata = prepare_empty_model_reply(
+                &mut content,
+                chat_response.reasoning_content.as_deref().unwrap_or(""),
+                chat_response.tool_calls().len(),
+                response_binaries.len(),
+                merge_chat_response_metadata(None, Some(usage), chat_response.response_id.as_deref()),
+            );
 
             // 现在才创建响应消息（在有实际内容后）
             let now = chrono::Utc::now();
@@ -4243,11 +4297,7 @@ pub async fn handle_non_stream_chat(
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
-                    metadata_json: merge_chat_response_metadata(
-                        None,
-                        Some(usage),
-                        chat_response.response_id.as_deref(),
-                    ),
+                    metadata_json: response_metadata,
                     first_token_time: None, // non-stream: unknown, fallback to start_time
                     ttft_ms,
                 })
@@ -4698,35 +4748,5 @@ mod pr40_error_handling_tests {
 
 
 #[cfg(test)]
-mod empty_model_reply_tests {
-    use super::{
-        empty_model_reply_notice, is_empty_model_reply_notice, should_announce_empty_model_reply,
-        EMPTY_MODEL_REPLY_NOTICE, REASONING_ONLY_MODEL_REPLY_NOTICE,
-    };
-
-    #[test]
-    fn reasoning_only_reply_gets_its_own_notice() {
-        assert_eq!(empty_model_reply_notice(""), EMPTY_MODEL_REPLY_NOTICE);
-        assert_eq!(empty_model_reply_notice("  
-"), EMPTY_MODEL_REPLY_NOTICE);
-        assert_eq!(empty_model_reply_notice("先想一想"), REASONING_ONLY_MODEL_REPLY_NOTICE);
-    }
-
-    #[test]
-    fn notices_are_recognised_only_as_response_messages() {
-        assert!(is_empty_model_reply_notice("response", EMPTY_MODEL_REPLY_NOTICE));
-        assert!(is_empty_model_reply_notice("response", REASONING_ONLY_MODEL_REPLY_NOTICE));
-        assert!(!is_empty_model_reply_notice("user", EMPTY_MODEL_REPLY_NOTICE));
-        assert!(!is_empty_model_reply_notice("response", "模型返回了空内容。还有别的"));
-    }
-
-    #[test]
-    fn announces_only_when_body_tools_and_binaries_are_all_empty() {
-        assert!(should_announce_empty_model_reply("", 0, 0));
-        assert!(should_announce_empty_model_reply("   ", 0, 0));
-        assert!(!should_announce_empty_model_reply("hi", 0, 0));
-        assert!(!should_announce_empty_model_reply("", 1, 0));
-        assert!(!should_announce_empty_model_reply("", 0, 2));
-        assert_eq!(EMPTY_MODEL_REPLY_NOTICE, "模型返回了空内容");
-    }
-}
+#[path = "chat_tests.rs"]
+mod empty_model_reply_tests;

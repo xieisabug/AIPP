@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import NewChatComponent from "./NewChatComponent";
+import { navigateMobile, subscribeMobileConfigNavigation } from "../mobile/navigation";
 
 const invokeMock = vi.fn();
 const layout = vi.hoisted(() => ({ isNarrow: false, isMobilePlatform: false }));
@@ -149,5 +150,18 @@ describe("NewChatComponent setup guide (#155)", () => {
         await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_assistant", { assistantId: 1 }));
         expect(document.querySelector('[data-aipp-slot="ask-prepare-setup-guides"]')).toBeNull();
         expect(screen.getByText("输入内容后点击发送，开始与助手交流")).toBeInTheDocument();
+    });
+
+    it("should retain the assistant destination when settings has not mounted at click time", async () => {
+        renderWith({ provider_id: 9, model_code: "deleted" });
+        fireEvent.click(await screen.findByRole("button", { name: "配置助手" }));
+        const receive = vi.fn();
+        const unsubscribe = subscribeMobileConfigNavigation(receive);
+        try {
+            expect(receive).toHaveBeenCalledExactlyOnceWith({ menu: "assistant-config", subNav: undefined });
+        } finally {
+            unsubscribe();
+            navigateMobile("chat_ui");
+        }
     });
 });

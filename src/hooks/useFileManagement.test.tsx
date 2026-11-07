@@ -47,4 +47,29 @@ describe("mobile attachment selection", () => {
         expect(result.current.fileInfoList).toBeNull();
         expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("permission denied"));
     });
+    it("should preserve a newly selected attachment when a draft finishes loading", async () => {
+        vi.mocked(mobileFileAction).mockResolvedValue({ status: "selected", files: [
+            { path: "/new", name: "new.png", mime: "image/png", size: 1 },
+        ] });
+        vi.mocked(invoke).mockResolvedValue({ attachment_id: 99 });
+        const { result } = renderHook(() => useFileManagement());
+        act(() => result.current.restoreFiles([]));
+        await act(async () => { await result.current.handleChooseFile(); });
+        act(() => result.current.restoreDraftFiles([
+            { id: 7, name: "old.png", path: "/old", type: AttachmentType.Image },
+        ]));
+        expect(result.current.fileInfoList?.map(file => file.id)).toEqual([99]);
+    });
+
+    it("should not resurrect attachments cleared during draft loading and should reset on conversation change", () => {
+        const stored = [{ id: 7, name: "old.png", path: "/old", type: AttachmentType.Image }];
+        const { result } = renderHook(() => useFileManagement());
+        act(() => result.current.clearFileInfoList());
+        act(() => result.current.restoreDraftFiles(stored));
+        expect(result.current.fileInfoList).toBeNull();
+        act(() => result.current.restoreFiles([]));
+        act(() => result.current.restoreDraftFiles(stored));
+        expect(result.current.fileInfoList).toEqual(stored);
+    });
+
 });

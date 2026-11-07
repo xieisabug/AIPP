@@ -5,6 +5,7 @@ import { Input } from '../ui/input';
 import { PinyinFilter, usePinyinReady } from '../../utils/pinyinFilter';
 import { useIsMobile } from '../../hooks/use-mobile';
 import { useIsMobilePlatform } from '../../hooks/use-platform';
+import { requestConfigLeave } from '@/lib/configLeaveGuard';
 import { setConfigSectionDetail, useConfigSectionId } from '@/lib/configSectionNav';
 
 /** 窄屏下拉超过此数量时显示搜索框（替代宽屏侧栏里的搜索）。 */
@@ -100,7 +101,7 @@ const ConfigPageLayout: React.FC<ConfigPageLayoutProps> = ({
     useEffect(() => {
         if (!sectionId) return;
         setConfigSectionDetail(sectionId, showDetail
-            ? { title: selectedLabel ?? '', back: () => setMobileView('list') }
+            ? { title: selectedLabel ?? '', back: () => requestConfigLeave(() => setMobileView('list')) }
             : null);
     }, [sectionId, showDetail, selectedLabel]);
     useEffect(() => () => { if (sectionId) setConfigSectionDetail(sectionId, null); }, [sectionId]);

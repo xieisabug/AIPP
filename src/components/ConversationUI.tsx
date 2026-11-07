@@ -423,15 +423,19 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             fileInfoList,
             clearFileInfoList,
             restoreFiles,
+            restoreDraftFiles,
             handleChooseFile,
             handleDeleteFile,
             handlePaste,
             handleDropFiles,
         } = useFileManagement();
 
-        const [draftReady, setDraftReady] = useState(false);
+        // Readiness belongs to a conversation, not the previous render. On a key
+        // change, effects must not save the old attachment list into the new draft.
+        const [draftReadyKey, setDraftReadyKey] = useState<string | null>(null);
+        const draftReady = draftReadyKey === conversationId;
         useEffect(() => {
-            setDraftReady(false);
+            setDraftReadyKey(null);
             restoreFiles([]);
         }, [conversationId, restoreFiles]);
 
@@ -452,8 +456,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         const [inputText, setInputText, saveDraftAttachmentIds] = useConversationDraft(
             conversationId,
-            restoreFiles,
-            () => setDraftReady(true),
+            restoreDraftFiles,
+            () => setDraftReadyKey(conversationId),
             notifyMissingDraftAttachments,
         );
 

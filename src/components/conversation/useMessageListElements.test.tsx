@@ -1,7 +1,9 @@
-import { render, renderHook, screen } from "@testing-library/react";
+import { ButlerResultsOnlyContext } from "../butler/ButlerPresentationContext";
+import { render, renderHook, screen, fireEvent } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     findFirstLiveSuffixIndex,
+    groupUnmergedRetryEntries,
     readMcpCallRefs,
     useMessageListElements,
     type UseMessageListElementsProps,
@@ -262,7 +264,9 @@ describe("useMessageListElements merged assistant preview state", () => {
         ]);
         // 尾部组仍整体留在 last-reply 容器中
         const lastReply = items.find((item) => item.key === "last-reply-container");
-        expect(lastReply?.messageIds).toEqual([5, 7]);
+        // All nested message IDs must remain addressable by virtualized scrolling,
+        // including replies hidden inside a collapsed retry/merged group.
+        expect(lastReply?.messageIds).toEqual([5, 6, 7]);
     });
 
     it("caps historical row height estimates for auto-collapsed code blocks", () => {
@@ -372,4 +376,111 @@ it("should refresh a merged error when its folded state changes", () => {
     expect(screen.getByTestId("message-2")).toHaveAttribute("data-error-superseded", "false");
     rerender(<Harness messages={[{ ...error, isSupersededError: true }, reply]} />);
     expect(screen.getByTestId("message-2")).toHaveAttribute("data-error-superseded", "true");
+});
+
+
+describe("unmerged retry attempts", () => {
+    afterEach(() => {
+        mockDisplayConfig.isMergeAssistantMessages = true;
+        vi.clearAllMocks();
+    });
+
+    const retry = (id: number, attempt: number, status = "interrupted", session = "retry-session") => makeMessage({
+        id, content: `answer-${id}`,
+        metadata_json: JSON.stringify({ stream_retry: {
+            session_id: session, attempt, status,
+            ...(status === "interrupted" ? { error: `full diagnostic ${id} ` + "detail ".repeat(50) } : {}),
+        } }),
+    });
+
+    it("should show attempts and copy full diagnostics when assistant bubbles are not merged", () => {
+        mockDisplayConfig.isMergeAssistantMessages = false;
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+        const messages = [retry(1, 1), retry(2, 2, "completed")];
+        render(<Harness messages={messages} />);
+        expect(screen.getByText("尝试 1")).toBeVisible();
+        expect(screen.getByText("尝试 2")).toBeVisible();
+        expect(screen.queryByTestId("message-1")).not.toBeInTheDocument();
+        expect(screen.getByTestId("message-2")).toHaveAttribute("data-merged-mode", "false");
+        fireEvent.click(screen.getByText("尝试 1"));
+        expect(screen.getByTestId("message-1")).toHaveTextContent("answer-1");
+        fireEvent.click(screen.getByRole("button", { name: "复制中断原因" }));
+        expect(writeText).toHaveBeenCalledWith(JSON.parse(messages[0].metadata_json!).stream_retry.error.trim());
+    });
+
+    it("should keep every retry message addressable in the live reply row when bubbles are not merged", () => {
+        mockDisplayConfig.isMergeAssistantMessages = false;
+        const messages = [makeMessage({ id: 1, message_type: "user" }), retry(2, 1), retry(3, 2, "completed")];
+        const { result } = renderHook(() => useMessageListElements(makeHookProps(messages)));
+        const row = result.current.renderItems.find(item => item.key === "last-reply-container");
+        expect(row?.messageIds).toEqual([1, 2, 3]);
+        expect(row?.messageId).toBe(3);
+    });
+
+    it("should retain every failed attempt after reopening when all retries fail", () => {
+        mockDisplayConfig.isMergeAssistantMessages = false;
+        const messages = [retry(1, 1), retry(2, 2), retry(3, 3)];
+        const first = render(<Harness messages={messages} />);
+        expect(screen.getByTestId("message-3")).toBeVisible();
+        first.unmount();
+        render(<Harness messages={messages} />);
+        for (const id of [1, 2]) {
+            fireEvent.click(screen.getByText(`尝试 ${id}`));
+            expect(screen.getByTestId(`message-${id}`)).toBeVisible();
+        }
+        expect(screen.getByTestId("message-3")).toBeVisible();
+        expect(screen.getAllByText("已中断")).toHaveLength(3);
+    });
+
+    it("should keep legacy history and Butler compact output flat when grouping is not applicable", () => {
+        mockDisplayConfig.isMergeAssistantMessages = false;
+        const legacy = render(<Harness messages={[makeMessage({id: 1}), makeMessage({id: 2})]} />);
+        expect(screen.queryByText(/尝试/)).not.toBeInTheDocument();
+        expect(screen.getByTestId("message-1")).toBeVisible();
+        expect(screen.getByTestId("message-2")).toBeVisible();
+        legacy.unmount();
+        render(<ButlerResultsOnlyContext.Provider value={true}>
+            <Harness messages={[retry(3, 1), retry(4, 2, "completed")]} />
+        </ButlerResultsOnlyContext.Provider>);
+        expect(screen.queryByText(/尝试/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/full diagnostic/)).not.toBeInTheDocument();
+        expect(screen.getByTestId("message-3")).toBeVisible();
+        expect(screen.getByTestId("message-4")).toBeVisible();
+    });
+
+    it("should group one retry session across distinct generation IDs while retaining real boundaries", () => {
+        const messages = [
+            { ...retry(1, 1), generation_group_id: "generation-a" },
+            { ...retry(2, 2, "completed"), generation_group_id: "generation-b" },
+            makeMessage({ id: 3, message_type: "agent_plan" }),
+            retry(4, 3),
+            { ...retry(5, 4), conversation_id: 2 },
+            retry(6, 1, "interrupted", "another-session"),
+        ];
+        const rows = messages.map(message => ({ messageId: message.id, estimatedHeight: 20,
+            messageElement: <div key={message.id}>{message.content}</div>, groupControl: null }));
+        const grouped = groupUnmergedRetryEntries(messages, rows);
+        expect(grouped.map(row => row.messageIds ?? [row.messageId])).toEqual([[1, 2], [3], [4], [5], [6]]);
+        expect(grouped[1]).toBe(rows[2]);
+        render(<>{grouped.map(row => row.messageElement)}</>);
+        expect(screen.queryByText("answer-1")).not.toBeInTheDocument();
+        expect(screen.getByText("answer-2")).toBeVisible();
+        fireEvent.click(screen.getAllByText("尝试 1")[0]);
+        expect(screen.getByText("answer-1")).toBeVisible();
+    });
+
+    it("should preserve row identity and boundaries when sessions or user turns differ", () => {
+        const messages = [retry(1, 1), retry(2, 2, "completed"),
+            makeMessage({ id: 3, message_type: "user" }), retry(4, 1, "interrupted", "other"),
+            makeMessage({ id: 5, content: "legacy" })];
+        const rows = messages.map(message => ({ messageId: message.id, estimatedHeight: 20,
+            messageElement: <div key={message.id}>{message.content}</div>, groupControl: null }));
+        const grouped = groupUnmergedRetryEntries(messages, rows);
+        expect(grouped.map(row => row.messageId)).toEqual([2, 3, 4, 5]);
+        expect(grouped[0].messageIds).toEqual([1, 2]);
+        expect(grouped[0].estimatedHeight).toBe(40);
+        expect(grouped[1]).toBe(rows[2]);
+        expect(grouped[3]).toBe(rows[4]);
+    });
 });

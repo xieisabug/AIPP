@@ -162,4 +162,47 @@ describe("mobile local draft persistence", () => {
         expect(restore.mock.calls[0][0].missing_attachments).toEqual([{ id: 5, name: "gone.jpg" }]);
         expect(restore.mock.calls[0][0].attachments.map((item: { id: number }) => item.id)).toEqual([4]);
     });
+    it.each([{ ids: [99] }, { ids: [] as number[] }])("should preserve edited attachment IDs $ids when an older draft resolves", async ({ ids }) => {
+        let resolve!: (value: any) => void;
+        mockInvokeHandler("get_mobile_draft", () => new Promise(done => { resolve = done; }));
+        mockInvokeHandler("save_mobile_draft", () => undefined);
+        const restore = vi.fn();
+        const key = `attachment-race-${ids.length}`;
+        const { result } = renderHook(() => useMobileDraftPersistence(key, restore));
+        await waitFor(() => expect(resolve).toBeDefined());
+        act(() => result.current.saveAttachmentIds(ids));
+        await act(async () => resolve({ content: "stored caption", attachments: [
+            { id: 7, name: "old.png", path: "old.png", attachment_type: 1 },
+        ] }));
+        expect(restore).toHaveBeenCalledWith(
+            { content: "stored caption", attachments: [] },
+            { preserveAttachments: true },
+        );
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_mobile_draft", {
+            conversationKey: key, content: "stored caption", attachmentIds: ids,
+        }));
+    });
+
+    it("should preserve both new text and attachment edits when the read is delayed", async () => {
+        let resolve!: (value: any) => void;
+        mockInvokeHandler("get_mobile_draft", () => new Promise(done => { resolve = done; }));
+        mockInvokeHandler("save_mobile_draft", () => undefined);
+        const restore = vi.fn();
+        const { result } = renderHook(() => useMobileDraftPersistence("both-edited", restore));
+        await waitFor(() => expect(resolve).toBeDefined());
+        act(() => {
+            result.current.saveContent("new text");
+            result.current.saveAttachmentIds([99]);
+        });
+        await act(async () => resolve({ content: "old text", attachments: [
+            { id: 7, name: "old.png", path: "old.png", attachment_type: 1 },
+        ] }));
+        expect(restore).toHaveBeenCalledWith(
+            { content: "new text", attachments: [] }, { preserveAttachments: true },
+        );
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_mobile_draft", {
+            conversationKey: "both-edited", content: "new text", attachmentIds: [99],
+        }));
+    });
+
 });

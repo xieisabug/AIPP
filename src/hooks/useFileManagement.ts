@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -17,7 +17,10 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
         null,
     );
 
+    const editedSinceRestore = useRef(false);
+
     const clearFileInfoList = useCallback(() => {
+        editedSinceRestore.current = true;
         setFileInfoList(null);
     }, []);
 
@@ -94,6 +97,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                 const results = await Promise.allSettled(filePromises);
                 const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
                 results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + fileErrorMessage(result.reason)); });
+                if (newFiles.length) editedSinceRestore.current = true;
                 setFileInfoList((prev) => [...(prev || []), ...newFiles]);
                 if (onFileSelect) {
                     onFileSelect(newFiles);
@@ -125,6 +129,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                         toast.error(`附件 ${file.name} 登记失败: ${fileErrorMessage(error)}`);
                     }
                 }
+                if (newFiles.length) editedSinceRestore.current = true;
                 setFileInfoList((prev) => [...(prev ?? []), ...newFiles]);
                 if (newFiles.length) onFileSelect?.(newFiles);
                 return;
@@ -177,6 +182,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
                 const results = await Promise.allSettled(filePromises);
                 const newFiles = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
                 results.forEach((result) => { if (result.status === "rejected") toast.error("文件上传失败: " + fileErrorMessage(result.reason)); });
+                if (newFiles.length) editedSinceRestore.current = true;
                 setFileInfoList((prev) => [...(prev || []), ...newFiles]);
                 if (onFileSelect) {
                     onFileSelect(newFiles);
@@ -188,6 +194,7 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
     }, [onFileSelect]);
 
     const handleDeleteFile = useCallback((fileId: number) => {
+        editedSinceRestore.current = true;
         setFileInfoList((prevList) =>
             prevList ? prevList.filter((file) => file.id !== fileId) : null,
         );
@@ -228,13 +235,21 @@ const useFileManagement = (onFileSelect?: FileSelectCallback) => {
     );
 
     const restoreFiles = useCallback((files: FileInfo[]) => {
+        editedSinceRestore.current = false;
         setFileInfoList(files.length ? files : null);
+    }, []);
+
+    // Draft reads can resolve after the picker, paste or removal action. A newer
+    // user selection (even an empty one) wins over the stored attachment list.
+    const restoreDraftFiles = useCallback((files: FileInfo[]) => {
+        if (!editedSinceRestore.current) setFileInfoList(files.length ? files : null);
     }, []);
 
     return {
         fileInfoList,
         clearFileInfoList,
         restoreFiles,
+        restoreDraftFiles,
         handleChooseFile,
         handleDeleteFile,
         handlePaste,

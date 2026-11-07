@@ -73,6 +73,7 @@ interface ConfigFormProps {
     useFormReturn: UseFormReturn<any, any, any>;
     /** Caller-computed dirty state; when omitted falls back to RHF formState.isDirty. */
     isDirty?: boolean;
+    isSaving?: boolean;
     assistantConfigApi?: AssistantConfigApi;
     layout?: "default" | "prompt" | "provider";
     assistantType?: number | null;  // 用于过滤模型（ACP 助手 vs 普通助手）
@@ -458,6 +459,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     layout = "default",
     useFormReturn,
     isDirty: isDirtyProp,
+    isSaving = false,
     assistantConfigApi,
     assistantType,
     onSave,
@@ -652,9 +654,10 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                 void onSave(useFormReturn.getValues());
                             }}
                             className="bg-primary hover:bg-primary/90 text-primary-foreground min-h-9"
+                            disabled={isSaving}
                             data-aipp-slot="config-form-save-header"
                         >
-                            保存配置
+                            {isSaving ? "保存中…" : "保存配置"}
                         </Button>
                     )}
                     {isMobilePlatform && (onCopy || onEdit || onDelete) ? (
@@ -742,10 +745,11 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             <div className="flex items-center gap-3">
                                 <Button
                                     type="button"
+                                    disabled={isSaving}
                                     onClick={() => void onSave(useFormReturn.getValues())}
                                     className="bg-primary hover:bg-primary/90 text-primary-foreground min-h-11"
                                 >
-                                    保存配置
+                                    {isSaving ? "保存中…" : "保存配置"}
                                 </Button>
                                 {isDirty ? (
                                     <span className="text-xs font-medium text-foreground">有未保存的更改</span>
