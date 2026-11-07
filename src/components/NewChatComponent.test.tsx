@@ -105,3 +105,49 @@ describe("NewChatComponent home hints", () => {
         }
     });
 });
+
+describe("NewChatComponent setup guide (#155)", () => {
+    beforeEach(() => {
+        invokeMock.mockReset();
+        layout.isNarrow = false;
+        layout.isMobilePlatform = true;
+    });
+
+    const renderWith = (assistantModel: { provider_id: number; model_code: string } | null) => {
+        invokeMock.mockImplementation((command: string) => {
+            if (command === "get_llm_providers") return Promise.resolve([{ id: 1, is_enabled: true }]);
+            if (command === "get_models_for_select") return Promise.resolve([{ code: "m1", llm_provider_id: 1 }]);
+            if (command === "get_assistant") {
+                return Promise.resolve({ assistant: { assistant_type: 0 }, model: assistantModel ? [assistantModel] : [], model_configs: [] });
+            }
+            return Promise.resolve(null);
+        });
+        render(
+            <NewChatComponent
+                selectedText=""
+                selectedAssistant={1}
+                setSelectedAssistant={vi.fn()}
+                assistants={[{ id: 1, name: "助手", assistant_type: 0 }]}
+                selectedModel=""
+                selectedEffort=""
+                selectedApprovalPolicy=""
+                selectedSandbox=""
+                onAgentConfigChange={vi.fn()}
+            />,
+        );
+    };
+
+    it("guides to fix the assistant when its bound model is gone even though a provider exists", async () => {
+        renderWith({ provider_id: 9, model_code: "deleted" });
+        expect(await screen.findByText(/当前助手的模型不可用/)).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "配置助手" })).toBeInTheDocument();
+    });
+
+    it("hides the guide when provider, model and assistant binding are all usable", async () => {
+        renderWith({ provider_id: 1, model_code: "m1" });
+        await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_models_for_select"));
+        await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_assistant", { assistantId: 1 }));
+        expect(document.querySelector('[data-aipp-slot="ask-prepare-setup-guides"]')).toBeNull();
+        expect(screen.getByText("输入内容后点击发送，开始与助手交流")).toBeInTheDocument();
+    });
+});

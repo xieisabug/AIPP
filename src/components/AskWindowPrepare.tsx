@@ -10,6 +10,10 @@ interface AskWindowPrepareProps {
     isMobile?: boolean;
     /** 无模型提供商/未完成首次配置时展示引导入口 */
     showSetupGuides?: boolean;
+    /** 当前缺什么配置；不传时使用通用文案 */
+    setupMessage?: string;
+    /** 哪个入口作为主按钮 */
+    setupPrimary?: "providers" | "assistant";
     onConfigureProviders?: () => void;
     onChooseAssistant?: () => void;
 }
@@ -18,6 +22,8 @@ const AskWindowPrepare: React.FC<AskWindowPrepareProps> = ({
     selectedText,
     isMobile = false,
     showSetupGuides = false,
+    setupMessage,
+    setupPrimary = "providers",
     onConfigureProviders,
     onChooseAssistant,
 }) => {
@@ -111,16 +117,30 @@ const AskWindowPrepare: React.FC<AskWindowPrepareProps> = ({
 
             {showSetupGuides ? (
                 <div className="mt-4 flex flex-col items-center gap-2" data-aipp-slot="ask-prepare-setup-guides">
-                    <p className="text-muted-foreground">首次使用请先完成配置</p>
+                    <p className="text-muted-foreground" data-aipp-slot="ask-prepare-setup-message">
+                        {setupMessage ?? "首次使用请先完成配置"}
+                    </p>
                     <div className="flex flex-wrap justify-center gap-2">
                         {onConfigureProviders ? (
-                            <Button type="button" size="sm" className="min-h-11" onClick={onConfigureProviders}>
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant={setupPrimary === "providers" ? "default" : "outline"}
+                                className="min-h-11"
+                                onClick={onConfigureProviders}
+                            >
                                 配置模型提供商
                             </Button>
                         ) : null}
                         {onChooseAssistant ? (
-                            <Button type="button" size="sm" variant="outline" className="min-h-11" onClick={onChooseAssistant}>
-                                选择助手
+                            <Button
+                                type="button"
+                                size="sm"
+                                variant={setupPrimary === "assistant" ? "default" : "outline"}
+                                className="min-h-11"
+                                onClick={onChooseAssistant}
+                            >
+                                {setupPrimary === "assistant" ? "配置助手" : "选择助手"}
                             </Button>
                         ) : null}
                     </div>

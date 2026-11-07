@@ -13,6 +13,8 @@ import type { ReactNode } from "react";
 import { getErrorMessage } from "@/utils/error";
 import { resolveAgentDefaultSelection } from "@/utils/agentDefaults";
 import type { AgentModelOption } from "@/utils/agentDefaults";
+import { useDataRefresh } from "@/hooks/useDataRefresh";
+import { resolveSetupGuide, type SetupGuide } from "@/utils/newChatSetupGuide";
 
 interface AssistantListItem {
     id: number;
@@ -106,7 +108,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
     const [codexDefaults, setCodexDefaults] = useState<{ approval_policy: string; sandbox: string } | null>(null);
     const [loadingConfig, setLoadingConfig] = useState(false);
     const [configError, setConfigError] = useState<string | null>(null);
-    const [needsProviderSetup, setNeedsProviderSetup] = useState(false);
+    const [setupGuide, setSetupGuide] = useState<SetupGuide | null>(null);
     const selectedAssistantInfo = assistants.find((assistant) => assistant.id === selectedAssistant);
 
     useEffect(() => {
@@ -158,20 +160,34 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
         return () => { cancelled = true; };
     }, [selectedAssistant, selectedAssistantInfo?.assistant_type]);
 
-    // 检测是否尚未配置可用模型提供商（首次使用引导）
-    useEffect(() => {
-        let cancelled = false;
-        invoke<Array<{ id: number; is_enabled?: boolean }>>("get_llm_providers")
-            .then((providers) => {
-                if (cancelled) return;
-                const enabled = providers.filter((p) => p.is_enabled !== false);
-                setNeedsProviderSetup(enabled.length === 0);
-            })
-            .catch(() => {
-                if (!cancelled) setNeedsProviderSetup(assistants.length === 0);
-            });
-        return () => { cancelled = true; };
-    }, [assistants.length]);
+    // 首次使用 / 配置不完整引导：提供商、模型、助手及其模型绑定全部可用才算能发送。
+    // 订阅配置变更事件，从设置页改完返回后自动刷新，不需要重进页面。
+    const selectedAssistantType = selectedAssistantInfo?.assistant_type;
+    useDataRefresh({
+        events: ["llm_provider_changed", "assistant_list_changed"],
+        identity: `${selectedAssistant}:${selectedAssistantType ?? ""}:${assistants.length}`,
+        initial: true,
+        onError: () => setSetupGuide(null),
+        refresh: async (isCurrent) => {
+            const [providers, models] = await Promise.all([
+                invoke<Array<{ id: number; is_enabled?: boolean }>>("get_llm_providers"),
+                invoke<Array<{ code: string; llm_provider_id: number }>>("get_models_for_select"),
+            ]);
+            let assistantModel: { provider_id: number; model_code: string } | null | undefined;
+            // Agent 助手的模型来自本机 CLI，由下方 Agent 选择器单独提示，这里不检查绑定。
+            if (selectedAssistant > 0 && selectedAssistantType !== 4) {
+                const detail = await invoke<{ assistant?: { assistant_type?: number }; model?: Array<{ provider_id: number; model_code: string }> }>(
+                    "get_assistant",
+                    { assistantId: selectedAssistant },
+                ).catch(() => undefined);
+                if (detail && detail.assistant?.assistant_type !== 4) {
+                    assistantModel = detail.model?.[0] ?? null;
+                }
+            }
+            if (!isCurrent()) return;
+            setSetupGuide(resolveSetupGuide({ providers, models, assistantCount: assistants.length, assistantModel }));
+        },
+    });
 
     const openConfigMenu = async (menu: string) => {
         if (isMobilePlatform) {
@@ -208,10 +224,12 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
                 <AskWindowPrepare
                     selectedText={selectedText}
                     isMobile={isMobilePlatform}
-                    showSetupGuides={needsProviderSetup || assistants.length === 0}
+                    showSetupGuides={setupGuide != null}
+                    setupMessage={setupGuide?.message}
+                    setupPrimary={setupGuide?.primary}
                     onConfigureProviders={() => { void openConfigMenu("llm-provider-config"); }}
                     onChooseAssistant={() => {
-                        if (needsProviderSetup || assistants.length === 0) {
+                        if (setupGuide != null) {
                             void openConfigMenu("assistant-config");
                             return;
                         }
