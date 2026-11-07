@@ -15,7 +15,8 @@ import { conversationExportService } from "@/services/conversationExportService"
 import { usePlatform } from "@/hooks/use-platform";
 import type { ConversationExportOptions } from "@/utils/exportFormatters";
 import type { ExportData } from "@/utils/exportFormatters";
-import { Loader2, FileText, FileImage, File, FileType, Download } from "lucide-react";
+import { Loader2, FileText, FileImage, File, FileType, Download, RotateCcw } from "lucide-react";
+import { getErrorMessage } from "@/utils/error";
 
 interface ConversationExportDialogProps {
     conversationId: string;
@@ -45,24 +46,32 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
     const [exporting, setExporting] = useState<string | null>(null);
     const [exportData, setExportData] = useState<ExportData | null>(null);
     const [options, setOptions] = useState<ConversationExportOptions>(defaultOptions);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [loadAttempt, setLoadAttempt] = useState(0);
 
-    // 当对话框打开时获取导出数据
+    // 当对话框打开时获取导出数据。失败时给出可读原因和重试，不展示可点但无反应的导出按钮。
     useEffect(() => {
-        if (open && conversationId) {
-            setLoading(true);
-            conversationExportService
-                .getExportData(conversationId)
-                .then((data) => {
-                    setExportData(data);
-                })
-                .catch((error) => {
-                    console.error("Failed to load export data:", error);
-                })
-                .finally(() => {
-                    setLoading(false);
-                });
-        }
-    }, [open, conversationId]);
+        if (!open || !conversationId) return;
+        let cancelled = false;
+        setLoading(true);
+        setLoadError(null);
+        setExportData(null); // 不沿用上一个会话的数据
+        conversationExportService
+            .getExportData(conversationId)
+            .then((data) => {
+                if (!cancelled) setExportData(data);
+            })
+            .catch((error) => {
+                console.error("Failed to load export data:", error);
+                if (!cancelled) setLoadError(getErrorMessage(error));
+            })
+            .finally(() => {
+                if (!cancelled) setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, conversationId, loadAttempt]);
 
     // 更新单个选项
     const updateOption = useCallback(
@@ -236,8 +245,29 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                         </div>
                     )}
 
+                    {!loading && loadError && (
+                        <div
+                            className="flex flex-col items-start gap-2 rounded-md border border-destructive/40 p-3 text-sm"
+                            role="alert"
+                            data-aipp-slot="conversation-export-load-error"
+                        >
+                            <span className="text-destructive">读取会话内容失败，暂时无法导出</span>
+                            <span className="break-all text-xs text-muted-foreground">{loadError}</span>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="min-h-11 gap-1"
+                                onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+                            >
+                                <RotateCcw className="h-4 w-4" />
+                                重试
+                            </Button>
+                        </div>
+                    )}
+
                     {/* 导出按钮 */}
-                    {!loading && (
+                    {!loading && exportData && (
                         <div className="space-y-3 pt-2">
                             <h4 className="text-sm font-medium">导出格式</h4>
                             <div className="grid grid-cols-4 gap-2">
@@ -297,6 +327,11 @@ const ConversationExportDialog: React.FC<ConversationExportDialogProps> = ({
                                     <span className="text-xs">图片</span>
                                 </Button>
                             </div>
+                            {platform === "android" ? (
+                                <p className="text-xs text-muted-foreground">
+                                    PDF 通过系统打印生成，请在打印界面选择“保存为 PDF”；是否生成以系统界面为准。
+                                </p>
+                            ) : null}
                         </div>
                     )}
                 </div>
