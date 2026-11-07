@@ -6,11 +6,41 @@ export function previewMobile(detail: MobilePreview): void {
 }
 
 export function navigateMobile(route: MobileRoute): void {
+    if (route !== "config") cancelMobileConfigNavigation();
     window.dispatchEvent(new CustomEvent("aipp:mobile-navigate", { detail: route }));
+}
+
+export interface MobileConfigNavigation { menu: string; subNav?: string }
+let pendingConfigNavigation: MobileConfigNavigation | null = null;
+const configNavigationListeners = new Set<(target: MobileConfigNavigation) => void>();
+
+export function cancelMobileConfigNavigation(): void {
+    pendingConfigNavigation = null;
+}
+
+/** Retain the destination until the lazy settings page is ready, without a timer. */
+export function navigateMobileConfig(menu: string, subNav?: string): void {
+    pendingConfigNavigation = { menu, subNav };
+    navigateMobile("config");
+    deliverConfigNavigation();
+}
+
+function deliverConfigNavigation(): void {
+    const target = pendingConfigNavigation;
+    if (!target || configNavigationListeners.size === 0) return;
+    pendingConfigNavigation = null;
+    for (const listener of configNavigationListeners) listener(target);
+}
+
+export function subscribeMobileConfigNavigation(listener: (target: MobileConfigNavigation) => void): () => void {
+    configNavigationListeners.add(listener);
+    deliverConfigNavigation();
+    return () => { configNavigationListeners.delete(listener); };
 }
 
 /** Pop the current page without consulting page back handlers (e.g. after a leave prompt confirmed). */
 export function popMobile(): void {
+    cancelMobileConfigNavigation();
     window.dispatchEvent(new CustomEvent("aipp:mobile-pop"));
 }
 

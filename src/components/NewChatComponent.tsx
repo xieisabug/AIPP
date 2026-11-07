@@ -6,7 +6,7 @@ import { useIsMobilePlatform } from "../hooks/use-platform";
 import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import { navigateMobile } from "@/mobile/navigation";
+import { navigateMobileConfig } from "@/mobile/navigation";
 import { Check, ChevronDown, Box, Cpu, Brain, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -191,11 +191,7 @@ const NewChatComponent: React.FC<NewChatComponentProps> = ({
 
     const openConfigMenu = async (menu: string) => {
         if (isMobilePlatform) {
-            navigateMobile("config");
-            // 等设置壳挂载后再导航到具体菜单
-            window.setTimeout(() => {
-                void emit("config-navigate-to", { menu });
-            }, 50);
+            navigateMobileConfig(menu);
             return;
         }
         try {

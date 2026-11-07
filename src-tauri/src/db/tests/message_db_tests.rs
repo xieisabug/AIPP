@@ -643,3 +643,54 @@ fn test_opencode_go_stream_metrics_preserve_message_and_billing() {
     assert_eq!(stats.tps, Some(8.0));
     assert_eq!(stats.opencode_go.unwrap()["allowance"], 0.00000927);
 }
+
+/// Local reply notices survive persistence and metrics updates but are excluded
+/// from the next model request. Identical genuine model text must remain.
+#[test]
+fn test_empty_reply_notice_persistence_and_context_provenance() {
+    use crate::api::ai::chat::{prepare_empty_model_reply, EMPTY_MODEL_REPLY_NOTICE};
+    use crate::api::ai::conversation::{build_message_list_with_metadata_from_db, BranchSelection};
+
+    let (_, _, repo, conversation) = create_shared_test_db();
+    let question = repo.create(&create_test_message(
+        conversation.id, "user", "请解释这个错误", None, Some(new_group_id()),
+    )).unwrap();
+    let mut notice = create_test_message(
+        conversation.id, "response", "", None, Some(new_group_id()),
+    );
+    notice.metadata_json = prepare_empty_model_reply(&mut notice.content, "", 0, 0, None);
+    let notice = repo.create(&notice).unwrap();
+    repo.update_stream_metrics(
+        notice.id, chrono::Utc::now(), None, None, None, None, None,
+        r#"{"generation_duration_ms":12}"#,
+    ).unwrap();
+    let genuine = repo.create(&create_test_message(
+        conversation.id, "response", EMPTY_MODEL_REPLY_NOTICE, None, Some(new_group_id()),
+    )).unwrap();
+    let rows = repo.list_by_conversation_id(conversation.id).unwrap();
+    let persisted = rows.iter().find(|(m, _)| m.id == notice.id).unwrap();
+    assert_eq!(persisted.0.content, EMPTY_MODEL_REPLY_NOTICE);
+    let metadata: serde_json::Value = serde_json::from_str(persisted.0.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["generation_duration_ms"], 12);
+    assert_eq!(metadata["local_reply_notice"]["source"], "aipp");
+    let (messages, selected) = build_message_list_with_metadata_from_db(&rows, BranchSelection::LatestBranch);
+    assert!(!selected.message_ids.contains(&notice.id));
+    assert!(selected.message_ids.contains(&question.id));
+    assert!(selected.message_ids.contains(&genuine.id));
+    assert_eq!(messages.len(), selected.message_ids.len());
+    assert_eq!(selected.db_token_counts.len(), selected.message_ids.len());
+}
+
+#[test]
+fn test_empty_reply_notice_does_not_guess_unmarked_or_invalid_provenance() {
+    use crate::api::ai::chat::{is_empty_model_reply_notice, EMPTY_MODEL_REPLY_NOTICE};
+    let mut message = create_test_message(1, "response", EMPTY_MODEL_REPLY_NOTICE, None, None);
+    for metadata in [None, Some("invalid"), Some(r#"{"local_reply_notice":{"source":"model","kind":"empty_model_reply"}}"#)] {
+        message.metadata_json = metadata.map(str::to_string);
+        assert!(!is_empty_model_reply_notice(&message));
+    }
+    message.metadata_json = Some(r#"{"local_reply_notice":{"source":"aipp","kind":"empty_model_reply"}}"#.into());
+    assert!(is_empty_model_reply_notice(&message));
+    message.message_type = "user".into();
+    assert!(!is_empty_model_reply_notice(&message));
+}

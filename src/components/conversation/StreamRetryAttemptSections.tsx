@@ -165,7 +165,8 @@ function AttemptSection({
  * collapsible sections instead of a flat list (LeaderAI #159 / UX-05).
  *
  * 适用范围：
- * - 普通会话：有 stream_retry 元数据且需要分组时，按尝试分组；
+ * - 普通会话（合并与非合并模式）：有 stream_retry 元数据且需要分组时，按尝试分组；
+ *   非合并模式仍保留每条消息自身的气泡和操作，只共享尝试标题与诊断；
  * - Butler resultsOnly：只看最终结果，保持平铺、不显示诊断；
  * - 没有元数据的旧历史：attempt 为空，原样平铺，不伪造尝试序号。
  */

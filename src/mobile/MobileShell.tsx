@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import LoadingScreen from "../components/LoadingScreen";
 import { isKeyboardCompact, isKeyboardOpen } from "./keyboardViewport";
-import { isMobileRoute, MobileRoute, MobilePreview, runMobileBackHandlers } from "./navigation";
+import { isMobileRoute, MobileRoute, MobilePreview, runMobileBackHandlers, cancelMobileConfigNavigation } from "./navigation";
 
 const Chat = lazy(() => import("../windows/ChatUIWindow"));
 const Config = lazy(() => import("../windows/ConfigWindow"));
@@ -53,6 +53,7 @@ export default function MobileShell() {
         window.addEventListener("aipp:mobile-preview", showPreview);
         const pop = () => {
             if (stackRef.current.length <= 1) return false;
+            if (stackRef.current.at(-1) === "config") cancelMobileConfigNavigation();
             capturePosition();
             stackRef.current = stackRef.current.slice(0, -1);
             setStack(stackRef.current);

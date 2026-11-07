@@ -158,6 +158,34 @@
     display: none;
 }
 
+.input-area-image-preview-button {
+    position: absolute;
+    inset: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.input-area-image-preview-button:focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: -2px;
+}
+
+.input-area.mobile .input-area-image-preview-button,
+.aipp-mobile-platform .input-area-image-preview-button {
+    position: static;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    border-radius: 6px;
+}
+
 .input-area-img {
     width: 100%;
     height: 100%;

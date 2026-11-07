@@ -6,11 +6,13 @@ import { middleEllipsis, useFileList } from "./useFileList";
 function Harness({
   files,
   onDelete = () => undefined,
+  onOpen = () => undefined,
 }: {
   files: FileInfo[];
   onDelete?: (id: number) => void;
+  onOpen?: (id: number) => void;
 }) {
-  const { renderFiles } = useFileList(files, onDelete, () => undefined);
+  const { renderFiles } = useFileList(files, onDelete, onOpen);
   return <div data-testid="list">{renderFiles()}</div>;
 }
 
@@ -63,4 +65,20 @@ describe("useFileList attachment tray chips", () => {
     expect(short).toHaveTextContent(name);
     expect(short).toHaveAttribute("aria-expanded", "true");
   });
+  it("should use a separate accessible preview button without triggering removal", () => {
+    const onOpen = vi.fn();
+    const onDelete = vi.fn();
+    render(<Harness onOpen={onOpen} onDelete={onDelete} files={[
+      { id: 9, name: "photo.png", path: "/photo.png", type: AttachmentType.Image },
+    ]} />);
+    const preview = screen.getByRole("button", { name: "预览 photo.png" });
+    expect(preview).toHaveClass("input-area-image-preview-button");
+    fireEvent.click(preview);
+    expect(onOpen).toHaveBeenCalledWith(9);
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTitle("移除 photo.png"));
+    expect(onDelete).toHaveBeenCalledWith(9);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
 });
