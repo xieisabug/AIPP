@@ -432,10 +432,25 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         }, [conversationId, restoreFiles]);
 
         // 输入相关状态（移动端会把附件 ID 一并写入本机草稿）
+        // 草稿里有附件无法恢复时逐项告知，并给出重新选择入口（走系统选择器，不扩大文件权限）
+        const notifyMissingDraftAttachments = useCallback(
+            (missing: { id: number; name: string }[]) => {
+                toast.warning(`${missing.length} 个草稿附件无法恢复，请重新选择`, {
+                    id: `draft-missing-attachments-${conversationId}`,
+                    description: missing.map((item) => `· ${item.name}`).join("\n"),
+                    duration: 15000,
+                    closeButton: true,
+                    action: { label: "重新选择", onClick: () => void handleChooseFile() },
+                });
+            },
+            [conversationId, handleChooseFile],
+        );
+
         const [inputText, setInputText, saveDraftAttachmentIds] = useConversationDraft(
             conversationId,
             restoreFiles,
             () => setDraftReady(true),
+            notifyMissingDraftAttachments,
         );
 
         // 文件拖拽

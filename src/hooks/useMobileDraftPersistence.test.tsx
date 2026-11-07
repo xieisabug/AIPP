@@ -89,6 +89,7 @@ describe("mobile local draft persistence", () => {
                 { id: 7, name: "a.png", path: "a.png", attachment_type: 1 },
                 { id: 8, name: "b.txt", path: "b.txt", attachment_type: 0 },
             ],
+            missing_attachments: [],
         });
         await waitFor(() =>
             expect(saved).toEqual([
@@ -148,5 +149,17 @@ describe("mobile local draft persistence", () => {
         await waitFor(() =>
             expect(saved).toContainEqual({ content: "caption", attachmentIds: [11, 12] }),
         );
+    });
+    it("should pass unrecoverable attachments through so the UI can ask to reselect", async () => {
+        mockInvokeHandler("get_mobile_draft", () => ({
+            content: "看这张图",
+            attachments: [{ id: 4, name: "ok.png", path: "ok.png", attachment_type: 1 }],
+            missing_attachments: [{ id: 5, name: "gone.jpg" }, { id: 0, name: "invalid" }],
+        }));
+        const restore = vi.fn();
+        renderHook(() => useMobileDraftPersistence("missing", restore));
+        await waitFor(() => expect(restore).toHaveBeenCalled());
+        expect(restore.mock.calls[0][0].missing_attachments).toEqual([{ id: 5, name: "gone.jpg" }]);
+        expect(restore.mock.calls[0][0].attachments.map((item: { id: number }) => item.id)).toEqual([4]);
     });
 });

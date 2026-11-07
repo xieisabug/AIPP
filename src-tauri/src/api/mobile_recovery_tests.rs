@@ -75,3 +75,39 @@ fn test_safe_draft_attachment_requires_recoverable_content() {
     assert_eq!(restored.attachment_type, AttachmentType::Image as i64);
     assert_eq!(restored.thumbnail.as_deref(), Some("data:image/png;base64,aGVsbG8="));
 }
+
+#[test]
+fn test_draft_attachments_report_each_unrecoverable_item() {
+    let image = |id: i64, url: Option<&str>, content: Option<&str>| MessageAttachment {
+        id,
+        message_id: -1,
+        attachment_type: AttachmentType::Image,
+        attachment_url: url.map(str::to_string),
+        attachment_content: content.map(str::to_string),
+        attachment_hash: None,
+        use_vector: false,
+        token_count: None,
+    };
+    let resolved = classify_draft_attachments(&[1, 2, 3, 1], |id| {
+        Ok(match id {
+            1 => Some(image(1, Some("ok.png"), Some("data:image/png;base64,aGVsbG8="))),
+            2 => Some(image(2, Some("/definitely/missing/photo.jpg"), None)),
+            _ => None,
+        })
+    })
+    .unwrap();
+    assert_eq!(resolved.restored.iter().map(|item| item.id).collect::<Vec<_>>(), vec![1]);
+    assert_eq!(
+        resolved.missing,
+        vec![
+            MobileDraftMissingAttachment { id: 2, name: "photo.jpg".to_string() },
+            MobileDraftMissingAttachment { id: 3, name: "attachment-3".to_string() },
+        ]
+    );
+}
+
+#[test]
+fn test_mobile_draft_missing_attachments_defaults_for_old_payloads() {
+    let draft: MobileDraft = serde_json::from_str(r#"{"content":"hi","attachments":[]}"#).unwrap();
+    assert!(draft.missing_attachments.is_empty());
+}

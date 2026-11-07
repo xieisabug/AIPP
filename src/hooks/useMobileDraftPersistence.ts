@@ -12,9 +12,22 @@ export interface MobileDraftAttachmentDto {
     thumbnail?: string | null;
 }
 
+export interface MobileDraftMissingAttachmentDto {
+    id: number;
+    name: string;
+}
+
 export interface MobileDraftDto {
     content: string;
     attachments: MobileDraftAttachmentDto[];
+    /** 草稿记录过但这次无法恢复的附件，需要提示用户重新选择。旧后端可能不返回。 */
+    missing_attachments?: MobileDraftMissingAttachmentDto[];
+}
+
+export function draftMissingAttachments(draft: Partial<MobileDraftDto> | null | undefined): MobileDraftMissingAttachmentDto[] {
+    const missing = Array.isArray(draft?.missing_attachments) ? draft.missing_attachments : [];
+    return missing.filter((item) => Number.isFinite(item?.id) && item.id > 0)
+        .map((item) => ({ id: item.id, name: item.name || `attachment-${item.id}` }));
 }
 
 const writes = new Map<string, Promise<unknown>>();
@@ -101,9 +114,10 @@ export function useMobileDraftPersistence(
                 const attachments = Array.isArray(draft?.attachments) ? draft.attachments : [];
                 const content = typeof draft?.content === "string" ? draft.content : "";
                 const attachmentIds = attachments.map((item) => item.id).filter((id) => id > 0);
+                const missing_attachments = draftMissingAttachments(draft);
                 if ((revisions.current.get(key) ?? 0) === revision) {
                     latestPayload.current.set(key, { content, attachmentIds });
-                    latestRestore.current({ content, attachments });
+                    latestRestore.current({ content, attachments, missing_attachments });
                 } else {
                     // User edited during hydrate: keep typed content, seed attachments from
                     // storage when the in-memory payload still has none (never wipe them).
@@ -117,10 +131,11 @@ export function useMobileDraftPersistence(
                         content: current.content,
                         attachmentIds: mergedIds,
                     });
-                    if (mergedIds.length > 0) {
+                    if (mergedIds.length > 0 || missing_attachments.length > 0) {
                         latestRestore.current({
                             content: current.content,
                             attachments,
+                            missing_attachments,
                         });
                     }
                 }
