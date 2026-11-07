@@ -99,15 +99,33 @@ fn prepare_schemas(conn: &Connection, schemas: Vec<String>) -> Result<JournalGua
     for schema in schemas {
         let mode: String = conn.query_row(&format!("PRAGMA {}.journal_mode", quote(&schema)), [], |r| r.get(0))?;
         let synchronous: i64 = conn.query_row(&format!("PRAGMA {}.synchronous", quote(&schema)), [], |r| r.get(0))?;
+        let actual = match conn.query_row(&format!("PRAGMA {}.journal_mode=DELETE", quote(&schema)), [], |r| r.get::<_, String>(0)) {
+            Ok(actual) => actual,
+            // Leaving WAL needs exclusive access; the running app always keeps
+            // other connections open, so this fails immediately. WAL stays
+            // durable per database and the savepoint still rolls back runtime
+            // errors; only a crash mid-commit may leave databases out of step.
+            Err(error) if mode == "wal" && is_busy(&error) => {
+                tracing::warn!(%schema, %error, "Cascade delete continues in WAL; cross-database crash atomicity is not guaranteed");
+                continue;
+            }
+            Err(e) => return Err(diagnostic(format!("跨库删除准备失败：{schema} 切换回滚日志失败，尚未删除数据：{e}"))),
+        };
         guard.restore.push((schema.clone(), mode, synchronous));
-        let actual: String = conn.query_row(&format!("PRAGMA {}.journal_mode=DELETE", quote(&schema)), [], |r| r.get(0))
-            .map_err(|e| diagnostic(format!("跨库删除准备失败：{schema} 切换回滚日志失败，尚未删除数据：{e}")))?;
+        if actual == "wal" {
+            continue;
+        }
         if actual != "delete" {
             return Err(diagnostic(format!("跨库删除准备失败：{schema} journal_mode={actual}，需要 DELETE；尚未删除数据")));
         }
         conn.execute_batch(&format!("PRAGMA {}.synchronous=EXTRA", quote(&schema)))?;
     }
     Ok(guard)
+}
+
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::SqliteFailure(e, _)
+        if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
 }
 
 fn lock_and_verify_journals(conn: &Connection) -> Result<()> {
@@ -127,7 +145,9 @@ fn verify_schemas(conn: &Connection, schemas: &[String]) -> Result<()> {
         conn.execute_batch(&format!("PRAGMA {}.user_version={version}", quote(schema)))?;
         let mode: String = conn.query_row(&format!("PRAGMA {}.journal_mode", quote(schema)), [], |r| r.get(0))?;
         let sync: i64 = conn.query_row(&format!("PRAGMA {}.synchronous", quote(schema)), [], |r| r.get(0))?;
-        if !schemas.iter().any(|s| s == "main") || mode != "delete" || sync < 3 {
+        // WAL is the busy fallback from preparation: durable per database.
+        let durable = mode == "wal" || (mode == "delete" && sync >= 3);
+        if !schemas.iter().any(|s| s == "main") || !durable {
             return Err(diagnostic(format!("跨库删除事务未安全准备：{schema} journal_mode={mode}, synchronous={sync}；请在外层事务开始前准备 DELETE/EXTRA")));
         }
     }
