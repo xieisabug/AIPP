@@ -1217,6 +1217,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             detailsOpen: mobileDetailsOpen,
             setDetailsOpen: setMobileDetailsOpen,
             detailsScrollRef,
+            detailsRestoreState,
             openDetails,
             suspendDetails,
         } = useMobileConversationDetails({
@@ -2310,6 +2311,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     <ChatSidebarContent
                                         className="h-full"
                                         mobile
+                                        restoreState={detailsRestoreState}
                                         todos={sidebarTodos}
                                         artifacts={artifacts}
                                         contextItems={contextItems}

@@ -5,7 +5,7 @@ import { ChevronDown } from 'lucide-react';
 import TodoList from './TodoList';
 import ArtifactList from './ArtifactList';
 import ContextList from './ContextList';
-import { TodoItem, CodeArtifact, ContextItem } from './types';
+import { TodoItem, CodeArtifact, ContextItem, type ChatSidebarSectionId, type ChatSidebarViewState } from './types';
 import PluginViewHost from '@/components/plugin/PluginViewHost';
 import type { LoadedPlugin } from '@/services/PluginRuntime';
 
@@ -17,6 +17,7 @@ interface ChatSidebarContentProps {
     conversationId?: string;
     className?: string;
     mobile?: boolean;
+    restoreState?: ChatSidebarViewState | null;
     focusedContextId?: string | null;
     selectedContextId?: string | null;
     onArtifactClick?: (artifact: CodeArtifact) => void;
@@ -38,6 +39,8 @@ interface SectionsContextValue {
 const SectionsContext = createContext<SectionsContextValue>({ sections: [], openCount: 0 });
 
 interface CollapsibleSectionProps {
+    id: ChatSidebarSectionId;
+    restoredScrollTop?: number;
     title: string;
     count: number;
     isOpen: boolean;
@@ -47,6 +50,8 @@ interface CollapsibleSectionProps {
 }
 
 const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
+    id,
+    restoredScrollTop,
     title,
     count,
     isOpen,
@@ -55,9 +60,21 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
     children,
 }) => {
     const { openCount } = useContext(SectionsContext);
+    const scrollRef = React.useRef<HTMLDivElement>(null);
+    // Restore the actual section scroller, not just the surrounding Sheet.
+    // The second layout pass follows Radix's initial content measurement.
+    React.useLayoutEffect(() => {
+        if (!mobile || !isOpen || restoredScrollTop == null) return;
+        const node = scrollRef.current;
+        if (!node) return;
+        node.scrollTop = restoredScrollTop;
+        const frame = requestAnimationFrame(() => { node.scrollTop = restoredScrollTop; });
+        return () => cancelAnimationFrame(frame);
+    }, [mobile, restoredScrollTop]);
 
     return (
         <Collapsible 
+            data-chat-sidebar-section={mobile ? id : undefined}
             open={isOpen} 
             onOpenChange={onOpenChange}
             className={cn(
@@ -85,7 +102,7 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
                 />
             </CollapsibleTrigger>
             <CollapsibleContent className="flex-1 min-h-0 overflow-hidden data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up">
-                <div className="h-full overflow-y-auto">
+                <div ref={scrollRef} data-chat-sidebar-scroll={mobile ? id : undefined} className="h-full overflow-y-auto">
                     {children}
                 </div>
             </CollapsibleContent>
@@ -101,27 +118,33 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     conversationId,
     className,
     mobile = false,
+    restoreState,
     focusedContextId,
     selectedContextId,
     onArtifactClick,
     onContextClick,
     onPreviewFileClick,
 }) => {
-    const [todoOpen, setTodoOpen] = React.useState(todos.length > 0);
-    const [artifactOpen, setArtifactOpen] = React.useState(artifacts.length > 0);
-    const [contextOpen, setContextOpen] = React.useState(contextItems.length > 0);
+    const restored = mobile ? restoreState : null;
+    const previousCounts = React.useRef({ todo: todos.length, artifact: artifacts.length, context: contextItems.length, plugin: -1 });
+    const [todoOpen, setTodoOpen] = React.useState(restored?.todo?.isOpen ?? todos.length > 0);
+    const [artifactOpen, setArtifactOpen] = React.useState(restored?.artifact?.isOpen ?? artifacts.length > 0);
+    const [contextOpen, setContextOpen] = React.useState(restored?.context?.isOpen ?? contextItems.length > 0);
 
     // Update open state when data changes
     React.useEffect(() => {
-        if (todos.length > 0 && !todoOpen) setTodoOpen(true);
+        if ((!restored || previousCounts.current.todo !== todos.length) && todos.length > 0 && !todoOpen) setTodoOpen(true);
+        previousCounts.current.todo = todos.length;
     }, [todos.length]);
 
     React.useEffect(() => {
-        if (artifacts.length > 0 && !artifactOpen) setArtifactOpen(true);
+        if ((!restored || previousCounts.current.artifact !== artifacts.length) && artifacts.length > 0 && !artifactOpen) setArtifactOpen(true);
+        previousCounts.current.artifact = artifacts.length;
     }, [artifacts.length]);
 
     React.useEffect(() => {
-        if (contextItems.length > 0 && !contextOpen) setContextOpen(true);
+        if ((!restored || previousCounts.current.context !== contextItems.length) && contextItems.length > 0 && !contextOpen) setContextOpen(true);
+        previousCounts.current.context = contextItems.length;
     }, [contextItems.length]);
 
     // Ensure context section is expanded when a focus request arrives so the
@@ -139,10 +162,12 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
             ),
         [pluginList]
     );
-    const [pluginViewsOpen, setPluginViewsOpen] = React.useState(mobile || sidebarPluginViews.length > 0);
+    if (previousCounts.current.plugin === -1) previousCounts.current.plugin = sidebarPluginViews.length;
+    const [pluginViewsOpen, setPluginViewsOpen] = React.useState(restored?.plugin?.isOpen ?? (mobile || sidebarPluginViews.length > 0));
 
     React.useEffect(() => {
-        if (sidebarPluginViews.length > 0 && !pluginViewsOpen) setPluginViewsOpen(true);
+        if ((!restored || previousCounts.current.plugin !== sidebarPluginViews.length) && sidebarPluginViews.length > 0 && !pluginViewsOpen) setPluginViewsOpen(true);
+        previousCounts.current.plugin = sidebarPluginViews.length;
     }, [sidebarPluginViews.length]);
 
     const openCount = useMemo(() => {
@@ -159,6 +184,8 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
             <div className={cn("flex flex-col gap-1 h-full", className)}>
                 {/* Planning Section */}
                 <CollapsibleSection
+                    id="todo"
+                    restoredScrollTop={restored?.todo?.scrollTop}
                     title="规划"
                     count={todos.length}
                     isOpen={todoOpen}
@@ -170,6 +197,8 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
 
                 {/* Artifacts Section */}
                 <CollapsibleSection 
+                    id="artifact"
+                    restoredScrollTop={restored?.artifact?.scrollTop}
                     title="Artifact" 
                     count={artifacts.length} 
                     isOpen={artifactOpen}
@@ -181,6 +210,8 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
 
                 {/* Context Section */}
                 <CollapsibleSection 
+                    id="context"
+                    restoredScrollTop={restored?.context?.scrollTop}
                     title="上下文" 
                     count={contextItems.length} 
                     isOpen={contextOpen}
@@ -199,6 +230,8 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
 
                 {(mobile || sidebarPluginViews.length > 0) && (
                     <CollapsibleSection
+                        id="plugin"
+                        restoredScrollTop={restored?.plugin?.scrollTop}
                         title="插件视图"
                         count={sidebarPluginViews.length}
                         isOpen={pluginViewsOpen}

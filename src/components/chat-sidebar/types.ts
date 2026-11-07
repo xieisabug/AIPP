@@ -174,3 +174,11 @@ export function getContextTypeFromToolName(toolName: string): ContextItem['type'
     }
     return 'other';
 }
+
+// Stable identifiers for the mobile detail panel's independent scroll areas.
+export const CHAT_SIDEBAR_SECTION_IDS = ['todo', 'artifact', 'context', 'plugin'] as const;
+export type ChatSidebarSectionId = typeof CHAT_SIDEBAR_SECTION_IDS[number];
+export type ChatSidebarViewState = Partial<Record<ChatSidebarSectionId, {
+    isOpen: boolean;
+    scrollTop: number;
+}>>;
