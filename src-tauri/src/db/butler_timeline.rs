@@ -83,7 +83,8 @@ pub fn task_posts(
                 CASE WHEN current.id=d.butler_conversation_id THEN 1 ELSE 0 END,
                 coalesce((SELECT max(id) FROM message WHERE conversation_id=current.id
                     AND julianday(created_time)<=julianday(d.created_time)),0),
-                coalesce(d.result_handling_mode,'')='direct_report'
+                coalesce(d.result_handling_mode,'')='direct_report',
+                CASE WHEN current.id=d.butler_conversation_id THEN current.created_time END
          FROM butler_task_definition d
          JOIN conversation t ON t.id=d.task_conversation_id
          JOIN conversation parent ON parent.id=d.butler_conversation_id
@@ -101,6 +102,9 @@ pub fn task_posts(
         let chief: Option<i64> = row.get(3)?;
         let owner_view: bool = row.get(10)?;
         let direct_report: bool = row.get(12)?;
+        // 重开主会话会把旧任务改挂到新会话以便继续回送结果；新会话只展示它创建之后发生的委派与回复。
+        let since: Option<DateTime<Utc>> = row.get(13)?;
+        let after_since = |at: &DateTime<Utc>| since.map_or(true, |since| *at >= since);
         let peer_assistant = if owner_view { Some(executor) } else { chief };
         let peer = peer_assistant.and_then(|id| names.get(&id).cloned())
             .unwrap_or_else(|| format!("助手 #{}", peer_assistant.unwrap_or(0)));
@@ -133,8 +137,9 @@ pub fn task_posts(
             task_reply: false,
             direct: false,
         };
-        let mut posts = vec![request];
-        if let Some(at) = finished {
+        let mut posts = Vec::new();
+        if after_since(&request.occurred_at) { posts.push(request); }
+        if let Some(at) = finished.filter(after_since) {
             posts.push(Post {
                 id: (1_i64 << 40) + task * 2 + 1,
                 anchor: if owner_view { row.get(9)? } else { 0 },
