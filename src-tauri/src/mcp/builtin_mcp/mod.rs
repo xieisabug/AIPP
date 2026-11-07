@@ -419,8 +419,8 @@ fn spawn_task_conversation_mcp_tool_execution(
     task_conversation_id: i64,
     pending_tool_call: MCPToolCall,
 ) {
-    std::thread::spawn(move || {
-        tauri::async_runtime::block_on(async move {
+    let tool_call_id = pending_tool_call.id;
+    let spawned = crate::utils::async_thread::spawn_async_thread("aipp-task-tool-exec", move || async move {
             let anchor_message_id = tool_call_anchor_message_id(&pending_tool_call);
             match crate::mcp::execution_api::execute_mcp_tool_call(
                 app_handle.clone(),
@@ -458,8 +458,15 @@ fn spawn_task_conversation_mcp_tool_execution(
                     );
                 }
             }
-        });
     });
+    if let Err(error) = spawned {
+        error!(
+            task_conversation_id,
+            tool_call_id,
+            error = %error,
+            "failed to spawn task conversation MCP tool execution thread"
+        );
+    }
 }
 
 fn resolve_artifact_tool_conversation_id(
@@ -1962,12 +1969,11 @@ pub async fn execute_aipp_builtin_tool(
                                 let app_handle_clone = app_handle.clone();
                                 let window_clone = window.clone();
                                 let prompt_owned = prompt.to_string();
-                                // std::thread::spawn + block_on is intentional here to break
+                                // A dedicated thread + block_on is intentional here to break
                                 // the recursive async cycle between execute_aipp_builtin_tool
                                 // and ask_ai (which invokes tools that call back into
                                 // execute_aipp_builtin_tool).
-                                std::thread::spawn(move || {
-                                    tauri::async_runtime::block_on(async move {
+                                crate::utils::async_thread::spawn_async_thread("aipp-task-reply", move || async move {
                                         let task_conversation_id_for_spawn = task_conversation_id;
                                         let request = AiRequest {
                                             conversation_id: task_conversation_id_for_spawn
@@ -2017,8 +2023,11 @@ pub async fn execute_aipp_builtin_tool(
                                             );
                                         }
                                     }
-                                    });
-                                });
+                                })
+                                .map_err(|e| format!(
+                                    "Failed to spawn reply_prompt thread for task conversation {}: {}",
+                                    task_conversation_id, e
+                                ))?;
 
                                 serde_json::json!({
                                     "content": [{

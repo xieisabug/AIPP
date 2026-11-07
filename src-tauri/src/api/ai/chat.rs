@@ -3601,7 +3601,7 @@ async fn attempt_stream_chat(
                                     );
 
                                     // Spawn tool execution in background (non-blocking)
-                                    // Use std::thread::spawn + block_on to avoid Send
+                                    // Use a dedicated thread + block_on to avoid Send
                                     // requirement (execute_mcp_tool_call uses non-Send types).
                                     if !exec_ids.is_empty() {
                                         debug!(
@@ -3610,8 +3610,10 @@ async fn attempt_stream_chat(
                                         );
                                         let app_bg = app_handle.clone();
                                         let window_bg = window.clone();
-                                        std::thread::spawn(move || {
-                                            tauri::async_runtime::block_on(async move {
+                                        let spawn_ids = exec_ids.clone();
+                                        if let Err(error) = crate::utils::async_thread::spawn_async_thread(
+                                            "aipp-tool-exec",
+                                            move || async move {
                                                 execute_and_continue_tool_calls(
                                                     app_bg,
                                                     window_bg,
@@ -3619,8 +3621,15 @@ async fn attempt_stream_chat(
                                                     exec_ids,
                                                 )
                                                 .await;
-                                            });
-                                        });
+                                            },
+                                        ) {
+                                            error!(
+                                                conversation_id,
+                                                exec_ids = ?spawn_ids,
+                                                error = %error,
+                                                "failed to spawn background tool execution thread"
+                                            );
+                                        }
                                     } else if setup_error_result_count > 0 && _all_ids.is_empty() {
                                         debug!(
                                             setup_error_result_count,

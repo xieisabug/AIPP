@@ -1812,7 +1812,7 @@ fn spawn_butler_main_followup(
     let error_task_conversation_id = task_clone.task_conversation_id;
     let error_task_title = definition_clone.title.clone();
 
-    std::thread::spawn(move || {
+    let spawned = crate::utils::async_thread::spawn_large_stack_thread("aipp-butler-followup", move || {
         let thread_result: Result<(), String> = tauri::async_runtime::block_on(async move {
             enqueue_butler_main_followup(
                 app_handle_clone.clone(),
@@ -1844,6 +1844,14 @@ fn spawn_butler_main_followup(
             );
         }
     });
+    if let Err(error) = spawned {
+        warn!(
+            butler_conversation_id = definition.butler_conversation_id,
+            task_conversation_id = task.task_conversation_id,
+            error = %error,
+            "failed to spawn butler main follow-up thread"
+        );
+    }
 }
 
 fn schedule_butler_main_followup(
@@ -3487,7 +3495,7 @@ async fn spawn_butler_task_inner(
     let definition_clone = definition.clone();
     let executor_assistant_id = executor_assistant.id;
     let executor_assistant_name = executor_assistant.name.clone();
-    std::thread::spawn(move || {
+    crate::utils::async_thread::spawn_large_stack_thread("aipp-butler-task", move || {
         let thread_result: Result<(), String> = tauri::async_runtime::block_on(async move {
             let _admission = if followup_id.is_some() {
                 Some(super::butler_work::execution_gate().await)
@@ -3541,7 +3549,8 @@ async fn spawn_butler_task_inner(
         if let Err(error) = thread_result {
             warn!(task_conversation_id = task_id, error = %error, "failed to launch butler task");
         }
-    });
+    })
+    .map_err(|e| format!("启动管家任务 {} 的执行线程失败: {}", task_id, e))?;
 
     Ok(SpawnButlerTaskResponse {
         butler_conversation_id,
