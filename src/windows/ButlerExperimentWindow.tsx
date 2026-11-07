@@ -12,6 +12,7 @@ import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
 import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import "@/components/butler/butlerDesktop.css";
 import { toast } from "sonner";
+import { openScheduleTask } from "@/lib/scheduleTaskFocus";
 import {
     Check,
     ChevronDown,
@@ -1523,9 +1524,18 @@ function ButlerExperimentWindow() {
                             {isScheduledTasksExpanded && (
                                 <div className="px-3 pb-3 space-y-1.5 max-h-[200px] overflow-y-auto">
                                     {scheduledTasks.map((st) => (
-                                        <div
+                                        <button
+                                            type="button"
                                             key={st.id}
-                                            className="rounded-lg border border-border/50 px-3 py-2 text-xs"
+                                            className="block w-full rounded-lg border border-border/50 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/60 focus-visible:outline-2 focus-visible:outline-ring"
+                                            title="在定时任务窗口中查看"
+                                            data-aipp-slot="butler-scheduled-task-item"
+                                            onClick={() => {
+                                                openScheduleTask(st.id).catch((error) => {
+                                                    console.error("[ButlerExperimentWindow] Failed to open scheduled task:", error);
+                                                    toast.error("打开定时任务失败");
+                                                });
+                                            }}
                                         >
                                             <div className="flex items-center justify-between gap-2">
                                                 <span className="font-medium truncate">{st.name}</span>
@@ -1546,7 +1556,7 @@ function ButlerExperimentWindow() {
                                                     下次执行：{formatTime(st.nextRunAt)}
                                                 </div>
                                             )}
-                                        </div>
+                                        </button>
                                     ))}
                                 </div>
                             )}

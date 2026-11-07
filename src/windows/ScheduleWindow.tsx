@@ -20,6 +20,11 @@ import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/com
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
+import {
+    SCHEDULE_FOCUS_TASK_EVENT,
+    consumePendingScheduleFocus,
+    type ScheduleFocusTaskPayload,
+} from "@/lib/scheduleTaskFocus";
 import { Calendar, Clock, Plus, RefreshCw, Trash2, Pencil, Play, Bell, HelpCircle, Square } from "lucide-react";
 
 interface ScheduledTask {
@@ -342,6 +347,9 @@ export default function ScheduleWindow() {
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
+    // 其他窗口（如管家窗口）请求定位的任务；任务列表加载到它之后再选中
+    const [pendingFocusTaskId, setPendingFocusTaskId] = useState<number | null>(() => consumePendingScheduleFocus());
+    const [focusReloadToken, setFocusReloadToken] = useState(0);
     const [editingTaskId, setEditingTaskId] = useState<number | null>(null);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [isHelpDialogOpen, setIsHelpDialogOpen] = useState(false);
@@ -409,12 +417,12 @@ export default function ScheduleWindow() {
     const loadTasks = useCallback(async () => {
         try {
             setIsLoading(true);
+            // 管家创建的任务也在这里展示：查看运行记录、编辑、删除都只能由用户在此完成
             const result = await invoke<ScheduledTask[]>("list_scheduled_tasks");
-            const appTasks = result.filter(t => !t.butlerConversationId);
-            setTasks(appTasks);
-            if (appTasks.length > 0 && !activeTaskId) {
-                setActiveTaskId(appTasks[0].id);
-            } else if (appTasks.length === 0) {
+            setTasks(result);
+            if (result.length > 0 && !activeTaskId) {
+                setActiveTaskId(result[0].id);
+            } else if (result.length === 0) {
                 setActiveTaskId(null);
             }
         } catch (error) {
@@ -450,7 +458,29 @@ export default function ScheduleWindow() {
     useEffect(() => {
         loadTasks();
         loadAssistants();
-    }, [loadTasks, loadAssistants]);
+    }, [loadTasks, loadAssistants, focusReloadToken]);
+
+    useEffect(() => {
+        const unlisten = listen<ScheduleFocusTaskPayload>(SCHEDULE_FOCUS_TASK_EVENT, (event) => {
+            // 事件已带上任务 id，清掉同一请求留在 localStorage 里的副本
+            consumePendingScheduleFocus();
+            setPendingFocusTaskId(event.payload.taskId);
+            // 任务可能是窗口上次加载之后才创建的：先标记加载中，避免用旧列表判定"找不到"
+            setIsLoading(true);
+            setFocusReloadToken((token) => token + 1);
+        });
+        return () => {
+            unlisten.then((fn) => fn());
+        };
+    }, []);
+
+    useEffect(() => {
+        if (pendingFocusTaskId === null || isLoading) return;
+        if (tasks.some((task) => task.id === pendingFocusTaskId)) {
+            setActiveTaskId(pendingFocusTaskId);
+        }
+        setPendingFocusTaskId(null);
+    }, [pendingFocusTaskId, tasks, isLoading]);
 
     const loadRuns = useCallback(
         async (taskId?: number | null, options?: { silent?: boolean }) => {
@@ -959,6 +989,7 @@ export default function ScheduleWindow() {
                                             </div>
                                             <div className={`text-xs mt-0.5 ${subTextClass}`}>
                                                 {task.scheduleType === "once" ? "单次" : "周期"} · {task.isEnabled ? "已启用" : "已停用"}
+                                                {task.butlerConversationId ? " · 管家" : ""}
                                             </div>
                                             {task.nextRunAt && (
                                                 <div className={`text-xs mt-1 flex items-center gap-1 ${subTextClass}`}>
