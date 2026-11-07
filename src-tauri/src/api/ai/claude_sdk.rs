@@ -6,6 +6,8 @@ use crate::api::ai::acp::{
 };
 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::agent_plan::AgentPlanMessage;
+use crate::api::ai::agent_driver::events::{AgentEventIdentity, emit_to_window, emit_to_chat_windows};
+use crate::api::ai::agent_driver::failure::{AgentDiagnosticBuffer, AgentFailure, AgentFailureStage, AgentProcessDiagnostics, emit_normalized_failure_to_window};
 use crate::api::ai::codex_app_server::AgentActivityEvent;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::acp_mcp_bridge::{
@@ -15,7 +17,7 @@ use crate::acp_mcp_bridge::{
 };
 use crate::api::operation_api::{emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT};
 use crate::mcp::builtin_mcp::interaction::{
-    request_ask_user_question, AskUserQuestionItem, AskUserQuestionMetadata,
+    request_ask_user_question_scoped, AskUserQuestionItem, AskUserQuestionMetadata,
     AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
 };
 use crate::db::conversation_db::{ConversationDatabase, Repository};
@@ -32,11 +34,11 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
 };
 
 pub const CLAUDE_SDK_API_TYPE: &str = "claude_sdk";
@@ -87,6 +89,8 @@ pub fn claude_model_choices(
 
 #[derive(Debug, Clone)]
 pub struct ClaudeSdkConfig {
+    /// Provider-row identity captured when this native runtime is prepared.
+    pub instance_id: Option<i64>,
     pub cli_command: String,
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
@@ -117,7 +121,7 @@ pub struct ClaudeConversationSessionState {
 }
 
 enum SessionCommand {
-    Prompt { message_id: i64, prompt: String, window: tauri::Window },
+    Prompt { message_id: i64, prompt: String, window: tauri::Window, cancel_generation: u64 },
     Cancel { response: oneshot::Sender<Result<(), String>> },
     SetConfig { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
 }
@@ -125,6 +129,7 @@ enum SessionCommand {
 #[derive(Clone)]
 pub struct ClaudeSessionHandle {
     sender: mpsc::UnboundedSender<SessionCommand>,
+    cancel_signal: watch::Sender<u64>,
     run_id: String,
 }
 
@@ -170,6 +175,14 @@ impl ClaudeSessionEntry {
         }
     }
 
+    pub(crate) fn reuse_handle(&mut self, config_signature: &str) -> Option<ClaudeSessionHandle> {
+        if self.config_signature != config_signature {
+            return None;
+        }
+        self.touch();
+        Some(self.handle.clone())
+    }
+
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
     }
@@ -184,6 +197,37 @@ impl ClaudeSessionEntry {
 }
 
 impl ClaudeSessionHandle {
+    pub(crate) fn run_id(&self) -> &str { &self.run_id }
+
+    #[cfg(test)]
+    pub(crate) fn driver_test_channel() -> (
+        Self,
+        mpsc::UnboundedReceiver<super::agent_driver::session::TestSessionCommand>,
+    ) {
+        use super::agent_driver::session::TestSessionCommand;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (observed, observations) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                let command = match command {
+                    SessionCommand::Cancel { response } => TestSessionCommand::Cancel { response },
+                    SessionCommand::SetConfig { config_id, value, response } => {
+                        TestSessionCommand::SetConfig { config_id, value, response }
+                    }
+                    _ => panic!("unexpected command in driver control test"),
+                };
+                if observed.send(command).is_err() {
+                    break;
+                }
+            }
+        });
+        (Self {
+            sender,
+            cancel_signal: watch::channel(0).0,
+            run_id: "driver-test-run".into(),
+        }, observations)
+    }
+
     pub fn send_prompt(
         &self,
         message_id: i64,
@@ -191,10 +235,15 @@ impl ClaudeSessionHandle {
         window: tauri::Window,
     ) -> Result<(), AppError> {
         self.sender
-            .send(SessionCommand::Prompt { message_id, prompt, window })
+            .send(SessionCommand::Prompt {
+                message_id, prompt, window, cancel_generation: *self.cancel_signal.borrow(),
+            })
             .map_err(|_| AppError::UnknownError("Claude Code session closed".into()))
     }
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
+        // Wake a blocked approval without consuming/reordering actor commands.
+        // The native actor still acknowledges only after writing the interrupt.
+        self.cancel_signal.send_modify(|generation| *generation = generation.wrapping_add(1));
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(SessionCommand::Cancel { response: tx })
@@ -279,6 +328,7 @@ pub fn extract_claude_sdk_config(
     }
     let session_signature = serde_json::to_string(&json!({"cli":cli_command,"cwd":working_directory,"model":model,"permission_mode":permission_mode,"effort":effort,"env":env_vars,"selected_mcp":""})).unwrap_or_default();
     Ok(ClaudeSdkConfig {
+        instance_id: None,
         cli_command,
         working_directory,
         env_vars,
@@ -294,7 +344,7 @@ pub fn extract_claude_sdk_config(
 
 pub fn refresh_claude_session_signature(config: &mut ClaudeSdkConfig) {
     config.session_signature = serde_json::to_string(&json!({
-        "cli": config.cli_command, "cwd": config.working_directory, "model": config.model,
+        "instance_id": config.instance_id, "cli": config.cli_command, "cwd": config.working_directory, "model": config.model,
         "permission_mode": config.permission_mode, "effort": config.effort, "env": config.env_vars,
         "selected_mcp": config.selected_mcp_tools_payload,
     })).unwrap_or_default();
@@ -489,14 +539,22 @@ async fn handle_ask_user_question(
     conversation_id: i64,
     request: &Value,
     request_id: &str,
+    instance_id: Option<i64>,
+    run_id: &str,
     stdin: &mut tokio::process::ChildStdin,
+    cancellation: &mut watch::Receiver<u64>,
+    cancel_generation: u64,
 ) -> Result<(), String> {
     let input = request.get("input").cloned().unwrap_or(Value::Null);
     let interaction_state = app.state::<InteractionState>();
     let result = match claude_ask_user_question_payload(&input) {
         Ok(payload) => {
-            request_ask_user_question(app, &interaction_state, Some(conversation_id), payload)
-                .await
+            wait_claude_decision(
+                request_ask_user_question_scoped(app, &interaction_state, Some(conversation_id), payload,
+                    Some(crate::api::ai::agent_driver::approval::AgentRequestScope::native(CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id))),
+                cancellation,
+                cancel_generation,
+            ).await.unwrap_or_else(|| Err("Claude Code prompt was cancelled".into()))
         }
         Err(error) => Err(error),
     };
@@ -527,17 +585,23 @@ async fn handle_permission(
     app: &tauri::AppHandle,
     conversation_id: i64,
     frame: &Value,
+    run_id: &str,
+    instance_id: Option<i64>,
     stdin: &mut tokio::process::ChildStdin,
+    cancellation: &mut watch::Receiver<u64>,
+    cancel_generation: u64,
 ) -> Result<(), String> {
     let request_id =
         frame.get("request_id").and_then(Value::as_str).unwrap_or("unknown").to_string();
     let request = frame.get("request").cloned().unwrap_or(Value::Null);
     let tool_name = request.get("tool_name").and_then(Value::as_str).unwrap_or("Claude Code tool");
     if tool_name == "AskUserQuestion" {
-        return handle_ask_user_question(app, conversation_id, &request, &request_id, stdin).await;
+        return handle_ask_user_question(
+            app, conversation_id, &request, &request_id, instance_id, run_id, stdin, cancellation, cancel_generation,
+        ).await;
     }
     let event = AcpPermissionRequestEvent {
-        request_id: format!("claude:{conversation_id}:{request_id}"),
+        request_id: format!("claude:{conversation_id}:{run_id}:{request_id}"),
         conversation_id: Some(conversation_id),
         agent_kind: Some(CLAUDE_SDK_API_TYPE.into()),
         tool_call_id: request
@@ -565,14 +629,27 @@ async fn handle_permission(
     };
     let (tx, rx) = oneshot::channel();
     let state = app.state::<AcpPermissionState>();
-    state.store_request(event.clone(), tx).await;
+    state.store_request_scoped(event.clone(), tx,
+        crate::api::ai::agent_driver::approval::AgentRequestScope::native(CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id)).await?;
     emit_permission_request_event(
         app,
         ACP_PERMISSION_REQUEST_EVENT,
         Some(conversation_id),
         &event,
     )?;
-    let decision = rx.await.unwrap_or(AcpPermissionDecision::Cancelled);
+    let (decision, cancelled_resolution) = wait_claude_permission_decision(
+        &state, &event.request_id, rx, cancellation, cancel_generation,
+    ).await;
+    if let Some(resolution) = cancelled_resolution {
+        let _ = crate::api::operation_api::emit_permission_resolved_event(
+            app,
+            crate::api::operation_api::ACP_PERMISSION_RESOLVED_EVENT,
+            &crate::api::operation_api::PermissionResolvedEvent {
+                request_id: event.request_id.clone(),
+                conversation_id: resolution.conversation_id,
+            },
+        );
+    }
     let (behavior, message) = match decision {
         AcpPermissionDecision::Selected(value) if value == "allow" => ("allow", Value::Null),
         _ => ("deny", json!({"message":"Permission denied by user"})),
@@ -585,7 +662,7 @@ async fn handle_permission(
     stdin.flush().await.map_err(|e| e.to_string())
 }
 
-fn emit_update(window: &tauri::Window, conversation_id: i64, id: i64, content: &str, done: bool) {
+fn emit_update(identity: &AgentEventIdentity, window: &tauri::Window, conversation_id: i64, id: i64, content: &str, done: bool) {
     let data = MessageUpdateEvent {
         message_id: id,
         message_type: "response".into(),
@@ -597,8 +674,8 @@ fn emit_update(window: &tauri::Window, conversation_id: i64, id: i64, content: &
         ttft_ms: None,
         tps: None,
     };
-    let _ = window.emit(
-        &format!("conversation_event_{conversation_id}"),
+    let _ = emit_to_window(
+        window, identity.clone(),
         ConversationEvent {
             r#type: "message_update".into(),
             data: serde_json::to_value(data).unwrap(),
@@ -607,105 +684,84 @@ fn emit_update(window: &tauri::Window, conversation_id: i64, id: i64, content: &
 }
 
 async fn emit_snapshot(
+    identity: &AgentEventIdentity,
     app: &tauri::AppHandle,
     conversation_id: i64,
     state: ClaudeConversationSessionState,
 ) {
-    if let Some(claude_state) = app.try_state::<crate::ClaudeSessionState>() {
-        if let Some(entry) = claude_state.sessions.lock().await.get_mut(&conversation_id) {
-            entry.snapshot = state.clone();
-            entry.touch();
-        }
+    let native_state = app.try_state::<crate::ClaudeSessionState>();
+    let mut sessions = if let Some(native) = native_state.as_ref() { Some(native.sessions.lock().await) } else { None };
+    let current_run = sessions.as_ref().and_then(|sessions| sessions.get(&conversation_id)).map(|entry| entry.run_id.as_str());
+    if !super::agent_driver::events::can_publish_native_snapshot(current_run, identity.run_id.as_deref(), true) { return; }
+    if let Some(entry) = sessions.as_mut().and_then(|sessions| sessions.get_mut(&conversation_id)) {
+        entry.snapshot = state.clone();
+        entry.touch();
     }
-    let _ = crate::utils::window_utils::send_conversation_event_to_chat_windows(
+    let data = match super::agent_driver::capabilities::snapshot_event_payload(
+        CLAUDE_SDK_API_TYPE, super::agent_driver::capabilities::AgentCapabilityDeclaration::claude(), Some(&state),
+    ) {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::error!(conversation_id, error = %error, "Claude Code capability snapshot emission failed");
+            return;
+        }
+    };
+    let mut identity = identity.clone();
+    identity.native_session_id = state.session_id.clone();
+    let _ = emit_to_chat_windows(
         app,
-        conversation_id,
+        identity,
         ConversationEvent {
             r#type: "acp_session_state_snapshot".into(),
-            data: json!({"state": state}),
+            data,
         },
     );
+}
+
+fn remove_claude_session_for_run(
+    sessions: &mut HashMap<i64, ClaudeSessionEntry>,
+    conversation_id: i64,
+    run_id: &str,
+) -> bool {
+    if sessions.get(&conversation_id).is_some_and(|entry| entry.run_id == run_id) {
+        sessions.remove(&conversation_id);
+        true
+    } else {
+        false
+    }
 }
 
 async fn cleanup_claude_session(
     app: &tauri::AppHandle,
     conversation_id: i64,
     run_id: &str,
+    instance_id: Option<i64>,
 ) {
-    let removed_current_entry = if let Some(state) = app.try_state::<crate::ClaudeSessionState>() {
+    let request_scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native(
+        CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id,
+    );
+    crate::api::ai::agent_driver::approval::cancel_app_requests_for_scope(app, &request_scope).await;
+    if let Some(state) = app.try_state::<crate::ClaudeSessionState>() {
         let mut sessions = state.sessions.lock().await;
-        if sessions
-            .get(&conversation_id)
-            .is_some_and(|entry| entry.run_id == run_id)
-        {
-            sessions.remove(&conversation_id);
-            true
-        } else {
-            false
+        if remove_claude_session_for_run(&mut sessions, conversation_id, run_id) {
+            let mut identity = AgentEventIdentity::new(CLAUDE_SDK_API_TYPE, conversation_id).with_run(run_id);
+            identity.instance_id = instance_id.map(|id| id.to_string());
+            let _ = emit_to_chat_windows(app, identity, ConversationEvent {
+                r#type: "acp_session_state_snapshot".into(), data: json!({"state": Value::Null}),
+            });
         }
-    } else {
-        false
-    };
-    if removed_current_entry {
-        let _ = crate::utils::window_utils::send_conversation_event_to_chat_windows(
-            app,
-            conversation_id,
-            ConversationEvent {
-                r#type: "acp_session_state_snapshot".into(),
-                data: json!({"state": Value::Null}),
-            },
-        );
     }
 }
 
-pub(crate) fn emit_claude_failure(
-    app: &tauri::AppHandle,
-    conversation_id: i64,
-    message_id: i64,
-    window: &tauri::Window,
-    error: &str,
+fn emit_claude_run_failure(
+    app: &tauri::AppHandle, identity: &AgentEventIdentity, message_id: i64,
+    window: &tauri::Window, cause: &str, stage: AgentFailureStage, process: AgentProcessDiagnostics,
 ) {
-    let content = format!("Claude Code 运行失败：{error}");
-    if let Ok(db) = ConversationDatabase::new(app) {
-        if let Ok(repo) = db.message_repo() {
-            if let Ok(Some(mut message)) = repo.read(message_id) {
-                message.message_type = "error".to_string();
-                message.content = content.clone();
-                message.finish_time = Some(chrono::Utc::now());
-                let _ = repo.update(&message);
-            }
-        }
+    let failure = AgentFailure::new(identity.clone().with_response_message(message_id), stage, cause)
+        .with_process_diagnostics(process);
+    if let Err(error) = emit_normalized_failure_to_window(app, window, failure, "Claude Code") {
+        tracing::error!(conversation_id = identity.conversation_id, message_id, error = %error, "Claude Code failure publication incomplete");
     }
-    let _ = window.emit(
-        &format!("conversation_event_{conversation_id}"),
-        ConversationEvent {
-            r#type: "message_update".into(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id,
-                message_type: "error".into(),
-                content,
-                is_done: true,
-                token_count: Some(0),
-                input_token_count: Some(0),
-                output_token_count: Some(0),
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        },
-    );
-    let _ = window.emit(
-        &format!("conversation_event_{conversation_id}"),
-        ConversationEvent {
-            r#type: "stream_complete".into(),
-            data: json!({
-                "conversation_id": conversation_id,
-                "response_message_id": message_id,
-                "has_response": false,
-                "error": error,
-            }),
-        },
-    );
 }
 
 fn claude_config_options(config: &ClaudeSdkConfig) -> Vec<AcpSessionConfigOptionPayload> {
@@ -831,6 +887,7 @@ fn tool_result_text(block: &Value) -> Option<String> {
 }
 
 fn emit_activity(
+    identity: &AgentEventIdentity,
     window: &tauri::Window,
     conversation_id: i64,
     message_id: i64,
@@ -860,8 +917,8 @@ fn emit_activity(
         metadata: json!({"source":"claude"}),
         content_offset: None,
     };
-    let _ = window.emit(
-        &format!("conversation_event_{conversation_id}"),
+    let _ = emit_to_window(
+        window, identity.clone(),
         ConversationEvent {
             r#type: "agent_activity".into(),
             data: serde_json::to_value(event).unwrap(),
@@ -872,6 +929,18 @@ fn emit_activity(
 async fn spawn_claude_process(
     config: &ClaudeSdkConfig,
     session_id: Option<&str>,
+) -> Result<(
+    tokio::process::Child,
+    tokio::process::ChildStdin,
+    tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+), String> {
+    spawn_claude_process_with_diagnostics(config, session_id, AgentDiagnosticBuffer::default()).await
+}
+
+async fn spawn_claude_process_with_diagnostics(
+    config: &ClaudeSdkConfig,
+    session_id: Option<&str>,
+    diagnostics: AgentDiagnosticBuffer,
 ) -> Result<(
     tokio::process::Child,
     tokio::process::ChildStdin,
@@ -892,6 +961,7 @@ async fn spawn_claude_process(
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                diagnostics.push(line.clone());
                 tracing::error!(target = "claude_code", "{line}");
             }
         });
@@ -925,6 +995,19 @@ fn build_claude_command(
     (command, resolved)
 }
 
+fn claude_result_error(frame: &Value) -> Option<String> {
+    if frame.get("is_error").and_then(Value::as_bool) == Some(true)
+        || frame.get("subtype").and_then(Value::as_str) == Some("error")
+        || frame.get("error").is_some_and(|value| !value.is_null())
+    {
+        Some(frame.get("error").and_then(Value::as_str)
+            .or_else(|| frame.get("result").and_then(Value::as_str))
+            .unwrap_or("Claude Code 返回错误").to_string())
+    } else {
+        None
+    }
+}
+
 pub(crate) fn confirm_claude_resume(
     expected_session_id: Option<&str>,
     actual_session_id: &str,
@@ -941,6 +1024,93 @@ pub(crate) fn confirm_claude_resume(
     Ok(Some(("resume".into(), format!("{run_id}:resume"))))
 }
 
+/// Approval waits observe cancellation independently of the actor command queue.
+/// The generation belongs to the enqueued prompt, so an old idle cancellation
+/// cannot cancel a later prompt, and a queued/startup cancellation is not lost.
+async fn wait_claude_decision<F: std::future::Future>(
+    decision: F,
+    cancellation: &mut watch::Receiver<u64>,
+    expected_generation: u64,
+) -> Option<F::Output> {
+    tokio::pin!(decision);
+    loop {
+        if *cancellation.borrow() != expected_generation {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            changed = cancellation.changed() => {
+                if changed.is_err() {
+                    return None;
+                }
+            }
+            result = &mut decision => return Some(result),
+        }
+    }
+}
+
+async fn wait_claude_permission_decision(
+    state: &AcpPermissionState,
+    request_id: &str,
+    decision: oneshot::Receiver<AcpPermissionDecision>,
+    cancellation: &mut watch::Receiver<u64>,
+    expected_generation: u64,
+) -> (AcpPermissionDecision, Option<super::acp::AcpPermissionResolution>) {
+    match wait_claude_decision(decision, cancellation, expected_generation).await {
+        Some(result) => (result.unwrap_or(AcpPermissionDecision::Cancelled), None),
+        None => {
+            // The run-scoped ID avoids touching a replacement actor's request.
+            let resolution = state.resolve_request(request_id, AcpPermissionDecision::Cancelled)
+                .await.ok().flatten();
+            (AcpPermissionDecision::Cancelled, resolution)
+        }
+    }
+}
+
+/// One step of the production active-turn transport loop. Keeping this boundary
+/// independent of desktop event delivery lets protocol tests exercise the actual
+/// native command receiver and child pipes, rather than reimplementing controls.
+enum ClaudePromptInput {
+    Frame(Value),
+    Interrupted,
+}
+
+async fn read_claude_prompt_input(
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+) -> Result<ClaudePromptInput, String> {
+    loop {
+        let line = tokio::select! {
+            next = lines.next_line() => match next {
+                Ok(Some(line)) => line,
+                Ok(None) => return Err("Claude Code 进程提前退出".into()),
+                Err(error) => return Err(format!("读取 Claude Code 输出失败：{error}")),
+            },
+            command = commands.recv() => match command {
+                Some(SessionCommand::Cancel { response }) => {
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    let interrupt = json!({"type":"control_request","request_id":request_id,"request":{"subtype":"interrupt"}});
+                    let result = stdin.write_all(format!("{interrupt}\n").as_bytes()).await;
+                    let _ = stdin.flush().await;
+                    let _ = response.send(result.map_err(|error| error.to_string()));
+                    return Ok(ClaudePromptInput::Interrupted);
+                }
+                Some(SessionCommand::Prompt { .. }) => continue,
+                Some(SessionCommand::SetConfig { response, .. }) => {
+                    let _ = response.send(Err("Claude Code 配置将在下一次会话启动时生效".into()));
+                    continue;
+                }
+                None => return Err("Claude Code 会话在完成当前请求前已关闭".into()),
+            }
+        };
+        // Preserve the CLI's existing tolerance of non-JSON diagnostic lines.
+        if let Ok(frame) = serde_json::from_str::<Value>(&line) {
+            return Ok(ClaudePromptInput::Frame(frame));
+        }
+    }
+}
+
 pub fn spawn_claude_session_task(
     app: tauri::AppHandle,
     _conversation_id: i64,
@@ -949,21 +1119,34 @@ pub fn spawn_claude_session_task(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let run_id = uuid::Uuid::new_v4().to_string();
     let task_run_id = run_id.clone();
-    let handle = ClaudeSessionHandle { sender: tx, run_id };
+    let (cancel_signal, mut cancellation) = watch::channel(0);
+    let handle = ClaudeSessionHandle { sender: tx, cancel_signal, run_id };
     tauri::async_runtime::spawn(async move {
-        let stored_session: Option<String> = ConversationDatabase::new(&app)
-            .ok()
-            .and_then(|db| db.get_agent_session_id(_conversation_id, CLAUDE_SDK_API_TYPE).ok())
-            .flatten();
-        let (mut child, mut stdin, mut lines) = match spawn_claude_process(&config, stored_session.as_deref()).await {
+        let session_lookup = ConversationDatabase::new(&app)
+            .map_err(|error| format!("Claude Code restore database unavailable: {error}"))
+            .and_then(|db| db.get_agent_session_id_for_instance(_conversation_id, CLAUDE_SDK_API_TYPE, config.instance_id)
+                .map_err(|error| format!("Claude Code persisted session lookup failed: {error}")));
+        let stored_session = session_lookup.as_ref().ok().cloned().flatten();
+        let startup_failure_stage = if session_lookup.is_err() { AgentFailureStage::Persistence }
+            else if stored_session.is_some() { AgentFailureStage::Resume } else { AgentFailureStage::Initialize };
+        let mut event_identity = AgentEventIdentity::new(CLAUDE_SDK_API_TYPE, _conversation_id).with_run(task_run_id.clone());
+        event_identity.instance_id = config.instance_id.map(|id| id.to_string());
+        event_identity.native_session_id = stored_session.clone();
+        let mut diagnostics = AgentDiagnosticBuffer::for_environment(&config.env_vars);
+        let startup = match session_lookup {
+            Ok(_) => spawn_claude_process_with_diagnostics(&config, stored_session.as_deref(), diagnostics.clone()).await,
+            Err(error) => Err(error),
+        };
+        let (mut child, mut stdin, mut lines) = match startup {
             Ok(process) => process,
             Err(error) => {
                 while let Some(message) = rx.recv().await {
                     match message {
                         SessionCommand::Prompt { message_id, window, .. } => {
-                            emit_claude_failure(&app, _conversation_id, message_id, &window, &error);
+                            emit_claude_run_failure(&app, &event_identity, message_id, &window, &error,
+                                startup_failure_stage, diagnostics.diagnostics(None, None));
                             if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                                manager.clear_focus(&app, _conversation_id).await;
+                                manager.clear_agent_focus(&app, &event_identity, false).await;
                             }
                             break;
                         }
@@ -975,7 +1158,7 @@ pub fn spawn_claude_session_task(
                         }
                     }
                 }
-                cleanup_claude_session(&app, _conversation_id, &task_run_id).await;
+                cleanup_claude_session(&app, _conversation_id, &task_run_id, config.instance_id).await;
                 return;
             }
         };
@@ -989,7 +1172,7 @@ pub fn spawn_claude_session_task(
         let mut restored_session_method: Option<String> = None;
         let mut connection_event_id: Option<String> = None;
         let mut current_plan = Vec::<AcpPlanEntryPayload>::new();
-        emit_snapshot(
+        emit_snapshot(&event_identity,
             &app,
             _conversation_id,
             claude_session_snapshot(
@@ -1030,7 +1213,8 @@ pub fn spawn_claude_session_task(
                         _ => { let _ = response.send(Err(format!("Claude Code 不支持会话配置项: {config_id}"))); continue; }
                     }
                     let _ = child.kill().await;
-                    match spawn_claude_process(&config, session_id.as_deref()).await {
+                    diagnostics = AgentDiagnosticBuffer::for_environment(&config.env_vars);
+                    match spawn_claude_process_with_diagnostics(&config, session_id.as_deref(), diagnostics.clone()).await {
                         Ok((new_child, new_stdin, new_lines)) => {
                             child = new_child;
                             stdin = new_stdin;
@@ -1045,7 +1229,7 @@ pub fn spawn_claude_session_task(
                             break;
                         }
                     }
-                    emit_snapshot(
+                    emit_snapshot(&event_identity,
                         &app,
                         _conversation_id,
                         claude_session_snapshot(
@@ -1060,41 +1244,40 @@ pub fn spawn_claude_session_task(
                     )
                     .await;
                 }
-                SessionCommand::Prompt { message_id, prompt, window } => {
+                SessionCommand::Prompt { message_id, prompt, window, cancel_generation } => {
+                    event_identity.response_message_id = Some(message_id);
                     let input = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":prompt}]},"session_id":session_id});
                     if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {
-                        emit_claude_failure(
+                        emit_claude_run_failure(
                             &app,
-                            _conversation_id,
+                            &event_identity,
                             message_id,
                             &window,
-                            &format!("写入 Claude Code 请求失败：{error}"),
-                        );
+                            &format!("写入 Claude Code 请求失败：{error}"), AgentFailureStage::SendPrompt, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
                         if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                            manager.clear_focus(&app, _conversation_id).await;
+                            manager.clear_agent_focus(&app, &event_identity, false).await;
                         }
                         break;
                     }
                     if let Err(error) = stdin.flush().await {
-                        emit_claude_failure(
+                        emit_claude_run_failure(
                             &app,
-                            _conversation_id,
+                            &event_identity,
                             message_id,
                             &window,
-                            &format!("提交 Claude Code 请求失败：{error}"),
-                        );
+                            &format!("提交 Claude Code 请求失败：{error}"), AgentFailureStage::SendPrompt, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
                         if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                            manager.clear_focus(&app, _conversation_id).await;
+                            manager.clear_agent_focus(&app, &event_identity, false).await;
                         }
                         break;
                     }
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                        manager.set_assistant_streaming(&app, _conversation_id, message_id).await;
+                        manager.set_agent_streaming(&app, &event_identity, message_id).await;
                     }
                     let mut content = String::new();
                     let mut agent_plan_message: Option<AgentPlanMessage> = None;
                     let mut sequence = 0_u64;
-                    emit_snapshot(
+                    emit_snapshot(&event_identity,
                         &app,
                         _conversation_id,
                         claude_session_snapshot(
@@ -1110,43 +1293,21 @@ pub fn spawn_claude_session_task(
                     .await;
                     let mut usage = Value::Null;
                     let mut stream_error: Option<String> = None;
+                    let mut stream_failure_stage = AgentFailureStage::Stream;
                     loop {
-                        let line = tokio::select! {
-                            next = lines.next_line() => match next {
-                                Ok(Some(line)) => line,
-                                Ok(None) => {
-                                    stream_error = Some("Claude Code 进程提前退出".into());
-                                    break;
+                        let frame = match read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await {
+                            Ok(ClaudePromptInput::Frame(frame)) => frame,
+                            Ok(ClaudePromptInput::Interrupted) => {
+                                if let Some(manager) = app.try_state::<ConversationActivityManager>() {
+                                    manager.clear_agent_focus(&app, &event_identity, false).await;
                                 }
-                                Err(error) => {
-                                    stream_error = Some(format!("读取 Claude Code 输出失败：{error}"));
-                                    break;
-                                }
-                            },
-                            command = rx.recv() => match command {
-                                Some(SessionCommand::Cancel { response }) => {
-                                    let request_id = uuid::Uuid::new_v4().to_string();
-                                    let interrupt = json!({"type":"control_request","request_id":request_id,"request":{"subtype":"interrupt"}});
-                                    let result = stdin.write_all(format!("{interrupt}\n").as_bytes()).await.and_then(|_| std::io::Result::Ok(()));
-                                    let _ = stdin.flush().await;
-                                    let _ = response.send(result.map_err(|error| error.to_string()));
-                                    if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                                        manager.clear_focus(&app, _conversation_id).await;
-                                    }
-                                    continue;
-                                }
-                                Some(SessionCommand::Prompt { .. }) => continue,
-                                Some(SessionCommand::SetConfig { response, .. }) => {
-                                    let _ = response.send(Err("Claude Code 配置将在下一次会话启动时生效".into()));
-                                    continue;
-                                }
-                                None => {
-                                    stream_error = Some("Claude Code 会话在完成当前请求前已关闭".into());
-                                    break;
-                                },
+                                continue;
+                            }
+                            Err(error) => {
+                                stream_error = Some(error);
+                                break;
                             }
                         };
-                        let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
                         if let Some(id) = frame.get("session_id").and_then(Value::as_str) {
                             match confirm_claude_resume(
                                 pending_resume_session_id.as_deref(),
@@ -1159,13 +1320,14 @@ pub fn spawn_claude_session_task(
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
+                                    stream_failure_stage = AgentFailureStage::Resume;
                                     stream_error = Some(error);
                                     break;
                                 }
                             }
                             if pending_resume_session_id.is_some() {
                                 pending_resume_session_id = None;
-                                emit_snapshot(
+                                emit_snapshot(&event_identity,
                                     &app,
                                     _conversation_id,
                                     claude_session_snapshot(
@@ -1181,12 +1343,17 @@ pub fn spawn_claude_session_task(
                                 .await;
                             }
                             session_id = Some(id.into());
-                            if let Ok(db) = ConversationDatabase::new(&app) {
-                                let _ = db.upsert_agent_session_id(
-                                    _conversation_id,
-                                    CLAUDE_SDK_API_TYPE,
-                                    id,
-                                );
+                            event_identity.native_session_id = session_id.clone();
+                            let save_result = {
+                                let state = app.state::<crate::ClaudeSessionState>();
+                                let sessions = state.sessions.lock().await;
+                                super::agent_driver::persistence::persist_session_id(&app, &event_identity,
+                                    sessions.get(&_conversation_id).map(|entry| entry.run_id.as_str()), id)
+                            };
+                            if let Err(error) = save_result {
+                                stream_failure_stage = AgentFailureStage::Persistence;
+                                stream_error = Some(format!("Claude Code session persistence failed: {error}"));
+                                break;
                             }
                         }
                         match frame.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -1197,7 +1364,7 @@ pub fn spawn_claude_session_task(
                                 if let Some(effort) = frame.get("effort").and_then(Value::as_str) {
                                     config.effort = Some(effort.to_string());
                                 }
-                                emit_snapshot(
+                                emit_snapshot(&event_identity,
                                     &app,
                                     _conversation_id,
                                     claude_session_snapshot(
@@ -1218,7 +1385,7 @@ pub fn spawn_claude_session_task(
                                 {
                                     content.push_str(delta);
                                     persist(&app, message_id, &content, false);
-                                    emit_update(
+                                    emit_update(&event_identity,
                                         &window,
                                         _conversation_id,
                                         message_id,
@@ -1231,7 +1398,7 @@ pub fn spawn_claude_session_task(
                                 for block in message_content_blocks(&frame) {
                                     if let Some(plan) = claude_plan_from_tool_use(block) {
                                         current_plan = plan;
-                                        emit_snapshot(
+                                        emit_snapshot(&event_identity,
                                             &app,
                                             _conversation_id,
                                             claude_session_snapshot(
@@ -1249,7 +1416,7 @@ pub fn spawn_claude_session_task(
                                     }
                                     if let Some(plan) = claude_full_plan_from_tool_use(block) {
                                         let item_id = block.get("id").and_then(Value::as_str);
-                                        if let Ok(mut plan_message) = AgentPlanMessage::create(
+                                        match AgentPlanMessage::create_with_identity(
                                             &app,
                                             &window,
                                             _conversation_id,
@@ -1257,8 +1424,8 @@ pub fn spawn_claude_session_task(
                                             CLAUDE_SDK_API_TYPE,
                                             session_id.as_deref(),
                                             None,
-                                            item_id,
-                                        ) {
+                                            item_id, event_identity.clone()) {
+                                            Ok(mut plan_message) => {
                                             plan_message.replace_content(
                                                 &app,
                                                 &window,
@@ -1267,15 +1434,18 @@ pub fn spawn_claude_session_task(
                                                 true,
                                             );
                                             agent_plan_message = Some(plan_message);
-                                        } else {
-                                            stream_error = Some("Claude Code Plan 已返回，但 AIPP 创建 Plan 消息失败".to_string());
+                                            }
+                                            Err(error) => {
+                                                stream_failure_stage = AgentFailureStage::Persistence;
+                                                stream_error = Some(format!("Claude Code Plan 已返回，但 AIPP 创建 Plan 消息失败: {error}"));
+                                            }
                                         }
                                         continue;
                                     }
                                     if block.get("type").and_then(Value::as_str) == Some("tool_use")
                                     {
                                         sequence += 1;
-                                        emit_activity(
+                                        emit_activity(&event_identity,
                                             &window,
                                             _conversation_id,
                                             message_id,
@@ -1309,7 +1479,7 @@ pub fn spawn_claude_session_task(
                                             .and_then(Value::as_bool)
                                             .unwrap_or(false);
                                         sequence += 1;
-                                        emit_activity(
+                                        emit_activity(&event_identity,
                                             &window,
                                             _conversation_id,
                                             message_id,
@@ -1331,26 +1501,19 @@ pub fn spawn_claude_session_task(
                             }
                             "control_request" => {
                                 if let Err(error) =
-                                    handle_permission(&app, _conversation_id, &frame, &mut stdin)
-                                        .await
+                                    handle_permission(
+                                        &app, _conversation_id, &frame, &task_run_id, config.instance_id, &mut stdin,
+                                        &mut cancellation, cancel_generation,
+                                    ).await
                                 {
+                                    stream_failure_stage = AgentFailureStage::Permission;
                                     stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
                                     break;
                                 }
                             }
                             "result" => {
-                                if frame.get("is_error").and_then(Value::as_bool) == Some(true)
-                                    || frame.get("subtype").and_then(Value::as_str) == Some("error")
-                                    || frame.get("error").is_some_and(|value| !value.is_null())
-                                {
-                                    stream_error = Some(
-                                        frame
-                                            .get("error")
-                                            .and_then(Value::as_str)
-                                            .or_else(|| frame.get("result").and_then(Value::as_str))
-                                            .unwrap_or("Claude Code 返回错误")
-                                            .to_string(),
-                                    );
+                                if let Some(error) = claude_result_error(&frame) {
+                                    stream_error = Some(error);
                                     break;
                                 }
                                 if content.is_empty() {
@@ -1372,22 +1535,21 @@ pub fn spawn_claude_session_task(
                         }
                     }
                     if let Some(error) = stream_error.as_deref() {
-                        emit_claude_failure(&app, _conversation_id, message_id, &window, error);
+                        emit_claude_run_failure(&app, &event_identity, message_id, &window, error, stream_failure_stage, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
                         if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                            manager.clear_focus(&app, _conversation_id).await;
+                            manager.clear_agent_focus(&app, &event_identity, false).await;
                         }
                         break;
                     }
                     if content.is_empty() && agent_plan_message.is_none() {
-                        emit_claude_failure(
+                        emit_claude_run_failure(
                             &app,
-                            _conversation_id,
+                            &event_identity,
                             message_id,
                             &window,
-                            "Claude Code 本轮未返回任何内容",
-                        );
+                            "Claude Code 本轮未返回任何内容", AgentFailureStage::Stream, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
                         if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                            manager.clear_focus(&app, _conversation_id).await;
+                            manager.clear_agent_focus(&app, &event_identity, false).await;
                         }
                         break;
                     }
@@ -1395,9 +1557,9 @@ pub fn spawn_claude_session_task(
                     if !usage.is_null() {
                         persist_usage(&app, message_id, &usage);
                     }
-                    emit_update(&window, _conversation_id, message_id, &content, true);
-                    let _ = window.emit(
-                        &format!("conversation_event_{}", _conversation_id),
+                    emit_update(&event_identity, &window, _conversation_id, message_id, &content, true);
+                    let _ = emit_to_window(
+                        &window, event_identity.clone(),
                         ConversationEvent {
                             r#type: "stream_complete".into(),
                             data: json!({
@@ -1414,9 +1576,9 @@ pub fn spawn_claude_session_task(
                     };
                     handle_agent_success(&app, &window, _conversation_id, success_content, AgentKind::ClaudeCode).await;
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
-                        manager.clear_focus(&app, _conversation_id).await;
+                        manager.clear_agent_focus(&app, &event_identity, false).await;
                     }
-                    emit_snapshot(
+                    emit_snapshot(&event_identity,
                         &app,
                         _conversation_id,
                         claude_session_snapshot(
@@ -1433,7 +1595,7 @@ pub fn spawn_claude_session_task(
                 }
             }
         }
-        cleanup_claude_session(&app, _conversation_id, &task_run_id).await;
+        cleanup_claude_session(&app, _conversation_id, &task_run_id, config.instance_id).await;
     });
     handle
 }
@@ -1753,3 +1915,11 @@ mod tests {
         assert!(updated.get("questions").is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "claude_sdk_lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+#[cfg(all(test, unix))]
+#[path = "claude_sdk_protocol_tests.rs"]
+mod protocol_tests;

@@ -922,3 +922,153 @@ fn test_delegated_token_usage_is_empty_without_delegation() {
     assert_eq!(usage, DelegatedTokenUsage::default());
     assert!(by_model.is_empty());
 }
+
+fn agent_session_instance_db() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    ensure_agent_session_table(&conn).unwrap();
+    conn
+}
+
+fn scoped_agent_session(conn: &Connection, conversation_id: i64, driver: &str, instance: Option<i64>) -> Option<String> {
+    ConversationDatabase::get_agent_session_id_for_instance_with_conn(
+        conn, conversation_id, driver, instance,
+    ).unwrap()
+}
+
+fn save_scoped_agent_session(conn: &Connection, conversation_id: i64, driver: &str, instance: Option<i64>, session_id: &str) {
+    ConversationDatabase::upsert_agent_session_id_for_instance_with_conn(
+        conn, conversation_id, driver, instance, session_id,
+    ).unwrap();
+}
+
+/// The persisted owner, rather than the currently selected provider, authorizes restore.
+#[test]
+fn test_agent_session_instance_same_owner_restores_and_mismatches_do_not() {
+    let conn = agent_session_instance_db();
+    for driver in ["acp", "codex_app_server", "claude_sdk", "custom_driver"] {
+        save_scoped_agent_session(&conn, 7, driver, Some(11), "owned-session");
+        assert_eq!(scoped_agent_session(&conn, 7, driver, Some(11)).as_deref(), Some("owned-session"));
+        assert_eq!(scoped_agent_session(&conn, 7, driver, Some(12)), None);
+        assert_eq!(scoped_agent_session(&conn, 7, driver, None), None);
+        assert_eq!(scoped_agent_session(&conn, 8, driver, Some(11)), None);
+    }
+    assert_eq!(scoped_agent_session(&conn, 7, "unknown_driver", Some(11)), None);
+}
+
+/// Existing single-driver latest mapping semantics stay intact, without A/B reuse.
+#[test]
+fn test_agent_session_instance_switch_replaces_latest_mapping_without_cross_restore() {
+    let conn = agent_session_instance_db();
+    save_scoped_agent_session(&conn, 7, "codex_app_server", Some(11), "provider-a-thread");
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(12)), None);
+    save_scoped_agent_session(&conn, 7, "codex_app_server", Some(12), "provider-b-thread");
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(11)), None);
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(12)).as_deref(), Some("provider-b-thread"));
+    save_scoped_agent_session(&conn, 7, "codex_app_server", Some(12), "provider-b-next-thread");
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(12)).as_deref(), Some("provider-b-next-thread"));
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM acp_session", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 1);
+}
+
+/// Reads preserve historical resume behavior but cannot manufacture owner evidence.
+#[test]
+fn test_agent_session_instance_legacy_owner_stamped_only_by_successful_save() {
+    let conn = agent_session_instance_db();
+    save_scoped_agent_session(&conn, 7, "claude_sdk", None, "legacy-session");
+    for requested in [None, Some(11), Some(12)] {
+        assert_eq!(scoped_agent_session(&conn, 7, "claude_sdk", requested).as_deref(), Some("legacy-session"));
+    }
+    let owner: Option<i64> = conn.query_row(
+        "SELECT provider_instance_id FROM acp_session WHERE conversation_id = 7 AND agent_kind = 'claude_sdk'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(owner, None, "A failed/interrupted resume must leave ownership unclaimed");
+    save_scoped_agent_session(&conn, 7, "claude_sdk", Some(11), "legacy-session");
+    assert_eq!(scoped_agent_session(&conn, 7, "claude_sdk", Some(11)).as_deref(), Some("legacy-session"));
+    assert_eq!(scoped_agent_session(&conn, 7, "claude_sdk", Some(12)), None);
+    assert_eq!(scoped_agent_session(&conn, 7, "claude_sdk", None), None);
+}
+
+#[test]
+fn test_agent_session_instance_unscoped_write_cannot_erase_established_owner() {
+    let conn = agent_session_instance_db();
+    save_scoped_agent_session(&conn, 7, "acp", Some(11), "owned-session");
+    let error = ConversationDatabase::upsert_agent_session_id_for_instance_with_conn(
+        &conn, 7, "acp", None, "unowned-replacement",
+    ).unwrap_err().to_string();
+    assert!(error.contains("without instance identity"));
+    assert_eq!(scoped_agent_session(&conn, 7, "acp", Some(11)).as_deref(), Some("owned-session"));
+    assert_eq!(scoped_agent_session(&conn, 7, "acp", Some(12)), None);
+    // Existing cleanup/delete callers intentionally use an unfiltered accessor.
+    assert_eq!(ConversationDatabase::get_agent_session_id_with_conn(&conn, 7, "acp").unwrap().as_deref(), Some("owned-session"));
+}
+
+/// The oldest ACP schema migrates without discarding the session or guessing a provider.
+#[test]
+fn test_agent_session_instance_migrates_original_schema_without_owner_inference() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE acp_session (
+            conversation_id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO acp_session VALUES (7, 'old-acp-session', '2025-01-02 03:04:05');"
+    ).unwrap();
+    ensure_agent_session_table(&conn).unwrap();
+    ensure_agent_session_table(&conn).unwrap();
+    let row: (String, String, Option<i64>, String) = conn.query_row(
+        "SELECT session_id, agent_kind, provider_instance_id, updated_time FROM acp_session WHERE conversation_id = 7",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(row, ("old-acp-session".into(), "acp".into(), None, "2025-01-02 03:04:05".into()));
+    assert_eq!(scoped_agent_session(&conn, 7, "acp", Some(11)).as_deref(), Some("old-acp-session"));
+    save_scoped_agent_session(&conn, 7, "acp", Some(11), "old-acp-session");
+    assert_eq!(scoped_agent_session(&conn, 7, "acp", Some(12)), None);
+}
+
+/// The current composite-key schema gains only nullable ownership metadata.
+#[test]
+fn test_agent_session_instance_migrates_composite_schema_and_keeps_driver_rows() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE acp_session (
+            conversation_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_kind TEXT NOT NULL DEFAULT 'acp',
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (conversation_id, agent_kind)
+        );
+        INSERT INTO acp_session (conversation_id, agent_kind, session_id) VALUES
+            (7, 'acp', 'acp-legacy'), (7, 'codex_app_server', 'codex-legacy');"
+    ).unwrap();
+    ensure_agent_session_table(&conn).unwrap();
+    assert_eq!(scoped_agent_session(&conn, 7, "acp", Some(11)).as_deref(), Some("acp-legacy"));
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(12)).as_deref(), Some("codex-legacy"));
+    save_scoped_agent_session(&conn, 7, "codex_app_server", Some(12), "codex-legacy");
+    ensure_agent_session_table(&conn).unwrap();
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(11)), None);
+    assert_eq!(scoped_agent_session(&conn, 7, "acp", Some(11)).as_deref(), Some("acp-legacy"));
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM acp_session", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 2);
+}
+
+/// Rebuilding an older primary key must preserve already recorded ownership, too.
+#[test]
+fn test_agent_session_instance_schema_rebuild_preserves_known_owner() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE acp_session (
+            conversation_id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            agent_kind TEXT NOT NULL DEFAULT 'acp',
+            provider_instance_id INTEGER,
+            updated_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO acp_session (conversation_id, session_id, agent_kind, provider_instance_id)
+            VALUES (7, 'owned-thread', 'codex_app_server', 12);"
+    ).unwrap();
+    ensure_agent_session_table(&conn).unwrap();
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(12)).as_deref(), Some("owned-thread"));
+    assert_eq!(scoped_agent_session(&conn, 7, "codex_app_server", Some(11)), None);
+}

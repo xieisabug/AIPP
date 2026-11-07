@@ -1,7 +1,7 @@
 import React from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useConversationEvents } from "@/hooks/useConversationEvents";
+import { normalizeAcpSessionState, useConversationEvents } from "@/hooks/useConversationEvents";
 import type { AcpConversationSessionState } from "@/data/Conversation";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
@@ -119,5 +119,48 @@ describe("useConversationEvents ACP session state", () => {
         expect(screen.getByTestId("config-count")).toHaveTextContent("1");
         expect(screen.getByTestId("context-used")).toHaveTextContent("2048");
         expect(screen.getByTestId("context-size")).toHaveTextContent("8192");
+    });
+});
+
+
+describe("normalizeAcpSessionState capability compatibility", () => {
+    it("should keep capability absence unknown when reading a legacy snapshot", () => {
+        const normalized = normalizeAcpSessionState(baseAcpSessionState());
+        expect(normalized?.agent_capabilities).toBeNull();
+        expect(normalized?.prompt_capabilities.image).toBe(true);
+        expect(normalized?.config_options[0].current_value).toBe("sonnet");
+    });
+
+    it("should preserve live capability evidence and opaque choices when normalizing", () => {
+        const capabilities = {
+            schema_version: 1,
+            driver_id: "vendor-agent",
+            discovery: "session",
+            configuration: {
+                source: "session",
+                complete: true,
+                options: [{ id: "vendor/model:v2", current_value: "", options: [{ value: " opaque value " }] }],
+            },
+            operations: { set_config_option: { support: "unknown", source: "unknown" } },
+        };
+        const normalized = normalizeAcpSessionState({
+            conversationId: 42,
+            sessionId: "native-session",
+            agentCapabilities: capabilities,
+            configOptions: [{ id: "vendor/model:v2", currentValue: "", options: [{ value: " opaque value ", groupName: "vendor" }] }],
+        });
+        expect(normalized?.agent_capabilities).toBe(capabilities);
+        expect(normalized?.agent_capabilities?.operations.set_config_option.support).toBe("unknown");
+        expect(normalized?.config_options[0].options[0].value).toBe(" opaque value ");
+        expect(normalized?.config_options[0].options[0].group_name).toBe("vendor");
+        expect(normalized?.config_options[0].current_value).toBe("");
+    });
+
+    it("should replace capability data when a new session snapshot arrives", () => {
+        const first = normalizeAcpSessionState({ ...baseAcpSessionState(), agent_capabilities: { driver_id: "provider-a" } });
+        const second = normalizeAcpSessionState({ ...baseAcpSessionState(), agent_capabilities: { driver_id: "provider-b" } });
+        expect(first?.agent_capabilities?.driver_id).toBe("provider-a");
+        expect(second?.agent_capabilities?.driver_id).toBe("provider-b");
+        expect(normalizeAcpSessionState(null)).toBeNull();
     });
 });

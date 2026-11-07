@@ -1,21 +1,10 @@
 use super::assistant_api::AssistantDetail;
-use crate::api::ai::acp::{
-    apply_network_proxy_to_env_vars, build_selected_mcp_tools_payload, extract_acp_config,
-    refresh_acp_config_signature,
-    refresh_acp_selected_mcp_tools_payload, spawn_agent_idle_reaper_once,
-    spawn_acp_session_task,
-};
 use crate::api::ai::chat::{
     extract_assistant_from_message, handle_non_stream_chat as ai_handle_non_stream_chat,
     handle_stream_chat as ai_handle_stream_chat,
 };
-use crate::api::ai::codex_app_server::{
-    emit_codex_failure, extract_codex_app_server_config, refresh_codex_session_signature,
-    spawn_codex_session_task, CodexSessionEntry, CODEX_APP_SERVER_API_TYPE,
-    CODEX_APPROVAL_POLICIES, CODEX_SANDBOX_MODES,
-};
-use crate::api::ai::claude_sdk::{claude_model_choices, emit_claude_failure, extract_claude_sdk_config, is_claude_code_provider, prepare_claude_mcp_bridge, refresh_claude_session_signature, spawn_claude_session_task, ClaudeSessionEntry, CLAUDE_SDK_API_TYPE};
-use crate::api::assistant_api::CLAUDE_CODE_DEFAULT_MODEL;
+#[cfg(test)]
+use crate::api::ai::claude_sdk::is_claude_code_provider;
 use crate::api::ai::config::{
     get_network_proxy_from_config, get_openai_prompt_cache_key_enabled,
     get_openai_responses_stateful_enabled, get_request_timeout_from_config,
@@ -33,7 +22,7 @@ use crate::api::ai::events::{
 };
 use crate::api::ai::title::{generate_title, maybe_generate_title_from_conversation_if_needed};
 use crate::api::ai::types::{AiRequest, AiResponse, McpOverrideConfig};
-use crate::api::assistant_api::{get_assistant, get_assistants, resolve_acp_provider_id};
+use crate::api::assistant_api::{get_assistant, get_assistants};
 use crate::api::butler_api::{is_butler_system_assistant_name, mark_butler_task_cancelled};
 
 use crate::api::genai_client;
@@ -57,7 +46,7 @@ use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::template_engine::build_template_engine;
 use crate::utils::window_utils::send_conversation_event_to_chat_windows;
-use crate::{AcpSessionState, AppState, ClaudeSessionState, CodexSessionState, FeatureConfigState};
+use crate::{AcpSessionState, AppState, FeatureConfigState};
 use anyhow::Context;
 use genai::chat::Tool;
 use std::collections::HashMap;
@@ -69,7 +58,7 @@ use tracing::{debug, error, info, instrument, warn};
 const QUEUE_KIND_NORMAL: &str = "normal";
 const QUEUE_KIND_INTERRUPT: &str = "interrupt";
 
-fn parse_agent_model_override(value: &str) -> Option<(&str, i64)> {
+pub(crate) fn parse_agent_model_override(value: &str) -> Option<(&str, i64)> {
     let (model, provider_id) = value.split_once("%%")?;
     let provider_id = provider_id.parse::<i64>().ok().filter(|id| *id > 0)?;
     let model = model.trim();
@@ -1160,11 +1149,11 @@ fn build_tool_config(
 }
 
 #[tauri::command]
-#[instrument(skip(app_handle, state, acp_session_state, feature_config_state, message_token_manager, activity_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
+#[instrument(skip(app_handle, state, _acp_session_state, feature_config_state, message_token_manager, activity_manager, window, request, override_model_config, override_prompt, override_mcp_config), fields(assistant_id = request.assistant_id, conversation_id = %request.conversation_id, override_model_id = request.override_model_id))]
 pub async fn ask_ai(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
-    acp_session_state: State<'_, AcpSessionState>,
+    _acp_session_state: State<'_, AcpSessionState>,
     feature_config_state: State<'_, FeatureConfigState>,
     message_token_manager: State<'_, MessageTokenManager>,
     activity_manager: State<'_, ConversationActivityManager>,
@@ -1176,7 +1165,6 @@ pub async fn ask_ai(
     runtime_user_prompt_prefix: Option<String>,
     relay_origin: Option<String>,
 ) -> Result<AiResponse, AppError> {
-    let codex_session_state = app_handle.state::<CodexSessionState>();
     info!("Ask AI start");
     debug!(
         ?request,
@@ -1495,441 +1483,24 @@ pub async fn ask_ai(
     let _request_prompt_result_with_context_clone = request_prompt_result_with_context.clone();
 
     let app_handle_clone = app_handle.clone();
-    let window_clone = window.clone(); // 提前克隆，供 ACP 分支使用
 
     // 检查是否是 ACP 助手类型（assistant_type === 4）
     // 这个检查必须在获取 model_detail 之前，因为 ACP 助手可能没有有效的模型配置
     if assistant_detail.assistant.assistant_type == Some(4) {
-        info!("ACP assistant detected (type=4), routing to ACP session");
-
-        // 移动端不支持本机 CLI Agent；禁止静默换模型/通道
-        if cfg!(mobile) {
-            return Err(AppError::InternalError(
-                crate::api::system_api::mobile_unsupported_error(
-                    "本地 CLI Agent（Codex/Claude/ACP）",
-                ),
-            ));
-        }
-
-        // 获取 provider 配置
-        // ACP 配置可能在 llm_provider_config 表中（如 acp_cli_command）
-        let agent_provider_id = resolve_acp_provider_id(&assistant_detail.model, &assistant_detail.model_configs);
-        let override_provider_id = processed_request
-            .override_model_id
-            .as_deref()
-            .and_then(parse_agent_model_override)
-            .map(|(_, provider_id)| provider_id);
-        let routing_provider_id = override_provider_id.or(agent_provider_id);
-        if let Some(provider_id) = override_provider_id {
-            info!(
-                default_provider_id = ?agent_provider_id,
-                override_provider_id = provider_id,
-                "Agent model override selects provider for routing"
-            );
-        }
-        let (provider_api_type, provider_configs) = if let Some(provider_id) = routing_provider_id {
-            debug!("ACP: Getting provider config for provider_id={}", provider_id);
-
-            let llm_db = LLMDatabase::new(&app_handle).map_err(|e| {
-                AppError::UnknownError(format!("Failed to open LLM database: {}", e))
-            })?;
-
-            let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => AppError::UnknownError(format!(
-                    "Agent 助手 {} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商",
-                    assistant_detail.assistant.id
-                )),
-                other => AppError::from(other),
-            })?;
-            let configs = llm_db
-                .get_llm_provider_config(provider_id)
-                .map_err(AppError::from)?;
-            (provider.api_type, configs)
-        } else {
-            return Err(AppError::UnknownError(
-                "Agent 助手尚未配置模型提供商".to_string(),
-            ));
-        };
-
-        let provider_api_type = if is_claude_code_provider(&provider_api_type, &provider_configs) {
-            CLAUDE_SDK_API_TYPE.to_string()
-        } else {
-            provider_api_type
-        };
-        if provider_api_type == CLAUDE_SDK_API_TYPE {
-            info!("Agent provider routes through Claude Code stream-json");
-        }
-
-        debug!(
-            provider_api_type = %provider_api_type,
-            config_names = ?provider_configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
-            "Agent provider configuration loaded"
-        );
-
-        if provider_api_type == CODEX_APP_SERVER_API_TYPE {
-            spawn_agent_idle_reaper_once(app_handle.clone());
-            info!(conversation_id, "Codex app-server provider detected");
-            let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
-            let mut codex_config = extract_codex_app_server_config(
-                &assistant_detail.model_configs,
-                &provider_configs,
-                model_code,
-            )?;
-            if let Some((model, _)) = processed_request.override_model_id.as_deref().and_then(parse_agent_model_override) {
-                codex_config.model = Some(model.to_string());
-            }
-            if let Some(config) = override_model_config.as_ref() {
-                if let Some(effort) = config.get("reasoning_effort").and_then(|value| value.as_str()) { codex_config.reasoning_effort = Some(effort.to_string()); }
-                // 新对话界面传入的会话级审批策略/沙箱覆盖，非法值直接报错（不做回退）
-                if let Some(approval) = config.get("approval_policy").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
-                    if !CODEX_APPROVAL_POLICIES.contains(&approval) { return Err(AppError::UnknownError(format!("Codex 不支持审批策略：{approval}"))); }
-                    codex_config.approval_policy = Some(approval.to_string());
-                }
-                if let Some(sandbox) = config.get("sandbox").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
-                    if !CODEX_SANDBOX_MODES.contains(&sandbox) { return Err(AppError::UnknownError(format!("Codex 不支持沙箱模式：{sandbox}"))); }
-                    codex_config.sandbox = Some(sandbox.to_string());
-                }
-                if let Some(mode) = config.get("collaboration_mode").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
-                    if !matches!(mode, "default" | "plan") { return Err(AppError::UnknownError(format!("Codex 不支持协作模式：{mode}"))); }
-                    codex_config.collaboration_mode = Some(mode.to_string());
-                }
-            }
-            // 与 ACP 通道一致：挂载助手绑定的 MCP 工具（桥接注入），payload 计入签名
-            codex_config.selected_mcp_tools_payload =
-                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id, Some(conversation_id))
-                    .map_err(AppError::UnknownError)?;
-            refresh_codex_session_signature(&mut codex_config);
-            let response_message = add_message(
-                &app_handle,
-                None,
+        return crate::api::ai::agent_driver::send_turn(
+            app_handle.clone(),
+            window.clone(),
+            crate::api::ai::agent_driver::AgentTurnRequest {
+                assistant: &assistant_detail,
                 conversation_id,
-                "response".to_string(),
-                String::new(),
-                Some(0),
-                Some("codex-app-server".to_string()),
-                Some(chrono::Utc::now()),
-                None,
-                0,
-                None,
-                None,
-            )?;
-            let add_event = ConversationEvent {
-                r#type: "message_add".to_string(),
-                data: serde_json::to_value(MessageAddEvent {
-                    message_id: response_message.id,
-                    message_type: "response".to_string(),
-                })
-                .unwrap(),
-            };
-            let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), add_event);
-            let handle = {
-                let mut sessions = codex_session_state.sessions.lock().await;
-                if sessions.get(&conversation_id).is_some_and(|entry| entry.config_signature == codex_config.session_signature) {
-                    let entry = sessions.get_mut(&conversation_id).expect("checked above");
-                    entry.touch();
-                    entry.handle.clone()
-                } else {
-                    let handle = spawn_codex_session_task(app_handle.clone(), conversation_id, codex_config.clone());
-                    if let Some(previous) = sessions.get(&conversation_id) {
-                        let reason = format!(
-                            "ask_ai 因用户本次请求的 Codex 配置发生变化而替换现有会话（old_run_id={}, new_run_id={}）",
-                            previous.run_id,
-                            handle.run_id()
-                        );
-                        warn!(conversation_id, reason, "Replacing Codex session from ask_ai");
-                        previous.handle.shutdown(reason);
-                    }
-                    sessions.insert(conversation_id, CodexSessionEntry::new(handle.clone(), conversation_id, codex_config.session_signature.clone()));
-                    handle
-                }
-            };
-            if let Err(error) = handle.send_prompt(
-                response_message.id,
-                runtime_prompt_result.clone(),
-                window_clone.clone(),
-            ) {
-                emit_codex_failure(
-                    &app_handle,
-                    conversation_id,
-                    response_message.id,
-                    &window_clone,
-                    &error.to_string(),
-                );
-                activity_manager.clear_focus(&app_handle, conversation_id).await;
-                return Err(error);
-            }
-            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt, error_message: None });
-        }
-
-        if provider_api_type == CLAUDE_SDK_API_TYPE {
-            spawn_agent_idle_reaper_once(app_handle.clone());
-            info!(conversation_id, "Entering Claude Code stream-json provider branch");
-            let llm_db = LLMDatabase::new(&app_handle).map_err(AppError::from)?;
-            let model_code = assistant_detail.model.first().map(|model| model.model_code.clone()).filter(|value| !value.trim().is_empty());
-            let default_provider_id = agent_provider_id.ok_or_else(|| {
-                AppError::UnknownError("Claude Code 助手没有配置模型提供商".to_string())
-            })?;
-            let selected_provider_id = processed_request.override_model_id.as_deref()
-                .and_then(parse_agent_model_override)
-                .map(|(_, provider_id)| provider_id)
-                .unwrap_or(default_provider_id);
-            let selected_provider_configs = llm_db.get_llm_provider_config(selected_provider_id).map_err(AppError::from)?;
-            let selected_provider = llm_db.get_llm_provider(selected_provider_id).map_err(AppError::from)?;
-            if !is_claude_code_provider(&selected_provider.api_type, &selected_provider_configs) {
-                return Err(AppError::UnknownError("Claude Code 只能使用 Claude Code 默认配置或 Anthropic Provider".into()));
-            }
-            debug!(
-                provider_id = selected_provider_id,
-                config_names = ?selected_provider_configs.iter().map(|config| config.name.as_str()).collect::<Vec<_>>(),
-                "Loaded Claude Code provider configs"
-            );
-            let model_choices = claude_model_choices(
-                &llm_db.get_llm_models(selected_provider_id.to_string()).map_err(|e| AppError::UnknownError(e.to_string()))?,
-            );
-            let selected_model = processed_request.override_model_id.as_deref()
-                .and_then(parse_agent_model_override)
-                .map(|(model, _)| model.to_string())
-                .or(model_code);
-            let selected_model = selected_model.filter(|model| model != CLAUDE_CODE_DEFAULT_MODEL);
-            let mut config = extract_claude_sdk_config(&assistant_detail.model_configs, &selected_provider_configs, selected_model, model_choices)?;
-            if let Some((model, _)) = processed_request.override_model_id.as_deref().and_then(parse_agent_model_override) {
-                config.model = (model != CLAUDE_CODE_DEFAULT_MODEL).then(|| model.to_string());
-            }
-            if let Some(overrides) = override_model_config.as_ref() {
-                if let Some(effort) = overrides.get("claude_effort").and_then(|value| value.as_str()) { config.effort = (effort != "default").then_some(effort.to_string()); }
-                if let Some(mode) = overrides.get("permission_mode").and_then(|value| value.as_str()).filter(|value| !value.trim().is_empty()) {
-                    if !matches!(mode, "default" | "plan") { return Err(AppError::UnknownError(format!("Claude Code 不支持工作模式：{mode}"))); }
-                    config.permission_mode = Some(mode.to_string());
-                }
-            }
-            config.selected_mcp_tools_payload =
-                build_selected_mcp_tools_payload(&app_handle, assistant_detail.assistant.id, Some(conversation_id))
-                    .map_err(AppError::UnknownError)?;
-            refresh_claude_session_signature(&mut config);
-            prepare_claude_mcp_bridge(&app_handle, conversation_id, &mut config)
-                .await
-                .map_err(|error| AppError::UnknownError(format!("Claude Code MCP bridge 初始化失败：{error}")))?;
-            info!(
-                conversation_id,
-                provider_id = selected_provider_id,
-                model = ?config.model,
-                cli = %config.cli_command,
-                "Claude Code provider selected; starting stream-json session"
-            );
-            let response_message = add_message(&app_handle, None, conversation_id, "response".to_string(), String::new(), Some(0), Some("claude-code".to_string()), Some(chrono::Utc::now()), None, 0, None, None)?;
-            let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), ConversationEvent { r#type: "message_add".to_string(), data: serde_json::to_value(MessageAddEvent { message_id: response_message.id, message_type: "response".to_string() }).unwrap() });
-            let claude_state = app_handle.state::<ClaudeSessionState>();
-            let handle = {
-                let mut sessions = claude_state.sessions.lock().await;
-                if sessions
-                    .get(&conversation_id)
-                    .is_some_and(|entry| entry.config_signature == config.session_signature)
-                {
-                    let entry = sessions.get_mut(&conversation_id).expect("checked above");
-                    entry.touch();
-                    entry.handle.clone()
-                } else {
-                    let handle = spawn_claude_session_task(app_handle.clone(), conversation_id, config.clone());
-                    sessions.insert(
-                        conversation_id,
-                        ClaudeSessionEntry::new(
-                            handle.clone(),
-                            conversation_id,
-                            config.session_signature.clone(),
-                            config.model.clone(),
-                            config.permission_mode.clone(),
-                            config.effort.clone(),
-                        ),
-                    );
-                    handle
-                }
-            };
-            if let Err(error) = handle.send_prompt(
-                response_message.id,
-                runtime_prompt_result.clone(),
-                window_clone.clone(),
-            ) {
-                emit_claude_failure(
-                    &app_handle,
-                    conversation_id,
-                    response_message.id,
-                    &window_clone,
-                    &error.to_string(),
-                );
-                activity_manager.clear_focus(&app_handle, conversation_id).await;
-                return Err(error);
-            }
-            return Ok(AiResponse { conversation_id, request_prompt_result_with_context: processed_request.prompt, error_message: None });
-        }
-
-        if provider_api_type != "acp" {
-            return Err(AppError::UnknownError(format!("不支持的 Agent provider api_type: {provider_api_type}")));
-        }
-
-        // 从 assistant_model_configs 和 llm_provider_configs 提取 ACP 配置
-        let proxy_enabled = provider_configs
-            .iter()
-            .find(|config| config.name == "proxy_enabled")
-            .and_then(|config| config.value.parse::<bool>().ok())
-            .unwrap_or(false);
-        let network_proxy =
-            proxy_enabled.then(|| get_network_proxy_from_config(&_config_feature_map)).flatten();
-        let mut acp_config =
-            extract_acp_config(&assistant_detail.model_configs, &provider_configs)?;
-        acp_config.model = processed_request
-            .override_model_id
-            .as_deref()
-            .and_then(parse_agent_model_override)
-            .map(|(model, _)| model.to_string())
-            .or_else(|| {
-                assistant_detail
-                    .model
-                    .first()
-                    .map(|model| model.model_code.trim())
-                    .filter(|model| !model.is_empty())
-                    .map(str::to_string)
-            });
-        if let Some(thought_level) = override_model_config
-            .as_ref()
-            .and_then(|config| config.get("reasoning_effort"))
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            acp_config.thought_level = Some(thought_level.to_string());
-        }
-        if let Some(proxy_url) = network_proxy.as_deref() {
-            let injected = apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
-            info!(
-                proxy_url = %proxy_url,
-                injected,
-                conversation_id,
-                "ACP proxy env vars applied"
-            );
-        }
-        refresh_acp_selected_mcp_tools_payload(
-            &app_handle,
-            assistant_detail.assistant.id,
-            Some(conversation_id),
-            &mut acp_config,
-        )
-        .map_err(AppError::UnknownError)?;
-        refresh_acp_config_signature(&mut acp_config);
-        info!(
-            "ACP config: cli_command={}, working_directory={}, env_vars={}, additional_args={}",
-            acp_config.cli_command,
-            acp_config.working_directory.display(),
-            acp_config.env_vars.len(),
-            acp_config.additional_args.len()
-        );
-
-        // 创建初始响应消息（ACP 不需要真实的 model_id，使用占位值）
-        let response_message = add_message(
-            &app_handle,
-            None,
-            conversation_id,
-            "response".to_string(),
-            String::new(),           // 初始为空，通过流式更新
-            Some(0),                 // ACP 使用占位 model_id = 0
-            Some("acp".to_string()), // ACP 使用占位 model_code
-            Some(chrono::Utc::now()),
-            None,
-            0,
-            None,
-            None,
-        )?;
-
-        // 发送消息添加事件
-        let add_event = ConversationEvent {
-            r#type: "message_add".to_string(),
-            data: serde_json::to_value(MessageAddEvent {
-                message_id: response_message.id,
-                message_type: "response".to_string(),
-            })
-            .unwrap(),
-        };
-        let _ = window.emit(format!("conversation_event_{}", conversation_id).as_str(), add_event);
-
-        let prompt_clone = runtime_prompt_result.clone();
-        let acp_attachments = init_message_list
-            .iter()
-            .rev()
-            .find(|(message_type, _, _)| message_type == "user")
-            .map(|(_, _, attachments)| attachments.clone())
-            .unwrap_or_default();
-
-        spawn_agent_idle_reaper_once(app_handle_clone.clone());
-
-        let session_handle = {
-            let mut sessions = acp_session_state.sessions.lock().await;
-            if sessions
-                .get(&conversation_id)
-                .is_some_and(|entry| entry.config_signature == acp_config.session_signature)
-            {
-                let entry = sessions.get_mut(&conversation_id).expect("checked above");
-                entry.touch();
-                entry.handle.clone()
-            } else {
-                if sessions.contains_key(&conversation_id) {
-                    info!(
-                        conversation_id,
-                        "ACP session config changed; replacing existing session"
-                    );
-                }
-                let handle = spawn_acp_session_task(
-                    app_handle_clone.clone(),
-                    conversation_id,
-                    acp_config.clone(),
-                );
-                sessions.insert(
-                    conversation_id,
-                    crate::api::ai::acp::AcpSessionEntry::new(
-                        handle.clone(),
-                        conversation_id,
-                        acp_config.session_signature.clone(),
-                    ),
-                );
-                handle
-            }
-        };
-
-        if let Err(e) = session_handle.send_prompt(
-            response_message.id,
-            prompt_clone.clone(),
-            acp_attachments.clone(),
-            window_clone.clone(),
-        ) {
-            warn!(conversation_id, error = %e, "ACP session send prompt failed, respawning session");
-            let replacement_handle = {
-                let mut sessions = acp_session_state.sessions.lock().await;
-                let handle = spawn_acp_session_task(
-                    app_handle_clone.clone(),
-                    conversation_id,
-                    acp_config.clone(),
-                );
-                sessions.insert(
-                    conversation_id,
-                    crate::api::ai::acp::AcpSessionEntry::new(
-                        handle.clone(),
-                        conversation_id,
-                        acp_config.session_signature.clone(),
-                    ),
-                );
-                handle
-            };
-            replacement_handle
-                .send_prompt(response_message.id, prompt_clone, acp_attachments, window_clone)
-                .map_err(|error| {
-                    error!(conversation_id, error = %error, "ACP session resend prompt failed");
-                    error
-                })?;
-        }
-
-        return Ok(AiResponse {
-            conversation_id,
-            request_prompt_result_with_context: processed_request.prompt,
-            error_message: None,
-        });
+                prompt: runtime_prompt_result,
+                display_prompt: processed_request.prompt,
+                override_model_id: processed_request.override_model_id,
+                overrides: &override_model_config,
+                feature_configs: &_config_feature_map,
+                messages: &init_message_list,
+            },
+        ).await;
     }
 
     // 非 ACP 助手，继续原有流程
@@ -1961,7 +1532,7 @@ pub async fn ask_ai(
         }
     };
 
-    // 重新克隆 window，因为前面的 ACP 分支可能已经消费了
+    // 为标准模型的异步任务克隆窗口句柄
     let window_clone = window.clone(); // 在移动之前克隆
     let model_id = model_detail.model.id; // 提前获取模型ID
     let provider_id = model_detail.provider.id;
@@ -3288,30 +2859,15 @@ pub async fn tool_result_continue_ask_ai(
 pub async fn cancel_ai(
     app_handle: tauri::AppHandle,
     feature_config_state: State<'_, FeatureConfigState>,
-    acp_session_state: State<'_, AcpSessionState>,
+    _acp_session_state: State<'_, AcpSessionState>,
     message_token_manager: State<'_, MessageTokenManager>,
     window: tauri::Window,
     conversation_id: i64,
 ) -> Result<(), String> {
-    let codex_session_state = app_handle.state::<CodexSessionState>();
-    let claude_session_state = app_handle.state::<ClaudeSessionState>();
-    let acp_session_handle = {
-        let sessions = acp_session_state.sessions.lock().await;
-        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
-    };
-
-    let codex_session_handle = {
-        let sessions = codex_session_state.sessions.lock().await;
-        sessions.get(&conversation_id).map(|entry| entry.handle.clone())
-    };
-    let claude_session_handle = { let sessions = claude_session_state.sessions.lock().await; sessions.get(&conversation_id).map(|entry| entry.handle.clone()) };
-
-    if let Some(handle) = claude_session_handle {
-        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
-    } else if let Some(handle) = codex_session_handle {
-        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
-    } else if let Some(handle) = acp_session_handle {
-        handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
+    let selected = crate::api::ai::agent_driver::lifecycle::lookup_session(&app_handle, conversation_id)
+        .await.map_err(|error| error.to_string())?;
+    if let Some(session) = selected {
+        session.handle.cancel_current_prompt().await.map_err(|error| error.to_string())?;
     } else {
         message_token_manager.cancel_request(conversation_id).await;
     }

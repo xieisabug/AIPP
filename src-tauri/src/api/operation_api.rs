@@ -2,7 +2,11 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tracing::{info, instrument, warn};
 
-use crate::api::ai::acp::{AcpElicitationDecision, AcpElicitationState, AcpPermissionDecision, AcpPermissionState};
+use crate::api::ai::acp::{AcpElicitationState, AcpPermissionState};
+use crate::api::ai::agent_driver::approval::{
+    resolve_app_reply, AgentElicitationReply, AgentInteractionKind, AgentInteractionReply,
+    AgentPermissionReply, AgentReplyTarget,
+};
 use crate::api::butler_api::emit_butler_task_permission_state_changed;
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::mcp::builtin_mcp::operation::types::PermissionDecision;
@@ -160,7 +164,59 @@ pub async fn confirm_operation_permission(
     }
 }
 
-/// 确认 ACP 工具调用权限
+/// The public typed entry point and legacy aliases use one resolution path.
+/// Legacy aliases derive ownership from the saved request, not the active driver.
+#[tauri::command]
+pub async fn confirm_agent_interaction(
+    app_handle: AppHandle,
+    target: AgentReplyTarget,
+    reply: AgentInteractionReply,
+) -> Result<bool, String> {
+    resolve_agent_interaction_response(&app_handle, target, reply).await
+}
+
+pub(crate) async fn resolve_agent_interaction_response(
+    app_handle: &AppHandle,
+    target: AgentReplyTarget,
+    reply: AgentInteractionReply,
+) -> Result<bool, String> {
+    let resolution = resolve_app_reply(app_handle, target, reply).await?;
+    let event_name = match resolution.kind {
+        AgentInteractionKind::Permission => Some(ACP_PERMISSION_RESOLVED_EVENT),
+        AgentInteractionKind::Elicitation => Some(ACP_ELICITATION_RESOLVED_EVENT),
+        AgentInteractionKind::AskUserQuestion => None,
+    };
+    if let Some(event_name) = event_name {
+        if let Err(error) = emit_permission_resolved_event(app_handle, event_name, &PermissionResolvedEvent {
+            request_id: resolution.request_id.clone(),
+            conversation_id: resolution.scope.conversation_id,
+        }) {
+            warn!(request_id = %resolution.request_id, error = %error, "Failed to emit interaction resolution event");
+        }
+    }
+    if resolution.kind == AgentInteractionKind::Permission {
+        if let Some(conversation_id) = resolution.scope.conversation_id {
+            // The decision has already been consumed and delivered. A secondary
+            // notification failure must not tell callers to retry that decision.
+            if let Err(error) = emit_butler_task_permission_state_changed(
+                app_handle, conversation_id, "acp", false,
+            ).await {
+                warn!(conversation_id, error = %error, "Failed to refresh resolved Agent permission state");
+            }
+        }
+    }
+    if resolution.delivered {
+        Ok(true)
+    } else {
+        Err(match resolution.kind {
+            AgentInteractionKind::Permission => "ACP permission receiver dropped before resolution",
+            AgentInteractionKind::Elicitation => "ACP elicitation receiver dropped before resolution",
+            AgentInteractionKind::AskUserQuestion => "AskUserQuestion request not found or already resolved: receiver dropped before resolution",
+        }.into())
+    }
+}
+
+/// Compatibility route used by ACP, Claude, MCP and Feishu callers.
 #[tauri::command]
 #[instrument(skip(app_handle))]
 pub async fn confirm_acp_permission(
@@ -169,55 +225,16 @@ pub async fn confirm_acp_permission(
     option_id: Option<String>,
     cancelled: Option<bool>,
 ) -> Result<bool, String> {
-    info!(request_id = %request_id, option_id = ?option_id, cancelled = ?cancelled, "Processing ACP permission confirmation");
-
-    let state = app_handle
-        .try_state::<AcpPermissionState>()
-        .ok_or_else(|| "AcpPermissionState not found".to_string())?;
-
-    let decision = if cancelled.unwrap_or(false) {
-        AcpPermissionDecision::Cancelled
-    } else if let Some(option_id) = option_id {
-        AcpPermissionDecision::Selected(option_id)
-    } else {
-        return Err("Invalid ACP permission decision".to_string());
-    };
-
-    let resolved = state.resolve_request(&request_id, decision).await;
-
-    if let Some(resolution) = resolved {
-        if let Err(error) = emit_permission_resolved_event(
-            &app_handle,
-            ACP_PERMISSION_RESOLVED_EVENT,
-            &PermissionResolvedEvent {
-                request_id: request_id.clone(),
-                conversation_id: resolution.conversation_id,
-            },
-        ) {
-            warn!(request_id = %request_id, error = %error, "Failed to emit ACP permission resolution event");
-        }
-        if let Some(conversation_id) = resolution.conversation_id {
-            emit_butler_task_permission_state_changed(&app_handle, conversation_id, "acp", false)
-                .await?;
-        }
-        if resolution.delivered {
-            info!(request_id = %request_id, "ACP permission request resolved successfully");
-            Ok(true)
-        } else {
-            warn!(request_id = %request_id, "ACP permission receiver dropped before resolution");
-            Err("ACP permission receiver dropped before resolution".to_string())
-        }
-    } else {
-        warn!(request_id = %request_id, "ACP permission request not found or already resolved");
-        Err("ACP permission request not found or already resolved".to_string())
-    }
+    let state = app_handle.try_state::<AcpPermissionState>()
+        .ok_or("AcpPermissionState not found")?;
+    let decision = AgentPermissionReply::from_legacy(option_id, cancelled.unwrap_or(false))?;
+    let scope = state.request_scope(&request_id).await
+        .ok_or("ACP permission request not found or already resolved")?;
+    resolve_agent_interaction_response(&app_handle,
+        AgentReplyTarget { request_id, scope }, AgentInteractionReply::Permission(decision)).await
 }
 
-/// 确认 ACP elicitation（结构化提问）
-///
-/// action: "accept"（携带 values）/ "decline" / "cancel"。
-/// values 的 JSON 值按类型映射为 ACP ElicitationContentValue
-/// （string/number/integer/boolean/string-array）。
+/// ACP form elicitation retains the existing action/value command contract.
 #[tauri::command]
 #[instrument(skip(app_handle, values))]
 pub async fn confirm_acp_elicitation(
@@ -226,57 +243,21 @@ pub async fn confirm_acp_elicitation(
     action: String,
     values: Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> Result<bool, String> {
-    info!(request_id = %request_id, action = %action, "Processing ACP elicitation confirmation");
-
-    let state = app_handle
-        .try_state::<AcpElicitationState>()
-        .ok_or_else(|| "AcpElicitationState not found".to_string())?;
-
+    let state = app_handle.try_state::<AcpElicitationState>()
+        .ok_or("AcpElicitationState not found")?;
     let decision = match action.as_str() {
-        "accept" => {
-            let mut content = std::collections::BTreeMap::new();
-            for (key, value) in values.unwrap_or_default() {
-                content.insert(
-                    key.clone(),
-                    crate::api::ai::acp::json_to_acp_elicitation_value(value)
-                        .map_err(|error| format!("elicitation value '{key}' invalid: {error}"))?,
-                );
-            }
-            AcpElicitationDecision::Accepted(content)
-        }
-        "decline" => AcpElicitationDecision::Declined,
-        "cancel" => AcpElicitationDecision::Cancelled,
+        "accept" => AgentElicitationReply::Accept { values: values.unwrap_or_default() },
+        "decline" => AgentElicitationReply::Decline,
+        "cancel" => AgentElicitationReply::Cancel,
         other => return Err(format!("Unknown ACP elicitation action: {other}")),
     };
-
-    let resolved = state.resolve_request(&request_id, decision).await;
-
-    if let Some(resolution) = resolved {
-        if let Err(error) = emit_permission_resolved_event(
-            &app_handle,
-            ACP_ELICITATION_RESOLVED_EVENT,
-            &PermissionResolvedEvent {
-                request_id: request_id.clone(),
-                conversation_id: resolution.conversation_id,
-            },
-        ) {
-            warn!(request_id = %request_id, error = %error, "Failed to emit ACP elicitation resolution event");
-        }
-        if resolution.delivered {
-            info!(request_id = %request_id, "ACP elicitation request resolved successfully");
-            Ok(true)
-        } else {
-            warn!(request_id = %request_id, "ACP elicitation receiver dropped before resolution");
-            Err("ACP elicitation receiver dropped before resolution".to_string())
-        }
-    } else {
-        warn!(request_id = %request_id, "ACP elicitation request not found or already resolved");
-        Err("ACP elicitation request not found or already resolved".to_string())
-    }
+    let scope = state.request_scope(&request_id).await
+        .ok_or("ACP elicitation request not found or already resolved")?;
+    resolve_agent_interaction_response(&app_handle,
+        AgentReplyTarget { request_id, scope }, AgentInteractionReply::Elicitation(decision)).await
 }
 
-/// 确认 Codex app-server 的 command/file-change/permissions 请求。
-/// 复用 ACP 的队列存储，但使用独立命令名，避免前端把原生 Codex 请求误路由回 ACP。
+/// Retain the frontend Codex alias without a second decision implementation.
 #[tauri::command]
 #[instrument(skip(app_handle))]
 pub async fn confirm_codex_permission(
@@ -285,32 +266,5 @@ pub async fn confirm_codex_permission(
     option_id: Option<String>,
     cancelled: Option<bool>,
 ) -> Result<bool, String> {
-    let state = app_handle
-        .try_state::<AcpPermissionState>()
-        .ok_or_else(|| "AcpPermissionState not found".to_string())?;
-    let decision = if cancelled.unwrap_or(false) {
-        AcpPermissionDecision::Cancelled
-    } else if let Some(option_id) = option_id {
-        AcpPermissionDecision::Selected(option_id)
-    } else {
-        return Err("Invalid Codex permission decision".to_string());
-    };
-    let resolved = state.resolve_request(&request_id, decision).await;
-    if let Some(resolution) = resolved {
-        let _ = emit_permission_resolved_event(
-            &app_handle,
-            ACP_PERMISSION_RESOLVED_EVENT,
-            &PermissionResolvedEvent {
-                request_id: request_id.clone(),
-                conversation_id: resolution.conversation_id,
-            },
-        );
-        if resolution.delivered {
-            Ok(true)
-        } else {
-            Err("Codex permission receiver dropped before resolution".to_string())
-        }
-    } else {
-        Err("Codex permission request not found or already resolved".to_string())
-    }
+    confirm_acp_permission(app_handle, request_id, option_id, cancelled).await
 }

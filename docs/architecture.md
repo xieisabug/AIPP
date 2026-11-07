@@ -152,3 +152,20 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 ### 管家会话的固定工具
 
 `mcp/butler_tools.rs` 统一按 `butler_main` / `butler_contact` / `butler_task` 会话注入 SuperAdmin 和助手协作工具；覆盖助手 MCP 选择，但不持久化配置变更。标准 AI 首轮、工具续答、重新生成、XML 检测及 Codex/Claude Code/ACP 的选中工具桥接共用该策略。执行器对同一白名单免除动态加载门槛，内置分发仍校验管家会话，普通聊天和普通定时任务不获得权限。助手发现/详情与协作查询/停止定义在 `api/butler_assistant_tools.rs`，停止原因存于 `butler_peer_stop`；不把“停止协作”解释为进程取消。
+
+## Agent 驱动边界
+
+`api/ai/agent_driver/` 是本地 Agent 的统一调用层：
+
+- `AgentTurnRequest` / `send_turn` 负责路由、原生配置准备以及统一的响应消息创建、prompt 提交和提交失败事件；`ask_ai` 不再维护三套执行分支。
+- `AgentSessionKind` 明确选择 Codex app-server、Claude Code CLI 或 ACP。旧 Claude provider 配置仍经现有识别规则进入原生 Claude 通道；未知 provider 直接报错，不切换协议或模型。
+- `AgentSessionHandle` 提供 prompt、取消和配置更新接口；`AgentSessionCapabilities` 表达本地适配器能力。只有 ACP 接收独立附件列表；Codex/Claude 保持原先运行时 prompt 的附件处理方式。ACP 服务端协商出的模型、模式、附件等能力仍由原生协议层校验，不能从本地能力标志推断。
+- 已有 `AcpSessionState`、`CodexSessionState`、`ClaudeSessionState` 继续拥有会话、配置签名、空闲回收、恢复和持久化；未增加进程池、数据库表或第二套会话注册表。
+- 原生协议层继续处理流式事件、MCP、权限请求、Plan 与 session 快照。已有前端命令和事件格式不变。失败事件写入复用同一帮助函数。
+- 控制通道关闭导致 prompt 提交失败时，记录具体通道、conversation/message 标识和底层错误并结束响应，不在本次提交中自动重建会话并重试。
+
+参考 t3code 的类型化 provider adapter 边界与可控命令通道测试方法，固定版本为 [`d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4`](https://github.com/pingdotgg/t3code/tree/d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4)，主要参考 `packages/provider-core/src/server/ProviderAdapter.ts`、`adapterDriver.ts` 和 `packages/provider-testing`。上游为 MIT（©2026 T3 Tools Inc.）；本实现未复制上游源码或引入其 Effect 编排框架。
+
+Claude 当前保持 Rust 启动 CLI stream-json。Anthropic [官方 Agent SDK 文档](https://code.claude.com/docs/en/agent-sdk/overview)列出 TypeScript/Python，并建议其他语言使用 CLI 子进程；本次不引入额外语言运行时或 sidecar。
+
+Agent 驱动的测试场景、上游参考及明确未覆盖的边界见 [Agent 驱动测试场景对照](./agent-driver-testing.md)。

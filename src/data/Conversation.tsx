@@ -276,7 +276,58 @@ export interface AcpAvailableCommand {
     input_hint?: string | null;
 }
 
+export type AgentCapabilitySupport = "supported" | "unsupported" | "unknown";
+export type AgentCapabilitySource = "adapter" | "session" | "unknown";
+
+export interface AgentCapability {
+    support: AgentCapabilitySupport;
+    source: AgentCapabilitySource;
+}
+
+/** Local implementation support is distinct from negotiated session support. */
+export interface AgentCapabilityDeclaration {
+    send_prompt: boolean;
+    cancel_prompt: boolean;
+    set_config_option: boolean;
+    respond_permission: boolean | null;
+    attachment_input: "structured" | "prompt_text";
+    image_input: boolean | null;
+    audio_input: boolean | null;
+    embedded_context_input: boolean | null;
+    load_session: boolean | null;
+    resume_session: boolean | null;
+    config_catalog_complete: boolean;
+}
+
+export interface AgentCapabilities {
+    schema_version: number;
+    driver_id: string;
+    discovery: "baseline" | "session";
+    adapter: AgentCapabilityDeclaration;
+    operations: {
+        send_prompt: AgentCapability;
+        cancel_prompt: AgentCapability;
+        set_config_option: AgentCapability;
+        respond_permission: AgentCapability;
+    };
+    attachments: {
+        input: "structured" | "prompt_text";
+        structured: AgentCapability;
+        image: AgentCapability;
+        audio: AgentCapability;
+        embedded_context: AgentCapability;
+    };
+    sessions: { load: AgentCapability; resume: AgentCapability };
+    configuration: {
+        source: AgentCapabilitySource;
+        complete: boolean;
+        options: AcpSessionConfigOption[];
+    };
+}
+
 export interface AcpConversationSessionState {
+    /** Optional for persisted events and older backends; absence is unknown. */
+    agent_capabilities?: AgentCapabilities | null;
     conversation_id: number;
     agent_kind?: "acp" | "codex_app_server" | string;
     session_id?: string | null;

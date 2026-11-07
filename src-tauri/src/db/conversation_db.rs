@@ -1040,6 +1040,34 @@ impl MessageRepository {
         })
     }
 
+    /// Atomically claim an unfinished response for Agent failure publication.
+    /// The existing message row is the terminal authority, not a second run map.
+    pub(crate) fn finish_agent_failure(
+        &self, conversation_id: i64, message_id: i64, content: &str, failure_json: &str,
+    ) -> Result<bool> {
+        self.with_serialized_write(|conn| {
+            let previous: Option<Option<String>> = conn.query_row(
+                "SELECT metadata_json FROM message WHERE id = ?1 AND conversation_id = ?2 AND finish_time IS NULL",
+                params![message_id, conversation_id], |row| row.get(0),
+            ).optional()?;
+            let Some(previous) = previous else { return Ok(false); };
+            let mut metadata = match previous.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+                Some(Ok(serde_json::Value::Object(object))) => serde_json::Value::Object(object),
+                Some(Ok(other)) => serde_json::json!({ "previous_metadata": other }),
+                Some(Err(_)) => serde_json::json!({ "previous_metadata_raw": previous }),
+                None => serde_json::json!({}),
+            };
+            metadata["agent_failure"] = serde_json::from_str(failure_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let changed = conn.execute(
+                "UPDATE message SET message_type = 'error', content = ?1, finish_time = ?2, metadata_json = ?3
+                 WHERE id = ?4 AND conversation_id = ?5 AND finish_time IS NULL",
+                params![content, Utc::now(), metadata.to_string(), message_id, conversation_id],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
     pub fn get_or_create_checkpoint(&self, conversation_id: i64, header: &str, content: &str) -> Result<String> {
         self.with_serialized_write(|conn| {
             // Concurrent continuations must use the same persisted summary, including the winning writer.
@@ -1658,6 +1686,7 @@ pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<
             conversation_id INTEGER NOT NULL,
             session_id TEXT NOT NULL,
             agent_kind TEXT NOT NULL DEFAULT 'acp',
+            provider_instance_id INTEGER,
             updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (conversation_id, agent_kind)
         )",
@@ -1671,21 +1700,30 @@ pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<
     let has_composite_primary_key = columns.iter().filter(|(_, pk)| *pk > 0).count() >= 2;
     if !has_agent_kind || !has_composite_primary_key {
         let legacy_agent_kind = if has_agent_kind { "agent_kind" } else { "'acp'" };
+        let legacy_instance = if columns.iter().any(|(name, _)| name == "provider_instance_id") {
+            "provider_instance_id"
+        } else {
+            "NULL"
+        };
         conn.execute_batch(&format!(
             "ALTER TABLE acp_session RENAME TO acp_session_legacy;
              CREATE TABLE acp_session (
                  conversation_id INTEGER NOT NULL,
                  session_id TEXT NOT NULL,
                  agent_kind TEXT NOT NULL DEFAULT 'acp',
+                 provider_instance_id INTEGER,
                  updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                  PRIMARY KEY (conversation_id, agent_kind)
              );
-             INSERT INTO acp_session (conversation_id, session_id, agent_kind, updated_time)
-             SELECT conversation_id, session_id, {legacy_agent_kind}, updated_time
+             INSERT INTO acp_session (conversation_id, session_id, agent_kind, provider_instance_id, updated_time)
+             SELECT conversation_id, session_id, {legacy_agent_kind}, {legacy_instance}, updated_time
              FROM acp_session_legacy;
              DROP TABLE acp_session_legacy;"
         ))?;
     }
+    // NULL means historical ownership is unknown. Never infer an owner from
+    // the conversation's current assistant/provider configuration during migration.
+    ensure_column_exists(conn, "acp_session", "provider_instance_id", "INTEGER")?;
     Ok(())
 }
 
@@ -2115,6 +2153,14 @@ impl ConversationDatabase {
         agent_kind: &str,
     ) -> Result<Option<String>, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
+        Self::get_agent_session_id_with_conn(&conn, conversation_id, agent_kind)
+    }
+
+    pub(crate) fn get_agent_session_id_with_conn(
+        conn: &Connection,
+        conversation_id: i64,
+        agent_kind: &str,
+    ) -> Result<Option<String>, AppError> {
         let session_id = conn
             .query_row(
                 "SELECT session_id FROM acp_session WHERE conversation_id = ?1 AND agent_kind = ?2",
@@ -2124,6 +2170,46 @@ impl ConversationDatabase {
             .optional()
             .map_err(AppError::from)?;
         Ok(session_id)
+    }
+
+    /// Restore only this configured instance's native context. Legacy unowned
+    /// rows retain their pre-migration first-resume behavior; successful native
+    /// setup must save through the scoped upsert to establish ownership.
+    /// A NULL legacy owner cannot prove isolation before that first scoped save.
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn get_agent_session_id_for_instance(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+    ) -> Result<Option<String>, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        Self::get_agent_session_id_for_instance_with_conn(&conn, conversation_id, agent_kind, instance_id)
+    }
+
+    pub(crate) fn get_agent_session_id_for_instance_with_conn(
+        conn: &Connection,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+    ) -> Result<Option<String>, AppError> {
+        let row: Option<(String, Option<i64>)> = conn.query_row(
+            "SELECT session_id, provider_instance_id FROM acp_session
+             WHERE conversation_id = ?1 AND agent_kind = ?2",
+            params![conversation_id, agent_kind],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(AppError::from)?;
+        match row {
+            Some((session_id, None)) => {
+                if let Some(instance_id) = instance_id {
+                    tracing::warn!(conversation_id, agent_kind, instance_id,
+                        "Restoring legacy native session with unknown provider ownership; ownership is recorded only after successful setup");
+                }
+                Ok(Some(session_id))
+            }
+            Some((session_id, owner)) if owner == instance_id => Ok(Some(session_id)),
+            _ => Ok(None),
+        }
     }
 
     #[instrument(level = "debug", skip(self), err)]
@@ -2142,19 +2228,51 @@ impl ConversationDatabase {
         agent_kind: &str,
         session_id: &str,
     ) -> Result<(), AppError> {
+        self.upsert_agent_session_id_for_instance(conversation_id, agent_kind, None, session_id)
+    }
+
+    /// Keep the existing latest-session mapping per conversation/driver. A
+    /// deliberate instance switch replaces that mapping rather than resuming
+    /// another provider's native session or creating a second conversation store.
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn upsert_agent_session_id_for_instance(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+        session_id: &str,
+    ) -> Result<(), AppError> {
         self.with_write_connection(|conn| {
-            conn.execute(
-                "INSERT INTO acp_session (conversation_id, agent_kind, session_id, updated_time)
-                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
-                 ON CONFLICT(conversation_id, agent_kind)
-                 DO UPDATE SET session_id = excluded.session_id, updated_time = CURRENT_TIMESTAMP",
-                params![conversation_id, agent_kind, session_id],
+            Self::upsert_agent_session_id_for_instance_with_conn(
+                conn, conversation_id, agent_kind, instance_id, session_id,
             )
-            .map_err(AppError::from)?;
-            Ok(())
         })
     }
 
+    pub(crate) fn upsert_agent_session_id_for_instance_with_conn(
+        conn: &Connection,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        let changed = conn.execute(
+            "INSERT INTO acp_session (conversation_id, agent_kind, provider_instance_id, session_id, updated_time)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(conversation_id, agent_kind)
+             DO UPDATE SET session_id = excluded.session_id,
+                           provider_instance_id = excluded.provider_instance_id,
+                           updated_time = CURRENT_TIMESTAMP
+             WHERE excluded.provider_instance_id IS NOT NULL OR acp_session.provider_instance_id IS NULL",
+            params![conversation_id, agent_kind, instance_id, session_id],
+        ).map_err(AppError::from)?;
+        if changed == 0 {
+            return Err(AppError::ProviderError(format!(
+                "Cannot overwrite a provider-owned native session without instance identity [conversation_id={conversation_id}, driver={agent_kind}]"
+            )));
+        }
+        Ok(())
+    }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn delete_agent_session_id(
