@@ -3453,6 +3453,41 @@ pub async fn list_butler_contact_previews(app_handle: AppHandle) -> Result<Vec<s
     Ok(previews)
 }
 
+/// 管家窗口搜索：只检索管家模式产生的公开消息（主会话含归档、联系人私聊、派工任务）。
+#[tauri::command]
+pub async fn search_butler_messages(
+    app_handle: AppHandle,
+    query: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let trimmed = query.trim().to_owned();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_butler_enabled(&app_handle).await?;
+    let names = super::butler_peer::bot_names(&app_handle)
+        .await
+        .map_err(|e| format!("搜索管家消息失败：读取助手名称出错：{e}"))?;
+    let db = ConversationDatabase::new(&app_handle)
+        .map_err(|e| format!("搜索管家消息失败：打开会话数据库出错：{e}"))?;
+    let conn = db.get_connection().map_err(|e| format!("搜索管家消息失败：获取数据库连接出错：{e}"))?;
+    let mut hits = crate::db::butler_history::ui_search(
+        &conn,
+        &names,
+        &trimmed,
+        limit.unwrap_or(50).min(200),
+        offset.unwrap_or(0),
+    )
+    .map_err(|e| format!("搜索管家消息失败：查询“{trimmed}”出错：{e}"))?;
+    for hit in &mut hits {
+        let text = hit["text"].as_str().unwrap_or_default().to_owned();
+        hit["snippet"] = json!(super::conversation_api::build_snippet(&text, &trimmed, 120));
+        hit.as_object_mut().map(|o| o.remove("text"));
+    }
+    Ok(hits)
+}
+
 #[tauri::command]
 pub async fn open_butler_contact(app_handle: AppHandle, assistant_id: i64) -> Result<i64, String> {
     ensure_butler_enabled(&app_handle).await?;

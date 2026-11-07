@@ -258,6 +258,8 @@ interface ConversationUIProps {
     windowLabel?: string;
     showExecutionDetails?: boolean;
     busySendBehavior?: "queue" | "interrupt";
+    /** 只读查看（如管家搜索打开的归档会话）：隐藏输入框，禁止重新生成/编辑等会改写会话的操作 */
+    readOnly?: boolean;
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
 }
 
@@ -325,11 +327,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             windowLabel = "chat_ui",
             showExecutionDetails = false,
             busySendBehavior = "queue",
+            readOnly = false,
             onPreviewFileContextClick,
         },
         ref
     ) => {
         const resultOnly = windowLabel === "butler_experiment" && !showExecutionDetails;
+        const rejectReadOnlyAction = useCallback(() => {
+            toast.info("这是只读的历史会话，不能重新生成或编辑消息");
+        }, []);
         // ============= 基础状态管理 =============
 
         // 当前对话信息和助手列表
@@ -2181,18 +2187,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
                                 handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
                                 onCodeRun={handleArtifact}
-                                onMessageRegenerate={handleMessageRegenerate}
-                                onMessageEdit={handleMessageEdit}
+                                onMessageRegenerate={readOnly ? rejectReadOnlyAction : handleMessageRegenerate}
+                                onMessageEdit={readOnly ? rejectReadOnlyAction : handleMessageEdit}
                                 onMessageFork={handleMessageFork}
-                                onQueuedMessagePromote={handleQueuedMessagePromote}
+                                onQueuedMessagePromote={readOnly ? undefined : handleQueuedMessagePromote}
                                 onToggleReasoningExpand={toggleReasoningExpand}
                                 inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}
                                 renderMessageActions={renderPluginMessageActions}
                                 actionableAgentPlanMessageId={actionableAgentPlanMessageId}
                                 agentPlanModeSwitching={planModeSwitching}
-                                onContinueAgentPlan={handleContinueAgentPlan}
-                                onApproveAgentPlan={handleApproveAgentPlan}
+                                onContinueAgentPlan={readOnly ? undefined : handleContinueAgentPlan}
+                                onApproveAgentPlan={readOnly ? undefined : handleApproveAgentPlan}
                                 scrollContainerRef={scrollContainerRef}
                                 pendingScrollMessageId={pendingScrollMessageId}
                                 pendingScrollAlign={pendingScrollAlign}
@@ -2224,7 +2230,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onClick={() => { smartScroll(true, "auto"); setShowBackToBottom(false); }}>
                             <ChevronDown className="h-4 w-4" />回到底部
                         </Button>}
-                        <InputArea
+                        {!readOnly && <InputArea
                             ref={inputAreaRef}
                             inputText={inputText}
                             setInputText={setInputText}
@@ -2246,7 +2252,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onPlanModeToggle={showPlanModeToggle
                                 ? () => void setAgentPlanMode(!isPlanMode)
                                 : undefined}
-                        />
+                        />}
                     </div>
 
                     {/* Right sidebar - only show on desktop when sidebar window is not open */}

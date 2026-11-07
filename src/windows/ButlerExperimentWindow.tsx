@@ -5,6 +5,9 @@ import { useForm } from "react-hook-form";
 import ButlerPeerActivity from "@/components/butler/ButlerPeerActivity";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
+import ConversationSearchDialog from "@/components/ConversationSearchDialog";
+import { searchButlerMessages } from "@/services/butlerSearchService";
+import type { ButlerMessageSearchHit } from "@/data/Conversation";
 import { useConversationAvatarState } from "@/components/avatar/useConversationAvatarState";
 import type { AvatarState } from "@/components/avatar/avatarDefinition";
 import { useLinger } from "@/hooks/useStablePresence";
@@ -16,8 +19,10 @@ import { openScheduleTask } from "@/lib/scheduleTaskFocus";
 import {
     Check,
     ChevronDown,
+    ChevronLeft,
     ChevronRight,
     Clock,
+    History,
     Loader2,
     MessageSquareText,
     Pencil,
@@ -215,7 +220,10 @@ function ButlerExperimentWindow() {
     const [contact, setContact] = useState<{ assistantId: number; conversationId: number } | null>(null);
     const contactRequest = useRef(0);
     const [detailsConversation, setDetailsConversation] = useState<string | null>(null);
-    const activeConversationId = contact ? String(contact.conversationId) : mainConversationId;
+    // 搜索打开的归档主会话/派工任务：只读查看，返回后恢复原来的主会话或联系人
+    const [historyView, setHistoryView] = useState<{ conversationId: string; title: string } | null>(null);
+    const activeConversationId = historyView?.conversationId
+        ?? (contact ? String(contact.conversationId) : mainConversationId);
     const activeAssistant = assistants.find(assistant => assistant.id === contact?.assistantId);
     const [profileTarget, setProfileTarget] = useState<{ id?: number; name: string } | null>(null);
     const saveProfile = async (name: string, appearance: ButlerAppearance) => {
@@ -289,6 +297,7 @@ function ButlerExperimentWindow() {
     }, [activePreview]);
     const selectContact = useCallback(async (assistant?: AssistantListItem) => {
         restoreContact.current = false;
+        setHistoryView(null);
         const request = ++contactRequest.current;
         if (!assistant) {
             localStorage.removeItem("butler-last-contact");
@@ -306,6 +315,41 @@ function ButlerExperimentWindow() {
             if (request === contactRequest.current) toast.error(`无法打开${assistant.name}的私聊：${error}`);
         }
     }, [loadPreviews]);
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [pendingScroll, setPendingScroll] = useState<{ conversationId: string; messageId: number } | null>(null);
+    const searchMessages = useCallback(
+        (query: string, limit: number, offset: number) =>
+            searchButlerMessages(query, limit, offset, mainConversationId ? Number(mainConversationId) : undefined),
+        [mainConversationId],
+    );
+    const handleSearchSelect = useCallback((hit: ButlerMessageSearchHit) => {
+        const conversationId = String(hit.conversation_id);
+        const assistant = hit.conversation_kind === "butler_contact"
+            ? assistants.find(item => item.id === hit.assistant_id)
+            : undefined;
+        if (assistant || conversationId === mainConversationId) {
+            // 当前主会话与联系人私聊在管家窗口内打开，切换完成后再定位消息
+            if (hit.message_id) setPendingScroll({ conversationId, messageId: hit.message_id });
+            void selectContact(assistant);
+            return;
+        }
+        // 已归档主会话、派工任务（以及已删除助手的私聊）在管家窗口内只读打开
+        setHistoryView({ conversationId, title: hit.conversation_name });
+        if (hit.message_id) setPendingScroll({ conversationId, messageId: hit.message_id });
+    }, [assistants, mainConversationId, selectContact]);
+    useEffect(() => {
+        if (!pendingScroll || pendingScroll.conversationId !== activeConversationId) return;
+        let attempts = 0;
+        const handle = window.setInterval(() => {
+            attempts += 1;
+            if (conversationUIRef.current || attempts >= 10) {
+                conversationUIRef.current?.scrollToMessage(pendingScroll.messageId);
+                setPendingScroll(null);
+                window.clearInterval(handle);
+            }
+        }, 200);
+        return () => window.clearInterval(handle);
+    }, [pendingScroll, activeConversationId]);
     useEffect(() => {
         if (!restoreContact.current || !mainConversationId || !assistants.length) return;
         restoreContact.current = false;
@@ -889,10 +933,13 @@ function ButlerExperimentWindow() {
 
     useAppShortcuts("butler", {
         new: () => {
-            if (contact || !mainConversationId || resettingMainConversation) {
+            if (contact || historyView || !mainConversationId || resettingMainConversation) {
                 return;
             }
             void handleResetMainConversation();
+        },
+        search: () => {
+            if (mainConversationId) setSearchOpen(true);
         },
         stats: handleOpenStats,
         settings: handleOpenSettings,
@@ -914,7 +961,8 @@ function ButlerExperimentWindow() {
                 >
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
                         ready={!!mainConversationId} previews={previews} mainConversationId={mainConversationId} plugins={pluginList}
-                        error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}/>
+                        error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
+                        onSearch={() => setSearchOpen(true)}/>
                     {scheduledTasks.length > 0 && (
                         <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
                             <button
@@ -1004,6 +1052,35 @@ function ButlerExperimentWindow() {
                         </div>
                     ) : mainConversationId ? (
                         <>
+                            {historyView ? (
+                            <div
+                                className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
+                                data-aipp-slot="butler-history-header"
+                            >
+                                <div className="flex min-w-0 items-center">
+                                    <Button type="button" variant="ghost" size="sm" className="gap-1 px-2"
+                                        onClick={() => setHistoryView(null)} data-aipp-slot="butler-history-back">
+                                        <ChevronLeft className="h-4 w-4" />
+                                        返回{contact ? activeAssistant?.name ?? "私聊" : "当前会话"}
+                                    </Button>
+                                </div>
+                                <div className="flex min-w-0 max-w-[26rem] items-center gap-2">
+                                    <History className="h-4 w-4 shrink-0 text-muted-foreground" />
+                                    <span className="truncate text-sm font-medium">{historyView.title}</span>
+                                    <Badge variant="outline" className="shrink-0 text-[10px] font-normal">只读</Badge>
+                                </div>
+                                <div className="flex min-w-0 items-center justify-end gap-1">
+                                    <IconButton
+                                        icon={detailsConversation === activeConversationId
+                                            ? <MessageSquareText className="h-4 w-4 text-icon" />
+                                            : <ScrollText className="h-4 w-4 text-icon" />}
+                                        onClick={() => setDetailsConversation(detailsConversation === activeConversationId ? null : activeConversationId)}
+                                        border
+                                        title={detailsConversation === activeConversationId ? "返回简洁聊天" : "执行记录"}
+                                    />
+                                </div>
+                            </div>
+                            ) : (
                             <div
                                 className="relative grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2"
                                 data-aipp-slot="butler-main-header"
@@ -1067,6 +1144,7 @@ function ButlerExperimentWindow() {
                                     />
                                 </div>
                             </div>
+                            )}
                             <div className="min-h-0 flex-1">
                                 <ConversationUI
                                     key={activeConversationId}
@@ -1077,11 +1155,12 @@ function ButlerExperimentWindow() {
                                     hideHeader
                                     allowRename={false}
                                     allowDelete={false}
-                                    inlineInteractionItems={inlineInteractionItems}
-                                    inlineInteractionVisible={hasInlineInteraction}
+                                    inlineInteractionItems={historyView ? undefined : inlineInteractionItems}
+                                    inlineInteractionVisible={!historyView && hasInlineInteraction}
                                     allowFeishuDebugResend={
-                                        !contact && showFeishuStatus && isMainConversationFeishuBound
+                                        !contact && !historyView && showFeishuStatus && isMainConversationFeishuBound
                                     }
+                                    readOnly={!!historyView}
                                     showExecutionDetails={detailsConversation === activeConversationId}
                                     windowLabel="butler_experiment"
                                     busySendBehavior="interrupt"
@@ -1150,6 +1229,14 @@ function ButlerExperimentWindow() {
                     onComplete={handleOnboardingComplete}
                 />
             </div>
+            <ConversationSearchDialog
+                open={searchOpen}
+                onOpenChange={setSearchOpen}
+                onSelectResult={handleSearchSelect}
+                search={searchMessages}
+                placeholder="搜索管家、私聊与派工任务中的消息..."
+                description="搜索管家模式产生的消息"
+            />
             {profileTarget && <ButlerProfileDialog
                 name={profileTarget.name}
                 appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(profileTarget.id)))}

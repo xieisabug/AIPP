@@ -980,7 +980,7 @@ pub async fn search_conversations(
     Ok(hits)
 }
 
-fn build_snippet(text: &str, query: &str, max_len: usize) -> String {
+pub(crate) fn build_snippet(text: &str, query: &str, max_len: usize) -> String {
     if text.is_empty() {
         return String::new();
     }

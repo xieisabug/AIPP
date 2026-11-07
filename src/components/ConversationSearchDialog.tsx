@@ -3,37 +3,47 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode
 import { CommandDialog, CommandInput } from "./ui/command";
 import { searchConversations } from "../services/conversationSearchService";
 import { ConversationSearchHit } from "../data/Conversation";
+import { formatHitTime, HIT_TYPE_LABELS, speakerLabel } from "./conversationSearchFormat";
 import { useAntiLeakage } from "../contexts/AntiLeakageContext";
 import { maskContent, maskTitle } from "../utils/antiLeakage";
 import { getErrorMessage } from "../utils/error";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, CornerDownLeft, MessagesSquare } from "lucide-react";
 import { Button } from "./ui/button";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 
-interface ConversationSearchDialogProps {
+interface ConversationSearchDialogProps<T extends ConversationSearchHit = ConversationSearchHit> {
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    onSelectResult: (hit: ConversationSearchHit) => void;
+    onSelectResult: (hit: T) => void;
+    /** 自定义检索源（如管家消息搜索）；默认搜索普通对话 */
+    search?: (query: string, limit: number, offset: number) => Promise<T[]>;
+    placeholder?: string;
+    description?: string;
 }
 
-interface ConversationGroup {
+interface ConversationGroup<T extends ConversationSearchHit> {
     conversationId: number;
     conversationName: string;
     assistantName: string;
-    hits: ConversationSearchHit[];
+    hits: T[];
 }
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const ConversationSearchDialog = memo(function ConversationSearchDialog({
+const PAGE_SIZE = 50;
+
+function ConversationSearchDialogImpl<T extends ConversationSearchHit>({
     open,
     onOpenChange,
     onSelectResult,
-}: ConversationSearchDialogProps) {
+    search = searchConversations as unknown as NonNullable<ConversationSearchDialogProps<T>["search"]>,
+    placeholder = "搜索对话内容、标题、总结...",
+    description = "搜索对话标题、摘要和消息内容",
+}: ConversationSearchDialogProps<T>) {
     const [query, setQuery] = useState("");
     const [isLoading, setIsLoading] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [hits, setHits] = useState<ConversationSearchHit[]>([]);
+    const [hits, setHits] = useState<T[]>([]);
     const [hasMore, setHasMore] = useState(false);
     const [emptyMessage, setEmptyMessage] = useState("输入关键字开始搜索");
     const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -79,7 +89,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                 nodes.push(
                     <span
                         key={`highlight-${index}`}
-                        className="rounded bg-primary/20 text-primary px-0.5"
+                        className="rounded-sm bg-foreground/15 px-0.5 font-semibold text-foreground"
                     >
                         {match[0]}
                     </span>,
@@ -102,7 +112,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
     );
 
     const groupedResults = useMemo(() => {
-        const map = new Map<number, ConversationGroup>();
+        const map = new Map<number, ConversationGroup<T>>();
         hits.forEach((hit) => {
             const existing = map.get(hit.conversation_id);
             if (!existing) {
@@ -136,10 +146,10 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
         setErrorMessage(null);
 
         try {
-            const results = await searchConversations(trimmed, 50, 0);
+            const results = await search(trimmed, PAGE_SIZE, 0);
             if (requestIdRef.current !== requestId) return;
             setHits(results);
-            setHasMore(results.length === 50);
+            setHasMore(results.length === PAGE_SIZE);
             setEmptyMessage(results.length === 0 ? "没有找到匹配结果" : "");
         } catch (error) {
             if (requestIdRef.current !== requestId) return;
@@ -152,7 +162,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                 setIsLoading(false);
             }
         }
-    }, []);
+    }, [search]);
 
     useDataRefresh({
         events: ["conversation_data_changed"],
@@ -173,19 +183,19 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
         setIsLoadingMore(true);
         const requestId = requestIdRef.current;
         try {
-            const results = await searchConversations(trimmed, 50, hits.length);
+            const results = await search(trimmed, PAGE_SIZE, hits.length);
             if (requestId !== requestIdRef.current) return;
             if (results.length > 0) {
                 setHits((prev) => [...prev, ...results]);
             }
-            setHasMore(results.length === 50);
+            setHasMore(results.length === PAGE_SIZE);
         } catch (error) {
             setErrorMessage(getErrorMessage(error));
             setHasMore(false);
         } finally {
             setIsLoadingMore(false);
         }
-    }, [hasMore, hits.length, isLoading, isLoadingMore, query]);
+    }, [hasMore, hits.length, isLoading, isLoadingMore, query, search]);
 
     useEffect(() => {
         if (!open) {
@@ -217,7 +227,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
     }, [open, query, runSearch]);
 
     const handleSelect = useCallback(
-        (hit: ConversationSearchHit) => {
+        (hit: T) => {
             onSelectResult(hit);
             onOpenChange(false);
         },
@@ -229,7 +239,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
             open={open}
             onOpenChange={onOpenChange}
             title="搜索"
-            description="搜索对话标题、摘要和消息内容"
+            description={description}
             className={isMobilePlatform ? "flex flex-col gap-0" : "sm:max-w-3xl"}
             showCloseButton={false}
         >
@@ -248,7 +258,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                         <ChevronLeft className="h-5 w-5" />
                     </Button>
                     <CommandInput
-                        placeholder="搜索对话内容、标题、总结..."
+                        placeholder={placeholder}
                         value={query}
                         onValueChange={setQuery}
                         enterKeyHint="search"
@@ -257,7 +267,7 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                 </div>
             ) : (
                 <CommandInput
-                    placeholder="搜索对话内容、标题、总结..."
+                    placeholder={placeholder}
                     value={query}
                     onValueChange={setQuery}
                     autoFocus
@@ -290,41 +300,59 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
                         {emptyMessage}
                     </div>
                 )}
-                {groupedResults.map((group) => (
-                    <div key={group.conversationId} className="px-2">
-                        <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-                            {renderHighlighted(maskedTitle(group.conversationName))}
-                            <span className="mx-1">·</span>
-                            {renderHighlighted(maskedTitle(group.assistantName))}
-                        </div>
-                        {group.hits.map((hit, index) => (
-                            <button
-                                key={`${hit.conversation_id}-${hit.message_id ?? "summary"}-${index}`}
-                                className={`w-full text-left px-2 py-2 rounded-md hover:bg-muted/60 transition-colors${isMobilePlatform ? " min-h-11 active:bg-muted/60" : ""}`}
-                                onClick={() => handleSelect(hit)}
-                                type="button"
+                {groupedResults.length > 0 && (
+                    <div className="space-y-3 p-3" data-aipp-slot="search-results">
+                        {groupedResults.map((group) => (
+                            <section
+                                key={group.conversationId}
+                                className="overflow-hidden rounded-lg border border-border"
+                                data-aipp-slot="search-result-group"
                             >
-                                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <span className="rounded-full bg-muted px-2 py-0.5 text-[11px]">
-                                        {hit.hit_type === "title"
-                                            ? "标题"
-                                            : hit.hit_type === "summary"
-                                                ? "摘要"
-                                                : "消息"}
+                                <header className="flex items-center gap-2 border-b border-border bg-muted/50 px-3 py-2">
+                                    <MessagesSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                    <span className="min-w-0 truncate text-xs font-semibold text-foreground">
+                                        {renderHighlighted(maskedTitle(group.conversationName))}
                                     </span>
-                                    {hit.message_type && (
-                                        <span className="text-[11px]">
-                                            {hit.message_type === "user" ? "用户" : hit.message_type}
-                                        </span>
-                                    )}
-                                </div>
-                                <div className="text-sm text-foreground line-clamp-2 mt-1">
-                                    {renderHighlighted(maskedText(hit.snippet))}
-                                </div>
-                            </button>
+                                    <span className="min-w-0 truncate text-xs text-muted-foreground">
+                                        {renderHighlighted(maskedTitle(group.assistantName))}
+                                    </span>
+                                    <span className="ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                                        {group.hits.length} 条
+                                    </span>
+                                </header>
+                                <ul className="divide-y divide-border">
+                                    {group.hits.map((hit, index) => (
+                                        <li key={`${hit.conversation_id}-${hit.message_id ?? "summary"}-${index}`}>
+                                            <button
+                                                className={`group block w-full px-3 py-2.5 text-left transition-colors hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none${isMobilePlatform ? " min-h-11 active:bg-muted/60" : ""}`}
+                                                onClick={() => handleSelect(hit)}
+                                                type="button"
+                                            >
+                                                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                                                    <span className="shrink-0 rounded border border-border px-1.5 leading-4">
+                                                        {HIT_TYPE_LABELS[hit.hit_type]}
+                                                    </span>
+                                                    {speakerLabel(hit) && (
+                                                        <span className="min-w-0 truncate font-medium text-foreground/80">
+                                                            {speakerLabel(hit)}
+                                                        </span>
+                                                    )}
+                                                    <span className="ml-auto shrink-0 tabular-nums">
+                                                        {formatHitTime(hit.created_time)}
+                                                    </span>
+                                                    <CornerDownLeft className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+                                                </div>
+                                                <div className="mt-1 line-clamp-2 break-words text-sm leading-relaxed text-foreground">
+                                                    {renderHighlighted(maskedText(hit.snippet))}
+                                                </div>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </section>
                         ))}
                     </div>
-                ))}
+                )}
                 {isLoadingMore && (
                     <div className="py-4 text-center text-xs text-muted-foreground">
                         加载更多...
@@ -338,8 +366,8 @@ const ConversationSearchDialog = memo(function ConversationSearchDialog({
             </div>
         </CommandDialog>
     );
-});
+}
 
-ConversationSearchDialog.displayName = "ConversationSearchDialog";
+const ConversationSearchDialog = memo(ConversationSearchDialogImpl) as typeof ConversationSearchDialogImpl;
 
 export default ConversationSearchDialog;

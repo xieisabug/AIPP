@@ -53,7 +53,7 @@ use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::butler_api::{
     get_butler_task_detail, list_butler_tasks, list_butler_tasks_paginated,
-    list_butler_contact_previews, get_butler_cache_activity, open_butler_contact, load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
+    list_butler_contact_previews, search_butler_messages, get_butler_cache_activity, open_butler_contact, load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
@@ -1078,6 +1078,7 @@ pub fn run() {
             crate::api::butler_peer::stop_butler_peer_exchange,
             crate::api::butler_peer::retry_butler_peer_receipt,
             list_butler_contact_previews,
+            search_butler_messages,
             crate::api::butler_contact_activity::list_butler_contact_activity,
             crate::api::butler_progress::get_butler_progress_summary,
             get_butler_cache_activity,

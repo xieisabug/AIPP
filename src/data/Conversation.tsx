@@ -514,4 +514,12 @@ export interface ConversationSearchHit {
     created_time: Date;
     snippet: string;
     hit_type: "title" | "summary" | "message";
+    /** 发言者标签（管家搜索提供，如“用户”“审稿”）；缺省时按 message_type 展示 */
+    speaker?: string;
+}
+
+/** 管家窗口搜索命中：在通用命中基础上携带跳转所需的会话类型与助手 */
+export interface ButlerMessageSearchHit extends ConversationSearchHit {
+    conversation_kind: "butler_main" | "butler_contact" | "butler_task";
+    assistant_id: number | null;
 }

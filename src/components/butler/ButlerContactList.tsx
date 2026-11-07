@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Search, X } from "lucide-react";
+import { Search } from "lucide-react";
 import type { AssistantListItem } from "@/data/Assistant";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import { Button } from "@/components/ui/button";
@@ -19,21 +18,18 @@ interface Props {
     error: string;
     onRefresh: () => void;
     onSelect: (assistant?: AssistantListItem) => void;
+    /** 打开管家消息搜索（与 ChatUI 搜索一致，范围限定为管家模式产生的消息） */
+    onSearch: () => void;
 }
-export default function ButlerContactList({chief, contacts, selected, ready, previews, mainConversationId, plugins, error, onRefresh, onSelect}: Props) {
+export default function ButlerContactList({chief, contacts, selected, ready, previews, mainConversationId, plugins, error, onRefresh, onSelect, onSearch}: Props) {
     const { visuals, acknowledge } = useContactAvatarActivity(mainConversationId, previews, selected);
     // 只有真实活动（任务、回复、审批、完成/失败反馈）才驱动动画；空闲时头像保持静止。
     const state = (id: number) => visuals.get(id)?.state ?? "idle";
-    const [searching, setSearching] = useState(false);
-    const [query, setQuery] = useState("");
     const {assistantTypes} = useAssistantTypePlugin(plugins);
-    const filtered = contacts.filter(a => a.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
     return <>
         <div className="flex h-12 shrink-0 items-center justify-end gap-1.5 px-3">
-            {searching && <input autoFocus aria-label="搜索联系人" placeholder="搜索联系人" value={query}
-                onChange={e => setQuery(e.target.value)} className="min-w-0 flex-1 rounded-md bg-background px-2 py-1 text-sm" />}
-            <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label={searching ? "关闭搜索" : "搜索联系人"}
-                onClick={() => {setSearching(!searching); setQuery("");}}>{searching ? <X/> : <Search/>}</Button>
+            <Button size="icon" variant="outline" className="size-8 rounded-full" aria-label="搜索管家消息" title="搜索管家消息"
+                disabled={!ready} onClick={onSearch} data-aipp-slot="butler-search"><Search/></Button>
             <AddAssistantDialog assistantTypes={assistantTypes} onAssistantAdded={onRefresh}
                 triggerButtonProps={{variant:"outline",size:"icon",className:"size-8 rounded-full",title:"添加助手","aria-label":"添加助手"}}/>
         </div>
@@ -46,7 +42,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
         </div>
         <nav aria-label="助手联系人" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
             {error && <button onClick={onRefresh} className="px-2 py-1 text-xs text-destructive">刷新联系人</button>}
-            {filtered.map(assistant => {
+            {contacts.map(assistant => {
                 const preview = previews.find(p => p.assistantId === assistant.id);
                 const unread = preview?.messageId && selected !== assistant.id &&
                     preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
@@ -60,7 +56,6 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                     {unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
                 </button>;
             })}
-            {query && !filtered.length && <p className="p-2 text-xs text-muted-foreground">没有匹配的助手</p>}
         </nav>
     </>;
 }

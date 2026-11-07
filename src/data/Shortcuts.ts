@@ -99,6 +99,12 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
         defaultShortcut: "Mod+N",
     },
     {
+        id: "butler.search",
+        label: "搜索管家消息",
+        window: "butler",
+        defaultShortcut: "Mod+F",
+    },
+    {
         id: "butler.stats",
         label: "查看消耗",
         window: "butler",
