@@ -125,8 +125,8 @@ describe("ConversationTurnRail", () => {
 
         const button = screen.getAllByRole("button")[0];
         const wrapper = button.parentElement as HTMLElement;
-        // BAR_H=6, GAP_MAX=10: 5*6 + 4*10 = 70, available = 2000*0.7 = 1400 → plenty
-        expect(wrapper.style.gap).toBe("10px");
+        // BAR_H=10, GAP_MAX=6: 5*10 + 4*6 = 74, available = 2000*0.7 = 1400 → plenty
+        expect(wrapper.style.gap).toBe("6px");
     });
 
     it("shrinks the gap below the max when the container is short", () => {
@@ -143,7 +143,7 @@ describe("ConversationTurnRail", () => {
 
         const button = screen.getAllByRole("button")[0];
         const wrapper = button.parentElement as HTMLElement;
-        // needed = 20*6 + 19*10 = 310 >> available = 50*0.7 = 35 → clamped to GAP_MIN=2
+        // needed = 20*10 + 19*6 = 314 >> available = 50*0.7 = 35 → clamped to GAP_MIN=2
         expect(wrapper.style.gap).toBe("2px");
     });
 });
