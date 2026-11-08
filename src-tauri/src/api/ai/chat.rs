@@ -2774,6 +2774,18 @@ pub async fn extract_assistant_from_message(
     Ok((result.primary_assistant_id.unwrap_or(default_assistant_id), result.cleaned_content))
 }
 
+/// Enforce persistent controls for every provider request, including retries and
+/// tool-result continuations prepared before the user paused or changed the goal.
+fn ensure_model_execution_current(
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+) -> anyhow::Result<()> {
+    let source = crate::db::butler_goal::OUTPUT_SOURCE.try_with(|source| *source).ok().flatten();
+    crate::db::butler_control::ensure_execution(
+        &conversation_db.get_connection()?, conversation_id, source,
+    )
+}
+
 pub async fn handle_stream_chat(
     client: &Client,
     model_name: &str,
@@ -2809,6 +2821,7 @@ pub async fn handle_stream_chat(
 
     // 外层重试循环，处理整个流式会话
     loop {
+        ensure_model_execution_current(conversation_db, conversation_id)?;
         main_attempts += 1;
         info!(attempt = main_attempts, max_attempts = max_retry_attempts, "stream chat attempt");
 
@@ -3020,6 +3033,7 @@ async fn attempt_stream_chat(
 
     let stream_request_start_time = chrono::Utc::now();
 
+    ensure_model_execution_current(conversation_db, conversation_id)?;
     let chat_stream_response = match client
         .exec_chat_stream(model_name, chat_request.clone(), Some(&chat_options))
         .await
@@ -4191,6 +4205,7 @@ pub async fn handle_non_stream_chat(
 
             info!(attempts, max_retry_attempts, "non stream chat attempt");
 
+            ensure_model_execution_current(conversation_db, conversation_id)?;
             let exec_result = if let Some(token) = cancel_token.as_ref() {
                 tokio::select! {
                     _ = token.cancelled() => {
@@ -4287,7 +4302,7 @@ pub async fn handle_non_stream_chat(
 
             let response_message = conversation_db
                 .message_repo()
-                .unwrap()
+                .context("创建非流式回复仓库失败")?
                 .create(&Message {
                     id: 0,
                     parent_id: None,
@@ -4311,7 +4326,7 @@ pub async fn handle_non_stream_chat(
                     first_token_time: None, // non-stream: unknown, fallback to start_time
                     ttft_ms,
                 })
-                .unwrap();
+                .with_context(|| format!("保存非流式回复失败（conversation_id={conversation_id}）"))?;
 
             info!(
                 message_id = response_message.id,

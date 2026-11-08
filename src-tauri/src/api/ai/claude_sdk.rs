@@ -100,6 +100,7 @@ pub struct ClaudeSdkConfig {
     pub model_choices: Vec<AcpSessionConfigChoicePayload>,
     pub selected_mcp_tools_payload: String,
     mcp_config_file: Option<Arc<ClaudeMcpConfigFile>>,
+    mcp_scope: Option<crate::acp_mcp_bridge::provenance::NativeMcpScope>,
     pub session_signature: String,
 }
 
@@ -338,6 +339,7 @@ pub fn extract_claude_sdk_config(
         model_choices,
         selected_mcp_tools_payload: String::new(),
         mcp_config_file: None,
+        mcp_scope: None,
         session_signature,
     })
 }
@@ -408,13 +410,16 @@ pub async fn prepare_claude_mcp_bridge(
     let payload = config.selected_mcp_tools_payload.trim();
     if payload.is_empty() || payload == "[]" {
         config.mcp_config_file = None;
+        config.mcp_scope = None;
         return Ok(());
     }
 
     let bridge_command = std::env::current_exe()
         .map_err(|error| format!("Failed to resolve AIPP executable for Claude MCP bridge: {error}"))?;
     let mcp_db_path = MCPDatabase::db_path(app_handle)?;
-    let proxy = ensure_proxy_server(app_handle.clone()).await?;
+    let mut proxy = ensure_proxy_server(app_handle.clone()).await?;
+    let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id)?;
+    proxy.token = mcp_scope.token().to_string();
     let mcp_config = build_claude_mcp_config(
         &bridge_command,
         &mcp_db_path,
@@ -423,6 +428,7 @@ pub async fn prepare_claude_mcp_bridge(
         &config.selected_mcp_tools_payload,
     )?;
     config.mcp_config_file = Some(write_claude_mcp_config_file(&mcp_config)?);
+    config.mcp_scope = Some(mcp_scope);
     Ok(())
 }
 
@@ -654,7 +660,14 @@ async fn handle_permission(
             },
         );
     }
-    let decision = if let Some(guard) = butler_guard {
+    let grants = match &decision {
+        AcpPermissionDecision::Selected(option_id) =>
+            crate::api::ai::agent_driver::approval::permission_option_requires_authorization(
+                &event.options, option_id,
+            ).unwrap_or(true),
+        AcpPermissionDecision::Cancelled => false,
+    };
+    let decision = if let Some(guard) = butler_guard.filter(|_| grants) {
         match guard.validate(app) { Ok(()) => decision, Err(error) => {
             tracing::warn!(%error, "Butler native approval invalidated before Claude execution");
             AcpPermissionDecision::Cancelled
@@ -1255,6 +1268,14 @@ pub fn spawn_claude_session_task(
                     .await;
                 }
                 SessionCommand::Prompt { message_id, prompt, window, cancel_generation } => {
+                    let _mcp_prompt = match config.mcp_scope.as_ref().map(|scope| scope.begin_prompt(message_id)).transpose() {
+                        Ok(guard) => guard.map(|guard| guard.watch_cancellation(cancellation.clone(), cancel_generation)),
+                        Err(error) => {
+                            emit_claude_run_failure(&app, &event_identity, message_id, &window, &error,
+                                AgentFailureStage::Mcp, diagnostics.diagnostics(None, None));
+                            break;
+                        }
+                    };
                     event_identity.response_message_id = Some(message_id);
                     let input = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":prompt}]},"session_id":session_id});
                     if let Err(error) = stdin.write_all(format!("{input}\n").as_bytes()).await {

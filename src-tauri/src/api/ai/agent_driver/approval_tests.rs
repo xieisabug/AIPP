@@ -390,3 +390,81 @@ async fn test_shared_permission_legacy_scope_and_frontend_payload_stay_compatibl
     assert!(matches!(AgentPermissionReply::from_legacy(Some("ignored".into()), true).unwrap(), AgentPermissionReply::Cancel));
     assert!(AgentPermissionReply::from_legacy(None, false).is_err());
 }
+
+fn guarded_permission_fixture() -> (rusqlite::Connection, crate::db::butler_approval::NativeApprovalGuard) {
+    use crate::db::butler_approval::{binding_from_connection, ApprovalRequest, NativeApprovalGuard};
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY, conversation_kind TEXT, butler_task_status TEXT);
+        CREATE TABLE message(id INTEGER PRIMARY KEY, conversation_id INTEGER, message_type TEXT, parent_id INTEGER);
+        INSERT INTO conversation VALUES(42,'butler_task','running');
+        INSERT INTO message VALUES(1,42,'user',NULL),(2,42,'response',1);").unwrap();
+    crate::db::butler_goal::schema(&conn).unwrap();
+    conn.execute("INSERT INTO butler_goal VALUES(42,1,'report',0)", []).unwrap();
+    crate::db::butler_goal::bind_turn(&conn, 42, 1, 1).unwrap();
+    let request = ApprovalRequest { action_id: "test.permission".into(), args: serde_json::json!({"file":"report"}) };
+    let frozen = binding_from_connection(&conn, 42, &request, 100, Some(2)).unwrap();
+    (conn, NativeApprovalGuard { frozen, request, source: Some(2) })
+}
+
+/// The exact preflight used by the application rejects stale grants but lets a
+/// scoped, advertised rejection reach the native waiter without reauthorizing work.
+#[tokio::test]
+async fn test_native_permission_denial_remains_available_after_authority_expires() {
+    for reason in ["expired", "paused", "stopped", "changed_goal"] {
+        for driver in ["acp", "codex_app_server", "claude_sdk"] {
+            let fixture = Fixture::new();
+            let mut target = target(&format!("{driver}-{reason}"));
+            target.scope.driver_id = Some(driver.into());
+            let (conn, guard) = guarded_permission_fixture();
+            let (tx, rx) = oneshot::channel();
+            fixture.permissions.store_request_guarded(permission_event(&target), tx,
+                target.scope.clone(), Some(guard)).await.unwrap();
+            let now = match reason {
+                "expired" => 100,
+                "paused" => { crate::db::butler_control::set(&conn, 42, "pause").unwrap(); 99 },
+                "stopped" => { crate::db::butler_control::set(&conn, 42, "cancel").unwrap(); 99 },
+                _ => { conn.execute("UPDATE butler_goal SET revision=2", []).unwrap(); 99 },
+            };
+            let required = fixture.permissions.butler_guard_for_reply(&target.request_id,
+                &target.scope, " vendor:approve/一次 ").await.unwrap().expect("grant must be checked");
+            assert!(required.validate_connection(&conn, now).is_err(), "{driver} {reason}");
+            assert!(fixture.permissions.butler_guard_for_reply(&target.request_id,
+                &target.scope, "vendor:deny").await.unwrap().is_none());
+            assert!(fixture.reply(&target, select("vendor:deny")).await.unwrap().delivered);
+            assert!(matches!(rx.await.unwrap(), AcpPermissionDecision::Selected(id) if id == "vendor:deny"));
+            assert!(fixture.permissions.get_request(&target.request_id).await.is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_native_denial_preflight_keeps_scope_and_advertised_option_checks() {
+    let fixture = Fixture::new();
+    let request = target("guard-scope");
+    let (_, guard) = guarded_permission_fixture();
+    let (tx, mut rx) = oneshot::channel();
+    fixture.permissions.store_request_guarded(permission_event(&request), tx,
+        request.scope.clone(), Some(guard)).await.unwrap();
+    for (_, wrong) in mismatches(&request) {
+        assert!(fixture.permissions.butler_guard_for_reply(&request.request_id,
+            &wrong.scope, "vendor:deny").await.is_err());
+    }
+    assert!(fixture.permissions.butler_guard_for_reply(&request.request_id,
+        &request.scope, "invented-deny").await.err().unwrap().contains("not advertised"));
+    assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+    fixture.reply(&request, AgentInteractionReply::Permission(AgentPermissionReply::Cancel)).await.unwrap();
+    assert!(matches!(rx.await.unwrap(), AcpPermissionDecision::Cancelled));
+}
+
+#[test]
+fn test_native_permission_classification_uses_advertised_kind_not_id_or_label() {
+    for kind in ["allow_once", "allow_always", "future_kind"] {
+        let options = vec![AcpPermissionOptionPayload { option_id: "deny".into(), name: "Reject".into(), kind: kind.into() }];
+        assert!(permission_option_requires_authorization(&options, "deny").unwrap());
+    }
+    for kind in ["reject_once", "reject_always"] {
+        let options = vec![AcpPermissionOptionPayload { option_id: "opaque:choice".into(), name: "No".into(), kind: kind.into() }];
+        assert!(!permission_option_requires_authorization(&options, "opaque:choice").unwrap());
+        assert!(permission_option_requires_authorization(&options, "unknown").is_err());
+    }
+}

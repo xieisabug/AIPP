@@ -1568,7 +1568,7 @@ pub async fn ask_ai(
         );
     }
 
-    message_token_manager.reset_cancel_token(conversation_id).await;
+    let execution_cancel_token = Some(message_token_manager.reset_cancel_token(conversation_id).await);
 
     // 总是启动流式处理，即使没有预先创建消息
     let _config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
@@ -1824,6 +1824,8 @@ pub async fn ask_ai(
         let budget = ContextBudget::from_config(&_config_feature_map);
         let is_butler = is_butler_system_assistant_name(&assistant_detail.assistant.name);
         let compaction_ctx = CompactionContext {
+            source_message_id: Some(user_message_id),
+            cancel_token: execution_cancel_token.clone(),
             client: &chat_config.client,
             model_name: &chat_config.model_name,
             conversation_id,
@@ -2035,11 +2037,14 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     );
 
     let conversation_id_i64 = conversation_id.parse::<i64>()?;
-    if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
-        token_manager.reset_cancel_token(conversation_id_i64).await;
-    }
+    let execution_cancel_token = app_handle.state::<MessageTokenManager>().get_cancel_token(conversation_id_i64).await;
+    crate::api::ai::context_manager::summarizer::ensure_summary_execution(&|| Ok(()), execution_cancel_token.as_ref())?;
+    // A delayed tool result is part of the original execution, not a new user
+    // request. Keep its cancellation token cancelled instead of reviving it.
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
-    crate::db::butler_goal::assert_message_current(&db.get_connection()?,conversation_id_i64,source_message_id).map_err(|e|AppError::UnknownError(e.to_string()))?;
+    crate::db::butler_control::ensure_execution(
+        &db.get_connection()?, conversation_id_i64, source_message_id,
+    ).map_err(|e| AppError::UnknownError(e.to_string()))?;
 
 
     // Get conversation details (validate exists)
@@ -2384,6 +2389,8 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     let budget = ContextBudget::from_config(&config_feature_map);
     let is_butler_cont = is_butler_system_assistant_name(&assistant_detail.assistant.name);
     let compaction_ctx = CompactionContext {
+            source_message_id: source_message_id,
+            cancel_token: execution_cancel_token.clone(),
         client: &chat_config.client,
         model_name: &chat_config.model_name,
         conversation_id: conversation_id_i64,
@@ -2532,12 +2539,13 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     source_message_id: Option<i64>,
 ) -> Result<AiResponse, AppError> {
     info!("Batch tool result continuation start");
-    if let Some(token_manager) = app_handle.try_state::<MessageTokenManager>() {
-        token_manager.reset_cancel_token(conversation_id).await;
-    }
-
+    let execution_cancel_token = app_handle.state::<MessageTokenManager>().get_cancel_token(conversation_id).await;
+    crate::api::ai::context_manager::summarizer::ensure_summary_execution(&|| Ok(()), execution_cancel_token.as_ref())?;
+    // Do not clear cancellation for a late batch of results from the old turn.
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
-    crate::db::butler_goal::assert_message_current(&db.get_connection()?,conversation_id,source_message_id).map_err(|e|AppError::UnknownError(e.to_string()))?;
+    crate::db::butler_control::ensure_execution(
+        &db.get_connection()?, conversation_id, source_message_id,
+    ).map_err(|e| AppError::UnknownError(e.to_string()))?;
 
 
     // Get conversation details (validate exists)
@@ -2798,6 +2806,8 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     let budget = ContextBudget::from_config(&config_feature_map);
     let is_butler_batch = is_butler_system_assistant_name(&assistant_detail.assistant.name);
     let compaction_ctx = CompactionContext {
+            source_message_id: source_message_id,
+            cancel_token: execution_cancel_token.clone(),
         client: &chat_config.client,
         model_name: &chat_config.model_name,
         conversation_id,
@@ -3164,7 +3174,7 @@ pub async fn regenerate_ai(
         activity_manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await;
     }
 
-    message_token_manager.reset_cancel_token(conversation_id).await;
+    let execution_cancel_token = Some(message_token_manager.reset_cancel_token(conversation_id).await);
 
     let window_clone = window.clone(); // 在移动之前克隆
     let app_handle_clone = app_handle.clone(); // 添加这行
@@ -3340,6 +3350,8 @@ pub async fn regenerate_ai(
         let budget = ContextBudget::from_config(&_config_feature_map);
         let is_butler_regen = is_butler_system_assistant_name(&assistant_detail.assistant.name);
         let compaction_ctx = CompactionContext {
+            source_message_id: Some(message_id),
+            cancel_token: execution_cancel_token.clone(),
             client: &chat_config.client,
             model_name: &chat_config.model_name,
             conversation_id,

@@ -92,6 +92,7 @@ async fn build_acp_manual_mcp_servers(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     selected_mcp_tools_payload: &str,
+    mcp_scope: &crate::acp_mcp_bridge::provenance::NativeMcpScope,
 ) -> Result<Vec<acp::McpServer>, String> {
     if selected_mcp_tools_payload.trim().is_empty() || selected_mcp_tools_payload.trim() == "[]" {
         return Ok(Vec::new());
@@ -100,7 +101,8 @@ async fn build_acp_manual_mcp_servers(
     let bridge_command = std::env::current_exe()
         .map_err(|error| format!("Failed to resolve AIPP executable for ACP MCP bridge: {error}"))?;
     let mcp_db_path = MCPDatabase::db_path(app_handle)?;
-    let proxy_config = ensure_proxy_server(app_handle.clone()).await?;
+    let mut proxy_config = ensure_proxy_server(app_handle.clone()).await?;
+    proxy_config.token = mcp_scope.token().to_string();
     Ok(build_acp_manual_mcp_servers_from_parts(
         bridge_command,
         mcp_db_path,
@@ -470,10 +472,18 @@ impl AcpPermissionState {
         Ok(())
     }
 
-    pub(crate) async fn validate_butler_reply(&self, app: &tauri::AppHandle, request_id: &str) -> Result<(), String> {
-        let guard = self.pending_requests.lock().await.get(request_id).and_then(|r| r.butler_guard.clone());
-        if let Some(guard) = guard { guard.validate(app)?; }
-        Ok(())
+    pub(crate) async fn butler_guard_for_reply(
+        &self, request_id: &str,
+        scope: &crate::api::ai::agent_driver::approval::AgentRequestScope,
+        option_id: &str,
+    ) -> Result<Option<crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard>, String> {
+        let pending = self.pending_requests.lock().await;
+        let request = pending.get(request_id).ok_or("Permission request not found or already resolved")?;
+        scope.validate(&request.scope, request_id)?;
+        let grants = crate::api::ai::agent_driver::approval::permission_option_requires_authorization(
+            &request.event.options, option_id,
+        )?;
+        Ok(if grants { request.butler_guard.clone() } else { None })
     }
 
     pub async fn request_scope(&self, request_id: &str)
@@ -4093,7 +4103,14 @@ impl AcpTauriClient {
         }
 
         let response = wait_for_acp_permission_decision(rx).await;
-        if let Some(guard) = butler_guard {
+        let grants = match &response.outcome {
+            acp::RequestPermissionOutcome::Selected(selected) =>
+                crate::api::ai::agent_driver::approval::permission_option_requires_authorization(
+                    &event.options, &selected.option_id.0.to_string(),
+                ).unwrap_or(true),
+            _ => false,
+        };
+        if let Some(guard) = butler_guard.filter(|_| grants) {
             if let Err(error) = guard.validate(&self.app_handle) {
                 warn!(%error, "Butler native approval invalidated before ACP execution");
                 return Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled));
@@ -5033,10 +5050,12 @@ async fn run_acp_connected_session(
         .close
         .is_some();
     startup_failure_stage = AgentFailureStage::Mcp;
+    let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id).map_err(AppError::UnknownError)?;
     let acp_mcp_servers = match build_acp_manual_mcp_servers(
         &app_handle,
         conversation_id,
         &acp_config.selected_mcp_tools_payload,
+        &mcp_scope,
     )
     .await
     {
@@ -5324,12 +5343,14 @@ async fn run_acp_connected_session(
         VecDeque::new()
     };
     let mut active_prompt: Option<oneshot::Receiver<Result<(), AppError>>> = None;
+    let mut active_mcp_prompt = None;
     let mut agent_closed_connection = false;
 
     loop {
         if active_prompt.is_none() {
             if let Some((message_id, prompt, attachments, window, history_prefix)) = prompt_queue.pop_front()
             {
+                active_mcp_prompt = Some(mcp_scope.begin_prompt(message_id).map_err(AppError::UnknownError)?);
                 client_handle.set_active_prompt(true).await;
                 let cx_prompt = cx.clone();
                 let client_handle_clone = client_handle.clone();
@@ -5376,6 +5397,7 @@ async fn run_acp_connected_session(
                             let _ = response.send(Ok(()));
                         }
                         Some(AcpSessionCommand::CancelCurrentPrompt { response }) => {
+                            mcp_scope.cancel_prompt();
                             prompt_queue.clear();
                             if let Some(permission_state) = app_handle.try_state::<AcpPermissionState>() {
                                 let resolutions =
@@ -5424,6 +5446,7 @@ async fn run_acp_connected_session(
                     }
                 }
                 prompt_result = prompt_done => {
+                    drop(active_mcp_prompt.take());
                     client_handle.set_active_prompt(false).await;
                     active_prompt = None;
                     match prompt_result {

@@ -81,6 +81,38 @@ const BUTLER_EXTRA_PROMPT: &str = r#"
 ## 待处理请求
 - [权限请求或用户确认]"#;
 
+/// Check the captured turn, never whichever request is currently newest.
+pub(crate) fn ensure_summary_execution(
+    validate: &(dyn Fn() -> Result<(), AppError> + Sync),
+    token: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<(), AppError> {
+    if token.is_some_and(|token| token.is_cancelled()) {
+        return Err(AppError::UnknownError("执行已取消，未继续生成上下文摘要".into()));
+    }
+    validate()
+}
+
+async fn guarded_summary_request<T>(
+    validate: &(dyn Fn() -> Result<(), AppError> + Sync),
+    token: Option<&tokio_util::sync::CancellationToken>,
+    request: impl std::future::Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    ensure_summary_execution(validate, token)?;
+    let cancelled = async {
+        match token {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancelled => return Err(AppError::UnknownError("执行已取消，未采用上下文摘要".into())),
+        result = request => result?,
+    };
+    ensure_summary_execution(validate, token)?;
+    Ok(result)
+}
+
 /// Generate a structured summary of the conversation body via LLM.
 ///
 /// `body_messages` is the middle segment of the conversation (between system
@@ -91,6 +123,8 @@ pub async fn generate_summary(
     body_messages: &[MessageTuple],
     is_butler: bool,
     require_complete: bool,
+    validate_execution: &(dyn Fn() -> Result<(), AppError> + Sync),
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<String, AppError> {
     let body_text = format_messages_for_summary(body_messages);
     let body_token_hint = body_text.len() / 3; // rough estimate
@@ -120,9 +154,11 @@ pub async fn generate_summary(
     ];
 
     let chat_request = ChatRequest::new(messages);
-    let response = client.exec_chat(model_name, chat_request, None).await.map_err(|e| {
-        AppError::UnknownError(format!("context compaction LLM call failed: {}", e))
-    })?;
+    let response = guarded_summary_request(validate_execution, cancel_token, async {
+        client.exec_chat(model_name, chat_request, None).await.map_err(|e| {
+            AppError::UnknownError(format!("context compaction LLM call failed: {}", e))
+        })
+    }).await?;
 
     if require_complete {
         check_summary_stop_reason(response.stop_reason.as_ref())?;
@@ -344,3 +380,7 @@ mod tests {
         assert!(GENERAL_SUMMARY_PROMPT.contains("<context_summary>"));
     }
 }
+
+#[cfg(test)]
+#[path = "summary_execution_tests.rs"]
+mod execution_tests;

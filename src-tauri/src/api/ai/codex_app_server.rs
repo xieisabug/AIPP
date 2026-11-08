@@ -290,6 +290,7 @@ impl CodexSessionHandle {
     }
 
     pub(crate) fn shutdown(&self, reason: String) {
+        self.cancellation.send_modify(|generation| *generation = generation.wrapping_add(1));
         let _ = self.sender.send(CodexSessionCommand::Shutdown { reason });
     }
 }
@@ -526,6 +527,7 @@ async fn codex_mcp_bridge_overrides(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     config: &CodexAppServerConfig,
+    mcp_scope: &crate::acp_mcp_bridge::provenance::NativeMcpScope,
 ) -> Result<Option<serde_json::Map<String, Value>>, String> {
     let payload = config.selected_mcp_tools_payload.trim();
     if payload.is_empty() || payload == "[]" {
@@ -534,7 +536,8 @@ async fn codex_mcp_bridge_overrides(
     let bridge_command = std::env::current_exe()
         .map_err(|error| format!("Failed to resolve AIPP executable for Codex MCP bridge: {error}"))?;
     let mcp_db_path = MCPDatabase::db_path(app_handle)?;
-    let proxy = ensure_proxy_server(app_handle.clone()).await?;
+    let mut proxy = ensure_proxy_server(app_handle.clone()).await?;
+    proxy.token = mcp_scope.token().to_string();
     Ok(Some(build_codex_mcp_config_overrides(
         &bridge_command,
         &mcp_db_path,
@@ -759,7 +762,14 @@ async fn handle_approval_request(
             &PermissionResolvedEvent { request_id, conversation_id: Some(conversation_id) },
         );
     }
-    let decision = if let Some(guard) = butler_guard {
+    let grants = match &decision {
+        AcpPermissionDecision::Selected(option_id) =>
+            crate::api::ai::agent_driver::approval::permission_option_requires_authorization(
+                &event.options, option_id,
+            ).unwrap_or(true),
+        AcpPermissionDecision::Cancelled => false,
+    };
+    let decision = if let Some(guard) = butler_guard.filter(|_| grants) {
         match guard.validate(app_handle) { Ok(()) => decision, Err(error) => {
             warn!(%error, "Butler native approval invalidated before Codex execution");
             AcpPermissionDecision::Cancelled
@@ -2079,7 +2089,8 @@ async fn run_session(
         .map_err(|error| format!("Codex persisted session lookup failed: {error}"))?;
     let mut request_id = 2_u64;
     *failure_stage = AgentFailureStage::Mcp;
-    let mcp_config_overrides = codex_mcp_bridge_overrides(&app_handle, conversation_id, &config)
+    let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id)?;
+    let mcp_config_overrides = codex_mcp_bridge_overrides(&app_handle, conversation_id, &config, &mcp_scope)
         .await
         .map_err(|error| format!("Codex MCP bridge 初始化失败：{error}"))?;
     *failure_stage = if stored_thread.is_some() { AgentFailureStage::Resume } else { AgentFailureStage::Initialize };
@@ -2253,6 +2264,8 @@ async fn run_session(
                 return Ok(());
             }
             CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation } => {
+                let _mcp_prompt = mcp_scope.begin_prompt(message_id)?
+                    .watch_cancellation(request_cancellation.signal.subscribe(), cancellation_generation);
                 event_identity.response_message_id = Some(message_id);
                 event_identity.turn_id = None;
                 *failure_stage = AgentFailureStage::Persistence;

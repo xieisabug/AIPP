@@ -40,6 +40,13 @@ pub fn ensure_turn(conn: &Connection,id:i64)->anyhow::Result<()> {
     anyhow::ensure!(!c.cancelled,"工作已停止，不再启动执行");
     anyhow::ensure!(!c.paused,"工作已暂停，请先恢复"); Ok(())
 }
+/// A tool result continues the original turn; it cannot resume a paused/stopped
+/// task or borrow a newer goal. Recheck at the provider boundary after async prep.
+pub fn ensure_execution(conn: &Connection, id: i64, source: Option<i64>) -> anyhow::Result<()> {
+    if !super::butler_goal::is_butler(conn, id)? { return Ok(()); }
+    ensure_turn(conn, id)?;
+    super::butler_goal::assert_message_current(conn, id, source)
+}
 pub fn ensure_delegation(conn: &Connection,id:i64)->anyhow::Result<()> {
     ensure_turn(conn,id)?;
     anyhow::ensure!(!get(conn,id)?.delegation_stopped,"已停止后续协作，不再派发"); Ok(())

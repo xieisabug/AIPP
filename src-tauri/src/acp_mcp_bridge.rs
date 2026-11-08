@@ -1,3 +1,5 @@
+pub(crate) mod provenance;
+
 use crate::db::connection::Connection;
 use crate::db::mcp_db::MCPDatabase;
 use serde::Deserialize;
@@ -18,10 +20,16 @@ pub const ACP_MCP_PROXY_ADDR_ENV: &str = "AIPP_ACP_MCP_PROXY_ADDR";
 pub const ACP_MCP_PROXY_TOKEN_ENV: &str = "AIPP_ACP_MCP_PROXY_TOKEN";
 pub const ACP_MCP_SELECTED_TOOLS_ENV: &str = "AIPP_ACP_SELECTED_MCP_TOOLS";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AcpMcpProxyConfig {
     pub addr: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for AcpMcpProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpMcpProxyConfig").field("addr", &self.addr).field("token", &"[REDACTED]").finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,21 +148,21 @@ async fn handle_proxy_stream(
 
 async fn execute_proxy_tool(
     app_handle: &tauri::AppHandle,
-    proxy_config: &AcpMcpProxyConfig,
+    _proxy_config: &AcpMcpProxyConfig,
     request: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let token = request
         .get("token")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "ACP MCP proxy request missing token".to_string())?;
-    if token != proxy_config.token {
-        return Err("ACP MCP proxy token mismatch".to_string());
-    }
-
     let conversation_id = request
         .get("conversation_id")
         .and_then(|value| value.as_i64())
         .ok_or_else(|| "ACP MCP proxy request missing conversation_id".to_string())?;
+    // Resolve the runtime-owned lease before any asynchronous work. Source IDs
+    // supplied in request JSON are intentionally ignored.
+    let prompt = provenance::capture(token, conversation_id)?;
+    let cancel = prompt.cancellation();
     let server_id = request
         .get("server_id")
         .and_then(|value| value.as_i64())
@@ -172,16 +180,22 @@ async fn execute_proxy_tool(
     let server = db.get_mcp_server(server_id).map_err(|error| error.to_string())?;
     let parameters = serde_json::to_string(&arguments).map_err(|error| error.to_string())?;
     let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-    let result = crate::mcp::execution_api::execute_tool_by_transport(
+    {
+        let db = crate::db::conversation_db::ConversationDatabase::new(app_handle).map_err(|error| error.to_string())?;
+        let conn = db.get_connection().map_err(|error| error.to_string())?;
+        prompt.validate_connection(&conn)?;
+    }
+    prompt.ensure_active()?;
+    let execute = crate::mcp::execution_api::execute_tool_by_transport(
         app_handle,
         &feature_config_state,
         &server,
         tool_name,
         &parameters,
         Some(conversation_id),
-        None,
-    )
-    .await?;
+        Some(cancel),
+    );
+    let result = prompt.run(execute).await?;
 
     Ok(json!({
         "content": parse_tool_content(&result),

@@ -31,6 +31,8 @@ pub struct FitResult {
 /// list exceeds the budget threshold, the body segment will be summarized
 /// via an LLM call.
 pub struct CompactionContext<'a> {
+    pub source_message_id: Option<i64>,
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
     pub client: &'a Client,
     pub model_name: &'a str,
     pub conversation_id: i64,
@@ -110,6 +112,8 @@ pub async fn fit_to_budget_with_compaction(
     db_token_counts: &[i32],
     ctx: CompactionContext<'_>,
 ) -> Result<FitResult, crate::errors::AppError> {
+    let validate_execution = || ctx.checkpoint_store.ensure_execution(ctx.conversation_id, ctx.source_message_id);
+    summarizer::ensure_summary_execution(&validate_execution, ctx.cancel_token.as_ref())?;
     if !budget.enabled {
         return Ok(FitResult { estimated_tokens: 0, compacted: false, messages });
     }
@@ -175,7 +179,7 @@ pub async fn fit_to_budget_with_compaction(
         .ok_or_else(|| crate::errors::AppError::UnknownError(format!("会话 {} 无法定位完整的压缩来源", ctx.conversation_id)))?;
     let mut summary_input=body_messages.to_vec();
     if let Some(goal)=&goal_snapshot {summary_input.push(("system".into(),goal.clone(),vec![]));}
-    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.is_butler, ctx.require_complete_summary)
+    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.is_butler, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref())
         .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
 
     // Assemble compacted message list: Head + Summary + Tail
