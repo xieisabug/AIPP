@@ -111,8 +111,8 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家 {BUTLER_NAME
 
 ## 处理用户消息
 1. 直接回答：闲聊、普通问题、你一步就能答的事。
-2. 交给团队：实现、修复、调研、撰写、整理、验证、运行类工作。用户点名的助手，无论事情大小（包括“让快速使用助手问个早安”）都交给它。
-3. 先定义完成：复杂任务先明确交付物、格式和验收标准。只有歧义会显著改变结果时才用一句话问用户（例如“整理报告”没说给谁看、要 Word 还是网页），否则做合理假设并在交付时注明。复杂工作用 todo 记录计划。
+2. 交给团队：实现、修复、调研、撰写、整理、验证、运行类工作。用户点名的助手，无论事情大小都交给它。
+3. 先定义完成：复杂任务先明确交付物、格式和验收标准。只有歧义会显著改变结果时才用一句话或者ask_user_question问用户，否则做合理假设并在交付时注明。复杂工作用 todo 记录计划。
 4. 选派发方式：
    - 默认用 `message_bot` 发到成员的长期会话：回复、问候、撰写、审阅、讨论、修改和一般执行。同一联系人会话里的多项委托按顺序处理。
    - 用 `spawn_task_conversation` 建独立任务：用户要求独立任务，或需要临时可信路径/临时 Skills、长时间运行，或同一成员要并行处理互不相关的多项工作。
@@ -166,7 +166,7 @@ const BUTLER_SYSTEM_PROMPT_BASE: &str = r#"你是 AIPP 的总管家 {BUTLER_NAME
 
 ## 交付标准
 - 产出符合要求的格式：要交互展示就生成 HTML 文件或 Artifact，不能只给代码让用户手动执行；要 Word、Excel、PowerPoint 就用 Skills 或代码执行生成真实文件，不用 Markdown 或代码块代替。确实做不到时，先与用户确认降级格式。委托成员时把格式要求写进委托。
-- 你自己修改了文件时，用 `preview_file` 展示修改后的内容（超过约 500 行的代码文件除外）。
+- 需要查看文件内容时，用 `preview_file` 展示而不是自己复述。
 - 汇报结构：先结论，再关键产物（文件路径、链接、Artifact），最后是需要用户关注的风险、假设或待办。不罗列过程，不复述成员往来，不贴工具名、参数、堆栈和原始错误（这些都在执行记录里）。
 - 写明归属：“写作助手交付了…”“根据任务 A 的结果…”，不把成员的工作说成自己做的；区分已确认的结论和仍待补充的信息。
 - 语气直接、有判断，不说空话套话，不做表演式热情。
@@ -532,7 +532,10 @@ pub(crate) fn is_butler_system_assistant(assistant: &Assistant) -> bool {
     is_butler_system_assistant_name(&assistant.name)
 }
 
-pub(super) async fn get_experimental_config_value(app_handle: &AppHandle, key: &str) -> Option<String> {
+pub(super) async fn get_experimental_config_value(
+    app_handle: &AppHandle,
+    key: &str,
+) -> Option<String> {
     let feature_state = app_handle.state::<crate::FeatureConfigState>();
     let config_map = feature_state.config_feature_map.lock().await;
     config_map
@@ -913,18 +916,29 @@ fn sync_butler_mcp_capabilities(app_handle: &AppHandle, assistant_id: i64) -> Re
     let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let mcp_db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
 
-    let servers = assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
-    let tools = assistant_db.get_assistant_mcp_tool_configs(assistant_id).map_err(|e| e.to_string())?;
+    let servers =
+        assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
+    let tools =
+        assistant_db.get_assistant_mcp_tool_configs(assistant_id).map_err(|e| e.to_string())?;
     for server in mcp_db.get_mcp_servers().map_err(|e| e.to_string())? {
-        if !servers.iter().any(|c| c.mcp_server_id == server.id && c.is_enabled == server.is_enabled) {
-            assistant_db.upsert_assistant_mcp_config(assistant_id, server.id, server.is_enabled).map_err(|e| e.to_string())?;
+        if !servers
+            .iter()
+            .any(|c| c.mcp_server_id == server.id && c.is_enabled == server.is_enabled)
+        {
+            assistant_db
+                .upsert_assistant_mcp_config(assistant_id, server.id, server.is_enabled)
+                .map_err(|e| e.to_string())?;
         }
 
         for tool in mcp_db.get_mcp_server_tools(server.id).map_err(|e| e.to_string())?.into_iter() {
             let is_enabled = server.is_enabled && tool.is_enabled;
             let auto_run = is_enabled && should_force_auto_run_for_butler_tool(&server, &tool);
-            if !tools.iter().any(|c| c.mcp_tool_id == tool.id && c.is_enabled == is_enabled && c.is_auto_run == auto_run) {
-                assistant_db.upsert_assistant_mcp_tool_config(assistant_id, tool.id, is_enabled, auto_run).map_err(|e| e.to_string())?;
+            if !tools.iter().any(|c| {
+                c.mcp_tool_id == tool.id && c.is_enabled == is_enabled && c.is_auto_run == auto_run
+            }) {
+                assistant_db
+                    .upsert_assistant_mcp_tool_config(assistant_id, tool.id, is_enabled, auto_run)
+                    .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -943,7 +957,11 @@ fn sync_butler_skill_capabilities(app_handle: &AppHandle, assistant_id: i64) -> 
 
     let configs = skill_db.get_assistant_skill_configs(assistant_id).map_err(|e| e.to_string())?;
     for (priority, skill) in scanned_skills.iter().enumerate() {
-        if configs.iter().any(|c| c.skill_identifier == skill.identifier && c.is_enabled && c.priority == priority as i32) { continue; }
+        if configs.iter().any(|c| {
+            c.skill_identifier == skill.identifier && c.is_enabled && c.priority == priority as i32
+        }) {
+            continue;
+        }
         skill_db
             .upsert_assistant_skill_config(assistant_id, &skill.identifier, true, priority as i32)
             .map_err(|e| e.to_string())?;
@@ -992,17 +1010,22 @@ async fn ensure_butler_system_assistant(app_handle: &AppHandle) -> Result<Assist
     let system_prompt = build_butler_system_prompt(app_handle).await?;
     let app = app_handle.clone();
     tokio::task::spawn_blocking(move || {
-        let assistant_db = AssistantDatabase::new(&app).map_err(|e| format!("打开总管家配置数据库失败：{e}"))?;
+        let assistant_db =
+            AssistantDatabase::new(&app).map_err(|e| format!("打开总管家配置数据库失败：{e}"))?;
         assistant_db.conn.busy_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
         let assistant = assistant_profile::sync(&assistant_db, &model_selection, &system_prompt)
-            .map_err(|e| format!("更新总管家配置事务失败（model={}）：{e}", model_selection.raw_value))?;
+            .map_err(|e| {
+                format!("更新总管家配置事务失败（model={}）：{e}", model_selection.raw_value)
+            })?;
         if !crate::mcp::registry_api::is_agent_load_skill_ready(&app, assistant.id)? {
             ensure_agent_load_skill_for_assistant(&app, assistant.id)?;
         }
         sync_butler_mcp_capabilities(&app, assistant.id)?;
         sync_butler_skill_capabilities(&app, assistant.id)?;
         Ok(assistant)
-    }).await.map_err(|e| format!("总管家配置初始化任务失败：{e}"))?
+    })
+    .await
+    .map_err(|e| format!("总管家配置初始化任务失败：{e}"))?
 }
 
 pub(crate) async fn refresh_butler_system_assistant_if_ready(
@@ -1130,10 +1153,7 @@ fn message_end_reason(message: &Message) -> Option<String> {
 }
 
 fn is_cancel_stamped_message(message: &Message) -> bool {
-    matches!(
-        message_end_reason(message).as_deref(),
-        Some("cancelled") | Some("interrupted")
-    )
+    matches!(message_end_reason(message).as_deref(), Some("cancelled") | Some("interrupted"))
 }
 
 fn is_naturally_completed_response(message: &Message) -> bool {
@@ -1201,8 +1221,12 @@ pub(crate) fn is_butler_main_busy_error(error: &str) -> bool {
 
 /// 内部续跑开工前的最终检查，在会话准入锁内调用：与用户消息的保存和运行状态发布互斥，
 /// 保证同一会话同一时间只有一轮开始执行，且用户消息优先。
-pub(crate) async fn internal_turn_busy_reason(app_handle: &AppHandle, conversation_id: i64) -> Option<String> {
-    let (ready, user_turn_pending) = butler_main_ready_for_internal_turn(app_handle, conversation_id).await;
+pub(crate) async fn internal_turn_busy_reason(
+    app_handle: &AppHandle,
+    conversation_id: i64,
+) -> Option<String> {
+    let (ready, user_turn_pending) =
+        butler_main_ready_for_internal_turn(app_handle, conversation_id).await;
     (!ready).then(|| {
         ButlerMainBusy { conversation_id, waited_secs: 0, user_turn_pending }.into_error_string()
     })
@@ -1321,7 +1345,8 @@ pub(crate) async fn wait_for_butler_main_to_be_idle(
 ) -> Result<(), ButlerMainBusy> {
     let mut user_turn_pending = false;
     for _ in 0..BUTLER_MAIN_IDLE_MAX_POLLS {
-        let (ready, pending) = butler_main_ready_for_internal_turn(app_handle, conversation_id).await;
+        let (ready, pending) =
+            butler_main_ready_for_internal_turn(app_handle, conversation_id).await;
         if ready {
             return Ok(());
         }
@@ -1330,7 +1355,8 @@ pub(crate) async fn wait_for_butler_main_to_be_idle(
     }
     Err(ButlerMainBusy {
         conversation_id,
-        waited_secs: BUTLER_MAIN_IDLE_POLL.as_millis() as u64 * BUTLER_MAIN_IDLE_MAX_POLLS as u64 / 1000,
+        waited_secs: BUTLER_MAIN_IDLE_POLL.as_millis() as u64 * BUTLER_MAIN_IDLE_MAX_POLLS as u64
+            / 1000,
         user_turn_pending,
     })
 }
@@ -1438,7 +1464,8 @@ fn build_butler_task_result_followup_prompt(
 
 /// 本进程中仍在执行的结果回送（按任务会话）。不在此集合中的 dispatching 视为上次进程遗留，可重新接手。
 fn followup_in_flight() -> &'static std::sync::Mutex<HashSet<i64>> {
-    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<i64>>> =
+        std::sync::OnceLock::new();
     IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
 }
 
@@ -1454,7 +1481,10 @@ pub(crate) struct FollowupClaim {
 
 impl Drop for FollowupClaim {
     fn drop(&mut self) {
-        followup_in_flight().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.task_conversation_id);
+        followup_in_flight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.task_conversation_id);
     }
 }
 
@@ -1480,7 +1510,9 @@ fn claim_task_result_followup(
             &claim.claim_id,
             reclaim_stale_dispatching,
         )
-        .map_err(|e| format!("task_conversation_id={task_conversation_id}; 领取结果回送失败: {e}"))?;
+        .map_err(|e| {
+            format!("task_conversation_id={task_conversation_id}; 领取结果回送失败: {e}")
+        })?;
     Ok(claimed.then_some(claim))
 }
 
@@ -1532,9 +1564,12 @@ async fn enqueue_butler_main_followup(
         } else {
             FOLLOWUP_STATUS_PENDING
         };
-        if let Err(requeue_error) =
-            update_followup_state_claimed(&butler_repo, &claim, requeue_status, result.handoff_message_id)
-        {
+        if let Err(requeue_error) = update_followup_state_claimed(
+            &butler_repo,
+            &claim,
+            requeue_status,
+            result.handoff_message_id,
+        ) {
             warn!(task_conversation_id = task.task_conversation_id, error = %requeue_error, "failed to requeue butler follow-up after busy wait");
         }
         return Err(busy.into_error_string());
@@ -1661,23 +1696,27 @@ async fn enqueue_butler_main_followup(
             butler_goal_revision: None,
         };
 
-        FOLLOWUP_KEYS.scope(followup_keys, ask_ai(
-            app_handle.clone(),
-            app_handle.state::<crate::AppState>(),
-            app_handle.state::<crate::AcpSessionState>(),
-            app_handle.state::<crate::FeatureConfigState>(),
-            app_handle.state::<crate::state::message_token::MessageTokenManager>(),
-            app_handle.state::<crate::state::activity_state::ConversationActivityManager>(),
-            window,
-            ai_request,
-            None,
-            None,
-            None,
-            None,
-            Some("internal".to_string()),
-        ))
-        .await
-        .map_err(|e| e.to_string())?;
+        FOLLOWUP_KEYS
+            .scope(
+                followup_keys,
+                ask_ai(
+                    app_handle.clone(),
+                    app_handle.state::<crate::AppState>(),
+                    app_handle.state::<crate::AcpSessionState>(),
+                    app_handle.state::<crate::FeatureConfigState>(),
+                    app_handle.state::<crate::state::message_token::MessageTokenManager>(),
+                    app_handle.state::<crate::state::activity_state::ConversationActivityManager>(),
+                    window,
+                    ai_request,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("internal".to_string()),
+                ),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
 
         // ask_ai 只是开始了续跑；是否完成由对账在主会话空闲后按完成证据判定
         for entry in &followup_batch {
@@ -1816,9 +1855,13 @@ fn build_batched_followup_prompt(batch: &[FollowupBatchEntry]) -> String {
                 "- 任务《{title}》{status}{cancel_suffix}{direct_suffix}",
                 title = entry.task.title,
                 status = describe_task_terminal_status(&entry.task.status),
-                direct_suffix = if is_direct_report(&entry.definition) && entry.task.status == STATUS_SUCCEEDED {
+                direct_suffix = if is_direct_report(&entry.definition)
+                    && entry.task.status == STATUS_SUCCEEDED
+                {
                     "（已由执行助手直接交付给用户，不要转述）"
-                } else { "" },
+                } else {
+                    ""
+                },
                 cancel_suffix =
                     if entry.cancel_requested { "（伴随取消请求）" } else { "" },
             )
@@ -1849,38 +1892,39 @@ fn spawn_butler_main_followup(
     let error_task_conversation_id = task_clone.task_conversation_id;
     let error_task_title = definition_clone.title.clone();
 
-    let spawned = crate::utils::async_thread::spawn_large_stack_thread("aipp-butler-followup", move || {
-        let thread_result: Result<(), String> = tauri::async_runtime::block_on(async move {
-            enqueue_butler_main_followup(
-                app_handle_clone.clone(),
-                task_clone,
-                definition_clone,
-                result_clone,
-                cancel_requested,
-                inject_system_message,
-                claim,
-            )
-            .await
-        });
+    let spawned =
+        crate::utils::async_thread::spawn_large_stack_thread("aipp-butler-followup", move || {
+            let thread_result: Result<(), String> = tauri::async_runtime::block_on(async move {
+                enqueue_butler_main_followup(
+                    app_handle_clone.clone(),
+                    task_clone,
+                    definition_clone,
+                    result_clone,
+                    cancel_requested,
+                    inject_system_message,
+                    claim,
+                )
+                .await
+            });
 
-        if let Err(error) = thread_result {
-            warn!(
-                butler_conversation_id = error_butler_conversation_id,
-                task_conversation_id = error_task_conversation_id,
-                error = %error,
-                "failed to enqueue butler main follow-up"
-            );
-            emit_butler_notification(
-                &error_app_handle,
-                error_butler_conversation_id,
-                error_task_conversation_id,
-                "task_followup_failed",
-                format!("任务 {} 已回流，但总管家续跑失败", error_task_title),
-                error,
-                "medium",
-            );
-        }
-    });
+            if let Err(error) = thread_result {
+                warn!(
+                    butler_conversation_id = error_butler_conversation_id,
+                    task_conversation_id = error_task_conversation_id,
+                    error = %error,
+                    "failed to enqueue butler main follow-up"
+                );
+                emit_butler_notification(
+                    &error_app_handle,
+                    error_butler_conversation_id,
+                    error_task_conversation_id,
+                    "task_followup_failed",
+                    format!("任务 {} 已回流，但总管家续跑失败", error_task_title),
+                    error,
+                    "medium",
+                );
+            }
+        });
     if let Err(error) = spawned {
         warn!(
             butler_conversation_id = definition.butler_conversation_id,
@@ -2164,7 +2208,10 @@ pub(crate) async fn emit_butler_task_ask_user_attention(
         task_conversation_id,
         "ask_user_question",
         format!("{} 在任务《{}》中向你提问", task_item.executor_assistant_name, definition.title),
-        format!("请在 {} 的会话里回答，答案会回到这项任务继续执行。", task_item.executor_assistant_name),
+        format!(
+            "请在 {} 的会话里回答，答案会回到这项任务继续执行。",
+            task_item.executor_assistant_name
+        ),
         "medium",
     );
     let _ = app_handle.emit(
@@ -2411,8 +2458,12 @@ async fn record_terminal_task_state(
 ) -> Result<ButlerTaskListItem, String> {
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     if status == STATUS_SUCCEEDED {
-        crate::db::butler_goal::assert_message_current(&db.get_connection().map_err(|e|e.to_string())?,
-            task_conversation_id,final_message_id).map_err(|e|e.to_string())?;
+        crate::db::butler_goal::assert_message_current(
+            &db.get_connection().map_err(|e| e.to_string())?,
+            task_conversation_id,
+            final_message_id,
+        )
+        .map_err(|e| e.to_string())?;
     }
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
     let butler_repo = db.butler_repo().map_err(|e| e.to_string())?;
@@ -2434,10 +2485,14 @@ async fn record_terminal_task_state(
         "cancel_requested": cancel_requested,
     });
     payload["execution"] = serde_json::to_value(crate::db::butler_execution::Outcome::finish(
-        crate::db::butler_execution::Identity::task(task_conversation_id), status, status,
+        crate::db::butler_execution::Identity::task(task_conversation_id),
+        status,
+        status,
         final_message_id.map(|id| format!("message:{id}")),
-        status == STATUS_SUCCEEDED && final_message_id.is_some(), "pending"
-    )).map_err(|e| e.to_string())?;
+        status == STATUS_SUCCEEDED && final_message_id.is_some(),
+        "pending",
+    ))
+    .map_err(|e| e.to_string())?;
     // completed / cancelled / interrupted 分记时间戳，便于 UI 与回流区分终态来源。
     match status {
         STATUS_SUCCEEDED => {
@@ -2472,8 +2527,11 @@ async fn record_terminal_task_state(
         structured["interrupted_at"] = interrupted_at.clone();
     }
     let (evidence, artifacts) = crate::db::butler_result_refs::result_references(
-        &db.get_connection().map_err(|e| e.to_string())?, task_conversation_id, final_message_id,
-    ).map_err(|e| format!("保存成果引用失败: {e}"))?;
+        &db.get_connection().map_err(|e| e.to_string())?,
+        task_conversation_id,
+        final_message_id,
+    )
+    .map_err(|e| format!("保存成果引用失败: {e}"))?;
     let result = ButlerTaskResult {
         id: existing_result.as_ref().map(|value| value.id).unwrap_or(0),
         task_conversation_id,
@@ -2493,7 +2551,9 @@ async fn record_terminal_task_state(
     // 结果与任务结束状态在同一事务中保存，崩溃时不会只写入一半
     let saved_result = butler_repo
         .save_terminal_task_result(&result, status, Some(summary.as_str()), Some(now))
-        .map_err(|e| format!("task_conversation_id={task_conversation_id}; 保存任务结果失败: {e}"))?;
+        .map_err(|e| {
+            format!("task_conversation_id={task_conversation_id}; 保存任务结果失败: {e}")
+        })?;
     let updated_conversation = conversation_repo
         .read(task_conversation_id)
         .map_err(|e| e.to_string())?
@@ -2781,8 +2841,14 @@ pub(crate) async fn finalize_butler_task_if_ready(
 
     // The old turn may finish after a replacement was queued. Retain it as history,
     // and let the current goal run; it must not finalize the work as succeeded.
-    if decision.status == STATUS_SUCCEEDED && crate::db::butler_goal::assert_message_current(
-        &db.get_connection().map_err(|e|e.to_string())?,task_conversation_id,decision.final_message_id).is_err() {
+    if decision.status == STATUS_SUCCEEDED
+        && crate::db::butler_goal::assert_message_current(
+            &db.get_connection().map_err(|e| e.to_string())?,
+            task_conversation_id,
+            decision.final_message_id,
+        )
+        .is_err()
+    {
         return Ok(None);
     }
     record_terminal_task_state(
@@ -2942,65 +3008,65 @@ async fn enqueue_butler_task_attention_followup(
     // 已注入但还没有开始处理的提醒（例如上次开工前因忙碌被退回）：沿用它继续开工，不能当作已处理
     let pending_attention = pending_attention_message_id(&main_messages, task.task_conversation_id);
     if pending_attention.is_none() {
-    let task_messages = dedupe_messages(
-        message_repo
-            .list_by_conversation_id(task.task_conversation_id)
-            .map_err(|e| e.to_string())?,
-    );
-    let latest_message_excerpt = task_messages
-        .iter()
-        .rev()
-        .find(|message| message.message_type != "system")
-        .map(|message| trim_chars(message.content.trim(), 500))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "无".to_string());
-    let pending_mcp_tool_call_count = MCPDatabase::new(&app_handle)
-        .map_err(|e| e.to_string())?
-        .get_mcp_tool_calls_by_conversation(task.task_conversation_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|tool_call| tool_call.status == "pending")
-        .count();
-    let operation_permission_count = app_handle
-        .state::<OperationState>()
-        .list_permission_requests_for_conversation(task.task_conversation_id)
-        .await
-        .len();
-    let acp_permission_count = app_handle
-        .state::<AcpPermissionState>()
-        .list_requests_for_conversation(task.task_conversation_id)
-        .await
-        .len();
-    let ask_user_question_count = app_handle
-        .state::<crate::mcp::builtin_mcp::interaction::InteractionState>()
-        .list_requests_for_conversation(task.task_conversation_id)
-        .await
-        .len();
+        let task_messages = dedupe_messages(
+            message_repo
+                .list_by_conversation_id(task.task_conversation_id)
+                .map_err(|e| e.to_string())?,
+        );
+        let latest_message_excerpt = task_messages
+            .iter()
+            .rev()
+            .find(|message| message.message_type != "system")
+            .map(|message| trim_chars(message.content.trim(), 500))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "无".to_string());
+        let pending_mcp_tool_call_count = MCPDatabase::new(&app_handle)
+            .map_err(|e| e.to_string())?
+            .get_mcp_tool_calls_by_conversation(task.task_conversation_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|tool_call| tool_call.status == "pending")
+            .count();
+        let operation_permission_count = app_handle
+            .state::<OperationState>()
+            .list_permission_requests_for_conversation(task.task_conversation_id)
+            .await
+            .len();
+        let acp_permission_count = app_handle
+            .state::<AcpPermissionState>()
+            .list_requests_for_conversation(task.task_conversation_id)
+            .await
+            .len();
+        let ask_user_question_count = app_handle
+            .state::<crate::mcp::builtin_mcp::interaction::InteractionState>()
+            .list_requests_for_conversation(task.task_conversation_id)
+            .await
+            .len();
 
-    add_message(
-        &app_handle,
-        None,
-        definition.butler_conversation_id,
-        "system".to_string(),
-        build_butler_task_attention_system_message(
-            &task,
-            &definition,
-            &attention_kind,
-            &latest_message_excerpt,
-            pending_mcp_tool_call_count,
-            operation_permission_count,
-            acp_permission_count,
-            ask_user_question_count,
-        ),
-        None,
-        None,
-        None,
-        None,
-        0,
-        None,
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+        add_message(
+            &app_handle,
+            None,
+            definition.butler_conversation_id,
+            "system".to_string(),
+            build_butler_task_attention_system_message(
+                &task,
+                &definition,
+                &attention_kind,
+                &latest_message_excerpt,
+                pending_mcp_tool_call_count,
+                operation_permission_count,
+                acp_permission_count,
+                ask_user_question_count,
+            ),
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     let window = resolve_or_create_butler_execution_window(&app_handle)?;
@@ -3016,8 +3082,8 @@ async fn enqueue_butler_task_attention_followup(
         stream: Some(true),
         attachment_list: None,
         quote: None,
-            butler_intent: None,
-            butler_goal_revision: None,
+        butler_intent: None,
+        butler_goal_revision: None,
     };
 
     ask_ai(
@@ -3083,7 +3149,8 @@ fn spawn_butler_task_attention_followup(
             .await
             {
                 Err(error) if is_butler_main_busy_error(&error) => {
-                    if is_butler_task_finalized(&app_handle_clone, task_clone.task_conversation_id) {
+                    if is_butler_task_finalized(&app_handle_clone, task_clone.task_conversation_id)
+                    {
                         break;
                     }
                     debug!(
@@ -3139,10 +3206,8 @@ async fn ensure_butler_task_followup_if_needed(
         return Ok(false);
     }
     // 发送中 / 续跑中：只有不属于本进程在途执行者（如上次进程中途崩溃）时才重新接手
-    let reclaim_stale_dispatching = matches!(
-        followup_status,
-        FOLLOWUP_STATUS_DISPATCHING | FOLLOWUP_STATUS_CONTINUING
-    );
+    let reclaim_stale_dispatching =
+        matches!(followup_status, FOLLOWUP_STATUS_DISPATCHING | FOLLOWUP_STATUS_CONTINUING);
     if reclaim_stale_dispatching && is_followup_in_flight(task_conversation_id) {
         return Ok(false);
     }
@@ -3193,7 +3258,10 @@ async fn ensure_butler_task_followup_if_needed(
                     definition.butler_conversation_id,
                     task_conversation_id,
                     "task_followup_failed",
-                    format!("任务 {} 的结果已送达主会话，但总管家续跑 {attempts} 次都未完成", definition.title),
+                    format!(
+                        "任务 {} 的结果已送达主会话，但总管家续跑 {attempts} 次都未完成",
+                        definition.title
+                    ),
                     "请在总管家主会话查看该任务结果并手动继续".to_string(),
                     "medium",
                 );
@@ -3381,7 +3449,11 @@ async fn spawn_butler_task_inner(
     followup_id: Option<i64>,
 ) -> Result<SpawnButlerTaskResponse, String> {
     ensure_butler_enabled(app_handle).await?;
-    super::butler_capabilities::ensure_enabled(app_handle, super::butler_capabilities::ButlerCapability::TaskDispatch).await?;
+    super::butler_capabilities::ensure_enabled(
+        app_handle,
+        super::butler_capabilities::ButlerCapability::TaskDispatch,
+    )
+    .await?;
 
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let conversation_repo = db.conversation_repo().map_err(|e| e.to_string())?;
@@ -3413,25 +3485,36 @@ async fn spawn_butler_task_inner(
     }
 
     crate::api::mobile_capability::ensure_assistant_execution(
-        app_handle, executor_assistant.id, "butler_dispatch_preflight",
+        app_handle,
+        executor_assistant.id,
+        "butler_dispatch_preflight",
         &request.butler_conversation_id.to_string(),
-    ).await?;
+    )
+    .await?;
     let _ = ensure_butler_system_assistant(app_handle).await?;
 
     let dispatch_key = request.request_key.clone().filter(|s| !s.trim().is_empty()).or_else(|| {
-        crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten()
-            .map(|id| format!("message:{id}:{}", serde_json::to_string(&request).unwrap_or_default()))
+        crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten().map(|id| {
+            format!("message:{id}:{}", serde_json::to_string(&request).unwrap_or_default())
+        })
     });
     if let Some(key) = dispatch_key.as_deref() {
-        let conn=db.get_connection().map_err(|e|e.to_string())?;
-        if let Some(response)=crate::db::butler_execution::reserve_dispatch(&conn,request.butler_conversation_id,key,
-            &serde_json::to_string(&request).map_err(|e|e.to_string())?).map_err(|e|e.to_string())? {
-            return serde_json::from_str(&response).map_err(|e|e.to_string());
+        let conn = db.get_connection().map_err(|e| e.to_string())?;
+        if let Some(response) = crate::db::butler_execution::reserve_dispatch(
+            &conn,
+            request.butler_conversation_id,
+            key,
+            &serde_json::to_string(&request).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            return serde_json::from_str(&response).map_err(|e| e.to_string());
         }
     }
 
     // Tasks also appear in the executor's contact timeline.
-    conversation_repo.open_butler_contact(executor_assistant.id, &executor_assistant.name)
+    conversation_repo
+        .open_butler_contact(executor_assistant.id, &executor_assistant.name)
         .map_err(|e| e.to_string())?;
     let created_task = conversation_repo
         .create(&build_butler_conversation(
@@ -3476,10 +3559,17 @@ async fn spawn_butler_task_inner(
         let chain = match request.link_chain {
             Some(chain) => Some(chain),
             None => {
-                let anchor = crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten();
+                let anchor =
+                    crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten();
                 crate::db::butler_peer::current_root(&conn, request.butler_conversation_id, anchor)
                     .map_err(|e| e.to_string())?
-                    .map(|root| crate::db::butler_peer::chain_of(&conn, root, request.butler_conversation_id))
+                    .map(|root| {
+                        crate::db::butler_peer::chain_of(
+                            &conn,
+                            root,
+                            request.butler_conversation_id,
+                        )
+                    })
                     .transpose()
                     .map_err(|e| e.to_string())?
             }
@@ -3495,20 +3585,37 @@ async fn spawn_butler_task_inner(
     if let Some(followup_id) = followup_id {
         let conn = db.get_connection().map_err(|e| e.to_string())?;
         if !crate::db::butler_work::bind_followup_task(&conn, followup_id, created_task.id)
-            .map_err(|e| e.to_string())? {
-            butler_repo.update_task_conversation_state(created_task.id, STATUS_CANCELLED,
-                Some("续接在开始前已停止，未执行"), None).map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+        {
+            butler_repo
+                .update_task_conversation_state(
+                    created_task.id,
+                    STATUS_CANCELLED,
+                    Some("续接在开始前已停止，未执行"),
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
             return Err("续接在开始前已停止，未执行".into());
         }
     }
 
-    if let Some(key)=dispatch_key.as_deref() {
-        let response=SpawnButlerTaskResponse{butler_conversation_id:request.butler_conversation_id,
-            task_conversation_id:created_task.id,title:definition.title.clone(),status:STATUS_ACCEPTED.to_string(),
-            executor_assistant_id:executor_assistant.id,executor_assistant_name:executor_assistant.name.clone()};
-        let conn=db.get_connection().map_err(|e|e.to_string())?;
-        crate::db::butler_execution::bind_dispatch(&conn,request.butler_conversation_id,key,
-            &serde_json::to_string(&response).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    if let Some(key) = dispatch_key.as_deref() {
+        let response = SpawnButlerTaskResponse {
+            butler_conversation_id: request.butler_conversation_id,
+            task_conversation_id: created_task.id,
+            title: definition.title.clone(),
+            status: STATUS_ACCEPTED.to_string(),
+            executor_assistant_id: executor_assistant.id,
+            executor_assistant_name: executor_assistant.name.clone(),
+        };
+        let conn = db.get_connection().map_err(|e| e.to_string())?;
+        crate::db::butler_execution::bind_dispatch(
+            &conn,
+            request.butler_conversation_id,
+            key,
+            &serde_json::to_string(&response).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     let accepted_task =
@@ -3530,9 +3637,12 @@ async fn spawn_butler_task_inner(
             WHERE id=?1 AND coalesce(butler_task_status,'')!='cancelled'
             AND EXISTS(SELECT 1 FROM butler_work_followup WHERE id=?2 AND state='sending' AND result_task=?1)",
             rusqlite::params![created_task.id, followup_id]).map_err(|e| e.to_string())?;
-        if changed == 0 { return Err("续接在启动前已停止，未执行".into()); }
+        if changed == 0 {
+            return Err("续接在启动前已停止，未执行".into());
+        }
     } else {
-        butler_repo.update_task_conversation_state(created_task.id, STATUS_RUNNING, None, None)
+        butler_repo
+            .update_task_conversation_state(created_task.id, STATUS_RUNNING, None, None)
             .map_err(|e| e.to_string())?;
     }
 
@@ -3556,8 +3666,8 @@ async fn spawn_butler_task_inner(
         stream: Some(true),
         attachment_list: None,
         quote: None,
-            butler_intent: None,
-            butler_goal_revision: None,
+        butler_intent: None,
+        butler_goal_revision: None,
     };
 
     let updated_conversation = conversation_repo
@@ -3648,15 +3758,27 @@ async fn spawn_butler_task_inner(
 }
 
 #[tauri::command]
-pub async fn get_butler_cache_activity(app_handle: AppHandle, conversation_id: i64) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_butler_cache_activity(
+    app_handle: AppHandle,
+    conversation_id: i64,
+) -> Result<Vec<serde_json::Value>, String> {
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    db.message_repo().map_err(|e| e.to_string())?.recent_cache_activity(conversation_id).map_err(|e| e.to_string())
+    db.message_repo()
+        .map_err(|e| e.to_string())?
+        .recent_cache_activity(conversation_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn list_butler_contact_previews(app_handle: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+pub async fn list_butler_contact_previews(
+    app_handle: AppHandle,
+) -> Result<Vec<serde_json::Value>, String> {
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let mut previews = db.conversation_repo().map_err(|e| e.to_string())?.butler_contact_previews().map_err(|e| e.to_string())?;
+    let mut previews = db
+        .conversation_repo()
+        .map_err(|e| e.to_string())?
+        .butler_contact_previews()
+        .map_err(|e| e.to_string())?;
     let conn = db.get_connection().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT d.executor_assistant_id,c.id,coalesce((SELECT max(id) FROM message WHERE conversation_id=d.task_conversation_id),0),
@@ -3668,14 +3790,20 @@ pub async fn list_butler_contact_previews(app_handle: AppHandle) -> Result<Vec<s
          LEFT JOIN butler_task_result r ON r.task_conversation_id=d.task_conversation_id
          WHERE d.id=(SELECT max(latest.id) FROM butler_task_definition latest WHERE latest.executor_assistant_id=d.executor_assistant_id)"
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |r| Ok(json!({
-        "assistantId":r.get::<_,i64>(0)?, "conversationId":r.get::<_,i64>(1)?,
-        "messageId":r.get::<_,i64>(2)?, "preview":r.get::<_,String>(3)?
-    }))).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "assistantId":r.get::<_,i64>(0)?, "conversationId":r.get::<_,i64>(1)?,
+                "messageId":r.get::<_,i64>(2)?, "preview":r.get::<_,String>(3)?
+            }))
+        })
+        .map_err(|e| e.to_string())?;
     for row in rows {
         let row = row.map_err(|e| e.to_string())?;
-        if let Some(preview) = previews.iter_mut().find(|p| p["assistantId"] == row["assistantId"]) {
-            if preview["messageId"].as_i64().unwrap_or(0) <= row["messageId"].as_i64().unwrap_or(0) {
+        if let Some(preview) = previews.iter_mut().find(|p| p["assistantId"] == row["assistantId"])
+        {
+            if preview["messageId"].as_i64().unwrap_or(0) <= row["messageId"].as_i64().unwrap_or(0)
+            {
                 *preview = row;
             }
         }
@@ -3701,7 +3829,8 @@ pub async fn search_butler_messages(
         .map_err(|e| format!("搜索管家消息失败：读取助手名称出错：{e}"))?;
     let db = ConversationDatabase::new(&app_handle)
         .map_err(|e| format!("搜索管家消息失败：打开会话数据库出错：{e}"))?;
-    let conn = db.get_connection().map_err(|e| format!("搜索管家消息失败：获取数据库连接出错：{e}"))?;
+    let conn =
+        db.get_connection().map_err(|e| format!("搜索管家消息失败：获取数据库连接出错：{e}"))?;
     let mut hits = crate::db::butler_history::ui_search(
         &conn,
         &names,
@@ -3722,13 +3851,16 @@ pub async fn search_butler_messages(
 pub async fn open_butler_contact(app_handle: AppHandle, assistant_id: i64) -> Result<i64, String> {
     ensure_butler_enabled(&app_handle).await?;
     let assistant = AssistantDatabase::new(&app_handle)
-        .and_then(|db| db.get_assistant(assistant_id)).map_err(|e| e.to_string())?;
+        .and_then(|db| db.get_assistant(assistant_id))
+        .map_err(|e| e.to_string())?;
     if is_butler_system_assistant(&assistant) {
         return Err("请通过总管家入口打开主会话".into());
     }
     let db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    db.conversation_repo().map_err(|e| e.to_string())?
-        .open_butler_contact(assistant_id, &assistant.name).map_err(|e| e.to_string())
+    db.conversation_repo()
+        .map_err(|e| e.to_string())?
+        .open_butler_contact(assistant_id, &assistant.name)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3900,18 +4032,19 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        build_batched_followup_prompt, build_butler_task_attention_system_message,
-        build_butler_task_result_system_message, cleanup_attention_debounce,
-        cleanup_butler_main_continuation_lock, cleanup_butler_task_finalization_lock,
-        find_latest_attention_message_id, find_latest_handoff_message_id,
-        has_non_system_message_after, is_active_butler_main_conversation_state,
+        awaits_peer_continuation, build_batched_followup_prompt,
+        build_butler_task_attention_system_message, build_butler_task_result_system_message,
+        cleanup_attention_debounce, cleanup_butler_main_continuation_lock,
+        cleanup_butler_task_finalization_lock, find_latest_attention_message_id,
+        find_latest_handoff_message_id, has_non_system_message_after,
+        is_active_butler_main_conversation_state,
         parse_task_conversation_id_from_attention_message,
-        parse_task_conversation_id_from_handoff_message, trim_chars, try_claim_attention_debounce,
-        try_decide_butler_task_terminal_state, update_butler_task_watcher_state,
-        ButlerTaskListItem, FollowupBatchEntry, Message, STATUS_CANCELLED, STATUS_FAILED,
+        parse_task_conversation_id_from_handoff_message, resolve_task_result_mode, trim_chars,
+        try_claim_attention_debounce, try_decide_butler_task_terminal_state,
+        update_butler_task_watcher_state, ButlerTaskListItem, FollowupBatchEntry, Message,
+        RESULT_MODE_DIRECT_REPORT, RESULT_MODE_NOTIFY_ONLY, STATUS_CANCELLED, STATUS_FAILED,
         STATUS_INTERRUPTED, STATUS_SUCCEEDED, TASK_RESULT_DETAIL_LIMIT,
-        TASK_RESULT_STRUCTURED_OUTPUT_LIMIT, awaits_peer_continuation, resolve_task_result_mode,
-        RESULT_MODE_DIRECT_REPORT, RESULT_MODE_NOTIFY_ONLY,
+        TASK_RESULT_STRUCTURED_OUTPUT_LIMIT,
     };
     use crate::db::conversation_db::{ButlerTaskDefinition, ButlerTaskResult, Conversation};
 
@@ -4014,7 +4147,8 @@ mod tests {
         // 用户普通聊天与其他任务的续跑完成，都不算本任务完成，也不计入重试
         let user_chat = build_message(11, "user", "顺便问个问题", true);
         let user_reply = build_message(12, "response", "回答", true);
-        let other_prompt = build_message_with_metadata(13, "user", "其他任务回流", true, other_task);
+        let other_prompt =
+            build_message_with_metadata(13, "user", "其他任务回流", true, other_task);
         let other_reply = build_message(14, "response", "[[NO_REPLY]]", true);
         let unrelated = vec![handoff.clone(), user_chat, user_reply, other_prompt, other_reply];
         assert_eq!(followup_turn_progress(&unrelated, 10, &key), FollowupTurnProgress::NotStarted);
@@ -4024,11 +4158,20 @@ mod tests {
         for unfinished in [
             build_message(16, "response", "正在汇总", false),
             build_message(16, "response", "<!-- MCP_TOOL_CALL:{} -->", true),
-            build_message_with_metadata(16, "response", "半截", true, Some(r#"{"end_reason":"interrupted"}"#)),
+            build_message_with_metadata(
+                16,
+                "response",
+                "半截",
+                true,
+                Some(r#"{"end_reason":"interrupted"}"#),
+            ),
         ] {
             let mut messages = unrelated.clone();
             messages.extend([prompt.clone(), unfinished]);
-            assert_eq!(followup_turn_progress(&messages, 10, &key), FollowupTurnProgress::Incomplete { attempts: 1 });
+            assert_eq!(
+                followup_turn_progress(&messages, 10, &key),
+                FollowupTurnProgress::Incomplete { attempts: 1 }
+            );
         }
         // 本轮之后用户插话得到的回复，不算本任务完成
         let mut messages = unrelated.clone();
@@ -4038,12 +4181,19 @@ mod tests {
             build_message(17, "user", "用户插话", true),
             build_message(18, "response", "回答插话", true),
         ]);
-        assert_eq!(followup_turn_progress(&messages, 10, &key), FollowupTurnProgress::Incomplete { attempts: 1 });
+        assert_eq!(
+            followup_turn_progress(&messages, 10, &key),
+            FollowupTurnProgress::Incomplete { attempts: 1 }
+        );
 
         let mut done = unrelated;
         done.extend([prompt, build_message(16, "response", "[[NO_REPLY]]", true)]);
         assert_eq!(followup_turn_progress(&done, 10, &key), FollowupTurnProgress::Completed);
-        assert_eq!(followup_turn_progress(&done, 10, &task_followup_key(8)), FollowupTurnProgress::Completed, "批量提示覆盖多个任务");
+        assert_eq!(
+            followup_turn_progress(&done, 10, &task_followup_key(8)),
+            FollowupTurnProgress::Completed,
+            "批量提示覆盖多个任务"
+        );
     }
 
     /// 回送标记与提示消息一起写入：只在续跑作用域内带上标记
@@ -4060,18 +4210,31 @@ mod tests {
     /// 忙碌退回后重试：已注入但未开工的提醒要继续处理，不能当作已处理
     #[test]
     fn pending_attention_is_resumed_until_a_turn_starts() {
-        let attention = build_message(20, "system", "<butler_task_attention>
+        let attention = build_message(
+            20,
+            "system",
+            "<butler_task_attention>
 task_conversation_id=7
-</butler_task_attention>", true);
+</butler_task_attention>",
+            true,
+        );
         assert_eq!(super::pending_attention_message_id(&[attention.clone()], 7), Some(20));
         assert_eq!(super::pending_attention_message_id(&[attention.clone()], 8), None);
-        let prompt = build_message_with_metadata(21, "user", "系统任务提醒", true, Some(r#"{"origin":"internal"}"#));
+        let prompt = build_message_with_metadata(
+            21,
+            "user",
+            "系统任务提醒",
+            true,
+            Some(r#"{"origin":"internal"}"#),
+        );
         assert_eq!(super::pending_attention_message_id(&[attention, prompt], 7), None);
     }
 
     #[test]
     fn butler_busy_error_survives_app_error_prefix() {
-        let busy = super::ButlerMainBusy { conversation_id: 1, waited_secs: 0, user_turn_pending: true }.into_error_string();
+        let busy =
+            super::ButlerMainBusy { conversation_id: 1, waited_secs: 0, user_turn_pending: true }
+                .into_error_string();
         let wrapped = crate::errors::AppError::UnknownError(busy).to_string();
         assert!(super::is_butler_main_busy_error(&wrapped));
         assert!(!super::is_butler_main_busy_error("未知错误: 模型配置错误"));
@@ -4081,7 +4244,12 @@ task_conversation_id=7
     #[test]
     fn butler_prompts_match_bounded_nested_collaboration_and_direct_delivery() {
         // #285：受托助手可以请其他成员协助（有层数/轮数/有效期与循环保护），不再写“无法再派工”。
-        for prompt in [super::BUTLER_SYSTEM_PROMPT_BASE, super::BUTLER_MEMBER_CORE_PROMPT, super::BUTLER_MEMBER_CONTACT_PROMPT, super::BUTLER_MEMBER_TASK_PROMPT] {
+        for prompt in [
+            super::BUTLER_SYSTEM_PROMPT_BASE,
+            super::BUTLER_MEMBER_CORE_PROMPT,
+            super::BUTLER_MEMBER_CONTACT_PROMPT,
+            super::BUTLER_MEMBER_TASK_PROMPT,
+        ] {
             assert!(!prompt.contains("无法再派工") && !prompt.contains("不能再向其他成员派工"));
             assert!(!prompt.contains("不要使用 `message_bot`"));
         }
@@ -4099,20 +4267,40 @@ task_conversation_id=7
     fn task_result_mode_defaults_to_executor_delivery() {
         use serde_json::json;
         assert_eq!(resolve_task_result_mode(&json!({})).unwrap(), RESULT_MODE_DIRECT_REPORT);
-        assert_eq!(resolve_task_result_mode(&json!({"deliver_to":"sender"})).unwrap(), RESULT_MODE_NOTIFY_ONLY);
-        assert_eq!(resolve_task_result_mode(&json!({"report_to_user":false})).unwrap(), RESULT_MODE_NOTIFY_ONLY);
-        assert_eq!(resolve_task_result_mode(&json!({"result_handling_mode":"notify_only"})).unwrap(), RESULT_MODE_NOTIFY_ONLY);
-        assert_eq!(resolve_task_result_mode(&json!({"deliver_to":"user","report_to_user":false})).unwrap(), RESULT_MODE_DIRECT_REPORT);
+        assert_eq!(
+            resolve_task_result_mode(&json!({"deliver_to":"sender"})).unwrap(),
+            RESULT_MODE_NOTIFY_ONLY
+        );
+        assert_eq!(
+            resolve_task_result_mode(&json!({"report_to_user":false})).unwrap(),
+            RESULT_MODE_NOTIFY_ONLY
+        );
+        assert_eq!(
+            resolve_task_result_mode(&json!({"result_handling_mode":"notify_only"})).unwrap(),
+            RESULT_MODE_NOTIFY_ONLY
+        );
+        assert_eq!(
+            resolve_task_result_mode(&json!({"deliver_to":"user","report_to_user":false})).unwrap(),
+            RESULT_MODE_DIRECT_REPORT
+        );
         assert!(resolve_task_result_mode(&json!({"deliver_to":"everyone"})).is_err());
     }
 
     #[test]
     fn task_waits_for_peer_continuation_and_ignores_silent_reply() {
-        let waiting = build_message_with_metadata(2, "user", "[助手协作答复 · …]", true,
-            Some(r#"{"origin":"butler_peer","leg":"reply","exchange_id":1}"#));
+        let waiting = build_message_with_metadata(
+            2,
+            "user",
+            "[助手协作答复 · …]",
+            true,
+            Some(r#"{"origin":"butler_peer","leg":"reply","exchange_id":1}"#),
+        );
         let messages = vec![build_message(1, "response", "已请资料助手协助", true), waiting];
         assert!(awaits_peer_continuation(&messages));
-        let finished = vec![build_message(1, "response", "最终交付", true), build_message(2, "response", "[[NO_REPLY]]", true)];
+        let finished = vec![
+            build_message(1, "response", "最终交付", true),
+            build_message(2, "response", "[[NO_REPLY]]", true),
+        ];
         assert!(!awaits_peer_continuation(&finished));
         let decision = try_decide_butler_task_terminal_state(&finished, None, false).unwrap();
         assert_eq!(decision.detail_text, "最终交付", "静默标记不是交付物");
@@ -4150,10 +4338,14 @@ task_conversation_id=7
     #[test]
     fn interrupted_status_without_cancel_flag_is_not_reported_as_cancel() {
         let mut result = build_task_result(10);
-        result.payload_json = Some(r#"{"status":"interrupted","cancel_requested":false}"#.to_string());
+        result.payload_json =
+            Some(r#"{"status":"interrupted","cancel_requested":false}"#.to_string());
         assert!(!super::result_cancel_requested(&result, Some(STATUS_INTERRUPTED)));
         result.payload_json = None;
-        assert!(super::result_cancel_requested(&result, Some(STATUS_INTERRUPTED)), "旧数据按状态推断");
+        assert!(
+            super::result_cancel_requested(&result, Some(STATUS_INTERRUPTED)),
+            "旧数据按状态推断"
+        );
     }
 
     #[test]
@@ -4210,12 +4402,7 @@ task_conversation_id=7
     #[test]
     fn cancel_near_end_natural_finish_still_succeeds() {
         // Near-end race: stream End finished the response first; cancel only requested later.
-        let messages = vec![build_message(
-            1,
-            "response",
-            "末块附近已写出完整交付物",
-            true,
-        )];
+        let messages = vec![build_message(1, "response", "末块附近已写出完整交付物", true)];
 
         let decision = try_decide_butler_task_terminal_state(&messages, None, true).unwrap();
 
