@@ -1,4 +1,3 @@
-import ButlerProgressCard from "@/components/butler/ButlerProgressCard";
 import { useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
@@ -107,7 +106,6 @@ export default function MobileTasksConfig() {
             </>}
             {overview?.tasks.map(task => <article key={task.task_conversation_id} className="border rounded p-3 space-y-2">
                 <h3>{task.title}</h3><p className="text-sm">{task.is_running ? "本机执行中" : `历史记录：${butlerTaskStatusLabel(task.status)}；本机未运行`}</p>
-                <ButlerProgressCard task={task} />
                 <Button className="min-h-11" variant="outline" disabled={busy} onClick={() => void act("读取任务", async () => setDetail({ taskId: task.task_conversation_id, data: await invoke<ButlerTaskDetailResponse>("get_butler_task_detail", { taskConversationId: task.task_conversation_id }) }))}>查看详情</Button>
                 {task.is_running && <Button className="min-h-11" variant="outline" onClick={() => void act("取消本机任务", () => invoke("cancel_ai", { conversationId: task.task_conversation_id }), true)}>取消本机执行</Button>}
                 {/* 详情紧跟所点任务展示，避免长列表时出现在页面底部 */}

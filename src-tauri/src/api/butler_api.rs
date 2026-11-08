@@ -232,8 +232,6 @@ pub(crate) struct ButlerWorkspaceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ButlerTaskListItem {
-    #[serde(default)]
-    pub progress: crate::db::butler_progress::Progress,
     pub butler_conversation_id: i64,
     pub task_conversation_id: i64,
     pub title: String,
@@ -1928,17 +1926,6 @@ fn emit_butler_notification(
     body: String,
     importance: &str,
 ) {
-    if let Ok(db) = ConversationDatabase::new(app_handle) {
-        if let Ok(conn) = db.get_connection() {
-            let policy = db.butler_repo().ok().and_then(|r| r.get_task_definition_by_task_conversation_id(task_conversation_id).ok().flatten()).and_then(|d| d.notification_policy);
-            let important = matches!(importance, "medium" | "high") || notification_type == "permission_requested" || notification_type.contains("question") || notification_type.contains("failed");
-            match crate::db::butler_progress::claim_notification(&conn, task_conversation_id, notification_type, &title, &body, important, policy.as_deref()) {
-                Ok(false) => return,
-                Ok(true) => {},
-                Err(error) => tracing::warn!(%error, "通知去重保存失败，保留通知"),
-            }
-        }
-    }
     let payload = ButlerNotificationEvent {
         butler_conversation_id,
         task_conversation_id,
@@ -2179,13 +2166,7 @@ async fn build_task_list_item(
         operation_state.has_pending_permission_for_conversation(conversation.id).await
             || acp_permission_state.has_pending_permission_for_conversation(conversation.id).await;
 
-    let progress_db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let progress_conn = progress_db.get_connection().map_err(|e| e.to_string())?;
-    let question_waiting = crate::db::mcp_db::MCPDatabase::new(app_handle).ok()
-        .and_then(|db| db.conn.query_row("SELECT EXISTS(SELECT 1 FROM mcp_tool_call WHERE conversation_id=?1 AND tool_name='ask_user_question' AND status IN ('pending','executing'))", [conversation.id], |r| r.get::<_,bool>(0)).ok()).unwrap_or(false);
-    let progress = crate::db::butler_progress::read(&progress_conn, conversation.id, &status, has_pending_permission, question_waiting).map_err(|e| e.to_string())?;
     Ok(ButlerTaskListItem {
-        progress,
         butler_conversation_id: definition.butler_conversation_id,
         task_conversation_id: conversation.id,
         title: definition.title.clone(),
@@ -2454,7 +2435,7 @@ async fn record_terminal_task_state(
     if let Some(interrupted_at) = payload.get("interrupted_at") {
         structured["interrupted_at"] = interrupted_at.clone();
     }
-    let (evidence, artifacts) = crate::db::butler_progress::result_references(
+    let (evidence, artifacts) = crate::db::butler_result_refs::result_references(
         &db.get_connection().map_err(|e| e.to_string())?, task_conversation_id, final_message_id,
     ).map_err(|e| format!("保存成果引用失败: {e}"))?;
     let result = ButlerTaskResult {

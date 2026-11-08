@@ -19,6 +19,14 @@ describe("mobile task controls", () => {
             throw new Error(`unexpected command: ${command}`);
         });
     });
+    it("should omit progress cards and their control queries when tasks are loaded", async () => {
+        render(<MobileTasksConfig />);
+        await screen.findByText("同步任务");
+        expect(screen.queryByRole("region", { name: /工作进展/ })).toBeNull();
+        expect(screen.queryByText("下一步：", { exact: false })).toBeNull();
+        expect(screen.getByText("查看详情")).toBeTruthy();
+        expect(invoke).not.toHaveBeenCalledWith("get_butler_task_control", expect.anything());
+    });
     it("should show remote running records as unknown without control when no local runtime exists", async () => {
         render(<MobileTasksConfig />);
         await screen.findByText("同步任务");
