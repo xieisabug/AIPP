@@ -20,6 +20,7 @@ use tauri::Manager;
 pub(crate) struct AgentTurnRequest<'a> {
     pub assistant: &'a AssistantDetail,
     pub conversation_id: i64,
+    pub source_message_id: Option<i64>,
     pub prompt: String,
     pub display_prompt: String,
     pub override_model_id: Option<String>,
@@ -94,7 +95,7 @@ pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Windo
         Ok((RegisteredPreparedSession { instance, prepared }, prompt))
     }.await;
     let effects = DesktopTurnEffects {
-        app_handle, window, provider_id, metadata,
+        app_handle, window, provider_id, metadata, source_message_id: request.source_message_id,
         failure_stage: if preparation.is_ok() { super::failure::AgentFailureStage::SendPrompt } else { preparation_stage },
     };
     match preparation {
@@ -107,6 +108,7 @@ pub(crate) async fn send_turn(app_handle: tauri::AppHandle, window: tauri::Windo
 }
 
 struct DesktopTurnEffects {
+    source_message_id: Option<i64>,
     app_handle: tauri::AppHandle,
     window: tauri::Window,
     provider_id: Option<i64>,
@@ -119,7 +121,9 @@ impl TurnEffects for DesktopTurnEffects {
     type Prepared = RegisteredPreparedSession;
     type Handle = AgentSessionHandle;
     fn create_response(&self, conversation_id: i64, metadata: AgentDriverMetadata) -> Result<Message, AppError> {
-        ConversationDatabase::new(&self.app_handle)?.message_repo()?.create(&response_message(conversation_id, metadata)).map_err(AppError::from)
+        let mut message=response_message(conversation_id, metadata);
+        message.parent_id=self.source_message_id;
+        ConversationDatabase::new(&self.app_handle)?.message_repo()?.create(&message).map_err(AppError::from)
     }
     fn emit(&self, conversation_id: i64, event: ConversationEvent) {
         let mut identity = super::events::AgentEventIdentity::new(self.metadata.id, conversation_id);

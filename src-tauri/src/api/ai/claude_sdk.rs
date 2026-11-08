@@ -629,8 +629,12 @@ async fn handle_permission(
     };
     let (tx, rx) = oneshot::channel();
     let state = app.state::<AcpPermissionState>();
-    state.store_request_scoped(event.clone(), tx,
-        crate::api::ai::agent_driver::approval::AgentRequestScope::native(CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id)).await?;
+    let butler_guard = crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard::capture(
+        app, conversation_id, crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok().flatten(),
+        "claude.permission", serde_json::to_value(&event).map_err(|e| e.to_string())?,
+    )?;
+    state.store_request_guarded(event.clone(), tx,
+        crate::api::ai::agent_driver::approval::AgentRequestScope::native(CLAUDE_SDK_API_TYPE, instance_id, conversation_id, run_id), butler_guard.clone()).await?;
     emit_permission_request_event(
         app,
         ACP_PERMISSION_REQUEST_EVENT,
@@ -650,6 +654,12 @@ async fn handle_permission(
             },
         );
     }
+    let decision = if let Some(guard) = butler_guard {
+        match guard.validate(app) { Ok(()) => decision, Err(error) => {
+            tracing::warn!(%error, "Butler native approval invalidated before Claude execution");
+            AcpPermissionDecision::Cancelled
+        }}
+    } else { decision };
     let (behavior, message) = match decision {
         AcpPermissionDecision::Selected(value) if value == "allow" => ("allow", Value::Null),
         _ => ("deny", json!({"message":"Permission denied by user"})),
@@ -1501,10 +1511,10 @@ pub fn spawn_claude_session_task(
                             }
                             "control_request" => {
                                 if let Err(error) =
-                                    handle_permission(
+                                    crate::api::butler_peer::TOOL_MESSAGE.scope(Some(message_id), handle_permission(
                                         &app, _conversation_id, &frame, &task_run_id, config.instance_id, &mut stdin,
                                         &mut cancellation, cancel_generation,
-                                    ).await
+                                    )).await
                                 {
                                     stream_failure_stage = AgentFailureStage::Permission;
                                     stream_error = Some(format!("Claude Code 权限响应失败：{error}"));
@@ -1574,7 +1584,7 @@ pub fn spawn_claude_session_task(
                     } else {
                         content.as_str()
                     };
-                    handle_agent_success(&app, &window, _conversation_id, success_content, AgentKind::ClaudeCode).await;
+                    handle_agent_success(&app, &window, _conversation_id, success_content, message_id, AgentKind::ClaudeCode).await;
                     if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                         manager.clear_agent_focus(&app, &event_identity, false).await;
                     }

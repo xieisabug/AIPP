@@ -54,8 +54,10 @@ pub async fn handle_agent_success(
     window: &tauri::Window,
     conversation_id: i64,
     content: &str,
+    message_id: i64,
     agent_kind: AgentKind,
 ) {
+    if !super::events::output_goal_current(app_handle,conversation_id,Some(message_id)) {return;}
     let config_feature_map = app_handle
         .state::<FeatureConfigState>()
         .config_feature_map

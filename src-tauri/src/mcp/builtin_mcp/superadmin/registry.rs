@@ -19,6 +19,12 @@ pub trait ActionHandler: Send + Sync {
         dry_run: bool,
     ) -> Result<serde_json::Value, String>;
 
+    /// High-risk handlers must atomically validate the approved resource before mutation.
+    async fn execute_approved(&self, _app_handle: &AppHandle, _args: serde_json::Value,
+        _snapshot: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
+        Err("该操作尚未实现原子批准校验，未执行".into())
+    }
+
     /// Capture the entity state before mutation for undo support.
     /// Returns None for read-only actions or when snapshot is not applicable.
     async fn snapshot_before(

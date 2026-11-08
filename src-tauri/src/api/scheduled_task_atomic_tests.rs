@@ -61,3 +61,18 @@ fn test_scheduled_run_registration_is_removed_on_drop() {
     drop(registration);
     assert!(!scheduled_run_cancel_registry().lock().unwrap().contains_key("test-registration-drop"));
 }
+
+#[test]
+fn test_scheduled_admission_rechecks_paused_contract_inside_transaction() {
+    let (mut conn, mut original, mut updated, run) = fixture();
+    original.butler_conversation_id=Some(1);
+    updated.butler_conversation_id=Some(1);
+    let policy=crate::db::butler_check::CheckPolicy {
+        mode:"read_only".into(),sources:vec!["https://example.com".into()],
+        expires_at:"2099-01-01T00:00:00Z".into(),paused:true,stopped:false,stop_current_on_pause:false,
+    };
+    crate::db::butler_check::save(&conn,original.id,&policy).unwrap();
+    assert!(create_scheduled_run_atomically(&mut conn,&original,&updated,&run).is_err());
+    assert_eq!(conn.query_row("SELECT count(*) FROM scheduled_task_run",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert!(conn.query_row("SELECT is_enabled FROM scheduled_task",[],|r|r.get::<_,bool>(0)).unwrap());
+}

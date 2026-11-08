@@ -174,6 +174,7 @@ pub async fn tool(app: &AppHandle, current: i64, name: &str, args: &Value) -> an
             Ok(value)
         }
         "continue_work" => {
+            super::butler_capabilities::ensure_enabled(app, super::butler_capabilities::ButlerCapability::WorkContinuation).await.map_err(anyhow::Error::msg)?;
             ensure!(kind == "task", "只有独立任务需要续接；其他工作请直接在当前会话里继续，或用 message_bot 请对应助手处理");
             let instruction = args["instruction"]
                 .as_str()
@@ -218,6 +219,7 @@ fn followup_goal(original_title: &str, goal: &str, result: Option<&str>, instruc
 
 /// 把用户的新要求送进仍在执行的任务会话（与任务内其他回合串行）。
 async fn send_to_task(app: &AppHandle, task: i64, assistant_id: i64, text: String, followup_id: i64) -> anyhow::Result<()> {
+    super::butler_capabilities::ensure_enabled(app, super::butler_capabilities::ButlerCapability::WorkContinuation).await.map_err(anyhow::Error::msg)?;
     let window = resolve_or_create_butler_execution_window(app).map_err(anyhow::Error::msg)?;
     let result = ask_ai(
         app.clone(),
@@ -239,6 +241,8 @@ async fn send_to_task(app: &AppHandle, task: i64, assistant_id: i64, text: Strin
             stream: Some(true),
             attachment_list: None,
             quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
         },
         None,
         None,
@@ -303,6 +307,7 @@ async fn process_followup(app: &AppHandle, followup: &Followup) -> anyhow::Resul
         app,
         &window,
         SpawnButlerTaskRequest {
+                        request_key: None,
             butler_conversation_id,
             title: format!("续：{}", definition.title),
             goal: followup_goal(&definition.title, &definition.goal, result.as_deref(), &followup.instruction),
@@ -333,6 +338,9 @@ pub(crate) async fn tick(app: &AppHandle, recovering: bool) -> anyhow::Result<bo
     let pending = work::next_followups(&conn)?;
     drop(conn);
     for followup in pending {
+        if !super::butler_capabilities::enabled(app, super::butler_capabilities::ButlerCapability::WorkContinuation).await {
+            break;
+        }
         let target = work::followup_target(&connection(app)?, &followup)?;
         if super::butler_peer::busy(app, target).await? {
             continue;
@@ -394,7 +402,6 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
         .map_err(|e| format!("读取联系人 #{conversation_id} 的任务失败：{e:#}"))?;
     let interactions = app_handle.state::<InteractionState>();
     let activity = app_handle.state::<ConversationActivityManager>();
-    let mcp = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for (task, title) in tasks {
         let mut uncertain_delivery = false;
@@ -424,21 +431,16 @@ pub async fn list_butler_contact_task_questions(app_handle: AppHandle, conversat
         if uncertain_delivery || !live.is_empty() || activity.get_runtime_state(task).await.is_running {
             continue;
         }
-        // 没有执行在等待、但提问调用仍未结束：原执行已中断（如应用重启），问题仍需回答。
-        for call in mcp.get_mcp_tool_calls_by_conversation(task).map_err(|e| e.to_string())? {
-            if call.tool_name != "ask_user_question" || !matches!(call.status.as_str(), "pending" | "executing") {
-                continue;
-            }
-            let parameters: Value = serde_json::from_str(&call.parameters).unwrap_or_default();
+        // Only recover the durable question identity with its original goal revision
+        // and expiry. A legacy MCP call_id is not evidence that the question is current.
+        let conn=connection(&app_handle).map_err(|e|e.to_string())?;
+        for event in crate::db::butler_goal::waiting_questions(&conn,task,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())? {
+            let event:Value=serde_json::from_str(&event).map_err(|e|e.to_string())?;
+            let Some(request_id)=event["request_id"].as_str() else {continue};
             result.push(TaskQuestion {
-                task_conversation_id: task,
-                task_title: title.clone(),
-                request_id: None,
-                call_id: Some(call.id),
-                stale: true,
-                questions: parameters["questions"].clone(),
-                metadata: parameters["metadata"].clone(),
-                history_key: None, answers: None, cancelled: false, delivery_status: None,
+                task_conversation_id:task, task_title:title.clone(), request_id:Some(request_id.to_string()), call_id:None,
+                stale:true, questions:event["questions"].clone(), metadata:event["metadata"].clone(),
+                history_key:None,answers:None,cancelled:false,delivery_status:None,
             });
         }
     }
@@ -479,57 +481,10 @@ pub async fn answer_butler_task_question(
     call_id: i64,
     answers: HashMap<String, String>,
 ) -> Result<Followup, String> {
-    let _stale_reply_guard = stale_question_reply_guard().await;
-    let fail = |e: anyhow::Error| format!("回答任务 #{task_conversation_id} 的问题失败：{e:#}");
-    let mut conn = connection(&app_handle).map_err(fail)?;
-    crate::db::butler_question_history::validate_owner(&conn, conversation_id, task_conversation_id).map_err(fail)?;
-    let mcp = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let call = mcp.get_mcp_tool_call(call_id).map_err(|e| format!("提问记录 #{call_id} 已删除：{e}"))?;
-    if call.conversation_id != task_conversation_id || call.tool_name != "ask_user_question" {
-        return Err(format!("提问记录 #{call_id} 不属于任务 #{task_conversation_id}"));
-    }
-    if !matches!(call.status.as_str(), "pending" | "executing") {
-        return Err("问题已结束或已取消，请刷新后重试；未重新启动任务".into());
-    }
-    if answers.is_empty() { return Err("缺少回答内容".into()); }
-    if !app_handle.state::<InteractionState>().list_requests_for_conversation(task_conversation_id).await.is_empty()
-        || app_handle.state::<ConversationActivityManager>().get_runtime_state(task_conversation_id).await.is_running {
-        return Err("任务仍在运行，请刷新后回答当前问题".into());
-    }
-    let parameters: Value = serde_json::from_str(&call.parameters).map_err(|e| format!("提问内容无法读取：{e}"))?;
-    if parameters["questions"].as_array().is_some_and(|items| items.iter().any(|q|
-        q["isSecret"].as_bool().unwrap_or(false) || q["is_secret"].as_bool().unwrap_or(false))) {
-        return Err("敏感问题的原执行已中断，请让助手重新提问；不会将敏感答案保存到续接队列".into());
-    }
-    let instruction = stale_answer_instruction(&parameters["questions"], &answers);
-    let chain = peer::task_link(&conn, task_conversation_id).map_err(|e| fail(e.into()))?.map(|(chain, _)| chain);
-    crate::db::butler_question_history::save(&conn, task_conversation_id,
-        crate::db::butler_question_history::AnswerRecord {
-            key: format!("call:{call_id}"), questions: parameters["questions"].clone(),
-            metadata: parameters["metadata"].clone(), answers: answers.clone(), cancelled: false, delivery_status: "pending".into(),
-        }).map_err(|e| format!("保存问答记录失败，未加入续接队列：{e:#}"))?;
-    // Persist the redacted intent before claiming the call. A crash at any later
-    // point leaves a visible unconfirmed record, never a silently lost answer.
-    crate::db::butler_question_history::claim_stale(&mcp.conn, task_conversation_id, call_id, false)
-        .map_err(|e| format!("答案未加入续接队列：{e:#}。已保留待核对记录，请勿自动重试。"))?;
-    let (followup, _) = work::enqueue_followup(
-        &mut conn,
-        conversation_id,
-        task_conversation_id,
-        &format!("answer:{call_id}"),
-        &instruction,
-        chain,
-    )
-    .map_err(|e| format!("问题已关闭，但答案未能加入续接队列：{e:#}。请核对任务状态，不要自动重试。"))?;
-    if matches!(call.status.as_str(), "pending" | "executing") {
-        mcp.update_mcp_tool_call_status(call_id, "failed", None, Some("原执行已中断，问题已改在执行助手会话中回答并作为续接要求送回任务"))
-            .map_err(|e| e.to_string())?;
-    }
-    crate::db::butler_question_history::finish_delivery(&conn, task_conversation_id, &format!("call:{call_id}"))
-        .map_err(|e| format!("答案已排队，但记录状态未确认，请勿重复提交：{e:#}"))?;
-    super::butler_peer::wake();
-    super::butler_peer::updated(&app_handle);
-    Ok(followup)
+    // Older MCP records have neither a trustworthy question identity nor a saved
+    // goal revision/expiry. Do not fabricate a new continuation from those records.
+    let _ = (app_handle, conversation_id, task_conversation_id, call_id, answers);
+    Err("旧问题缺少有效的问题版本和期限，不能安全续接；请刷新后回答当前问题，或让助手重新提问".into())
 }
 
 /// Contact-window reply: bind both live and recovered questions to the current contact and task.
@@ -546,12 +501,17 @@ pub async fn respond_butler_contact_task_question(
     }
     if let Some(request_id) = request_id {
         let state = app_handle.state::<InteractionState>();
-        let request = state.get_ask_user_request(&request_id).await.ok_or("问题已结束或已失效，请刷新后重试")?;
-        if request.conversation_id != Some(task_conversation_id) {
-            return Err("问题不属于当前任务，未提交答案".into());
+        let owner = if let Some(request) = state.get_ask_user_request(&request_id).await {
+            request.conversation_id
+        } else {
+            let conn=connection(&app_handle).map_err(|e|e.to_string())?;
+            crate::db::butler_goal::validate_question(&conn,&request_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?
+        };
+        if owner != Some(task_conversation_id) {
+            return Err("问题不属于当前任务或已失效，未提交答案".into());
         }
-        let delivered = crate::mcp::builtin_mcp::interaction::resolve_ask_user_question_response(
-            &app_handle, &request_id, answers.clone(), cancelled,
+        let delivered = crate::mcp::builtin_mcp::interaction::submit_ask_user_question_response(
+            app_handle.clone(), request_id, answers.clone(), Some(cancelled),
         ).await?;
         if !delivered { return Err("原执行已结束，答案未送达".into()); }
     } else if let Some(call_id) = call_id {

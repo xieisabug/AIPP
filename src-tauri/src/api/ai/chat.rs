@@ -19,7 +19,7 @@ use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::utils::window_utils::{
-    emit_conversation_list_activity, send_conversation_event_to_chat_windows,
+    emit_conversation_list_activity,
     send_error_to_appropriate_window,
 };
 use anyhow::Context as _;
@@ -1774,6 +1774,7 @@ async fn trigger_continuation_for_setup_error_results(
         window.clone(),
         conversation_id,
         assistant_id,
+        crate::db::butler_goal::OUTPUT_SOURCE.try_with(|id|*id).ok().flatten(),
     )
     .await
     .map_err(|error| anyhow::anyhow!("工具创建失败结果续写失败: {}", error))?;
@@ -3864,13 +3865,13 @@ async fn attempt_stream_chat(
                             None
                         };
 
-                        send_completion_notification(
+                        if super::events::output_goal_current(app_handle,conversation_id,response_message_id) { send_completion_notification(
                             app_handle,
                             &response_content,
                             assistant_name,
                             &config_feature_map,
                         )
-                        .await;
+                        .await; }
 
                         // 清理消息焦点（保留 MCP 执行焦点）
                         let app_handle = window.app_handle();
@@ -4556,8 +4557,9 @@ pub async fn handle_non_stream_chat(
                 None
             };
 
-            send_completion_notification(app_handle, &content, assistant_name, &config_feature_map)
-                .await;
+            if super::events::output_goal_current(app_handle,conversation_id,Some(response_message_id)) {
+                send_completion_notification(app_handle, &content, assistant_name, &config_feature_map).await;
+            }
 
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
                 activity_manager.clear_message_focus_keep_mcp(app_handle, conversation_id).await;
@@ -4759,3 +4761,8 @@ mod pr40_error_handling_tests {
 #[cfg(test)]
 #[path = "chat_tests.rs"]
 mod empty_model_reply_tests;
+
+fn send_conversation_event_to_chat_windows(app:&tauri::AppHandle,conversation:i64,event:ConversationEvent) {
+    crate::utils::window_utils::send_conversation_event_to_chat_windows(app,conversation,
+        super::events::guard_goal_event(app,conversation,event));
+}

@@ -173,9 +173,8 @@ pub fn task_posts(
                 task_id: Some(task),
                 root: None,
                 task_reply: true,
-                // 谁接手谁交付：直接交付的结果只在执行助手自己的会话里以其身份完整展示；
-                // 发起方（总管家）会话只保留一行交付事件，避免同一答复出现两次。
-                direct: direct_report && status == "delivered" && !owner_view,
+                // 执行助手自己的会话保留完整结果及失败；总管家只显示交付事件。
+                direct: direct_report && !owner_view,
                 to_user: direct_report,
                 parent: None,
                 speaker: (!owner_view).then(|| names.get(&executor).cloned()

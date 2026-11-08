@@ -748,3 +748,59 @@ fn test_butler_peer_turn_work_and_subtree_stop_spare_parallel_work() {
     conversations.sort();
     assert_eq!(conversations, vec![10, 20, 30, 60]);
 }
+
+#[test]
+fn test_butler_peer_old_goal_output_cannot_be_settled_as_success() {
+    let mut db=database();
+    db.execute("ALTER TABLE message ADD COLUMN parent_id INTEGER",[]).unwrap();
+    super::super::butler_goal::schema(&db).unwrap();
+    message(&db,20,"user","review");
+    let ex=enqueue(&mut db,request("old-goal","review old goal")).unwrap();
+    assert!(claim(&db,&ex).unwrap());
+    let input=write_input(&mut db,ex.id,"request",30,"old",1,"model").unwrap();
+    super::super::butler_goal::bind_turn(&db,30,input,1).unwrap();
+    let output=message(&db,30,"response","old answer");
+    db.execute("UPDATE message SET parent_id=?1 WHERE id=?2",params![input,output]).unwrap();
+    super::super::butler_goal::bind_output(&db,30,output).unwrap();
+    db.execute("INSERT INTO butler_goal VALUES(30,2,'replacement',0)",[]).unwrap();
+    assert!(settle(&db,&reread(&db,ex.id),false).unwrap());
+    assert_eq!(reread(&db,ex.id).state,"failed");
+    assert_eq!(db.query_row("SELECT content FROM message WHERE id=?1",[output],|r|r.get::<_,String>(0)).unwrap(),"old answer");
+}
+
+#[test]
+fn test_queued_owner_controls_block_claim_and_delivery_without_hiding_replies() {
+    for action in ["pause", "stop_delegation", "cancel"] {
+        let mut db = database();
+        message(&db, 20, "user", "审稿");
+        let ex = enqueue(&mut db, request("controlled", "稿件")).unwrap();
+        crate::db::butler_control::set(&db,20,action).unwrap();
+        assert!(!claim(&db,&ex).unwrap(), "owner {action} must prevent queued delivery");
+        // Simulate the interval between claiming and the final delivery transaction.
+        db.execute("UPDATE butler_peer_exchange SET state='sending' WHERE id=?1",[ex.id]).unwrap();
+        assert!(write_input(&mut db,ex.id,"request",30,"稿件",1,"model").is_err());
+        let count:i64=db.query_row("SELECT count(*) FROM message WHERE conversation_id=30",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+    }
+    let mut db=database();
+    message(&db,20,"user","审稿");
+    let ex=enqueue(&mut db,request("reply","稿件")).unwrap();
+    assert!(claim(&db,&ex).unwrap());
+    write_input(&mut db,ex.id,"request",30,"稿件",1,"model").unwrap();
+    crate::db::butler_control::set(&db,20,"stop_delegation").unwrap();
+    db.execute("UPDATE butler_peer_exchange SET state='returning',reply='结论' WHERE id=?1",[ex.id]).unwrap();
+    assert!(claim(&db,&reread(&db,ex.id)).unwrap());
+    assert!(write_input(&mut db,ex.id,"reply",20,"结论",1,"model").is_ok());
+}
+
+#[test]
+fn test_queued_owner_resume_and_unrelated_work_remain_eligible() {
+    let mut db=database();message(&db,20,"user","审稿");
+    let ex=enqueue(&mut db,request("resume","稿件")).unwrap();
+    crate::db::butler_control::set(&db,40,"cancel").unwrap();
+    crate::db::butler_control::set(&db,20,"pause").unwrap();
+    assert!(!claim(&db,&ex).unwrap());
+    crate::db::butler_control::set(&db,20,"resume").unwrap();
+    assert!(claim(&db,&ex).unwrap());
+    assert!(write_input(&mut db,ex.id,"request",30,"稿件",1,"model").is_ok());
+}

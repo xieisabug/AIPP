@@ -55,8 +55,8 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
     const label = incomplete ? "与" : sent ? (first.task_reply ? "已回复" : posts.some(p => ["queued", "sending"].includes(p.status)) ? "正在联系" : "已发消息给")
         : incomingRequest ? (posts.every(p => p.to_user) ? "接手工作，来自" : posts.every(p => p.to_user === false) ? "协助请求来自" : "消息来自")
         : incoming ? "消息来自" : `${posts.length} 条消息往来`;
-    const directReport = posts.length === 1 && first.direct && !first.error && first.text.trim() !== "";
-    // 受托助手已在自己的会话里直接答复用户：发起方（总管家）只留一行事件，正文不重复展示。
+    const directReport = posts.length === 1 && first.direct && (first.text.trim() !== "" || !!first.error);
+    // 发起方仅显示交付事件，不重复助手正文。
     const answeredUser = !incomplete && incoming && posts.every(p => p.task_reply && p.to_user && p.status === "delivered");
     const speaker = first.speaker ?? first.peer;
     const speakerAvatar = first.speaker_assistant ?? first.peer_assistant ?? first.peer_conversation;
@@ -83,7 +83,7 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
                 </span>
             </div>
             <div className="butler-peer-bubble mt-1.5 max-w-full">
-                <UnifiedMarkdown>{first.text}</UnifiedMarkdown>
+                <UnifiedMarkdown>{first.error || first.text}</UnifiedMarkdown>
             </div>
         </div> : <div className="butler-exchange" data-aipp-slot="butler-peer-event">
             <time className="block text-center text-[11px] text-muted-foreground" dateTime={first.occurred_at}>

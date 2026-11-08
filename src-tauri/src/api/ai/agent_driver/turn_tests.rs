@@ -51,7 +51,7 @@ fn test_turn_text_drivers_receive_initialized_attachment_context_once() {
     let assistant = assistant(); let overrides = None; let features = HashMap::new();
     let contextual = "private prefix\nquestion\n<fileattachment name=\"notes.txt\">attached evidence</fileattachment>";
     let messages = vec![("user".into(), contextual.into(), vec![attachment(AttachmentType::Text)])];
-    let request = AgentTurnRequest { assistant: &assistant, conversation_id: 42, prompt: "private prefix\nquestion".into(), display_prompt: "question".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &messages };
+    let request = AgentTurnRequest { source_message_id: None, assistant: &assistant, conversation_id: 42, prompt: "private prefix\nquestion".into(), display_prompt: "question".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &messages };
     for kind in [AgentSessionKind::Codex, AgentSessionKind::Claude] {
         let prompt = prompt_for_driver(kind.into(), &request).unwrap();
         assert_eq!(prompt, contextual); assert_eq!(prompt.matches("attached evidence").count(), 1);
@@ -63,7 +63,7 @@ fn test_turn_text_drivers_receive_initialized_attachment_context_once() {
 fn test_turn_text_drivers_reject_non_text_attachments_instead_of_dropping_them() {
     let assistant = assistant(); let overrides = None; let features = HashMap::new();
     let messages = vec![("user".into(), "question".into(), vec![attachment(AttachmentType::Image)])];
-    let request = AgentTurnRequest { assistant: &assistant, conversation_id: 42, prompt: "question".into(), display_prompt: "question".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &messages };
+    let request = AgentTurnRequest { source_message_id: None, assistant: &assistant, conversation_id: 42, prompt: "question".into(), display_prompt: "question".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &messages };
     let error = prompt_for_driver(AgentSessionKind::Codex.into(), &request).err().unwrap().to_string();
     assert!(error.contains("attachment_id=12")); assert!(error.contains("without losing user input"));
 }

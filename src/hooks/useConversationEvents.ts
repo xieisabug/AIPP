@@ -750,6 +750,7 @@ export function useConversationEvents(options: UseConversationEventsOptions) {
                     message_type: messageUpdateData.message_type as any,
                     content: messageUpdateData.content,
                     is_done: messageUpdateData.is_done,
+                    end_reason: messageUpdateData.end_reason,
                     // 如果事件中包含 Token 计数，则添加到 StreamEvent 中
                     token_count: messageUpdateData.token_count,
                     input_token_count: messageUpdateData.input_token_count,

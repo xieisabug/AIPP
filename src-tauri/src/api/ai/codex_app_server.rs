@@ -622,6 +622,7 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
 /// Cancellation generations belong to the prompt at enqueue time, so an idle
 /// Stop cannot cancel a later prompt, and Stop during startup is not lost.
 struct CodexRequestCancellation {
+    source_message_id: Option<i64>,
     instance_id: Option<i64>,
     signal: watch::Sender<u64>,
     generation: u64,
@@ -735,7 +736,11 @@ async fn handle_approval_request(
         conversation_id: Some(conversation_id),
         run_id: cancellation.map(|context| context.run_id.clone()),
     };
-    permission_state.store_request_scoped(event.clone(), decision_tx, scope).await?;
+    let butler_guard = crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard::capture(
+        app_handle, conversation_id, cancellation.and_then(|c| c.source_message_id),
+        "codex.permission", serde_json::to_value(&event).map_err(|e| e.to_string())?,
+    )?;
+    permission_state.store_request_guarded(event.clone(), decision_tx, scope, butler_guard.clone()).await?;
     if let Err(error) = emit_permission_request_event(
         app_handle,
         ACP_PERMISSION_REQUEST_EVENT,
@@ -754,6 +759,12 @@ async fn handle_approval_request(
             &PermissionResolvedEvent { request_id, conversation_id: Some(conversation_id) },
         );
     }
+    let decision = if let Some(guard) = butler_guard {
+        match guard.validate(app_handle) { Ok(()) => decision, Err(error) => {
+            warn!(%error, "Butler native approval invalidated before Codex execution");
+            AcpPermissionDecision::Cancelled
+        }}
+    } else { decision };
     let result = codex_approval_response(method, &params, decision);
     write_frame(stdin, &json!({"jsonrpc":"2.0","id":rpc_id,"result":result})).await?;
     Ok(true)
@@ -1317,7 +1328,7 @@ async fn handle_server_request(
     let interaction_state = app_handle.state::<InteractionState>();
     // Dropping the request future invokes its existing exact-request cleanup
     // guard; do not clear all conversation questions or consume control commands.
-    let result = match wait_codex_interaction(request_ask_user_question_scoped(
+    let result = match wait_codex_interaction(crate::api::butler_peer::TOOL_MESSAGE.scope(cancellation.and_then(|c|c.source_message_id),request_ask_user_question_scoped(
         app_handle,
         &interaction_state,
         Some(conversation_id),
@@ -1328,7 +1339,7 @@ async fn handle_server_request(
             conversation_id: Some(conversation_id),
             run_id: cancellation.map(|context| context.run_id.clone()),
         }),
-    ), cancellation).await
+    )), cancellation).await
     {
         Ok(answers) => codex_user_input_response(&mappings, &answers),
         Err(error) => {
@@ -2050,6 +2061,7 @@ async fn run_session(
     failure_stage: &mut AgentFailureStage,
 ) -> Result<(), String> {
     let mut request_cancellation = CodexRequestCancellation {
+        source_message_id: None,
         signal: cancellation, generation: 0, run_id: run_id.to_string(), instance_id: config.instance_id,
     };
     let (_child, mut stdin, mut lines) = spawn_process(&config, stderr_buffer).await?;
@@ -2252,6 +2264,7 @@ async fn run_session(
                 }
                 *failure_stage = AgentFailureStage::SendPrompt;
                 request_cancellation.generation = cancellation_generation;
+                request_cancellation.source_message_id = Some(message_id);
                 let turn_start_time = chrono::Utc::now();
                 request_id += 1;
                 write_frame(
@@ -2626,7 +2639,7 @@ async fn run_session(
                 } else {
                     content.as_str()
                 };
-                handle_agent_success(&app_handle, &window, conversation_id, success_content, AgentKind::Codex).await;
+                handle_agent_success(&app_handle, &window, conversation_id, success_content, message_id, AgentKind::Codex).await;
                 if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_agent_focus(&app_handle, &event_identity, false).await; }
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;

@@ -412,6 +412,7 @@ async fn create_scheduled_tool_call_record(
 async fn execute_single_tool(
     app_handle: &tauri::AppHandle,
     call_db_id: i64,
+    scheduled_task_id: i64,
     timeout: Duration,
     cancel_token: Option<CancellationToken>,
 ) -> (bool, String) {
@@ -465,6 +466,22 @@ async fn execute_single_tool(
         }
     };
 
+    // Read the current contract immediately before each external tool call.
+    let check = (|| -> Result<bool, String> {
+        let db = ScheduledTaskDatabase::new(app_handle).map_err(|e|e.to_string())?;
+        let task = db.read_task(scheduled_task_id).map_err(|e|e.to_string())?.ok_or("后台任务不存在")?;
+        if task.butler_conversation_id.is_some() {
+            let mut policy = crate::db::butler_check::read(&db.conn,task.id).map_err(|e|e.to_string())?.ok_or("后台检查未授权")?;
+            // Pausing future runs need not cancel an already-running read-only check.
+            if !policy.stop_current_on_pause { policy.paused=false; policy.stopped=false; }
+            crate::db::butler_check::ensure_tool(&policy,server.is_builtin,server.command.as_deref().unwrap_or(""),&record.tool_name,&record.parameters,Utc::now())?;
+        }
+        Ok(task.butler_conversation_id.is_some())
+    })();
+    let bounded_check = match check { Ok(value)=>value, Err(error)=> {
+        let _ = mcp_db.update_mcp_tool_call_status(call_db_id,"failed",None,Some(&error));
+        return (false,error);
+    }};
     let feature_config_state = app_handle.state::<FeatureConfigState>();
     if let Some(token) = cancel_token.as_ref() {
         if token.is_cancelled() {
@@ -473,19 +490,42 @@ async fn execute_single_tool(
             return (false, err);
         }
     }
-    let exec_result = tokio::time::timeout(
+    let stop_token = cancel_token.clone().unwrap_or_default();
+    let execution = tokio::time::timeout(
         timeout,
-        crate::mcp::execution_api::execute_tool_by_transport(
-            app_handle,
-            &feature_config_state,
-            &server,
-            &record.tool_name,
-            &record.parameters,
-            Some(record.conversation_id),
-            cancel_token,
-        ),
-    )
-    .await;
+        async {
+            if bounded_check && record.tool_name == "fetch_url" {
+                // Do not launch a browser, send ambient cookies, load subresources,
+                // or follow a redirect outside the exact user-approved source.
+                let args: serde_json::Value = serde_json::from_str(&record.parameters).map_err(|e| e.to_string())?;
+                let url = args["url"].as_str().ok_or("缺少网址")?;
+                let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().map_err(|e|e.to_string())?;
+                let response = client.get(url).send().await.map_err(|e|e.to_string())?;
+                if response.status().is_redirection() { return Err("检查网址发生跳转，请用户明确授权目标网址".to_string()); }
+                let mut response = response.error_for_status().map_err(|e|e.to_string())?;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response.chunk().await.map_err(|e|e.to_string())? {
+                    if bytes.len()+chunk.len()>2_000_000 { return Err("检查来源内容超过 2 MB 上限".to_string()); }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(String::from_utf8_lossy(&bytes).into_owned())
+            } else {
+                crate::mcp::execution_api::execute_tool_by_transport(
+                    app_handle, &feature_config_state, &server, &record.tool_name,
+                    &record.parameters, Some(record.conversation_id), cancel_token,
+                ).await.map_err(|e|e.to_string())
+            }
+        },
+    );
+    let exec_result = tokio::select! {
+        biased;
+        _ = stop_token.cancelled() => {
+            let error = "工具执行已停止或检查已到期".to_string();
+            let _ = mcp_db.update_mcp_tool_call_status(call_db_id, "failed", None, Some(&error));
+            return (false, error);
+        }
+        result = execution => result,
+    };
 
     // 4. 处理结果
     match exec_result {
@@ -640,13 +680,23 @@ fn remove_outcome_journal(app_handle: &tauri::AppHandle, run_id: &str) {
 }
 
 pub(crate) fn scheduled_followup_needs_retry(status: Option<&str>) -> bool {
-    matches!(status, Some("pending" | "continuing" | "failed" | "retry"))
+    crate::db::butler_execution::may_retry_report(status)
 }
 
 fn persist_scheduled_outcome(app_handle: &tauri::AppHandle, entry: &ScheduledOutcomeJournal) -> Result<(), String> {
     let journal_error = write_outcome_journal(app_handle, entry).err();
     let outcome = &entry.outcome;
-    let payload = serde_json::to_string(outcome).map_err(|e| e.to_string())?;
+    let mut payload_value = serde_json::to_value(outcome).map_err(|e| e.to_string())?;
+    let is_butler = ScheduledTaskDatabase::new(app_handle).map_err(|e|e.to_string())?
+        .read_task(entry.task_id).map_err(|e|e.to_string())?.is_some_and(|task|task.butler_conversation_id.is_some());
+    if is_butler {
+    payload_value["execution"] = serde_json::to_value(crate::db::butler_execution::Outcome::finish(
+        crate::db::butler_execution::Identity::scheduled(entry.task_id,&entry.run_id),
+        outcome.status,outcome.end_reason,Some(format!("scheduled_run:{}",entry.run_id)),
+        outcome.status == "success" && outcome.end_reason == "completed", "pending"
+    )).map_err(|e|e.to_string())?;
+    }
+    let payload = payload_value.to_string();
     let saved = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string()).and_then(|db| {
         db.save_run_outcome(&entry.run_id, outcome.status, outcome.notify,
             outcome.summary.as_deref(), outcome.error.as_deref(), Some(entry.finished_time), &payload)
@@ -1085,6 +1135,7 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
                     execute_single_tool(
                         ctx.app_handle,
                         call_db_id,
+                        ctx.task_id,
                         Duration::from_secs(AGENTIC_LOOP_PER_TOOL_TIMEOUT_SECS),
                         Some(ctx.cancel_token.clone()),
                     )
@@ -1735,6 +1786,7 @@ pub async fn create_scheduled_task(
 ) -> Result<ScheduledTaskDTO, String> {
     validate_assistant_type(&app_handle, request.assistant_id)?;
     if let Some(butler_conversation_id) = request.butler_conversation_id {
+        crate::api::butler_capabilities::ensure_enabled(&app_handle, crate::api::butler_capabilities::ButlerCapability::BackgroundChecks).await?;
         let conversation_db = ConversationDatabase::new(&app_handle).map_err(|e| e.to_string())?;
         let conversation_repo = conversation_db.conversation_repo().map_err(|e| e.to_string())?;
         let conversation = conversation_repo
@@ -1773,7 +1825,7 @@ pub async fn create_scheduled_task(
     let task = ScheduledTask {
         id: 0,
         name: request.name,
-        is_enabled: request.is_enabled,
+        is_enabled: request.is_enabled && request.butler_conversation_id.is_none(),
         schedule_type: request.schedule_type,
         interval_value: request.interval_value,
         interval_unit: request.interval_unit,
@@ -1825,6 +1877,10 @@ pub async fn update_scheduled_task(
         },
         now,
     )?;
+    if existing.butler_conversation_id.is_some() && request.is_enabled {
+        let policy=crate::db::butler_check::read(&db.conn,existing.id).map_err(|e|e.to_string())?;
+        crate::db::butler_check::ensure_active(policy.as_ref(),Utc::now())?;
+    }
     let updated = ScheduledTask {
         id: existing.id,
         name: request.name,
@@ -1962,6 +2018,10 @@ fn create_scheduled_run_atomically(
 ) -> Result<ScheduledTaskRun, String> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("task_id={}; run_id={}; 创建事务失败: {e}", original.id, run.run_id))?;
+    if original.butler_conversation_id.is_some() {
+        let policy = crate::db::butler_check::read(&tx, original.id).map_err(|e| e.to_string())?;
+        crate::db::butler_check::ensure_active(policy.as_ref(), Utc::now())?;
+    }
     let current: Option<DateTime<Utc>> = tx.query_row(
         "SELECT updated_time FROM scheduled_task WHERE id=?1", [original.id],
         |row| crate::utils::db_utils::get_required_datetime_from_row(row, 0, "updated_time"),
@@ -1995,6 +2055,12 @@ pub async fn execute_scheduled_task(
     original: &ScheduledTask,
     task: &ScheduledTask,
 ) -> Result<RunScheduledTaskResult, String> {
+    if task.butler_conversation_id.is_some() {
+        crate::api::butler_capabilities::ensure_enabled(app_handle, crate::api::butler_capabilities::ButlerCapability::BackgroundChecks).await?;
+        let check_db=ScheduledTaskDatabase::new(app_handle).map_err(|e|e.to_string())?;
+        let policy=crate::db::butler_check::read(&check_db.conn,task.id).map_err(|e|e.to_string())?;
+        crate::db::butler_check::ensure_active(policy.as_ref(),Utc::now())?;
+    }
     let run_id = Uuid::new_v4().to_string();
     let mut log_db = ScheduledTaskDatabase::new(app_handle)
         .map_err(|e| format!("task_id={}; run_id={run_id}; 打开运行记录数据库失败: {e}", task.id))?;
@@ -2023,6 +2089,13 @@ pub async fn execute_scheduled_task(
         dto.local_running = true;
         let _ = app_handle.emit(SCHEDULED_TASK_RUN_CREATED_EVENT, dto);
         log_task_message(app_handle, task.id, &run_id, "start", "开始执行定时任务");
+        let expiry_guard = if task.butler_conversation_id.is_some() {
+            let policy=crate::db::butler_check::read(&log_db.conn,task.id).map_err(|e|e.to_string())?.ok_or("检查合同不存在")?;
+            let deadline=DateTime::parse_from_rfc3339(&policy.expires_at).map_err(|e|e.to_string())?.with_timezone(&Utc);
+            let delay=(deadline-Utc::now()).to_std().unwrap_or_default();
+            let token=registration.token.clone();
+            Some(tokio::spawn(async move {tokio::time::sleep(delay).await;token.cancel();}))
+        } else {None};
         let run_result = match crate::api::mobile_capability::ensure_assistant_execution(
             app_handle, task.assistant_id, "scheduled_run_preflight", "not_created",
         ).await {
@@ -2032,11 +2105,16 @@ pub async fn execute_scheduled_task(
             Err(error) => Err(format!("task_id={}; run_id={run_id}; {error}", task.id)),
         };
 
+        if let Some(guard)=expiry_guard {guard.abort();}
         // 所有结束原因（含启动前置失败）统一在这里入库，再回报管家；回报失败不改写执行结果。
-        let outcome = match run_result {
+        let mut outcome = match run_result {
             Ok(outcome) => outcome,
             Err(err) => ScheduledRunOutcome::failed("error", err, None),
         };
+        if task.butler_conversation_id.is_some() && outcome.status=="success" && outcome.notify {
+            let previous: Option<String> = log_db.conn.query_row("SELECT summary FROM scheduled_task_run WHERE task_id=?1 AND run_id<>?2 AND status='success' AND butler_followup_status='delivered' ORDER BY id DESC LIMIT 1",rusqlite::params![task.id,&run_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?.flatten();
+            if previous.is_some() && previous==outcome.summary {outcome.notify=false;}
+        }
         let entry = ScheduledOutcomeJournal {
             task_id: task.id, run_id: run_id.clone(), finished_time: Utc::now(), outcome: outcome.clone(),
         };
@@ -2323,6 +2401,10 @@ fn spawn_scheduled_run_report(
     };
     tauri::async_runtime::spawn(async move {
         let _guard = guard;
+        if outcome.status == "success" && !outcome.notify {
+            persist_terminal_followup_status(&app_handle, &task, &run_id, "delivered").await;
+            return;
+        }
         report_scheduled_run_to_butler(&app_handle, &task, &run_id, &outcome).await;
     });
 }
@@ -2484,17 +2566,23 @@ async fn execute_scheduled_task_inner(
     // ── 2. 渲染提示词 ──────────────────────────────────────────────
     let template_engine = build_template_engine(app_handle).map_err(|e| e.to_string())?;
     let mut template_context = HashMap::new();
-    if let Some(state) = app_handle.try_state::<AppState>() {
+    if task.butler_conversation_id.is_none() { if let Some(state) = app_handle.try_state::<AppState>() {
         let selected_text = state.selected_text.lock().await.clone();
         template_context.insert("selected_text".to_string(), selected_text);
+    }}
+    let slash_parse_result = if task.butler_conversation_id.is_some() {
+        crate::slash::types::SlashParseResult { display_prompt: task.task_prompt.clone(), runtime_user_prompt: task.task_prompt.clone(), active_skills: Vec::new() }
+    } else { parse_slash_prompt(app_handle, &task.task_prompt).await.map_err(|e| e.to_string())? };
+    let mut system_prompt_rendered = if task.butler_conversation_id.is_some() {system_prompt.clone()} else {template_engine.parse(&system_prompt, &template_context).await};
+    if task.butler_conversation_id.is_some() {
+        let db=ScheduledTaskDatabase::new(app_handle).map_err(|e|e.to_string())?;
+        let policy=crate::db::butler_check::read(&db.conn,task.id).map_err(|e|e.to_string())?.ok_or("检查合同不存在")?;
+        system_prompt_rendered.push_str(&format!("\n后台检查合同：模式={}；只允许读取以下明确来源：{}；期限={}。不得写文件、发送消息、创建新检查或提交外部操作。草稿只作为本次结果交付。",policy.mode,policy.sources.join("、"),policy.expires_at));
     }
-    let slash_parse_result =
-        parse_slash_prompt(app_handle, &task.task_prompt).await.map_err(|e| e.to_string())?;
-    let system_prompt_rendered = template_engine.parse(&system_prompt, &template_context).await;
     let task_prompt_rendered =
-        template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await;
+        if task.butler_conversation_id.is_some() {slash_parse_result.runtime_user_prompt.clone()} else {template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await};
     let task_prompt_display =
-        template_engine.parse(&slash_parse_result.display_prompt, &template_context).await;
+        if task.butler_conversation_id.is_some() {slash_parse_result.display_prompt.clone()} else {template_engine.parse(&slash_parse_result.display_prompt, &template_context).await};
     log_task_message(app_handle, task.id, run_id, "task_prompt", task_prompt_display.clone());
 
     // ── 3. 收集 MCP 工具信息 & skills ────────────────────────────────
@@ -2510,7 +2598,7 @@ async fn execute_scheduled_task_inner(
     let skills_info = collect_skills_info_for_assistant(app_handle, task.assistant_id)
         .await
         .map_err(|e| e.to_string())?;
-    if !skills_info.enabled_skills.is_empty() {
+    if task.butler_conversation_id.is_none() && !skills_info.enabled_skills.is_empty() {
         assistant_prompt_result =
             format_skills_prompt(app_handle, assistant_prompt_result, &skills_info).await;
     }
@@ -3006,6 +3094,8 @@ async fn enqueue_scheduled_task_butler_followup(
         stream: Some(true),
         attachment_list: None,
         quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
     };
 
     FOLLOWUP_KEYS.scope(vec![scheduled_followup_key(run_id)], ask_ai(
@@ -3030,5 +3120,33 @@ async fn enqueue_scheduled_task_butler_followup(
 }
 
 pub(crate) fn scheduled_followup_key(run_id: &str) -> String {
-    format!("run:{run_id}")
+    crate::db::butler_execution::Identity::scheduled(0,run_id).request_key
+}
+
+#[tauri::command]
+pub fn get_butler_check_policy(app_handle: tauri::AppHandle, task_id:i64) -> Result<Option<crate::db::butler_check::CheckPolicy>,String> {
+    let db=ScheduledTaskDatabase::new(&app_handle).map_err(|e|e.to_string())?;
+    let task=db.read_task(task_id).map_err(|e|e.to_string())?.ok_or("检查任务不存在")?;
+    if task.butler_conversation_id.is_none() {return Err("只适用于管家后台检查".into());}
+    crate::db::butler_check::read(&db.conn,task_id).map_err(|e|e.to_string())
+}
+
+/// Native UI only; deliberately not registered as a model management action.
+#[tauri::command]
+pub async fn configure_butler_check(app_handle:tauri::AppHandle,task_id:i64,policy:crate::db::butler_check::CheckPolicy) -> Result<(),String> {
+    let mut db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    crate::db::butler_check::configure(&mut db.conn, task_id, &policy, Utc::now())
+}
+
+#[tauri::command]
+pub async fn control_butler_check(app_handle:tauri::AppHandle,task_id:i64,action:String,stop_current:bool) -> Result<(),String> {
+    let mut db = ScheduledTaskDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    crate::db::butler_check::control(&mut db.conn, task_id, &action, stop_current, Utc::now())?;
+    if stop_current && action!="resume" {
+        let runs=db.list_runs_by_task(task_id,50).map_err(|e|e.to_string())?;
+        for run in runs.iter().filter(|r|r.status=="running") {
+            if !cancel_scheduled_run(&run.run_id).await {return Err(format!("已禁止后续检查，但运行 {} 的停止尚未确认；不能保证撤销已经发生的操作",run.run_id));}
+        }
+    }
+    Ok(())
 }

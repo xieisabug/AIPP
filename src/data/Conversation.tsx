@@ -77,6 +77,7 @@ export interface QueuedConversationMessage {
 
 // 流式事件数据类型
 export interface StreamEvent {
+    end_reason?: string;
     message_id: number;
     message_type: 'reasoning' | 'response' | 'error';
     content: string;
@@ -105,6 +106,7 @@ export interface MessageAddEvent {
 }
 
 export interface MessageUpdateEvent {
+    end_reason?: string;
     message_id: number;
     message_type: string;
     content: string;

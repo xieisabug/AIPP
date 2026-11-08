@@ -130,7 +130,7 @@ async fn test_registry_same_driver_multiple_instances_prepare_isolated_configs()
     let second = registry.resolve_provider(52, "test_extension", vec![config(52, "plan")]).unwrap();
     assert_ne!(first.config_fingerprint, second.config_fingerprint);
     let assistant = assistant(); let overrides = None; let features = HashMap::new();
-    let request = AgentTurnRequest { assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
+    let request = AgentTurnRequest { source_message_id: None, assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
     let first_handle = registry.prepare(&first, &request, Some("model-a")).unwrap().acquire(&NoDesktop, 42).await.unwrap();
     let second_handle = registry.prepare(&second, &request, Some("model-b")).unwrap().acquire(&NoDesktop, 43).await.unwrap();
     assert_eq!(first_handle.run_id(), "custom-run-51"); assert_eq!(second_handle.run_id(), "custom-run-52");
@@ -162,7 +162,7 @@ impl TurnEffects for HeadlessEffects {
 async fn test_registry_fourth_driver_runs_production_dispatch_and_controls() {
     let (registry, actions) = setup();
     let assistant = assistant(); let overrides = None; let features = HashMap::new();
-    let request = AgentTurnRequest { assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
+    let request = AgentTurnRequest { source_message_id: None, assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
     let (instance, model) = super::super::turn::load_agent_instance(&registry, &assistant, Some("selected%%51"), |id| Ok(("test_extension".into(), vec![config(id, "plan")]))).unwrap();
     let prepared = registry.prepare(&instance, &request, model.as_deref()).unwrap();
     let metadata = prepared.metadata();
@@ -198,7 +198,7 @@ fn test_registry_unsupported_send_prompt_rejects_before_driver_preparation() {
     registry.register(Arc::new(driver)).unwrap();
     let instance = registry.resolve_provider(51, "test_extension", vec![config(51, "safe")]).unwrap();
     let assistant = assistant(); let overrides = None; let features = HashMap::new();
-    let request = AgentTurnRequest { assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
+    let request = AgentTurnRequest { source_message_id: None, assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
     let error = registry.prepare(&instance, &request, None).err().unwrap().to_string();
     assert!(error.contains("test_extension")); assert!(error.contains("send_prompt")); assert!(error.contains("unsupported"));
     assert!(actions.lock().unwrap().is_empty(), "unsupported declaration must reject before prepare/acquire/submit");
@@ -213,7 +213,7 @@ fn test_registry_unknown_send_prompt_defers_to_registered_driver() {
     registry.register(Arc::new(driver)).unwrap();
     let instance = registry.resolve_provider(51, "test_extension", vec![config(51, "safe")]).unwrap();
     let assistant = assistant(); let overrides = None; let features = HashMap::new();
-    let request = AgentTurnRequest { assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
+    let request = AgentTurnRequest { source_message_id: None, assistant: &assistant, conversation_id: 42, prompt: "runtime".into(), display_prompt: "display".into(), override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[] };
     assert!(registry.prepare(&instance, &request, None).is_ok());
     assert_eq!(*actions.lock().unwrap(), ["prepare:51:safe:default"]);
 }

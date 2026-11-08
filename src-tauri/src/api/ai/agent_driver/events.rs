@@ -183,10 +183,12 @@ impl AgentEventSink for ChatWindowsEventSink<'_> {
 }
 
 pub(crate) fn emit_to_window(window: &tauri::Window, identity: AgentEventIdentity, event: ConversationEvent) -> Result<(), String> {
+    let event=crate::api::ai::events::guard_goal_event(window.app_handle(),identity.conversation_id,event);
     publish_event(&WindowEventSink(window), &AgentEventEnvelope::from_conversation_event(identity, event))
 }
 
 pub(crate) fn emit_to_chat_windows(app: &tauri::AppHandle, identity: AgentEventIdentity, event: ConversationEvent) -> Result<(), String> {
+    let event=crate::api::ai::events::guard_goal_event(app,identity.conversation_id,event);
     publish_event(&ChatWindowsEventSink(app), &AgentEventEnvelope::from_conversation_event(identity, event))
 }
 

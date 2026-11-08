@@ -569,6 +569,27 @@ impl PermissionManager {
         path: &str,
         conversation_id: Option<i64>,
     ) -> Result<bool, String> {
+        let guard = crate::mcp::builtin_mcp::superadmin::approval::operation_binding(
+            &self.app_handle, conversation_id, operation, path,
+        )?;
+        // Keep the guard alive across every await, including workspace checks and
+        // the permission dialog. A paused or superseded turn must not execute.
+        let allowed = self.check_permission_inner(operation_state, operation, path, conversation_id, guard.as_ref()).await?;
+        if let Some((frozen, request)) = guard.as_ref() {
+            crate::mcp::builtin_mcp::superadmin::approval::validate(&self.app_handle, frozen, request)?;
+        }
+        Ok(allowed)
+    }
+
+    async fn check_permission_inner(
+        &self,
+        operation_state: &OperationState,
+        operation: &str,
+        path: &str,
+        conversation_id: Option<i64>,
+        guard: Option<&(crate::mcp::builtin_mcp::superadmin::approval::ApprovalBinding,
+            crate::mcp::builtin_mcp::superadmin::types::ExecuteRequest)>,
+    ) -> Result<bool, String> {
         // 1. 对会话专属 Artifact 工作区自动放行，避免每次弹窗确认
         if self.is_conversation_artifact_workspace_path(path, conversation_id) {
             debug!(
@@ -632,6 +653,11 @@ impl PermissionManager {
         let decision =
             self.request_permission(operation_state, operation, path, conversation_id).await?;
 
+        // Recheck before processing the decision, especially before saving a
+        // broader permission. An expired decision must have no lasting effects.
+        if let Some((frozen, request)) = guard {
+            crate::mcp::builtin_mcp::superadmin::approval::validate(&self.app_handle, frozen, request)?;
+        }
         match decision {
             PermissionDecision::Allow => Ok(true),
             PermissionDecision::AllowForConversation => {
