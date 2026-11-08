@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn test_butler_work_failed_exchange_returns_original_error_with_access_control() {
+    let mut conn = fixture();
+    conn.execute("INSERT INTO message(id,conversation_id,message_type,content) VALUES(100,10,'user','请写作写诗')", []).unwrap();
+    let ex = crate::db::butler_peer::enqueue(&mut conn, crate::db::butler_peer::NewRequest {
+        owner:10,target:20,sender:"总管家",recipient:"写作",key:"repair",body:"写诗",
+        limit:6,tool_message_id:None,report_to_user:None,
+    }).unwrap();
+    crate::db::butler_peer::fail(&conn,ex.id,"HTTP 400: unsupported temperature; conversation=20").unwrap();
+    let view = resolve(&conn,10,"exchange",ex.id).unwrap();
+    assert_eq!(view.result.as_deref(),Some("HTTP 400: unsupported temperature; conversation=20"));
+    assert!(resolve(&conn,30,"exchange",ex.id).is_err());
+}
+
+#[test]
+fn test_butler_work_startup_failure_reads_persisted_detail_without_final_message() {
+    let conn = fixture();
+    conn.execute("UPDATE butler_task_result SET final_message_id=NULL, summary='启动失败', structured_output_json=?1 WHERE task_conversation_id=41",
+        [r#"{"content":"配置读取失败：assistant=2 model=missing；原执行未启动"}"#]).unwrap();
+    conn.execute("UPDATE conversation SET butler_task_status='failed' WHERE id=41",[]).unwrap();
+    let view = resolve(&conn,10,"task",41).unwrap();
+    assert_eq!(view.result.as_deref(),Some("配置读取失败：assistant=2 model=missing；原执行未启动"));
+}
+
 /// 联系人 20（写作，助手 2）执行了两项独立任务 41/42；联系人 30（审稿，助手 3）是另一位助手。
 fn fixture() -> Connection {
     let conn = Connection::open_in_memory().unwrap();

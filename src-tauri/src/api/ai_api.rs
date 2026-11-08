@@ -1323,8 +1323,17 @@ pub async fn ask_ai(
     }
 
     let app_handle_clone = app_handle.clone();
-    let assistant_detail = get_assistant(app_handle_clone, processed_request.assistant_id).unwrap();
-    let assistant_prompt_origin = &assistant_detail.prompts[0].prompt;
+    let assistant_detail = get_assistant(app_handle_clone, processed_request.assistant_id)
+        .map_err(|error| AppError::UnknownError(format!(
+            "读取助手配置失败（assistant_id={}, conversation_id={}）：{error}",
+            processed_request.assistant_id, processed_request.conversation_id
+        )))?;
+    let assistant_prompt_origin = &assistant_detail.prompts.first().ok_or_else(|| {
+        AppError::UnknownError(format!(
+            "读取助手提示词失败（assistant_id={}, conversation_id={}）：助手没有提示词记录，请检查配置",
+            processed_request.assistant_id, processed_request.conversation_id
+        ))
+    })?.prompt;
     let assistant_prompt_result =
         template_engine.parse(&assistant_prompt_origin, &template_context).await;
     debug!(

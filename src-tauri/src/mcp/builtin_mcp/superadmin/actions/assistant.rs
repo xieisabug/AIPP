@@ -77,17 +77,19 @@ impl ActionHandler for AssistantGetHandler {
                 })
             })
             .collect();
-        let config_info: Vec<serde_json::Value> = model_configs
+        let mut config_info: Vec<serde_json::Value> = model_configs
             .iter()
             .map(|c| {
                 json!({
                     "name": c.name,
+                    "assistant_model_id": c.assistant_model_id,
                     "value": c.value,
                     "value_type": c.value_type,
                 })
             })
             .collect();
 
+        config_info.sort_by(|a,b| a["name"].as_str().cmp(&b["name"].as_str()));
         Ok(json!({
             "id": assistant.id,
             "name": assistant.name,
@@ -541,6 +543,7 @@ impl ActionHandler for AssistantUpdateSkillConfigHandler {
 // ---------------------------------------------------------------------------
 
 pub fn register(registry: &mut ActionRegistry) {
+    super::assistant_model_config::register(registry);
     registry.register(
         ActionMeta {
             action_id: "assistant.list".into(),

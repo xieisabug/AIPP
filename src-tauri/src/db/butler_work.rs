@@ -90,7 +90,9 @@ fn resolve_task(conn: &Connection, conversation: i64, task: i64) -> anyhow::Resu
         .query_row(
             "SELECT d.title,d.goal,d.executor_assistant_id,d.butler_conversation_id,t.butler_task_status,
                     t.butler_task_finalized_at IS NOT NULL,
-                    coalesce(nullif(final.content,''),r.summary,t.butler_task_summary)
+                    coalesce(nullif(final.content,''),
+                        CASE WHEN json_valid(r.structured_output_json) THEN nullif(json_extract(r.structured_output_json,'$.content'),'') END,
+                        r.summary,t.butler_task_summary)
              FROM butler_task_definition d JOIN conversation t ON t.id=d.task_conversation_id
              LEFT JOIN butler_task_result r ON r.task_conversation_id=t.id
              LEFT JOIN message final ON final.id=r.final_message_id
@@ -133,7 +135,7 @@ fn resolve_task(conn: &Connection, conversation: i64, task: i64) -> anyhow::Resu
 fn resolve_exchange(conn: &Connection, conversation: i64, id: i64) -> anyhow::Result<WorkView> {
     let (owner, target, sender, recipient, body, state, reply): (i64, i64, String, String, String, String, Option<String>) = conn
         .query_row(
-            "SELECT owner,target,sender,recipient,body,state,reply FROM butler_peer_exchange WHERE id=?1",
+            "SELECT owner,target,sender,recipient,body,state,CASE WHEN state='failed' THEN error ELSE reply END FROM butler_peer_exchange WHERE id=?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         )

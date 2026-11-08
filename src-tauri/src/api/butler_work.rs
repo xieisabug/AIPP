@@ -162,6 +162,26 @@ pub async fn tool(app: &AppHandle, current: i64, name: &str, args: &Value) -> an
             let conn = connection(app)?;
             let view = work::resolve(&conn, current, kind, id)?;
             let mut value = serde_json::to_value(&view)?;
+            // Access was checked by resolve above. Expose diagnostic ownership separately
+            // from the concise result, including failures before a response was created.
+            if kind == "exchange" {
+                if let Some(exchange) = peer::get(&conn, id)? {
+                    let assistant: Option<i64> = conn.query_row(
+                        "SELECT assistant_id FROM conversation WHERE id=?1", [exchange.target], |r| r.get(0),
+                    ).optional()?.flatten();
+                    value["diagnostic"] = json!({"work_ref":work_ref,"exchange_id":id,
+                        "conversation_id":exchange.target,"assistant_id":assistant,
+                        "state":exchange.state,"error":exchange.error,
+                        "execution_outcome":"失败不代表没有部分执行；继续前检查已有结果"});
+                }
+            } else if kind == "task" {
+                let assistant: Option<i64> = conn.query_row(
+                    "SELECT assistant_id FROM conversation WHERE id=?1", [id], |r| r.get(0),
+                ).optional()?.flatten();
+                value["diagnostic"] = json!({"work_ref":work_ref,"conversation_id":id,
+                    "assistant_id":assistant,"state":view.status,"detail":view.result,
+                    "execution_outcome":"失败不代表没有部分执行；继续前检查已有结果"});
+            }
             for key in ["title", "result", "excerpt"] {
                 if let Some(text) = value[key].as_str() {
                     value[key] = json!(clip(text, 6000));
