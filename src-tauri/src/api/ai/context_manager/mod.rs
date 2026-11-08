@@ -37,7 +37,7 @@ pub struct CompactionContext<'a> {
     pub model_name: &'a str,
     pub conversation_id: i64,
     pub checkpoint_store: &'a dyn persistence::CheckpointStore,
-    pub is_butler: bool,
+    pub summary_role: summarizer::SummaryRole,
     /// 管家主会话、成员会话、任务会话要求完整摘要；不完整时拒绝压缩并保留原记录。
     pub require_complete_summary: bool,
     /// DB message IDs aligned by index with the message list.
@@ -179,7 +179,7 @@ pub async fn fit_to_budget_with_compaction(
         .ok_or_else(|| crate::errors::AppError::UnknownError(format!("会话 {} 无法定位完整的压缩来源", ctx.conversation_id)))?;
     let mut summary_input=body_messages.to_vec();
     if let Some(goal)=&goal_snapshot {summary_input.push(("system".into(),goal.clone(),vec![]));}
-    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.is_butler, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref())
+    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.summary_role, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref())
         .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
 
     // Assemble compacted message list: Head + Summary + Tail

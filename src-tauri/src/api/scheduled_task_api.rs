@@ -2983,9 +2983,15 @@ pub(crate) fn build_butler_scheduled_task_followup_prompt(task: &ScheduledTask, 
         (_, "interrupted") => "因应用退出而中断，结果未知".to_string(),
         _ => "失败".to_string(),
     };
+    let next = if outcome.status == "success" {
+        "`notify_decision=false` 时不打扰用户；为 true 时简要告知结果。"
+    } else {
+        "如实告知用户原因和已完成部分，不要把未完成说成已完成，也不要自动重做可能已产生外部影响的操作。"
+    };
     format!(
-        "系统定时任务回流：定时任务《{name}》执行{status_desc}。这不是终端用户的新需求，而是你之前安排的定时任务执行回调。请基于最新注入的 <butler_scheduled_task_result> 信息判断下一步：成功且结果重要时向用户汇报；失败、停止、超时或中断时如实告知用户原因与已完成部分，不要把未完成的任务说成已完成，也不要自动重做可能已产生外部影响的操作。",
+        "系统定时任务回流：定时任务《{name}》执行{status_desc}，详情见上方的 <butler_scheduled_task_result>。{next}\n{guidance}",
         name = task.name,
+        guidance = crate::api::butler_reporting::CALLBACK_GUIDANCE,
     )
 }
 

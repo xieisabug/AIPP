@@ -55,6 +55,16 @@ pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
     BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name) || crate::api::butler_peer::is_peer_tool(tool_name)
 }
 
+/// 只在总管家主会话可用的工具（派发/操作独立任务、定时任务）。成员会话调用必然失败，因此不向其暴露。
+pub fn is_butler_main_only_agent_tool(tool_name: &str) -> bool {
+    BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
+}
+
+/// 管家会话中某个 `aipp:agent` 工具是否可见：主会话全部可见，成员会话（联系人/任务）去掉总管家专用工具。
+pub fn is_agent_tool_visible_in_butler(kind: &str, tool_name: &str) -> bool {
+    kind == "butler_main" || !is_butler_main_only_agent_tool(tool_name)
+}
+
 /// Tools whose schemas stay in the model `tools` list while MCP dynamic loading is on.
 /// Other tools are discovered through load results and invoked via `call_mcp_tool`.
 pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_butler: bool) -> bool {
@@ -373,7 +383,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
         Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
             BuiltinToolInfo {
                 name: "message_bot".into(),
-                description: "Send a self-contained request (goal, materials, expected result) to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting, or when you need another member's help for your current work. The receipt is not its answer. End this turn; its answer wakes you later. Never send acknowledgements. deliver_to decides who receives the answer: \"user\" means the receiver delivers results or asks questions to the user in its own conversation under its own name and you must not restate it; \"sender\" means the answer comes back only to you as material for your own work or for a summary the user asked for. Default: \"user\" when you act on a user message; \"sender\" while you are handling another assistant's request. Chains are limited in depth, rounds and lifetime, and assistants already in the chain cannot be messaged again (loop).".into(),
+                description: "Send a self-contained request (goal, materials, expected result) to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting, or when you need another member's help for your current work. The receipt is not its answer. End this turn; its answer wakes you later. Never send acknowledgements. deliver_to decides who receives the answer: \"user\" means the receiver delivers results or asks questions to the user in its own conversation under its own name and you must not restate it; \"sender\" means the answer comes back only to you as material for your own work or for a summary the user asked for. Default: \"user\" when you act on a user message; \"sender\" while handling another assistant's request or executing an independent task. Chains are limited in depth, rounds and lifetime, and assistants already in the chain cannot be messaged again (loop).".into(),
                 input_schema: serde_json::json!({"type":"object","required":["to","message","request_id"],"properties":{
                     "to":{"type":"string","description":"Exact contact name or #assistant_id"},
                     "message":{"type":"string","description":"Goal, relevant context and expected deliverable"},
@@ -574,7 +584,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "spawn_task_conversation".into(),
-                description: "Create and start a hidden butler task conversation under the current butler main conversation. Use this when the butler needs to delegate a concrete task to another assistant and let it run asynchronously.".into(),
+                description: "Create and start an independent Butler task: the executor runs the goal in a separate task conversation with its own materials, permissions, questions, cancellation and result, asynchronously. Prefer message_bot for ordinary work in a member's long-lived conversation; use this tool only when the user asks for an independent task, when the work needs temporary trusted paths or temporary skills, runs for a long time, or the same member must handle unrelated work in parallel. The member cannot see your conversation, so the goal must be self-contained. End your turn afterwards; the result flows back automatically. Only available in the Butler main conversation.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -584,7 +594,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "goal": {
                             "type": "string",
-                            "description": "The exact execution goal/prompt that should be sent to the delegated task assistant."
+                            "description": "Self-contained instruction sent to the executor as the task's first message: goal, background and materials, constraints, deliverable and format, acceptance criteria."
                         },
                         "executor_assistant_id": {
                             "type": "integer",
@@ -600,7 +610,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "handoff_contract_json": {
                             "type": "string",
-                            "description": "Optional JSON string describing handoff constraints or expected deliverables."
+                            "description": "Optional JSON string recorded with the task definition for later inspection. It is NOT sent to the executor; put deliverables and acceptance criteria in goal."
                         },
                         "deliver_to": {
                             "type": "string",
@@ -617,7 +627,8 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                         },
                         "notification_policy": {
                             "type": "string",
-                            "description": "Optional notification policy for task result delivery."
+                            "enum": ["quiet", "important_only"],
+                            "description": "Optional. quiet / important_only suppress light progress notifications for this task; questions, permission requests, failures and the final result are still notified. Omit for the default."
                         },
                         "temporary_trusted_paths": {
                             "type": "array",
@@ -639,7 +650,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "task_conversation_operation".into(),
-                description: "Inspect and operate an existing butler task conversation. Use this to read the latest task messages, execute pending MCP tool calls, send a follow-up prompt to the task assistant, confirm pending operation/ACP permissions, or answer pending ask_user_question requests when a task becomes blocked.".into(),
+                description: "Unblock an existing Butler task conversation. Use only after <butler_task_attention> or when the user asks you to operate a task; do not use it to check progress (results flow back automatically). Actions: read = latest messages and pending items (default 1 message); mcp_tool_execute = run a pending MCP tool call; permission_confirm = decide a pending file/operation permission (OP-… review code); operate_confirm = legacy alias of permission_confirm; acp_permission_confirm = choose an option for a native agent (ACP) permission request; ask_user_respond = answer the executor's pending question on the user's behalf (only when the user asked you to, or the answer is unambiguous from the task and the user's own words); reply_prompt = send a message into the task to unblock it. To add or change requirements of a task, use continue_work instead of reply_prompt.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1764,6 +1775,19 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "command"));
         assert!(required.iter().any(|r| r == "source_type"));
+    }
+
+    #[test]
+    fn test_butler_main_only_tools_hidden_from_member_conversations() {
+        for tool in ["spawn_task_conversation", "task_conversation_operation", "schedule_task"] {
+            assert!(is_agent_tool_visible_in_butler("butler_main", tool));
+            assert!(!is_agent_tool_visible_in_butler("butler_contact", tool), "{tool} 只能在主会话使用");
+            assert!(!is_agent_tool_visible_in_butler("butler_task", tool), "{tool} 只能在主会话使用");
+        }
+        for tool in ["message_bot", "read_work_context", "continue_work", "list_assistants", "load_skill"] {
+            assert!(is_agent_tool_visible_in_butler("butler_contact", tool));
+            assert!(is_agent_tool_visible_in_butler("butler_task", tool));
+        }
     }
 
     #[test]

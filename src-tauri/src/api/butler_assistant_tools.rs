@@ -17,7 +17,7 @@ pub fn definitions() -> Vec<BuiltinToolInfo> {
         BuiltinToolInfo { name:"get_assistant_exchange".into(), description:"查看自己参与的助手协作。传 exchange_id 查看该次协作的轮次、状态和可选往来正文；省略则分页列出最近协作。答复会自动回流，不要轮询。".into(), input_schema:json!({"type":"object","properties":{
             "exchange_id":{"type":"integer","minimum":1},"include_context":{"type":"boolean","default":false},
             "before_id":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":50}}}) },
-        BuiltinToolInfo { name:"stop_assistant_exchange".into(), description:"停止自己参与的某次协作及其后续轮次，撤销尚未投递的请求/答复，记录原因。不会强制终止正在运行的模型或进程，也不会撤销已完成操作；重复调用幂等。".into(), input_schema:json!({"type":"object","required":["exchange_id","reason"],"properties":{
+        BuiltinToolInfo { name:"stop_assistant_exchange".into(), description:"停止自己参与的某次协作所在的整条工作链：撤销尚未投递的请求/答复，打断链上正在运行的回合、待执行工具与待答问题，并停止它派出的独立任务；记录原因。已提交的外部操作无法撤销，返回的 report 会写明实际打断了什么、哪些无法确认已停止。重复调用幂等。".into(), input_schema:json!({"type":"object","required":["exchange_id","reason"],"properties":{
             "exchange_id":{"type":"integer","minimum":1},"reason":{"type":"string","minLength":1,"maxLength":1000}}}) },
     ]
 }

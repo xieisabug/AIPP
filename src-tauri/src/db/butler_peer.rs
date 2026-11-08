@@ -291,7 +291,7 @@ pub struct NewRequest<'a> {
     pub limit: i64,
     pub tool_message_id: Option<i64>,
     /// None 按默认规则：用户或助手自主发起的委托由受托助手向用户交付；
-    /// 受托期间为完成上级委托而请求的协助默认是内部协作。
+    /// 受托期间为完成上级委托而请求的协助、独立任务请来的协助默认是内部协作。
     pub report_to_user: Option<bool>,
 }
 
@@ -328,7 +328,12 @@ pub fn enqueue(conn: &mut Connection, req: NewRequest<'_>) -> anyhow::Result<Exc
     } else {
         (turn, None)
     };
-    let report_to_user = req.report_to_user.unwrap_or(parent.is_none());
+    // 独立任务请来的协助是任务的资料：最终交付由任务本身负责，默认不让协助方直接向用户交付。
+    let owner_is_task = tx
+        .query_row("SELECT conversation_kind FROM conversation WHERE id=?1", [req.owner], |r| r.get::<_, String>(0))
+        .optional()?
+        .is_some_and(|kind| kind == "butler_task");
+    let report_to_user = req.report_to_user.unwrap_or(parent.is_none() && !owner_is_task);
     let chain = match &parent {
         Some(p) => p.chain,
         None => chain_of(&tx, root, req.owner)?,

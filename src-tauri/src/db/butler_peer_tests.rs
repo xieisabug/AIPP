@@ -597,7 +597,7 @@ fn test_butler_peer_task_owned_exchanges_block_finalize_and_stop_with_task() {
     message(&db, 40, "user", "任务说明：整理资料");
     message(&db, 20, "user", "与任务无关的私聊");
     let ex = enqueue(&mut db, delegate(40, 60, "help", "请提供资料")).unwrap();
-    assert!(ex.report_to_user, "任务直接发起的协作同样默认由对方答复用户，可显式改为 sender");
+    assert!(!ex.report_to_user, "任务请来的协助是任务资料，默认内部协作，由任务自己最终交付");
     assert!(has_open_owned(&db, 40).unwrap());
     assert!(!has_open_owned(&db, 20).unwrap());
     assert_eq!(stop_owned(&db, 40).unwrap(), vec![ex.id]);

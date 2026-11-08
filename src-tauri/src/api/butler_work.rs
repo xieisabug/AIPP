@@ -52,6 +52,19 @@ pub(crate) struct TurnContext {
     pub metadata: Option<Value>,
 }
 
+/// 管家会话每轮附带的当前时间。系统提示词只在会话首轮写入，长期会话不能依赖其中的日期。
+pub(crate) fn current_time_prefix<Tz: chrono::TimeZone>(kind: &str, now: chrono::DateTime<Tz>) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike;
+    if !crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(kind) {
+        return None;
+    }
+    let weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday().num_days_from_monday() as usize];
+    Some(format!("<current_time>{} {weekday}</current_time>", now.format("%Y-%m-%d %H:%M (UTC%:z)")))
+}
+
 pub(crate) fn quote_prompt(view: &WorkView) -> String {
     let mut text = format!(
         "<quoted_work ref=\"{}\">\n类型：{}｜状态：{}\n",

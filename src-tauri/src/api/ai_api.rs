@@ -10,7 +10,7 @@ use crate::api::ai::config::{
     get_openai_responses_stateful_enabled, get_request_timeout_from_config,
     should_use_openai_responses_features, ChatConfig, ConfigBuilder, OpenAiCacheContext,
 };
-use crate::api::ai::context_manager::{self, budget::ContextBudget, CompactionContext};
+use crate::api::ai::context_manager::{self, budget::ContextBudget, summarizer::SummaryRole, CompactionContext};
 use crate::api::ai::conversation::{
     build_chat_request_from_messages, build_message_list_with_metadata_from_db,
     filter_messages_for_parent_group, init_conversation, select_responses_stateful_request,
@@ -962,6 +962,54 @@ fn get_butler_task_temporary_skill_identifiers(
         .unwrap_or_default())
 }
 
+/// 按会话类型裁剪管家工具：普通会话去掉 SuperAdmin 与全部管家工具；
+/// 成员会话（联系人/任务）保留协作工具，去掉只在总管家主会话可用的工具。
+fn filter_butler_tools_for_kind(mcp_info: MCPInfoForAssistant, kind: Option<&str>) -> MCPInfoForAssistant {
+    use crate::mcp::builtin_mcp::templates::{
+        is_agent_tool_visible_in_butler, is_butler_conversation_kind, is_butler_only_agent_tool,
+        is_butler_only_builtin_command,
+    };
+    let butler_kind = kind.filter(|kind| is_butler_conversation_kind(kind));
+    let enabled_servers = mcp_info
+        .enabled_servers
+        .into_iter()
+        .filter_map(|mut server| {
+            let is_agent = server.command.as_deref() == Some("aipp:agent");
+            match butler_kind {
+                Some(kind) => {
+                    if is_agent {
+                        server.tools.retain(|t| is_agent_tool_visible_in_butler(kind, &t.name));
+                    }
+                    Some(server)
+                }
+                None => {
+                    if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
+                        return None;
+                    }
+                    if is_agent {
+                        server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
+                    }
+                    (!server.tools.is_empty()).then_some(server)
+                }
+            }
+        })
+        .collect();
+    MCPInfoForAssistant { enabled_servers, ..mcp_info }
+}
+
+/// 摘要角色：总管家主会话、管家成员会话（联系人/任务）与普通会话各自保留不同的信息。
+fn context_summary_role(conversation_db: &ConversationDatabase, conversation_id: i64, is_chief: bool) -> SummaryRole {
+    if is_chief {
+        return SummaryRole::ButlerChief;
+    }
+    match conversation_db.conversation_repo().and_then(|repo| Ok(repo.read(conversation_id)?)) {
+        Ok(Some(conversation)) if matches!(conversation.conversation_kind.as_str(), "butler_contact" | "butler_task") => {
+            SummaryRole::ButlerMember
+        }
+        _ => SummaryRole::General,
+    }
+}
+
 /// 管家主会话、成员会话与任务会话压缩时要求完整摘要（读取失败时按要求完整处理，宁可不压缩也不用半截摘要）。
 fn requires_complete_context_summary(conversation_db: &ConversationDatabase, conversation_id: i64) -> bool {
     match conversation_db.conversation_repo().and_then(|repo| Ok(repo.read(conversation_id)?)) {
@@ -1170,6 +1218,15 @@ fn build_tool_config(
             }
         }
     }
+    if let Some(kind) = kind.as_deref().filter(|_| is_butler) {
+        for server in &mut servers_for_injection {
+            if server.command.as_deref() == Some("aipp:agent") {
+                server.tools.retain(|tool| {
+                    crate::mcp::builtin_mcp::templates::is_agent_tool_visible_in_butler(kind, &tool.name)
+                });
+            }
+        }
+    }
     let (tools, tool_name_mapping) = build_tools_with_mapping(&servers_for_injection);
     debug!(tools = ?tools, "injected MCP tools");
     Some(ToolConfig { tools, tool_name_mapping })
@@ -1308,6 +1365,17 @@ pub async fn ask_ai(
             _ => prefix.to_string(),
         });
     }
+    // 管家会话（含内部回调与协作回合）每轮带上当前时间，只发给模型、不写进消息正文。
+    let time_prefix = processed_request.conversation_id.parse::<i64>().ok().and_then(|id| {
+        let kind = ConversationDatabase::new(&app_handle).ok()?.conversation_repo().ok()?.read(id).ok()??.conversation_kind;
+        crate::api::butler_work::current_time_prefix(&kind, chrono::Local::now())
+    });
+    if let Some(time_prefix) = time_prefix {
+        runtime_user_prompt_prefix = Some(match runtime_user_prompt_prefix.take() {
+            Some(existing) if !existing.trim().is_empty() => format!("{time_prefix}\n{existing}"),
+            _ => time_prefix,
+        });
+    }
 
     let template_engine = build_template_engine(&app_handle)
         .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
@@ -1375,35 +1443,11 @@ pub async fn ask_ai(
         }
     }
 
-    // Filter butler-only tools for non-butler conversations
-    let mcp_info = {
-        use crate::mcp::builtin_mcp::templates::{
-            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
-        };
-        let is_butler = existing_conversation.as_ref().is_some_and(|c| is_butler_conversation_kind(&c.conversation_kind));
-        if is_butler {
-            mcp_info
-        } else {
-            let filtered_servers = mcp_info
-                .enabled_servers
-                .into_iter()
-                .filter_map(|mut server| {
-                    if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
-                        return None;
-                    }
-                    if server.command.as_deref() == Some("aipp:agent") {
-                        server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
-                    }
-                    if server.tools.is_empty() {
-                        None
-                    } else {
-                        Some(server)
-                    }
-                })
-                .collect();
-            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
-        }
-    };
+    // 按会话类型裁剪管家工具：普通会话去掉全部管家工具，成员会话去掉总管家专用工具
+    let mcp_info = filter_butler_tools_for_kind(
+        mcp_info,
+        existing_conversation.as_ref().map(|c| c.conversation_kind.as_str()),
+    );
 
     info!(
         enabled_servers = mcp_info.enabled_servers.len(),
@@ -1856,7 +1900,7 @@ pub async fn ask_ai(
             model_name: &chat_config.model_name,
             conversation_id,
             checkpoint_store: &conversation_db,
-            is_butler,
+            summary_role: context_summary_role(&conversation_db, conversation_id, is_butler),
             require_complete_summary: is_butler || requires_complete_context_summary(&conversation_db, conversation_id),
             message_ids: init_message_ids,
         };
@@ -2211,40 +2255,13 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     )
     .await?;
 
-    // Filter butler-only tools for non-butler conversations
-    let mcp_info = {
-        use crate::mcp::builtin_mcp::templates::{
-            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
-        };
-        let is_butler_conv = ConversationDatabase::new(&app_handle)
-            .ok()
-            .and_then(|db| db.conversation_repo().ok())
-            .and_then(|repo| repo.read(conversation_id_i64).ok().flatten())
-            .map(|c| is_butler_conversation_kind(&c.conversation_kind))
-            .unwrap_or(false);
-        if is_butler_conv {
-            mcp_info
-        } else {
-            let filtered_servers = mcp_info
-                .enabled_servers
-                .into_iter()
-                .filter_map(|mut server| {
-                    if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
-                        return None;
-                    }
-                    if server.command.as_deref() == Some("aipp:agent") {
-                        server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
-                    }
-                    if server.tools.is_empty() {
-                        None
-                    } else {
-                        Some(server)
-                    }
-                })
-                .collect();
-            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
-        }
-    };
+    // 按会话类型裁剪管家工具：普通会话去掉全部管家工具，成员会话去掉总管家专用工具
+    let conversation_kind = ConversationDatabase::new(&app_handle)
+        .ok()
+        .and_then(|db| db.conversation_repo().ok())
+        .and_then(|repo| repo.read(conversation_id_i64).ok().flatten())
+        .map(|c| c.conversation_kind);
+    let mcp_info = filter_butler_tools_for_kind(mcp_info, conversation_kind.as_deref());
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details (same as ask_ai)
@@ -2425,7 +2442,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         model_name: &chat_config.model_name,
         conversation_id: conversation_id_i64,
         checkpoint_store: &conversation_db,
-        is_butler: is_butler_cont,
+        summary_role: context_summary_role(&conversation_db, conversation_id_i64, is_butler_cont),
         require_complete_summary: is_butler_cont || requires_complete_context_summary(&conversation_db, conversation_id_i64),
         message_ids: init_metadata.message_ids,
     };
@@ -2643,40 +2660,13 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     )
     .await?;
 
-    // Filter butler-only tools for non-butler conversations
-    let mcp_info = {
-        use crate::mcp::builtin_mcp::templates::{
-            is_butler_conversation_kind, is_butler_only_agent_tool, is_butler_only_builtin_command,
-        };
-        let is_butler_conv = ConversationDatabase::new(&app_handle)
-            .ok()
-            .and_then(|db| db.conversation_repo().ok())
-            .and_then(|repo| repo.read(conversation_id).ok().flatten())
-            .map(|c| is_butler_conversation_kind(&c.conversation_kind))
-            .unwrap_or(false);
-        if is_butler_conv {
-            mcp_info
-        } else {
-            let filtered_servers = mcp_info
-                .enabled_servers
-                .into_iter()
-                .filter_map(|mut server| {
-                    if server.command.as_deref().map_or(false, is_butler_only_builtin_command) {
-                        return None;
-                    }
-                    if server.command.as_deref() == Some("aipp:agent") {
-                        server.tools.retain(|t| !is_butler_only_agent_tool(&t.name));
-                    }
-                    if server.tools.is_empty() {
-                        None
-                    } else {
-                        Some(server)
-                    }
-                })
-                .collect();
-            MCPInfoForAssistant { enabled_servers: filtered_servers, ..mcp_info }
-        }
-    };
+    // 按会话类型裁剪管家工具：普通会话去掉全部管家工具，成员会话去掉总管家专用工具
+    let conversation_kind = ConversationDatabase::new(&app_handle)
+        .ok()
+        .and_then(|db| db.conversation_repo().ok())
+        .and_then(|repo| repo.read(conversation_id).ok().flatten())
+        .map(|c| c.conversation_kind);
+    let mcp_info = filter_butler_tools_for_kind(mcp_info, conversation_kind.as_deref());
     let is_native_toolcall = mcp_info.use_native_toolcall;
 
     // Get model details
@@ -2846,7 +2836,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         model_name: &chat_config.model_name,
         conversation_id,
         checkpoint_store: &conversation_db,
-        is_butler: is_butler_batch,
+        summary_role: context_summary_role(&conversation_db, conversation_id, is_butler_batch),
         require_complete_summary: is_butler_batch || requires_complete_context_summary(&conversation_db, conversation_id),
         message_ids: init_metadata.message_ids,
     };
@@ -3390,7 +3380,7 @@ pub async fn regenerate_ai(
             model_name: &chat_config.model_name,
             conversation_id,
             checkpoint_store: &conversation_db,
-            is_butler: is_butler_regen,
+            summary_role: context_summary_role(&conversation_db, conversation_id, is_butler_regen),
             require_complete_summary: is_butler_regen || requires_complete_context_summary(&conversation_db, conversation_id),
             message_ids: init_metadata.message_ids,
         };

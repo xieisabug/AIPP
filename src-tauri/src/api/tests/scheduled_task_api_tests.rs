@@ -412,6 +412,8 @@ mod run_outcome_tests {
         let prompt = build_butler_scheduled_task_followup_prompt(&task("x"), &outcome);
         assert!(prompt.contains("超时未完成"));
         assert!(!prompt.contains("执行成功"));
+        assert!(prompt.contains("[[NO_REPLY]]") && prompt.contains("不要自动重做"));
+        assert!(!prompt.contains("notify_decision=false"), "失败结果总要告知用户");
     }
 
     #[test]

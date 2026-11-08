@@ -51,7 +51,7 @@ async fn test_live_butler_checkpoint_cache() {
         tail_ratio: 0.25, compaction_threshold: 0.90, enabled: true };
     let result = fit_to_budget_with_compaction(history.clone(), &budget, &[], CompactionContext {
         source_message_id: None, cancel_token: None,
-        client: &client, model_name: &model, conversation_id: 1, checkpoint_store: &store, is_butler: true, require_complete_summary: true,
+        client: &client, model_name: &model, conversation_id: 1, checkpoint_store: &store, summary_role: super::summarizer::SummaryRole::ButlerChief, require_complete_summary: true,
         message_ids: (1..=history.len() as i64).collect(),
     }).await.unwrap();
     assert!(result.compacted);
