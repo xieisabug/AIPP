@@ -5,6 +5,7 @@ pub mod assistant_api;
 pub mod assistant_summary_api;
 pub mod attachment_api;
 pub mod butler_api;
+pub(crate) mod butler_reporting;
 pub(crate) mod butler_capabilities;
 pub mod butler_contact_activity;
 pub mod butler_progress;
