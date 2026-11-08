@@ -1,5 +1,5 @@
 import { emit } from "@tauri-apps/api/event";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FeatureAssistantConfig from "@/components/config/FeatureAssistantConfig";
@@ -58,7 +58,10 @@ describe("FeatureAssistantConfig network config", () => {
         platformState.value = "windows";
     });
 
-    it("saves network_proxy into global network_config", async () => {
+    it.each([
+        { ttl: "30m", retention: "24h" },
+        { ttl: "12h", retention: "in_memory" },
+    ])("should save cache TTL $ttl and preserve legacy retention when network config is saved", async ({ ttl, retention }) => {
         window.innerWidth = 1400;
         window.dispatchEvent(new Event("resize"));
 
@@ -67,6 +70,7 @@ describe("FeatureAssistantConfig network config", () => {
             { id: 2, feature_code: "network_config", key: "retry_attempts", value: "3" },
             { id: 3, feature_code: "network_config", key: "network_proxy", value: "" },
             { id: 4, feature_code: "network_config", key: "custom_headers", value: "{}" },
+            { id: 5, feature_code: "network_config", key: "openai_prompt_cache_retention", value: retention },
         ];
         mockInvokeHandler("get_all_feature_config", () => featureRows);
         mockInvokeHandler("save_feature_config", () => undefined);
@@ -78,6 +82,17 @@ describe("FeatureAssistantConfig network config", () => {
         const user = userEvent.setup();
         await user.click(await screen.findByRole("button", { name: /网络配置/ }));
         const proxyInput = await screen.findByPlaceholderText("http://127.0.0.1:7890");
+        expect(screen.queryByText(/GPT-5.6 及后续型号的 Responses 模式使用新版最低缓存寿命参数/)).not.toBeInTheDocument();
+        const cacheHelp = within(screen.getByText("OpenAI 提示词缓存保留时间")).getByRole("button");
+        await user.hover(cacheHelp);
+        expect(await screen.findByRole("tooltip")).toHaveTextContent("GPT-5.6 及后续型号的 Responses 模式使用新版最低缓存寿命参数");
+        await user.unhover(cacheHelp);
+        await user.keyboard("{Escape}");
+        await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
+        if (ttl === "12h") {
+            await user.click(screen.getByText("30 分钟（默认）").closest("button")!);
+            await user.click(await screen.findByRole("option", { name: "12 小时" }));
+        }
         fireEvent.change(proxyInput, {
             target: { value: "http://proxy.example.com:8080" },
         });
@@ -97,7 +112,8 @@ describe("FeatureAssistantConfig network config", () => {
                         retry_attempts: "3",
                         network_proxy: "http://proxy.example.com:8080",
                         openai_prompt_cache_key_enabled: "true",
-                        openai_prompt_cache_retention: "24h",
+                        openai_prompt_cache_retention: retention,
+                        openai_prompt_cache_ttl: ttl,
                         openai_responses_stateful_enabled: "false",
                         custom_headers: "{}",
                     },

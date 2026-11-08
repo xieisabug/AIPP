@@ -2729,7 +2729,6 @@ dependencies = [
 [[package]]
 name = "genai"
 version = "0.6.0-beta.17-WIP"
-source = "git+https://github.com/xieisabug/rust-genai.git?rev=4bdd56e4b308a988300d442ed73359d16f845e23#4bdd56e4b308a988300d442ed73359d16f845e23"
 dependencies = [
  "base64 0.22.1",
  "bytes",

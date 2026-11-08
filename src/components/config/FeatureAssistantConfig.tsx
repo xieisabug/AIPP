@@ -207,6 +207,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             network_proxy: "",
             openai_prompt_cache_key_enabled: "true",
             openai_prompt_cache_retention: "24h",
+            openai_prompt_cache_ttl: "30m",
             openai_responses_stateful_enabled: "false",
             custom_headers: [{ key: "", value: "" }],
         },
@@ -352,6 +353,8 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
                         networkConfig.get("openai_prompt_cache_key_enabled") || "true",
                     openai_prompt_cache_retention:
                         networkConfig.get("openai_prompt_cache_retention") || "24h",
+                    openai_prompt_cache_ttl:
+                        networkConfig.get("openai_prompt_cache_ttl") || "30m",
                     openai_responses_stateful_enabled:
                         networkConfig.get("openai_responses_stateful_enabled") || "false",
                     custom_headers: (() => {
@@ -533,6 +536,7 @@ const FeatureAssistantConfig: React.FC<{ subNav?: string; onSubNavConsumed?: () 
             openai_prompt_cache_retention: String(
                 values.openai_prompt_cache_retention ?? "24h"
             ),
+            openai_prompt_cache_ttl: String(values.openai_prompt_cache_ttl ?? "30m"),
             openai_responses_stateful_enabled: String(
                 values.openai_responses_stateful_enabled ?? "false"
             ),
