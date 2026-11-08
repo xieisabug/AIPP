@@ -752,6 +752,21 @@ pub async fn save_assistant(
     Ok(())
 }
 
+fn resolve_new_assistant_model(
+    models: Vec<(String, String, i64, i64)>,
+    selection: &str,
+    assistant_type: i64,
+) -> Result<(i64, String), String> {
+    let (_, code, model_id, provider_id) = models.into_iter()
+        .find(|(_, code, _, provider)| format!("{code}%%{provider}") == selection)
+        .ok_or_else(|| format!("新增助手失败：所选模型不可用或不适用于助手类型 {assistant_type}，请重新选择模型"))?;
+    Ok((provider_id, if assistant_type == 4 && model_id == 0 { String::new() } else { code }))
+}
+
+#[cfg(test)]
+#[path = "assistant_creation_tests.rs"]
+mod assistant_creation_tests;
+
 #[tauri::command]
 #[instrument(skip(app_handle, name, description), fields(assistant_type))]
 pub fn add_assistant(
@@ -759,9 +774,18 @@ pub fn add_assistant(
     name: String,
     description: String,
     assistant_type: i64,
+    model_selection: Option<String>,
 ) -> Result<AssistantDetail, String> {
     info!("add assistant start");
     reject_reserved_butler_assistant_name(&name)?;
+    // Validate before creating any rows; never silently substitute another model.
+    let (provider_id, model_code) = if let Some(selection) = model_selection {
+        let models = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?
+            .get_filtered_models_for_select(assistant_type)?;
+        resolve_new_assistant_model(models, &selection, assistant_type)?
+    } else {
+        (0, String::new())
+    };
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // Add a default assistant
@@ -785,7 +809,7 @@ pub fn add_assistant(
     }];
 
     let model_id =
-        assistant_db.add_assistant_model(assistant_id, 0, "", "").map_err(|e| e.to_string())?;
+        assistant_db.add_assistant_model(assistant_id, provider_id, &model_code, "").map_err(|e| e.to_string())?;
     debug!(model_id, "added default model");
 
     // Add default model configs
@@ -849,8 +873,8 @@ pub fn add_assistant(
     let model = vec![AssistantModel {
         id: model_id,
         assistant_id,
-        provider_id: 0,
-        model_code: "".to_string(),
+        provider_id,
+        model_code,
         alias: "".to_string(),
     }];
     let prompt_params = Vec::new();

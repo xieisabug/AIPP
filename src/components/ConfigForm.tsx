@@ -1,3 +1,4 @@
+import OptionalConfigSection from "./config/OptionalConfigSection";
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Control, Controller, SubmitHandler, UseFormReturn } from "react-hook-form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
@@ -77,12 +78,18 @@ interface ConfigFormProps {
     assistantConfigApi?: AssistantConfigApi;
     layout?: "default" | "prompt" | "provider";
     assistantType?: number | null;  // 用于过滤模型（ACP 助手 vs 普通助手）
+    advancedFieldKeys?: readonly string[];
+    extensionFieldKeys?: readonly string[];
+    advancedConfigKey?: string | number;
     onSave?: SubmitHandler<any>;
     showHeaderSave?: boolean;
     onCopy?: () => void;
     onDelete?: () => void;
     onEdit?: () => void;
+    editLabel?: string;
     onTitleClick?: () => void;
+    onDescriptionClick?: () => void;
+    beforeFields?: React.ReactNode;
     extraButtons?: React.ReactNode;
 }
 
@@ -462,12 +469,18 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
     isSaving = false,
     assistantConfigApi,
     assistantType,
+    advancedFieldKeys = [],
+    extensionFieldKeys = [],
+    advancedConfigKey,
     onSave,
     showHeaderSave = true,
     onCopy,
     onDelete,
     onEdit,
+    editLabel = "编辑",
     onTitleClick,
+    onDescriptionClick,
+    beforeFields,
     extraButtons,
 }) => {
     const [isExpanded, setIsExpanded] = useState<boolean>(defaultExpanded);
@@ -570,15 +583,28 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                 return (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                         <div className="space-y-6">
+                            {beforeFields}
                             {config
-                                .filter((item) => item.key !== "prompt")
+                                .filter((item) => item.key !== "prompt" && !advancedFieldKeys.includes(item.key) && !extensionFieldKeys.includes(item.key))
                                 .map((item) => renderFormField(item.key, item.config))}
                         </div>
-                        {config.find((item) => item.key === "prompt") && (
+                        {config.find((item) => item.key === "prompt") && !extensionFieldKeys.includes("prompt") && !advancedFieldKeys.includes("prompt") && (
                             <div className="space-y-6">
                                 {renderFormField("prompt", config.find((item) => item.key === "prompt")!.config)}
                             </div>
                         )}
+                        {[
+                            { id: "advanced", title: "高级配置", keys: advancedFieldKeys, description: "按需调整模型参数和运行设置，未修改的配置保留当前值。" },
+                            { id: "extension", title: "扩展配置", keys: extensionFieldKeys, description: "配置已安装插件提供的设置项。" },
+                        ].map(section => config.some(item => section.keys.includes(item.key) && !item.config.hidden) && (
+                            <OptionalConfigSection key={`${advancedConfigKey}-${section.id}`} title={section.title} description={section.description}>
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8">
+                                    {config
+                                        .filter((item) => section.keys.includes(item.key))
+                                        .map((item) => renderFormField(item.key, item.config))}
+                                </div>
+                            </OptionalConfigSection>
+                        ))}
                     </div>
                 );
             case "provider":
@@ -625,12 +651,23 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                     onTitleClick();
                                 }
                             }}
+                            role={onTitleClick ? "button" : undefined}
+                            tabIndex={onTitleClick ? 0 : undefined}
+                            onKeyDown={event => {
+                                if (onTitleClick && (event.key === "Enter" || event.key === " ")) {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    onTitleClick();
+                                }
+                            }}
                         >
                             {title}
                         </CardTitle>
                         {description && (
                             <CardDescription className="text-sm text-muted-foreground mt-1 truncate">
-                                {description}
+                                {onDescriptionClick ? <button type="button" className="max-w-full truncate text-left hover:text-foreground" onClick={event => { event.stopPropagation(); onDescriptionClick(); }}>
+                                    {description}
+                                </button> : description}
                             </CardDescription>
                         )}
                     </div>
@@ -683,7 +720,7 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                                 {onEdit && (
                                     <DropdownMenuItem onSelect={onEdit}>
                                         <Edit3 className="h-4 w-4" />
-                                        编辑
+                                        {editLabel}
                                     </DropdownMenuItem>
                                 )}
                                 {onDelete && (
@@ -710,9 +747,11 @@ const ConfigForm: React.FC<ConfigFormProps> = ({
                             variant="ghost"
                             size="sm"
                             onClick={onEdit}
+                            aria-label={editLabel}
                             className="hover:bg-muted hover:border-border hover:text-foreground"
                         >
                             <Edit3 className="h-4 w-4 mr-1" />
+                            {editLabel}
                         </Button>
                     )}
                     {!isMobilePlatform && onDelete && (

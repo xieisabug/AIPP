@@ -34,12 +34,14 @@ function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: Butler
 interface Props {
     name: string;
     appearance?: ButlerAppearance;
+    description?: string;
     onClose: () => void;
-    onSave: (name: string, appearance: ButlerAppearance) => Promise<void>;
+    onSave: (name: string, appearance: ButlerAppearance, description?: string) => Promise<void>;
 }
 
-export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, onClose, onSave }: Props) {
+export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, onClose, onSave }: Props) {
     const [name, setName] = useState(initialName);
+    const [description, setDescription] = useState(initialDescription ?? "");
     const [appearance, setAppearance] = useState(initialAppearance ?? defaultAppearance);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
@@ -61,7 +63,11 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
         setError("");
         try {
             // 编辑器不再提供动画开关，保存时统一开启（兼容旧配置里关掉的情况）。
-            await onSave(name.trim(), { ...appearance, motion: true });
+            if (initialDescription === undefined) {
+                await onSave(name.trim(), { ...appearance, motion: true });
+            } else {
+                await onSave(name.trim(), { ...appearance, motion: true }, description);
+            }
             onClose();
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause));
@@ -75,7 +81,7 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
             {colors.map(([label, color]) => <button key={color} type="button" title={label}
                 aria-label={`${title}：${label}`} aria-pressed={appearance.colors[side] === color}
                 onClick={() => setAppearance(previous => ({ ...previous, colors: { ...previous.colors, [side]: color } }))}
-                className="flex size-8 items-center justify-center rounded-full border border-black/15 outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring aria-pressed:ring-2 aria-pressed:ring-foreground aria-pressed:ring-offset-2 aria-pressed:ring-offset-background"
+                className="flex size-11 items-center justify-center rounded-full border border-black/15 outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring aria-pressed:ring-2 aria-pressed:ring-foreground aria-pressed:ring-offset-2 aria-pressed:ring-offset-background"
                 style={{ backgroundColor: color, color: side === "primary" ? "#111A2D" : "#FFFFFF" }}>
                 {appearance.colors[side] === color && <Check className="size-4" />}
             </button>)}
@@ -85,7 +91,7 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
     return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
         <DialogContent className="sm:max-w-[720px] max-h-[90vh] overflow-y-auto" showCloseButton={!saving}>
             <DialogHeader>
-                <DialogTitle>名字与形象</DialogTitle>
+                <DialogTitle>{initialDescription === undefined ? "名字与形象" : "名字、描述与形象"}</DialogTitle>
                 <DialogDescription>为助手选一个名字，搭配属于它的颜色。</DialogDescription>
             </DialogHeader>
             <form onSubmit={event => { event.preventDefault(); void save(); }} className="space-y-6">
@@ -101,9 +107,13 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
                             <label htmlFor="butler-profile-name" className="text-sm font-medium">助手名称</label>
                             <Input id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
                         </div>
+                        {initialDescription !== undefined && <div className="space-y-2">
+                            <label htmlFor="assistant-profile-description" className="text-sm font-medium">描述（选填）</label>
+                            <Input id="assistant-profile-description" value={description} onChange={event => setDescription(event.target.value)} />
+                        </div>}
                         <fieldset className="space-y-2">
                             <legend className="text-sm font-medium">形状</legend>
-                            <div className="flex gap-2">
+                            <div className="flex flex-wrap gap-2">
                                 {Object.values(avatarDefinitions).map(shape => <button key={shape.id} type="button" aria-label={shape.label} title={shape.label}
                                     aria-pressed={appearance.shape === shape.id}
                                     onClick={() => setAppearance(previous => ({ ...previous, shape: shape.id }))}

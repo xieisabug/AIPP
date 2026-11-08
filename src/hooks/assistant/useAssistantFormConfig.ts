@@ -1,3 +1,4 @@
+import { isAssistantExtensionConfig } from "@/utils/assistantFormSections";
 import { useMemo, useCallback } from "react";
 import React from "react";
 import { emit } from "@tauri-apps/api/event";
@@ -409,6 +410,7 @@ export const useAssistantFormConfig = ({
                 )
                 .map((config) => ({
                     key: config.name,
+                    section: isAssistantExtensionConfig(config.name) ? "extension" as const : undefined,
                     config: {
                         type: config.value_type === "boolean" ? ("checkbox" as const) : ("input" as const),
                         label: assistantTypeCustomLabel.get(config.name) ?? config.name,
@@ -424,6 +426,7 @@ export const useAssistantFormConfig = ({
                 .filter((field) => !assistantTypeHideField.includes(field.key))
                 .map((field) => ({
                     key: field.key,
+                    section: "extension" as const,
                     config: {
                         ...field.value,
                         type: field.value.type,
@@ -652,6 +655,7 @@ export const useAssistantFormConfig = ({
                 renderedPluginGroups.add(field.pluginId);
                 baseConfigs.push({
                     key: `plugin-group::${field.pluginId}`,
+                    section: "extension",
                     config: {
                         type: "static" as const,
                         label: "插件扩展",
@@ -685,6 +689,7 @@ export const useAssistantFormConfig = ({
 
             baseConfigs.push({
                 key: field.formKey,
+                section: "extension",
                 config: {
                     type: fieldType,
                     label: field.label,

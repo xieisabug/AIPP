@@ -406,3 +406,29 @@ describe("useAssistantFormConfig tool review mode", () => {
         });
     });
 });
+
+it("should group legacy stored plugin fields as extensions without changing their values or callbacks", () => {
+    const onConfigChange = vi.fn();
+    const configs = [
+        { name: "confirmBeforeGenerate", value: "true", value_type: "boolean" },
+        { name: "fileScanDirectory", value: "E:/example/project", value_type: "string" },
+        { name: "temperature", value: "0.7", value_type: "float" },
+    ].map((config, id) => ({ ...config, id, assistant_id: 1, assistant_model_id: 1 }));
+    const { result } = renderHook(() => useAssistantFormConfig({
+        currentAssistant: { ...baseAssistantDetail, model_configs: configs },
+        assistantTypeNameMap: new Map(), assistantTypeCustomField: [], assistantTypeCustomLabel: new Map(),
+        assistantTypeCustomTips: new Map(), assistantTypeHideField: [], navigateTo: vi.fn(),
+        onConfigChange, onPromptChange: vi.fn(), pluginAssistantFormFields: [], pluginAssistantConfigValues: {},
+        onPluginConfigChange: vi.fn(), agentModelOptions: [], agentModelLoading: false, agentModelError: null,
+        onAgentProviderChange: vi.fn(), onAgentModelChange: vi.fn(),
+    }));
+    const field = (key: string) => result.current.formConfig.find(item => item.key === key)!;
+    expect(field("confirmBeforeGenerate").section).toBe("extension");
+    expect(field("confirmBeforeGenerate").config.value).toBe(true);
+    expect(field("fileScanDirectory").section).toBe("extension");
+    expect(field("fileScanDirectory").config.value).toBe("E:/example/project");
+    expect(field("temperature").section).toBeUndefined();
+    expect(field("model").section).toBeUndefined();
+    field("confirmBeforeGenerate").config.onChange?.(false);
+    expect(onConfigChange).toHaveBeenCalledWith("confirmBeforeGenerate", false, "boolean");
+});

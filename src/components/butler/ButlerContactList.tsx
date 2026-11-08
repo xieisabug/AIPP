@@ -1,3 +1,4 @@
+import AssistantItemContextMenu, { type AssistantItemAction } from "@/components/config/assistant/AssistantItemContextMenu";
 import { Search } from "lucide-react";
 import type { AssistantListItem } from "@/data/Assistant";
 import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
@@ -20,8 +21,9 @@ interface Props {
     onSelect: (assistant?: AssistantListItem) => void;
     /** 打开管家消息搜索（与 ChatUI 搜索一致，范围限定为管家模式产生的消息） */
     onSearch: () => void;
+    onAssistantAction: (assistant: AssistantListItem, action: AssistantItemAction) => void;
 }
-export default function ButlerContactList({chief, contacts, selected, ready, previews, mainConversationId, plugins, error, onRefresh, onSelect, onSearch}: Props) {
+export default function ButlerContactList({chief, contacts, selected, ready, previews, mainConversationId, plugins, error, onRefresh, onSelect, onSearch, onAssistantAction}: Props) {
     const { visuals, acknowledge } = useContactAvatarActivity(mainConversationId, previews, selected);
     // 只有真实活动（任务、回复、审批、完成/失败反馈）才驱动动画；空闲时头像保持静止。
     const state = (id: number) => visuals.get(id)?.state ?? "idle";
@@ -46,7 +48,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                 const preview = previews.find(p => p.assistantId === assistant.id);
                 const unread = preview?.messageId && selected !== assistant.id &&
                     preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
-                return <button key={assistant.id} onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
+                return <AssistantItemContextMenu key={assistant.id} assistant={assistant} onAction={onAssistantAction} canClear><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
                     aria-pressed={selected === assistant.id} className="butler-contact">
                     <ButlerAvatar id={assistant.id} figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
                     <span className="min-w-0 flex-1">
@@ -54,7 +56,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                         <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>
                     </span>
                     {unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
-                </button>;
+                </button></AssistantItemContextMenu>;
             })}
         </nav>
     </>;

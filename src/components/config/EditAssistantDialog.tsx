@@ -1,113 +1,68 @@
-import React from 'react';
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import * as z from "zod";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../ui/dialog";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "../ui/form";
-import { Input } from "../ui/input";
-import { Button } from "../ui/button";
-import { AssistantDetail } from '../../data/Assistant';
-import { toast } from 'sonner';
+import React from "react";
+import { AssistantDetail } from "@/data/Assistant";
+import { toast } from "sonner";
+import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
+import { appearanceKey, parseAppearance } from "@/components/butler/butlerAppearance";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import type { FeatureConfig } from "@/hooks/feature/useFeatureConfig";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 interface EditAssistantDialogProps {
-  isOpen: boolean;
-  onClose: () => void;
-  currentAssistant: AssistantDetail | null;
-  onSave: (assistant: AssistantDetail) => Promise<void>;
-  onAssistantUpdated: (updatedAssistant: AssistantDetail) => void;
+    isOpen: boolean;
+    onClose: () => void;
+    currentAssistant: AssistantDetail | null;
+    onSave: (assistant: AssistantDetail) => Promise<void>;
+    onAssistantUpdated: (updatedAssistant: AssistantDetail) => void;
 }
 
-const updateAssistantSchema = z.object({
-  name: z.string().min(1, "名称不能为空"),
-  description: z.string().optional(),
-});
-
 const EditAssistantDialog: React.FC<EditAssistantDialogProps> = ({
-  isOpen,
-  onClose,
-  currentAssistant,
-  onSave,
-  onAssistantUpdated,
+    isOpen, onClose, currentAssistant, onSave, onAssistantUpdated,
 }) => {
-  const form = useForm<z.infer<typeof updateAssistantSchema>>({
-    resolver: zodResolver(updateAssistantSchema),
-    defaultValues: {
-      name: currentAssistant?.assistant.name || "",
-      description: currentAssistant?.assistant.description || "",
-    },
-  });
-
-  React.useEffect(() => {
-    if (isOpen && currentAssistant) {
-      form.reset({
-        name: currentAssistant.assistant.name,
-        description: currentAssistant.assistant.description || "",
-      });
-    }
-  }, [isOpen, currentAssistant, form]);
-
-  const handleSubmit = (values: z.infer<typeof updateAssistantSchema>) => {
-    if (currentAssistant) {
-      const updatedAssistant = {
-        ...currentAssistant,
-        assistant: {
-          ...currentAssistant.assistant,
-          name: values.name,
-          description: values.description ?? null,
-        },
-      };
-      onSave(updatedAssistant).then(() => {
-        onAssistantUpdated(updatedAssistant);
-        onClose();
-        toast.success('修改助手名称与描述成功');
-      }).catch((error) => {
-        toast.error('修改助手名称与描述失败: ' + error);
-      });
-    }
-  };
-
-  return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>修改助手 : {currentAssistant?.assistant.name}</DialogTitle>
-        </DialogHeader>
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(handleSubmit)} className='form-group-container'>
-            <FormField
-              control={form.control}
-              name="name"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>名称:</FormLabel>
-                  <FormControl>
-                    <Input {...field} enterKeyHint="done" autoCapitalize="none" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="description"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>描述:</FormLabel>
-                  <FormControl>
-                    <Input {...field} enterKeyHint="done" autoCapitalize="none" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <DialogFooter>
-              <Button type="submit">确认</Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  );
+    const { loadFeatureConfig, saveFeatureConfig } = useFeatureConfig();
+    const [loaded, setLoaded] = React.useState<{ id: number; config: FeatureConfig } | null>(null);
+    const [error, setError] = React.useState("");
+    const id = currentAssistant?.assistant.id;
+    React.useEffect(() => {
+        if (!isOpen || id == null) { setLoaded(null); return; }
+        let active = true;
+        setLoaded(null);
+        setError("");
+        void loadFeatureConfig().then(config => {
+            if (active) setLoaded({ id, config });
+        }).catch(cause => {
+            if (active) setError(`读取助手 ${id} 形象失败：${String(cause)}`);
+        });
+        return () => { active = false; };
+    }, [isOpen, id, loadFeatureConfig]);
+    if (!isOpen || !currentAssistant) return null;
+    if (!loaded || loaded.id !== id) return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
+        <DialogContent><DialogHeader><DialogTitle>名字、描述与形象</DialogTitle></DialogHeader>
+            <p role={error ? "alert" : "status"}>{error || "正在读取助手形象…"}</p>
+        </DialogContent>
+    </Dialog>;
+    return <ButlerProfileDialog
+        key={id}
+        name={currentAssistant.assistant.name}
+        description={currentAssistant.assistant.description ?? ""}
+        appearance={parseAppearance(loaded.config.get("butler_appearance")?.get(appearanceKey(id)))}
+        onClose={onClose}
+        onSave={async (name, appearance, description) => {
+            let detailsSaved = false;
+            try {
+                const latest = await loadFeatureConfig();
+                const updated = { ...currentAssistant, assistant: { ...currentAssistant.assistant, name, description: description ?? "" } };
+                await onSave(updated);
+                detailsSaved = true;
+                onAssistantUpdated(updated);
+                await saveFeatureConfig("butler_appearance", {
+                    ...Object.fromEntries(latest.get("butler_appearance") ?? []),
+                    [appearanceKey(id)]: JSON.stringify(appearance),
+                });
+                toast.success("名字、描述与形象已保存");
+            } catch (error) {
+                throw new Error(`${detailsSaved ? "名字与描述已保存，但形象保存失败" : "读取配置或保存助手信息失败"}（助手 ${id}）：${error instanceof Error ? error.message : String(error)}`);
+            }
+        }} />;
 };
 
 export default EditAssistantDialog;

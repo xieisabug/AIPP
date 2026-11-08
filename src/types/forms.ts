@@ -43,7 +43,9 @@ export interface SelectOption {
 }
 
 // Assistant 相关类型
-export interface AssistantFormConfig extends FormConfigField {}
+export interface AssistantFormConfig extends FormConfigField {
+    section?: "extension";
+}
 
 // Feature 相关类型  
 export interface FeatureFormConfig extends FormConfigField {}

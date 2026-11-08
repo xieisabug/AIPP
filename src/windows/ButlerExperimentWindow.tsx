@@ -1,3 +1,5 @@
+import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
+import { clearButlerContactHistory } from "@/services/butlerContactService";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -526,6 +528,17 @@ function ButlerExperimentWindow() {
         }
     }, []);
 
+    const assistantItemActions = useAssistantItemActions({
+        onClear: async assistant => {
+            const selectionRequest = contactRequest.current;
+            const conversationId = await clearButlerContactHistory(assistant.id);
+            if (conversationId === null) return;
+            localStorage.removeItem(`butler-read-${conversationId}`);
+            if (selectionRequest === contactRequest.current && contact?.assistantId === assistant.id) await selectContact(assistant);
+            await loadPreviews();
+        },
+    });
+
     useEffect(() => {
         let active = true;
         const refresh = () => { if (active) void loadAssistants(); };
@@ -972,7 +985,8 @@ function ButlerExperimentWindow() {
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
                         ready={!!mainConversationId} previews={previews} mainConversationId={mainConversationId} plugins={pluginList}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
-                        onSearch={() => setSearchOpen(true)}/>
+                        onSearch={() => setSearchOpen(true)} onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}/>
+
                     {scheduledTasks.length > 0 && (
                         <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
                             <button
@@ -1249,6 +1263,7 @@ function ButlerExperimentWindow() {
                 placeholder="搜索管家、私聊与派工任务中的消息..."
                 description="搜索管家模式产生的消息"
             />
+            {assistantItemActions.dialogs}
             {profileTarget && <ButlerProfileDialog
                 name={profileTarget.name}
                 appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(profileTarget.id)))}

@@ -93,6 +93,11 @@ describe("ExperimentalConfigForm", () => {
             expect(screen.getByText(label)).toBeInTheDocument();
         }
         expect(screen.getByText(/关闭不会撤销已发生的外部操作/)).toBeInTheDocument();
+        expect(screen.getByText("高级配置").closest("details")).not.toHaveAttribute("open");
+        expect(screen.queryByText("扩展配置")).toBeNull();
+        expect(screen.getByText("管家能力开关").closest("details")).toBe(screen.getByText("高级配置").closest("details"));
+        expect(screen.getByText("飞书").closest("details")).toBe(screen.getByText("高级配置").closest("details"));
+        expect(screen.getByText("主工作区").closest("details")).toBeNull();
     });
 
 });
