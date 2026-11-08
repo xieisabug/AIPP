@@ -78,13 +78,16 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
             open={isOpen} 
             onOpenChange={onOpenChange}
             className={cn(
-                "flex flex-col min-h-0",
-                isOpen && openCount > 0 && "flex-1"
+                "flex flex-col",
+                // Desktop splits the column height between open sections; mobile lets the
+                // Sheet scroll as one page so a 360px screen is not carved into tiny scrollers.
+                !mobile && "min-h-0",
+                !mobile && isOpen && openCount > 0 && "flex-1"
             )}
         >
             <CollapsibleTrigger className={cn(
                 "flex items-center justify-between w-full p-2 hover:bg-muted/50 rounded-md transition-colors flex-shrink-0",
-                mobile && "min-h-11"
+                mobile && "sticky top-0 z-10 min-h-11 bg-background px-3 active:bg-muted"
             )}>
                 <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{title}</span>
@@ -94,15 +97,18 @@ const CollapsibleSection: React.FC<CollapsibleSectionProps> = ({
                         </span>
                     )}
                 </div>
-                <ChevronDown 
+                <ChevronDown
                     className={cn(
                         "h-4 w-4 text-muted-foreground transition-transform",
                         isOpen && "rotate-180"
                     )}
                 />
             </CollapsibleTrigger>
-            <CollapsibleContent className="flex-1 min-h-0 overflow-hidden data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up">
-                <div ref={scrollRef} data-chat-sidebar-scroll={mobile ? id : undefined} className="h-full overflow-y-auto">
+            <CollapsibleContent className={cn(
+                "overflow-hidden data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up",
+                !mobile && "flex-1 min-h-0"
+            )}>
+                <div ref={scrollRef} data-chat-sidebar-scroll={mobile ? id : undefined} className={cn(!mobile && "h-full overflow-y-auto")}>
                     {children}
                 </div>
             </CollapsibleContent>
@@ -181,7 +187,7 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
 
     return (
         <SectionsContext.Provider value={contextValue}>
-            <div className={cn("flex flex-col gap-1 h-full", className)}>
+            <div className={cn("flex flex-col gap-1", mobile ? "px-1 pb-2" : "h-full", className)}>
                 {/* Planning Section */}
                 <CollapsibleSection
                     id="todo"

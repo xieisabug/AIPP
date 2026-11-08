@@ -82,7 +82,7 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobil
                     className={cn(
                         "flex items-center gap-2 p-2 rounded-md transition-colors",
                         "hover:bg-muted/50 cursor-pointer group",
-                        mobile && "min-h-11"
+                        mobile && "min-h-11 py-1 pr-0 active:bg-muted"
                     )}
                     onClick={() => onArtifactClick?.(artifact)}
                 >
@@ -90,7 +90,8 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobil
                         {getLanguageIcon(artifact.language)}
                     </div>
                     <div className="flex-1 min-w-0">
-                        <p className="text-sm truncate">{artifact.title}</p>
+                        {/* No hover tooltip on touch: let long titles wrap instead of truncating. */}
+                        <p className={cn("text-sm", mobile ? "line-clamp-2 wrap-anywhere" : "truncate")}>{artifact.title}</p>
                         <p className="text-xs text-muted-foreground">{artifact.language}</p>
                     </div>
                     <div className={cn(
@@ -104,7 +105,7 @@ const ArtifactList: React.FC<ArtifactListProps> = ({ artifacts, className, mobil
                             aria-label={`复制 ${artifact.title}`}
                             onClick={(e) => handleCopy(artifact.code, e)}
                         >
-                            <Copy className="h-3 w-3" />
+                            <Copy className={mobile ? "h-4 w-4" : "h-3 w-3"} />
                         </Button>
                     </div>
                 </div>

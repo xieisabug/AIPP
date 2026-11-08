@@ -2335,7 +2335,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 </div>
                                 <div ref={detailsScrollRef} className="min-h-0 flex-1 overflow-y-auto">
                                     <ChatSidebarContent
-                                        className="h-full"
                                         mobile
                                         restoreState={detailsRestoreState}
                                         todos={sidebarTodos}

@@ -370,7 +370,7 @@ const ContextList: React.FC<ContextListProps> = ({
                                     className={cn(
                                         "flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border bg-background transition-colors",
                                         isContextItemActionable(item, onItemClick, onPreviewFileClick)
-                                            ? "hover:bg-muted/40 cursor-pointer"
+                                            ? cn("hover:bg-muted/40 cursor-pointer", mobile && "active:bg-muted")
                                             : "cursor-default",
                                         mobile && "min-h-11",
                                         item.id === selectedItemId && "bg-muted/50 border-primary/30",
@@ -388,12 +388,13 @@ const ContextList: React.FC<ContextListProps> = ({
                                     }}
                                 >
                                     {getContextIcon(item.type, item.attachmentData?.type)}
+                                    {/* Touch has no hover tooltip, so mobile wraps names/paths instead of truncating behind `title`. */}
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-sm font-medium truncate" title={item.name}>
+                                        <p className={cn("text-sm font-medium", mobile ? "line-clamp-2 wrap-anywhere" : "truncate")} title={item.name}>
                                             {getDisplayName(item)}
                                         </p>
                                         {item.details && item.details !== item.name && (
-                                            <p className="text-xs text-muted-foreground truncate mt-0.5" title={item.details}>
+                                            <p className={cn("text-xs text-muted-foreground mt-0.5", mobile ? "line-clamp-3 wrap-anywhere" : "truncate")} title={item.details}>
                                                 {item.details}
                                             </p>
                                         )}
@@ -429,7 +430,7 @@ const ContextList: React.FC<ContextListProps> = ({
                                                 type="button"
                                                 className={cn(
                                                     "text-left px-2 py-1.5 rounded-md transition-colors hover:bg-muted/40",
-                                                    mobile && "min-h-11"
+                                                    mobile && "min-h-11 active:bg-muted"
                                                 )}
                                                 onClick={(event) => {
                                                     event.stopPropagation();
@@ -437,7 +438,7 @@ const ContextList: React.FC<ContextListProps> = ({
                                                 }}
                                             >
                                                 <div className="flex items-center gap-1.5">
-                                                    <span className="text-sm text-foreground flex-1 truncate" title={result.title}>
+                                                    <span className={cn("text-sm text-foreground flex-1", mobile ? "line-clamp-2 wrap-anywhere" : "truncate")} title={result.title}>
                                                         {result.title}
                                                     </span>
                                                     <ExternalLink className="h-3 w-3 text-muted-foreground flex-shrink-0" />

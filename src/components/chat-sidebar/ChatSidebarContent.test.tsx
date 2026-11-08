@@ -66,6 +66,23 @@ describe("ChatSidebarContent mobile details", () => {
         expect(screen.queryByRole("button", { name: "插件视图" })).not.toBeInTheDocument();
         expect(screen.getByRole("button", { name: "规划" })).not.toHaveClass("min-h-11");
     });
+
+    it("should scroll mobile details as one page with sticky headers while desktop keeps split scrollers", () => {
+        const props = { todos, artifacts: longArtifacts, contextItems: longContext };
+        const { rerender, container } = render(<ChatSidebarContent {...props} mobile />);
+        expect(container.firstElementChild).not.toHaveClass("h-full");
+        expect(sectionScroller("artifact")).not.toHaveClass("overflow-y-auto");
+        expect(document.querySelector('[data-chat-sidebar-section="artifact"]')).not.toHaveClass("flex-1");
+        expect(sectionToggle("artifact")).toHaveClass("sticky", "top-0", "bg-background");
+        expect(screen.getByText("Artifact item 3")).toHaveClass("line-clamp-2");
+        expect(screen.getByText("Artifact item 3")).not.toHaveClass("truncate");
+
+        rerender(<ChatSidebarContent {...props} />);
+        expect(container.firstElementChild).toHaveClass("h-full");
+        expect(screen.getByText("Artifact item 3")).toHaveClass("truncate");
+        expect(screen.getByText("Artifact", { selector: "span" }).closest("button")).not.toHaveClass("sticky");
+        expect(screen.getByText("Artifact item 3").closest(".overflow-y-auto")).not.toBeNull();
+    });
 });
 
 const longArtifacts = Array.from({ length: 17 }, (_, i) => ({
