@@ -714,6 +714,19 @@ pub async fn enqueue_conversation_message(
             .assistant_id
             .ok_or_else(|| AppError::DatabaseError("对话未关联助手".to_string()))?
     };
+    // Native drivers do not consume the application queue. Reject before any
+    // goal mutation or persistence, including cross-assistant mentions.
+    let assistants = get_assistants(app_handle.clone()).map_err(AppError::UnknownError)?;
+    let (target_id, _) = extract_assistant_from_message(&assistants, &request.prompt, assistant_id).await?;
+    for id in [conversation.assistant_id.unwrap_or(assistant_id), target_id] {
+        let detail = get_assistant(app_handle.clone(), id).map_err(AppError::UnknownError)?;
+        ensure_queue_supported(detail.assistant.assistant_type)?;
+    }
+    if let Some(session) = crate::api::ai::agent_driver::lifecycle::lookup_session(&app_handle, conversation_id).await? {
+        if native_prompt_is_active(&session.snapshot) {
+            ensure_queue_supported(Some(4))?;
+        }
+    }
     let mut queued_request = request;
     crate::api::mobile_capability::ensure_assistant_execution(
         &app_handle, assistant_id, "enqueue_preflight", &conversation_id.to_string(),
@@ -723,11 +736,9 @@ pub async fn enqueue_conversation_message(
     let mut conn=db.get_connection()?;
     crate::db::butler_goal::schema(&conn).map_err(|e|AppError::UnknownError(e.to_string()))?;
     let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    if let Some(goal)=crate::db::butler_goal::apply_in_transaction(&tx,conversation_id,
-        queued_request.butler_intent.as_deref().unwrap_or("supplement"),&queued_request.prompt)
-        .map_err(|e|AppError::UnknownError(e.to_string()))? {
-        queued_request.butler_goal_revision=Some(goal.revision);
-    }
+    queued_request.butler_goal_revision = prepare_queued_goal(
+        &tx, conversation_id, queued_request.butler_intent.as_deref(), &queued_request.prompt,
+    )?;
     let request_json=serde_json::to_string(&queued_request).map_err(|e|AppError::UnknownError(e.to_string()))?;
     tx.execute("INSERT INTO queued_conversation_message(conversation_id,queue_kind,status,request_json,prompt,assistant_id,created_time,updated_time) VALUES(?1,?2,'queued',?3,?4,?5,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",rusqlite::params![conversation_id,queue_kind,request_json,queued_request.prompt,assistant_id])?;
     let queued_id=tx.last_insert_rowid();
@@ -865,6 +876,10 @@ pub(crate) async fn try_dispatch_queued_message(
 ) -> bool {
     let result = async {
         let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+        let token = app_handle.state::<MessageTokenManager>().get_cancel_token(conversation_id).await;
+        crate::api::ai::context_manager::summarizer::ensure_summary_execution(&|| Ok(()), token.as_ref())?;
+        crate::db::butler_control::ensure_turn(&db.get_connection()?, conversation_id)
+            .map_err(|e| AppError::UnknownError(e.to_string()))?;
         loop {
             let queued = db.queued_message_repo()?.take_next_for_dispatch(conversation_id, interrupt_only)?;
             let Some(queued) = queued else {return Ok(false)};
@@ -1198,9 +1213,11 @@ pub async fn ask_ai(
             if let Some(revision)=request.butler_goal_revision {
                 crate::db::butler_goal::assert_current(&conn,id,revision).map_err(|e|AppError::UnknownError(e.to_string()))?;
             } else if relay_origin.is_none() {
-                request.butler_goal_revision=crate::db::butler_goal::apply(&conn,id,
-                    request.butler_intent.as_deref().unwrap_or("supplement"),&request.prompt)
-                    .map_err(|e|AppError::UnknownError(e.to_string()))?.map(|g|g.revision);
+                let goal = match request.butler_intent.as_deref() {
+                    Some(intent) => crate::db::butler_goal::apply(&conn, id, intent, &request.prompt),
+                    None => crate::db::butler_goal::accept_natural_message(&conn, id, &request.prompt),
+                }.map_err(|e| AppError::UnknownError(e.to_string()))?;
+                request.butler_goal_revision = goal.map(|g| g.revision);
             } else {
                 request.butler_goal_revision=crate::db::butler_goal::current_revision(&conn,id).map_err(|e|AppError::UnknownError(e.to_string()))?;
                 if request.butler_goal_revision.is_none() {
@@ -2042,9 +2059,9 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
     // A delayed tool result is part of the original execution, not a new user
     // request. Keep its cancellation token cancelled instead of reviving it.
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
-    crate::db::butler_control::ensure_execution(
-        &db.get_connection()?, conversation_id_i64, source_message_id,
-    ).map_err(|e| AppError::UnknownError(e.to_string()))?;
+    crate::db::butler_control::ensure_turn(&db.get_connection()?, conversation_id_i64)
+        .map_err(|e| AppError::UnknownError(e.to_string()))?;
+    validate_continuation_identity(&db.get_connection()?, conversation_id_i64, source_message_id)?;
 
 
     // Get conversation details (validate exists)
@@ -2146,6 +2163,10 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
             error_message: None,
         });
     }
+
+    crate::db::butler_control::ensure_execution(
+        &db.get_connection()?, conversation_id_i64, source_message_id,
+    ).map_err(|e| AppError::UnknownError(e.to_string()))?;
 
     // Get all existing messages
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
@@ -2543,9 +2564,9 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     crate::api::ai::context_manager::summarizer::ensure_summary_execution(&|| Ok(()), execution_cancel_token.as_ref())?;
     // Do not clear cancellation for a late batch of results from the old turn.
     let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
-    crate::db::butler_control::ensure_execution(
-        &db.get_connection()?, conversation_id, source_message_id,
-    ).map_err(|e| AppError::UnknownError(e.to_string()))?;
+    crate::db::butler_control::ensure_turn(&db.get_connection()?, conversation_id)
+        .map_err(|e| AppError::UnknownError(e.to_string()))?;
+    validate_continuation_identity(&db.get_connection()?, conversation_id, source_message_id)?;
 
 
     // Get conversation details (validate exists)
@@ -2573,6 +2594,10 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
             error_message: None,
         });
     }
+
+    crate::db::butler_control::ensure_execution(
+        &db.get_connection()?, conversation_id, source_message_id,
+    ).map_err(|e| AppError::UnknownError(e.to_string()))?;
 
     // Get all existing messages (including the just-created tool_result messages)
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
@@ -4725,3 +4750,45 @@ fn resolve_continuation_source(calls:&[crate::db::mcp_db::MCPToolCall],conversat
 #[cfg(test)]
 #[path="butler_source_tests.rs"]
 mod butler_source_tests;
+
+// Application-managed model turns use this queue; native agents and plugins have
+// their own execution lifecycle and cannot consume this queue.
+fn ensure_queue_supported(assistant_type: Option<i64>) -> Result<(), AppError> {
+    match assistant_type {
+        Some(4) => Err(AppError::UnknownError("此 Agent 暂不支持运行中插队，请等待本轮结束，或停止后再发送；消息尚未发送".into())),
+        Some(3) => Err(AppError::UnknownError("插件助手暂不支持运行中排队发送".into())),
+        _ => Ok(()),
+    }
+}
+
+// Preserve trustworthy evidence before handoff, but never execute the old turn
+// until the stricter goal/control checks below the handoff have also passed.
+fn validate_continuation_identity(conn: &rusqlite::Connection, conversation: i64, source: Option<i64>) -> Result<(), AppError> {
+    if let Some(source) = source {
+        let belongs: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message WHERE id=?1 AND conversation_id=?2)",
+            rusqlite::params![source, conversation], |row| row.get(0),
+        )?;
+        if !belongs { return Err(AppError::UnknownError("工具结果所属回合与当前对话不一致".into())); }
+    } else if crate::db::butler_goal::is_butler(conn, conversation)
+        .map_err(|e| AppError::UnknownError(e.to_string()))? {
+        return Err(AppError::UnknownError("工具结果缺少原始回合身份".into()));
+    }
+    Ok(())
+}
+
+fn native_prompt_is_active(snapshot: &serde_json::Value) -> bool {
+    // All three native snapshots expose this field. An unknown driver snapshot
+    // must not silently claim application-queue support.
+    snapshot.get("has_active_prompt").and_then(serde_json::Value::as_bool).unwrap_or(true)
+}
+
+fn prepare_queued_goal(conn: &rusqlite::Connection, conversation: i64, intent: Option<&str>, prompt: &str) -> Result<Option<i64>, AppError> {
+    // Natural input is bound only at dispatch, never to an old queued revision.
+    match intent {
+        None => Ok(None),
+        Some(intent) => crate::db::butler_goal::apply_in_transaction(conn, conversation, intent, prompt)
+            .map(|goal| goal.map(|goal| goal.revision))
+            .map_err(|e| AppError::UnknownError(e.to_string())),
+    }
+}

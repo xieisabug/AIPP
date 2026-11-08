@@ -1167,9 +1167,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             });
         }, []);
 
-        const [butlerIntent, setButlerIntent] = useState<"supplement" | "replace" | "aside" | "stop">("supplement");
-        const isButlerGoal = Boolean(conversation?.conversation_kind?.startsWith("butler_"));
-        useEffect(() => { setButlerIntent("supplement"); }, [conversationId]);
         // 对话操作
         const {
             handleDeleteConversationSuccess,
@@ -1208,7 +1205,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             assistantTypePluginMap,
             assistantRunApi,
             busySendBehavior,
-            butlerIntent: isButlerGoal ? butlerIntent : undefined,
             selectedAgentModel,
             selectedAgentEffort,
             selectedAgentApprovalPolicy,
@@ -2258,16 +2254,6 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onClick={() => { smartScroll(true, "auto"); setShowBackToBottom(false); }}>
                             <ChevronDown className="h-4 w-4" />回到底部
                         </Button>}
-                        {!readOnly && isButlerGoal && <label className="flex items-center gap-2 px-3 text-sm">
-                            这条消息用于
-                            <select aria-label="消息用途" className="min-h-11 rounded border bg-background px-2"
-                                value={butlerIntent} onChange={(event) => setButlerIntent(event.target.value as typeof butlerIntent)}>
-                                <option value="supplement">补充要求</option>
-                                <option value="replace">更改目标（以本条为准）</option>
-                                <option value="aside">旁问（不改目标）</option>
-                                <option value="stop">停止当前工作</option>
-                            </select>
-                        </label>}
                         {!readOnly && <InputArea
                             ref={inputAreaRef}
                             inputText={inputText}
