@@ -1744,7 +1744,6 @@ fn try_build_followup_batch_entry(
         is_finalized: conversation.butler_task_finalized_at.is_some(),
         has_pending_permission: false,
         is_running: false,
-        progress: Default::default(),
     };
     let existing_handoff = result
         .handoff_message_id
@@ -4378,7 +4377,6 @@ task_conversation_id=7
     ) -> ButlerTaskListItem {
         let now = Utc::now();
         ButlerTaskListItem {
-            progress: Default::default(),
             butler_conversation_id: 100,
             task_conversation_id,
             title: title.to_string(),
