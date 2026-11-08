@@ -60,6 +60,34 @@ use std::sync::LazyLock;
 static LAST_ARTIFACT_CACHE: LazyLock<Arc<Mutex<HashMap<String, LastArtifactCache>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+fn resolve_preview_language<'a>(lang: &'a str, input: &str) -> &'a str {
+    if lang != "xml" {
+        return lang;
+    }
+
+    let mut xml = input.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    if let Some(declaration) = xml.strip_prefix("<?xml").filter(|s| s.starts_with(char::is_whitespace)) {
+        let Some((_, remaining)) = declaration.split_once("?>") else {
+            return lang;
+        };
+        xml = remaining.trim_start();
+    }
+    while let Some(comment) = xml.strip_prefix("<!--") {
+        let Some((_, remaining)) = comment.split_once("-->") else {
+            return lang;
+        };
+        xml = remaining.trim_start();
+    }
+
+    if xml.strip_prefix("<mxfile").is_some_and(|suffix| {
+        suffix.starts_with(char::is_whitespace) || suffix.starts_with('>') || suffix.starts_with("/>")
+    }) {
+        "drawio"
+    } else {
+        lang
+    }
+}
+
 fn preview_cache_key(source_window: Option<&str>) -> &'static str {
     match source_window {
         Some("sidebar") => "sidebar",
@@ -263,7 +291,8 @@ pub async fn run_artifacts(
         );
     }
 
-    match lang {
+    let preview_language = resolve_preview_language(lang, input_str);
+    match preview_language {
         "powershell" => {
             if let Some(window) = app_handle.get_webview_window(target_window) {
                 let _ = window.emit(
@@ -793,6 +822,10 @@ pub async fn restore_artifact_preview(
         Err(e) => Err(e.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "preview_router_tests.rs"]
+mod preview_router_tests;
 
 #[cfg(test)]
 mod tests {
