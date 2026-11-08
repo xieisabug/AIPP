@@ -852,12 +852,12 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 key: "endpoint",
                 config: {
                     type: "input" as const,
-                    label: "Endpoint",
+                    label: "接口地址",
                     value: "",
                     inputMode: "url" as const,
                     hint: endpointStatus.kind === "invalid"
                         ? <span role="alert" className="text-destructive">{endpointStatus.message}</span>
-                        : endpointStatus.message,
+                        : undefined,
                 },
             }]),
             {

@@ -329,7 +329,7 @@ const LLMProviderConfig: React.FC = () => {
 
     const sidebar = useMemo(() => (
         <SidebarList
-            title="模型提供商"
+            title="提供商"
             description="选择提供商进行配置"
             icon={<ServerCrash className="h-5 w-5" />}
             searchValue={searchQuery}

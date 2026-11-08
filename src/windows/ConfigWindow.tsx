@@ -62,13 +62,13 @@ function ConfigWindow() {
         const items: Array<MenuItem> = [
             {
                 id: "llm-provider-config",
-                name: "模型提供商",
+                name: "提供商",
                 icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
                 iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
             },
             {
                 id: "assistant-config",
-                name: "个人助手",
+                name: "助手",
                 icon: <Bot className="w-full h-full text-muted-foreground" />,
                 iconSelected: <Bot className="w-full h-full text-foreground" />,
             },

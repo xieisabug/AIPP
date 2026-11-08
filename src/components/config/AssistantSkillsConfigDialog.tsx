@@ -64,7 +64,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
 
         } catch (error) {
             console.error('Failed to fetch skills data:', error);
-            toast.error('获取Skills列表失败: ' + error);
+            toast.error('获取技能列表失败: ' + error);
         } finally {
             setIsScanning(false);
         }
@@ -92,7 +92,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                 const checkResult = await checkOperationMcpForSkills(assistantId);
                 const hasAgent = !!checkResult.agent_mcp_id;
                 if (!hasAgent) {
-                    toast.error('未找到 Agent 工具集（aipp:agent），请先添加或初始化内置工具');
+                    toast.error('未找到智能体工具集（aipp:agent），请先添加或初始化内置工具');
                     return;
                 }
                 const agentReady = checkResult.agent_ready ??
@@ -104,7 +104,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                 }
             } catch (error) {
                 console.error('Failed to check agent MCP status:', error);
-                toast.error('检查 Agent 工具集状态失败: ' + error);
+                toast.error('检查智能体工具集状态失败: ' + error);
                 return;
             }
         }
@@ -121,7 +121,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
             const configs = await invoke<SkillWithConfig[]>('get_assistant_skills', { assistantId });
             setAssistantSkills(configs);
 
-            toast.success(enabled ? 'Skill已启用' : 'Skill已禁用');
+            toast.success(enabled ? '技能已启用' : '技能已禁用');
             onConfigChange?.();
         } catch (error) {
             console.error('Failed to update skill config:', error);
@@ -130,7 +130,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                 setMcpEnableConfirmOpen(true);
                 return;
             }
-            toast.error('更新Skill配置失败: ' + error);
+            toast.error('更新技能配置失败: ' + error);
         }
     }, [assistantId, checkOperationMcpForSkills, isAgentLoadSkillError, onConfigChange]);
 
@@ -151,7 +151,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
             const configs = await invoke<SkillWithConfig[]>('get_assistant_skills', { assistantId });
             setAssistantSkills(configs);
 
-            toast.success('已启用 Agent load_skill 并开启 Skill');
+            toast.success('已启用技能加载工具并开启技能');
             onConfigChange?.();
         } catch (error) {
             toast.error('启用失败: ' + error);
@@ -196,10 +196,10 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                             <div>
                                 <DialogTitle className="flex items-center gap-2">
                                     <Sparkles className="h-5 w-5" />
-                                    Skills配置
+                                    技能配置
                                 </DialogTitle>
                                 <DialogDescription>
-                                    为该助手配置可用的Skills ({enabledSkillsCount}个已启用)
+                                    为该助手配置可用的技能 ({enabledSkillsCount}个已启用)
                                 </DialogDescription>
                             </div>
                             <Button
@@ -218,8 +218,8 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                         {allSkills.length === 0 ? (
                             <div className="text-center py-8">
                                 <Sparkles className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                                <p className="text-sm text-muted-foreground mb-2">暂无可用的Skills</p>
-                                <p className="text-xs text-muted-foreground">请先在Skills配置中扫描或安装Skills</p>
+                                <p className="text-sm text-muted-foreground mb-2">暂无可用的技能</p>
+                                <p className="text-xs text-muted-foreground">请先在技能配置中扫描或安装技能</p>
                             </div>
                         ) : (
                             <div className="space-y-4">
@@ -229,7 +229,7 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
                                     <Input
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
-                                        placeholder="搜索Skills..."
+                                        placeholder="搜索技能..."
                                         className="pl-8 h-8 text-sm"
                                     />
                                 </div>
@@ -335,8 +335,8 @@ const AssistantSkillsConfigDialog: React.FC<AssistantSkillsConfigDialogProps> = 
             {/* 操作 MCP 启用确认对话框 */}
         <ConfirmDialog
             isOpen={mcpEnableConfirmOpen}
-            title="需要启用 Agent load_skill"
-            confirmText="启用Skill需要开启 Agent 工具集的 load_skill。是否同时启用该工具并启用Skill？"
+            title="需要启用技能加载工具"
+            confirmText="启用技能需要开启智能体工具集的技能加载工具。是否同时启用该工具并启用技能？"
             onConfirm={handleConfirmEnableMcpAndSkill}
             onCancel={() => {
                 setMcpEnableConfirmOpen(false);

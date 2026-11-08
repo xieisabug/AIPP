@@ -96,7 +96,7 @@ const TagInputContainer: React.FC<TagInputContainerProps> = ({
             onFetchModels(modelData);
         } catch (e) {
             toast.error(
-                "获取模型列表失败，请检查Endpoint和Api Key配置: " + e,
+                "获取模型列表失败，请检查接口地址和 API 密钥配置: " + e,
             );
         } finally {
             setIsFetchingModels(false);

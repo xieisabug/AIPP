@@ -2,7 +2,7 @@ import { getErrorMessage } from "@/utils/error";
 
 /** 与后端 `NO_MODEL_CONFIGURED_MESSAGE` 保持一致。 */
 export const NO_MODEL_CONFIGURED_MESSAGE =
-    "当前助手尚未配置模型，请先在「设置 → 模型提供商」中添加模型，并在「个人助手」中为该助手选择模型后重试。";
+    "当前助手尚未配置模型，请先在「设置 → 提供商」中添加模型，并在「助手」中为该助手选择模型后重试。";
 
 /**
  * ask_ai 的返回：对话已创建但在调用模型前失败（如助手未配置模型）时，

@@ -182,7 +182,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
 
             await forceRefreshServers();
 
-            toast.success('已关闭工具集和相关Skills');
+            toast.success('已关闭工具集和相关技能');
             onConfigChange?.();
         } catch (e) {
             toast.error('关闭失败: ' + e);
@@ -505,14 +505,14 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
             {/* 关闭操作 MCP 确认对话框 */}
             <ConfirmDialog
                 isOpen={disableOperationMcpConfirmOpen}
-                title="确认关闭 Agent 工具集"
-                confirmText={`关闭 Agent 工具集或 load_skill 将同时禁用该助手的 ${affectedSkillsCount} 个Skills。确定要继续吗？`}
+                title="确认关闭智能体工具集"
+                confirmText={`关闭智能体工具集或技能加载工具将同时禁用该助手的 ${affectedSkillsCount} 个技能。确定要继续吗？`}
                 onConfirm={async () => {
                     if (pendingToolToggle) {
                         try {
                             await disableAssistantAgentMcpWithSkills(assistantId);
                             await forceRefreshServers();
-                            toast.success('已关闭 load_skill 和相关Skills');
+                            toast.success('已关闭技能加载工具和相关技能');
                             onConfigChange?.();
                         } catch (e) {
                             toast.error('关闭失败: ' + e);

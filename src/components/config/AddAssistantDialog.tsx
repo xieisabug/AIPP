@@ -140,13 +140,13 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                             )}
                         />
                         <FormField control={form.control} name="model" render={({ field }) => <FormItem>
-                            <FormLabel>{form.watch("assistantType") === "4" ? "模型 / Agent 提供商" : "模型"}</FormLabel>
+                            <FormLabel>{form.watch("assistantType") === "4" ? "模型 / 智能体提供商" : "模型"}</FormLabel>
                             <Select value={field.value} onValueChange={field.onChange} disabled={modelsLoading || !!modelsError}>
                                 <FormControl><SelectTrigger><SelectValue placeholder={modelsLoading ? "加载模型中…" : "选择模型"} /></SelectTrigger></FormControl>
                                 <SelectContent>{models.map(model => <SelectItem key={`${model.code}%%${model.llm_provider_id}`} value={`${model.code}%%${model.llm_provider_id}`}>{model.name}</SelectItem>)}</SelectContent>
                             </Select>
                             {modelsError && <p role="alert" className="text-sm text-destructive">{modelsError}</p>}
-                            {!modelsLoading && !modelsError && models.length === 0 && <p className="text-sm text-muted-foreground">暂无可用模型，请先在模型提供商设置中配置。</p>}
+                            {!modelsLoading && !modelsError && models.length === 0 && <p className="text-sm text-muted-foreground">暂无可用模型，请先在提供商设置中配置。</p>}
                             <FormMessage />
                         </FormItem>} />
                         <DialogFooter>

@@ -78,7 +78,7 @@ export default function MobileSkillsManager({ assistantId }: { assistantId?: num
         : skills;
     if (!loaded) return <ConfigPageLoading />;
     return <div className="flex flex-col gap-4 p-4 safe-bottom overflow-auto h-full">
-        <h2 className="text-lg font-semibold">应用内 Skills</h2>
+        <h2 className="text-lg font-semibold">应用内技能</h2>
         <p className="text-sm text-muted-foreground">技能保存在此应用内，重启后保留。安装不代表可执行；本地脚本在 Android 不可执行。ZIP 上限 20 MiB，解压上限 50 MiB。</p>
         <div className="flex gap-2"><Button className="min-h-11" disabled={busy} onClick={() => void importZip()}>导入 ZIP</Button><Button className="min-h-11" variant="outline" disabled={busy} onClick={() => void run(refresh)}>刷新</Button></div>
         <Input className="min-h-11" type="url" inputMode="url" enterKeyHint="go" value={url} onChange={event => setUrl(event.target.value)}
@@ -101,7 +101,7 @@ export default function MobileSkillsManager({ assistantId }: { assistantId?: num
                         await enableOperationMcpAndSkill(assistantId, selected.identifier, 0);
                     }
                 })}>{config?.config.is_enabled ? "取消绑定" : "启用技能加载工具并绑定"}</Button>}
-                {!assistantId && <p className="text-sm text-muted-foreground">在助手设置的 Skills 页面绑定，聊天中可按需加载完整指令。</p>}
+                {!assistantId && <p className="text-sm text-muted-foreground">在助手设置的技能页面绑定，聊天中可按需加载完整指令。</p>}
                 {confirmUninstall
                     ? <div className="flex flex-wrap items-center gap-2">
                         <span className="mr-auto text-sm">确认卸载此技能？</span>
