@@ -61,7 +61,7 @@ export const avatarRecipes = {
     computing: state("计算", "日常", ["ponder", "scan", "tap"], { effect: "dots", tempo: 1.3 }),
     controlling: state("操控", "日常", ["scan", "workLeft", "nod"], { face: { pitch: 10 } }),
     waiting: state("等待", "日常", ["wait", "glance"], { effect: "orbit" }),
-    blocked: state("受阻", "日常", ["shrug", "wait", "doubt"], { next: "drowsy", hold: 120 }),
+    blocked: state("受阻", "日常", ["shrug", "wait", "doubt"], { next: "idle", hold: 5 }),
     finished: state("完成", "日常", ["bounce", "nod"], { face: { happy: 0.8 }, next: "idle", hold: 4 }),
     failed: state("失败", "日常", ["shake", "droop"], { face: { sad: 0.5 }, next: "idle", hold: 5 }),
     sleeping: state("睡眠", "日常", ["breathe"], { face: { left: 0.04, right: 0.04, pitch: 15 }, tempo: 0.65 }),

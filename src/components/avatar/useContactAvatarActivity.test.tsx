@@ -74,6 +74,48 @@ describe("contact activity subscriptions", () => {
         act(() => result.current.acknowledge?.(8));
         expect(result.current.visuals.get(8)?.label).not.toBe("执行出错");
     });
+    it("should follow the executing tool and hold each action for a minimum dwell", async () => {
+        let now = 1000;
+        vi.spyOn(Date, "now").mockImplementation(() => now);
+        const executing = { ...row(), runtime: { ...row().runtime, is_running: true, phase: "mcp_executing" as const, epoch: 2 } };
+        mockInvokeHandler("list_butler_contact_activity", () => [executing]);
+        const { result } = renderHook(() => useContactAvatarActivity("1", []));
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("working"));
+        now += 2000;
+        await act(async () => { await emit("conversation_event_3", { type: "mcp_tool_call_update", data: { call_id: 1, status: "executing", tool_name: "read_file", parameters: "{\"file_path\":\"a.md\"}" } }); });
+        expect(result.current.visuals.get(8)?.state).toBe("reading");
+        now += 100;
+        await act(async () => {
+            await emit("conversation_event_3", { type: "mcp_tool_call_update", data: { call_id: 1, status: "success" } });
+            await emit("conversation_event_3", { type: "mcp_tool_call_update", data: { call_id: 2, status: "executing", tool_name: "search_web" } });
+        });
+        expect(result.current.visuals.get(8)?.state).toBe("reading");
+        now += 1200;
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("searching"), { timeout: 2500 });
+        await act(async () => { await emit("conversation_event_3", { type: "tool_review_update", data: { call_id: 2, phase: "reviewing" } }); });
+        now += 1300;
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("suspicious"), { timeout: 2500 });
+    });
+    it("should celebrate a finished run whose todo list was fully checked off", async () => {
+        mockInvokeHandler("list_butler_contact_activity", () => [row()]);
+        const { result } = renderHook(() => useContactAvatarActivity("1", []));
+        await waitFor(() => expect(result.current.visuals.has(8)).toBe(true));
+        const todos = JSON.stringify({ todos: [{ content: "a", status: "completed" }, { content: "b", status: "completed" }] });
+        await act(async () => {
+            await emit("conversation_event_3", { type: "mcp_tool_call_update", data: { call_id: 5, status: "success", tool_name: "todo_write", parameters: todos } });
+            await emit("conversation_event_3", { type: "stream_complete", data: { has_response: true } });
+        });
+        expect(result.current.visuals.get(8)?.state).toBe("celebrate");
+    });
+    it("should show a one-shot interruption when a task is interrupted", async () => {
+        let rows = [row("running")];
+        mockInvokeHandler("list_butler_contact_activity", () => rows);
+        const { result } = renderHook(() => useContactAvatarActivity("1", []));
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("working"));
+        rows = [row("interrupted")];
+        await act(async () => { await emit("butler_task_updated", {}); });
+        await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("blocked"));
+    });
     it("should notify only a new unread message and preserve its baseline on selection", async () => {
         vi.stubGlobal("localStorage", { getItem: vi.fn(() => null) });
         mockInvokeHandler("list_butler_contact_activity", () => [row()]);
