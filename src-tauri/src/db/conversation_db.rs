@@ -1205,11 +1205,22 @@ pub(crate) fn merge_message_end_reason_metadata(
 impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
     fn create(&self, message: &Message) -> Result<Message> {
-        if matches!(message.message_type.as_str(), "response" | "assistant") {
-            super::butler_goal::assert_message_current(&self.conn,message.conversation_id,message.parent_id)
-                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        // Resolve the immutable request source before validating it. Ordinary model
+        // handlers use OUTPUT_SOURCE rather than setting parent_id on each chunk.
+        // Never replace an explicit parent with the latest conversation message.
+        let mut anchored = message.clone();
+        if anchored.parent_id.is_none()
+            && matches!(anchored.message_type.as_str(), "response" | "assistant" | "reasoning")
+        {
+            anchored.parent_id = super::butler_goal::OUTPUT_SOURCE
+                .try_with(|source| *source).ok().flatten();
         }
-        self.insert_message(message, true)
+        if matches!(anchored.message_type.as_str(), "response" | "assistant") {
+            super::butler_goal::assert_message_current(
+                &self.conn, anchored.conversation_id, anchored.parent_id,
+            ).map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        }
+        self.insert_message(&anchored, true)
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]

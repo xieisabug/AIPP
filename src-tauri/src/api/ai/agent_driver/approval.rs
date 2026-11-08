@@ -107,6 +107,16 @@ pub struct AgentInteractionResolution {
     pub delivered: bool,
 }
 
+/// Only explicitly advertised rejection kinds may bypass execution-authority
+/// checks. Option IDs and display labels are opaque and cannot grant this bypass.
+pub(crate) fn permission_option_requires_authorization(
+    options: &[crate::api::ai::acp::AcpPermissionOptionPayload], option_id: &str,
+) -> Result<bool, String> {
+    let option = options.iter().find(|option| option.option_id == option_id)
+        .ok_or_else(|| format!("Invalid permission option ID '{option_id}': option was not advertised"))?;
+    Ok(!matches!(option.kind.as_str(), "reject_once" | "reject_always"))
+}
+
 /// Borrow the real stores; this facade never owns or copies pending requests.
 pub(crate) struct AgentInteractionStores<'a> {
     pub permissions: &'a AcpPermissionState,
@@ -175,8 +185,10 @@ pub(crate) async fn resolve_app_reply(
     let permissions = app.try_state::<AcpPermissionState>().ok_or("AcpPermissionState not found")?;
     let elicitations = app.try_state::<AcpElicitationState>().ok_or("AcpElicitationState not found")?;
     let questions = app.try_state::<InteractionState>().ok_or("InteractionState not found")?;
-    if matches!(&reply, AgentInteractionReply::Permission(AgentPermissionReply::Select { .. })) {
-        permissions.validate_butler_reply(app, &target.request_id).await?;
+    if let AgentInteractionReply::Permission(AgentPermissionReply::Select { option_id }) = &reply {
+        if let Some(guard) = permissions.butler_guard_for_reply(&target.request_id, &target.scope, option_id).await? {
+            guard.validate(app)?;
+        }
     }
     resolve_reply(AgentInteractionStores {
         permissions: &permissions, elicitations: &elicitations, questions: &questions,

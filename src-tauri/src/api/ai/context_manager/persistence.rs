@@ -26,6 +26,7 @@ pub fn checkpoint_text(content: &str) -> &str {
 }
 
 pub trait CheckpointStore: Sync {
+    fn ensure_execution(&self, conversation_id: i64, source: Option<i64>) -> Result<(), AppError>;
     fn goal_snapshot(&self, _conversation_id:i64) -> Result<Option<String>,AppError> {Ok(None)}
     fn save_for_goal(&self, conversation_id:i64, header:&str, content:&str, snapshot:Option<&str>) -> Result<String,AppError> {
         if self.goal_snapshot(conversation_id)?.as_deref()!=snapshot {return Err(AppError::UnknownError("摘要期间目标已变更，请按最新要求重新准备上下文".into()))}
@@ -35,6 +36,10 @@ pub trait CheckpointStore: Sync {
 }
 
 impl CheckpointStore for ConversationDatabase {
+    fn ensure_execution(&self, conversation_id: i64, source: Option<i64>) -> Result<(), AppError> {
+        crate::db::butler_control::ensure_execution(&self.get_connection()?, conversation_id, source)
+            .map_err(|e| AppError::UnknownError(e.to_string()))
+    }
     fn goal_snapshot(&self,conversation_id:i64)->Result<Option<String>,AppError> {
         crate::db::butler_goal::prompt(&self.get_connection()?,conversation_id).map_err(|e|AppError::UnknownError(e.to_string()))
     }

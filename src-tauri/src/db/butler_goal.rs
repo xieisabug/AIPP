@@ -142,7 +142,7 @@ pub fn recover_answer(conn:&mut Connection,id:&str,answers:&std::collections::Ha
         let questions=event["questions"].as_array().ok_or_else(||anyhow::anyhow!("问题记录损坏"))?;
         ensure!(!answers.is_empty(),"缺少回答");
         for q in questions {
-            ensure!(!q["isSecret"].as_bool().unwrap_or(false),"敏感问题的原执行已中断，请重新提问；不保存敏感答案");
+            ensure!(!q["isSecret"].as_bool().unwrap_or(false) && !q["is_secret"].as_bool().unwrap_or(false),"敏感问题的原执行已中断，请重新提问；不保存敏感答案");
         }
         let allowed=questions.iter().flat_map(|q|[q["header"].as_str(),q["question"].as_str()]).flatten().collect::<Vec<_>>();
         ensure!(answers.keys().all(|k|allowed.contains(&k.as_str())),"答案与题目版本不匹配");
@@ -151,6 +151,16 @@ pub fn recover_answer(conn:&mut Connection,id:&str,answers:&std::collections::Ha
         let request=serde_json::json!({"conversation_id":conversation.to_string(),"assistant_id":assistant,"prompt":prompt,"butler_intent":"aside","butler_goal_revision":current_revision(&tx,conversation)?});
         tx.execute("INSERT INTO queued_conversation_message(conversation_id,queue_kind,status,request_json,prompt,assistant_id) VALUES(?1,'interrupt','queued',?2,?3,?4)",params![conversation,request.to_string(),prompt,assistant])?;
     }
+    // Recovery has no live request store, so it bypasses the normal reply-history
+    // boundary. Commit the durable answer together with its continuation and the
+    // question state: failure of any write must leave the question retryable.
+    super::butler_question_history::save(&tx, conversation,
+        super::butler_question_history::AnswerRecord {
+            key: format!("request:{id}"), questions: event["questions"].clone(),
+            metadata: event["metadata"].clone(),
+            answers: if cancelled { std::collections::HashMap::new() } else { answers.clone() },
+            cancelled, delivery_status: "delivered".into(),
+        })?;
     let state=if cancelled {"cancelled"} else {"answered"};
     tx.execute("UPDATE butler_goal_question SET state=?2 WHERE request_id=?1",params![id,state])?;
     tx.commit()?;Ok(conversation)

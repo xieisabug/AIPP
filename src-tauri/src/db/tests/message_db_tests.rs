@@ -694,3 +694,66 @@ fn test_empty_reply_notice_does_not_guess_unmarked_or_invalid_provenance() {
     message.message_type = "user".into();
     assert!(!is_empty_model_reply_notice(&message));
 }
+
+fn butler_output_repository() -> MessageRepository {
+    let conn = create_test_db();
+    conn.execute_batch(
+        "INSERT INTO conversation(id,name,conversation_kind,created_time)
+         VALUES(1,'Butler','butler_main',CURRENT_TIMESTAMP),
+               (2,'Ordinary','normal',CURRENT_TIMESTAMP);
+         INSERT INTO message(id,conversation_id,message_type,content,created_time)
+         VALUES(10,1,'user','old requirement',CURRENT_TIMESTAMP),
+               (11,1,'user','current requirement',CURRENT_TIMESTAMP);",
+    ).unwrap();
+    let old = crate::db::butler_goal::apply(&conn, 1, "replace", "old").unwrap().unwrap();
+    crate::db::butler_goal::bind_turn(&conn, 1, 10, old.revision).unwrap();
+    let current = crate::db::butler_goal::apply(&conn, 1, "replace", "current").unwrap().unwrap();
+    crate::db::butler_goal::bind_turn(&conn, 1, 11, current.revision).unwrap();
+    MessageRepository::new(conn)
+}
+
+/// Ordinary provider handlers supply an immutable task-local source, not parent_id.
+#[tokio::test]
+async fn test_butler_output_binds_request_source_before_validation() {
+    let repo = butler_output_repository();
+    for kind in ["response", "assistant", "reasoning"] {
+        let reply = create_test_message(1, kind, "answer", None, Some(new_group_id()));
+        let created = crate::db::butler_goal::OUTPUT_SOURCE.scope(Some(11), async {
+            repo.create(&reply)
+        }).await.unwrap();
+        assert_eq!(created.parent_id, Some(11));
+        assert_eq!(repo.read(created.id).unwrap().unwrap().parent_id, Some(11));
+    }
+}
+
+#[tokio::test]
+async fn test_butler_output_rejects_old_captured_source_and_keeps_explicit_parent() {
+    let repo = butler_output_repository();
+    let reply = create_test_message(1, "response", "late old answer", None, None);
+    let error = crate::db::butler_goal::OUTPUT_SOURCE.scope(Some(10), async {
+        repo.create(&reply)
+    }).await.unwrap_err();
+    assert!(error.to_string().contains("目标已变更"));
+
+    // An explicit old parent cannot borrow the task-local current source.
+    let explicit = create_test_message(1, "response", "old parent", Some(10), None);
+    assert!(crate::db::butler_goal::OUTPUT_SOURCE.scope(Some(11), async {
+        repo.create(&explicit)
+    }).await.is_err());
+
+    let current = create_test_message(1, "response", "explicit current", Some(11), None);
+    let created = crate::db::butler_goal::OUTPUT_SOURCE.scope(Some(10), async {
+        repo.create(&current)
+    }).await.unwrap();
+    assert_eq!(created.parent_id, Some(11));
+}
+
+#[test]
+fn test_butler_output_without_source_is_rejected_but_normal_chat_is_unchanged() {
+    let repo = butler_output_repository();
+    let error = repo.create(&create_test_message(1, "response", "unattributed", None, None))
+        .unwrap_err();
+    assert!(error.to_string().contains("缺少原始目标回合身份"));
+    let created = repo.create(&create_test_message(2, "response", "ordinary", None, None)).unwrap();
+    assert_eq!(created.parent_id, None);
+}

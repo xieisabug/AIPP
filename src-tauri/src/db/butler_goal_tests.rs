@@ -109,3 +109,69 @@ fn test_goal_late_output_and_question_never_inherit_newer_user_identity() {
  assert!(save_question(&c,1,"missing-source",r#"{"questions":[]}"#,None,100).is_err());
  assert!(save_question(&c,1,"new-question",r#"{"questions":[]}"#,Some(4),100).is_ok());
 }
+
+#[test]
+fn test_recovered_task_answer_history_is_atomic_and_survives_refresh() {
+    let mut c = db();
+    apply(&c, 3, "replace", "make report").unwrap();
+    let event = r#"{"questions":[{"header":"format","question":"Which format?"}],"metadata":{"purpose":"report"}}"#;
+    save_test_question(&c, 3, "recovered", event, 100).unwrap();
+    let answers = std::collections::HashMap::from([("format".into(), "Markdown".into())]);
+    recover_answer(&mut c, "recovered", &answers, false, 101).unwrap();
+    assert!(waiting_questions(&c, 3, 102).unwrap().is_empty());
+    let records = crate::db::butler_question_history::list(&c, 3).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].key, "request:recovered");
+    assert_eq!(records[0].questions[0]["question"], "Which format?");
+    assert_eq!(records[0].metadata["purpose"], "report");
+    assert_eq!(records[0].answers, answers);
+    assert_eq!(records[0].delivery_status, "delivered");
+    assert!(!records[0].cancelled);
+    assert!(crate::db::butler_question_history::list(&c, 1).unwrap().is_empty());
+    assert!(recover_answer(&mut c, "recovered", &answers, false, 102).is_err());
+    assert_eq!(crate::db::butler_question_history::list(&c, 3).unwrap().len(), 1);
+    assert_eq!(c.query_row("SELECT count(*) FROM queued_conversation_message", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn test_recovered_question_history_failure_rolls_back_answer_and_queue() {
+    let mut c = db();
+    apply(&c, 3, "replace", "report").unwrap();
+    save_test_question(&c, 3, "retry", r#"{"questions":[{"header":"format"}]}"#, 100).unwrap();
+    crate::db::butler_question_history::list(&c, 3).unwrap();
+    c.execute_batch("CREATE TRIGGER fail_history BEFORE INSERT ON butler_task_question_answer BEGIN SELECT RAISE(ABORT, 'history write failed'); END;").unwrap();
+    let answers = std::collections::HashMap::from([("format".into(), "Markdown".into())]);
+    assert!(recover_answer(&mut c, "retry", &answers, false, 101).is_err());
+    assert_eq!(waiting_questions(&c, 3, 102).unwrap().len(), 1);
+    assert_eq!(c.query_row("SELECT count(*) FROM queued_conversation_message", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert!(crate::db::butler_question_history::list(&c, 3).unwrap().is_empty());
+    c.execute_batch("DROP TRIGGER fail_history;").unwrap();
+    recover_answer(&mut c, "retry", &answers, false, 102).unwrap();
+    assert_eq!(crate::db::butler_question_history::list(&c, 3).unwrap().len(), 1);
+}
+
+#[test]
+fn test_recovered_question_cancel_history_does_not_queue_or_store_answers() {
+    let mut c = db();
+    apply(&c, 3, "replace", "report").unwrap();
+    save_test_question(&c, 3, "cancel", r#"{"questions":[{"header":"secret","isSecret":true}]}"#, 100).unwrap();
+    let answers = std::collections::HashMap::from([("secret".into(), "must not persist".into())]);
+    recover_answer(&mut c, "cancel", &answers, true, 101).unwrap();
+    let records = crate::db::butler_question_history::list(&c, 3).unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].cancelled);
+    assert!(records[0].answers.is_empty());
+    assert_eq!(records[0].delivery_status, "delivered");
+    assert_eq!(c.query_row("SELECT count(*) FROM queued_conversation_message", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert!(recover_answer(&mut c, "cancel", &answers, false, 102).is_err());
+}
+
+#[test]
+fn test_recovered_secret_alias_is_not_queued_or_saved() {
+    let mut c = db();
+    apply(&c, 3, "replace", "report").unwrap();
+    save_test_question(&c, 3, "secret", r#"{"questions":[{"header":"password","is_secret":true}]}"#, 100).unwrap();
+    let answers = std::collections::HashMap::from([("password".into(), "not stored".into())]);
+    assert!(recover_answer(&mut c, "secret", &answers, false, 101).is_err());
+    assert!(crate::db::butler_question_history::list(&c, 3).unwrap().is_empty());
+}
