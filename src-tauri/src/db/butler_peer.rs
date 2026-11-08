@@ -98,7 +98,6 @@ pub struct Exchange {
     pub stop_note: Option<String>,
 }
 const SELECT: &str = "SELECT id,root,owner,target,sender,recipient,body,state,input_id,reply,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at,coalesce(chain,root),stop_note FROM butler_peer_exchange";
-const SUMMARY: &str = "SELECT id,root,owner,target,sender,recipient,'',state,input_id,NULL,error,round_no,max_rounds,stop_requested,report_to_user,receipt_state,parent,depth,expires_at,coalesce(chain,root),stop_note FROM butler_peer_exchange";
 /// 仍在进行、尚未交付的协作状态。
 const ACTIVE: &str = "('queued','sending','waiting','returning','reply_sending')";
 /// 协作链最多层数：总管家→甲→乙→丙。
@@ -276,19 +275,9 @@ fn read(conn: &Connection, id: i64) -> rusqlite::Result<Exchange> {
 pub fn get(conn: &Connection, id: i64) -> rusqlite::Result<Option<Exchange>> {
     read(conn, id).optional()
 }
-pub fn list(
-    conn: &Connection,
-    conversation: Option<i64>,
-    details: bool,
-) -> rusqlite::Result<Vec<Exchange>> {
-    let filter = if conversation.is_some() {
-        "WHERE owner=?1 OR target=?1 ORDER BY id DESC LIMIT 50"
-    } else {
-        "WHERE ?1 IS NULL AND state IN ('queued','waiting','returning') ORDER BY id"
-    };
-    let projection = if details { SELECT } else { SUMMARY };
-    let mut stmt = conn.prepare(&format!("{projection} {filter}"))?;
-    let rows = stmt.query_map([conversation], row)?;
+pub fn pending_exchanges(conn: &Connection) -> rusqlite::Result<Vec<Exchange>> {
+    let mut stmt = conn.prepare(&format!("{SELECT} WHERE state IN ('queued','waiting','returning') ORDER BY id"))?;
+    let rows = stmt.query_map([], row)?;
     rows.collect()
 }
 
@@ -627,16 +616,6 @@ pub fn fail_receipt(conn: &Connection, id: i64) -> rusqlite::Result<()> {
         params![id, MAX_RECEIPT_ATTEMPTS],
     )?;
     Ok(())
-}
-
-/// 用户显式重试已放弃的回执。只重置通知投递，不重排可能已执行的原协作。
-pub fn retry_receipt(conn: &Connection, id: i64, conversation: i64) -> rusqlite::Result<bool> {
-    Ok(conn.execute(
-        "UPDATE butler_peer_exchange SET receipt_state='pending',receipt_attempts=0
-         WHERE id=?1 AND (owner=?2 OR target=?2)
-           AND state IN ('failed','stopped') AND receipt_state='failed'",
-        params![id, conversation],
-    )? == 1)
 }
 
 struct ReplyCandidate {

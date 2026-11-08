@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
-import ButlerPeerActivity from "@/components/butler/ButlerPeerActivity";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
@@ -1129,7 +1128,6 @@ function ButlerExperimentWindow() {
                                     <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                                 </button>
                                 <div className="flex min-w-0 items-center justify-end gap-1">
-                                    <ButlerPeerActivity key={activeConversationId} conversationId={Number(activeConversationId)} />
                                     <IconButton
                                         icon={detailsConversation === activeConversationId
                                             ? <MessageSquareText className="h-4 w-4 text-icon" />

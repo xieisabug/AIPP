@@ -259,54 +259,6 @@ pub async fn get_butler_exchange_context(app_handle: AppHandle, conversation_id:
         .map_err(|e| format!("读取会话 #{conversation_id} 的协作上下文失败：{e}"))
 }
 
-#[tauri::command]
-pub fn list_butler_peer_exchanges(
-    app_handle: AppHandle,
-    conversation_id: i64,
-    include_details: bool,
-) -> Result<Vec<Exchange>, String> {
-    connection(&app_handle)
-        .and_then(|conn| Ok(peer::list(&conn, Some(conversation_id), include_details)?))
-        .map_err(|e| e.to_string())
-}
-/// 停止整项工作：停止该协作链上的全部协作和关联任务，实际打断属于这项工作的执行，返回停止情况说明。
-#[tauri::command]
-pub async fn stop_butler_peer_exchange(
-    app_handle: AppHandle,
-    conversation_id: i64,
-    root: i64,
-) -> Result<String, String> {
-    let chain = {
-        let conn = connection(&app_handle).map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT coalesce(chain,root) FROM butler_peer_exchange WHERE root=?1 AND (owner=?2 OR target=?2) LIMIT 1",
-            rusqlite::params![root, conversation_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(|_| "没有属于此联系人的协作".to_string())?
-    };
-    stop_chain_work(&app_handle, chain, None)
-        .await
-        .map_err(|e| format!("停止协作 root={root} 失败：{e:#}"))
-}
-
-#[tauri::command]
-pub fn retry_butler_peer_receipt(
-    app_handle: AppHandle,
-    conversation_id: i64,
-    exchange_id: i64,
-) -> Result<(), String> {
-    let conn = connection(&app_handle).map_err(|e| format!("重试协作 #{exchange_id} 回执失败：{e:#}"))?;
-    if !peer::retry_receipt(&conn, exchange_id, conversation_id)
-        .map_err(|e| format!("重试协作 #{exchange_id} 回执失败：{e}"))?
-    {
-        return Err(format!("协作 #{exchange_id} 不属于此联系人，或回执并未投递失败，未重复投递"));
-    }
-    updated(&app_handle);
-    WAKE.notify_one();
-    Ok(())
-}
-
 pub(super) async fn busy(app: &AppHandle, id: i64) -> anyhow::Result<bool> {
     if app.state::<ConversationActivityManager>().get_runtime_state(id).await.is_running {
         return Ok(true);
@@ -524,7 +476,7 @@ async fn tick(
             true
         }
     };
-    let exchanges = peer::list(&conn, None, true)?;
+    let exchanges = peer::pending_exchanges(&conn)?;
     idle.retain(|id, _| exchanges.iter().any(|ex| ex.id == *id && ex.state == "waiting"));
     let receipts = peer::pending_receipts(&conn)?;
     if exchanges.is_empty() && receipts.is_empty() {

@@ -178,6 +178,26 @@ fn test_butler_peer_history_pagination_and_sender_scope() {
 }
 
 #[test]
+fn test_butler_peer_pending_exchanges_preserves_delivery_queue() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿并核对资料");
+    let first = enqueue(&mut db, request("review", "稿件正文")).unwrap();
+    let second = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("check", "核对资料") }).unwrap();
+    let pending = pending_exchanges(&db).unwrap();
+    assert_eq!(pending.iter().map(|ex| ex.id).collect::<Vec<_>>(), vec![first.id, second.id]);
+    assert_eq!(pending[0].body, "稿件正文");
+
+    assert!(claim(&db, &first).unwrap());
+    assert_eq!(pending_exchanges(&db).unwrap().len(), 1, "投递中不重复领取");
+    write_input(&mut db, first.id, "request", 30, "稿件正文", 1, "model").unwrap();
+    assert_eq!(pending_exchanges(&db).unwrap()[0].state, "waiting");
+    fail(&db, first.id, "模型不可用").unwrap();
+    let pending = pending_exchanges(&db).unwrap();
+    assert_eq!(pending.len(), 1, "终态协作不重新进入投递队列");
+    assert_eq!(pending[0].id, second.id);
+}
+
+#[test]
 fn test_butler_peer_stop_preserves_delivered_round_and_blocks_new_one() {
     let mut db = database();
     let root = message(&db, 20, "user", "请审稿");
@@ -193,8 +213,8 @@ fn test_butler_peer_stop_preserves_delivered_round_and_blocks_new_one() {
     assert_eq!(stored.state, "delivered");
     assert!(stored.stop_requested);
     assert!(enqueue(&mut db, request("rev2", "新稿")).is_err());
-    assert!(list(&db, Some(20), false).unwrap()[0].body.is_empty());
-    assert_eq!(list(&db, Some(20), true).unwrap()[0].reply.as_deref(), Some("修改建议"));
+    assert_eq!(stored.reply.as_deref(), Some("修改建议"));
+    assert!(pending_exchanges(&db).unwrap().is_empty());
 }
 
 #[test]
@@ -461,89 +481,6 @@ fn test_butler_peer_recover_requeues_legacy_undelivered_receipts() {
         params![b.id, MAX_RECEIPT_ATTEMPTS]).unwrap();
     recover(&db).unwrap();
     assert_eq!(reread(&db, b.id).receipt_state.as_deref(), Some("failed"));
-}
-
-/// 用户重试只重排失败/停止回执、重置预算，不更改原协作或重复已送达消息。
-#[test]
-fn test_butler_peer_retry_receipt_preserves_original_work_and_delivery_idempotence() {
-    for stopped in [false, true] {
-        let mut db = database();
-        message(&db, 20, "user", "请审稿");
-        let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
-        assert!(claim(&db, &ex).unwrap());
-        write_input(&mut db, ex.id, "request", 30, "稿件", 1, "model").unwrap();
-        db.execute("UPDATE butler_peer_exchange SET reply='已知部分进展' WHERE id=?1", [ex.id]).unwrap();
-        if stopped {
-            stop(&db, ex.root, 20).unwrap();
-        } else {
-            fail(&db, ex.id, "执行结果不明，不得重做").unwrap();
-        }
-        for _ in 0..MAX_RECEIPT_ATTEMPTS {
-            assert!(claim_receipt(&db, &reread(&db, ex.id)).unwrap());
-            fail_receipt(&db, ex.id).unwrap();
-        }
-        recover(&db).unwrap();
-        let exhausted = reread(&db, ex.id);
-        assert_eq!(exhausted.receipt_state.as_deref(), Some("failed"));
-        assert!(pending_receipts(&db).unwrap().is_empty());
-
-        // 双方的协作记录均可显式重试；重复点击不能重置已排队/投递中的通知。
-        assert!(retry_receipt(&db, ex.id, if stopped { 30 } else { 20 }).unwrap());
-        assert!(!retry_receipt(&db, ex.id, 20).unwrap());
-        let mut retried = serde_json::to_value(reread(&db, ex.id)).unwrap();
-        assert_eq!(retried["receipt_state"], "pending");
-        retried["receipt_state"] = serde_json::json!("failed");
-        assert_eq!(retried, serde_json::to_value(&exhausted).unwrap(), "原协作字段保持不变");
-        let attempts: i64 = db.query_row(
-            "SELECT receipt_attempts FROM butler_peer_exchange WHERE id=?1", [ex.id], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(attempts, 0);
-        assert_eq!(pending_receipts(&db).unwrap().len(), 1);
-        assert!(list(&db, None, true).unwrap().is_empty(), "原请求不重新进入派发队列");
-        assert!(!claim(&db, &reread(&db, ex.id)).unwrap());
-        assert!(write_input(&mut db, ex.id, "request", 30, "不应重做", 1, "model").is_err());
-
-        assert!(claim_receipt(&db, &reread(&db, ex.id)).unwrap());
-        assert!(!retry_receipt(&db, ex.id, 20).unwrap());
-        fail_receipt(&db, ex.id).unwrap();
-        assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("pending"), "获得新的自动重试预算");
-        assert!(claim_receipt(&db, &reread(&db, ex.id)).unwrap());
-        write_input(&mut db, ex.id, "receipt", 20, "失败或停止通知", 1, "model").unwrap();
-        assert!(!retry_receipt(&db, ex.id, 20).unwrap());
-        fail_receipt(&db, ex.id).unwrap();
-        recover(&db).unwrap();
-        assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("delivered"));
-        assert!(pending_receipts(&db).unwrap().is_empty());
-        assert!(write_input(&mut db, ex.id, "receipt", 20, "重复通知", 1, "model").is_err());
-        let messages: i64 = db.query_row("SELECT count(*) FROM message", [], |r| r.get(0)).unwrap();
-        assert_eq!(messages, 3, "仅原用户请求、接收方输入和一条回执");
-    }
-}
-
-/// 拒绝越权、缺失记录，以及尚未失败或不属于终态协作的回执重试。
-#[test]
-fn test_butler_peer_retry_receipt_requires_matching_conversation_and_failed_receipt() {
-    let mut db = database();
-    message(&db, 20, "user", "请审稿");
-    let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
-    for (state, receipt) in [
-        ("queued", None), ("queued", Some("failed")), ("waiting", Some("failed")),
-        ("failed", None), ("failed", Some("pending")), ("failed", Some("sending")),
-        ("failed", Some("delivered")), ("delivered", Some("failed")),
-    ] {
-        db.execute("UPDATE butler_peer_exchange SET state=?2,receipt_state=?3,receipt_attempts=5 WHERE id=?1",
-            params![ex.id, state, receipt]).unwrap();
-        assert!(!retry_receipt(&db, ex.id, 20).unwrap(), "state={state}, receipt={receipt:?}");
-        assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), receipt);
-    }
-    db.execute("UPDATE butler_peer_exchange SET state='failed',receipt_state='failed' WHERE id=?1", [ex.id]).unwrap();
-    assert!(!retry_receipt(&db, ex.id, 50).unwrap());
-    assert!(!retry_receipt(&db, ex.id + 1, 20).unwrap());
-    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("failed"));
-    let attempts: i64 = db.query_row(
-        "SELECT receipt_attempts FROM butler_peer_exchange WHERE id=?1", [ex.id], |r| r.get(0),
-    ).unwrap();
-    assert_eq!(attempts, MAX_RECEIPT_ATTEMPTS);
 }
 
 fn meta(conn: &Connection, id: i64) -> serde_json::Value {
