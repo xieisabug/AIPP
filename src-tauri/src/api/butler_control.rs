@@ -7,11 +7,6 @@ fn validate(app:&AppHandle,id:i64)->Result<ConversationDatabase,String>{
  if c.conversation_kind!="butler_task" {return Err("只允许控制独立管家工作".into())} Ok(db)
 }
 #[tauri::command]
-pub fn get_butler_task_control(app_handle:AppHandle,task_conversation_id:i64)->Result<Control,String>{
- let db=validate(&app_handle,task_conversation_id)?;
- butler_control::get(&db.get_connection().map_err(|e|e.to_string())?,task_conversation_id).map_err(|e|e.to_string())
-}
-#[tauri::command]
 pub async fn control_butler_task(app_handle:AppHandle,task_conversation_id:i64,action:String)->Result<Control,String>{
  let db=validate(&app_handle,task_conversation_id)?;
  let state={

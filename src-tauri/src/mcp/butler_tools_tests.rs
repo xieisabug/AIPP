@@ -19,7 +19,7 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
                 .map(|t|t.name.as_str()).collect();
             // 受托助手可在自己的会话里向用户提问；其余界面交互工具仍按助手自身配置。
             assert!(!names.contains(&"preview_code"),"{kind} should not force preview tools");
-            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","superadmin_execute","superadmin_undo","ask_user_question"] {
+            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","read_work_context","continue_work","resume_work","superadmin_execute","superadmin_undo","ask_user_question"] {
                 assert!(names.contains(&expected),"{kind} dynamic={dynamic} missing {expected}");
             }
             assert!(configured.iter().all(|s|s.is_enabled&&s.tools.iter().all(|t|t.is_enabled)));
@@ -64,7 +64,7 @@ async fn test_butler_tools_have_direct_schemas_in_native_bridge_and_dynamic_prom
     let native:serde_json::Value=serde_json::from_str(&payload).unwrap();
     let names:Vec<_>=native.as_array().unwrap().iter().flat_map(|s|s["tools"].as_array().unwrap())
         .map(|t|t["tool_name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"superadmin_execute"));assert!(names.contains(&"get_assistant_details"));
+    assert!(names.contains(&"resume_work"));assert!(names.contains(&"superadmin_execute"));assert!(names.contains(&"get_assistant_details"));
     let info=MCPInfoForAssistant {enabled_servers:servers,use_native_toolcall:false,dynamic_loading_enabled:true};
     let prompt=super::super::prompt::format_mcp_prompt(String::new(),&info).await;
     assert!(prompt.contains("superadmin_execute"));assert!(prompt.contains("get_assistant_details"));

@@ -38,7 +38,7 @@ pub fn set(conn: &Connection, id: i64, action: &str) -> anyhow::Result<Control> 
 pub fn ensure_turn(conn: &Connection,id:i64)->anyhow::Result<()> {
     let c=get(conn,id)?;
     anyhow::ensure!(!c.cancelled,"工作已停止，不再启动执行");
-    anyhow::ensure!(!c.paused,"工作已暂停，请先恢复"); Ok(())
+    anyhow::ensure!(!c.paused,"工作已暂停。请在总管家或执行助手的联系人对话里说明要恢复哪项工作；本任务窗口不会绕过暂停直接运行"); Ok(())
 }
 /// A tool result continues the original turn; it cannot resume a paused/stopped
 /// task or borrow a newer goal. Recheck at the provider boundary after async prep.

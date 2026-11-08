@@ -1,14 +1,6 @@
 import { Conversation, ConversationRuntimeState } from "./Conversation";
 
-export interface ButlerProgress {
-    waiting_for: string[];
-    blocker: string | null;
-    next_step: string;
-    evidence: { kind: string; message_id?: number; label?: string }[];
-    artifacts: { kind: string; location?: string; label?: string }[];
-}
 export interface ButlerTaskListItem {
-    progress?: ButlerProgress;
     butler_conversation_id: number;
     task_conversation_id: number;
     title: string;
