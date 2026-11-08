@@ -340,6 +340,21 @@ fn test_review_exempt_tools_require_builtin_identity() {
 }
 
 #[test]
+fn test_message_bot_review_exemption_requires_builtin_agent() {
+    let parameters = r##"{"to":"#2","message":"请检查这份草稿","request_id":"review-draft"}"##;
+    let exempt = is_review_exempt_tool(true, Some("aipp:agent"), "message_bot", parameters);
+    for mode in ["off", "auto_model"] {
+        assert!(resolve_auto_execute(mode, exempt, None));
+    }
+    assert!(!is_review_exempt_tool(false, Some("aipp:agent"), "message_bot", parameters));
+    assert!(!is_review_exempt_tool(true, Some("external"), "message_bot", parameters));
+    assert!(!is_review_exempt_tool(true, Some("aipp:agent"), "message_bot", "invalid"));
+    assert!(!is_review_exempt_tool(true, Some("aipp:agent"), "message_bot", "null"));
+    // 发送消息的豁免不传递到接收方实际执行的操作。
+    assert!(!is_review_exempt_tool(true, Some("aipp:operation"), "execute_bash", "{}"));
+}
+
+#[test]
 fn test_review_exempt_suboperations_fail_closed() {
     let agent = |tool: &str, args: &str| is_review_exempt_tool(true, Some("aipp:agent"), tool, args);
     assert!(agent("task_conversation_operation", r#"{"action":"read"}"#));
