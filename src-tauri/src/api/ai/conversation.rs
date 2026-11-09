@@ -842,6 +842,10 @@ pub fn build_message_list_with_metadata_from_db(
                 }
             }
             filter_tool_results_for_branch(conversation_id, "latest_branch", &mut latest_branch);
+            // 空回复说明只给用户看，不进入后续模型上下文（LeaderAI #161）。
+            latest_branch.retain(|message| {
+                !crate::api::ai::chat::is_empty_model_reply_notice(message)
+            });
             log_selected_messages(conversation_id, "latest_branch", &latest_branch);
             let metadata = MessageListMetadata {
                 message_ids: latest_branch.iter().map(|m| m.id).collect(),

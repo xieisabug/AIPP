@@ -31,7 +31,7 @@ export const useAssistantTypePlugin = (pluginList: any[]) => {
     // 助手类型
     const [assistantTypes, setAssistantTypes] = useState<AssistantType[]>([
         { code: 0, name: "普通对话助手" },
-        { code: 4, name: "Agent 助手" },
+        { code: 4, name: "智能体助手" },
     ]);
 
     // 使用 useMemo 缓存 assistantTypeApi
@@ -106,12 +106,12 @@ export const useAssistantTypePlugin = (pluginList: any[]) => {
 
     // 给默认的字段增加Label和Tips
     useEffect(() => {
-        assistantTypeApi.changeFieldLabel("max_tokens", "Max Tokens");
-        assistantTypeApi.changeFieldLabel("temperature", "Temperature");
-        assistantTypeApi.changeFieldLabel("top_p", "Top P");
-        assistantTypeApi.changeFieldLabel("stream", "Stream");
+        assistantTypeApi.changeFieldLabel("max_tokens", "最大输出词元数");
+        assistantTypeApi.changeFieldLabel("temperature", "温度");
+        assistantTypeApi.changeFieldLabel("top_p", "核采样概率");
+        assistantTypeApi.changeFieldLabel("stream", "流式输出");
         assistantTypeApi.changeFieldLabel("reasoning_effort", "思考级别");
-        assistantTypeApi.addFieldTips("max_tokens", "最大Token数，影响回复的长度");
+        assistantTypeApi.addFieldTips("max_tokens", "最大输出词元数，影响回复的长度");
         assistantTypeApi.addFieldTips("temperature", "控制生成的随机性，越高越随机");
         assistantTypeApi.addFieldTips("top_p", "控制生成的多样性，越高越多样");
         assistantTypeApi.addFieldTips("stream", "是否流式输出，开启后可能会有延迟");

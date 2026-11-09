@@ -1,3 +1,4 @@
+import { isAssistantExtensionConfig } from "@/utils/assistantFormSections";
 import { useMemo, useCallback } from "react";
 import React from "react";
 import { emit } from "@tauri-apps/api/event";
@@ -83,7 +84,7 @@ export const useAssistantFormConfig = ({
     const { getConfigValue } = useFeatureConfig();
 
     const isAgentAssistant = currentAssistant?.assistant.assistant_type === 4;
-    // Agent 助手需要知道所选提供商的 api_type，以便按通道（如 Codex）展示专用配置项
+    // 智能体助手需要知道所选提供商的 api_type，以便按通道（如 Codex）展示专用配置项
     const { providers: agentProviders } = useFilteredProviders(isAgentAssistant ? 4 : null, isAgentAssistant);
 
     const resolvePluginFieldValue = useCallback(
@@ -161,7 +162,7 @@ export const useAssistantFormConfig = ({
                 );
             })();
 
-        // Agent 助手类型 (assistant_type === 4) 的专用配置
+        // 智能体助手类型 (assistant_type === 4) 的专用配置
         if (currentAssistant?.assistant.assistant_type === 4) {
             // 获取当前选择的提供商 ID
             const modelProviderId = currentAssistant.model[0]?.provider_id ?? 0;
@@ -183,7 +184,7 @@ export const useAssistantFormConfig = ({
                     config: {
                         type: "static" as const,
                         label: "助手类型",
-                        value: "Agent 助手",
+                        value: "智能体助手",
                     },
                 },
                 {
@@ -217,7 +218,7 @@ export const useAssistantFormConfig = ({
                                       label: option.name,
                                   })),
                                   disabled: agentModelLoading || agentModelOptions.length === 0,
-                                  tooltip: agentModelError ?? "默认读取 Codex config/read 的生效配置",
+                                  tooltip: agentModelError ?? "默认读取 Codex 当前生效的配置",
                                   onChange: (value: string | boolean) => {
                                       const model = agentModelOptions.find((option) => option.code === value);
                                       const effort = model?.default_effort && model.efforts.includes(model.default_effort)
@@ -237,10 +238,10 @@ export const useAssistantFormConfig = ({
                                       const currentModel = currentAssistant.model[0]?.model_code;
                                       return agentModelOptions
                                           .find((option) => option.code.startsWith(`${currentModel}%%`))
-                                          ?.efforts.map((effort) => ({ value: effort, label: effort })) ?? [];
+                                          ?.efforts.map((effort) => ({ value: effort, label: ({ none: "无", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" } as Record<string, string>)[effort] ?? effort })) ?? [];
                                   })(),
                                   disabled: agentModelLoading || agentModelOptions.length === 0,
-                                  tooltip: agentModelError ?? "默认读取 Codex config/read 的生效配置",
+                                  tooltip: agentModelError ?? "默认读取 Codex 当前生效的配置",
                                   onChange: (value: string | boolean) =>
                                       handleConfigChange("reasoning_effort", value, "string"),
                               },
@@ -254,7 +255,7 @@ export const useAssistantFormConfig = ({
                         label: "工作目录",
                         value: getAcpConfigValue("acp_working_directory", ""),
                         placeholder: "选择工作目录",
-                        tooltip: "Agent 将在此目录下运行",
+                        tooltip: "智能体将在此目录下运行",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_working_directory", value, "string"),
                     },
@@ -265,7 +266,7 @@ export const useAssistantFormConfig = ({
                         type: "textarea" as const,
                         label: "环境变量",
                         value: getAcpConfigValue("acp_env_vars", ""),
-                        tooltip: "每行一个，格式: KEY=VALUE",
+                        tooltip: "每行一个，格式：变量名=值",
                         className: "h-32",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_env_vars", value, "string"),
@@ -277,7 +278,7 @@ export const useAssistantFormConfig = ({
                         type: "input" as const,
                         label: "附加启动参数",
                         value: getAcpConfigValue("acp_additional_args", ""),
-                        tooltip: "传递给 CLI 的额外参数，空格分隔",
+                        tooltip: "传递给命令行程序的额外参数，空格分隔",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_additional_args", value, "string"),
                     },
@@ -292,9 +293,9 @@ export const useAssistantFormConfig = ({
                                   value: getAcpConfigValue("codex_approval_policy", "") || "default",
                                   options: [
                                       { value: "default", label: "跟随提供商配置" },
-                                      { value: "untrusted", label: "仅读命令自动执行（untrusted）" },
-                                      { value: "on-request", label: "由模型决定何时请求审批（on-request）" },
-                                      { value: "never", label: "从不请求审批（never）" },
+                                      { value: "untrusted", label: "仅读命令自动执行" },
+                                      { value: "on-request", label: "由模型决定何时请求审批" },
+                                      { value: "never", label: "从不请求审批" },
                                   ],
                                   tooltip: "Codex 何时请求用户审批；默认跟随提供商配置",
                                   onChange: (value: string | boolean) =>
@@ -313,9 +314,9 @@ export const useAssistantFormConfig = ({
                                   value: getAcpConfigValue("codex_sandbox", "") || "default",
                                   options: [
                                       { value: "default", label: "跟随提供商配置" },
-                                      { value: "read-only", label: "只读（read-only）" },
-                                      { value: "workspace-write", label: "工作区可写（workspace-write）" },
-                                      { value: "danger-full-access", label: "完全访问（danger-full-access）" },
+                                      { value: "read-only", label: "只读" },
+                                      { value: "workspace-write", label: "工作区可写" },
+                                      { value: "danger-full-access", label: "完全访问" },
                                   ],
                                   tooltip: "Codex 命令执行的沙箱范围；默认跟随提供商配置",
                                   onChange: (value: string | boolean) =>
@@ -334,8 +335,8 @@ export const useAssistantFormConfig = ({
                                   value: getAcpConfigValue("codex_approvals_reviewer", "") || "default",
                                   options: [
                                       { value: "default", label: "跟随提供商配置" },
-                                      { value: "user", label: "人工审批（user）" },
-                                      { value: "auto_review", label: "自动审批（auto_review）" },
+                                      { value: "user", label: "人工审批" },
+                                      { value: "auto_review", label: "自动审批" },
                                   ],
                                   tooltip: "Codex 审批请求由人工处理还是由子代理自动审批；默认跟随提供商配置",
                                   onChange: (value: string | boolean) =>
@@ -389,7 +390,7 @@ export const useAssistantFormConfig = ({
                 key: "model",
                 config: {
                     type: "model-select" as const,
-                    label: assistantTypeCustomLabel.get("model") ?? "Model",
+                    label: assistantTypeCustomLabel.get("model") ?? "模型",
                     value:
                         currentAssistant?.model.length ?? 0 > 0
                             ? `${currentAssistant?.model[0].model_code}%%${currentAssistant?.model[0].provider_id}`
@@ -409,6 +410,7 @@ export const useAssistantFormConfig = ({
                 )
                 .map((config) => ({
                     key: config.name,
+                    section: isAssistantExtensionConfig(config.name) ? "extension" as const : undefined,
                     config: {
                         type: config.value_type === "boolean" ? ("checkbox" as const) : ("input" as const),
                         label: assistantTypeCustomLabel.get(config.name) ?? config.name,
@@ -424,6 +426,7 @@ export const useAssistantFormConfig = ({
                 .filter((field) => !assistantTypeHideField.includes(field.key))
                 .map((field) => ({
                     key: field.key,
+                    section: "extension" as const,
                     config: {
                         ...field.value,
                         type: field.value.type,
@@ -500,9 +503,9 @@ export const useAssistantFormConfig = ({
                 key: "use_native_toolcall",
                 config: {
                     type: "switch" as const,
-                    label: "使用原生ToolCall",
+                    label: "使用原生工具调用",
                     value: nativeToolCallValue,
-                    tooltip: "如果模型支持并且模型能力够强，推荐使用原生Toolcall调用工具更加准确",
+                    tooltip: "如果模型支持且能力足够，推荐使用原生工具调用以提高准确性",
                     onChange: (value: string | boolean) =>
                         handleConfigChange("use_native_toolcall", value, "boolean"),
                 },
@@ -569,7 +572,7 @@ export const useAssistantFormConfig = ({
                 key: "skills_config",
                 config: {
                     type: "custom" as const,
-                    label: "Skills",
+                    label: "技能",
                     customRender: () => {
                         if (platform === "android") {
                             return React.createElement(MobileSkillsManager, { assistantId: currentAssistant?.assistant.id });
@@ -611,7 +614,7 @@ export const useAssistantFormConfig = ({
                 key: "prompt",
                 config: {
                     type: "textarea" as const,
-                    label: assistantTypeCustomLabel.get("prompt") ?? "Prompt",
+                    label: assistantTypeCustomLabel.get("prompt") ?? "提示词",
                     className: "h-64",
                     value: currentAssistant?.prompts[0]?.prompt ?? "",
                     onChange: (value: string | boolean) => onPromptChange(value as string),
@@ -652,6 +655,7 @@ export const useAssistantFormConfig = ({
                 renderedPluginGroups.add(field.pluginId);
                 baseConfigs.push({
                     key: `plugin-group::${field.pluginId}`,
+                    section: "extension",
                     config: {
                         type: "static" as const,
                         label: "插件扩展",
@@ -685,6 +689,7 @@ export const useAssistantFormConfig = ({
 
             baseConfigs.push({
                 key: field.formKey,
+                section: "extension",
                 config: {
                     type: fieldType,
                     label: field.label,

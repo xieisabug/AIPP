@@ -15,9 +15,13 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
                 try {
                     const metadata = JSON.parse(message.metadata_json);
                     if (metadata?.origin === "butler_peer") {
-                        // A request's answer belongs to the peer dialogue. A returned reply may
-                        // trigger the current assistant's final summary for the human.
-                        internalTurn = metadata.leg !== "reply";
+                        // audience=user: the assistant that took the work answers the user here under its own
+                        // name (delegated work, or continuing it after a peer replied). audience=peer: the
+                        // answer only goes back to another assistant. Older deliveries carry no audience:
+                        // requests were internal, replies/receipts led to a summary for the human.
+                        internalTurn = metadata.audience
+                            ? metadata.audience !== "user"
+                            : metadata.leg !== "reply" && metadata.leg !== "receipt";
                         continue;
                     }
                     if (metadata?.origin === "internal") continue;

@@ -14,6 +14,7 @@ import { AssistantDetail } from "../../data/Assistant";
 import { Plus } from "lucide-react";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { isMobileExecutableAssistantType } from "@/lib/mobileUnsupported";
+import { useFilteredModels } from "@/hooks/useFilteredModels";
 
 interface AddAssistantDialogProps {
     assistantTypes: AssistantType[];
@@ -34,37 +35,44 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
         : assistantTypes;
 
     const formSchema = z.object({
-        name: z.string().min(1, "名称不能为空"),
+        name: z.string().trim().min(1, "名称不能为空"),
         description: z.string(),
         assistantType: z.string(),
+        model: z.string().min(1, "请选择模型"),
     });
 
     const form = useForm<z.infer<typeof formSchema>>({
         resolver: zodResolver(formSchema),
         defaultValues: {
-            name: "初始化助手名称",
-            description: "这是一个初始化的描述",
+            name: "",
+            description: "",
             assistantType: "0",
+            model: "",
         },
     });
+    const { models, loading: modelsLoading, error: modelsError } = useFilteredModels(Number(form.watch("assistantType")), openAddAssistantDialog);
 
-    const onSubmit = (values: z.infer<typeof formSchema>) => {
-        invoke<AssistantDetail>("add_assistant", {
+    const onSubmit = async (values: z.infer<typeof formSchema>) => {
+        if (!models.some(model => `${model.code}%%${model.llm_provider_id}` === values.model)) {
+            form.setError("model", { message: "所选模型已不可用，请重新选择" });
+            return;
+        }
+        await invoke<AssistantDetail>("add_assistant", {
             name: values.name,
             description: values.description,
             assistantType: parseInt(values.assistantType),
+            modelSelection: values.model,
         })
             .then((assistantDetail: AssistantDetail) => {
                 onAssistantAdded(assistantDetail);
                 setOpenAddAssistantDialog(false);
+                form.reset();
                 toast.success("新增助手成功");
             })
             .catch((error) => {
                 toast.error("新增助手失败: " + error);
             });
     };
-
-    console.log("add assistant dialog", assistantTypes);
 
     return (
         <Dialog open={openAddAssistantDialog} onOpenChange={setOpenAddAssistantDialog}>
@@ -86,7 +94,7 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                                 <FormItem>
                                     <FormLabel>名称</FormLabel>
                                     <FormControl>
-                                        <Input {...field} />
+                                        <Input {...field} placeholder="例如：写作助手" enterKeyHint="done" autoCapitalize="none" />
                                     </FormControl>
                                     <FormMessage />
                                 </FormItem>
@@ -97,9 +105,9 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                             name="description"
                             render={({ field }) => (
                                 <FormItem>
-                                    <FormLabel>描述</FormLabel>
+                                    <FormLabel>描述（选填）</FormLabel>
                                     <FormControl>
-                                        <Input {...field} />
+                                        <Input {...field} placeholder="简单介绍助手的用途" enterKeyHint="done" autoCapitalize="none" />
                                     </FormControl>
                                     <FormMessage />
                                 </FormItem>
@@ -111,7 +119,7 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                             render={({ field }) => (
                                 <FormItem>
                                     <FormLabel>类型</FormLabel>
-                                    <Select onValueChange={field.onChange} defaultValue={field.value}>
+                                    <Select onValueChange={value => { field.onChange(value); form.setValue("model", ""); }} value={field.value}>
                                         <FormControl>
                                             <SelectTrigger>
                                                 <SelectValue placeholder="选择助手类型" />
@@ -131,8 +139,18 @@ const AddAssistantDialog: React.FC<AddAssistantDialogProps> = ({
                                 </FormItem>
                             )}
                         />
+                        <FormField control={form.control} name="model" render={({ field }) => <FormItem>
+                            <FormLabel>{form.watch("assistantType") === "4" ? "模型 / 智能体提供商" : "模型"}</FormLabel>
+                            <Select value={field.value} onValueChange={field.onChange} disabled={modelsLoading || !!modelsError}>
+                                <FormControl><SelectTrigger><SelectValue placeholder={modelsLoading ? "加载模型中…" : "选择模型"} /></SelectTrigger></FormControl>
+                                <SelectContent>{models.map(model => <SelectItem key={`${model.code}%%${model.llm_provider_id}`} value={`${model.code}%%${model.llm_provider_id}`}>{model.name}</SelectItem>)}</SelectContent>
+                            </Select>
+                            {modelsError && <p role="alert" className="text-sm text-destructive">{modelsError}</p>}
+                            {!modelsLoading && !modelsError && models.length === 0 && <p className="text-sm text-muted-foreground">暂无可用模型，请先在提供商设置中配置。</p>}
+                            <FormMessage />
+                        </FormItem>} />
                         <DialogFooter>
-                            <Button type="submit">确认</Button>
+                            <Button type="submit" disabled={form.formState.isSubmitting || modelsLoading || !!modelsError || models.length === 0}>{form.formState.isSubmitting ? "创建中…" : "确认"}</Button>
                         </DialogFooter>
                     </form>
                 </Form>

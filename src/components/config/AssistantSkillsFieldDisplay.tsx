@@ -98,10 +98,10 @@ const AssistantSkillsFieldDisplay: React.FC<AssistantSkillsFieldDisplayProps> = 
         }
 
         if (skillsSummary.totalSkills === 0) {
-            return "暂无可用的Skills";
+            return "暂无可用的技能";
         }
 
-        return `已启用 ${skillsSummary.enabledSkills} 个Skill`;
+        return `已启用 ${skillsSummary.enabledSkills} 个技能`;
     };
 
     return (
@@ -122,7 +122,7 @@ const AssistantSkillsFieldDisplay: React.FC<AssistantSkillsFieldDisplayProps> = 
                     {skillsSummary.totalSkills === 0 ? (
                         <>
                             <Sparkles className="h-4 w-4 mr-1" />
-                            扫描Skills
+                            扫描技能
                         </>
                     ) : (
                         <>

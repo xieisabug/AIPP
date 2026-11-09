@@ -19,7 +19,7 @@ use crate::plugin::hook_bus::PluginHookBus;
 use crate::state::activity_state::ConversationActivityManager;
 use crate::state::message_token::MessageTokenManager;
 use crate::utils::window_utils::{
-    emit_conversation_list_activity, send_conversation_event_to_chat_windows,
+    emit_conversation_list_activity,
     send_error_to_appropriate_window,
 };
 use anyhow::Context as _;
@@ -52,6 +52,56 @@ fn positive_token_count(value: i32) -> Option<i32> {
 
 /// LeaderAI #161: normal stop/DONE with zero assistant body.
 pub(crate) const EMPTY_MODEL_REPLY_NOTICE: &str = "模型返回了空内容";
+/// 只有推理、没有正文时的说明（与真正的空输出区分）。
+pub(crate) const REASONING_ONLY_MODEL_REPLY_NOTICE: &str = "模型只返回了思考过程，没有给出正文";
+
+/// 空回复说明是本地写入的系统说明，不是模型的回答：
+/// 构建后续请求上下文时整条排除，避免把它当作助手说过的话发回给模型。
+pub(crate) fn is_empty_model_reply_notice(message: &Message) -> bool {
+    message.message_type == "response"
+        && message.metadata_json.as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|metadata| metadata.get("local_reply_notice").cloned())
+            .is_some_and(|notice| {
+                notice.get("source").and_then(|v| v.as_str()) == Some("aipp")
+                    && matches!(notice.get("kind").and_then(|v| v.as_str()),
+                        Some("empty_model_reply" | "reasoning_only_model_reply"))
+            })
+}
+
+/// Classify both streaming and non-streaming successful responses identically.
+/// Provenance is stored separately from visible text: a genuine model response
+/// which happens to repeat our notice remains part of the conversation context.
+pub(crate) fn prepare_empty_model_reply(
+    content: &mut String,
+    reasoning: &str,
+    tool_call_count: usize,
+    binary_count: usize,
+    metadata: Option<String>,
+) -> Option<String> {
+    if !should_announce_empty_model_reply(content, tool_call_count, binary_count) {
+        return metadata;
+    }
+    *content = empty_model_reply_notice(reasoning).to_string();
+    let mut map = metadata_object_from_raw(metadata.as_deref());
+    map.insert("local_reply_notice".into(), serde_json::json!({
+        "source": "aipp",
+        "kind": if reasoning.trim().is_empty() {
+            "empty_model_reply"
+        } else {
+            "reasoning_only_model_reply"
+        },
+    }));
+    Some(serde_json::Value::Object(map).to_string())
+}
+
+pub(crate) fn empty_model_reply_notice(reasoning_content: &str) -> &'static str {
+    if reasoning_content.trim().is_empty() {
+        EMPTY_MODEL_REPLY_NOTICE
+    } else {
+        REASONING_ONLY_MODEL_REPLY_NOTICE
+    }
+}
 
 pub(crate) fn should_announce_empty_model_reply(
     response_content: &str,
@@ -1724,6 +1774,7 @@ async fn trigger_continuation_for_setup_error_results(
         window.clone(),
         conversation_id,
         assistant_id,
+        crate::db::butler_goal::OUTPUT_SOURCE.try_with(|id|*id).ok().flatten(),
     )
     .await
     .map_err(|error| anyhow::anyhow!("工具创建失败结果续写失败: {}", error))?;
@@ -2723,6 +2774,18 @@ pub async fn extract_assistant_from_message(
     Ok((result.primary_assistant_id.unwrap_or(default_assistant_id), result.cleaned_content))
 }
 
+/// Enforce persistent controls for every provider request, including retries and
+/// tool-result continuations prepared before the user paused or changed the goal.
+fn ensure_model_execution_current(
+    conversation_db: &ConversationDatabase,
+    conversation_id: i64,
+) -> anyhow::Result<()> {
+    let source = crate::db::butler_goal::OUTPUT_SOURCE.try_with(|source| *source).ok().flatten();
+    crate::db::butler_control::ensure_execution(
+        &conversation_db.get_connection()?, conversation_id, source,
+    )
+}
+
 pub async fn handle_stream_chat(
     client: &Client,
     model_name: &str,
@@ -2758,6 +2821,7 @@ pub async fn handle_stream_chat(
 
     // 外层重试循环，处理整个流式会话
     loop {
+        ensure_model_execution_current(conversation_db, conversation_id)?;
         main_attempts += 1;
         info!(attempt = main_attempts, max_attempts = max_retry_attempts, "stream chat attempt");
 
@@ -2969,6 +3033,7 @@ async fn attempt_stream_chat(
 
     let stream_request_start_time = chrono::Utc::now();
 
+    ensure_model_execution_current(conversation_db, conversation_id)?;
     let (chat_options, billing_capture) = crate::api::opencode_go::capture_billing(chat_options.clone());
     let chat_stream_response = match client
         .exec_chat_stream(model_name, chat_request.clone(), Some(&chat_options))
@@ -3553,7 +3618,7 @@ async fn attempt_stream_chat(
                                     );
 
                                     // Spawn tool execution in background (non-blocking)
-                                    // Use std::thread::spawn + block_on to avoid Send
+                                    // Use a dedicated thread + block_on to avoid Send
                                     // requirement (execute_mcp_tool_call uses non-Send types).
                                     if !exec_ids.is_empty() {
                                         debug!(
@@ -3562,8 +3627,10 @@ async fn attempt_stream_chat(
                                         );
                                         let app_bg = app_handle.clone();
                                         let window_bg = window.clone();
-                                        std::thread::spawn(move || {
-                                            tauri::async_runtime::block_on(async move {
+                                        let spawn_ids = exec_ids.clone();
+                                        if let Err(error) = crate::utils::async_thread::spawn_async_thread(
+                                            "aipp-tool-exec",
+                                            move || async move {
                                                 execute_and_continue_tool_calls(
                                                     app_bg,
                                                     window_bg,
@@ -3571,8 +3638,15 @@ async fn attempt_stream_chat(
                                                     exec_ids,
                                                 )
                                                 .await;
-                                            });
-                                        });
+                                            },
+                                        ) {
+                                            error!(
+                                                conversation_id,
+                                                exec_ids = ?spawn_ids,
+                                                error = %error,
+                                                "failed to spawn background tool execution thread"
+                                            );
+                                        }
                                     } else if setup_error_result_count > 0 && _all_ids.is_empty() {
                                         debug!(
                                             setup_error_result_count,
@@ -3603,7 +3677,8 @@ async fn attempt_stream_chat(
                             captured_tool_calls.len(),
                             captured_binary_count,
                         ) {
-                            response_content = EMPTY_MODEL_REPLY_NOTICE.to_string();
+                            let notice = empty_model_reply_notice(&reasoning_content);
+                            response_content = notice.to_string();
                             if response_message_id.is_none() {
                                 let now = chrono::Utc::now();
                                 response_start_time.get_or_insert(now);
@@ -3612,7 +3687,7 @@ async fn attempt_stream_chat(
                                     &window,
                                     conversation_id,
                                     "response",
-                                    EMPTY_MODEL_REPLY_NOTICE,
+                                    notice,
                                     llm_model_id,
                                     &llm_model_name,
                                     &generation_group_id,
@@ -3632,8 +3707,20 @@ async fn attempt_stream_chat(
                                 }
                             }
                             if let Some(msg_id) = response_message_id {
+                                // Persist provenance before publishing the local notice as complete.
+                                let repo = conversation_db.message_repo()
+                                    .context(StreamMessageWrite(conversation_id))?;
+                                let existing = repo.read(msg_id)
+                                    .context(StreamMessageWrite(conversation_id))?
+                                    .context("empty reply notice message missing")?;
+                                let mut empty_body = String::new();
+                                let metadata = prepare_empty_model_reply(
+                                    &mut empty_body, &reasoning_content, 0, 0, existing.metadata_json,
+                                );
+                                repo.update_metadata(msg_id, metadata.as_deref())
+                                    .context(StreamMessageWrite(conversation_id))?;
                                 // 立刻落库并标记完成，覆盖仅有 reasoning / None 等收尾分支漏掉 response 的情况。
-                                let _ = persist_and_emit_update(
+                                persist_and_emit_update(
                                     &conversation_db,
                                     &window,
                                     conversation_id,
@@ -3641,7 +3728,7 @@ async fn attempt_stream_chat(
                                     "response",
                                     &response_content,
                                     true,
-                                );
+                                )?;
                                 if let Ok(repo) = conversation_db.message_repo() {
                                     let _ = repo.update_finish_time(msg_id);
                                 }
@@ -3794,13 +3881,13 @@ async fn attempt_stream_chat(
                             None
                         };
 
-                        send_completion_notification(
+                        if super::events::output_goal_current(app_handle,conversation_id,response_message_id) { send_completion_notification(
                             app_handle,
                             &response_content,
                             assistant_name,
                             &config_feature_map,
                         )
-                        .await;
+                        .await; }
 
                         // 清理消息焦点（保留 MCP 执行焦点）
                         let app_handle = window.app_handle();
@@ -4056,7 +4143,10 @@ pub async fn handle_non_stream_chat(
     let max_retry_attempts = get_retry_attempts_from_config(&config_feature_map);
 
     // 非流式：强制捕获工具调用，便于将工具以 UI 注释形式插入
-    let non_stream_options = chat_options.clone().with_capture_tool_calls(true).with_capture_raw_body(true);
+    let non_stream_options = chat_options.clone()
+        .with_capture_tool_calls(true)
+        .with_capture_reasoning_content(true)
+        .with_capture_raw_body(true);
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
@@ -4118,6 +4208,7 @@ pub async fn handle_non_stream_chat(
 
             info!(attempts, max_retry_attempts, "non stream chat attempt");
 
+            ensure_model_execution_current(conversation_db, conversation_id)?;
             let exec_result = if let Some(token) = cancel_token.as_ref() {
                 tokio::select! {
                     _ = token.cancelled() => {
@@ -4179,7 +4270,7 @@ pub async fn handle_non_stream_chat(
             // 在创建新的 response 消息前，如果上一条是错误消息，则清理
             let _ = cleanup_last_error_message(conversation_db, conversation_id).await;
 
-            let mut content = chat_response.first_text().unwrap_or("").to_string();
+            let mut content = chat_response.texts().join("");
             let response_binaries = chat_response.content.clone().into_binaries();
 
             // Extract token usage data
@@ -4189,6 +4280,18 @@ pub async fn handle_non_stream_chat(
             let input_tokens = usage.prompt_tokens.unwrap_or(0);
             let output_tokens = usage.completion_tokens.unwrap_or(0);
             let total_tokens = usage.total_tokens.unwrap_or(input_tokens + output_tokens);
+            let response_metadata = prepare_empty_model_reply(
+                &mut content,
+                chat_response.reasoning_content.as_deref().unwrap_or(""),
+                chat_response.tool_calls().len(),
+                response_binaries.len(),
+                merge_chat_response_metadata(
+                    None,
+                    Some(usage),
+                    chat_response.response_id.as_deref(),
+                    Some(&billing),
+                ),
+            );
 
             // 现在才创建响应消息（在有实际内容后）
             let now = chrono::Utc::now();
@@ -4208,7 +4311,7 @@ pub async fn handle_non_stream_chat(
 
             let response_message = conversation_db
                 .message_repo()
-                .unwrap()
+                .context("创建非流式回复仓库失败")?
                 .create(&Message {
                     id: 0,
                     parent_id: None,
@@ -4228,16 +4331,11 @@ pub async fn handle_non_stream_chat(
                     generation_group_id: Some(generation_group_id.clone()),
                     parent_group_id: parent_group_id_override.clone(),
                     tool_calls_json: None,
-                    metadata_json: merge_chat_response_metadata(
-                        None,
-                        Some(usage),
-                        chat_response.response_id.as_deref(),
-                        Some(&billing),
-                    ),
+                    metadata_json: response_metadata,
                     first_token_time: None, // non-stream: unknown, fallback to start_time
                     ttft_ms,
                 })
-                .unwrap();
+                .with_context(|| format!("保存非流式回复失败（conversation_id={conversation_id}）"))?;
 
             info!(
                 message_id = response_message.id,
@@ -4483,8 +4581,9 @@ pub async fn handle_non_stream_chat(
                 None
             };
 
-            send_completion_notification(app_handle, &content, assistant_name, &config_feature_map)
-                .await;
+            if super::events::output_goal_current(app_handle,conversation_id,Some(response_message_id)) {
+                send_completion_notification(app_handle, &content, assistant_name, &config_feature_map).await;
+            }
 
             if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
                 activity_manager.clear_message_focus_keep_mcp(app_handle, conversation_id).await;
@@ -4684,16 +4783,10 @@ mod pr40_error_handling_tests {
 
 
 #[cfg(test)]
-mod empty_model_reply_tests {
-    use super::{should_announce_empty_model_reply, EMPTY_MODEL_REPLY_NOTICE};
+#[path = "chat_tests.rs"]
+mod empty_model_reply_tests;
 
-    #[test]
-    fn announces_only_when_body_tools_and_binaries_are_all_empty() {
-        assert!(should_announce_empty_model_reply("", 0, 0));
-        assert!(should_announce_empty_model_reply("   ", 0, 0));
-        assert!(!should_announce_empty_model_reply("hi", 0, 0));
-        assert!(!should_announce_empty_model_reply("", 1, 0));
-        assert!(!should_announce_empty_model_reply("", 0, 2));
-        assert_eq!(EMPTY_MODEL_REPLY_NOTICE, "模型返回了空内容");
-    }
+fn send_conversation_event_to_chat_windows(app:&tauri::AppHandle,conversation:i64,event:ConversationEvent) {
+    crate::utils::window_utils::send_conversation_event_to_chat_windows(app,conversation,
+        super::events::guard_goal_event(app,conversation,event));
 }

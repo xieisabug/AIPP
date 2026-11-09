@@ -6,6 +6,29 @@ use super::registry::ActionRegistry;
 use super::types::*;
 use crate::db::conversation_db::ConversationDatabase;
 
+/// 管家动作批准边界：显式批准策略不允许被其他入口绕过。
+/// SuperAdmin 与其他能执行同一动作的管家工具入口都必须复用这里，保证决策一致。
+pub(crate) fn approval_gate_error(meta: &ActionMeta, dry_run: bool) -> Option<String> {
+    if (meta.requires_approval || matches!(meta.approval_policy, ApprovalPolicy::UserApprovalRequired | ApprovalPolicy::Deny)) && !dry_run {
+
+        return Some(format!(
+            "Action '{}' has risk_level={} and requires user approval. \
+             Use superadmin_execute to show the exact one-time approval dialog, or dry_run=true to preview.",
+            meta.action_id, meta.risk_level
+        ));
+    }
+    None
+}
+
+/// Legacy schedule.create does not carry trusted ownership. Never let a Butler
+/// call silently become an unrestricted ordinary schedule (including batch calls).
+fn schedule_origin_error(action: &str, dry_run: bool, kind: Option<&str>) -> Option<String> {
+    if action == "schedule.create" && !dry_run
+        && matches!(kind, Some("butler_main" | "butler_contact" | "butler_task" | "butler_group_member")) {
+        Some("管家不能通过旧版 schedule.create 创建无归属的日程。请使用 schedule_task 的 create 操作并绑定当前总管家主会话；创建后须由用户确认来源、模式和期限才会启用。".into())
+    } else { None }
+}
+
 /// Handle the `superadmin_execute` tool call.
 #[instrument(skip(app_handle, registry))]
 pub async fn handle_execute(
@@ -34,39 +57,23 @@ pub async fn handle_execute(
 
     let meta = &registered.meta;
 
-    // 2. Risk gate – high-risk actions require approval (not auto-executed)
-    if meta.risk_level.0 >= 3 && !request.dry_run {
-        let needs_approval = meta.requires_approval;
-        if needs_approval {
-            // For Phase 1 we reject high-risk actions outright; Phase 3 will add
-            // interactive approval via ask_user_question.
-            let err_msg = format!(
-                "Action '{}' has risk_level={} and requires user approval. \
-                 Use dry_run=true to preview, or request approval through ask_user_question first.",
-                request.action_id, meta.risk_level
-            );
-            log_audit(
-                app_handle,
-                &audit_id,
-                meta,
-                &request,
-                false,
-                None,
-                Some(&err_msg),
-                false,
-                butler_conversation_id,
-                None,
-            );
-            return ExecuteResult {
-                success: false,
-                action_id: request.action_id.clone(),
-                risk_level: meta.risk_level,
-                approval_used: false,
-                result: serde_json::Value::Null,
-                audit_id,
-                error: Some(err_msg),
-            };
+    let origin_check = (|| -> Result<(), String> {
+        if request.action_id != "schedule.create" || request.dry_run { return Ok(()); }
+        if let Some(id) = butler_conversation_id {
+            use crate::db::conversation_db::Repository;
+            let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+            let origin = db.conversation_repo().map_err(|e| e.to_string())?.read(id)
+                .map_err(|e| e.to_string())?.ok_or("调用会话不存在，不能创建日程")?;
+            if let Some(error) = schedule_origin_error(&request.action_id, request.dry_run, Some(&origin.conversation_kind)) {
+                return Err(error);
+            }
         }
+        Ok(())
+    })();
+    if let Err(error) = origin_check {
+        log_audit(app_handle, &audit_id, meta, &request, false, None, Some(&error), false, butler_conversation_id, None);
+        return ExecuteResult { success: false, action_id: request.action_id.clone(), risk_level: meta.risk_level,
+            approval_used: false, result: serde_json::Value::Null, audit_id, error: Some(error) };
     }
 
     // 3. Capture before-snapshot for write actions (risk > 0)
@@ -76,9 +83,37 @@ pub async fn handle_execute(
         None
     };
 
+    // Bind approval to an immutable action and current work, never a model assertion.
+    let approved = if matches!(meta.approval_policy, ApprovalPolicy::Deny) {
+        Err("该管理操作禁止执行，不能通过批准绕过".to_string())
+    } else if approval_gate_error(meta, request.dry_run).is_some() {
+        super::approval::approve(app_handle, meta, &request, butler_conversation_id, before_snapshot.as_ref()).await.map(Some)
+    } else { Ok(None) };
+    let approved = match approved {
+        Ok(binding) => binding,
+        Err(error) => {
+            log_audit(app_handle,&audit_id,meta,&request,false,None,Some(&error),false,butler_conversation_id,None);
+            return ExecuteResult {success:false, action_id:request.action_id.clone(),risk_level:meta.risk_level,
+                approval_used:false,result:serde_json::Value::Null,audit_id,error:Some(error)};
+        }
+    };
+    let approval_used = approved.is_some();
+
+    // Snapshot may await; recheck immediately before crossing the action boundary.
+    if let Some(binding) = approved.as_ref() {
+        if let Err(error) = super::approval::validate(app_handle,binding,&request) {
+            log_audit(app_handle,&audit_id,meta,&request,false,None,Some(&error),false,butler_conversation_id,None);
+            return ExecuteResult {success:false, action_id:request.action_id.clone(),risk_level:meta.risk_level,
+                approval_used:false,result:serde_json::Value::Null,audit_id,error:Some(error)};
+        }
+    }
     // 4. Execute via handler
     let handler_result =
-        registered.handler.execute(app_handle, request.args.clone(), request.dry_run).await;
+        if approval_used {
+            registered.handler.execute_approved(app_handle, request.args.clone(), before_snapshot.as_ref()).await
+        } else {
+            registered.handler.execute(app_handle, request.args.clone(), request.dry_run).await
+        };
 
     match handler_result {
         Ok(result_value) => {
@@ -97,7 +132,7 @@ pub async fn handle_execute(
                 true,
                 Some(&result_value),
                 None,
-                false,
+                approval_used,
                 butler_conversation_id,
                 before_snapshot.as_ref(),
             );
@@ -106,7 +141,7 @@ pub async fn handle_execute(
                 success: true,
                 action_id: request.action_id.clone(),
                 risk_level: meta.risk_level,
-                approval_used: false,
+                approval_used,
                 result: result_value,
                 audit_id,
                 error: None,
@@ -127,7 +162,7 @@ pub async fn handle_execute(
                 false,
                 None,
                 Some(&err),
-                false,
+                approval_used,
                 butler_conversation_id,
                 None, // No snapshot for failed actions
             );
@@ -136,7 +171,7 @@ pub async fn handle_execute(
                 success: false,
                 action_id: request.action_id.clone(),
                 risk_level: meta.risk_level,
-                approval_used: false,
+                approval_used,
                 result: serde_json::Value::Null,
                 audit_id,
                 error: Some(err),
@@ -198,3 +233,7 @@ fn log_audit(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "execute_origin_tests.rs"]
+mod schedule_origin_tests;

@@ -106,3 +106,25 @@ pub fn context(
     };
     read().map_err(|e| e.to_string())?.ok_or_else(|| format!("管家消息 {id} 不存在或不在可读范围"))
 }
+
+/// 管家窗口左上角搜索：在管家主会话（含已归档）、联系人私聊与派工任务中检索公开消息。
+/// 返回完整正文，由调用方按命中位置截取摘要；按消息 id 倒序分页。
+pub fn ui_search(
+    conn: &Connection,
+    names: &HashMap<i64, String>,
+    query: &str,
+    limit: u32,
+    offset: u32,
+) -> rusqlite::Result<Vec<Value>> {
+    let sql = format!(
+        "{ROWS}m.content, 0 {FROM} AND instr(lower(m.content),lower(?1))>0
+        ORDER BY m.id DESC LIMIT ?2 OFFSET ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![query, limit, offset], |row| entry(row, names))?;
+    rows.collect()
+}
+
+#[cfg(test)]
+#[path = "butler_history_tests.rs"]
+mod tests;

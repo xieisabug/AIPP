@@ -43,6 +43,7 @@ import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { AssistantListItem } from "@/data/Assistant";
 import { claimAgentConnectionEvent } from "./conversation/agentSessionNotice";
 import { agentSupportsPlanToggle } from "@/utils/agentPlanMode";
+import { agentAllowsConfigMutation } from "@/utils/agentCapabilities";
 
 interface AgentRuntimeInfo {
     agent_kind: string;
@@ -57,7 +58,10 @@ import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
-import { withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
+import { ButlerQuoteButton, ButlerQuoteChip, isQuotableMessage, quoteExcerpt, useButlerQuote } from "./butler/ButlerQuote";
+import { hasPublishedReply, withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
+import { useLinger } from "@/hooks/useStablePresence";
+import ButlerHeldToolCalls from "@/components/butler/ButlerHeldToolCalls";
 import { useButlerPeerTimeline } from "@/components/butler/useButlerPeerTimeline";
 import { useMessageProcessing } from "@/hooks/useMessageProcessing";
 import { useReasoningExpand } from "@/hooks/useReasoningExpand";
@@ -79,7 +83,7 @@ import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Bot, Check, ChevronDown, LoaderCircle } from "lucide-react";
+import { Bot, Check, ChevronDown, LoaderCircle, X } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/utils/utils";
 
@@ -93,6 +97,7 @@ import { mergeMessagesWithStreamingState } from "@/utils/streamingMessageState";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { useMobileConversationDetails } from "@/hooks/useMobileConversationDetails";
 
 // 暴露给外部的方法接口
 export interface ConversationUIRef {
@@ -233,6 +238,8 @@ function AcpConfigSelect({ option, disabled, onChange }: AcpConfigSelectProps) {
 }
 
 const EMPTY_STREAMS = new Map();
+// 总管家简洁视图：吸收工具轮次间的短暂空闲。
+const BUTLER_IDLE_GAP_MS = 1200;
 
 interface ConversationUIProps {
     conversationId: string;
@@ -244,6 +251,7 @@ interface ConversationUIProps {
     onConversationChange?: (conversation?: Conversation) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     inlineInteractionVisible?: boolean;
+    previewFileOpen?: boolean;
     allowRename?: boolean;
     allowDelete?: boolean;
     headerExtraActions?: ReactNode;
@@ -251,6 +259,8 @@ interface ConversationUIProps {
     windowLabel?: string;
     showExecutionDetails?: boolean;
     busySendBehavior?: "queue" | "interrupt";
+    /** 只读查看（如管家搜索打开的归档会话）：隐藏输入框，禁止重新生成/编辑等会改写会话的操作 */
+    readOnly?: boolean;
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
 }
 
@@ -310,6 +320,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             onConversationChange,
             inlineInteractionItems,
             inlineInteractionVisible = false,
+            previewFileOpen = false,
             allowRename = true,
             allowDelete = true,
             headerExtraActions,
@@ -317,11 +328,15 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             windowLabel = "chat_ui",
             showExecutionDetails = false,
             busySendBehavior = "queue",
+            readOnly = false,
             onPreviewFileContextClick,
         },
         ref
     ) => {
         const resultOnly = windowLabel === "butler_experiment" && !showExecutionDetails;
+        const rejectReadOnlyAction = useCallback(() => {
+            toast.info("这是只读的历史会话，不能重新生成或编辑消息");
+        }, []);
         // ============= 基础状态管理 =============
 
         // 当前对话信息和助手列表
@@ -399,6 +414,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         const [showBackToBottom, setShowBackToBottom] = useState(false);
         const inputAreaRef = useRef<InputAreaRef>(null);
+        // 管家会话的引用回复状态（普通聊天没有 Provider，为 null）
+        const butlerQuote = useButlerQuote();
+        const butlerQuoteAvailable = !!butlerQuote;
+        const setButlerQuote = butlerQuote?.setQuote;
+        const clearButlerQuote = useCallback(() => setButlerQuote?.(null), [setButlerQuote]);
         // 加载请求标识，避免旧请求覆盖最新状态（StrictMode 双调用等场景）
         const loadRequestIdRef = useRef<number>(0);
 
@@ -415,23 +435,42 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             fileInfoList,
             clearFileInfoList,
             restoreFiles,
+            restoreDraftFiles,
             handleChooseFile,
             handleDeleteFile,
             handlePaste,
             handleDropFiles,
         } = useFileManagement();
 
-        const [draftReady, setDraftReady] = useState(false);
+        // Readiness belongs to a conversation, not the previous render. On a key
+        // change, effects must not save the old attachment list into the new draft.
+        const [draftReadyKey, setDraftReadyKey] = useState<string | null>(null);
+        const draftReady = draftReadyKey === conversationId;
         useEffect(() => {
-            setDraftReady(false);
+            setDraftReadyKey(null);
             restoreFiles([]);
         }, [conversationId, restoreFiles]);
 
         // 输入相关状态（移动端会把附件 ID 一并写入本机草稿）
+        // 草稿里有附件无法恢复时逐项告知，并给出重新选择入口（走系统选择器，不扩大文件权限）
+        const notifyMissingDraftAttachments = useCallback(
+            (missing: { id: number; name: string }[]) => {
+                toast.warning(`${missing.length} 个草稿附件无法恢复，请重新选择`, {
+                    id: `draft-missing-attachments-${conversationId}`,
+                    description: missing.map((item) => `· ${item.name}`).join("\n"),
+                    duration: 15000,
+                    closeButton: true,
+                    action: { label: "重新选择", onClick: () => void handleChooseFile() },
+                });
+            },
+            [conversationId, handleChooseFile],
+        );
+
         const [inputText, setInputText, saveDraftAttachmentIds] = useConversationDraft(
             conversationId,
-            restoreFiles,
-            () => setDraftReady(true),
+            restoreDraftFiles,
+            () => setDraftReadyKey(conversationId),
+            notifyMissingDraftAttachments,
         );
 
         // 文件拖拽
@@ -955,6 +994,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ? new Map<string, AgentActivityEvent>()
             : displayAgentActivities, [resultOnly, displayAgentActivities]);
         const peerTimeline = useButlerPeerTimeline(Number(conversationId), resultOnly);
+        const butlerRunningHeld = useLinger(resultOnly && effectiveAiIsResponsing, BUTLER_IDLE_GAP_MS, conversationId);
         const transcript = useMemo(() => {
             if (!resultOnly) return allDisplayMessages;
             const unpublished = new Set<number>();
@@ -965,11 +1005,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     unpublished.add(message.id);
                 }
             }
-            return withButlerProcessing(
-                withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId)),
-                Number(conversationId), effectiveAiIsResponsing,
-            );
-        }, [resultOnly, allDisplayMessages, effectiveAiIsResponsing, peerTimeline, conversationId]);
+            const visible = withPeerTimeline(allDisplayMessages, unpublished, peerTimeline?.posts ?? [], Number(conversationId));
+            // 工具轮次之间运行态会短暂回落为空闲；保留"处理中"直到真正的回复发布，避免提示行闪烁。
+            return withButlerProcessing(visible, Number(conversationId),
+                effectiveAiIsResponsing || (butlerRunningHeld && !hasPublishedReply(visible)));
+        }, [resultOnly, allDisplayMessages, effectiveAiIsResponsing, butlerRunningHeld, peerTimeline, conversationId]);
         // 滚动管理 - 移除依赖项，改为手动调用
         const {
             messagesEndRef,
@@ -1144,6 +1184,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             openTitleEditDialog,
             closeTitleEditDialog,
         } = useConversationOperations({
+            quote: butlerQuote?.quote ?? null,
+            clearQuote: clearButlerQuote,
             quietRuntimeErrors: resultOnly,
             conversation,
             selectedAssistant,
@@ -1179,7 +1221,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // ============= 初始化和生命周期逻辑 =============
 
         // 移动端：会话详情面板（桌面由右侧 ChatSidebar 承担；轮次导航由 MobileTurnScrubber 承担）
-        const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
+        const {
+            detailsOpen: mobileDetailsOpen,
+            setDetailsOpen: setMobileDetailsOpen,
+            detailsScrollRef,
+            detailsRestoreState,
+            openDetails,
+            suspendDetails,
+        } = useMobileConversationDetails({
+            conversationId,
+            enabled: mobilePlatform,
+            previewFileOpen,
+        });
 
         // 暴露给外部的方法
         useImperativeHandle(
@@ -1216,11 +1269,9 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                 openTitleEdit: () => {
                     if (conversationId && allowRename) openTitleEditDialog();
                 },
-                openDetails: () => {
-                    if (conversationId) setMobileDetailsOpen(true);
-                },
+                openDetails,
             }),
-            [conversationId, handleOpenSidebarWindow, allowRename, openTitleEditDialog]
+            [conversationId, handleOpenSidebarWindow, allowRename, openTitleEditDialog, openDetails]
         );
 
         // 左侧对话轮次导航条：从当前展示的消息中抽取用户提问轮次
@@ -1485,6 +1536,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     return false;
                 }
 
+                if (!agentAllowsConfigMutation(acpSessionState?.agent_capabilities)) {
+                    toast.error("当前 Agent 会话不支持修改配置", { position: "bottom-right" });
+                    return false;
+                }
+
                 setAcpMutationKey(`config:${option.id}`);
                 try {
                     await invoke("set_acp_session_config_option", {
@@ -1503,7 +1559,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     setAcpMutationKey(null);
                 }
             },
-            [conversationId]
+            [conversationId, acpSessionState?.agent_capabilities]
         );
 
         const planModeOption = useMemo(
@@ -1726,6 +1782,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             }
             return rendered;
         }, [pluginList]);
+        // 管家会话：助手回复可“引用回复”。按消息缓存渲染结果，保持历史消息的 messageActions 引用稳定。
+        const quoteActionCacheRef = useRef(new Map<number, { plugin: React.ReactNode; content: string; rendered: React.ReactNode }>());
+        const renderMessageActionsWithQuote = useCallback((message: Message) => {
+            const plugin = renderPluginMessageActions(message);
+            if (!butlerQuoteAvailable || readOnly || !isQuotableMessage(message)) return plugin;
+            const cache = quoteActionCacheRef.current;
+            const cached = cache.get(message.id);
+            if (cached && cached.plugin === plugin && cached.content === message.content) return cached.rendered;
+            const rendered = <>{plugin}<ButlerQuoteButton variant="toolbar" target={{
+                kind: "message", id: message.id, label: "引用回复", excerpt: quoteExcerpt(message.content),
+            }} /></>;
+            if (cache.size > MAX_PLUGIN_MESSAGE_ACTION_CACHE_ENTRIES) cache.clear();
+            cache.set(message.id, { plugin, content: message.content, rendered });
+            return rendered;
+        }, [butlerQuoteAvailable, readOnly, renderPluginMessageActions]);
 
         const sendButtonSlotContext = useMemo(
             () => ({
@@ -1864,7 +1935,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                     ) : null}
                     <AcpConfigSelect
                         option={option}
-                        disabled={Boolean(acpMutationKey)}
+                        disabled={Boolean(acpMutationKey) || !agentAllowsConfigMutation(acpSessionState?.agent_capabilities)}
                         onChange={(option, value) => void handleAcpConfigChange(option, value)}
                     />
                 </div>
@@ -2140,18 +2211,18 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 getGenerationGroupControl={messageGroupsData.getGenerationGroupControl}
                                 handleGenerationVersionChange={messageGroupsData.handleGenerationVersionChange}
                                 onCodeRun={handleArtifact}
-                                onMessageRegenerate={handleMessageRegenerate}
-                                onMessageEdit={handleMessageEdit}
+                                onMessageRegenerate={readOnly ? rejectReadOnlyAction : handleMessageRegenerate}
+                                onMessageEdit={readOnly ? rejectReadOnlyAction : handleMessageEdit}
                                 onMessageFork={handleMessageFork}
-                                onQueuedMessagePromote={handleQueuedMessagePromote}
+                                onQueuedMessagePromote={readOnly ? undefined : handleQueuedMessagePromote}
                                 onToggleReasoningExpand={toggleReasoningExpand}
                                 inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}
-                                renderMessageActions={renderPluginMessageActions}
+                                renderMessageActions={renderMessageActionsWithQuote}
                                 actionableAgentPlanMessageId={actionableAgentPlanMessageId}
                                 agentPlanModeSwitching={planModeSwitching}
-                                onContinueAgentPlan={handleContinueAgentPlan}
-                                onApproveAgentPlan={handleApproveAgentPlan}
+                                onContinueAgentPlan={readOnly ? undefined : handleContinueAgentPlan}
+                                onApproveAgentPlan={readOnly ? undefined : handleApproveAgentPlan}
                                 scrollContainerRef={scrollContainerRef}
                                 pendingScrollMessageId={pendingScrollMessageId}
                                 pendingScrollAlign={pendingScrollAlign}
@@ -2174,15 +2245,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>
 
-                        {resultOnly && [...mcpToolCallStates.values()].some(call => call.status === "pending") &&
-                            <p role="status" className="px-6 py-1 text-xs text-muted-foreground">有操作等待确认，请查看执行记录。</p>}
+                        {resultOnly &&
+                            <ButlerHeldToolCalls conversationId={Number(conversationId)} mcpToolCallStates={mcpToolCallStates}
+                                floating={!isMobile} />}
                         {isDragging ? <FileDropArea onDragChange={setIsDragging} onFilesSelect={handleDropFiles} /> : null}
 
                         {isMobile && showBackToBottom && <Button variant="secondary" className="self-center min-h-11 shrink-0"
                             onClick={() => { smartScroll(true, "auto"); setShowBackToBottom(false); }}>
                             <ChevronDown className="h-4 w-4" />回到底部
                         </Button>}
-                        <InputArea
+                        {!readOnly && <InputArea
                             ref={inputAreaRef}
                             inputText={inputText}
                             setInputText={setInputText}
@@ -2204,7 +2276,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onPlanModeToggle={showPlanModeToggle
                                 ? () => void setAgentPlanMode(!isPlanMode)
                                 : undefined}
-                        />
+                            topChip={butlerQuote?.quote
+                                ? <ButlerQuoteChip quote={butlerQuote.quote} onClear={clearButlerQuote} />
+                                : undefined}
+                        />}
                     </div>
 
                     {/* Right sidebar - only show on desktop when sidebar window is not open */}
@@ -2231,9 +2306,10 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 className="w-full max-w-none gap-0 p-0 sm:max-w-none safe-top safe-bottom"
                                 aria-describedby={undefined}
                                 data-aipp-slot="chat-mobile-details-sheet"
+                                hideCloseButton
                             >
-                                <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border px-4 py-2 pr-12">
-                                    <SheetTitle className="text-sm font-medium">会话详情</SheetTitle>
+                                <div className="flex min-h-11 items-center gap-2 border-b border-border px-2 py-1">
+                                    <SheetTitle className="min-w-0 flex-1 px-2 text-sm font-medium">会话详情</SheetTitle>
                                     <Button
                                         type="button"
                                         variant="outline"
@@ -2246,13 +2322,21 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     >
                                         导出对话
                                     </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="min-h-11 min-w-11"
+                                        aria-label="关闭会话详情"
+                                        onClick={() => setMobileDetailsOpen(false)}
+                                    >
+                                        <X className="h-5 w-5" />
+                                    </Button>
                                 </div>
-                                <div className="min-h-0 flex-1 overflow-y-auto">
-                                    {sidebarTodos.length === 0 && artifacts.length === 0 && contextItems.length === 0 ? (
-                                        <div className="px-4 py-6 text-sm text-muted-foreground">当前会话暂无待办、上下文或制品</div>
-                                    ) : null}
+                                <div ref={detailsScrollRef} className="min-h-0 flex-1 overflow-y-auto">
                                     <ChatSidebarContent
-                                        className="h-full"
+                                        mobile
+                                        restoreState={detailsRestoreState}
                                         todos={sidebarTodos}
                                         artifacts={artifacts}
                                         contextItems={contextItems}
@@ -2260,11 +2344,13 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                         conversationId={conversationId}
                                         focusedContextId={focusedContextId}
                                         onArtifactClick={(artifact) => {
-                                            setMobileDetailsOpen(false);
+                                            if (mobilePlatform) suspendDetails("artifact");
+                                            else setMobileDetailsOpen(false);
                                             handleArtifact(artifact.language, artifact.code);
                                         }}
                                         onPreviewFileClick={(item) => {
-                                            setMobileDetailsOpen(false);
+                                            if (mobilePlatform) suspendDetails("context");
+                                            else setMobileDetailsOpen(false);
                                             handlePreviewFileContextClick(item);
                                         }}
                                     />

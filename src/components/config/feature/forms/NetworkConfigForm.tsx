@@ -130,26 +130,41 @@ export const NetworkConfigForm: React.FC<NetworkConfigFormProps> = ({ form, onSa
             key: "openai_prompt_cache_key_enabled",
             config: {
                 type: "switch" as const,
-                label: "OpenAI Responses Prompt Cache Key",
-                description: "仅对 OpenAI / OpenAI API 且 request mode 为 Responses 的模型生效，默认开启",
+                label: "OpenAI Responses 提示词缓存标识",
+                tooltip: "为同一会话发送固定缓存标识。旧模型可用它优化缓存路由；GPT-5.6 及后续型号自动路由，标识可用于区分缓存统计。仅对 OpenAI / OpenAI API 类型且使用 Responses 模式的模型生效，默认开启。",
+            },
+        },
+        {
+            key: "openai_prompt_cache_ttl",
+            config: {
+                type: "select" as const,
+                label: "OpenAI 提示词缓存保留时间",
+                tooltip: "GPT-5.6 及后续型号的 Responses 模式使用新版最低缓存寿命参数，默认 30 分钟。30 分钟与 12 小时的缓存写入费分别为普通输入价格的 1.25 倍和 2.5 倍。关闭「OpenAI Responses 提示词缓存标识」后不发送缓存参数。",
+                options: [
+                    { value: "30m", label: "30 分钟（默认）" },
+                    { value: "12h", label: "12 小时" },
+                ],
             },
         },
         {
             key: "openai_prompt_cache_retention",
             config: {
                 type: "select" as const,
-                label: "OpenAI Prompt Cache Retention",
-                description: "当前支持 24h；关闭上方开关后不会发送 cache 参数",
-                options: [{ value: "24h", label: "24h" }],
+                label: "OpenAI 旧版提示词缓存保留策略",
+                tooltip: "旧模型或无法识别版本的自定义模型名称在 Responses 模式下沿用旧版参数，实际支持情况取决于模型和服务商。GPT-5.5 / GPT-5.5 Pro 仅支持 24 小时。内存缓存通常闲置 5～10 分钟后失效，最长约 1 小时；24 小时表示最长保留时间。关闭缓存标识后不发送此参数。",
+                options: [
+                    { value: "24h", label: "最长 24 小时" },
+                    { value: "in_memory", label: "内存缓存" },
+                ],
             },
         },
         {
             key: "openai_responses_stateful_enabled",
             config: {
                 type: "switch" as const,
-                label: "OpenAI Responses Stateful Session",
-                description:
-                    "仅在关闭 Prompt Cache Key 时使用 previous_response_id/store 增量续接；缓存开启时优先发送完整历史以稳定命中缓存",
+                label: "OpenAI Responses 服务端会话续接",
+                tooltip:
+                    "使用上一轮响应标识续接对话，由服务端保存并衔接历史，减少重复上传。仅对 OpenAI / OpenAI API 类型且使用 Responses 模式的模型生效，需先关闭「OpenAI Responses 提示词缓存标识」。历史输入仍参与计费，默认关闭。",
             },
         },
         {

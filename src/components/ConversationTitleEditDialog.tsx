@@ -105,7 +105,7 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" data-aipp-slot="legacy-modal">
             {/* 背景遮罩 */}
             <div
                 className="absolute inset-0 bg-black/50 backdrop-blur-sm"
@@ -113,7 +113,7 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
             />
 
             {/* 模态框内容 */}
-            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-200 scale-100">
+            <div className="relative bg-background rounded-xl shadow-2xl w-full max-w-md transform transition-all duration-200 scale-100" data-aipp-slot="legacy-modal-panel">
                 {/* 标题栏 */}
                 <div className="flex items-center justify-between p-6 border-b border-border">
                     <h2 className="text-xl font-semibold text-foreground truncate pr-4">修改对话标题</h2>
@@ -126,7 +126,7 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
                 </div>
 
                 {/* 内容区域 */}
-                <div className="p-6">
+                <div className="p-6" data-aipp-slot="legacy-modal-body">
                     <div className="space-y-4">
                         <div className="space-y-2">
                             <div className="flex items-center justify-between">
@@ -147,6 +147,7 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
                                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
                                 type="text"
                                 autoCapitalize="none"
+                                enterKeyHint="done"
                                 name="name"
                                 value={title}
                                 onChange={(e) => setTitle(e.target.value)}
@@ -158,7 +159,7 @@ const ConversationTitleEditDialog: React.FC<ConversationTitleEditDialogProps> = 
                 </div>
 
                 {/* 按钮区域 */}
-                <div className="flex justify-end gap-3 p-6 pt-0">
+                <div className="flex justify-end gap-3 p-6 pt-0" data-aipp-slot="legacy-modal-actions">
                     <Button
                         variant="outline"
                         onClick={onClose}

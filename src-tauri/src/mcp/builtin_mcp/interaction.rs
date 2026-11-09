@@ -8,6 +8,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
+use crate::api::ai::agent_driver::approval::{
+    AgentInteractionReply, AgentQuestionReply, AgentReplyTarget, AgentRequestScope,
+};
+
 use super::preview_resources::{
     prepare_preview_code_event, prepare_preview_file_event, PreviewExternalResourcesPayload,
     PreviewResourceState,
@@ -666,10 +670,15 @@ pub fn handle_preview_file_relay_request<R: tauri::Runtime>(
         })
 }
 
+struct PendingAskUserRequest {
+    sender: oneshot::Sender<AskUserQuestionDecision>,
+    event: AskUserQuestionRequestEvent,
+    scope: AgentRequestScope,
+}
+
 #[derive(Clone)]
 pub struct InteractionState {
-    pending_ask_user: Arc<Mutex<HashMap<String, oneshot::Sender<AskUserQuestionDecision>>>>,
-    pending_ask_user_events: Arc<Mutex<HashMap<String, AskUserQuestionRequestEvent>>>,
+    pending_ask_user: Arc<Mutex<HashMap<String, PendingAskUserRequest>>>,
     pending_preview_code: Arc<Mutex<HashMap<String, oneshot::Sender<PreviewCodeDecision>>>>,
     pending_preview_code_events: Arc<Mutex<HashMap<String, PreviewCodeRequestEvent>>>,
 }
@@ -724,7 +733,6 @@ impl InteractionState {
     pub fn new() -> Self {
         Self {
             pending_ask_user: Arc::new(Mutex::new(HashMap::new())),
-            pending_ask_user_events: Arc::new(Mutex::new(HashMap::new())),
             pending_preview_code: Arc::new(Mutex::new(HashMap::new())),
             pending_preview_code_events: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -735,42 +743,49 @@ impl InteractionState {
         event: AskUserQuestionRequestEvent,
         sender: oneshot::Sender<AskUserQuestionDecision>,
     ) {
-        let request_id = event.request_id.clone();
-        let mut pending = self.pending_ask_user.lock().await;
-        pending.insert(request_id, sender);
-        drop(pending);
+        let scope = AgentRequestScope::application(event.conversation_id);
+        if let Err(error) = self.store_ask_user_request_scoped(event, sender, scope).await {
+            warn!(error = %error, "Rejected duplicate AskUserQuestion registration");
+        }
+    }
 
-        let mut pending_events = self.pending_ask_user_events.lock().await;
-        pending_events.insert(event.request_id.clone(), event);
+    pub async fn store_ask_user_request_scoped(
+        &self,
+        event: AskUserQuestionRequestEvent,
+        sender: oneshot::Sender<AskUserQuestionDecision>,
+        scope: AgentRequestScope,
+    ) -> Result<(), String> {
+        scope.validate_conversation(event.conversation_id)?;
+        let mut pending = self.pending_ask_user.lock().await;
+        if pending.contains_key(&event.request_id) {
+            return Err(format!("AskUserQuestion request '{}' is already pending", event.request_id));
+        }
+        pending.insert(event.request_id.clone(), PendingAskUserRequest { sender, event, scope });
+        Ok(())
+    }
+
+    pub async fn ask_user_request_scope(&self, request_id: &str) -> Option<AgentRequestScope> {
+        self.pending_ask_user.lock().await.get(request_id).map(|request| request.scope.clone())
     }
 
     pub async fn get_ask_user_request(
         &self,
         request_id: &str,
     ) -> Option<AskUserQuestionRequestEvent> {
-        let pending_events = self.pending_ask_user_events.lock().await;
-        pending_events.get(request_id).cloned()
+        self.pending_ask_user.lock().await.get(request_id).map(|request| request.event.clone())
     }
 
     pub async fn remove_ask_user_request(&self, request_id: &str) {
-        let mut pending = self.pending_ask_user.lock().await;
-        pending.remove(request_id);
-        drop(pending);
-
-        let mut pending_events = self.pending_ask_user_events.lock().await;
-        pending_events.remove(request_id);
+        self.pending_ask_user.lock().await.remove(request_id);
     }
 
     pub async fn list_requests_for_conversation(
         &self,
         conversation_id: i64,
     ) -> Vec<AskUserQuestionRequestEvent> {
-        let pending_events = self.pending_ask_user_events.lock().await;
-        pending_events
-            .values()
-            .filter(|event| event.conversation_id == Some(conversation_id))
-            .cloned()
-            .collect()
+        self.pending_ask_user.lock().await.values()
+            .filter(|request| request.event.conversation_id == Some(conversation_id))
+            .map(|request| request.event.clone()).collect()
     }
 
     pub async fn resolve_ask_user_request(
@@ -778,19 +793,43 @@ impl InteractionState {
         request_id: &str,
         decision: AskUserQuestionDecision,
     ) -> bool {
+        let Some(scope) = self.ask_user_request_scope(request_id).await else { return false; };
+        self.resolve_ask_user_request_scoped(request_id, &scope, decision).await
+            .ok().flatten().is_some_and(|resolution| resolution.delivered)
+    }
+
+    pub async fn resolve_ask_user_request_scoped(
+        &self,
+        request_id: &str,
+        scope: &AgentRequestScope,
+        decision: AskUserQuestionDecision,
+    ) -> Result<Option<crate::api::ai::acp::AcpPermissionResolution>, String> {
         let mut pending = self.pending_ask_user.lock().await;
-        let sender = pending.remove(request_id);
-        drop(pending);
-
-        let mut pending_events = self.pending_ask_user_events.lock().await;
-        pending_events.remove(request_id);
-        drop(pending_events);
-
-        if let Some(sender) = sender {
-            sender.send(decision).is_ok()
-        } else {
-            false
+        let Some(request) = pending.get(request_id) else { return Ok(None); };
+        scope.validate(&request.scope, request_id)?;
+        if decision.as_ref().is_ok_and(|answers| answers.is_empty()) {
+            return Err("Answers cannot be empty".into());
         }
+        Ok(pending.remove(request_id).map(|request| crate::api::ai::acp::AcpPermissionResolution {
+            conversation_id: request.event.conversation_id,
+            delivered: request.sender.send(decision).is_ok(),
+        }))
+    }
+
+    pub async fn cancel_requests_for_scope(
+        &self,
+        scope: &AgentRequestScope,
+    ) -> Vec<(String, crate::api::ai::acp::AcpPermissionResolution)> {
+        let mut pending = self.pending_ask_user.lock().await;
+        let ids: Vec<_> = pending.iter().filter_map(|(id, request)| {
+            (request.scope == *scope).then_some(id.clone())
+        }).collect();
+        ids.into_iter().filter_map(|id| pending.remove(&id).map(|request| {
+            (id, crate::api::ai::acp::AcpPermissionResolution {
+                conversation_id: request.event.conversation_id,
+                delivered: request.sender.send(Err("User cancelled AskUserQuestion".into())).is_ok(),
+            })
+        })).collect()
     }
 
     pub async fn store_preview_code_request(
@@ -861,6 +900,16 @@ pub async fn request_ask_user_question(
     conversation_id: Option<i64>,
     request: AskUserQuestionRequest,
 ) -> Result<HashMap<String, String>, String> {
+    request_ask_user_question_scoped(app_handle, interaction_state, conversation_id, request, None).await
+}
+
+pub(crate) async fn request_ask_user_question_scoped(
+    app_handle: &AppHandle,
+    interaction_state: &InteractionState,
+    conversation_id: Option<i64>,
+    request: AskUserQuestionRequest,
+    scope: Option<AgentRequestScope>,
+) -> Result<HashMap<String, String>, String> {
     request.validate()?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -871,8 +920,13 @@ pub async fn request_ask_user_question(
         metadata: request.metadata,
     };
 
+    if let Some(id)=conversation_id {
+        let conn=crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+        crate::db::butler_goal::save_question(&conn,id,&request_id,&serde_json::to_string(&event).map_err(|e|e.to_string())?,crate::api::butler_peer::TOOL_MESSAGE.try_with(|id|*id).ok().flatten(),chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+    }
     let (tx, rx) = oneshot::channel::<AskUserQuestionDecision>();
-    interaction_state.store_ask_user_request(event.clone(), tx).await;
+    let scope = scope.unwrap_or_else(|| AgentRequestScope::application(conversation_id));
+    interaction_state.store_ask_user_request_scoped(event.clone(), tx, scope).await?;
     let mut cleanup_guard = PendingInteractionCleanup::new(
         interaction_state,
         request_id.clone(),
@@ -1150,25 +1204,21 @@ pub(crate) async fn resolve_ask_user_question_response(
         .try_state::<InteractionState>()
         .ok_or_else(|| "InteractionState not found".to_string())?;
 
+    let conn=crate::db::conversation_db::ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+    crate::db::butler_goal::validate_question(&conn,request_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+    drop(conn);
     let decision = if cancelled {
-        Err("User cancelled AskUserQuestion".to_string())
+        AgentQuestionReply::Cancel
     } else {
-        let Some(value) = answers else {
-            return Err("Missing answers".to_string());
-        };
-        if value.is_empty() {
-            return Err("Answers cannot be empty".to_string());
-        }
-        Ok(value)
+        AgentQuestionReply::Answer { answers: answers.ok_or("Missing answers")? }
     };
-
-    let resolved = state.resolve_ask_user_request(request_id, decision).await;
-
-    if resolved {
-        Ok(true)
-    } else {
-        Err("AskUserQuestion request not found or already resolved".to_string())
-    }
+    let scope = state.ask_user_request_scope(request_id).await
+        .ok_or("AskUserQuestion request not found or already resolved")?;
+    crate::api::operation_api::resolve_agent_interaction_response(
+        app_handle,
+        AgentReplyTarget { request_id: request_id.to_string(), scope },
+        AgentInteractionReply::AskUserQuestion(decision),
+    ).await
 }
 
 pub(crate) async fn resolve_preview_code_response(
@@ -1214,6 +1264,25 @@ pub async fn submit_ask_user_question_response(
     answers: Option<HashMap<String, String>>,
     cancelled: Option<bool>,
 ) -> Result<bool, String> {
+    if app_handle.state::<InteractionState>().get_ask_user_request(&request_id).await.is_none() {
+        let mut conn=crate::db::conversation_db::ConversationDatabase::new(&app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+        let id=crate::db::butler_goal::validate_question(&conn,&request_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?.ok_or("问题已失效")?;
+        if app_handle.state::<crate::state::activity_state::ConversationActivityManager>().get_runtime_state(id).await.is_running {
+            return Err("当前会话仍在运行，请稍后再回答恢复的问题".into());
+        }
+        // A crashed external operation has an unknown outcome. Never resume it automatically.
+        let calls=crate::db::mcp_db::MCPDatabase::new(&app_handle).and_then(|db|db.get_mcp_tool_calls_by_conversation(id)).map_err(|e|e.to_string())?;
+        if !cancelled.unwrap_or(false) && calls.iter().any(|call|call.tool_name != "ask_user_question" && matches!(call.status.as_str(),"pending"|"executing")) {
+            return Err("原执行还有结果不明的工具操作，请先核对操作结果，再重新提出要求；未自动续接".into());
+        }
+        crate::db::butler_goal::recover_answer(&mut conn,&request_id,&answers.clone().unwrap_or_default(),cancelled.unwrap_or(false),chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
+        drop(conn);
+        if !cancelled.unwrap_or(false) {
+            let window=crate::api::butler_api::resolve_or_create_butler_execution_window(&app_handle)?;
+            crate::api::ai_api::try_dispatch_queued_message_after_completion(&app_handle,&window,id).await;
+        }
+        return Ok(true);
+    }
     resolve_ask_user_question_response(
         &app_handle,
         &request_id,
@@ -1390,4 +1459,11 @@ mod tests {
         assert!(!is_allowed_preview_relay_origin("https://127.0.0.1.attacker.tld"));
         assert!(!is_allowed_preview_relay_origin("http://tauri.localhost.evil.com"));
     }
+}
+
+#[tauri::command]
+pub async fn list_recoverable_butler_questions(app_handle:AppHandle,conversation_id:i64)->Result<Vec<AskUserQuestionRequestEvent>,String> {
+    let conn=crate::db::conversation_db::ConversationDatabase::new(&app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+    crate::db::butler_goal::waiting_questions(&conn,conversation_id,chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?
+        .into_iter().map(|raw|serde_json::from_str(&raw).map_err(|e|e.to_string())).collect()
 }

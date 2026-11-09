@@ -4,9 +4,13 @@ import { appearanceKey, ButlerAppearanceContext, defaultAppearance, parseAppeara
 
 const colors = ["#246bd5", "#bb3156", "#9353ba", "#147764", "#9a612e", "#5365a9", "#c14a28"];
 
-export default function ButlerAvatar({ id, chief = false, size = 32, appearance, ...animation }: { id: number; chief?: boolean; size?: number; appearance?: ButlerAppearance } & Omit<AnimatedAvatarProps, "appearance" | "size">) {
+/**
+ * `figure` 决定未自定义形象时是否使用矢量形象（而不是旧的 CSS 色块），与是否播放动画解耦：
+ * 静止的头像与动起来的头像外观保持一致，切换动画不会导致形象跳变。
+ */
+export default function ButlerAvatar({ id, chief = false, size = 32, appearance, figure = false, ...animation }: { id: number; chief?: boolean; size?: number; appearance?: ButlerAppearance; figure?: boolean } & Omit<AnimatedAvatarProps, "appearance" | "size">) {
     const appearances = useContext(ButlerAppearanceContext);
-    const selected = appearance ?? parseAppearance(appearances.get(appearanceKey(chief ? undefined : id))) ?? (chief ? defaultAppearance : animation.animated ? {
+    const selected = appearance ?? parseAppearance(appearances.get(appearanceKey(chief ? undefined : id))) ?? (chief ? defaultAppearance : figure || animation.animated ? {
         ...defaultAppearance, shape: "pebble" as const,
         colors: { primary: colors[Math.abs(id) % colors.length], secondary: colors[Math.abs(id) % colors.length] },
     } : undefined);

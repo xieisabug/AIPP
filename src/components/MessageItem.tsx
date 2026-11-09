@@ -1,8 +1,10 @@
 import React, { useCallback, useMemo, useState } from "react";
+import { ButlerMessageQuoteLabel } from "./butler/ButlerQuote";
 import UnifiedMarkdown from "./UnifiedMarkdown";
 import ReasoningMessage from "./ReasoningMessage";
 import ErrorMessage from "./message-item/ErrorMessage";
-import MessageActionButtons from "./message-item/MessageActionButtons";
+import MessageActionButtons, { type MessageActionButtonsProps } from "./message-item/MessageActionButtons";
+import MessageContextMenu from "./message-item/MessageContextMenu";
 import ImageAttachments from "./message-item/ImageAttachments";
 import RawTextRenderer from "./RawTextRenderer";
 import { ShineBorder } from "./magicui/shine-border";
@@ -363,6 +365,14 @@ const MessageItem = React.memo<MessageItemProps>(
             }
         }, [message.metadata_json]);
 
+        const obsoleteGoal = useMemo(() => {
+            if (streamEvent?.end_reason === "goal_superseded") return true;
+            try {
+                const metadata = JSON.parse(message.metadata_json || "{}");
+                return metadata.end_reason === "goal_superseded" || metadata.butler_goal_stale === true;
+            } catch { return false; }
+        }, [message.metadata_json, streamEvent?.end_reason]);
+
         const canResendToFeishuDebug =
             allowFeishuDebugResend
             && (message.message_type === "response" || message.message_type === "tool_result");
@@ -438,7 +448,7 @@ const MessageItem = React.memo<MessageItemProps>(
             ? buildActivitySegments(renderedDisplayContent, agentActivities)
             : null;
 
-        const messageBodyContent = activitySegments ? (
+        const rawMessageBodyContent = activitySegments ? (
             <>
                 {activitySegments.map((segment, segmentIndex) => (
                     <React.Fragment key={`activity-segment-${segmentIndex}`}>
@@ -460,6 +470,11 @@ const MessageItem = React.memo<MessageItemProps>(
                 )}
             </>
         );
+
+        const messageBodyContent = <>
+            {obsoleteGoal && <div role="note" className="mb-2 text-xs text-muted-foreground">旧目标的历史回复，不是当前结果</div>}
+            {rawMessageBodyContent}
+        </>;
 
         // 早期返回：reasoning 类型消息
         if (message.message_type === "reasoning") {
@@ -538,7 +553,23 @@ const MessageItem = React.memo<MessageItemProps>(
             );
         }
 
+        const actionProps: MessageActionButtonsProps = {
+            messageId: message.id,
+            messageType: message.message_type,
+            isUserMessage,
+            copyIconState,
+            onCopy: handleCopy,
+            onEdit: onMessageEdit,
+            onRegenerate: onMessageRegenerate,
+            onFork: onMessageFork,
+            onResendToFeishuDebug: canResendToFeishuDebug ? handleFeishuDebugResend : undefined,
+            isResendToFeishuDebugPending: isFeishuDebugSending,
+            messageContent: message.content,
+            pluginActions: messageActions,
+        };
+
         const bubbleElement = (
+            <MessageContextMenu actions={actionProps}>
             <div
                 className={`group relative inline-block ${isMobilePlatform ? "aipp-mobile-message-bubble max-w-[92%] min-w-0 px-3 py-2" : "max-w-[65%] px-5 py-4"} rounded-2xl border border-border bg-background text-foreground transition-all duration-200`}
             >
@@ -550,6 +581,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     />
                 )}
 
+                {isUserMessage && <ButlerMessageQuoteLabel message={message} />}
                 {speakerLabel && (
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
                         {speakerLabel}
@@ -589,21 +621,9 @@ const MessageItem = React.memo<MessageItemProps>(
                     messageId={message.id}
                 />
 
-                <MessageActionButtons
-                    messageId={message.id}
-                    messageType={message.message_type}
-                    isUserMessage={isUserMessage}
-                    copyIconState={copyIconState}
-                    onCopy={handleCopy}
-                    onEdit={onMessageEdit}
-                    onRegenerate={onMessageRegenerate}
-                    onFork={onMessageFork}
-                    onResendToFeishuDebug={canResendToFeishuDebug ? handleFeishuDebugResend : undefined}
-                    isResendToFeishuDebugPending={isFeishuDebugSending}
-                    messageContent={message.content}
-                    pluginActions={messageActions}
-                />
+                <MessageActionButtons {...actionProps} />
             </div>
+            </MessageContextMenu>
         );
 
         return (
@@ -650,6 +670,7 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     const nextStreamEvent = nextProps.streamEvent;
     if (prevStreamEvent?.is_done !== nextStreamEvent?.is_done) return false;
     if (prevStreamEvent?.content !== nextStreamEvent?.content) return false;
+    if (prevStreamEvent?.end_reason !== nextStreamEvent?.end_reason) return false;
 
     // reasoning 展开状态比较
     if (prevProps.isReasoningExpanded !== nextProps.isReasoningExpanded) return false;

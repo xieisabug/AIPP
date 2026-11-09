@@ -42,17 +42,19 @@ describe("LLM provider field autosave", () => {
         await act(async () => { await expect(mocks.refresh!(() => true)).rejects.toBe("db locked"); });
         expect(screen.queryByText("加载中...")).not.toBeInTheDocument();
     });
-    it("should show field errors and destination hints when the endpoint changes", async () => {
+    it("should show only errors when the endpoint changes", async () => {
         mocks.invoke.mockImplementation((command: string) => command === "get_llm_provider_config" || command === "get_llm_models" ? Promise.resolve([]) : Promise.resolve());
         mount(); await refresh();
-        expect(screen.getByText("Endpoint 未填写，将使用该提供商的默认端点。")).toBeInTheDocument();
+        expect(screen.queryByText(/未填写|请求基址/)).not.toBeInTheDocument();
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
         const input = screen.getByLabelText("endpoint");
         fireEvent.change(input, { target: { value: "bad" } });
-        expect(await screen.findByText(/Endpoint 无效/)).toBeInTheDocument();
+        expect(await screen.findByText(/接口地址无效/)).toBeInTheDocument();
         expect(screen.queryByText(/api.openai.com/)).not.toBeInTheDocument();
         fireEvent.change(input, { target: { value: "http://127.0.0.1:8080/v1" } });
-        expect(await screen.findByText("请求基址：http://127.0.0.1:8080/v1/")).toBeInTheDocument();
-        expect(screen.queryByText(/Endpoint 无效/)).not.toBeInTheDocument();
+        await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+        expect(screen.queryByText(/请求基址/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/接口地址无效/)).not.toBeInTheDocument();
         await waitDebounce();
     });
     it("saves the latest value for each field edited inside the debounce window", async () => {

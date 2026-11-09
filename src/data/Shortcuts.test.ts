@@ -16,6 +16,11 @@ describe("shortcut registry", () => {
                 defaultShortcut: "Mod+N",
             }),
             expect.objectContaining({
+                id: "butler.search",
+                label: "搜索管家消息",
+                defaultShortcut: "Mod+F",
+            }),
+            expect.objectContaining({
                 id: "butler.stats",
                 label: "查看消耗",
                 defaultShortcut: "Mod+Shift+I",

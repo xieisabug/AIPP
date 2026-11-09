@@ -1,5 +1,5 @@
 import { useDataRefresh } from "@/hooks/useDataRefresh";
-import React, { useCallback, useState, useMemo } from 'react';
+import React, { useCallback, useRef, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import LLMProviderConfigForm from "./LLMProviderConfigForm";
 import FormDialog from "../FormDialog";
@@ -35,6 +35,14 @@ interface LLMProvider {
 }
 
 const LOCAL_CLI_AGENT_API_TYPES: ReadonlySet<string> = new Set(['acp', 'codex_app_server', 'claude_sdk']);
+
+/** 新增提供商名称。键盘「完成」和确认按钮共用：空或重名时返回提示，不创建。 */
+export function newProviderNameError(name: string, existingNames: readonly string[]): string | null {
+    const trimmed = name.trim();
+    if (!trimmed) return "请填写提供商名称";
+    if (existingNames.some((existing) => existing.trim() === trimmed)) return "已有同名提供商";
+    return null;
+}
 
 const LLMProviderConfig: React.FC = () => {
     const [LLMProviders, setLLMProviders] = useState<Array<LLMProvider>>([]);
@@ -87,7 +95,9 @@ const LLMProviderConfig: React.FC = () => {
 
     const [newProviderDialogOpen, setNewProviderDialogOpen] = useState(false);
     const [providerName, setProviderName] = useState('');
+    const [providerNameError, setProviderNameError] = useState<string | null>(null);
     const [formApiType, setFormApiType] = useState('openai_api');
+    const creatingProviderRef = useRef(false);
     const apiTypes = [
         { value: 'openai_api', label: 'OpenAI API' },
         { value: 'ollama', label: 'Ollama API' },
@@ -95,6 +105,7 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'cohere', label: 'Cohere API' },
         { value: 'deepseek', label: 'DeepSeek API' },
         { value: 'opencode_go', label: 'OpenCode Go' },
+        { value: 'magpie', label: 'Magpie' },
         { value: 'github_copilot', label: 'GitHub Copilot' },
         { value: 'acp', label: 'ACP (Agent Client Protocol)' },
         { value: 'codex_app_server', label: 'Codex' },
@@ -107,27 +118,41 @@ const LLMProviderConfig: React.FC = () => {
         : apiTypes.filter((type) => !LOCAL_CLI_AGENT_API_TYPES.has(type.value));
 
     const openNewProviderDialog = useCallback(() => {
+        setProviderNameError(null);
         setNewProviderDialogOpen(true);
     }, []);
 
     const closeNewProviderDialog = useCallback(() => {
+        setProviderNameError(null);
         setNewProviderDialogOpen(false);
     }, []);
 
     const handleNewProviderSubmit = useCallback(() => {
+        // 键盘「完成 / Enter」与确认按钮相同：校验通过才提交。输入法组字中的 Enter 不走这里。
+        const error = newProviderNameError(providerName, LLMProviders.map((provider) => provider.name));
+        if (error) {
+            setProviderNameError(error);
+            return;
+        }
+        if (creatingProviderRef.current) return;
+        creatingProviderRef.current = true;
+        const name = providerName.trim();
         invoke('add_llm_provider', {
-            name: providerName,
+            name,
             apiType: formApiType
         }).then(() => {
             toast.success('添加大模型提供商成功');
             setProviderName('');
+            setProviderNameError(null);
             setFormApiType('openai_api');
             closeNewProviderDialog();
             getLLMProviderList();
         }).catch((e) => {
             toast.error('添加大模型提供商失败: ' + e);
+        }).finally(() => {
+            creatingProviderRef.current = false;
         });
-    }, [providerName, formApiType, closeNewProviderDialog, getLLMProviderList]);
+    }, [providerName, formApiType, LLMProviders, closeNewProviderDialog, getLLMProviderList]);
 
     const [confirmDialogIsOpen, setConfirmDialogIsOpen] = useState(false);
     const [deleteLLMProviderId, setDeleteLLMProviderId] = useState("");
@@ -271,6 +296,7 @@ const LLMProviderConfig: React.FC = () => {
                 <TooltipTrigger asChild>
                     <Button
                         onClick={openNewProviderDialog}
+                        aria-label="添加提供商"
                         className="gap-2 bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm hover:shadow-md transition-all"
                     >
                         <Plus className="h-4 w-4" />
@@ -304,7 +330,7 @@ const LLMProviderConfig: React.FC = () => {
 
     const sidebar = useMemo(() => (
         <SidebarList
-            title="模型提供商"
+            title="提供商"
             description="选择提供商进行配置"
             icon={<ServerCrash className="h-5 w-5" />}
             searchValue={searchQuery}
@@ -435,15 +461,32 @@ const LLMProviderConfig: React.FC = () => {
             >
                 <div className="space-y-5">
                     <div className="space-y-2">
-                        <label className="text-sm font-medium text-foreground">提供商名称</label>
+                        <label htmlFor="new-provider-name" className="text-sm font-medium text-foreground">提供商名称</label>
                         <input
+                            id="new-provider-name"
                             className="w-full px-3 py-2 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors bg-background text-foreground"
                             type="text"
                             autoCapitalize="none"
+                            enterKeyHint="done"
                             placeholder="例如：我的 OpenAI"
                             value={providerName}
-                            onChange={e => setProviderName(e.target.value)}
+                            aria-invalid={providerNameError ? true : undefined}
+                            aria-describedby={providerNameError ? "new-provider-name-error" : undefined}
+                            onChange={e => {
+                                setProviderName(e.target.value);
+                                if (providerNameError) setProviderNameError(null);
+                            }}
+                            onKeyDown={event => {
+                                if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229) return;
+                                event.preventDefault();
+                                handleNewProviderSubmit();
+                            }}
                         />
+                        {providerNameError && (
+                            <p id="new-provider-name-error" role="alert" className="text-sm text-destructive">
+                                {providerNameError}
+                            </p>
+                        )}
                     </div>
                     <div className="space-y-2">
                         <label className="text-sm font-medium text-foreground">API 调用类型</label>

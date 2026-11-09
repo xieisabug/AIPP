@@ -15,6 +15,7 @@
 
 -   Core AI logic is in `ai_api.rs` with modular implementations in `ai/` subdirectory
 -   Stream processing uses genai client with event emission for real-time UI updates
+-   genai 协议改动应修改 Cargo 实际引用的 `src-tauri/vendor/genai`，并更新其中的 `AIPP-PATCHES.md`；旧目录 `src-tauri/vendor/rust-genai` 未参与构建。
 -   MCP tools are automatically detected via `mcp/detection.rs` and can be called natively
 -   All AI responses support versioning through `generation_group_id` and `parent_group_id`
 -   Built-in MCP tools are organized under `mcp/builtin_mcp/`

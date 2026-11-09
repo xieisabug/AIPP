@@ -277,19 +277,23 @@ pub async fn detect_and_process_mcp_calls(
         }
 
         // Register the whole round before a fast auto-run tool can finish and continue.
+        // 工具执行完会续写，再次进入 ask_ai；debug 构建下这条链路的 future 很深，
+        // 阻塞线程池默认 2MB 栈会溢出（无人值守的管家成员自动执行 ask_user_question 时触发过），
+        // 因此和其他工具执行路径一样放在大栈线程上。
         for tool_call_id in auto_run_ids {
             let app = app_handle.clone();
             let window = window.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                tauri::async_runtime::block_on(async move {
-                    if let Err(error) = crate::mcp::execution_api::execute_mcp_tool_call(
-                        app.clone(), app.state::<crate::AppState>(),
-                        app.state::<crate::FeatureConfigState>(), window, tool_call_id, true,
-                    ).await {
-                        error!(call_id = tool_call_id, error = %error, "Auto-execute MCP tool failed");
-                    }
-                });
+            let spawned = crate::utils::async_thread::spawn_async_thread("aipp-detected-tool-exec", move || async move {
+                if let Err(error) = crate::mcp::execution_api::execute_mcp_tool_call(
+                    app.clone(), app.state::<crate::AppState>(),
+                    app.state::<crate::FeatureConfigState>(), window, tool_call_id, true,
+                ).await {
+                    error!(call_id = tool_call_id, error = %error, "Auto-execute MCP tool failed");
+                }
             });
+            if let Err(error) = spawned {
+                error!(call_id = tool_call_id, conversation_id, error = %error, "Failed to spawn auto-execute MCP tool thread");
+            }
         }
 
         // 如果没有检测到任何工具调用，输出日志

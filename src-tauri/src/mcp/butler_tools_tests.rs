@@ -13,11 +13,13 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
     for kind in ["butler_main","butler_contact","butler_task"] {
         for dynamic in [false,true] {
             let mut configured=Vec::new();
-            merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin")],kind);
+            merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin"),server(3,"aipp:ui_interaction")],kind);
             let names:Vec<_>=configured.iter().flat_map(|s|s.tools.iter().filter(move |t|
                 !dynamic || super::super::builtin_mcp::templates::is_dynamic_loading_fixed_tool(s.command.as_deref(),&t.name,true)))
                 .map(|t|t.name.as_str()).collect();
-            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","superadmin_execute","superadmin_undo"] {
+            // 受托助手可在自己的会话里向用户提问；其余界面交互工具仍按助手自身配置。
+            assert!(!names.contains(&"preview_code"),"{kind} should not force preview tools");
+            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","read_work_context","continue_work","resume_work","superadmin_execute","superadmin_undo","ask_user_question"] {
                 assert!(names.contains(&expected),"{kind} dynamic={dynamic} missing {expected}");
             }
             assert!(configured.iter().all(|s|s.is_enabled&&s.tools.iter().all(|t|t.is_enabled)));
@@ -25,6 +27,23 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
             assert!(configured.iter().flat_map(|s|&s.tools).all(|t|!t.is_auto_run));
         }
     }
+}
+
+#[test]
+fn test_butler_tools_group_member_keeps_admin_and_questions_without_contact_collaboration() {
+    // 助手配置里勾选了协作工具，在群里也不会出现：群内协作通过 @ 完成。
+    let mut configured=vec![server(1,"aipp:agent")];
+    for tool in &mut configured[0].tools { tool.is_enabled=true; }
+    merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin"),server(3,"aipp:ui_interaction")],"butler_group_member");
+    let names:Vec<_>=configured.iter().flat_map(|s|s.tools.iter()).map(|t|t.name.as_str()).collect();
+    for expected in ["superadmin_execute","superadmin_undo","ask_user_question"] {
+        assert!(names.contains(&expected),"group member missing {expected}");
+    }
+    for hidden in ["message_bot","list_assistants","search_bot_history","spawn_task_conversation"] {
+        assert!(!names.contains(&hidden),"group member should not see {hidden}");
+    }
+    assert!(!is_direct_tool("butler_group_member",Some("aipp:agent"),"message_bot"));
+    assert!(is_direct_tool("butler_group_member",Some("aipp:superadmin"),"superadmin_execute"));
 }
 
 #[test]
@@ -62,7 +81,7 @@ async fn test_butler_tools_have_direct_schemas_in_native_bridge_and_dynamic_prom
     let native:serde_json::Value=serde_json::from_str(&payload).unwrap();
     let names:Vec<_>=native.as_array().unwrap().iter().flat_map(|s|s["tools"].as_array().unwrap())
         .map(|t|t["tool_name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"superadmin_execute"));assert!(names.contains(&"get_assistant_details"));
+    assert!(names.contains(&"resume_work"));assert!(names.contains(&"superadmin_execute"));assert!(names.contains(&"get_assistant_details"));
     let info=MCPInfoForAssistant {enabled_servers:servers,use_native_toolcall:false,dynamic_loading_enabled:true};
     let prompt=super::super::prompt::format_mcp_prompt(String::new(),&info).await;
     assert!(prompt.contains("superadmin_execute"));assert!(prompt.contains("get_assistant_details"));

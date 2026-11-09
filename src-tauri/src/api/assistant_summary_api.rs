@@ -612,7 +612,7 @@ pub async fn build_butler_assistant_directory_prompt(
     let items = list_assistant_directory_for_butler(app_handle).await?;
     if items.is_empty() {
         return Ok(
-            "当前没有可派发的普通助手。若用户要求实质性工作，先提示其创建或配置至少一个普通助手。"
+            "## 可派发助手目录\n当前没有可派发的普通助手。用户要求实质性工作时，先提示其创建或配置至少一个普通助手。"
                 .to_string(),
         );
     }
@@ -649,7 +649,7 @@ pub async fn build_butler_assistant_directory_prompt(
         .join("\n");
 
     Ok(format!(
-        "当前可派发助手目录：\n系统会先注入这份助手画像，再注入 MCP / Skills 运行时能力目录。派工前优先根据下列目录选择最合适的执行助手。\n{}",
+        "## 可派发助手目录\n派工时用 assistant_id 指定执行人，同名时以 ID 为准。\n{}",
         sections
     ))
 }

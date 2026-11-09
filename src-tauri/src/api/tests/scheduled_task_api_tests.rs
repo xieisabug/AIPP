@@ -2,6 +2,54 @@
 mod tests {
     use crate::api::scheduled_task_api::*;
 
+    #[test]
+    fn test_scheduled_outcome_roundtrip_preserves_complete_result() {
+        let outcome = ScheduledRunOutcome {
+            status: "success", end_reason: "completed", notify: false,
+            summary: Some("简要结论".into()), error: None,
+            detail: Some("完整成果\n".repeat(3000)),
+            judged_task_state: Some("done".into()),
+            notify_error: Some("通知模型暂不可用".into()),
+        };
+        let saved = serde_json::to_string(&outcome).unwrap();
+        let recovered: ScheduledRunOutcome = serde_json::from_str(&saved).unwrap();
+        assert_eq!(serde_json::to_value(&outcome).unwrap(), serde_json::to_value(&recovered).unwrap());
+        assert_eq!(recovered.detail.as_ref().unwrap().len(), outcome.detail.unwrap().len());
+    }
+
+    #[test]
+    fn test_scheduled_outcome_roundtrip_preserves_failure_reasons() {
+        for reason in ["cancelled", "timeout", "max_rounds_reached", "error", "interrupted"] {
+            let outcome = ScheduledRunOutcome::failed(reason, "底层错误".into(), Some("部分成果".into()));
+            let recovered: ScheduledRunOutcome = serde_json::from_str(&serde_json::to_string(&outcome).unwrap()).unwrap();
+            assert_eq!(recovered.status, "failed");
+            assert_eq!(recovered.end_reason, reason);
+            assert_eq!(recovered.error.as_deref(), Some("底层错误"));
+            assert_eq!(recovered.detail.as_deref(), Some("部分成果"));
+        }
+    }
+
+    #[test]
+    fn test_scheduled_outcome_rejects_invalid_persisted_state() {
+        let outcome = ScheduledRunOutcome::failed("error", "failure".into(), None);
+        let mut value = serde_json::to_value(&outcome).unwrap();
+        value["status"] = serde_json::json!("running");
+        assert!(serde_json::from_value::<ScheduledRunOutcome>(value.clone()).is_err());
+        value["status"] = serde_json::json!("failed");
+        value["end_reason"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<ScheduledRunOutcome>(value).is_err());
+    }
+
+    #[test]
+    fn test_scheduled_followup_retry_preserves_terminal_states() {
+        for state in ["pending", "continuing", "failed", "retry"] {
+            assert!(scheduled_followup_needs_retry(Some(state)));
+        }
+        for state in [None, Some("done"), Some("exhausted")] {
+            assert!(!scheduled_followup_needs_retry(state));
+        }
+    }
+
     // ── normalize_tool_arguments ─────────────────────────────────────
 
     #[test]
@@ -316,5 +364,116 @@ mod tests {
         let err = result.expect_err("expected validation error");
         assert!(err.contains("week_days"));
         assert!(err.contains("interval_unit='week'"));
+    }
+}
+
+#[cfg(test)]
+mod run_outcome_tests {
+    use crate::api::scheduled_task_api::*;
+    use crate::db::scheduled_task_db::ScheduledTask;
+    use chrono::Utc;
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    fn task(prompt: &str) -> ScheduledTask {
+        ScheduledTask {
+            id: 7, name: "日报".into(), is_enabled: false, schedule_type: "once".into(),
+            interval_value: None, interval_unit: None, start_time: None, week_days: None,
+            month_days: None, run_at: None, next_run_at: None, last_run_at: None,
+            assistant_id: 1, task_prompt: prompt.into(), notify_prompt: String::new(),
+            butler_conversation_id: Some(1), created_time: Utc::now(), updated_time: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_loop_status_failure_maps_every_unfinished_reason() {
+        assert!(loop_status_failure(&AgenticLoopStatus::Completed, 3, 1, 0).is_none());
+        let (reason, msg) = loop_status_failure(&AgenticLoopStatus::Timeout, 4, 2, 1).unwrap();
+        assert_eq!(reason, "timeout");
+        assert!(msg.contains("超时") && msg.contains("无法撤回"));
+        assert_eq!(loop_status_failure(&AgenticLoopStatus::MaxRoundsReached, 50, 0, 0).unwrap().0, "max_rounds_reached");
+        let (reason, msg) = loop_status_failure(&AgenticLoopStatus::Cancelled, 1, 0, 0).unwrap();
+        assert_eq!(reason, "cancelled");
+        assert!(!msg.contains("无法撤回"));
+        let (reason, msg) = loop_status_failure(&AgenticLoopStatus::Error("LLM 调用失败: 502".into()), 2, 0, 0).unwrap();
+        assert_eq!(reason, "error");
+        assert!(msg.contains("502"));
+    }
+
+    #[test]
+    fn test_butler_result_message_reports_real_status_and_is_char_safe() {
+        let long_cn = "测".repeat(3000); // 9000 字节，截断点落在多字节字符中间
+        let outcome = ScheduledRunOutcome::failed("timeout", "执行超时".into(), Some(long_cn.clone()));
+        let msg = build_butler_scheduled_task_result_message(&task(&"任".repeat(100)), "run-1", &outcome, "助手");
+        assert!(msg.contains("status=failed"));
+        assert!(msg.contains("end_reason=timeout"));
+        assert!(msg.contains("error=执行超时"));
+        assert!(msg.contains("…(truncated)"));
+        let prompt = build_butler_scheduled_task_followup_prompt(&task("x"), &outcome);
+        assert!(prompt.contains("超时未完成"));
+        assert!(!prompt.contains("执行成功"));
+        assert!(prompt.contains("[[NO_REPLY]]") && prompt.contains("不要自动重做"));
+        assert!(!prompt.contains("notify_decision=false"), "失败结果总要告知用户");
+    }
+
+    #[test]
+    fn test_scheduled_result_message_found_by_exact_run_id() {
+        use crate::db::conversation_db::Message;
+        let outcome = ScheduledRunOutcome::failed("timeout", "执行超时".into(), None);
+        let content = build_butler_scheduled_task_result_message(&task("x"), "run-1", &outcome, "助手");
+        let now = Utc::now();
+        let message = |id: i64, content: String| Message {
+            id, parent_id: None, conversation_id: 1, message_type: "system".into(), content,
+            llm_model_id: None, llm_model_name: None, created_time: now, start_time: None,
+            finish_time: Some(now), token_count: 0, input_token_count: 0, output_token_count: 0,
+            generation_group_id: None, parent_group_id: None, tool_calls_json: None,
+            metadata_json: None, first_token_time: None, ttft_ms: None,
+        };
+        let messages = vec![message(5, content)];
+        assert_eq!(find_scheduled_result_message_id(&messages, "run-1"), Some(5));
+        assert_eq!(find_scheduled_result_message_id(&messages, "run-"), None, "不能前缀误配");
+        assert_eq!(find_scheduled_result_message_id(&messages, "run-2"), None);
+    }
+
+    #[test]
+    fn test_scheduled_report_runs_once_per_run_id() {
+        let first = claim_scheduled_report("run-dup").expect("first claim");
+        assert!(claim_scheduled_report("run-dup").is_none(), "同一运行不并行回报");
+        drop(first);
+        assert!(claim_scheduled_report("run-dup").is_some(), "结束后可再次回报");
+        assert_eq!(scheduled_followup_key("abc"), "run:abc");
+    }
+
+    #[test]
+    fn test_outcome_from_recorded_run_keeps_real_status() {
+        use crate::db::scheduled_task_db::ScheduledTaskRun;
+        let run = ScheduledTaskRun {
+            id: 1, task_id: 7, run_id: "r".into(), status: "success".into(), notify: true,
+            summary: Some("结论".into()), error_message: None, started_time: Utc::now(),
+            finished_time: Some(Utc::now()), butler_followup_status: Some("pending".into()),
+        };
+        let ok = outcome_from_recorded_run(&run);
+        assert_eq!((ok.status, ok.end_reason, ok.summary.as_deref()), ("success", "completed", Some("结论")));
+        let failed = outcome_from_recorded_run(&ScheduledTaskRun { status: "failed".into(), error_message: Some("超时".into()), ..run });
+        assert_eq!((failed.status, failed.error.as_deref()), ("failed", Some("超时")));
+    }
+
+    #[tokio::test]
+    async fn test_await_llm_or_stop_prefers_cancel_while_waiting_model() {
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel.cancel();
+        });
+        let never = std::future::pending::<()>();
+        let result = await_llm_or_stop(never, &token, Instant::now() + Duration::from_secs(30)).await;
+        assert!(matches!(result, LlmWait::Cancelled));
+
+        let fresh = CancellationToken::new();
+        let result = await_llm_or_stop(std::future::pending::<()>(), &fresh, Instant::now() + Duration::from_millis(10)).await;
+        assert!(matches!(result, LlmWait::Timeout));
+        let result = await_llm_or_stop(async { 5 }, &fresh, Instant::now() + Duration::from_secs(1)).await;
+        assert!(matches!(result, LlmWait::Done(5)));
     }
 }

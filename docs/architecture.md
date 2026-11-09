@@ -7,7 +7,7 @@
 -   **Backend**: Rust with Tauri 2.0 framework, SQLite via rusqlite
 -   **Frontend**: React 19 with TypeScript, Vite build system
 -   **UI Framework**: shadcn/ui components, Radix UI primitives, Tailwind CSS v4
--   **AI Integration**: Custom forked genai client with streaming support
+-   **AI Integration**: Custom forked genai client with streaming support, built from `src-tauri/vendor/genai`; upstream revision and local protocol patches are recorded in its `AIPP-PATCHES.md`.
 -   **MCP Protocol**: rmcp crate for Model Context Protocol integration
 -   **State Management**: React hooks for frontend, Arc<TokioMutex<>> for Rust backend
 -   **Content Execution**: Support for HTML, SVG, React, Vue, Python, Bash/PowerShell, AppleScript
@@ -22,12 +22,13 @@ The application uses multiple Tauri windows for different features:
 -   **Config Window**: Settings and configuration
 -   **ChatUI Window**: Main chat interface
 -   **Schedule Window**: Scheduled task management and run logs
--   **ButlerExperiment Window**: Butler main conversation, task board, approvals, Feishu status
+-   **ButlerExperiment Window**: Butler main conversation, contacts and group chats, task board, approvals, Feishu status
 -   **Sidebar Window**: Conversation side panel for todo/context/artifact preview
 -   **ArtifactPreview Window**: Content preview (HTML, SVG, components)
 -   **Artifact Window**: Standalone artifact rendering window
 -   **ArtifactCollections Window**: Manage artifact collections
 -   **Plugin Window**: Plugin UI host window
+-   **Native Chrome verification** (desktop only): Normal searches remain headless. Only a detected challenge starts a separate headed Chrome instance using the persistent manual profile and original request URL. HTML is read from the verified headed target; cancellation/success/error shuts that instance down. A profile lease serializes manual sessions and is held until process shutdown. Human wait pauses the active-search budget; no screenshot relay or remote-site Tauri IPC is used.
 
 ## Frontend Structure
 
@@ -100,6 +101,7 @@ src-tauri/
 -   `scheduled_task_api.rs`: Scheduled task CRUD, structured scheduling, run, logs, cancellation
 -   `skill_api.rs`: Skill scanning/installing and assistant skill configuration
 -   `butler_api.rs`: Butler main conversation, task orchestration, task detail/result flow
+-   `butler_group.rs` / `butler_group_runtime.rs` / `butler_group_router.rs`: group chat commands, the per-member reply dispatcher and automatic responder selection.
 -   `export_api.rs`: Markdown to PDF / DOCX export helpers
 -   `plugin_api.rs`: Plugin registry, lifecycle, config and data storage
 -   `token_statistics_api.rs`: Conversation/message token statistics
@@ -152,3 +154,30 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 ### 管家会话的固定工具
 
 `mcp/butler_tools.rs` 统一按 `butler_main` / `butler_contact` / `butler_task` 会话注入 SuperAdmin 和助手协作工具；覆盖助手 MCP 选择，但不持久化配置变更。标准 AI 首轮、工具续答、重新生成、XML 检测及 Codex/Claude Code/ACP 的选中工具桥接共用该策略。执行器对同一白名单免除动态加载门槛，内置分发仍校验管家会话，普通聊天和普通定时任务不获得权限。助手发现/详情与协作查询/停止定义在 `api/butler_assistant_tools.rs`，停止原因存于 `butler_peer_stop`；不把“停止协作”解释为进程取消。
+
+## Agent 驱动边界
+
+`api/ai/agent_driver/` 是本地 Agent 的统一调用层：
+
+- `AgentTurnRequest` / `send_turn` 负责路由、原生配置准备以及统一的响应消息创建、prompt 提交和提交失败事件；`ask_ai` 不再维护三套执行分支。
+- `AgentSessionKind` 明确选择 Codex app-server、Claude Code CLI 或 ACP。旧 Claude provider 配置仍经现有识别规则进入原生 Claude 通道；未知 provider 直接报错，不切换协议或模型。
+- `AgentSessionHandle` 提供 prompt、取消和配置更新接口；`AgentSessionCapabilities` 表达本地适配器能力。只有 ACP 接收独立附件列表；Codex/Claude 保持原先运行时 prompt 的附件处理方式。ACP 服务端协商出的模型、模式、附件等能力仍由原生协议层校验，不能从本地能力标志推断。
+- 已有 `AcpSessionState`、`CodexSessionState`、`ClaudeSessionState` 继续拥有会话、配置签名、空闲回收、恢复和持久化；未增加进程池、数据库表或第二套会话注册表。
+- 原生协议层继续处理流式事件、MCP、权限请求、Plan 与 session 快照。已有前端命令和事件格式不变。失败事件写入复用同一帮助函数。
+- 控制通道关闭导致 prompt 提交失败时，记录具体通道、conversation/message 标识和底层错误并结束响应，不在本次提交中自动重建会话并重试。
+
+参考 t3code 的类型化 provider adapter 边界与可控命令通道测试方法，固定版本为 [`d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4`](https://github.com/pingdotgg/t3code/tree/d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4)，主要参考 `packages/provider-core/src/server/ProviderAdapter.ts`、`adapterDriver.ts` 和 `packages/provider-testing`。上游为 MIT（©2026 T3 Tools Inc.）；本实现未复制上游源码或引入其 Effect 编排框架。
+
+Claude 当前保持 Rust 启动 CLI stream-json。Anthropic [官方 Agent SDK 文档](https://code.claude.com/docs/en/agent-sdk/overview)列出 TypeScript/Python，并建议其他语言使用 CLI 子进程；本次不引入额外语言运行时或 sidecar。
+
+Agent 驱动的测试场景、上游参考及明确未覆盖的边界见 [Agent 驱动测试场景对照](./agent-driver-testing.md)。
+
+### Butler group chat
+
+Groups live in the Butler contact list and behave like a chat-app group: the user just posts; nobody picks recipients or discussion modes. `db/butler_group.rs` owns four tables: `butler_chat_group` (id = hidden `butler_group` conversation), `butler_chat_group_member` (one hidden `butler_group_member` execution conversation per membership, with `joined_after` / `delivered_through` cursors), `butler_chat_group_message` (the public log: user / member messages and system `notice` / `error` lines) and `butler_chat_group_turn` (the reply queue).
+
+Routing (`api/butler_group_runtime.rs` → `decide`): explicit `@name` / `@所有人` in the text, then a quoted member message, then a single-member group; otherwise `api/butler_group_router.rs` asks the Butler helper model (`butler_helper_model_id`, or the Butler model when unset) for an ordered responder list. With two or more explicit mentions the responders are fixed and the router only decides `rounds`. Router failures post a specific `error` line in the group; there is no model fallback. Selected responders run concurrently (round 1); they catch up on each other's replies through their cursors on the next turn. `rounds > 1` is a discussion: when every depth-0 turn of a round is terminal (finished, silent, failed or skipped) and at least one member spoke, `advance_discussion` queues the next round for the still-active participants; it stops on a quiet round, the planned round count (≤ 5), a newer user message, or a stop. Each member runs one turn at a time (FIFO); a turn whose trigger was already delivered in an earlier turn is skipped.
+
+A turn freezes the public upper bound, formats the other speakers' messages since the member's cursor as a plain transcript (`用户：…` / `成员名：…` / `〔系统〕…`, with quote excerpts and size caps) and calls `ask_ai` with origin `butler_group/{turn}` plus a per-turn `<group_chat>` prefix (roster, concurrent peers, discussion round guidance and a short chat-style reminder; not stored in history). `ask_ai` skips @assistant extraction, slash/template parsing and work context for that origin and rejects any other input into member conversations. `write_turn_input` inserts the user message only while the turn is still `running` and advances the cursor only after the write. Completion uses the last finished message after the input (same rule as peer exchanges): a complete reply is posted under the member's name with `source_conversation_id` / `source_message_id` pointing at that message (the UI renders group messages through the private-chat `MessageItem`, so token info, code preview/run and export target the real member message), `[[NO_REPLY]]` is silent, errors / interrupted ends post an `error` line, and an idle execution without a final reply fails after a grace period. `@name` in a member reply relays to that member (depth ≤ 3, ≤ 12 relays per user message); participants of a discussion with rounds remaining are left to the next round instead. Stop/remove cancel queued turns, fence running ones and call `butler_peer::halt_turn`; late results of cancelled turns are dropped. Restart recovery publishes finished answers and reports unknown ones without retrying.
+
+Members keep Butler-mode SuperAdmin tools and `ask_user_question` (cards render inside the group view; approvals use the window-level dialogs), but contact-collaboration tools are hidden (`templates::GROUP_MEMBER_KIND`). The group rules are appended to the system prompt via `build_butler_member_prompt`. Private chats and other groups never enter a member's group context. The first collaboration-group implementation's queue tables are migrated (groups, members, public messages) and dropped by `butler_group::schema`.

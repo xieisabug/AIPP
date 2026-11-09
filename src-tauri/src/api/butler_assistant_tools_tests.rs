@@ -35,9 +35,9 @@ fn test_assistant_exchange_stop_is_idempotent_and_preserves_other_work() {
     let args=json!({"exchange_id":2,"reason":"用户要求停止本轮审稿"});
     assert!(exchange_tool(&conn,30,"stop_assistant_exchange",&args).is_err());
     let result=exchange_tool(&conn,10,"stop_assistant_exchange",&args).unwrap();
-    assert_eq!(result["execution_cancelled"],false);
+    assert_eq!((result["stopped"].as_bool(),result["chain"].as_i64()),(Some(true),Some(100)));
     exchange_tool(&conn,10,"stop_assistant_exchange",&args).unwrap();
-    let records=butler_peer::list(&conn,Some(20),true).unwrap();
+    let records=[1,2,3].map(|id|butler_peer::get(&conn,id).unwrap().unwrap());
     assert_eq!(records.iter().find(|r|r.id==1).unwrap().state,"delivered");
     assert_eq!(records.iter().find(|r|r.id==2).unwrap().state,"stopped");
     assert_eq!(records.iter().find(|r|r.id==3).unwrap().state,"queued");

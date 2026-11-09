@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@/data/Conversation";
-import { withButlerProcessing, withPeerTimeline, type PeerPost } from "./butlerTimeline";
+import { hasPublishedReply, withButlerProcessing, withPeerTimeline, type PeerPost } from "./butlerTimeline";
 
 const at = (minute: number) => new Date(Date.UTC(2026, 10, 4, 12, minute));
 const raw = (id: number, type: string, content: string, metadata_json?: string) =>
@@ -42,5 +42,14 @@ describe("Butler peer timeline", () => {
         const messages = [raw(1,"user","初稿"),raw(4,"user","请确认")];
         const posts = [post(1,2,true,30),post(2,3,false,30),post(3,5,true,30),post(4,6,false,30,30)];
         expect(display(messages,posts)).toEqual(["初稿",[1,2],"请确认",[3],[4]]);
+    });
+});
+
+describe("hasPublishedReply", () => {
+    const row = (id: number, message_type: string) => ({ id, message_type } as Message);
+    it("only counts replies after the latest user message", () => {
+        expect(hasPublishedReply([row(1, "user"), row(2, "response")])).toBe(true);
+        expect(hasPublishedReply([row(1, "response"), row(2, "user")])).toBe(false);
+        expect(hasPublishedReply([row(1, "user"), row(2, "butler_exchange")])).toBe(false);
     });
 });

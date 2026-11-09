@@ -18,6 +18,22 @@ fn test_mobile_queue_failure_pauses_until_explicit_retry() {
     assert_eq!(repo.take_next_for_dispatch(conversation_id, true).unwrap().unwrap().id, queued.id);
 }
 
+/// 管家内部续跑让用户新消息优先：排队/刚开始派发的用户消息算待处理，暂停与崩溃遗留不阻塞
+#[test]
+fn test_has_pending_user_turn_prioritizes_user_messages() {
+    let (repo, conversation_id) = create_queue_test_repo();
+    assert!(!repo.has_pending_user_turn(conversation_id).unwrap());
+
+    let queued = repo.enqueue(conversation_id, "normal", "{}", "用户追问", 1).unwrap();
+    assert!(repo.has_pending_user_turn(conversation_id).unwrap());
+
+    repo.take_next_for_dispatch(conversation_id, false).unwrap().unwrap();
+    assert!(repo.has_pending_user_turn(conversation_id).unwrap(), "刚开始派发仍算用户优先");
+
+    repo.pause_dispatch(queued.id).unwrap().unwrap();
+    assert!(!repo.has_pending_user_turn(conversation_id).unwrap(), "暂停的消息不阻塞续跑");
+}
+
 fn create_queue_test_repo() -> (QueuedConversationMessageRepository, i64) {
     let conn = create_test_db();
     let conversation = build_test_conversation("queue test", Some(1));

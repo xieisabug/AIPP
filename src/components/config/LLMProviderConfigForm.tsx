@@ -103,6 +103,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'cohere': 'Cohere API',
         'deepseek': 'DeepSeek API',
         'opencode_go': 'OpenCode Go',
+        'magpie': 'Magpie',
         'github_copilot': 'GitHub Copilot',
         'acp': 'ACP(Agent Client Protocol)',
         'codex_app_server': 'Codex',
@@ -852,12 +853,14 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 key: "endpoint",
                 config: {
                     type: "input" as const,
-                    label: "Endpoint",
+                    label: "接口地址",
                     value: "",
                     inputMode: "url" as const,
                     hint: endpointStatus.kind === "invalid"
                         ? <span role="alert" className="text-destructive">{endpointStatus.message}</span>
-                        : endpointStatus.message,
+                        : apiType === "magpie" && endpointStatus.kind === "unset"
+                            ? <span>留空则连接本机 magpie（默认 127.0.0.1:3425，端口以 settings.json 为准）。</span>
+                            : undefined,
                 },
             }]),
             {
@@ -865,7 +868,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 config: {
                     type: "password" as const,
                     label: "API Key",
-                    hint: apiType === "opencode_go" ? <a href="https://opencode.ai/auth" target="_blank" rel="noreferrer">从 OpenCode Console 获取订阅 API Key</a> : undefined,
+                    hint: apiType === "opencode_go"
+                        ? <a href="https://opencode.ai/auth" target="_blank" rel="noreferrer">从 OpenCode Console 获取订阅 API Key</a>
+                        : apiType === "magpie"
+                            ? <span>留空时使用 magpie-aipp，在 magpie 用量里记为本应用。访问另一台电脑上的网关时，改为那里的网关密钥。</span>
+                            : undefined,
                     value: "",
                 },
             },

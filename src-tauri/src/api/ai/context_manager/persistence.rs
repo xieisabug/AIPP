@@ -1,3 +1,4 @@
+use rusqlite::OptionalExtension;
 use crate::db::conversation_db::ConversationDatabase;
 use crate::errors::AppError;
 use serde::{Deserialize, Serialize};
@@ -25,10 +26,37 @@ pub fn checkpoint_text(content: &str) -> &str {
 }
 
 pub trait CheckpointStore: Sync {
+    fn ensure_execution(&self, conversation_id: i64, source: Option<i64>) -> Result<(), AppError>;
+    fn goal_snapshot(&self, _conversation_id:i64) -> Result<Option<String>,AppError> {Ok(None)}
+    fn save_for_goal(&self, conversation_id:i64, header:&str, content:&str, snapshot:Option<&str>) -> Result<String,AppError> {
+        if self.goal_snapshot(conversation_id)?.as_deref()!=snapshot {return Err(AppError::UnknownError("摘要期间目标已变更，请按最新要求重新准备上下文".into()))}
+        self.save(conversation_id,header,content)
+    }
     fn save(&self, conversation_id: i64, header: &str, content: &str) -> Result<String, AppError>;
 }
 
 impl CheckpointStore for ConversationDatabase {
+    fn ensure_execution(&self, conversation_id: i64, source: Option<i64>) -> Result<(), AppError> {
+        crate::db::butler_control::ensure_execution(&self.get_connection()?, conversation_id, source)
+            .map_err(|e| AppError::UnknownError(e.to_string()))
+    }
+    fn goal_snapshot(&self,conversation_id:i64)->Result<Option<String>,AppError> {
+        crate::db::butler_goal::prompt(&self.get_connection()?,conversation_id).map_err(|e|AppError::UnknownError(e.to_string()))
+    }
+    fn save_for_goal(&self,conversation_id:i64,header:&str,content:&str,snapshot:Option<&str>)->Result<String,AppError> {
+        let mut conn=self.get_connection()?;
+        crate::db::butler_goal::schema(&conn).map_err(|e|AppError::UnknownError(e.to_string()))?;
+        let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if crate::db::butler_goal::prompt(&tx,conversation_id).map_err(|e|AppError::UnknownError(e.to_string()))?.as_deref()!=snapshot {
+            return Err(AppError::UnknownError("摘要期间目标或待答问题已变更，未采用旧摘要".into()));
+        }
+        let existing:Option<String>=tx.query_row("SELECT content FROM message WHERE conversation_id=?1 AND message_type='system' AND substr(content,1,length(?2))=?2 ORDER BY id DESC LIMIT 1",rusqlite::params![conversation_id,header],|r|r.get(0)).optional()?;
+        let saved=if let Some(existing)=existing {existing} else {
+            tx.execute("INSERT INTO message(conversation_id,message_type,content,created_time,token_count,input_token_count,output_token_count) VALUES(?1,'system',?2,CURRENT_TIMESTAMP,0,0,0)",rusqlite::params![conversation_id,content])?;
+            content.to_string()
+        };
+        tx.commit()?;Ok(saved)
+    }
     fn save(&self, conversation_id: i64, header: &str, content: &str) -> Result<String, AppError> {
         Ok(self.message_repo()?.get_or_create_checkpoint(conversation_id, header, content)?)
     }
@@ -199,3 +227,14 @@ mod tests {
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod checkpoint_tests;
+
+pub fn store_goal_compaction_summary(store:&dyn CheckpointStore,conversation:i64,summary:&str,ids:&[i64],body:&[super::MessageTuple],snapshot:Option<&str>)->Result<String,AppError> {
+    let mut content=checkpoint_content(summary,ids,body);
+    if let Some(snapshot)=snapshot {
+        let source=serde_json::json!({"ids":ids,"digest":source_digest(body.iter().map(|(kind,text,_)|(kind.as_str(),text.as_str()))),"goal_snapshot":snapshot});
+        content=format!("<!-- compacted_ids: {} -->\n{}",source,summary);
+    }
+    let header=content.split_once('\n').unwrap().0;
+    let stored=store.save_for_goal(conversation,header,&content,snapshot)?;
+    Ok(checkpoint_text(&stored).to_owned())
+}

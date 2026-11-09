@@ -20,7 +20,7 @@ import { Button } from "../components/ui/button";
 import { ChevronLeft, Home, Menu } from "lucide-react";
 import MCP from "../assets/mcp.svg?react";
 import { pluginRuntime } from "../services/PluginRuntime";
-import { navigateMobile, popMobile, registerMobileBackHandler } from "../mobile/navigation";
+import { navigateMobile, popMobile, registerMobileBackHandler, subscribeMobileConfigNavigation } from "../mobile/navigation";
 import { canLeaveConfigNow, requestConfigLeave } from "@/lib/configLeaveGuard";
 import ConfigPageLoading from "../components/common/ConfigPageLoading";
 import { backConfigSection, ConfigSectionContext, useConfigSectionDetailTitle } from "@/lib/configSectionNav";
@@ -62,13 +62,13 @@ function ConfigWindow() {
         const items: Array<MenuItem> = [
             {
                 id: "llm-provider-config",
-                name: "模型提供商",
+                name: "提供商",
                 icon: <ServerCrash className="w-full h-full text-muted-foreground" />,
                 iconSelected: <ServerCrash className="w-full h-full text-foreground" />,
             },
             {
                 id: "assistant-config",
-                name: "个人助手",
+                name: "助手",
                 icon: <Bot className="w-full h-full text-muted-foreground" />,
                 iconSelected: <Bot className="w-full h-full text-foreground" />,
             },
@@ -144,6 +144,18 @@ function ConfigWindow() {
             unlistenHidden.then((unlistenFn) => unlistenFn());
         };
     }, []);
+
+    // Mobile settings may be lazy loaded after the navigation request was issued.
+    useEffect(() => {
+        if (!isMobilePlatform) return;
+        return subscribeMobileConfigNavigation(({ menu, subNav: sub }) => {
+            if (!contentMap[menu]) return;
+            requestConfigLeave(() => {
+                setSubNav(sub);
+                goToSection(menu);
+            });
+        });
+    }, [isMobilePlatform, goToSection]);
 
     // 监听窗口内导航事件（供子组件跨层级触发导航）
     useEffect(() => {

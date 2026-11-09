@@ -15,6 +15,7 @@ vi.mock("../../utils/caretCoordinates", () => ({
 
 function InputAreaHarness({
     initialText = "",
+    aiIsResponsing = false,
     planMode = false,
     planModeSwitching = false,
     onPlanModeToggle,
@@ -25,6 +26,7 @@ function InputAreaHarness({
     onDeleteFile = () => {},
 }: {
     initialText?: string;
+    aiIsResponsing?: boolean;
     planMode?: boolean;
     planModeSwitching?: boolean;
     onPlanModeToggle?: () => void;
@@ -45,7 +47,7 @@ function InputAreaHarness({
             handlePaste={() => {}}
             handleDeleteFile={onDeleteFile}
             handleSend={onSend}
-            aiIsResponsing={false}
+            aiIsResponsing={aiIsResponsing}
             placement={placement}
             isMobile={isMobile}
             planMode={planMode}
@@ -76,6 +78,25 @@ describe("InputArea slash completion", () => {
                 tags: ["react", "frontend"],
             },
         ]);
+    });
+
+    it("should preserve the stop button when the assistant is running and the draft is empty", async () => {
+        const onSend = vi.fn();
+        render(<InputAreaHarness aiIsResponsing onSend={onSend} />);
+
+        await userEvent.click(screen.getByRole("button", { name: "停止" }));
+
+        expect(onSend).toHaveBeenCalledOnce();
+    });
+
+    it("should allow a natural message to be sent while the assistant is running", async () => {
+        const onSend = vi.fn();
+        render(<InputAreaHarness aiIsResponsing initialText="再短一些" onSend={onSend} />);
+
+        expect(screen.getByRole("textbox")).toHaveValue("再短一些");
+        await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+        expect(onSend).toHaveBeenCalledOnce();
     });
 
     it("shows slash namespaces after typing slash", async () => {
@@ -335,6 +356,8 @@ describe("InputArea mobile attachment tray", () => {
         expect(screen.getByText("附件 2")).toBeTruthy();
         expect(screen.getByText("notes.txt")).toBeTruthy();
         expect(screen.getByText("TXT")).toBeTruthy();
+        expect(screen.getByText("shot.png")).toBeTruthy();
+        expect(screen.getByText("IMG")).toBeTruthy();
 
         const capsule = container.querySelector('[data-aipp-slot="chat-input-area-container"]');
         expect(capsule?.querySelector('[data-aipp-slot="chat-input-attachments"]')).toBeNull();

@@ -9,6 +9,14 @@ interface FileListRendererProps {
   onOpen?: (fileId: number) => void;
 }
 
+export function middleEllipsis(name: string, head = 10, tail = 12): string {
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 && name.length - dot <= 8 ? name.slice(dot) : "";
+  const stem = extension ? name.slice(0, name.length - extension.length) : name;
+  if (stem.length <= head + tail + 1) return name;
+  return `${stem.slice(0, head)}…${stem.slice(stem.length - tail)}${extension}`;
+}
+
 function attachmentTypeLabel(type: AttachmentType): string {
   switch (type) {
     case AttachmentType.Image:
@@ -30,48 +38,66 @@ function attachmentTypeLabel(type: AttachmentType): string {
   }
 }
 
-const FileListRenderer: React.FC<FileListRendererProps> = ({ fileInfo, onOpen }) => {
-  switch (fileInfo.type) {
-    case AttachmentType.Image:
-      return (
-        <img
-          onClick={() => {
-            onOpen && onOpen(fileInfo.id);
-          }}
-          src={fileInfo.thumbnail}
-          alt={fileInfo.name || "缩略图"}
-          className="input-area-img"
-        />
-      );
-    case AttachmentType.Text:
-      return (
-        <>
-          <Text className="input-area-attachment-icon" fill="currentColor" />
-          <span className="input-area-attachment-name" title={fileInfo.name}>
-            {fileInfo.name}
-          </span>
-          <span className="input-area-attachment-type" aria-hidden>
-            {attachmentTypeLabel(fileInfo.type)}
-          </span>
-        </>
-      );
-    case AttachmentType.PDF:
-    case AttachmentType.Word:
-    case AttachmentType.PowerPoint:
-    case AttachmentType.Excel:
-    case AttachmentType.Skill:
-    default:
-      return (
-        <>
-          <span className="input-area-attachment-name" title={fileInfo.name}>
-            {fileInfo.name}
-          </span>
-          <span className="input-area-attachment-type" aria-hidden>
-            {attachmentTypeLabel(fileInfo.type)}
-          </span>
-        </>
-      );
+function AttachmentName({ name }: { name: string }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const short = middleEllipsis(name);
+  const truncated = short !== name;
+  if (!truncated) {
+    return <span className="input-area-attachment-name">{name}</span>;
   }
+  return (
+    <button
+      type="button"
+      className="input-area-attachment-name"
+      title={name}
+      aria-expanded={expanded}
+      onClick={(event) => {
+        event.stopPropagation();
+        setExpanded((open) => !open);
+      }}
+    >
+      {expanded ? name : short}
+    </button>
+  );
+}
+
+const FileListRenderer: React.FC<FileListRendererProps> = ({ fileInfo, onOpen }) => {
+  const name = <AttachmentName name={fileInfo.name} />;
+  const type = (
+    <span className="input-area-attachment-type" aria-hidden>
+      {attachmentTypeLabel(fileInfo.type)}
+    </span>
+  );
+  if (fileInfo.type === AttachmentType.Image) {
+    return (
+      <>
+        <button
+          type="button"
+          className="input-area-image-preview-button"
+          aria-label={`预览 ${fileInfo.name || "图片"}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpen?.(fileInfo.id);
+          }}
+        >
+          <img
+            src={fileInfo.thumbnail}
+            alt={fileInfo.name || "缩略图"}
+            className="input-area-img"
+          />
+        </button>
+        {name}
+        {type}
+      </>
+    );
+  }
+  return (
+    <>
+      {fileInfo.type === AttachmentType.Text ? <Text className="input-area-attachment-icon" fill="currentColor" /> : null}
+      {name}
+      {type}
+    </>
+  );
 };
 
 export const useFileList = (

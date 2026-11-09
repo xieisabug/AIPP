@@ -176,6 +176,128 @@ fn test_build_chat_options_invalid_max_tokens() {
 // 模型配置合并测试
 // ============================================================================
 
+fn prompt_cache_options_for_test(
+    model: &str,
+    request_mode: &str,
+    provider: &str,
+    settings: &[(&str, &str)],
+) -> genai::chat::ChatOptions {
+    let network_config = settings.iter().map(|(key, value)| {
+        ((*key).to_string(), create_feature_config(value))
+    }).collect();
+    let features = HashMap::from([("network_config".to_string(), network_config)]);
+    ConfigBuilder::build_chat_options(&HashMap::new(), Some(&features), Some(&OpenAiCacheContext {
+        provider_id: 7,
+        provider_api_type: provider.to_string(),
+        model_code: model.to_string(),
+        request_mode: request_mode.to_string(),
+        assistant_id: 11,
+        conversation_id: 13,
+    }))
+}
+
+/// Exercise the real Responses adapter over loopback, including client defaults and call overrides.
+async fn prompt_cache_request_payload(options: &genai::chat::ChatOptions) -> serde_json::Value {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 4096];
+        let (body_start, content_length) = loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&chunk[..n]);
+            if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = std::str::from_utf8(&request[..index]).unwrap();
+                assert!(headers.starts_with("POST /v1/responses HTTP/1.1"));
+                let length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                }).unwrap();
+                break (index + 4, length);
+            }
+        };
+        while request.len() < body_start + content_length {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&chunk[..n]);
+        }
+        let payload = serde_json::from_slice(&request[body_start..body_start + content_length]).unwrap();
+        let body = r#"{"id":"resp_test","model":"gpt-test","status":"completed","output":[]}"#;
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        payload
+    });
+    let client = genai::Client::builder().with_reqwest(
+        reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build().unwrap()
+    ).build().unwrap();
+    let target = genai::ServiceTarget {
+        endpoint: genai::resolver::Endpoint::from_owned(endpoint),
+        auth: genai::resolver::AuthData::from_single("local-test-key"),
+        model: genai::ModelIden::new(genai::adapter::AdapterKind::OpenAIResp, "gpt-test"),
+    };
+    client.exec_chat(target, genai::chat::ChatRequest::from_user("test"), Some(options)).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), server).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn test_prompt_cache_modern_models_send_new_ttl_without_legacy_retention() {
+    for model in ["gpt-5.6", "gpt-5.6-mini-2026-01-01", "gpt-5.10", "gpt-6", "openai/gpt-6.1-sol"] {
+        for ttl in ["30m", "12h"] {
+            let options = prompt_cache_options_for_test(model, "responses", "openai_api", &[
+                ("openai_prompt_cache_ttl", ttl), ("openai_prompt_cache_retention", "24h"),
+            ]);
+            let payload = prompt_cache_request_payload(&options).await;
+            assert_eq!(payload["prompt_cache_options"]["ttl"], ttl, "{model}");
+            assert!(payload.get("prompt_cache_retention").is_none(), "{model}");
+            assert_eq!(payload["prompt_cache_key"], format!("aipp:7:{model}:11:13"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_prompt_cache_upgrade_keeps_legacy_policy_and_defaults_new_models_to_30m() {
+    let old_settings = [("openai_prompt_cache_retention", "24h")];
+    let payload = prompt_cache_request_payload(&prompt_cache_options_for_test("gpt-6.1-sol", "responses", "openai", &old_settings)).await;
+    assert_eq!(payload["prompt_cache_options"]["ttl"], "30m");
+    for model in ["gpt-5.4", "gpt-5.5", "gpt-5.5-pro", "gpt-4.1", "o3", "custom-alias"] {
+        let payload = prompt_cache_request_payload(&prompt_cache_options_for_test(model, "responses", "openai", &old_settings)).await;
+        assert_eq!(payload["prompt_cache_retention"], "24h", "{model}");
+        assert!(payload.get("prompt_cache_options").is_none(), "{model}");
+    }
+    let options = prompt_cache_options_for_test("gpt-5.4", "responses", "openai", &[("openai_prompt_cache_retention", "in_memory")]);
+    let payload = prompt_cache_request_payload(&options).await;
+    assert_eq!(payload["prompt_cache_retention"], "in_memory");
+}
+
+#[tokio::test]
+async fn test_prompt_cache_disabled_or_ineligible_requests_omit_both_cache_parameters() {
+    for (mode, provider, settings) in [
+        ("responses", "openai", vec![("openai_prompt_cache_key_enabled", "false"), ("openai_prompt_cache_ttl", "12h")]),
+        ("chat_completions", "openai", vec![]),
+        ("responses", "opencode_go", vec![]),
+    ] {
+        let payload = prompt_cache_request_payload(&prompt_cache_options_for_test("gpt-6.1-sol", mode, provider, &settings)).await;
+        assert!(payload.get("prompt_cache_key").is_none());
+        assert!(payload.get("prompt_cache_options").is_none());
+        assert!(payload.get("prompt_cache_retention").is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_prompt_cache_invalid_ttl_fails_before_http_without_substitution() {
+    let options = prompt_cache_options_for_test("gpt-6.1-sol", "responses", "openai", &[("openai_prompt_cache_ttl", "24h")]);
+    let target = genai::ServiceTarget {
+        endpoint: genai::resolver::Endpoint::from_static("http://127.0.0.1:9/v1/"),
+        auth: genai::resolver::AuthData::from_single("local-test-key"),
+        model: genai::ModelIden::new(genai::adapter::AdapterKind::OpenAIResp, "gpt-6.1-sol"),
+    };
+    let err = genai::Client::default().exec_chat(target, genai::chat::ChatRequest::from_user("test"), Some(&options)).await.unwrap_err();
+    assert!(matches!(&err, genai::Error::PromptCacheTtlParsing { actual } if actual == "24h"));
+    assert!(err.to_string().contains("prompt_cache_options.ttl"));
+}
+
 fn create_test_model_detail() -> ModelDetail {
     ModelDetail {
         model: LLMModel {

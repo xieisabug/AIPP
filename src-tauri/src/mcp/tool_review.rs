@@ -141,6 +141,8 @@ pub fn is_review_exempt_tool(
         Some("aipp:ui_interaction") => matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file"),
         Some("aipp:agent") => match tool_name {
             "load_skill" | "todo_write" | "load_mcp_server" | "load_mcp_tool" | "spawn_task_conversation" => true,
+            // 助手间消息只发起内部协作；接收方后续工具调用仍独立审核。
+            "message_bot" => true,
             "task_conversation_operation" => matches!(args["action"].as_str(), Some("read" | "reply_prompt")),
             "schedule_task" => matches!(args["action"].as_str(), Some("list" | "get" | "disable")),
             // 转调用不按包装工具放行；正常调用记录已投影为真实目标。

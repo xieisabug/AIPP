@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod actions;
 pub mod audit;
 pub mod audit_query;
@@ -28,6 +29,15 @@ static REGISTRY: LazyLock<ActionRegistry> = LazyLock::new(|| {
     debug!("Initializing SuperAdmin action registry (lazy)");
     registry::build_registry()
 });
+
+/// 其他管家工具执行与 SuperAdmin 动作等价的操作时，按同一风险决策判断。
+/// 返回 Some(错误信息) 表示必须拒绝。动作未注册时同样拒绝，避免绕过检查。
+pub fn action_approval_gate(action_id: &str, dry_run: bool) -> Option<String> {
+    match REGISTRY.get(action_id) {
+        Some(registered) => execute::approval_gate_error(&registered.meta, dry_run),
+        None => Some(format!("SuperAdmin 动作 {action_id} 未注册，无法确认风险，已拒绝执行")),
+    }
+}
 
 /// Ensure the audit table exists. Call from init_builtin_mcp_servers.
 pub fn init_superadmin_tables(app_handle: &AppHandle) {

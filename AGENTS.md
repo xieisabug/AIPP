@@ -7,7 +7,9 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 - 测试框架与编写规范：[docs/testing-guidelines.md](./docs/testing-guidelines.md)
 - 各功能用户向文档：[docs/product/](./docs/product/README.md)（ACP 集成细节见 `docs/product/11-ACP集成.md`）
 
-**桌面管家**：联系人长期私聊、总管家主会话和派发任务会话独立。助手间协作须保留发送方和请求归属；团队历史检索只覆盖管家会话。聊天正文的简洁展示与模型工作上下文分别处理。管家模式全部助手直接注入 SuperAdmin 与 assistant 查询/协作工具，不受原助手 MCP 动态加载配置影响；普通聊天不继承该权限。见 [Butler 任务系统](./docs/product/18-Butler任务系统.md)。
+**桌面管家**：联系人长期私聊、总管家主会话和派发任务会话独立。谁接手工作谁和用户沟通：受托助手默认在自己的会话里直接交付/提问（`deliver_to=user`），总管家只协调，要求整体汇总时才收回（`deliver_to=sender`）。受托助手可再请协助（有界多层：parent/depth、按工作链 chain 计预算与有效期、按助手身份防循环，见 `db/butler_peer.rs`），独立任务也可发起并接收协作回送；停止会实际打断属于该工作的执行（`api/butler_peer.rs` halt_*）。引用回复/续接/任务提问见 `api/butler_work.rs`。助手间协作须保留发送方和请求归属；团队历史检索只覆盖管家会话。聊天正文的简洁展示与模型工作上下文分别处理。管家模式全部助手直接注入 SuperAdmin 与 assistant 查询/协作工具，不受原助手 MCP 动态加载配置影响；普通聊天不继承该权限。见 [Butler 任务系统](./docs/product/18-Butler任务系统.md)。
+
+**管家群聊**：群聊与联系人同列，用户直接发言，不选接收人或讨论模式。谁来回复：`@成员`/`@所有人` → 引用的原作者 → 单成员 → 调度模型（小型辅助模型，未配置用总管家模型；失败如实报错不换模型）；多人同时回复（之后通过读取位置补上彼此的回复）；要求讨论时按轮推进（一轮全部结束后进入下一轮，静默轮/轮数上限/用户插话/停止即结束）；成员回复里的 @ 触发接力（有层数/次数上限）。成员说话方式（简短、分段、不逐条列点）每轮随 `<group_chat>` 提醒。每个成员在每个群有独立执行会话，输入是纯文本聊天记录（不含调度字段），私聊与其他群不注入；群成员不提供联系人协作工具。回复只在仍进行时写入成员会话，停止/移出后的迟到结果不公开，重启不重做。实现见 `db/butler_group.rs`、`api/butler_group*.rs`、`src/components/butler/ButlerGroupChat.tsx`，设计与验收见 [群聊 PRD](./docs/butler-group-prd.md)。
 
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
 

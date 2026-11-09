@@ -1308,16 +1308,15 @@ async fn dispatch_multi_tool_round(
     let window = window.clone();
     let conversation_id = tool_call.conversation_id;
     let ids = calls.iter().map(|call| call.id).collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
-            if let Err(error) = continue_tool_round(
-                &app, app.state::<crate::FeatureConfigState>(), window,
-                conversation_id, ids, allow_error,
-            ).await {
-                warn!(conversation_id, error = %error, "manual tool round continuation failed");
-            }
-        });
-    });
+    // 续写会再次进入 ask_ai 和工具执行，debug 构建下 future 很深，阻塞线程池默认 2MB 栈会溢出。
+    crate::utils::async_thread::spawn_async_thread("aipp-tool-round-continue", move || async move {
+        if let Err(error) = continue_tool_round(
+            &app, app.state::<crate::FeatureConfigState>(), window,
+            conversation_id, ids, allow_error,
+        ).await {
+            warn!(conversation_id, error = %error, "manual tool round continuation failed");
+        }
+    }).with_context(|| format!("启动工具轮次续写线程失败：conversation={conversation_id}"))?;
     Ok(true)
 }
 
@@ -1515,6 +1514,7 @@ async fn handle_tool_execution_result(
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
+            crate::api::butler_progress::notify_tool_progress(app_handle, tool_call.conversation_id);
 
             // 处理对话继续逻辑（仅当 trigger_continuation 为 true 时）
             if trigger_continuation {
@@ -1587,6 +1587,7 @@ async fn handle_tool_execution_result(
 
             // 广播到所有监听该对话的窗口，确保多窗口场景下事件同步
             broadcast_mcp_tool_call_update(app_handle, &tool_call);
+            crate::api::butler_progress::notify_tool_progress(app_handle, tool_call.conversation_id);
 
             let error_lower = error.to_lowercase();
             let is_user_cancelled = error_lower.contains("cancelled by user")
@@ -2022,6 +2023,11 @@ pub async fn execute_mcp_tool_call(
     let mut tool_call =
         db.get_mcp_tool_call(call_id).map_err(|e| format!("获取工具调用信息失败: {}", e))?;
     debug!(tool_call_name=%tool_call.tool_name, tool_call_server=%tool_call.server_name, tool_call_params=%tool_call.parameters, "准备调用的mcp工具");
+    let goal_conn=ConversationDatabase::new(&app_handle).map_err(|e|e.to_string())?.get_connection().map_err(|e|e.to_string())?;
+    crate::db::butler_goal::assert_message_current(&goal_conn,tool_call.conversation_id,
+        tool_call.assistant_message_id.or(tool_call.message_id)).map_err(|e|e.to_string())?;
+    drop(goal_conn);
+
 
     if is_acp_tool_call_record(&app_handle, &tool_call).map_err(|e| e.to_string())? {
         return Err(
@@ -2051,6 +2057,7 @@ pub async fn execute_mcp_tool_call(
         activity_manager.set_mcp_executing(&app_handle, tool_call.conversation_id, call_id).await;
     }
     broadcast_mcp_tool_call_update(&app_handle, &tool_call);
+    crate::api::butler_progress::notify_tool_progress(&app_handle, tool_call.conversation_id);
 
     // 获取并验证服务器状态；前置校验失败也写入 failed/error，便于 UI 展示和错误续写
     let mut server = match db.get_mcp_server(tool_call.server_id) {
@@ -2270,6 +2277,13 @@ pub async fn execute_mcp_tool_call(
         }
     }
 
+    // Recheck after asynchronous hooks and immediately before committing an operation.
+    let goal_conn=ConversationDatabase::new(&app_handle).map_err(|e|e.to_string())?.get_connection().map_err(|e|e.to_string())?;
+    let current=crate::db::butler_goal::assert_message_current(&goal_conn,tool_call.conversation_id,tool_call.assistant_message_id.or(tool_call.message_id));
+    drop(goal_conn);
+    if let Err(error)=current {
+        return handle_tool_execution_result(&app_handle,&state,&feature_config_state,&window,call_id,tool_call,Err(error.to_string()),is_retry,false).await;
+    }
     // 执行工具
     let cancel_token = register_cancel_token(call_id).await;
     let execution_result = {
@@ -2282,7 +2296,7 @@ pub async fn execute_mcp_tool_call(
             Some(tool_call.conversation_id),
             Some(cancel_token.clone()),
         );
-        let exec_future = crate::api::butler_peer::TOOL_MESSAGE.scope(tool_call.message_id, exec_future);
+        let exec_future = crate::api::butler_peer::TOOL_MESSAGE.scope(tool_call.assistant_message_id.or(tool_call.message_id), exec_future);
         tokio::select! {
             _ = cancel_token.cancelled() => Err("Cancelled by user".to_string()),
             res = exec_future => res,
@@ -2748,8 +2762,10 @@ async fn trigger_conversation_continuation(
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
+    let source_message_id=tool_call.assistant_message_id.or(tool_call.message_id);
+    // 续写会再次进入 ask_ai 和工具执行，放在大栈线程上，避免阻塞线程池默认 2MB 栈溢出。
+    crate::utils::async_thread::spawn_async_thread("aipp-tool-continue", move || async move {
+        {
             // 使用会话级锁保证续写串行，避免同一会话并发触发续写
             let _lock_guard = continuation_lock.lock().await;
             let feature_config_state = app_handle_clone.state::<crate::FeatureConfigState>();
@@ -2761,6 +2777,7 @@ async fn trigger_conversation_continuation(
                 assistant_id,
                 tool_call_id,
                 continuation_result,
+                source_message_id,
             )
             .await
             {
@@ -2802,8 +2819,8 @@ async fn trigger_conversation_continuation(
                     "failed to drain queued batch continuations after serialized continuation"
                 );
             }
-        });
-    });
+        }
+    }).with_context(|| format!("启动工具续写线程失败：conversation={continuation_conversation_id}, call={continuation_call_id}"))?;
     Ok(())
 }
 
@@ -2882,8 +2899,10 @@ async fn trigger_conversation_continuation_with_error(
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     };
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
+    let source_message_id=tool_call.assistant_message_id.or(tool_call.message_id);
+    // 续写会再次进入 ask_ai 和工具执行，放在大栈线程上，避免阻塞线程池默认 2MB 栈溢出。
+    crate::utils::async_thread::spawn_async_thread("aipp-tool-continue-error", move || async move {
+        {
             // 使用会话级锁保证续写串行，避免同一会话并发触发续写
             let _lock_guard = continuation_lock.lock().await;
             let feature_config_state = app_handle_clone.state::<crate::FeatureConfigState>();
@@ -2895,6 +2914,7 @@ async fn trigger_conversation_continuation_with_error(
                 assistant_id,
                 tool_call_id,
                 error_result,
+                source_message_id,
             )
             .await
             {
@@ -2936,8 +2956,8 @@ async fn trigger_conversation_continuation_with_error(
                     "failed to drain queued batch continuations after serialized error continuation"
                 );
             }
-        });
-    });
+        }
+    }).with_context(|| format!("启动工具错误续写线程失败：conversation={continuation_conversation_id}, call={continuation_call_id}"))?;
     Ok(())
 }
 
@@ -2986,6 +3006,7 @@ async fn run_batch_continuation_once(
         window,
         conversation_id,
         assistant_id,
+        anchor_message_id,
     )
     .await
     {
@@ -3200,6 +3221,12 @@ pub async fn execute_tool_by_transport(
     conversation_id: Option<i64>,
     cancel_token: Option<CancellationToken>,
 ) -> std::result::Result<String, String> {
+    // Recheck at the tool boundary, not only when a model turn starts.
+    if let Some(id) = conversation_id {
+        let db = crate::db::conversation_db::ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        let conn = db.get_connection().map_err(|e| e.to_string())?;
+        crate::db::butler_control::ensure_turn(&conn, id).map_err(|e| e.to_string())?;
+    }
     // 如果没有提供 cancel_token，创建一个永远不会取消的令牌
     if cfg!(mobile) {
         if let Some(issue) = crate::api::mobile_capability::tool_issue(
@@ -3395,7 +3422,11 @@ async fn execute_builtin_tool(
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
-    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or_else(|| {
+        if command == "aipp:search" {
+            crate::mcp::builtin_mcp::search::recovery::SEARCH_TIMEOUT_MS as u64
+        } else { DEFAULT_TIMEOUT_MS }
+    });
     // 部分内置工具有自己的等待/超时语义，不应被 MCP server 的外层超时抢先截断。
     let skip_outer_timeout = (command == "aipp:ui_interaction"
         && matches!(tool_name, "ask_user_question" | "preview_code"))
@@ -3424,6 +3455,7 @@ async fn execute_builtin_tool(
             tool_name.to_string(),
             normalize_parameters_json(parameters),
             conversation_id,
+            Some(server.id),
         )
         .await
     };
@@ -3438,6 +3470,17 @@ async fn execute_builtin_tool(
                 match result {
                     Ok(r) => r,
                     Err(e) => return Err(anyhow!("工具执行失败: {}", e)),
+                }
+            }
+        }
+    } else if command == "aipp:search" {
+        tokio::select! {
+            _ = cancel_token.cancelled() => return Err(anyhow!("Cancelled by user (server_id={}, tool={})", server.id, tool_name)),
+            result = crate::mcp::builtin_mcp::search::verification_budget::with_search_budget(std::time::Duration::from_millis(timeout_ms), execution) => {
+                match result {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(error)) => return Err(anyhow!("工具执行失败: {}", error)),
+                    Err(error) => return Err(anyhow!("{} (server_id={}, tool={}, conversation_id={:?})", error, server.id, tool_name, conversation_id)),
                 }
             }
         }

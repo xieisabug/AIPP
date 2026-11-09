@@ -17,7 +17,7 @@ pub fn definitions() -> Vec<BuiltinToolInfo> {
         BuiltinToolInfo { name:"get_assistant_exchange".into(), description:"查看自己参与的助手协作。传 exchange_id 查看该次协作的轮次、状态和可选往来正文；省略则分页列出最近协作。答复会自动回流，不要轮询。".into(), input_schema:json!({"type":"object","properties":{
             "exchange_id":{"type":"integer","minimum":1},"include_context":{"type":"boolean","default":false},
             "before_id":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":50}}}) },
-        BuiltinToolInfo { name:"stop_assistant_exchange".into(), description:"停止自己参与的某次协作及其后续轮次，撤销尚未投递的请求/答复，记录原因。不会强制终止正在运行的模型或进程，也不会撤销已完成操作；重复调用幂等。".into(), input_schema:json!({"type":"object","required":["exchange_id","reason"],"properties":{
+        BuiltinToolInfo { name:"stop_assistant_exchange".into(), description:"停止自己参与的某次协作所在的整条工作链：撤销尚未投递的请求/答复，打断链上正在运行的回合、待执行工具与待答问题，并停止它派出的独立任务；记录原因。已提交的外部操作无法撤销，返回的 report 会写明实际打断了什么、哪些无法确认已停止。重复调用幂等。".into(), input_schema:json!({"type":"object","required":["exchange_id","reason"],"properties":{
             "exchange_id":{"type":"integer","minimum":1},"reason":{"type":"string","minLength":1,"maxLength":1000}}}) },
     ]
 }
@@ -74,8 +74,14 @@ pub async fn tool(app: &AppHandle, current: i64, name: &str, args: &Value) -> an
     if matches!(name,"get_assistant_exchange"|"stop_assistant_exchange") {
         let conn=ConversationDatabase::new(app)?.get_connection()?;
         let args=args.clone(); let name=name.to_owned();
-        let result=tokio::task::spawn_blocking(move || exchange_tool(&conn,current,&name,&args)).await??;
-        if name_is_stop(result.get("operation")) { super::butler_peer::updated(app); }
+        let mut result=tokio::task::spawn_blocking(move || exchange_tool(&conn,current,&name,&args)).await??;
+        if name_is_stop(result.get("operation")) {
+            let chain=result["chain"].as_i64().context("停止协作缺少工作链")?;
+            let note=super::butler_peer::stop_chain_work(app,chain,Some(current)).await?;
+            result["stopped"]=json!(true);
+            result["report"]=json!(note);
+            result["instruction"]=json!("这项工作及其下级协作已停止；report 写明实际打断了哪些执行、哪些无法确认已停止，向用户如实说明，不要声称全部已撤销。");
+        }
         return Ok(result);
     }
     let db=AssistantDatabase::new(app)?;
@@ -191,11 +197,13 @@ pub(super) fn exchange_tool(conn: &Connection, current: i64, name: &str, args: &
     if name=="stop_assistant_exchange" {
         let root=root.context("停止协作需要 exchange_id")?;
         let reason=args["reason"].as_str().map(str::trim).filter(|s|!s.is_empty()&&s.chars().count()<=1000).context("reason 必须为 1 至 1000 字符")?;
+        let chain:i64=conn.query_row("SELECT coalesce(chain,root) FROM butler_peer_exchange WHERE root=?1 LIMIT 1",[root],|r|r.get(0))?;
         let tx=conn.unchecked_transaction()?;
         crate::db::butler_peer::stop(&tx,root,current)?;
         tx.execute("INSERT OR IGNORE INTO butler_peer_stop(root,conversation_id,reason) VALUES (?1,?2,?3)",params![root,current,reason])?;
         tx.commit()?;
-        return Ok(json!({"operation":"stop","root":root,"stopped":true,"execution_cancelled":false,"instruction":"后续协作轮次已停止；正在运行的模型或进程未被强制终止。"}));
+        // 打断仍在运行的下级执行由异步调用方完成（重复停止是幂等的）。
+        return Ok(json!({"operation":"stop","root":root,"chain":chain,"stopped":true}));
     }
     let limit=limit(args)?;
     let before=args.get("before_id").map(|_|positive(args,"before_id")).transpose()?.unwrap_or(i64::MAX);

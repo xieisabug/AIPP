@@ -1,12 +1,15 @@
 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::agent_plan::AgentPlanMessage;
+use crate::api::ai::agent_driver::events::{AgentEventIdentity, emit_to_window, emit_to_chat_windows};
+use crate::api::ai::agent_driver::failure::{AgentFailure, AgentFailureStage, AgentProcessDiagnostics, emit_normalized_failure_to_window};
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::api::ai::acp::{
     resolve_acp_cli_path, AcpPermissionDecision, AcpPermissionOptionPayload, AcpPermissionRequestEvent,
     AcpPermissionState, AcpPlanEntryPayload,
 };
 use crate::api::operation_api::{
-    emit_permission_request_event, ACP_PERMISSION_REQUEST_EVENT,
+    emit_permission_request_event, emit_permission_resolved_event, PermissionResolvedEvent,
+    ACP_PERMISSION_REQUEST_EVENT, ACP_PERMISSION_RESOLVED_EVENT,
 };
 use crate::acp_mcp_bridge::{
     ensure_proxy_server, AcpMcpProxyConfig, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
@@ -17,7 +20,7 @@ use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
 use crate::mcp::builtin_mcp::interaction::{
-    request_ask_user_question, AskUserQuestionItem, AskUserQuestionMetadata,
+    request_ask_user_question_scoped, AskUserQuestionItem, AskUserQuestionMetadata,
     AskUserQuestionOption, AskUserQuestionRequest, InteractionState,
 };
 use crate::state::activity_state::ConversationActivityManager;
@@ -27,16 +30,18 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 pub const CODEX_APP_SERVER_API_TYPE: &str = "codex_app_server";
 
 #[derive(Debug, Clone)]
 pub struct CodexAppServerConfig {
+    /// Provider-row identity captured when this native runtime is prepared.
+    pub instance_id: Option<i64>,
     pub cli_command: String,
     pub working_directory: PathBuf,
     pub env_vars: HashMap<String, String>,
@@ -92,11 +97,6 @@ pub struct CodexSessionConfigChoice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexSessionStateSnapshotEvent {
-    state: Option<CodexConversationSessionState>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentActivityEvent {
     pub conversation_id: i64,
     pub response_message_id: i64,
@@ -117,7 +117,7 @@ pub struct AgentActivityEvent {
 }
 
 enum CodexSessionCommand {
-    Prompt { message_id: i64, prompt: String, window: tauri::Window },
+    Prompt { message_id: i64, prompt: String, window: tauri::Window, cancellation_generation: u64 },
     CancelCurrentPrompt { response: oneshot::Sender<Result<(), String>> },
     SetConfigOption { config_id: String, value: String, response: oneshot::Sender<Result<(), String>> },
     Shutdown { reason: String },
@@ -192,10 +192,41 @@ fn is_tracing_noise(line: &str) -> bool {
 pub struct CodexSessionHandle {
     sender: mpsc::UnboundedSender<CodexSessionCommand>,
     run_id: String,
+    cancellation: watch::Sender<u64>,
     failure_context: std::sync::Arc<std::sync::Mutex<Option<(i64, tauri::Window)>>>,
 }
 
 impl CodexSessionHandle {
+    #[cfg(test)]
+    pub(crate) fn driver_test_channel() -> (
+        Self,
+        mpsc::UnboundedReceiver<super::agent_driver::session::TestSessionCommand>,
+    ) {
+        use super::agent_driver::session::TestSessionCommand;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (observed, observations) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                let command = match command {
+                    CodexSessionCommand::CancelCurrentPrompt { response } => TestSessionCommand::Cancel { response },
+                    CodexSessionCommand::SetConfigOption { config_id, value, response } => {
+                        TestSessionCommand::SetConfig { config_id, value, response }
+                    }
+                    _ => panic!("unexpected command in driver control test"),
+                };
+                if observed.send(command).is_err() {
+                    break;
+                }
+            }
+        });
+        (Self {
+            sender,
+            run_id: "driver-test-run".into(),
+            cancellation: watch::channel(0).0,
+            failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }, observations)
+    }
+
     pub(crate) fn run_id(&self) -> &str {
         &self.run_id
     }
@@ -210,7 +241,7 @@ impl CodexSessionHandle {
             Some((message_id, window.clone()));
         if self
             .sender
-            .send(CodexSessionCommand::Prompt { message_id, prompt, window })
+            .send(CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation: *self.cancellation.borrow() })
             .is_err()
         {
             self.failure_context
@@ -228,6 +259,7 @@ impl CodexSessionHandle {
     }
 
     pub async fn cancel_current_prompt(&self) -> Result<(), AppError> {
+        self.cancellation.send_modify(|generation| *generation = generation.wrapping_add(1));
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(CodexSessionCommand::CancelCurrentPrompt { response: tx })
@@ -258,6 +290,7 @@ impl CodexSessionHandle {
     }
 
     pub(crate) fn shutdown(&self, reason: String) {
+        self.cancellation.send_modify(|generation| *generation = generation.wrapping_add(1));
         let _ = self.sender.send(CodexSessionCommand::Shutdown { reason });
     }
 }
@@ -283,6 +316,14 @@ impl CodexSessionEntry {
             config_signature,
             last_activity: Instant::now(),
         }
+    }
+
+    pub(crate) fn reuse_handle(&mut self, config_signature: &str) -> Option<CodexSessionHandle> {
+        if self.config_signature != config_signature {
+            return None;
+        }
+        self.touch();
+        Some(self.handle.clone())
     }
 
     pub fn touch(&mut self) {
@@ -378,6 +419,7 @@ pub fn extract_codex_app_server_config(
         }
     }
     let mut config = CodexAppServerConfig {
+        instance_id: None,
         cli_command,
         working_directory,
         env_vars,
@@ -397,6 +439,7 @@ pub fn extract_codex_app_server_config(
 
 fn codex_config_signature(config: &CodexAppServerConfig) -> String {
     serde_json::to_string(&json!({
+        "instance_id": config.instance_id,
         "cli": config.cli_command,
         "cwd": config.working_directory,
         "args": config.additional_args,
@@ -417,28 +460,37 @@ pub fn refresh_codex_session_signature(config: &mut CodexAppServerConfig) {
 }
 
 async fn emit_session_snapshot(
+    identity: &AgentEventIdentity,
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     state: Option<CodexConversationSessionState>,
 ) {
-    if let (Some(codex_state), Some(state_for_cache)) = (
-        app_handle.try_state::<crate::CodexSessionState>(),
-        state.clone(),
-    ) {
-        if let Some(entry) = codex_state.sessions.lock().await.get_mut(&conversation_id) {
-            entry.snapshot = state_for_cache;
-            entry.touch();
-        }
+    let native_state = app_handle.try_state::<crate::CodexSessionState>();
+    let mut sessions = if let Some(native) = native_state.as_ref() { Some(native.sessions.lock().await) } else { None };
+    let current_run = sessions.as_ref().and_then(|sessions| sessions.get(&conversation_id)).map(|entry| entry.run_id.as_str());
+    if !super::agent_driver::events::can_publish_native_snapshot(current_run, identity.run_id.as_deref(), state.is_some()) { return; }
+    if let Some(entry) = sessions.as_mut().and_then(|sessions| sessions.get_mut(&conversation_id)) {
+        if let Some(state_for_cache) = &state { entry.snapshot = state_for_cache.clone(); entry.touch(); }
     }
+    let data = match super::agent_driver::capabilities::snapshot_event_payload(
+        CODEX_APP_SERVER_API_TYPE, super::agent_driver::capabilities::AgentCapabilityDeclaration::codex(), state.as_ref(),
+    ) {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::error!(conversation_id, error = %error, "Codex capability snapshot emission failed");
+            return;
+        }
+    };
     let event = ConversationEvent {
         r#type: "acp_session_state_snapshot".to_string(),
-        data: serde_json::to_value(CodexSessionStateSnapshotEvent { state }).unwrap(),
+        data,
     };
-    let _ = crate::utils::window_utils::send_conversation_event_to_chat_windows(
-        app_handle,
-        conversation_id,
-        event,
-    );
+    let mut identity = identity.clone();
+    if let Some(state) = &state {
+        identity.native_session_id = state.session_id.clone();
+        identity.turn_id = state.current_turn_id.clone();
+    }
+    let _ = emit_to_chat_windows(app_handle, identity, event);
 }
 
 fn json_rpc_request(id: u64, method: &str, params: Value) -> Value {
@@ -475,6 +527,7 @@ async fn codex_mcp_bridge_overrides(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
     config: &CodexAppServerConfig,
+    mcp_scope: &crate::acp_mcp_bridge::provenance::NativeMcpScope,
 ) -> Result<Option<serde_json::Map<String, Value>>, String> {
     let payload = config.selected_mcp_tools_payload.trim();
     if payload.is_empty() || payload == "[]" {
@@ -483,7 +536,8 @@ async fn codex_mcp_bridge_overrides(
     let bridge_command = std::env::current_exe()
         .map_err(|error| format!("Failed to resolve AIPP executable for Codex MCP bridge: {error}"))?;
     let mcp_db_path = MCPDatabase::db_path(app_handle)?;
-    let proxy = ensure_proxy_server(app_handle.clone()).await?;
+    let mut proxy = ensure_proxy_server(app_handle.clone()).await?;
+    proxy.token = mcp_scope.token().to_string();
     Ok(Some(build_codex_mcp_config_overrides(
         &bridge_command,
         &mcp_db_path,
@@ -549,7 +603,79 @@ fn codex_approval_response(method: &str, params: &Value, decision: AcpPermission
             json!({"permissions": {}})
         }
     } else {
+        // Native command/file approvals support these string variants. Command
+        // policy amendments are structured objects, which Selected(String) and
+        // the current permission UI cannot represent. Never forward an arbitrary
+        // string (including serialized amendment JSON) as a native decision.
+        // `cancel` denies the action and interrupts the turn in both protocols.
+        let supported_method = matches!(method,
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval");
+        let selected = if supported_method
+            && matches!(selected.as_str(), "accept" | "acceptForSession" | "decline" | "cancel")
+        {
+            selected.as_str()
+        } else {
+            warn!(method, decision = %selected, "Unsupported Codex approval decision; cancelling request");
+            "cancel"
+        };
         json!({"decision": selected})
+    }
+}
+
+/// Cancellation generations belong to the prompt at enqueue time, so an idle
+/// Stop cannot cancel a later prompt, and Stop during startup is not lost.
+struct CodexRequestCancellation {
+    source_message_id: Option<i64>,
+    instance_id: Option<i64>,
+    signal: watch::Sender<u64>,
+    generation: u64,
+    run_id: String,
+}
+
+impl CodexRequestCancellation {
+    async fn cancelled(&self) {
+        let mut receiver = self.signal.subscribe();
+        loop {
+            if *receiver.borrow_and_update() != self.generation {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+async fn wait_codex_interaction<T>(
+    interaction: impl std::future::Future<Output = Result<T, String>>,
+    cancellation: Option<&CodexRequestCancellation>,
+) -> Result<T, String> {
+    match cancellation {
+        Some(cancellation) => tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err("Codex interaction cancelled by Stop".to_string()),
+            result = interaction => result,
+        },
+        None => interaction.await,
+    }
+}
+
+async fn wait_codex_approval_decision(
+    permission_state: &AcpPermissionState,
+    request_id: &str,
+    decision_rx: oneshot::Receiver<AcpPermissionDecision>,
+    cancellation: Option<&CodexRequestCancellation>,
+) -> (AcpPermissionDecision, bool) {
+    let result = wait_codex_interaction(async {
+        Ok(decision_rx.await.unwrap_or(AcpPermissionDecision::Cancelled))
+    }, cancellation).await;
+    match result {
+        Ok(decision) => (decision, false),
+        Err(_) => {
+            // IDs contain the run identity: never clear another run/conversation.
+            let _ = permission_state.resolve_request(request_id, AcpPermissionDecision::Cancelled).await;
+            (AcpPermissionDecision::Cancelled, true)
+        }
     }
 }
 
@@ -558,6 +684,7 @@ async fn handle_approval_request(
     conversation_id: i64,
     stdin: &mut tokio::process::ChildStdin,
     frame: &Value,
+    cancellation: Option<&CodexRequestCancellation>,
 ) -> Result<bool, String> {
     let Some(method) = frame.get("method").and_then(Value::as_str) else {
         return Ok(false);
@@ -577,7 +704,10 @@ async fn handle_approval_request(
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let request_id = format!("codex:{conversation_id}:{}", rpc_id_key(&rpc_id));
+    let request_id = match cancellation {
+        Some(context) => format!("codex:{conversation_id}:{}:{}", context.run_id, rpc_id_key(&rpc_id)),
+        None => format!("codex:{conversation_id}:{}", rpc_id_key(&rpc_id)),
+    };
     let title = params
         .get("command")
         .and_then(Value::as_str)
@@ -603,7 +733,17 @@ async fn handle_approval_request(
     };
     let (decision_tx, decision_rx) = oneshot::channel();
     let permission_state = app_handle.state::<AcpPermissionState>();
-    permission_state.store_request(event.clone(), decision_tx).await;
+    let scope = crate::api::ai::agent_driver::approval::AgentRequestScope {
+        driver_id: Some(CODEX_APP_SERVER_API_TYPE.into()),
+        instance_id: cancellation.and_then(|context| context.instance_id),
+        conversation_id: Some(conversation_id),
+        run_id: cancellation.map(|context| context.run_id.clone()),
+    };
+    let butler_guard = crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard::capture(
+        app_handle, conversation_id, cancellation.and_then(|c| c.source_message_id),
+        "codex.permission", serde_json::to_value(&event).map_err(|e| e.to_string())?,
+    )?;
+    permission_state.store_request_guarded(event.clone(), decision_tx, scope, butler_guard.clone()).await?;
     if let Err(error) = emit_permission_request_event(
         app_handle,
         ACP_PERMISSION_REQUEST_EVENT,
@@ -613,9 +753,28 @@ async fn handle_approval_request(
         permission_state.remove_request(&request_id).await;
         return Err(error);
     }
-    let decision = decision_rx
-        .await
-        .unwrap_or(AcpPermissionDecision::Cancelled);
+    let (decision, cancelled_by_control) = wait_codex_approval_decision(
+        &permission_state, &request_id, decision_rx, cancellation,
+    ).await;
+    if cancelled_by_control {
+        let _ = emit_permission_resolved_event(
+            app_handle, ACP_PERMISSION_RESOLVED_EVENT,
+            &PermissionResolvedEvent { request_id, conversation_id: Some(conversation_id) },
+        );
+    }
+    let grants = match &decision {
+        AcpPermissionDecision::Selected(option_id) =>
+            crate::api::ai::agent_driver::approval::permission_option_requires_authorization(
+                &event.options, option_id,
+            ).unwrap_or(true),
+        AcpPermissionDecision::Cancelled => false,
+    };
+    let decision = if let Some(guard) = butler_guard.filter(|_| grants) {
+        match guard.validate(app_handle) { Ok(()) => decision, Err(error) => {
+            warn!(%error, "Butler native approval invalidated before Codex execution");
+            AcpPermissionDecision::Cancelled
+        }}
+    } else { decision };
     let result = codex_approval_response(method, &params, decision);
     write_frame(stdin, &json!({"jsonrpc":"2.0","id":rpc_id,"result":result})).await?;
     Ok(true)
@@ -722,28 +881,8 @@ pub async fn probe_codex_model_options(
         let (_child, mut stdin, mut lines) =
             spawn_process(config, stderr_buffer.clone()).await?;
         let mut pending_notifications = VecDeque::new();
-        write_frame(
-            &mut stdin,
-            &json_rpc_request(
-                1,
-                "initialize",
-                json!({
-                    "clientInfo":{"name":"aipp-model-probe","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
-                    "capabilities":{"experimentalApi":true}
-                }),
-            ),
-        )
-        .await?;
-        read_rpc_response_with_approvals(
-            app_handle,
-            -1,
-            &mut stdin,
-            &mut lines,
-            1,
-            &mut pending_notifications,
-        )
-        .await?;
-        write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
+        let requests = DesktopCodexServerRequests { app_handle, conversation_id: -1, cancellation: None };
+        initialize_codex_transport(&requests, -1, "aipp-model-probe", &mut stdin, &mut lines, &mut pending_notifications).await?;
         write_frame(
             &mut stdin,
             &json_rpc_request(
@@ -763,6 +902,7 @@ pub async fn probe_codex_model_options(
             &mut lines,
             2,
             &mut pending_notifications,
+            None,
         )
         .await
         .map_err(|error| format!("Codex config/read 失败：{error}"))?;
@@ -776,6 +916,7 @@ pub async fn probe_codex_model_options(
             &mut lines,
             3,
             &mut pending_notifications,
+            None,
         )
         .await
         .map_err(|error| format!("Codex model/list 失败：{error}"))?;
@@ -1183,8 +1324,9 @@ async fn handle_server_request(
     conversation_id: i64,
     stdin: &mut tokio::process::ChildStdin,
     frame: &Value,
+    cancellation: Option<&CodexRequestCancellation>,
 ) -> Result<bool, String> {
-    if handle_approval_request(app_handle, conversation_id, stdin, frame).await? {
+    if handle_approval_request(app_handle, conversation_id, stdin, frame, cancellation).await? {
         return Ok(true);
     }
     if frame.get("method").and_then(Value::as_str) != Some("item/tool/requestUserInput") {
@@ -1194,13 +1336,20 @@ async fn handle_server_request(
     let params = frame.get("params").cloned().unwrap_or(Value::Null);
     let (request, mappings) = codex_user_input_request(&params)?;
     let interaction_state = app_handle.state::<InteractionState>();
-    let result = match request_ask_user_question(
+    // Dropping the request future invokes its existing exact-request cleanup
+    // guard; do not clear all conversation questions or consume control commands.
+    let result = match wait_codex_interaction(crate::api::butler_peer::TOOL_MESSAGE.scope(cancellation.and_then(|c|c.source_message_id),request_ask_user_question_scoped(
         app_handle,
         &interaction_state,
         Some(conversation_id),
         request,
-    )
-    .await
+        Some(crate::api::ai::agent_driver::approval::AgentRequestScope {
+            driver_id: Some(CODEX_APP_SERVER_API_TYPE.into()),
+            instance_id: cancellation.and_then(|context| context.instance_id),
+            conversation_id: Some(conversation_id),
+            run_id: cancellation.map(|context| context.run_id.clone()),
+        }),
+    )), cancellation).await
     {
         Ok(answers) => codex_user_input_response(&mappings, &answers),
         Err(error) => {
@@ -1226,8 +1375,42 @@ async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> R
         .map_err(|error| format!("刷新 Codex app-server stdin 失败：{error}"))
 }
 
+/// Only the desktop interaction boundary is substituted in protocol tests.
+/// The JSON-RPC reader, handshake and native thread RPCs below are shared with
+/// run_session; tests do not implement a second driver/session loop.
+#[async_trait::async_trait]
+trait CodexServerRequests: Sync {
+    async fn handle(&self, stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<bool, String>;
+}
+
+struct DesktopCodexServerRequests<'a> {
+    app_handle: &'a tauri::AppHandle,
+    conversation_id: i64,
+    cancellation: Option<&'a CodexRequestCancellation>,
+}
+
+#[async_trait::async_trait]
+impl CodexServerRequests for DesktopCodexServerRequests<'_> {
+    async fn handle(&self, stdin: &mut tokio::process::ChildStdin, frame: &Value) -> Result<bool, String> {
+        handle_server_request(self.app_handle, self.conversation_id, stdin, frame, self.cancellation).await
+    }
+}
+
 async fn read_rpc_response_with_approvals(
     app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    expected_id: u64,
+    pending_notifications: &mut VecDeque<Value>,
+    cancellation: Option<&CodexRequestCancellation>,
+) -> Result<Value, String> {
+    let requests = DesktopCodexServerRequests { app_handle, conversation_id, cancellation };
+    read_codex_rpc_response(&requests, conversation_id, stdin, lines, expected_id, pending_notifications).await
+}
+
+async fn read_codex_rpc_response(
+    requests: &impl CodexServerRequests,
     conversation_id: i64,
     stdin: &mut tokio::process::ChildStdin,
     lines: &mut Lines<BufReader<ChildStdout>>,
@@ -1242,7 +1425,7 @@ async fn read_rpc_response_with_approvals(
         let frame: Value = serde_json::from_str(&line)
             .map_err(|error| format!("Invalid Codex app-server JSON: {error}: {line}"))?;
         if frame.get("method").is_some() && frame.get("id").is_some() {
-            if !handle_server_request(app_handle, conversation_id, stdin, &frame).await? {
+            if !requests.handle(stdin, &frame).await? {
                 warn!(
                     conversation_id,
                     method = frame.get("method").and_then(|value| value.as_str()).unwrap_or("unknown"),
@@ -1273,6 +1456,78 @@ async fn read_rpc_response_with_approvals(
     Err(format!(
         "Codex app-server stdout 在等待 JSON-RPC 响应 id={expected_id} 时关闭；进程未返回 JSON-RPC error，底层原因只能从附带的 Codex stderr 诊断"
     ))
+}
+
+async fn initialize_codex_transport(
+    requests: &impl CodexServerRequests,
+    conversation_id: i64,
+    client_name: &str,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    pending_notifications: &mut VecDeque<Value>,
+) -> Result<(), String> {
+    write_frame(stdin, &json_rpc_request(1, "initialize", json!({
+        "clientInfo":{"name":client_name,"title":"AIPP","version":env!("CARGO_PKG_VERSION")},
+        "capabilities":{"experimentalApi":true}
+    }))).await?;
+    read_codex_rpc_response(requests, conversation_id, stdin, lines, 1, pending_notifications).await?;
+    write_frame(stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await
+}
+
+async fn open_codex_thread(
+    requests: &impl CodexServerRequests,
+    conversation_id: i64,
+    config: &CodexAppServerConfig,
+    stored_thread: Option<&str>,
+    mcp_config_overrides: Option<serde_json::Map<String, Value>>,
+    request_id: u64,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    pending_notifications: &mut VecDeque<Value>,
+) -> Result<Value, String> {
+    let (method, params) = if let Some(thread_id) = stored_thread {
+        ("thread/resume", json!({
+            "threadId": thread_id,
+            "approvalPolicy": config.approval_policy,
+            "sandbox": config.sandbox,
+            "approvalsReviewer": config.approvals_reviewer,
+            "config": mcp_config_overrides,
+        }))
+    } else {
+        ("thread/start", json!({
+            "model": config.model,
+            "reasoningEffort": config.reasoning_effort,
+            "cwd": config.working_directory,
+            "approvalPolicy": config.approval_policy,
+            "sandbox": config.sandbox,
+            "approvalsReviewer": config.approvals_reviewer,
+            "config": mcp_config_overrides,
+        }))
+    };
+    write_frame(stdin, &json_rpc_request(request_id, method, params)).await?;
+    read_codex_rpc_response(requests, conversation_id, stdin, lines, request_id, pending_notifications)
+        .await.map_err(|error| {
+            if stored_thread.is_some() {
+                format!("Codex thread 恢复失败：{error}")
+            } else {
+                format!("Codex thread 启动失败：{error}")
+            }
+        })
+}
+
+/// Reject only explicitly foreign identities. Some legitimate session-wide or
+/// older-protocol notifications have no turn/thread ID and remain supported.
+fn codex_notification_matches_turn(frame: &Value, thread_id: &str, turn_id: Option<&str>) -> bool {
+    let params = &frame["params"];
+    if params.get("threadId").and_then(Value::as_str).is_some_and(|id| id != thread_id) {
+        return false;
+    }
+    let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
+    let event_turn_id = params.get("turnId").and_then(Value::as_str).or_else(|| {
+        matches!(method, "turn/started" | "turn/completed")
+            .then(|| params.pointer("/turn/id").and_then(Value::as_str)).flatten()
+    });
+    !matches!((turn_id, event_turn_id), (Some(active), Some(event)) if active != event)
 }
 
 fn thread_id_from_result(result: &Value) -> Option<String> {
@@ -1423,6 +1678,7 @@ fn activity_content_offset(
 }
 
 fn emit_activity(
+    identity: &AgentEventIdentity,
     window: &tauri::Window,
     conversation_id: i64,
     response_message_id: i64,
@@ -1461,7 +1717,7 @@ fn emit_activity(
         data: serde_json::to_value(&activity).unwrap(),
     };
     persist_activity(window.app_handle(), response_message_id, &activity);
-    let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+    let _ = emit_to_window(window, identity.clone(), event);
 }
 
 fn persist_activity(app_handle: &tauri::AppHandle, message_id: i64, activity: &AgentActivityEvent) {
@@ -1538,55 +1794,6 @@ fn persist_response(
     }
 }
 
-pub(crate) fn emit_codex_failure(
-    app_handle: &tauri::AppHandle,
-    conversation_id: i64,
-    message_id: i64,
-    window: &tauri::Window,
-    error: &str,
-) {
-    let content = format!("Codex 运行失败：{error}");
-    if let Ok(db) = ConversationDatabase::new(app_handle) {
-        if let Ok(repo) = db.message_repo() {
-            if let Ok(Some(mut message)) = repo.read(message_id) {
-                message.message_type = "error".to_string();
-                message.content = content.clone();
-                message.finish_time = Some(chrono::Utc::now());
-                let _ = repo.update(&message);
-            }
-        }
-    }
-    let _ = window.emit(
-        format!("conversation_event_{conversation_id}").as_str(),
-        ConversationEvent {
-            r#type: "message_update".to_string(),
-            data: serde_json::to_value(MessageUpdateEvent {
-                message_id,
-                message_type: "error".to_string(),
-                content,
-                is_done: true,
-                token_count: Some(0),
-                input_token_count: Some(0),
-                output_token_count: Some(0),
-                ttft_ms: None,
-                tps: None,
-            })
-            .unwrap(),
-        },
-    );
-    let _ = window.emit(
-        format!("conversation_event_{conversation_id}").as_str(),
-        ConversationEvent {
-            r#type: "stream_complete".to_string(),
-            data: json!({
-                "conversation_id": conversation_id,
-                "response_message_id": message_id,
-                "has_response": false,
-                "error": error,
-            }),
-        },
-    );
-}
 
 fn persist_codex_timing(
     app_handle: &tauri::AppHandle,
@@ -1625,7 +1832,7 @@ fn persist_codex_reasoning(
 /// 记录一行 Codex stderr：先剥离 ANSI 转义，再过滤 tracing 的 TRACE/DEBUG/INFO 噪音，
 /// 让缓冲只保留对用户诊断有意义的行。返回 true 表示该行已记入缓冲。
 fn record_codex_stderr(buffer: &CodexStderrBuffer, line: String) -> bool {
-    let cleaned = strip_ansi_escapes(&line);
+    let cleaned = super::agent_driver::failure::redact_agent_diagnostic(&strip_ansi_escapes(&line), &[]);
     if cleaned.trim().is_empty() || is_tracing_noise(&cleaned) {
         return false;
     }
@@ -1714,13 +1921,14 @@ async fn spawn_process(
     let stdin = child.stdin.take().ok_or("Codex app-server stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("Codex app-server stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("Codex app-server stderr unavailable")?;
+    let diagnostic_redactions = super::agent_driver::failure::AgentDiagnosticBuffer::for_environment(&config.env_vars);
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     // 缓冲只保留清洗后的关键行；被过滤的噪音行降级到 debug 日志，原文仍可查
-                    if record_codex_stderr(&stderr_buffer, line.clone()) {
+                    if record_codex_stderr(&stderr_buffer, diagnostic_redactions.sanitize(&line)) {
                         error!(target = "codex_app_server", "{line}");
                     } else {
                         debug!(target = "codex_app_server", "{line}");
@@ -1739,6 +1947,19 @@ async fn spawn_process(
     Ok((child, stdin, BufReader::new(stdout).lines()))
 }
 
+fn remove_codex_session_for_run(
+    sessions: &mut HashMap<i64, CodexSessionEntry>,
+    conversation_id: i64,
+    run_id: &str,
+) -> bool {
+    if sessions.get(&conversation_id).is_some_and(|entry| entry.run_id == run_id) {
+        sessions.remove(&conversation_id);
+        true
+    } else {
+        false
+    }
+}
+
 pub fn spawn_codex_session_task(
     app_handle: tauri::AppHandle,
     conversation_id: i64,
@@ -1746,11 +1967,19 @@ pub fn spawn_codex_session_task(
 ) -> CodexSessionHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
     let run_id = uuid::Uuid::new_v4().to_string();
+    let cancellation = watch::channel(0).0;
+    let task_cancellation = cancellation.clone();
     let failure_context = std::sync::Arc::new(std::sync::Mutex::new(None));
     let task_failure_context = failure_context.clone();
     let task_run_id = run_id.clone();
+    let request_scope = crate::api::ai::agent_driver::approval::AgentRequestScope::native(
+        CODEX_APP_SERVER_API_TYPE, config.instance_id, conversation_id, task_run_id.clone(),
+    );
     tauri::async_runtime::spawn(async move {
         let stderr_buffer = CodexStderrBuffer::default();
+        let mut event_identity = AgentEventIdentity::new(CODEX_APP_SERVER_API_TYPE, conversation_id).with_run(task_run_id.clone());
+        event_identity.instance_id = config.instance_id.map(|id| id.to_string());
+        let mut failure_stage = AgentFailureStage::Process;
         let session_result = run_session(
             app_handle.clone(),
             conversation_id,
@@ -1759,6 +1988,9 @@ pub fn spawn_codex_session_task(
             task_failure_context.clone(),
             &task_run_id,
             stderr_buffer.clone(),
+            task_cancellation,
+            &mut event_identity,
+            &mut failure_stage,
         )
         .await;
         let failed_prompt = {
@@ -1776,9 +2008,17 @@ pub fn spawn_codex_session_task(
             );
             error!(conversation_id, error = %error, "Codex app-server session exited");
             if let Some((message_id, window)) = failed_prompt {
-                emit_codex_failure(&app_handle, conversation_id, message_id, &window, &error);
+                let stderr = stderr_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().cloned().collect::<Vec<_>>().join("\n");
+                let failure = AgentFailure::new(event_identity.clone().with_response_message(message_id), failure_stage, &error)
+                    .with_process_diagnostics(AgentProcessDiagnostics {
+                        stderr: (!stderr.is_empty()).then_some(stderr), exit_status: None, protocol_error: None,
+                        unavailable_reason: Some("The native actor did not return a separate process exit status; its protocol cause and retained stderr are included".into()),
+                    });
+                if let Err(publication_error) = emit_normalized_failure_to_window(&app_handle, &window, failure, "Codex") {
+                    error!(conversation_id, message_id, error = %publication_error, "Codex failure publication incomplete");
+                }
                 if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
-                    manager.clear_focus(&app_handle, conversation_id).await;
+                    manager.clear_agent_focus(&app_handle, &event_identity, false).await;
                 }
             }
         } else if let Some((message_id, window)) = failed_prompt {
@@ -1789,27 +2029,33 @@ pub fn spawn_codex_session_task(
                 &stderr_buffer,
             );
             error!(conversation_id, error, "Codex app-server session stopped with an active prompt");
-            emit_codex_failure(&app_handle, conversation_id, message_id, &window, &error);
+            let stderr = stderr_buffer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().cloned().collect::<Vec<_>>().join("\n");
+                let failure = AgentFailure::new(event_identity.clone().with_response_message(message_id), failure_stage, &error)
+                    .with_process_diagnostics(AgentProcessDiagnostics {
+                        stderr: (!stderr.is_empty()).then_some(stderr), exit_status: None, protocol_error: None,
+                        unavailable_reason: Some("The native actor did not return a separate process exit status; its protocol cause and retained stderr are included".into()),
+                    });
+                if let Err(publication_error) = emit_normalized_failure_to_window(&app_handle, &window, failure, "Codex") {
+                    error!(conversation_id, message_id, error = %publication_error, "Codex failure publication incomplete");
+                }
             if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() {
-                manager.clear_focus(&app_handle, conversation_id).await;
+                manager.clear_agent_focus(&app_handle, &event_identity, false).await;
             }
         }
+        crate::api::ai::agent_driver::approval::cancel_app_requests_for_scope(
+            &app_handle, &request_scope,
+        ).await;
         let removed_current_entry = if let Some(state) = app_handle.try_state::<crate::CodexSessionState>() {
             let mut sessions = state.sessions.lock().await;
-            if sessions.get(&conversation_id).is_some_and(|entry| entry.run_id == task_run_id) {
-                sessions.remove(&conversation_id);
-                true
-            } else {
-                false
-            }
+            remove_codex_session_for_run(&mut sessions, conversation_id, &task_run_id)
         } else {
             false
         };
         if removed_current_entry {
-            emit_session_snapshot(&app_handle, conversation_id, None).await;
+            emit_session_snapshot(&event_identity, &app_handle, conversation_id, None).await;
         }
     });
-    CodexSessionHandle { sender, run_id, failure_context }
+    CodexSessionHandle { sender, run_id, cancellation, failure_context }
 }
 
 async fn run_session(
@@ -1820,92 +2066,51 @@ async fn run_session(
     failure_context: std::sync::Arc<std::sync::Mutex<Option<(i64, tauri::Window)>>>,
     run_id: &str,
     stderr_buffer: CodexStderrBuffer,
+    cancellation: watch::Sender<u64>,
+    event_identity: &mut AgentEventIdentity,
+    failure_stage: &mut AgentFailureStage,
 ) -> Result<(), String> {
+    let mut request_cancellation = CodexRequestCancellation {
+        source_message_id: None,
+        signal: cancellation, generation: 0, run_id: run_id.to_string(), instance_id: config.instance_id,
+    };
     let (_child, mut stdin, mut lines) = spawn_process(&config, stderr_buffer).await?;
     let mut pending_notifications = VecDeque::new();
-    write_frame(
-        &mut stdin,
-        &json_rpc_request(
-            1,
-            "initialize",
-            json!({
-                "clientInfo":{"name":"aipp","title":"AIPP","version":env!("CARGO_PKG_VERSION")},
-                "capabilities":{"experimentalApi":true}
-            }),
-        ),
-    )
-    .await?;
-    read_rpc_response_with_approvals(
-        &app_handle,
-        conversation_id,
-        &mut stdin,
-        &mut lines,
-        1,
-        &mut pending_notifications,
-    )
-    .await?;
-    write_frame(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized"})).await?;
+    let requests = DesktopCodexServerRequests {
+        app_handle: &app_handle, conversation_id, cancellation: Some(&request_cancellation),
+    };
+    *failure_stage = AgentFailureStage::Initialize;
+    initialize_codex_transport(&requests, conversation_id, "aipp", &mut stdin, &mut lines, &mut pending_notifications).await?;
 
+    *failure_stage = AgentFailureStage::Persistence;
     let stored_thread = ConversationDatabase::new(&app_handle)
-        .ok()
-        .and_then(|db| {
-            db.get_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE)
-                .ok()
-                .flatten()
-        });
+        .map_err(|error| format!("Codex restore database unavailable: {error}"))?
+        .get_agent_session_id_for_instance(conversation_id, CODEX_APP_SERVER_API_TYPE, config.instance_id)
+        .map_err(|error| format!("Codex persisted session lookup failed: {error}"))?;
     let mut request_id = 2_u64;
-    let mcp_config_overrides = codex_mcp_bridge_overrides(&app_handle, conversation_id, &config)
+    *failure_stage = AgentFailureStage::Mcp;
+    let mcp_scope = crate::acp_mcp_bridge::provenance::NativeMcpScope::new(conversation_id)?;
+    let mcp_config_overrides = codex_mcp_bridge_overrides(&app_handle, conversation_id, &config, &mcp_scope)
         .await
         .map_err(|error| format!("Codex MCP bridge 初始化失败：{error}"))?;
-    let thread_params = json!({
-        "model": config.model,
-        "reasoningEffort": config.reasoning_effort,
-        "cwd": config.working_directory,
-        "approvalPolicy": config.approval_policy,
-        "sandbox": config.sandbox,
-        "approvalsReviewer": config.approvals_reviewer,
-        "config": mcp_config_overrides.clone(),
-    });
-    let (thread_method, params) = if let Some(thread_id) = stored_thread.as_deref() {
-        // thread/resume 也支持 approvalPolicy/sandbox 覆盖，否则恢复历史线程时新配置不生效
-        ("thread/resume", json!({
-            "threadId": thread_id,
-            "approvalPolicy": config.approval_policy,
-            "sandbox": config.sandbox,
-            "approvalsReviewer": config.approvals_reviewer,
-            "config": mcp_config_overrides,
-        }))
-    } else {
-        ("thread/start", thread_params.clone())
-    };
-    write_frame(&mut stdin, &json_rpc_request(request_id, thread_method, params)).await?;
-    let thread_result = read_rpc_response_with_approvals(
-        &app_handle,
-        conversation_id,
-        &mut stdin,
-        &mut lines,
-        request_id,
-        &mut pending_notifications,
-    )
-    .await
-        .map_err(|error| {
-            if stored_thread.is_some() {
-                format!("Codex thread 恢复失败：{error}")
-            } else {
-                format!("Codex thread 启动失败：{error}")
-            }
-        })?;
+    *failure_stage = if stored_thread.is_some() { AgentFailureStage::Resume } else { AgentFailureStage::Initialize };
+    let thread_result = open_codex_thread(
+        &requests, conversation_id, &config, stored_thread.as_deref(), mcp_config_overrides,
+        request_id, &mut stdin, &mut lines, &mut pending_notifications,
+    ).await?;
     let restored_session_method = stored_thread.as_ref().map(|_| "resume".to_string());
     let connection_event_id = restored_session_method
         .as_ref()
         .map(|method| format!("{run_id}:{method}"));
     let thread_id = thread_id_from_result(&thread_result)
         .ok_or_else(|| format!("Codex thread response missing thread id: {thread_result}"))?;
+    event_identity.native_session_id = Some(thread_id.clone());
+    *failure_stage = AgentFailureStage::Configuration;
     request_id += 1;
     let (model_catalog, supported_efforts) = {
         write_frame(&mut stdin, &json_rpc_request(request_id, "model/list", json!({}))).await?;
         let result = read_rpc_response_with_approvals(
-            &app_handle, conversation_id, &mut stdin, &mut lines, request_id, &mut pending_notifications,
+            &app_handle, conversation_id, &mut stdin, &mut lines, request_id, &mut pending_notifications, Some(&request_cancellation),
         ).await.map_err(|error| format!("Codex model/list 失败：{error}"))?;
         let catalog = model_catalog(&result);
         if catalog.is_empty() {
@@ -1930,14 +2135,13 @@ async fn run_session(
         &mut lines,
         request_id,
         &mut pending_notifications,
+        Some(&request_cancellation),
     )
     .await
     .map_err(|error| format!("Codex collaborationMode/list 失败：{error}"))?;
     let plan_mode_supported = codex_supports_plan_mode(&collaboration_modes);
-    ConversationDatabase::new(&app_handle)
-        .map_err(|error| error.to_string())?
-        .upsert_agent_session_id(conversation_id, CODEX_APP_SERVER_API_TYPE, &thread_id)
-        .map_err(|error| error.to_string())?;
+    // Save only after the first Prompt is submitted: eager startup can finish
+    // before acquisition registers the native handle and provider binding.
     let mut snapshot = CodexConversationSessionState {
         conversation_id,
         agent_kind: CODEX_APP_SERVER_API_TYPE.to_string(),
@@ -2037,14 +2241,14 @@ async fn run_session(
         }
         apply_codex_config_option(&mut snapshot, &model_catalog, "model", model)?;
     }
-    emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+    emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
 
     while let Some(command) = receiver.recv().await {
         match command {
             CodexSessionCommand::SetConfigOption { config_id, value, response } => {
                 match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                     Ok(()) => {
-                        emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                        emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                         let _ = response.send(Ok(()));
                     }
                     Err(error) => {
@@ -2059,7 +2263,21 @@ async fn run_session(
                 info!(conversation_id, run_id, reason, "Codex session shutdown requested");
                 return Ok(());
             }
-            CodexSessionCommand::Prompt { message_id, prompt, window } => {
+            CodexSessionCommand::Prompt { message_id, prompt, window, cancellation_generation } => {
+                let _mcp_prompt = mcp_scope.begin_prompt(message_id)?
+                    .watch_cancellation(request_cancellation.signal.subscribe(), cancellation_generation);
+                event_identity.response_message_id = Some(message_id);
+                event_identity.turn_id = None;
+                *failure_stage = AgentFailureStage::Persistence;
+                {
+                    let state = app_handle.state::<crate::CodexSessionState>();
+                    let sessions = state.sessions.lock().await;
+                    super::agent_driver::persistence::persist_session_id(&app_handle, event_identity,
+                        sessions.get(&conversation_id).map(|entry| entry.run_id.as_str()), &thread_id)?;
+                }
+                *failure_stage = AgentFailureStage::SendPrompt;
+                request_cancellation.generation = cancellation_generation;
+                request_cancellation.source_message_id = Some(message_id);
                 let turn_start_time = chrono::Utc::now();
                 request_id += 1;
                 write_frame(
@@ -2078,6 +2296,7 @@ async fn run_session(
                     &mut lines,
                     request_id,
                     &mut pending_notifications,
+                    Some(&request_cancellation),
                 )
                 .await?;
                 let mut turn_id = turn_result
@@ -2086,8 +2305,10 @@ async fn run_session(
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 snapshot.current_turn_id = turn_id.clone();
+                event_identity.turn_id = turn_id.clone();
+                *failure_stage = AgentFailureStage::Stream;
                 snapshot.has_active_prompt = true;
-                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                 let mut content = String::new();
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
@@ -2119,7 +2340,7 @@ async fn run_session(
                                 Some(CodexSessionCommand::SetConfigOption { config_id, value, response }) => {
                                     match apply_codex_config_option(&mut snapshot, &model_catalog, &config_id, value) {
                                         Ok(()) => {
-                                            emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                                            emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                                             let _ = response.send(Ok(()));
                                         }
                                         Err(error) => {
@@ -2159,6 +2380,7 @@ async fn run_session(
                             conversation_id,
                             &mut stdin,
                             &frame,
+                            Some(&request_cancellation),
                         )
                         .await? {
                             warn!(
@@ -2178,12 +2400,17 @@ async fn run_session(
                         }
                         continue;
                     }
+                    if !codex_notification_matches_turn(&frame, &thread_id, turn_id.as_deref()) {
+                        debug!(conversation_id, thread_id, turn_id = ?turn_id, "Ignoring Codex notification for another thread or turn");
+                        continue;
+                    }
                     let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
                     let params = frame.get("params").cloned().unwrap_or(Value::Null);
                     match method {
                                 "turn/started" => {
                                     turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string).or(turn_id);
                                     snapshot.current_turn_id = turn_id.clone();
+                                    event_identity.turn_id = turn_id.clone();
                                 }
                                 "item/agentMessage/delta" => {
                                     if let Some(delta) = params.get("delta").and_then(Value::as_str) {
@@ -2193,8 +2420,8 @@ async fn run_session(
                                         content.push_str(delta);
                                         persist_response(&app_handle, message_id, &content, false, None);
                                         let event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: false, token_count: None, input_token_count: None, output_token_count: None, ttft_ms: None, tps: None }).unwrap() };
-                                        let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
-                                        if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.set_assistant_streaming(&app_handle, conversation_id, message_id).await; }
+                                        let _ = emit_to_window(&window, event_identity.clone(), event);
+                                        if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.set_agent_streaming(&app_handle, &event_identity, message_id).await; }
                                     }
                                 }
                                 "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
@@ -2223,7 +2450,7 @@ async fn run_session(
                                                     r#type: "message_add".to_string(),
                                                     data: json!({"message_id":message.id,"message_type":"reasoning"}),
                                                 };
-                                                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), add_event);
+                                                let _ = emit_to_window(&window, event_identity.clone(), add_event);
                                             }
                                         }
                                         if let Some(reasoning_id) = reasoning_message_id {
@@ -2242,7 +2469,7 @@ async fn run_session(
                                                     tps: None,
                                                 }).unwrap(),
                                             };
-                                            let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), event);
+                                            let _ = emit_to_window(&window, event_identity.clone(), event);
                                         }
                                     }
                                 }
@@ -2256,7 +2483,7 @@ async fn run_session(
                                                 let authoritative_text = item.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
                                                 if !authoritative_text.is_empty() {
                                                     if !plan_messages.contains_key(&item_id) {
-                                                        let plan_message = AgentPlanMessage::create(
+                                                        let plan_message = AgentPlanMessage::create_with_identity(
                                                             &app_handle,
                                                             &window,
                                                             conversation_id,
@@ -2264,8 +2491,7 @@ async fn run_session(
                                                             CODEX_APP_SERVER_API_TYPE,
                                                             Some(&thread_id),
                                                             turn_id.as_deref(),
-                                                            Some(&item_id),
-                                                        )?;
+                                                            Some(&item_id), event_identity.clone())?;
                                                         plan_messages.insert(item_id.clone(), plan_message);
                                                     }
                                                     if let Some(plan_message) = plan_messages.get_mut(&item_id) {
@@ -2281,7 +2507,7 @@ async fn run_session(
                                             }
                                         } else {
                                             let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                            emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
+                                            emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
                                         }
                                     }
                                 }
@@ -2291,7 +2517,7 @@ async fn run_session(
                                         params.get("delta").and_then(Value::as_str),
                                     ) {
                                         if !plan_messages.contains_key(item_id) {
-                                            let plan_message = AgentPlanMessage::create(
+                                            let plan_message = AgentPlanMessage::create_with_identity(
                                                 &app_handle,
                                                 &window,
                                                 conversation_id,
@@ -2299,8 +2525,7 @@ async fn run_session(
                                                 CODEX_APP_SERVER_API_TYPE,
                                                 Some(&thread_id),
                                                 params.get("turnId").and_then(Value::as_str).or(turn_id.as_deref()),
-                                                Some(item_id),
-                                            )?;
+                                                Some(item_id), event_identity.clone())?;
                                             plan_messages.insert(item_id.to_string(), plan_message);
                                         }
                                         if let Some(plan_message) = plan_messages.get_mut(item_id) {
@@ -2312,7 +2537,7 @@ async fn run_session(
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
                                     }
                                 }
                                 "turn/plan/updated" => {
@@ -2321,7 +2546,7 @@ async fn run_session(
                                         .get("explanation")
                                         .and_then(Value::as_str)
                                         .map(str::to_string);
-                                    emit_session_snapshot(
+                                    emit_session_snapshot(event_identity,
                                         &app_handle,
                                         conversation_id,
                                         Some(snapshot.clone()),
@@ -2364,7 +2589,7 @@ async fn run_session(
                                     if let Some(item) = generic_item_notification(method, &params) {
                                         sequence += 1;
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                        emit_activity(&window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
                                     } else if !method.is_empty() {
                                         warn!(conversation_id, method, "Unhandled Codex notification");
                                     }
@@ -2392,8 +2617,8 @@ async fn run_session(
                 persist_response(&app_handle, message_id, &content, true, turn_usage);
                 if let Some(reasoning_id) = reasoning_message_id {
                     persist_codex_reasoning(&app_handle, reasoning_id, &reasoning);
-                    let _ = window.emit(
-                        format!("conversation_event_{conversation_id}").as_str(),
+                    let _ = emit_to_window(
+                        &window, event_identity.clone(),
                         ConversationEvent {
                             r#type: "message_update".to_string(),
                             data: serde_json::to_value(MessageUpdateEvent {
@@ -2419,19 +2644,19 @@ async fn run_session(
                     (output_tokens > 0 && duration_ms > 0).then(|| output_tokens as f64 * 1000.0 / duration_ms as f64)
                 });
                 let done_event = ConversationEvent { r#type: "message_update".to_string(), data: serde_json::to_value(MessageUpdateEvent { message_id, message_type: "response".to_string(), content: content.clone(), is_done: true, token_count: Some(turn_usage.map(|usage| usage.total_tokens).unwrap_or(estimated_output_tokens)), input_token_count: turn_usage.map(|usage| usage.input_tokens), output_token_count: Some(output_tokens), ttft_ms, tps }).unwrap() };
-                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), done_event);
+                let _ = emit_to_window(&window, event_identity.clone(), done_event);
                 let complete_event = ConversationEvent { r#type: "stream_complete".to_string(), data: json!({"conversation_id":conversation_id,"response_message_id":message_id,"reasoning_message_id":reasoning_message_id,"has_response":!content.is_empty(),"has_reasoning":!reasoning.is_empty(),"has_plan":!plan_messages.is_empty(),"response_length":content.len(),"reasoning_length":reasoning.len()}) };
-                let _ = window.emit(format!("conversation_event_{conversation_id}").as_str(), complete_event);
+                let _ = emit_to_window(&window, event_identity.clone(), complete_event);
                 let success_content = if content.is_empty() {
                     plan_messages.values().max_by_key(|plan| plan.message_id).map(|plan| plan.content.as_str()).unwrap_or_default()
                 } else {
                     content.as_str()
                 };
-                handle_agent_success(&app_handle, &window, conversation_id, success_content, AgentKind::Codex).await;
-                if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_focus(&app_handle, conversation_id).await; }
+                handle_agent_success(&app_handle, &window, conversation_id, success_content, message_id, AgentKind::Codex).await;
+                if let Some(manager) = app_handle.try_state::<ConversationActivityManager>() { manager.clear_agent_focus(&app_handle, &event_identity, false).await; }
                 snapshot.current_turn_id = None;
                 snapshot.has_active_prompt = false;
-                emit_session_snapshot(&app_handle, conversation_id, Some(snapshot.clone())).await;
+                emit_session_snapshot(event_identity, &app_handle, conversation_id, Some(snapshot.clone())).await;
                 failure_context
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2524,6 +2749,7 @@ mod tests {
         let handle = CodexSessionHandle {
             sender,
             run_id: "old-run".to_string(),
+            cancellation: watch::channel(0).0,
             failure_context: std::sync::Arc::new(std::sync::Mutex::new(None)),
         };
         handle.shutdown("auto-connect attempted replacement".to_string());
@@ -2952,6 +3178,7 @@ mod tests {
 
     fn codex_test_config() -> CodexAppServerConfig {
         CodexAppServerConfig {
+            instance_id: None,
             cli_command: "codex".to_string(),
             working_directory: PathBuf::from("/tmp/work"),
             env_vars: HashMap::new(),
@@ -3032,3 +3259,15 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "codex_app_server_lifecycle_tests.rs"]
+mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "codex_app_server_permission_tests.rs"]
+mod permission_tests;
+
+#[cfg(all(test, unix))]
+#[path = "codex_app_server_protocol_tests.rs"]
+mod protocol_tests;

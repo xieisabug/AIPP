@@ -112,6 +112,20 @@ impl PermissionManager {
     }
 
     /// Get assistant_id from conversation
+    /// 是否为管家会话（总管家主会话、成员联系人会话、管家任务会话）。读取失败按非管家处理。
+    fn is_butler_conversation(&self, conversation_id: Option<i64>) -> bool {
+        let kind = conversation_id.and_then(|id| {
+            ConversationDatabase::new(&self.app_handle)
+                .ok()?
+                .conversation_repo()
+                .ok()?
+                .read(id)
+                .ok()?
+                .map(|conversation| conversation.conversation_kind)
+        });
+        butler_trust_applies(kind.as_deref())
+    }
+
     fn get_assistant_id_from_conversation(&self, conversation_id: i64) -> Option<i64> {
         let conversation_db = ConversationDatabase::new(&self.app_handle).ok()?;
         conversation_db.conversation_repo().ok()?.read(conversation_id).ok()??.assistant_id
@@ -555,6 +569,27 @@ impl PermissionManager {
         path: &str,
         conversation_id: Option<i64>,
     ) -> Result<bool, String> {
+        let guard = crate::mcp::builtin_mcp::superadmin::approval::operation_binding(
+            &self.app_handle, conversation_id, operation, path,
+        )?;
+        // Keep the guard alive across every await, including workspace checks and
+        // the permission dialog. A paused or superseded turn must not execute.
+        let allowed = self.check_permission_inner(operation_state, operation, path, conversation_id, guard.as_ref()).await?;
+        if let Some((frozen, request)) = guard.as_ref() {
+            crate::mcp::builtin_mcp::superadmin::approval::validate(&self.app_handle, frozen, request)?;
+        }
+        Ok(allowed)
+    }
+
+    async fn check_permission_inner(
+        &self,
+        operation_state: &OperationState,
+        operation: &str,
+        path: &str,
+        conversation_id: Option<i64>,
+        guard: Option<&(crate::mcp::builtin_mcp::superadmin::approval::ApprovalBinding,
+            crate::mcp::builtin_mcp::superadmin::types::ExecuteRequest)>,
+    ) -> Result<bool, String> {
         // 1. 对会话专属 Artifact 工作区自动放行，避免每次弹窗确认
         if self.is_conversation_artifact_workspace_path(path, conversation_id) {
             debug!(
@@ -565,8 +600,10 @@ impl PermissionManager {
             return Ok(true);
         }
 
-        // 2. 总管家可信工作区自动放行
-        if self.is_butler_trusted_workspace(path).await {
+        // 2. 总管家可信工作区自动放行：只对管家会话生效，普通聊天不继承管家权限
+        if self.is_butler_conversation(conversation_id)
+            && self.is_butler_trusted_workspace(path).await
+        {
             debug!(
                 path = %path,
                 "Path auto-allowed for butler trusted workspace"
@@ -616,6 +653,11 @@ impl PermissionManager {
         let decision =
             self.request_permission(operation_state, operation, path, conversation_id).await?;
 
+        // Recheck before processing the decision, especially before saving a
+        // broader permission. An expired decision must have no lasting effects.
+        if let Some((frozen, request)) = guard {
+            crate::mcp::builtin_mcp::superadmin::approval::validate(&self.app_handle, frozen, request)?;
+        }
         match decision {
             PermissionDecision::Allow => Ok(true),
             PermissionDecision::AllowForConversation => {
@@ -652,10 +694,25 @@ impl PermissionManager {
     }
 }
 
+/// 管家可信工作区只授予管家会话；无会话或普通聊天不继承。
+pub(crate) fn butler_trust_applies(conversation_kind: Option<&str>) -> bool {
+    conversation_kind.is_some_and(crate::mcp::builtin_mcp::templates::is_butler_conversation_kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::butler_api::parse_trusted_workspaces;
+
+    #[test]
+    fn test_butler_trust_does_not_leak_to_normal_chat() {
+        assert!(!butler_trust_applies(None));
+        assert!(!butler_trust_applies(Some("normal")));
+        assert!(!butler_trust_applies(Some("")));
+        for kind in ["butler_main", "butler_contact", "butler_task"] {
+            assert!(butler_trust_applies(Some(kind)), "{kind}");
+        }
+    }
 
     fn extract_trusted_paths(raw: &str) -> Vec<String> {
         parse_trusted_workspaces(raw).into_iter().map(|workspace| workspace.path).collect()

@@ -1,11 +1,13 @@
 /* Platform-scoped: tablet landscape follows the same mobile form contract. */
 .aipp-mobile-platform [data-slot="dialog-content"] {
-    top: 0; left: 0;
+    top: var(--aipp-vv-offset-top, 0px); left: 0;
     /* Desktop centering / enter animations must not translate a fullscreen panel. */
     --tw-translate-x: 0; --tw-translate-y: 0;
     transform: none !important; translate: none !important; animation: none;
     /* Desktop min widths (e.g. min-w-xl) would overflow a 360px screen. */
-    width: 100%; min-width: 0; max-width: 100%; height: 100dvh; max-height: 100dvh;
+    /* 100dvh does not shrink with the IME; follow visualViewport so confirm stays above the keyboard. */
+    width: 100%; min-width: 0; max-width: 100%;
+    height: var(--aipp-vv-height, 100dvh); max-height: var(--aipp-vv-height, 100dvh);
     border-radius: 0; overflow-y: auto;
     padding-top: max(24px, env(safe-area-inset-top));
     padding-bottom: max(1rem, env(safe-area-inset-bottom));
@@ -26,6 +28,44 @@
 }
 .aipp-mobile-platform [data-slot="dialog-footer"] {
     position: sticky; bottom: 0; background: var(--background); padding-top: .75rem;
+}
+/* Nested footers (inside <form>) sit below the fold when the IME is open. Pin them. FormDialog already grids its footer.
+   The dialog shell must not scroll: an absolute footer inside an overflow:auto dialog scrolls away with the fields.
+   Direct content (the form, or the body between header and footer) scrolls above the reserved footer. */
+.aipp-mobile-platform [data-slot="dialog-content"]:not([data-aipp-slot="form-dialog"]):has([data-slot="dialog-footer"]) {
+    display: flex; flex-direction: column; overflow: hidden;
+    padding-bottom: 8.5rem;
+}
+.aipp-mobile-platform [data-slot="dialog-content"]:not([data-aipp-slot="form-dialog"]):has([data-slot="dialog-footer"]) > [data-slot="dialog-header"] {
+    flex: none;
+}
+.aipp-mobile-platform [data-slot="dialog-content"]:not([data-aipp-slot="form-dialog"]):has([data-slot="dialog-footer"]) > :not([data-slot="dialog-header"]):not([data-slot="dialog-footer"]):not([data-slot="dialog-close"]) {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+}
+.aipp-mobile-platform [data-slot="dialog-content"]:not([data-aipp-slot="form-dialog"]) [data-slot="dialog-footer"] {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 2; margin: 0;
+    background: var(--background); border-top: 1px solid var(--border);
+    padding: .75rem max(1rem, env(safe-area-inset-right)) max(.75rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+}
+.aipp-mobile-platform [data-slot="dialog-content"] textarea {
+    max-height: 9rem;
+}
+/* Custom centered modals (import / password / title / share) and the fullscreen message editor. */
+.aipp-mobile-platform [data-aipp-slot="legacy-modal"] { align-items: stretch; justify-content: flex-start; padding: 0; }
+.aipp-mobile-platform [data-aipp-slot="legacy-modal-panel"] {
+    width: 100%; max-width: 100%; margin-top: var(--aipp-vv-offset-top, 0px);
+    height: var(--aipp-vv-height, 100dvh); max-height: var(--aipp-vv-height, 100dvh);
+    border-radius: 0; display: flex; flex-direction: column; overflow: hidden;
+}
+.aipp-mobile-platform [data-aipp-slot="legacy-modal-body"] { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.aipp-mobile-platform [data-aipp-slot="legacy-modal-actions"] {
+    flex-shrink: 0; border-top: 1px solid var(--border); background: var(--background);
+    padding-bottom: max(.75rem, env(safe-area-inset-bottom));
+}
+.aipp-mobile-platform [data-mobile-panel] {
+    top: var(--aipp-vv-offset-top, 0px) !important;
+    height: var(--aipp-vv-height, 100dvh) !important;
+    bottom: auto !important;
 }
 /* Single-column forms, but keep segmented tab lists (grid-cols-2/3) horizontal. */
 .aipp-mobile-platform [data-aipp-window="config"] .grid:not([role="tablist"]):not([data-slot="tabs-list"]) {
@@ -62,6 +102,18 @@
 
 /* The mobile chat fills the shell, including when the IME shrinks its visual viewport. */
 [data-aipp-mobile-shell] [data-aipp-window='chat_ui'] { height: 100%; }
+
+/* Landscape IME: the shell is already below the status bar, so drop the extra top inset. */
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] [data-aipp-slot="chat-mobile-header"] {
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+/* 12px 上下留白会把滚动区撑住，横屏可视高度不够时把输入区顶进键盘。 */
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] [data-aipp-slot="chat-conversation-scroll"] {
+    padding-top: 0;
+    padding-bottom: 0;
+}
 
 /* Settings forms on phones: drop the desktop card chrome so fields use the full width. */
 .aipp-mobile-platform [data-aipp-window="config"] [data-aipp-config-section] {

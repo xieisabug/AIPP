@@ -1,5 +1,5 @@
 import { ButlerResultsOnlyContext } from "../butler/ButlerPresentationContext";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { Message } from "@/data/Conversation";
 import { StreamRetryAttemptSections } from "./StreamRetryAttemptSections";
@@ -107,5 +107,36 @@ describe("StreamRetryAttemptSections", () => {
         for (const button of copyButtons) {
             expect(button).toHaveClass("min-h-11", "min-w-11", "h-11", "w-11");
         }
+    });
+
+    it("shows the full interruption diagnostic on tap and copies it on its own", async () => {
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+        const longError = "upstream closed connection: " + "x".repeat(300) + " [request_id=abc]";
+        const messages = [
+            makeMessage(1, "partial-one", JSON.stringify({
+                stream_retry: { session_id: "s1", attempt: 1, status: "interrupted", error: longError },
+            })),
+            makeMessage(2, "final-two", JSON.stringify({
+                stream_retry: { session_id: "s1", attempt: 2, status: "completed" },
+            })),
+        ];
+        render(
+            <StreamRetryAttemptSections
+                messages={messages}
+                renderMessages={(chunk) => <div>{chunk.map((message) => message.content).join("|")}</div>}
+            />,
+        );
+
+        // 标题摘要不再依赖 title 悬停
+        expect(document.querySelector(`[title]`)).toBeNull();
+
+        fireEvent.click(screen.getByText("尝试 1"));
+        const diagnostic = document.querySelector("[data-stream-retry-error]");
+        expect(diagnostic).not.toBeNull();
+        expect(diagnostic).toHaveTextContent("[request_id=abc]");
+
+        fireEvent.click(screen.getByRole("button", { name: "复制中断原因" }));
+        expect(writeText).toHaveBeenCalledWith(longError);
     });
 });

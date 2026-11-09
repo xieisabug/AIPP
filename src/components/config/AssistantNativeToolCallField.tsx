@@ -11,7 +11,7 @@ import {
 } from "../ui/tooltip";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 
-const NATIVE_TOOLCALL_HINT = "如果模型支持并且模型能力够强，推荐使用原生Toolcall调用工具更加准确";
+const NATIVE_TOOLCALL_HINT = "如果模型支持且能力足够，推荐使用原生工具调用以提高准确性";
 
 interface AssistantNativeToolCallFieldProps {
     assistantId: number;
@@ -55,11 +55,11 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
             });
 
             setUseNativeToolCall(checked);
-            toast.success(`原生ToolCall已${checked ? '启用' : '禁用'}`);
+            toast.success(`原生工具调用已${checked ? '启用' : '禁用'}`);
             onConfigChange?.();
         } catch (error) {
             console.error('Failed to update native toolcall config:', error);
-            toast.error('更新原生ToolCall配置失败: ' + error);
+            toast.error('更新原生工具调用配置失败: ' + error);
         }
     }, [assistantId, onConfigChange]);
 
@@ -67,7 +67,7 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
         return (
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-foreground">使用原生ToolCall</span>
+                    <span className="text-sm font-medium text-foreground">使用原生工具调用</span>
                 </div>
                 <div className="h-6 w-11 bg-muted rounded-full animate-pulse" />
             </div>
@@ -78,7 +78,7 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
         <div className="space-y-2" data-aipp-slot="assistant-native-toolcall">
             <div className="flex w-full min-w-0 items-center justify-between gap-3">
                 <div className="flex min-w-0 flex-1 items-center gap-2">
-                    <span className="text-sm font-medium text-foreground break-words">使用原生ToolCall</span>
+                    <span className="text-sm font-medium text-foreground break-words">使用原生工具调用</span>
                     {!isMobilePlatform && (
                         <TooltipProvider>
                             <Tooltip>
@@ -99,7 +99,7 @@ const AssistantNativeToolCallField: React.FC<AssistantNativeToolCallFieldProps> 
                 />
             </div>
             <p className="text-xs text-muted-foreground">
-                {useNativeToolCall ? '已启用原生ToolCall调用' : '使用prompt方式调用工具'}
+                {useNativeToolCall ? '已启用原生工具调用调用' : '使用提示词方式调用工具'}
             </p>
             {isMobilePlatform && <p className="text-xs text-muted-foreground">{NATIVE_TOOLCALL_HINT}</p>}
         </div>

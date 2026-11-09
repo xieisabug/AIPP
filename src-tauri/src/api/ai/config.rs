@@ -164,6 +164,18 @@ pub fn build_openai_prompt_cache_key(context: &OpenAiCacheContext) -> String {
     )
 }
 
+// Match canonical GPT version numbers, including dated and namespaced model IDs.
+// Unknown/custom aliases retain the existing legacy retention behavior.
+fn supports_openai_prompt_cache_ttl(model_code: &str) -> bool {
+    let normalized = model_code.trim().to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let Some(version) = name.strip_prefix("gpt-") else { return false; };
+    let mut parts = version.split(['.', '-']);
+    let Some(major) = parts.next().and_then(|part| part.parse::<u32>().ok()) else { return false; };
+    let minor = parts.next().and_then(|part| part.parse::<u32>().ok()).unwrap_or(0);
+    major > 5 || (major == 5 && minor >= 6)
+}
+
 fn apply_openai_prompt_cache_options(
     mut chat_options: ChatOptions,
     config_feature_map: &HashMap<String, HashMap<String, FeatureConfig>>,
@@ -177,10 +189,19 @@ fn apply_openai_prompt_cache_options(
 
     chat_options = chat_options.with_prompt_cache_key(build_openai_prompt_cache_key(context));
 
+    if supports_openai_prompt_cache_ttl(&context.model_code) {
+        let ttl = network_config_value(config_feature_map, "openai_prompt_cache_ttl")
+            .unwrap_or("30m");
+        // The adapter rejects invalid values before transport, without substituting a TTL.
+        return chat_options.with_prompt_cache_ttl(ttl.trim());
+    }
+
     let retention =
         network_config_value(config_feature_map, "openai_prompt_cache_retention").unwrap_or("24h");
     if retention.trim().eq_ignore_ascii_case("24h") {
         chat_options = chat_options.with_cache_control(CacheControl::Ephemeral24h);
+    } else if retention.trim().eq_ignore_ascii_case("in_memory") {
+        chat_options = chat_options.with_cache_control(CacheControl::Memory);
     }
 
     chat_options

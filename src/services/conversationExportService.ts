@@ -53,7 +53,7 @@ export const conversationExportService = {
                 }),
                 invoke<MCPToolCall[]>("get_mcp_tool_calls_by_conversation", {
                     conversationId: parseInt(conversationId),
-                }).catch(() => []), // 如果没有工具调用，返回空数组
+                }), // Empty results are valid; read failures must abort instead of silently dropping tools.
             ]);
             const exportMessages = conversation.messages;
             const messageIdSet = new Set(exportMessages.map((msg) => msg.id));

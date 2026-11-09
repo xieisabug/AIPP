@@ -29,12 +29,34 @@ describe("Butler exchange context", () => {
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
         expect(view.container).not.toHaveTextContent(post.text);
     });
+    it("should collapse a reply the assistant already gave the user directly when viewed by the requester", () => {
+        const answered = {...post,task_reply:true,to_user:true,text:"早安！祝你今天顺利。"};
+        const view = render(<ButlerExchangeRow conversationId={10} posts={[answered]}/>);
+        expect(view.container).not.toHaveTextContent(answered.text);
+        expect(screen.getByRole("button",{name:/审稿已直接答复你/})).toBeVisible();
+        expect(view.container.querySelector('[data-aipp-slot="butler-direct-report"]')).toBeNull();
+    });
     it("should show a direct report in full under the reporting assistant's name", () => {
         const view = render(<ButlerExchangeRow conversationId={10} posts={[{...post,direct:true,text:"核查结论：未发现 6.2"}]}/>);
         expect(view.container).toHaveTextContent("审稿");
-        expect(view.container).toHaveTextContent("直接汇报");
+        expect(view.container).toHaveTextContent("直接答复");
         expect(view.container).toHaveTextContent("核查结论：未发现 6.2");
         expect(screen.getByRole("button",{name:"查看往来"})).toBeVisible();
+    });
+    it("should show a task delivered in the executor's own chat under the executor's identity", () => {
+        const delivered = {...post,outgoing:true,peer:"总管家",task_id:30,task_reply:true,direct:true,
+            speaker:"问候助手",speaker_assistant:2,text:"早安！"};
+        const view = render(<ButlerExchangeRow conversationId={20} posts={[delivered]}/>);
+        expect(view.container).toHaveTextContent("问候助手");
+        expect(view.container).toHaveTextContent("交付任务结果");
+        expect(view.container).not.toHaveTextContent("总管家");
+    });
+    it("should tell handed-over work apart from internal help requests", () => {
+        const handed = render(<ButlerExchangeRow conversationId={20} posts={[{...post,peer:"总管家",to_user:true}]}/>);
+        expect(handed.container).toHaveTextContent("接手工作，来自");
+        handed.unmount();
+        const help = render(<ButlerExchangeRow conversationId={20} posts={[{...post,peer:"写作",to_user:false}]}/>);
+        expect(help.container).toHaveTextContent("协助请求来自");
     });
     it("should keep technical failure details out of both the receipt and the dialog", async () => {
         mockInvokeHandler("get_butler_exchange_context", () => [{prompt:"问早安",status:"failed",messages:[]}]);
@@ -44,4 +66,10 @@ describe("Butler exchange context", () => {
         expect(await screen.findByText("本次对话未完成")).toBeVisible();
         expect(screen.queryByText(/401/)).not.toBeInTheDocument();
     });
+    it("keeps direct failure delivery visible rather than hiding it in an exchange", () => {
+        const view=render(<ButlerExchangeRow conversationId={20} posts={[{...post,direct:true,task_id:30,status:"failed",text:"",error:"资料无法读取，请补充来源"}]}/>);
+        expect(view.container).toHaveTextContent("资料无法读取，请补充来源");
+        expect(view.container.querySelector('[data-aipp-slot="butler-direct-report"]')).toBeTruthy();
+    });
+
 });

@@ -9,6 +9,7 @@ use crate::api::ai::events::{
     ConversationRuntimePhase, ConversationRuntimeState, ConversationShineState,
     RuntimeStateSnapshotEvent, ShineStateSnapshotEvent, ShineTarget,
 };
+use crate::api::ai::agent_driver::{events::AgentEventIdentity, lifecycle::publish_if_current_binding};
 use crate::utils::window_utils::emit_conversation_list_activity;
 use crate::db::mcp_db::MCPDatabase;
 
@@ -70,6 +71,17 @@ impl ConversationActivity {
 
     fn finish_mcp_call(&mut self, call_id: i64) {
         self.active_mcp_calls.retain(|call| call.call_id != call_id);
+    }
+
+    fn clear_message_fields(&mut self, active_mcp_calls: Vec<ActiveMcpCall>) {
+        self.pending_user_message_id = None;
+        self.streaming_message_id = None;
+        self.active_mcp_calls = active_mcp_calls;
+    }
+
+    fn set_streaming_message(&mut self, message_id: i64) {
+        self.pending_user_message_id = None;
+        self.streaming_message_id = Some(message_id);
     }
 }
 
@@ -347,6 +359,33 @@ impl ConversationActivityManager {
         }
     }
 
+    /// Native actor completion may only clear the currently bound driver's run.
+    /// Check under the activity write lock, then mutate under the synchronous
+    /// binding lock. Do not acquire the conversation gate here: ACP warmup can
+    /// hold it while awaiting this actor. Same-run turn epochs remain separate.
+    pub(crate) async fn clear_agent_focus(
+        &self,
+        app_handle: &tauri::AppHandle,
+        identity: &AgentEventIdentity,
+        keep_mcp: bool,
+    ) {
+        let conversation_id = identity.conversation_id;
+        let active_calls = if keep_mcp {
+            Self::fetch_active_mcp_calls(app_handle, conversation_id)
+        } else {
+            Vec::new()
+        };
+        self.update_state(app_handle, conversation_id, |activity| {
+            if let Err(error) = publish_if_current_binding(
+                app_handle, conversation_id, &identity.driver_id, identity.run_id.as_deref(),
+                || activity.clear_message_fields(active_calls),
+            ) {
+                warn!(conversation_id, driver_id = %identity.driver_id, run_id = ?identity.run_id, error = %error,
+                    "Agent activity clear rejected because binding verification failed");
+            }
+        }).await;
+    }
+
     /// 清除所有活动焦点（设置为 None）
     pub async fn clear_focus(&self, app_handle: &tauri::AppHandle, conversation_id: i64) {
         self.update_state(app_handle, conversation_id, |activity| {
@@ -387,6 +426,26 @@ impl ConversationActivityManager {
             activity.active_mcp_calls.clear();
         })
         .await;
+    }
+
+    /// An old native delta must not replace the current run's pending/streaming
+    /// focus. The activity lock is held before checking and mutating the binding.
+    pub(crate) async fn set_agent_streaming(
+        &self,
+        app_handle: &tauri::AppHandle,
+        identity: &AgentEventIdentity,
+        message_id: i64,
+    ) {
+        let conversation_id = identity.conversation_id;
+        self.update_state(app_handle, conversation_id, |activity| {
+            if let Err(error) = publish_if_current_binding(
+                app_handle, conversation_id, &identity.driver_id, identity.run_id.as_deref(),
+                || activity.set_streaming_message(message_id),
+            ) {
+                warn!(conversation_id, driver_id = %identity.driver_id, run_id = ?identity.run_id, error = %error,
+                    "Agent streaming focus rejected because binding verification failed");
+            }
+        }).await;
     }
 
     /// 设置 Assistant 消息流式输出状态
@@ -581,3 +640,7 @@ mod tests {
         assert_eq!(shine.primary_target, ShineTarget::None);
     }
 }
+
+#[cfg(test)]
+#[path = "activity_state_tests.rs"]
+mod agent_activity_tests;

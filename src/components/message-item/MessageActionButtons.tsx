@@ -7,7 +7,7 @@ import { useIsMobilePlatform } from "../../hooks/use-platform";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 
-interface MessageActionButtonsProps {
+export interface MessageActionButtonsProps {
     messageId: number;
     messageType: string;
     isUserMessage: boolean;

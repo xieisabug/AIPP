@@ -77,6 +77,7 @@ export interface QueuedConversationMessage {
 
 // 流式事件数据类型
 export interface StreamEvent {
+    end_reason?: string;
     message_id: number;
     message_type: 'reasoning' | 'response' | 'error';
     content: string;
@@ -105,6 +106,7 @@ export interface MessageAddEvent {
 }
 
 export interface MessageUpdateEvent {
+    end_reason?: string;
     message_id: number;
     message_type: string;
     content: string;
@@ -276,7 +278,58 @@ export interface AcpAvailableCommand {
     input_hint?: string | null;
 }
 
+export type AgentCapabilitySupport = "supported" | "unsupported" | "unknown";
+export type AgentCapabilitySource = "adapter" | "session" | "unknown";
+
+export interface AgentCapability {
+    support: AgentCapabilitySupport;
+    source: AgentCapabilitySource;
+}
+
+/** Local implementation support is distinct from negotiated session support. */
+export interface AgentCapabilityDeclaration {
+    send_prompt: boolean;
+    cancel_prompt: boolean;
+    set_config_option: boolean;
+    respond_permission: boolean | null;
+    attachment_input: "structured" | "prompt_text";
+    image_input: boolean | null;
+    audio_input: boolean | null;
+    embedded_context_input: boolean | null;
+    load_session: boolean | null;
+    resume_session: boolean | null;
+    config_catalog_complete: boolean;
+}
+
+export interface AgentCapabilities {
+    schema_version: number;
+    driver_id: string;
+    discovery: "baseline" | "session";
+    adapter: AgentCapabilityDeclaration;
+    operations: {
+        send_prompt: AgentCapability;
+        cancel_prompt: AgentCapability;
+        set_config_option: AgentCapability;
+        respond_permission: AgentCapability;
+    };
+    attachments: {
+        input: "structured" | "prompt_text";
+        structured: AgentCapability;
+        image: AgentCapability;
+        audio: AgentCapability;
+        embedded_context: AgentCapability;
+    };
+    sessions: { load: AgentCapability; resume: AgentCapability };
+    configuration: {
+        source: AgentCapabilitySource;
+        complete: boolean;
+        options: AcpSessionConfigOption[];
+    };
+}
+
 export interface AcpConversationSessionState {
+    /** Optional for persisted events and older backends; absence is unknown. */
+    agent_capabilities?: AgentCapabilities | null;
     conversation_id: number;
     agent_kind?: "acp" | "codex_app_server" | string;
     session_id?: string | null;
@@ -358,6 +411,20 @@ export interface ConversationTokenStats {
     // 时间戳信息
     start_time?: Date | null;
     finish_time?: Date | null;
+    /** 已计入上述总量的助手协作用量（管家任务、Bot 间协作） */
+    delegated?: DelegatedTokenUsage;
+}
+
+export interface DelegatedTokenUsage {
+    run_count: number;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    thought_tokens: number;
+    cached_input_tokens: number;
+    cached_read_tokens: number;
+    cached_write_tokens: number;
+    estimated_message_count: number;
 }
 
 export interface ModelTokenBreakdown {
@@ -449,4 +516,12 @@ export interface ConversationSearchHit {
     created_time: Date;
     snippet: string;
     hit_type: "title" | "summary" | "message";
+    /** 发言者标签（管家搜索提供，如“用户”“审稿”）；缺省时按 message_type 展示 */
+    speaker?: string;
+}
+
+/** 管家窗口搜索命中：在通用命中基础上携带跳转所需的会话类型与助手 */
+export interface ButlerMessageSearchHit extends ConversationSearchHit {
+    conversation_kind: "butler_main" | "butler_contact" | "butler_task";
+    assistant_id: number | null;
 }

@@ -78,6 +78,23 @@ pub fn start_scheduler(app_handle: tauri::AppHandle, scheduler_state: SchedulerS
 
     // 使用 tauri::async_runtime::spawn 确保在 Tauri 的异步运行时中执行
     tauri::async_runtime::spawn(async move {
+        // 先完成上次退出遗留运行的收尾与补报登记，再开始调度新任务，避免两者交错。
+        // 补报本身在后台排队执行，不阻塞调度。
+        loop {
+            match crate::api::scheduled_task_api::recover_interrupted_scheduled_runs(&app_handle).await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!(count, "已收尾上次退出时未结束的定时任务运行");
+                    }
+                    break;
+                }
+                Err(e) => {
+                    error!(error = %e, "收尾中断的定时任务运行失败，保留待恢复状态并重试");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+
         if let Err(e) =
             scheduled_task::run_scheduled_tasks(app_handle.clone(), &scheduler_state).await
         {

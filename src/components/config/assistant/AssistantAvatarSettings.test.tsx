@@ -18,7 +18,7 @@ describe("AssistantAvatarSettings", () => {
         await waitFor(() => expect(screen.getByRole("button", { name: "编辑头像" })).toBeEnabled());
         fireEvent.click(screen.getByRole("button", { name: "编辑头像" }));
         expect(screen.queryByLabelText("助手名称")).not.toBeInTheDocument();
-        fireEvent.click(screen.getByRole("button", { name: "佩戴眼镜" }));
+        fireEvent.click(screen.getByRole("button", { name: "脸部：圆框眼镜" }));
         fireEvent.click(screen.getByRole("button", { name: /^保存$/ }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_feature_config", expect.objectContaining({
             featureCode: "butler_appearance",

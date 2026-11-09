@@ -1,11 +1,19 @@
+pub mod butler_control;
+pub mod butler_group;
+pub mod butler_group_runtime;
+mod butler_group_router;
 pub mod ai;
 pub mod ai_api;
 pub mod assistant_api;
 pub mod assistant_summary_api;
 pub mod attachment_api;
 pub mod butler_api;
+pub(crate) mod butler_reporting;
+pub(crate) mod butler_capabilities;
 pub mod butler_contact_activity;
+pub mod butler_progress;
 pub mod butler_peer;
+pub mod butler_work;
 pub mod conversation_api;
 pub mod copilot_api;
 #[cfg(desktop)]
@@ -20,6 +28,7 @@ pub mod llm_api;
 pub mod mobile_capability;
 pub mod mobile_recovery;
 pub mod mobile_tasks;
+pub(crate) mod magpie;
 pub(crate) mod opencode_go;
 pub mod operation_api;
 pub mod plugin_api;

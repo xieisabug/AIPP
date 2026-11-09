@@ -729,7 +729,10 @@ async fn process_incoming_text_message(
     let continuation_lock = get_butler_main_continuation_lock(butler_conversation.id).await;
     {
         let _guard = continuation_lock.lock().await;
-        wait_for_butler_main_to_be_idle(app_handle, butler_conversation.id).await;
+        // 飞书消息本身就是用户消息，超时后仍按原逻辑投递（外部渠道不在本次管家修复范围内）
+        if let Err(busy) = wait_for_butler_main_to_be_idle(app_handle, butler_conversation.id).await {
+            tracing::warn!(error = %busy, "feishu message proceeds after butler main busy wait");
+        }
         let window = resolve_butler_execution_window(app_handle)?;
         let request = AiRequest {
             conversation_id: butler_conversation.id.to_string(),
@@ -742,6 +745,9 @@ async fn process_incoming_text_message(
             max_tokens: None,
             stream: Some(true),
             attachment_list: None,
+            quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
         };
         ask_ai(
             app_handle.clone(),

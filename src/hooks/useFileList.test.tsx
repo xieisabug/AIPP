@@ -1,16 +1,18 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AttachmentType, FileInfo } from "../data/Conversation";
-import { useFileList } from "./useFileList";
+import { middleEllipsis, useFileList } from "./useFileList";
 
 function Harness({
   files,
   onDelete = () => undefined,
+  onOpen = () => undefined,
 }: {
   files: FileInfo[];
   onDelete?: (id: number) => void;
+  onOpen?: (id: number) => void;
 }) {
-  const { renderFiles } = useFileList(files, onDelete, () => undefined);
+  const { renderFiles } = useFileList(files, onDelete, onOpen);
   return <div data-testid="list">{renderFiles()}</div>;
 }
 
@@ -40,6 +42,8 @@ describe("useFileList attachment tray chips", () => {
 
     expect(screen.getByText("notes.txt")).toBeTruthy();
     expect(screen.getByText("TXT")).toBeTruthy();
+    expect(screen.getByText("shot.png")).toBeTruthy();
+    expect(screen.getByText("IMG")).toBeTruthy();
     expect(screen.getByAltText("shot.png")).toBeTruthy();
 
     const removes = screen.getAllByTitle(/移除/);
@@ -47,4 +51,34 @@ describe("useFileList attachment tray chips", () => {
     fireEvent.click(removes[0]);
     expect(onDelete).toHaveBeenCalled();
   });
+
+  it("keeps the differing tail of same-prefix names and expands the full name", () => {
+    const name = "aaaaa-report-final-version-2026-11-06-very-long-name.txt";
+    const copy = "aaaaa-report-final-version-2026-11-06-very-long-name-copy.txt";
+    expect(middleEllipsis(name)).not.toBe(middleEllipsis(copy));
+    expect(middleEllipsis(name).endsWith(".txt")).toBe(true);
+    expect(middleEllipsis("notes.txt")).toBe("notes.txt");
+
+    render(<Harness files={[{ id: 3, name, path: "/tmp/a.txt", type: AttachmentType.Text }]} />);
+    const short = screen.getByRole("button", { name: middleEllipsis(name) });
+    fireEvent.click(short);
+    expect(short).toHaveTextContent(name);
+    expect(short).toHaveAttribute("aria-expanded", "true");
+  });
+  it("should use a separate accessible preview button without triggering removal", () => {
+    const onOpen = vi.fn();
+    const onDelete = vi.fn();
+    render(<Harness onOpen={onOpen} onDelete={onDelete} files={[
+      { id: 9, name: "photo.png", path: "/photo.png", type: AttachmentType.Image },
+    ]} />);
+    const preview = screen.getByRole("button", { name: "预览 photo.png" });
+    expect(preview).toHaveClass("input-area-image-preview-button");
+    fireEvent.click(preview);
+    expect(onOpen).toHaveBeenCalledWith(9);
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTitle("移除 photo.png"));
+    expect(onDelete).toHaveBeenCalledWith(9);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
 });

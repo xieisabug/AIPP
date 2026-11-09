@@ -220,6 +220,17 @@ fn contains_manual_review_command_keyword(value: &str) -> bool {
         .any(|token| matches!(token, "rm" | "rmdir"))
 }
 
+/// 管家代批只允许一次性决定：长期授权或会扩大到上级目录的选项必须由用户决定。
+pub(crate) fn butler_proxy_permission_decision_error(decision: &str) -> Option<String> {
+    match decision {
+        "allow" | "deny" => None,
+        "allow_for_conversation" | "allow_for_assistant" | "allow_and_save" => Some(format!(
+            "总管家代批只能选择 allow（仅本次允许）或 deny；{decision} 会保存长期授权或把授权扩大到上级目录，必须由用户决定"
+        )),
+        other => Some(format!("未知的权限决定 {other}，总管家代批只能选择 allow 或 deny")),
+    }
+}
+
 fn operation_permission_manual_review_reason(
     snapshot: &PermissionRequestSnapshot,
 ) -> Option<String> {
@@ -408,8 +419,8 @@ fn spawn_task_conversation_mcp_tool_execution(
     task_conversation_id: i64,
     pending_tool_call: MCPToolCall,
 ) {
-    std::thread::spawn(move || {
-        tauri::async_runtime::block_on(async move {
+    let tool_call_id = pending_tool_call.id;
+    let spawned = crate::utils::async_thread::spawn_async_thread("aipp-task-tool-exec", move || async move {
             let anchor_message_id = tool_call_anchor_message_id(&pending_tool_call);
             match crate::mcp::execution_api::execute_mcp_tool_call(
                 app_handle.clone(),
@@ -447,8 +458,15 @@ fn spawn_task_conversation_mcp_tool_execution(
                     );
                 }
             }
-        });
     });
+    if let Err(error) = spawned {
+        error!(
+            task_conversation_id,
+            tool_call_id,
+            error = %error,
+            "failed to spawn task conversation MCP tool execution thread"
+        );
+    }
 }
 
 fn resolve_artifact_tool_conversation_id(
@@ -1065,6 +1083,7 @@ pub async fn execute_aipp_builtin_tool(
     tool_name: String,
     parameters: String,
     conversation_id: Option<i64>,
+    server_id: Option<i64>,
 ) -> Result<String, String> {
     use search::types::{SearchRequest, SearchResponse, SearchResultType};
 
@@ -1080,7 +1099,7 @@ pub async fn execute_aipp_builtin_tool(
 
     let result_value = match cmd_id.as_str() {
         "search" => {
-            let handler = SearchHandler::new(app_handle.clone());
+            let handler = SearchHandler::new(app_handle.clone(), server_id);
             match tool_name.as_str() {
                 "search_http" => {
                     let query = args.get("query").and_then(|v| v.as_str())
@@ -1670,6 +1689,7 @@ pub async fn execute_aipp_builtin_tool(
                     serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
                 }
                 "message_bot" | "search_bot_history" | "read_bot_message_context"
+                | "read_work_context" | "continue_work" | "resume_work"
                 | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" | "stop_assistant_exchange" => {
                     let id = conversation_id.ok_or("此工具需要管家联系人会话")?;
                     let result = crate::api::butler_peer::tool(&app_handle, id, &tool_name, &args)
@@ -1856,6 +1876,7 @@ pub async fn execute_aipp_builtin_tool(
                         .ok_or_else(|| "Missing required parameter: goal".to_string())?;
 
                     let request = SpawnButlerTaskRequest {
+                        request_key: None,
                         butler_conversation_id,
                         title: title.to_string(),
                         goal: goal.to_string(),
@@ -1868,13 +1889,10 @@ pub async fn execute_aipp_builtin_tool(
                             .get("handoff_contract_json")
                             .and_then(|v| v.as_str())
                             .map(|v| v.to_string()),
-                        result_handling_mode: if args.get("report_to_user").and_then(|v| v.as_bool()) == Some(true) {
-                            Some(crate::api::butler_api::RESULT_MODE_DIRECT_REPORT.to_string())
-                        } else {
-                            args.get("result_handling_mode")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string())
-                        },
+                        result_handling_mode: Some(
+                            crate::api::butler_api::resolve_task_result_mode(&args)
+                                .map_err(|e| format!("spawn_task_conversation: {e}"))?,
+                        ),
                         notification_policy: args
                             .get("notification_policy")
                             .and_then(|v| v.as_str())
@@ -1887,6 +1905,8 @@ pub async fn execute_aipp_builtin_tool(
                             &args,
                             "temporary_skill_identifiers",
                         )?,
+                        followup_of: None,
+                        link_chain: None,
                     };
 
                     let window = resolve_butler_spawn_window(&app_handle)?;
@@ -1978,12 +1998,11 @@ pub async fn execute_aipp_builtin_tool(
                                 let app_handle_clone = app_handle.clone();
                                 let window_clone = window.clone();
                                 let prompt_owned = prompt.to_string();
-                                // std::thread::spawn + block_on is intentional here to break
+                                // A dedicated thread + block_on is intentional here to break
                                 // the recursive async cycle between execute_aipp_builtin_tool
                                 // and ask_ai (which invokes tools that call back into
                                 // execute_aipp_builtin_tool).
-                                std::thread::spawn(move || {
-                                    tauri::async_runtime::block_on(async move {
+                                crate::utils::async_thread::spawn_async_thread("aipp-task-reply", move || async move {
                                         let task_conversation_id_for_spawn = task_conversation_id;
                                         let request = AiRequest {
                                             conversation_id: task_conversation_id_for_spawn
@@ -1997,6 +2016,9 @@ pub async fn execute_aipp_builtin_tool(
                                             max_tokens: None,
                                             stream: Some(true),
                                             attachment_list: None,
+                                            quote: None,
+            butler_intent: None,
+            butler_goal_revision: None,
                                         };
                                         match ask_ai(
                                         app_handle_clone.clone(),
@@ -2032,8 +2054,11 @@ pub async fn execute_aipp_builtin_tool(
                                             );
                                         }
                                     }
-                                    });
-                                });
+                                })
+                                .map_err(|e| format!(
+                                    "Failed to spawn reply_prompt thread for task conversation {}: {}",
+                                    task_conversation_id, e
+                                ))?;
 
                                 serde_json::json!({
                                     "content": [{
@@ -2102,12 +2127,9 @@ pub async fn execute_aipp_builtin_tool(
                                 .ok_or_else(|| {
                                     "Pending operation permission request not found".to_string()
                                 })?;
-                            if decision == "allow_and_save" {
+                            if let Some(reason) = butler_proxy_permission_decision_error(decision) {
                                 serde_json::json!({
-                                    "content": [{
-                                        "type": "text",
-                                        "text": "Butler cannot use allow_and_save automatically. Persistent whitelist grants require explicit user review."
-                                    }],
+                                    "content": [{"type": "text", "text": reason}],
                                     "isError": true
                                 })
                             } else if let Some(reason) =
@@ -2586,6 +2608,16 @@ pub async fn execute_aipp_builtin_tool(
                                 Some(id) => id,
                                 None => return Ok(r#"{"content":[{"type":"text","text":"缺少必要参数 task_id"}],"isError":true}"#.to_string()),
                             };
+                            // 与 superadmin 的 schedule.delete 采用同一风险决策
+                            if let Some(reason) =
+                                superadmin::action_approval_gate("schedule.delete", false)
+                            {
+                                return Ok(serde_json::json!({
+                                    "content": [{"type": "text", "text": format!("删除定时任务 {} 需要用户批准，未执行：{}", task_id, reason)}],
+                                    "isError": true
+                                })
+                                .to_string());
+                            }
                             match delete_scheduled_task(app_handle.clone(), task_id).await {
                                 Ok(()) => serde_json::json!({
                                     "content": [{"type": "text", "text": format!("定时任务 {} 已删除", task_id)}],
@@ -2680,6 +2712,26 @@ mod tests {
     };
     use crate::db::mcp_db::MCPToolCall;
     use crate::mcp::builtin_mcp::operation::types::PermissionRequestEvent;
+
+    /// 管家代批不能扩大长期权限：只允许一次性允许或拒绝
+    #[test]
+    fn butler_proxy_permission_only_allows_once_or_deny() {
+        assert!(butler_proxy_permission_decision_error("allow").is_none());
+        assert!(butler_proxy_permission_decision_error("deny").is_none());
+        for widening in ["allow_for_conversation", "allow_for_assistant", "allow_and_save", "always"] {
+            assert!(butler_proxy_permission_decision_error(widening).is_some(), "{widening}");
+        }
+    }
+
+    /// 管家删除定时任务：schedule_task 与 superadmin 的 schedule.delete 采用同一决策
+    #[test]
+    fn schedule_delete_entries_share_superadmin_risk_gate() {
+        let gate = superadmin::action_approval_gate("schedule.delete", false);
+        assert!(gate.as_deref().is_some_and(|e| e.contains("requires user approval")));
+        assert!(superadmin::action_approval_gate("schedule.delete", true).is_none(), "预览不执行");
+        assert!(superadmin::action_approval_gate("schedule.list", false).is_none());
+        assert!(superadmin::action_approval_gate("no.such.action", false).is_some());
+    }
 
     #[test]
     fn dynamic_mcp_server_payload_is_compact() {

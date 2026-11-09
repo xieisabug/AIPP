@@ -10,11 +10,17 @@ describe("avatar appearance persistence", () => {
     it("should preserve the second shape and decorations when round-tripping", () => {
         const appearance = { ...defaultAppearance, shape: "pebble", accessories: { eyes: "round-glasses", head: "beret" }, motion: false };
         expect(parseAppearance(JSON.stringify(appearance))).toEqual(appearance);
+        for (const accessories of [{ eyes: "sunglasses", head: "bow-bell" }, { eyes: "blush", head: "flower" }]) {
+            const decorated = { ...defaultAppearance, accessories };
+            expect(parseAppearance(JSON.stringify(decorated))).toEqual(decorated);
+        }
     });
     it("should reject unsupported versions and malformed assets when reading configuration", () => {
         for (const value of [null, [], { ...defaultAppearance, version: 3 }, { ...defaultAppearance, shape: "__proto__" },
             { ...defaultAppearance, colors: { primary: "url(external)", secondary: "#000000" } },
-            { ...defaultAppearance, accessories: { eyes: "unknown", head: null } }]) {
+            { ...defaultAppearance, accessories: { eyes: "unknown", head: null } },
+            { ...defaultAppearance, accessories: { eyes: "beret", head: null } },
+            { ...defaultAppearance, accessories: { eyes: null, head: "hasOwnProperty" } }]) {
             expect(parseAppearance(JSON.stringify(value))).toBeUndefined();
         }
     });

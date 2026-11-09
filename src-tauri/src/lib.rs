@@ -53,7 +53,7 @@ use crate::api::assistant_summary_api::summarize_all_assistant_summaries;
 use crate::api::attachment_api::{add_attachment, open_attachment_with_default_app};
 use crate::api::butler_api::{
     get_butler_task_detail, list_butler_tasks, list_butler_tasks_paginated,
-    list_butler_contact_previews, get_butler_cache_activity, open_butler_contact, load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
+    list_butler_contact_previews, search_butler_messages, get_butler_cache_activity, open_butler_contact, load_butler_main_conversation, reset_butler_main_conversation, spawn_butler_task_conversation,
 };
 use crate::api::conversation_api::{
     create_conversation_with_messages, create_message, delete_conversation, fork_conversation,
@@ -76,7 +76,7 @@ use crate::api::llm_api::{
     preview_model_list, update_llm_model_request_mode, update_llm_provider,
     update_llm_provider_config, update_selected_models,
 };
-use crate::api::operation_api::{confirm_acp_elicitation, confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
+use crate::api::operation_api::{confirm_agent_interaction, confirm_acp_elicitation, confirm_acp_permission, confirm_codex_permission, confirm_operation_permission};
 use crate::api::plugin_api::{
     disable_plugin, enable_plugin, fetch_official_plugins, get_enabled_plugins,
     get_plugin_assistant_configs, get_plugin_config, get_plugin_data, get_plugin_detail,
@@ -698,6 +698,7 @@ pub fn run() {
     let _ = tracing::subscriber::set_global_default(subscriber);
     ensure_rustls_crypto_provider();
     let builder = tauri::Builder::default()
+        .manage(crate::api::ai::agent_driver::lifecycle::AgentSessionBindings::default())
         .register_uri_scheme_protocol(PREVIEW_FILE_RELAY_SCHEME, handle_preview_file_relay_request)
         .plugin(tauri_plugin_notification::init())
         .plugin(mobile_files::init())
@@ -896,6 +897,8 @@ pub fn run() {
             crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
             #[cfg(desktop)]
             crate::api::butler_peer::start(app_handle.clone());
+            #[cfg(desktop)]
+            crate::api::butler_group_runtime::start_runtime(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );
@@ -1071,12 +1074,27 @@ pub fn run() {
             remove_assistant_workspace,
             list_conversations,
             search_conversations,
-            crate::api::butler_peer::list_butler_peer_exchanges,
             crate::api::butler_peer::list_butler_peer_posts,
             crate::api::butler_peer::get_butler_exchange_context,
-            crate::api::butler_peer::stop_butler_peer_exchange,
+            crate::api::butler_control::control_butler_task,
+            crate::api::butler_group::create_butler_group,
+            crate::api::butler_group::list_butler_groups,
+            crate::api::butler_group::get_butler_group,
+            crate::api::butler_group::list_butler_group_messages,
+            crate::api::butler_group::post_butler_group_message,
+            crate::api::butler_group::stop_butler_group_replies,
+            crate::api::butler_group::add_butler_group_members,
+            crate::api::butler_group::remove_butler_group_member,
+            crate::api::butler_group::rename_butler_group,
+            crate::api::butler_group::delete_butler_group,
+            crate::api::butler_work::list_butler_contact_task_questions,
+            crate::mcp::builtin_mcp::interaction::list_recoverable_butler_questions,
+            crate::api::butler_work::answer_butler_task_question,
+            crate::api::butler_work::respond_butler_contact_task_question,
             list_butler_contact_previews,
+            search_butler_messages,
             crate::api::butler_contact_activity::list_butler_contact_activity,
+            crate::api::butler_progress::get_butler_progress_summary,
             get_butler_cache_activity,
             open_butler_contact,
             load_butler_main_conversation,
@@ -1242,8 +1260,10 @@ pub fn run() {
             submit_ask_user_question_response,
             submit_preview_code_response,
             confirm_operation_permission,
+            confirm_agent_interaction,
             confirm_acp_permission,
             confirm_acp_elicitation,
+            crate::api::operation_api::list_acp_elicitation_requests,
             confirm_codex_permission,
             highlight_code,
             list_syntect_themes,
@@ -1303,6 +1323,9 @@ pub fn run() {
             delete_scheduled_task,
             run_scheduled_task_now,
             stop_scheduled_task_run,
+            crate::api::scheduled_task_api::get_butler_check_policy,
+            crate::api::scheduled_task_api::configure_butler_check,
+            crate::api::scheduled_task_api::control_butler_check,
             list_scheduled_task_logs,
             list_scheduled_task_runs,
             // Plugin commands

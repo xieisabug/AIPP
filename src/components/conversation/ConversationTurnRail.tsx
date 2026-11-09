@@ -21,9 +21,9 @@ export interface ConversationTurnRailProps {
     onSelect: (messageId: number) => void;
 }
 
-// 自动收缩间距常量
-const BAR_H = 6;
-const GAP_MAX = 10;
+// 自动收缩间距常量：BAR_H 为每个刻度的点击热区高度（可见细线仅 3px，与移动端滑轨一致）
+const BAR_H = 10;
+const GAP_MAX = 6;
 const GAP_MIN = 2;
 const HEIGHT_RATIO = 0.7;
 const ACTIVE_LINE_OFFSET_PX = 56;
@@ -246,26 +246,31 @@ export default function ConversationTurnRail({
     return (
         <div
             aria-hidden={false}
-            className="pointer-events-none absolute left-1.5 top-1/2 z-10 flex -translate-y-1/2 flex-col items-center w-8"
+            className="pointer-events-none absolute left-1.5 top-1/2 z-10 flex -translate-y-1/2 flex-col items-start w-8"
             style={{ gap: `${gap}px` }}
         >
-            {turns.map((turn, i) => (
+            {turns.map((turn, i) => {
+                const isActive = activeTurnId === turn.id;
+                return (
                 <Tooltip key={turn.id}>
                     <TooltipTrigger asChild>
                         <button
                             type="button"
                             onClick={() => handleClick(turn.id)}
                             aria-label={`跳转到第 ${i + 1} 轮对话`}
-                            aria-current={
-                                activeTurnId === turn.id ? "true" : undefined
-                            }
-                            className={cn(
-                                "pointer-events-auto h-[6px] w-6 cursor-pointer rounded-full transition-all",
-                                "bg-foreground/30 hover:w-8 hover:bg-foreground",
-                                activeTurnId === turn.id
-                                && "h-2 w-8 bg-foreground shadow-sm ring-2 ring-foreground/15",
-                            )}
-                        />
+                            aria-current={isActive ? "true" : undefined}
+                            className="group pointer-events-auto flex h-2.5 w-8 shrink-0 cursor-pointer items-center pl-1"
+                        >
+                            <span
+                                aria-hidden
+                                className={cn(
+                                    "block h-[3px] rounded-full transition-all duration-150",
+                                    isActive
+                                        ? "w-5 bg-foreground shadow-sm ring-2 ring-background"
+                                        : "w-3 bg-foreground/35 group-hover:w-5 group-hover:bg-foreground/70",
+                                )}
+                            />
+                        </button>
                     </TooltipTrigger>
                     <TooltipContent side="right" className="max-w-[260px]">
                         <span className="line-clamp-2 break-all text-xs">
@@ -273,7 +278,8 @@ export default function ConversationTurnRail({
                         </span>
                     </TooltipContent>
                 </Tooltip>
-            ))}
+                );
+            })}
         </div>
     );
 }

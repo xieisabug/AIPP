@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import ButlerAvatar from "./ButlerAvatar";
 import type { PeerPost } from "./butlerTimeline";
+import { ButlerQuoteButton, quoteExcerpt, type ButlerQuoteTarget } from "./ButlerQuote";
 
 interface Episode {
     prompt: string | null;
@@ -50,23 +51,39 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
     const sent = posts.every(p => p.outgoing);
     const incoming = posts.every(p => !p.outgoing);
     const incomplete = posts.some(p => ["failed", "stopped"].includes(p.status));
-    const label = incomplete ? "与" : sent ? (first.task_reply ? "已回复" : posts.some(p => ["queued", "sending"].includes(p.status)) ? "正在联系" : "已发消息给") : incoming ? "消息来自" : `${posts.length} 条消息往来`;
-    const directReport = posts.length === 1 && first.direct && !first.error && first.text.trim() !== "";
+    const incomingRequest = incoming && posts.every(p => !p.task_reply);
+    const label = incomplete ? "与" : sent ? (first.task_reply ? "已回复" : posts.some(p => ["queued", "sending"].includes(p.status)) ? "正在联系" : "已发消息给")
+        : incomingRequest ? (posts.every(p => p.to_user) ? "接手工作，来自" : posts.every(p => p.to_user === false) ? "协助请求来自" : "消息来自")
+        : incoming ? "消息来自" : `${posts.length} 条消息往来`;
+    const directReport = posts.length === 1 && first.direct && (first.text.trim() !== "" || !!first.error);
+    // 发起方仅显示交付事件，不重复助手正文。
+    const answeredUser = !incomplete && incoming && posts.every(p => p.task_reply && p.to_user && p.status === "delivered");
+    const speaker = first.speaker ?? first.peer;
+    const speakerAvatar = first.speaker_assistant ?? first.peer_assistant ?? first.peer_conversation;
+    // 直接交付可引用回复：任务结果按任务身份，助手委托按协作身份。
+    const quoteTarget: ButlerQuoteTarget | null = first.task_id
+        ? { kind: "task", id: first.task_id, label: `${speaker} 的任务结果`, excerpt: quoteExcerpt(first.text) }
+        : first.exchange_id
+            ? { kind: "exchange", id: first.exchange_id, label: `${speaker} 的答复`, excerpt: quoteExcerpt(first.text) }
+            : null;
     return <Dialog open={open} onOpenChange={setOpen}>
         {directReport ? <div className="butler-exchange" data-aipp-slot="butler-direct-report">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <ButlerAvatar id={first.peer_assistant ?? first.peer_conversation} size={20}/>
-                <span className="font-medium text-foreground">{first.peer}</span>
-                <span>直接汇报</span>
+                <ButlerAvatar id={speakerAvatar} size={20}/>
+                <span className="font-medium text-foreground">{speaker}</span>
+                <span>{first.task_id ? "交付任务结果" : "直接答复"}</span>
                 <time dateTime={first.occurred_at}>
                     {new Date(first.occurred_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                 </time>
-                <DialogTrigger asChild>
-                    <button type="button" className="ml-auto rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground">查看往来</button>
-                </DialogTrigger>
+                <span className="ml-auto flex items-center gap-1">
+                    {quoteTarget && <ButlerQuoteButton target={quoteTarget} />}
+                    <DialogTrigger asChild>
+                        <button type="button" className="rounded px-1.5 py-0.5 hover:bg-muted hover:text-foreground">查看往来</button>
+                    </DialogTrigger>
+                </span>
             </div>
             <div className="butler-peer-bubble mt-1.5 max-w-full">
-                <UnifiedMarkdown>{first.text}</UnifiedMarkdown>
+                <UnifiedMarkdown>{first.error || first.text}</UnifiedMarkdown>
             </div>
         </div> : <div className="butler-exchange" data-aipp-slot="butler-peer-event">
             <time className="block text-center text-[11px] text-muted-foreground" dateTime={first.occurred_at}>
@@ -75,9 +92,10 @@ export default function ButlerExchangeRow({ posts, conversationId }: { posts: Pe
             <div className="mt-2 flex justify-center">
                 <DialogTrigger asChild>
                     <button type="button" className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground">
-                        {label}
+                        {!answeredUser && label}
                         <span className="flex -space-x-1">{people.slice(0, 4).map(p => <ButlerAvatar key={p.peer_conversation} id={p.peer_assistant ?? p.peer_conversation} size={17}/>)}</span>
                         {people.length === 1 ? first.peer : `${people.length} 个 Bot`}{incomplete ? "的对话" : ""}
+                        {answeredUser && (first.task_id ? "已直接向你交付任务结果" : "已直接答复你")}
                     </button>
                 </DialogTrigger>
             </div>

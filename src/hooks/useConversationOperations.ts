@@ -41,6 +41,9 @@ export interface UseConversationOperationsProps {
     selectedAgentApprovalPolicy?: string;
     selectedAgentSandbox?: string;
     selectedAgentMode?: string;
+    /** 管家会话中的引用回复：发送时携带稳定身份，发送后清除 */
+    quote?: { kind: string; id: number } | null;
+    clearQuote?: () => void;
 }
 
 export interface UseConversationOperationsReturn {
@@ -92,6 +95,8 @@ export function useConversationOperations({
     selectedAgentApprovalPolicy = "",
     selectedAgentSandbox = "",
     selectedAgentMode = "",
+    quote = null,
+    clearQuote,
 }: UseConversationOperationsProps): UseConversationOperationsReturn {
     const isMobilePlatform = useIsMobilePlatform();
     const latestInput = useRef({ conversationId: conversation?.id, fileInfoList });
@@ -282,10 +287,12 @@ export function useConversationOperations({
                         conversation_id: String(conversation.id),
                         assistant_id: parsedAssistantId,
                         attachment_list: fileInfoList?.map((i) => i.id),
+                        quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
                     },
                     queueKind: busySendBehavior === "interrupt" ? "interrupt" : "normal",
                 })
                     .then(() => {
+                        clearQuote?.();
                         if (isMobilePlatform) clearAcceptedMobileInput();
                         else { setInputText(""); clearFileInfoList(); }
                     })
@@ -474,6 +481,7 @@ export function useConversationOperations({
                         assistant_id: parsedAssistantId,
                         attachment_list: fileInfoList?.map((i) => i.id),
                         override_model_id: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,
+                        quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
                     },
                     override_model_config: Object.keys(agentOverrideConfig).length > 0
                         ? agentOverrideConfig
@@ -507,6 +515,7 @@ export function useConversationOperations({
                     });
             }
 
+            clearQuote?.();
             if (!isMobilePlatform) {
                 setInputText("");
                 clearFileInfoList();

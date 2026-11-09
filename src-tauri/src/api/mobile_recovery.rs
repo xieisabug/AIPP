@@ -79,10 +79,20 @@ pub struct MobileDraftAttachment {
     pub thumbnail: Option<String>,
 }
 
+/// 草稿里记录过、但这次无法恢复的附件（文件被删、记录被清理等）。
+/// 只回传 id 与可读名称，供前端逐项提示并引导重新选择；不会回传或重新打开任意路径。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MobileDraftMissingAttachment {
+    pub id: i64,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
 pub struct MobileDraft {
     pub content: String,
     pub attachments: Vec<MobileDraftAttachment>,
+    #[serde(default)]
+    pub missing_attachments: Vec<MobileDraftMissingAttachment>,
 }
 
 fn initialize_drafts(conn: &Connection) -> rusqlite::Result<()> {
@@ -175,27 +185,50 @@ fn safe_draft_attachment(attachment: MessageAttachment) -> Option<MobileDraftAtt
     })
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ResolvedDraftAttachments {
+    restored: Vec<MobileDraftAttachment>,
+    missing: Vec<MobileDraftMissingAttachment>,
+}
+
+/// 按草稿保存的顺序把附件分成「可恢复」与「无法恢复」两组；重复 id 只处理一次。
+fn classify_draft_attachments(
+    ids: &[i64],
+    mut read: impl FnMut(i64) -> Result<Option<MessageAttachment>, String>,
+) -> Result<ResolvedDraftAttachments, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = ResolvedDraftAttachments::default();
+    for &id in ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        match read(id)? {
+            Some(attachment) => {
+                let name = attachment_name(&attachment);
+                match safe_draft_attachment(attachment) {
+                    Some(item) => result.restored.push(item),
+                    None => result.missing.push(MobileDraftMissingAttachment { id, name }),
+                }
+            }
+            None => result.missing.push(MobileDraftMissingAttachment {
+                id,
+                name: format!("attachment-{id}"),
+            }),
+        }
+    }
+    Ok(result)
+}
+
 fn resolve_draft_attachments(
     app_handle: &tauri::AppHandle,
     ids: &[i64],
-) -> Result<Vec<MobileDraftAttachment>, String> {
+) -> Result<ResolvedDraftAttachments, String> {
     if ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ResolvedDraftAttachments::default());
     }
     let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let repo = db.attachment_repo().map_err(|e| e.to_string())?;
-    let mut resolved = Vec::new();
-    for id in ids {
-        match repo.read(*id).map_err(|e| e.to_string())? {
-            Some(attachment) => {
-                if let Some(item) = safe_draft_attachment(attachment) {
-                    resolved.push(item);
-                }
-            }
-            None => {}
-        }
-    }
-    Ok(resolved)
+    classify_draft_attachments(ids, |id| repo.read(id).map_err(|e| e.to_string()))
 }
 
 /// A dedicated app-local DB deliberately outside the synchronized business DB directory.
@@ -219,8 +252,12 @@ pub async fn get_mobile_draft(app_handle: tauri::AppHandle, conversation_key: St
         let conversation_key = conversation_key.clone();
         move |conn| read_draft_row(conn, &conversation_key).map_err(|e| e.to_string())
     }).await?;
-    let attachments = resolve_draft_attachments(&app_handle, &attachment_ids)?;
-    Ok(MobileDraft { content, attachments })
+    let resolved = resolve_draft_attachments(&app_handle, &attachment_ids)?;
+    Ok(MobileDraft {
+        content,
+        attachments: resolved.restored,
+        missing_attachments: resolved.missing,
+    })
 }
 
 #[tauri::command]
@@ -239,7 +276,7 @@ pub async fn save_mobile_draft(
     }
     // Persist only safe attachment IDs that still resolve locally; drop stale refs.
     let resolved = resolve_draft_attachments(&app_handle, &attachment_ids)?;
-    let safe_ids: Vec<i64> = resolved.iter().map(|item| item.id).collect();
+    let safe_ids: Vec<i64> = resolved.restored.iter().map(|item| item.id).collect();
     with_draft_db(app_handle, move |conn| {
         write_draft(conn, &conversation_key, &content, &safe_ids).map_err(|e| e.to_string())
     }).await

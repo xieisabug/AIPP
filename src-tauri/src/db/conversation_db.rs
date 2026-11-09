@@ -561,6 +561,19 @@ impl ConversationRepository {
         rows.collect()
     }
 
+    /// 处于发送中或续跑中的回送；调用方需排除本进程仍在运行的执行者后才能接手。
+    #[instrument(level = "debug", skip(self))]
+    pub fn list_butler_task_conversation_ids_dispatching_followup(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_conversation_id
+             FROM butler_task_result
+             WHERE followup_status IN ('dispatching', 'continuing')
+             ORDER BY updated_time ASC, task_conversation_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn update_assistant_id(
         &self,
         origin_assistant_id: i64,
@@ -819,10 +832,30 @@ impl MessageRepository {
             };
             Ok((message, attachment))
         })?;
-        rows.collect()
+        let mut messages=rows.collect::<Result<Vec<_>>>()?;
+        let has_goal:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='butler_goal')",[],|r|r.get(0))?;
+        if has_goal {
+            let snapshot=crate::db::butler_goal::prompt(&self.conn,conversation_id).map_err(|e|rusqlite::Error::InvalidParameterName(e.to_string()))?;
+            messages.retain(|(m,_)| m.message_type != "system" || !(m.content.starts_with("<!-- compacted_ids:") || m.content.starts_with("<!-- compacted_range:")) || crate::db::butler_goal::checkpoint_is_current(&m.content,snapshot.as_deref()));
+            for (message,_) in &mut messages {
+                let stale:bool=self.conn.query_row("SELECT EXISTS(SELECT 1 FROM butler_goal_stale_message WHERE message_id=?1)",[message.id],|r|r.get(0))?;
+                if stale {
+                    let mut metadata:serde_json::Value=message.metadata_json.as_deref().and_then(|v|serde_json::from_str(v).ok()).unwrap_or_else(||serde_json::json!({}));
+                    if !metadata.is_object() {metadata=serde_json::json!({});}
+                    metadata["butler_goal_stale"]=serde_json::json!(true);
+                    message.metadata_json=Some(metadata.to_string());
+                }
+            }
+        }
+        Ok(messages)
     }
 
     fn insert_message(&self, message: &Message, touch_conversation: bool) -> Result<Message> {
+        let mut anchored = message.clone();
+        if anchored.parent_id.is_none() && matches!(anchored.message_type.as_str(),"response"|"assistant"|"reasoning") {
+            anchored.parent_id = super::butler_goal::OUTPUT_SOURCE.try_with(|id|*id).ok().flatten();
+        }
+        let message=&anchored;
         self.with_serialized_write(|conn| {
             conn.execute(
                 "INSERT INTO message (parent_id, conversation_id, message_type, content, llm_model_id, llm_model_name, created_time, start_time, finish_time, token_count, input_token_count, output_token_count, generation_group_id, parent_group_id, tool_calls_json, metadata_json, first_token_time, ttft_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
@@ -854,6 +887,10 @@ impl MessageRepository {
                 )?;
             }
             let id = conn.last_insert_rowid();
+            if matches!(message.message_type.as_str(), "response" | "assistant" | "reasoning") {
+                super::butler_goal::bind_output(conn, message.conversation_id, id)?;
+                super::butler_goal::mark_obsolete_output(conn, id)?;
+            }
             Ok(Message {
                 id,
                 parent_id: message.parent_id,
@@ -893,6 +930,7 @@ impl MessageRepository {
                 "UPDATE message SET finish_time = ?1 WHERE id = ?2",
                 rusqlite::params![now, id],
             )?;
+            super::butler_goal::mark_obsolete_output(conn, id)?;
             Ok(())
         })
     }
@@ -1023,7 +1061,36 @@ impl MessageRepository {
     pub fn update_content(&self, id: i64, content: &str) -> Result<()> {
         self.with_serialized_write(|conn| {
             conn.execute("UPDATE message SET content = ?1 WHERE id = ?2", (content, id))?;
+            super::butler_goal::mark_obsolete_output(conn, id)?;
             Ok(())
+        })
+    }
+
+    /// Atomically claim an unfinished response for Agent failure publication.
+    /// The existing message row is the terminal authority, not a second run map.
+    pub(crate) fn finish_agent_failure(
+        &self, conversation_id: i64, message_id: i64, content: &str, failure_json: &str,
+    ) -> Result<bool> {
+        self.with_serialized_write(|conn| {
+            let previous: Option<Option<String>> = conn.query_row(
+                "SELECT metadata_json FROM message WHERE id = ?1 AND conversation_id = ?2 AND finish_time IS NULL",
+                params![message_id, conversation_id], |row| row.get(0),
+            ).optional()?;
+            let Some(previous) = previous else { return Ok(false); };
+            let mut metadata = match previous.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+                Some(Ok(serde_json::Value::Object(object))) => serde_json::Value::Object(object),
+                Some(Ok(other)) => serde_json::json!({ "previous_metadata": other }),
+                Some(Err(_)) => serde_json::json!({ "previous_metadata_raw": previous }),
+                None => serde_json::json!({}),
+            };
+            metadata["agent_failure"] = serde_json::from_str(failure_json)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let changed = conn.execute(
+                "UPDATE message SET message_type = 'error', content = ?1, finish_time = ?2, metadata_json = ?3
+                 WHERE id = ?4 AND conversation_id = ?5 AND finish_time IS NULL",
+                params![content, Utc::now(), metadata.to_string(), message_id, conversation_id],
+            )?;
+            Ok(changed == 1)
         })
     }
 
@@ -1138,7 +1205,22 @@ pub(crate) fn merge_message_end_reason_metadata(
 impl Repository<Message> for MessageRepository {
     #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
     fn create(&self, message: &Message) -> Result<Message> {
-        self.insert_message(message, true)
+        // Resolve the immutable request source before validating it. Ordinary model
+        // handlers use OUTPUT_SOURCE rather than setting parent_id on each chunk.
+        // Never replace an explicit parent with the latest conversation message.
+        let mut anchored = message.clone();
+        if anchored.parent_id.is_none()
+            && matches!(anchored.message_type.as_str(), "response" | "assistant" | "reasoning")
+        {
+            anchored.parent_id = super::butler_goal::OUTPUT_SOURCE
+                .try_with(|source| *source).ok().flatten();
+        }
+        if matches!(anchored.message_type.as_str(), "response" | "assistant") {
+            super::butler_goal::assert_message_current(
+                &self.conn, anchored.conversation_id, anchored.parent_id,
+            ).map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        }
+        self.insert_message(&anchored, true)
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
@@ -1172,6 +1254,10 @@ impl Repository<Message> for MessageRepository {
 
     #[instrument(level = "debug", skip(self, message), fields(id = message.id))]
     fn update(&self, message: &Message) -> Result<()> {
+        if matches!(message.message_type.as_str(), "response" | "assistant") {
+            super::butler_goal::assert_message_current(&self.conn,message.conversation_id,Some(message.id))
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+        }
         self.with_serialized_write(|conn| {
             conn.execute(
                 "UPDATE message SET conversation_id = ?1, message_type = ?2, content = ?3, llm_model_id = ?4, llm_model_name = ?5, token_count = ?6, input_token_count = ?7, output_token_count = ?8, tool_calls_json = ?9, metadata_json = ?10, first_token_time = ?11, ttft_ms = ?12, start_time = ?13, finish_time = ?14 WHERE id = ?15",
@@ -1193,6 +1279,7 @@ impl Repository<Message> for MessageRepository {
                     &message.id,
                 ],
             )?;
+            super::butler_goal::mark_obsolete_output(conn, message.id)?;
             Ok(())
         })
     }
@@ -1436,6 +1523,22 @@ impl QueuedConversationMessageRepository {
         rows.collect()
     }
 
+    /// 是否有等待派发（或刚开始派发）的用户消息。内部续跑要让用户新消息优先。
+    /// 只把最近 30 秒内进入 dispatching 的记录算作在途，避免崩溃遗留记录永久阻塞。
+    #[instrument(level = "debug", skip(self), fields(conversation_id))]
+    pub fn has_pending_user_turn(&self, conversation_id: i64) -> Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM queued_conversation_message
+                WHERE conversation_id = ?1
+                  AND (status = 'queued'
+                       OR (status = 'dispatching' AND updated_time >= datetime('now', '-30 seconds')))
+            )",
+            params![conversation_id],
+            |row| row.get(0),
+        )
+    }
+
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn promote_to_interrupt(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
         self.with_serialized_write(|conn| {
@@ -1629,6 +1732,7 @@ pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<
             conversation_id INTEGER NOT NULL,
             session_id TEXT NOT NULL,
             agent_kind TEXT NOT NULL DEFAULT 'acp',
+            provider_instance_id INTEGER,
             updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (conversation_id, agent_kind)
         )",
@@ -1642,21 +1746,30 @@ pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<
     let has_composite_primary_key = columns.iter().filter(|(_, pk)| *pk > 0).count() >= 2;
     if !has_agent_kind || !has_composite_primary_key {
         let legacy_agent_kind = if has_agent_kind { "agent_kind" } else { "'acp'" };
+        let legacy_instance = if columns.iter().any(|(name, _)| name == "provider_instance_id") {
+            "provider_instance_id"
+        } else {
+            "NULL"
+        };
         conn.execute_batch(&format!(
             "ALTER TABLE acp_session RENAME TO acp_session_legacy;
              CREATE TABLE acp_session (
                  conversation_id INTEGER NOT NULL,
                  session_id TEXT NOT NULL,
                  agent_kind TEXT NOT NULL DEFAULT 'acp',
+                 provider_instance_id INTEGER,
                  updated_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                  PRIMARY KEY (conversation_id, agent_kind)
              );
-             INSERT INTO acp_session (conversation_id, session_id, agent_kind, updated_time)
-             SELECT conversation_id, session_id, {legacy_agent_kind}, updated_time
+             INSERT INTO acp_session (conversation_id, session_id, agent_kind, provider_instance_id, updated_time)
+             SELECT conversation_id, session_id, {legacy_agent_kind}, {legacy_instance}, updated_time
              FROM acp_session_legacy;
              DROP TABLE acp_session_legacy;"
         ))?;
     }
+    // NULL means historical ownership is unknown. Never infer an owner from
+    // the conversation's current assistant/provider configuration during migration.
+    ensure_column_exists(conn, "acp_session", "provider_instance_id", "INTEGER")?;
     Ok(())
 }
 
@@ -2067,7 +2180,11 @@ impl ConversationDatabase {
             "TEXT DEFAULT 'enqueued'",
         )?;
         ensure_column_exists(&conn, "butler_task_result", "handoff_message_id", "INTEGER")?;
+        // 回送领取标识：只有持有当前领取的执行者才能推进回送状态
+        ensure_column_exists(&conn, "butler_task_result", "followup_claim_id", "TEXT")?;
         super::butler_peer::schema(&conn)?;
+        super::butler_group::schema(&conn)?;
+        super::butler_work::schema(&conn)?;
 
         Ok(())
     }
@@ -2084,6 +2201,14 @@ impl ConversationDatabase {
         agent_kind: &str,
     ) -> Result<Option<String>, AppError> {
         let conn = self.get_connection().map_err(AppError::from)?;
+        Self::get_agent_session_id_with_conn(&conn, conversation_id, agent_kind)
+    }
+
+    pub(crate) fn get_agent_session_id_with_conn(
+        conn: &Connection,
+        conversation_id: i64,
+        agent_kind: &str,
+    ) -> Result<Option<String>, AppError> {
         let session_id = conn
             .query_row(
                 "SELECT session_id FROM acp_session WHERE conversation_id = ?1 AND agent_kind = ?2",
@@ -2093,6 +2218,46 @@ impl ConversationDatabase {
             .optional()
             .map_err(AppError::from)?;
         Ok(session_id)
+    }
+
+    /// Restore only this configured instance's native context. Legacy unowned
+    /// rows retain their pre-migration first-resume behavior; successful native
+    /// setup must save through the scoped upsert to establish ownership.
+    /// A NULL legacy owner cannot prove isolation before that first scoped save.
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn get_agent_session_id_for_instance(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+    ) -> Result<Option<String>, AppError> {
+        let conn = self.get_connection().map_err(AppError::from)?;
+        Self::get_agent_session_id_for_instance_with_conn(&conn, conversation_id, agent_kind, instance_id)
+    }
+
+    pub(crate) fn get_agent_session_id_for_instance_with_conn(
+        conn: &Connection,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+    ) -> Result<Option<String>, AppError> {
+        let row: Option<(String, Option<i64>)> = conn.query_row(
+            "SELECT session_id, provider_instance_id FROM acp_session
+             WHERE conversation_id = ?1 AND agent_kind = ?2",
+            params![conversation_id, agent_kind],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional().map_err(AppError::from)?;
+        match row {
+            Some((session_id, None)) => {
+                if let Some(instance_id) = instance_id {
+                    tracing::warn!(conversation_id, agent_kind, instance_id,
+                        "Restoring legacy native session with unknown provider ownership; ownership is recorded only after successful setup");
+                }
+                Ok(Some(session_id))
+            }
+            Some((session_id, owner)) if owner == instance_id => Ok(Some(session_id)),
+            _ => Ok(None),
+        }
     }
 
     #[instrument(level = "debug", skip(self), err)]
@@ -2111,19 +2276,51 @@ impl ConversationDatabase {
         agent_kind: &str,
         session_id: &str,
     ) -> Result<(), AppError> {
+        self.upsert_agent_session_id_for_instance(conversation_id, agent_kind, None, session_id)
+    }
+
+    /// Keep the existing latest-session mapping per conversation/driver. A
+    /// deliberate instance switch replaces that mapping rather than resuming
+    /// another provider's native session or creating a second conversation store.
+    #[instrument(level = "debug", skip(self), err)]
+    pub fn upsert_agent_session_id_for_instance(
+        &self,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+        session_id: &str,
+    ) -> Result<(), AppError> {
         self.with_write_connection(|conn| {
-            conn.execute(
-                "INSERT INTO acp_session (conversation_id, agent_kind, session_id, updated_time)
-                 VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
-                 ON CONFLICT(conversation_id, agent_kind)
-                 DO UPDATE SET session_id = excluded.session_id, updated_time = CURRENT_TIMESTAMP",
-                params![conversation_id, agent_kind, session_id],
+            Self::upsert_agent_session_id_for_instance_with_conn(
+                conn, conversation_id, agent_kind, instance_id, session_id,
             )
-            .map_err(AppError::from)?;
-            Ok(())
         })
     }
 
+    pub(crate) fn upsert_agent_session_id_for_instance_with_conn(
+        conn: &Connection,
+        conversation_id: i64,
+        agent_kind: &str,
+        instance_id: Option<i64>,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        let changed = conn.execute(
+            "INSERT INTO acp_session (conversation_id, agent_kind, provider_instance_id, session_id, updated_time)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(conversation_id, agent_kind)
+             DO UPDATE SET session_id = excluded.session_id,
+                           provider_instance_id = excluded.provider_instance_id,
+                           updated_time = CURRENT_TIMESTAMP
+             WHERE excluded.provider_instance_id IS NOT NULL OR acp_session.provider_instance_id IS NULL",
+            params![conversation_id, agent_kind, instance_id, session_id],
+        ).map_err(AppError::from)?;
+        if changed == 0 {
+            return Err(AppError::ProviderError(format!(
+                "Cannot overwrite a provider-owned native session without instance identity [conversation_id={conversation_id}, driver={agent_kind}]"
+            )));
+        }
+        Ok(())
+    }
 
     #[instrument(level = "debug", skip(self), err)]
     pub fn delete_agent_session_id(
@@ -2465,17 +2662,37 @@ impl ConversationDatabase {
             Some(0.0)
         };
 
+        let (delegated, delegated_by_model) = delegated_token_usage(&conn, conversation_id)?;
+        for extra in delegated_by_model {
+            match by_model.iter_mut().find(|entry| entry.model_id == extra.model_id) {
+                Some(entry) => {
+                    entry.total_tokens += extra.total_tokens;
+                    entry.input_tokens += extra.input_tokens;
+                    entry.output_tokens += extra.output_tokens;
+                    entry.thought_tokens += extra.thought_tokens;
+                    entry.cached_input_tokens += extra.cached_input_tokens;
+                    entry.cached_read_tokens += extra.cached_read_tokens;
+                    entry.cached_write_tokens += extra.cached_write_tokens;
+                    entry.message_count += extra.message_count;
+                }
+                None => by_model.push(extra),
+            }
+        }
+        by_model.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+
         Ok(ConversationTokenStats {
             opencode_go_allowance,
-            total_tokens: total_tokens as i32,
-            input_tokens: input_tokens as i32,
-            output_tokens: output_tokens as i32,
-            thought_tokens: thought_tokens_total as i32,
-            cached_input_tokens: cached_input_tokens_total as i32,
-            cached_read_tokens: cached_read_tokens_total as i32,
-            cached_write_tokens: cached_write_tokens_total as i32,
+            total_tokens: (total_tokens + delegated.total_tokens) as i32,
+            input_tokens: (input_tokens + delegated.input_tokens) as i32,
+            output_tokens: (output_tokens + delegated.output_tokens) as i32,
+            thought_tokens: (thought_tokens_total + delegated.thought_tokens) as i32,
+            cached_input_tokens: (cached_input_tokens_total + delegated.cached_input_tokens) as i32,
+            cached_read_tokens: (cached_read_tokens_total + delegated.cached_read_tokens) as i32,
+            cached_write_tokens: (cached_write_tokens_total + delegated.cached_write_tokens) as i32,
             by_model,
-            estimated_message_count: estimated_message_count as i32,
+            estimated_message_count: (estimated_message_count + delegated.estimated_message_count)
+                as i32,
+            delegated,
             message_count: message_count as i32,
             system_message_count: system_count as i32,
             user_message_count: user_count as i32,
@@ -2621,9 +2838,124 @@ pub struct ConversationTodoInput {
     pub active_form: String,
 }
 
+/// 本对话委派给其他助手的工作（管家任务、Bot 间协作消息）产生的用量。
+/// 这些模型调用落在任务会话或对方会话里，不在本对话的 message 表行中。
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct DelegatedTokenUsage {
+    pub run_count: i64,
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub thought_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub cached_read_tokens: i64,
+    pub cached_write_tokens: i64,
+    pub estimated_message_count: i64,
+}
+
+/// 委派范围：任务会话整段；协作请求只取接收方从投递消息到下一条用户消息之间的回合。
+const DELEGATED_SCOPE_CTE: &str = "WITH delegated(conversation_id, after_id, before_id) AS (
+        SELECT task_conversation_id, 0, NULL FROM butler_task_definition WHERE butler_conversation_id = ?1
+        UNION ALL
+        SELECT e.target, e.input_id,
+               (SELECT min(m.id) FROM message m
+                 WHERE m.conversation_id = e.target AND m.message_type = 'user' AND m.id > e.input_id)
+          FROM butler_peer_exchange e
+         WHERE e.owner = ?1 AND e.input_id IS NOT NULL
+    )";
+
+pub(crate) fn delegated_token_usage(
+    conn: &Connection,
+    conversation_id: i64,
+) -> rusqlite::Result<(DelegatedTokenUsage, Vec<ModelTokenBreakdown>)> {
+    let mut usage = DelegatedTokenUsage {
+        run_count: conn.query_row(
+            &format!("{DELEGATED_SCOPE_CTE} SELECT count(*) FROM delegated"),
+            [conversation_id],
+            |row| row.get(0),
+        )?,
+        ..Default::default()
+    };
+    if usage.run_count == 0 {
+        return Ok((usage, Vec::new()));
+    }
+
+    let mut stmt = conn.prepare(&format!(
+        "{DELEGATED_SCOPE_CTE}
+         SELECT m.llm_model_id, m.llm_model_name, m.token_count, m.input_token_count,
+                m.output_token_count, m.metadata_json
+           FROM delegated d
+           JOIN message m ON m.conversation_id = d.conversation_id
+                         AND m.id > d.after_id
+                         AND (d.before_id IS NULL OR m.id < d.before_id)
+          WHERE m.message_type IN ('response', 'reasoning')"
+    ))?;
+    let rows = stmt.query_map([conversation_id], |row| {
+        Ok((
+            row.get::<_, Option<i64>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+
+    let mut by_model: Vec<ModelTokenBreakdown> = Vec::new();
+    for row in rows {
+        let (model_id, model_name, total, input, output, metadata_json) = row?;
+        let metadata = parse_persisted_usage_metadata(metadata_json.as_deref());
+        usage.total_tokens += total;
+        usage.input_tokens += input;
+        usage.output_tokens += output;
+        usage.thought_tokens += metadata.thought_tokens;
+        usage.cached_input_tokens += metadata.cached_input_tokens;
+        usage.cached_read_tokens += metadata.cached_read_tokens;
+        usage.cached_write_tokens += metadata.cached_write_tokens;
+        if metadata.usage_source.as_deref() == Some("estimated") {
+            usage.estimated_message_count += 1;
+        }
+        if model_id.is_none() {
+            continue;
+        }
+        let index = match by_model.iter().position(|entry| entry.model_id == model_id) {
+            Some(index) => index,
+            None => {
+                by_model.push(ModelTokenBreakdown {
+                    model_id,
+                    model_name: model_name.unwrap_or_else(|| "Unknown".to_string()),
+                    total_tokens: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    thought_tokens: 0,
+                    cached_input_tokens: 0,
+                    cached_read_tokens: 0,
+                    cached_write_tokens: 0,
+                    message_count: 0,
+                    avg_ttft_ms: None,
+                    avg_tps: None,
+                });
+                by_model.len() - 1
+            }
+        };
+        let entry = &mut by_model[index];
+        entry.total_tokens += total;
+        entry.input_tokens += input;
+        entry.output_tokens += output;
+        entry.thought_tokens += metadata.thought_tokens;
+        entry.cached_input_tokens += metadata.cached_input_tokens;
+        entry.cached_read_tokens += metadata.cached_read_tokens;
+        entry.cached_write_tokens += metadata.cached_write_tokens;
+        entry.message_count += 1;
+    }
+    Ok((usage, by_model))
+}
+
 /// 对话token统计信息
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConversationTokenStats {
+    /// 已计入上面各项总量中的助手协作用量，供界面单独说明
+    pub delegated: DelegatedTokenUsage,
     pub opencode_go_allowance: Option<f64>,
     pub total_tokens: i32,
     pub input_tokens: i32,
@@ -3092,9 +3424,8 @@ impl ButlerRepository {
         })
     }
 
-    #[instrument(level = "debug", skip(self, result), fields(task_conversation_id = result.task_conversation_id))]
-    pub fn upsert_task_result(&self, result: &ButlerTaskResult) -> Result<ButlerTaskResult> {
-        self.with_serialized_write(|conn| {
+    fn upsert_task_result_with_conn(conn: &Connection, result: &ButlerTaskResult) -> Result<ButlerTaskResult> {
+        {
             conn.execute(
                 "INSERT INTO butler_task_result (
                     task_conversation_id,
@@ -3122,6 +3453,7 @@ impl ButlerRepository {
                     followup_status = excluded.followup_status,
                     handoff_message_id = excluded.handoff_message_id,
                     final_message_id = excluded.final_message_id,
+                    followup_claim_id = NULL,
                     updated_time = excluded.updated_time",
                 params![
                     result.task_conversation_id,
@@ -3166,7 +3498,7 @@ impl ButlerRepository {
                     })
                 },
             )
-        })
+        }
     }
 
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
@@ -3223,24 +3555,82 @@ impl ButlerRepository {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn conn_for_tests(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// 领取一次结果回送。`reclaim_dispatching=true` 表示调用方已确认当前 dispatching 不属于
+    /// 本进程仍在运行的执行者（例如上次进程在发送中崩溃），允许重新接手。
     #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id))]
-    pub fn try_mark_task_result_followup_dispatching(
+    pub fn try_claim_task_result_followup(
         &self,
         task_conversation_id: i64,
         handoff_message_id: Option<i64>,
+        claim_id: &str,
+        reclaim_dispatching: bool,
     ) -> Result<bool> {
         let now = Utc::now();
         self.with_serialized_write(|conn| {
             let affected = conn.execute(
                 "UPDATE butler_task_result
                  SET followup_status = 'dispatching',
-                     handoff_message_id = COALESCE(?1, handoff_message_id),
-                     updated_time = ?2
-                 WHERE task_conversation_id = ?3
-                   AND COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')",
-                params![handoff_message_id, now, task_conversation_id],
+                     followup_claim_id = ?1,
+                     handoff_message_id = COALESCE(?2, handoff_message_id),
+                     updated_time = ?3
+                 WHERE task_conversation_id = ?4
+                   AND (COALESCE(followup_status, 'pending') IN ('pending', 'handoff_injected')
+                        OR (?5 AND followup_status IN ('dispatching', 'continuing')))",
+                params![claim_id, handoff_message_id, now, task_conversation_id, reclaim_dispatching],
             )?;
             Ok(affected > 0)
+        })
+    }
+
+    /// 仅当仍持有领取时推进回送状态；被新执行者接手后，旧执行者的写入不会生效。
+    #[instrument(level = "debug", skip(self), fields(task_conversation_id = task_conversation_id, followup_status = followup_status))]
+    pub fn update_task_result_followup_state_if_claimed(
+        &self,
+        task_conversation_id: i64,
+        followup_status: &str,
+        handoff_message_id: Option<i64>,
+        claim_id: &str,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        self.with_serialized_write(|conn| {
+            let affected = conn.execute(
+                "UPDATE butler_task_result
+                 SET followup_status = ?1,
+                     handoff_message_id = ?2,
+                     updated_time = ?3
+                 WHERE task_conversation_id = ?4 AND followup_claim_id = ?5",
+                params![followup_status, handoff_message_id, now, task_conversation_id, claim_id],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    /// 在同一事务中保存任务结果与任务结束状态，避免崩溃后只写入一半。
+    #[instrument(level = "debug", skip(self, result, summary), fields(task_conversation_id = result.task_conversation_id, status = status))]
+    pub fn save_terminal_task_result(
+        &self,
+        result: &ButlerTaskResult,
+        status: &str,
+        summary: Option<&str>,
+        finalized_at: Option<DateTime<Utc>>,
+    ) -> Result<ButlerTaskResult> {
+        self.with_serialized_write(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let saved = Self::upsert_task_result_with_conn(&tx, result)?;
+            Self::update_task_conversation_state_with_conn(
+                &tx,
+                result.task_conversation_id,
+                status,
+                summary,
+                finalized_at,
+            )?;
+            tx.commit()?;
+            Ok(saved)
         })
     }
 
@@ -3252,18 +3642,28 @@ impl ButlerRepository {
         summary: Option<&str>,
         finalized_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        let now = Utc::now();
         self.with_serialized_write(|conn| {
-            conn.execute(
-                "UPDATE conversation
-                 SET butler_task_status = ?1,
-                     butler_task_summary = COALESCE(?2, butler_task_summary),
-                     butler_task_finalized_at = COALESCE(?3, butler_task_finalized_at),
-                     updated_time = ?4
-                 WHERE id = ?5",
-                params![status, summary, finalized_at, now, task_conversation_id],
-            )?;
-            Ok(())
+            Self::update_task_conversation_state_with_conn(conn, task_conversation_id, status, summary, finalized_at)
         })
+    }
+
+    fn update_task_conversation_state_with_conn(
+        conn: &Connection,
+        task_conversation_id: i64,
+        status: &str,
+        summary: Option<&str>,
+        finalized_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        conn.execute(
+            "UPDATE conversation
+             SET butler_task_status = ?1,
+                 butler_task_summary = COALESCE(?2, butler_task_summary),
+                 butler_task_finalized_at = COALESCE(?3, butler_task_finalized_at),
+                 updated_time = ?4
+             WHERE id = ?5",
+            params![status, summary, finalized_at, now, task_conversation_id],
+        )?;
+        Ok(())
     }
 }

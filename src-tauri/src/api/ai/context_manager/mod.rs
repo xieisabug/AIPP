@@ -31,11 +31,15 @@ pub struct FitResult {
 /// list exceeds the budget threshold, the body segment will be summarized
 /// via an LLM call.
 pub struct CompactionContext<'a> {
+    pub source_message_id: Option<i64>,
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
     pub client: &'a Client,
     pub model_name: &'a str,
     pub conversation_id: i64,
     pub checkpoint_store: &'a dyn persistence::CheckpointStore,
-    pub is_butler: bool,
+    pub summary_role: summarizer::SummaryRole,
+    /// 管家主会话、成员会话、任务会话要求完整摘要；不完整时拒绝压缩并保留原记录。
+    pub require_complete_summary: bool,
     /// DB message IDs aligned by index with the message list.
     /// Used for persistence (recording which messages were compacted).
     pub message_ids: Vec<i64>,
@@ -108,6 +112,8 @@ pub async fn fit_to_budget_with_compaction(
     db_token_counts: &[i32],
     ctx: CompactionContext<'_>,
 ) -> Result<FitResult, crate::errors::AppError> {
+    let validate_execution = || ctx.checkpoint_store.ensure_execution(ctx.conversation_id, ctx.source_message_id);
+    summarizer::ensure_summary_execution(&validate_execution, ctx.cancel_token.as_ref())?;
     if !budget.enabled {
         return Ok(FitResult { estimated_tokens: 0, compacted: false, messages });
     }
@@ -164,13 +170,16 @@ pub async fn fit_to_budget_with_compaction(
         "compacting conversation context via LLM summary"
     );
 
+    let goal_snapshot=ctx.checkpoint_store.goal_snapshot(ctx.conversation_id)?;
     let body_messages = &messages[head_count..body_end];
 
     // Generate summary via LLM
     let source_ids = ctx.message_ids.get(head_count..body_end)
         .filter(|ids| ids.iter().all(|id| *id > 0))
         .ok_or_else(|| crate::errors::AppError::UnknownError(format!("会话 {} 无法定位完整的压缩来源", ctx.conversation_id)))?;
-    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, body_messages, ctx.is_butler)
+    let mut summary_input=body_messages.to_vec();
+    if let Some(goal)=&goal_snapshot {summary_input.push(("system".into(),goal.clone(),vec![]));}
+    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.summary_role, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref())
         .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
 
     // Assemble compacted message list: Head + Summary + Tail
@@ -198,7 +207,7 @@ pub async fn fit_to_budget_with_compaction(
     if compacted_tokens >= estimated_tokens || compacted_tokens > budget.effective_input_limit() {
         return Err(crate::errors::AppError::UnknownError(format!("会话 {} 压缩后预计 {} tokens（原 {}，输入预算 {}）", ctx.conversation_id, compacted_tokens, estimated_tokens, budget.effective_input_limit())));
     }
-    let persisted = persistence::store_compaction_summary(ctx.checkpoint_store, ctx.conversation_id, &summary, source_ids, body_messages)
+    let persisted = persistence::store_goal_compaction_summary(ctx.checkpoint_store, ctx.conversation_id, &summary, source_ids, body_messages, goal_snapshot.as_deref())
         .map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 保存上下文检查点失败：{}", ctx.conversation_id, e)))?;
     compacted[head_count].1 = persisted;
     let estimated_tokens = estimate_total(&compacted, &[]);

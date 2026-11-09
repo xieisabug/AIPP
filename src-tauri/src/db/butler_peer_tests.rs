@@ -28,7 +28,7 @@ pub(super) fn request<'a>(key: &'a str, body: &'a str) -> NewRequest<'a> {
         body,
         tool_message_id: None,
         limit: 2,
-        report_to_user: false,
+        report_to_user: Some(false),
     }
 }
 fn reread(conn: &Connection, id: i64) -> Exchange {
@@ -178,6 +178,26 @@ fn test_butler_peer_history_pagination_and_sender_scope() {
 }
 
 #[test]
+fn test_butler_peer_pending_exchanges_preserves_delivery_queue() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿并核对资料");
+    let first = enqueue(&mut db, request("review", "稿件正文")).unwrap();
+    let second = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("check", "核对资料") }).unwrap();
+    let pending = pending_exchanges(&db).unwrap();
+    assert_eq!(pending.iter().map(|ex| ex.id).collect::<Vec<_>>(), vec![first.id, second.id]);
+    assert_eq!(pending[0].body, "稿件正文");
+
+    assert!(claim(&db, &first).unwrap());
+    assert_eq!(pending_exchanges(&db).unwrap().len(), 1, "投递中不重复领取");
+    write_input(&mut db, first.id, "request", 30, "稿件正文", 1, "model").unwrap();
+    assert_eq!(pending_exchanges(&db).unwrap()[0].state, "waiting");
+    fail(&db, first.id, "模型不可用").unwrap();
+    let pending = pending_exchanges(&db).unwrap();
+    assert_eq!(pending.len(), 1, "终态协作不重新进入投递队列");
+    assert_eq!(pending[0].id, second.id);
+}
+
+#[test]
 fn test_butler_peer_stop_preserves_delivered_round_and_blocks_new_one() {
     let mut db = database();
     let root = message(&db, 20, "user", "请审稿");
@@ -193,8 +213,8 @@ fn test_butler_peer_stop_preserves_delivered_round_and_blocks_new_one() {
     assert_eq!(stored.state, "delivered");
     assert!(stored.stop_requested);
     assert!(enqueue(&mut db, request("rev2", "新稿")).is_err());
-    assert!(list(&db, Some(20), false).unwrap()[0].body.is_empty());
-    assert_eq!(list(&db, Some(20), true).unwrap()[0].reply.as_deref(), Some("修改建议"));
+    assert_eq!(stored.reply.as_deref(), Some("修改建议"));
+    assert!(pending_exchanges(&db).unwrap().is_empty());
 }
 
 #[test]
@@ -351,7 +371,7 @@ async fn test_live_peer_review_history() {
 fn test_butler_peer_report_to_user_persists_and_is_part_of_idempotency() {
     let mut db = database();
     message(&db, 20, "user", "让审稿查完直接告诉我");
-    let direct = NewRequest { report_to_user: true, ..request("direct", "核查并直接汇报") };
+    let direct = NewRequest { report_to_user: Some(true), ..request("direct", "核查并直接汇报") };
     let ex = enqueue(&mut db, direct).unwrap();
     assert!(ex.report_to_user);
     assert!(reread(&db, ex.id).report_to_user);
@@ -359,4 +379,365 @@ fn test_butler_peer_report_to_user_persists_and_is_part_of_idempotency() {
     assert!(enqueue(&mut db, request("direct", "核查并直接汇报")).is_err());
     // 迁移可重复执行。
     schema(&db).unwrap();
+}
+
+/// 成员失败或被停止后，发起方收到且只收到一次回执；回执后发起方可继续处理
+#[test]
+fn test_butler_peer_failure_and_stop_send_single_receipt_to_owner() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
+    assert!(claim(&db, &ex).unwrap());
+    write_input(&mut db, ex.id, "request", 30, "稿件", 1, "model").unwrap();
+    db.execute(
+        "INSERT INTO message(conversation_id,message_type,content,finish_time) VALUES (30,'error','模型认证失败',CURRENT_TIMESTAMP)",
+        [],
+    )
+    .unwrap();
+    settle(&db, &reread(&db, ex.id), false).unwrap();
+    let failed = reread(&db, ex.id);
+    assert_eq!(failed.state, "failed");
+    assert!(failed.error.as_deref().unwrap().contains("认证失败"), "保留失败原因");
+    assert_eq!(failed.receipt_state.as_deref(), Some("pending"));
+
+    let pending = pending_receipts(&db).unwrap();
+    assert_eq!(pending.iter().map(|e| e.id).collect::<Vec<_>>(), vec![ex.id]);
+    assert!(claim_receipt(&db, &failed).unwrap());
+    assert!(!claim_receipt(&db, &failed).unwrap(), "同一回执只领取一次");
+    assert!(write_input(&mut db, ex.id, "receipt", 30, "回执", 1, "model").is_err(), "回执只能送到发起方");
+    write_input(&mut db, ex.id, "receipt", 20, "回执", 1, "model").unwrap();
+    assert!(write_input(&mut db, ex.id, "receipt", 20, "回执", 1, "model").is_err(), "不会重复送达");
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("delivered"));
+    assert!(pending_receipts(&db).unwrap().is_empty());
+
+    // 收到回执后发起方可以继续发起下一轮（例如改派），不会被当作收件人派工拦截
+    let next = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("r2", "改派") }).unwrap();
+    assert_eq!(next.round_no, 2);
+
+    // 进行中的协作被停止：同样回执一次
+    assert!(claim(&db, &next).unwrap());
+    assert_eq!(stop(&db, next.root, 20).unwrap(), 2);
+    let stopped = reread(&db, next.id);
+    assert_eq!((stopped.state.as_str(), stopped.receipt_state.as_deref()), ("stopped", Some("pending")));
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("delivered"), "已失败的不再重复回执");
+}
+
+/// 投递中退出：结果标记为未知且不重复投递；回执未写入时退回待送重发
+#[test]
+fn test_butler_peer_recover_marks_unknown_without_redelivery() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
+    assert!(claim(&db, &ex).unwrap());
+    recover(&db).unwrap();
+    let failed = reread(&db, ex.id);
+    assert_eq!(failed.state, "failed");
+    assert!(failed.error.as_deref().unwrap().contains("未知"));
+    assert!(claim_receipt(&db, &failed).unwrap());
+    recover(&db).unwrap();
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("pending"), "回执未写入，重启后重发");
+    assert_eq!(pending_receipts(&db).unwrap().len(), 1);
+}
+
+/// 回执投递失败会重试，达到上限后停止；已送达后失败不会重发
+#[test]
+fn test_butler_peer_receipt_retries_until_limit_without_duplicates() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let ex = enqueue(&mut db, request("r1", "稿件")).unwrap();
+    fail(&db, ex.id, "接收方模型错误").unwrap();
+    for attempt in 1..MAX_RECEIPT_ATTEMPTS {
+        assert!(claim_receipt(&db, &reread(&db, ex.id)).unwrap(), "attempt {attempt}");
+        fail_receipt(&db, ex.id).unwrap();
+        assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("pending"));
+    }
+    assert!(claim_receipt(&db, &reread(&db, ex.id)).unwrap());
+    fail_receipt(&db, ex.id).unwrap();
+    assert_eq!(reread(&db, ex.id).receipt_state.as_deref(), Some("failed"));
+
+    let second = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("r2", "改派") });
+    let second = second.unwrap();
+    fail(&db, second.id, "失败").unwrap();
+    assert!(claim_receipt(&db, &reread(&db, second.id)).unwrap());
+    write_input(&mut db, second.id, "receipt", 20, "回执", 1, "model").unwrap();
+    fail_receipt(&db, second.id).unwrap();
+    assert_eq!(reread(&db, second.id).receipt_state.as_deref(), Some("delivered"), "已送达不会重发");
+}
+
+/// 旧版本遗留的未送达回执（unknown、首次失败即放弃的 failed）在启动时恢复为待送
+#[test]
+fn test_butler_peer_recover_requeues_legacy_undelivered_receipts() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let a = enqueue(&mut db, request("a", "一")).unwrap();
+    let b = enqueue(&mut db, NewRequest { target: 10, recipient: "总管家", ..request("b", "二") }).unwrap();
+    db.execute("UPDATE butler_peer_exchange SET state='failed',receipt_state='unknown' WHERE id=?1", [a.id]).unwrap();
+    db.execute("UPDATE butler_peer_exchange SET state='failed',receipt_state='failed',receipt_attempts=0 WHERE id=?1", [b.id]).unwrap();
+    recover(&db).unwrap();
+    assert_eq!(reread(&db, a.id).receipt_state.as_deref(), Some("pending"));
+    assert_eq!(reread(&db, b.id).receipt_state.as_deref(), Some("pending"));
+    // 新版本重试到上限的 failed 不再恢复
+    db.execute("UPDATE butler_peer_exchange SET receipt_state='failed',receipt_attempts=?2 WHERE id=?1",
+        params![b.id, MAX_RECEIPT_ATTEMPTS]).unwrap();
+    recover(&db).unwrap();
+    assert_eq!(reread(&db, b.id).receipt_state.as_deref(), Some("failed"));
+}
+
+fn meta(conn: &Connection, id: i64) -> serde_json::Value {
+    let raw: String = conn.query_row("SELECT metadata_json FROM message WHERE id=?1", [id], |r| r.get(0)).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+fn chain_database() -> Connection {
+    let db = database();
+    db.execute_batch("INSERT INTO conversation VALUES (60,4,'资料','butler_contact',NULL),(70,5,'排版','butler_contact',NULL);").unwrap();
+    db
+}
+
+fn delegate<'a>(owner: i64, target: i64, key: &'a str, body: &'a str) -> NewRequest<'a> {
+    NewRequest { owner, target, limit: 6, report_to_user: None, ..request(key, body) }
+}
+
+/// 总管家派给甲（默认由甲直接答复用户）；甲在受托回合里请乙协助（默认内部协作），乙答复回到甲，
+/// 甲继续工作后交付，上级协作才结束。
+#[test]
+fn test_butler_peer_delegate_requests_help_and_continues_after_reply() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "让写作写一篇稿子");
+    let top = enqueue(&mut db, delegate(10, 20, "write", "写稿")).unwrap();
+    assert!(top.report_to_user, "直接受用户委托的工作默认由受托助手答复用户");
+    assert_eq!((top.depth, top.parent), (1, None));
+    assert!(top.expires_at.is_some());
+    assert!(claim(&db, &top).unwrap());
+    let input = write_input(&mut db, top.id, "request", 20, "写稿", 1, "model").unwrap();
+    assert_eq!(meta(&db, input)["audience"], "user");
+
+    let help = enqueue(&mut db, delegate(20, 30, "review", "请审稿")).unwrap();
+    assert_eq!((help.parent, help.depth, help.root), (Some(top.id), 2, top.root));
+    assert!(!help.report_to_user, "受托期间请来的协助默认是内部协作");
+    assert_eq!(help.expires_at, top.expires_at, "下级沿用整条协作链的有效期");
+    message(&db, 20, "response", "已请审稿协助");
+    assert!(!settle(&db, &reread(&db, top.id), false).unwrap(), "下级未返回时上级不能结束");
+    assert_eq!(reread(&db, top.id).state, "waiting");
+
+    assert!(claim(&db, &help).unwrap());
+    let inbound = write_input(&mut db, help.id, "request", 30, "请审稿", 1, "model").unwrap();
+    assert_eq!(meta(&db, inbound)["audience"], "peer");
+    message(&db, 30, "response", "意见：补充数据来源");
+    assert!(settle(&db, &reread(&db, help.id), false).unwrap());
+    let returning = reread(&db, help.id);
+    assert!(claim(&db, &returning).unwrap(), "上级仍在等待时，下级答复也能送回受托方");
+    let back = write_input(&mut db, help.id, "reply", 20, "意见", 1, "model").unwrap();
+    assert_eq!(meta(&db, back)["audience"], "user", "甲继续的是面向用户的工作");
+    assert_eq!(meta(&db, back)["parent"], top.id);
+
+    message(&db, 20, "response", "终稿（已补充数据来源）");
+    assert!(settle(&db, &reread(&db, top.id), false).unwrap());
+    let done = reread(&db, top.id);
+    assert_eq!((done.state.as_str(), done.reply.as_deref()), ("returning", Some("终稿（已补充数据来源）")));
+}
+
+#[test]
+fn test_butler_peer_rejects_loops_depth_overflow_and_stopped_parent() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "多层协作");
+    let mut hops = Vec::new();
+    for (owner, target, key) in [(10, 20, "a"), (20, 30, "b"), (30, 60, "c")] {
+        let ex = enqueue(&mut db, delegate(owner, target, key, key)).unwrap();
+        assert!(claim(&db, &ex).unwrap());
+        write_input(&mut db, ex.id, "request", target, key, 1, "model").unwrap();
+        hops.push(ex);
+    }
+    assert_eq!(hops[2].depth, MAX_DEPTH);
+    let deep = enqueue(&mut db, delegate(60, 70, "d", "再转派")).unwrap_err().to_string();
+    assert!(deep.contains("层上限"), "{deep}");
+    // 协作链上已有的助手（含总管家）不能被拉回来。
+    for target in [10, 20] {
+        let looped = enqueue(&mut db, NewRequest { recipient: "链上助手", ..delegate(30, target, "loop", "回头问") })
+            .unwrap_err().to_string();
+        assert!(looped.contains("循环"), "{looped}");
+    }
+    // 停止整条协作后，受托方不能再为它联系其他助手。
+    stop(&db, hops[0].root, 10).unwrap();
+    assert!(enqueue(&mut db, delegate(30, 70, "late", "迟到的协助")).is_err());
+}
+
+#[test]
+fn test_butler_peer_silent_reply_is_not_a_delivery() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "任务");
+    let ex = enqueue(&mut db, delegate(10, 20, "w", "写")).unwrap();
+    claim(&db, &ex).unwrap();
+    write_input(&mut db, ex.id, "request", 20, "写", 1, "model").unwrap();
+    message(&db, 20, "response", "[[NO_REPLY]]");
+    assert!(!settle(&db, &reread(&db, ex.id), false).unwrap());
+    assert!(settle(&db, &reread(&db, ex.id), true).unwrap());
+    assert_eq!(reread(&db, ex.id).state, "failed", "没有可确认的最终答复");
+}
+
+#[test]
+fn test_butler_peer_expiry_fails_waiting_work_once_with_receipt() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "任务");
+    let ex = enqueue(&mut db, delegate(10, 20, "w", "写")).unwrap();
+    let now = Utc::now();
+    assert!(!expire(&db, &ex, now).unwrap(), "未到有效期");
+    let later = now + chrono::Duration::minutes(TTL_MINUTES + 1);
+    assert!(expire(&db, &ex, later).unwrap());
+    let failed = reread(&db, ex.id);
+    assert_eq!((failed.state.as_str(), failed.receipt_state.as_deref()), ("failed", Some("pending")));
+    assert!(failed.error.unwrap().contains("有效期"));
+    assert!(!expire(&db, &reread(&db, ex.id), later).unwrap(), "只失败一次");
+}
+
+/// 独立任务发起协作：未闭环时任务不收尾；整项停止只停本任务的协作，不给被取消的任务自己回执。
+#[test]
+fn test_butler_peer_task_owned_exchanges_block_finalize_and_stop_with_task() {
+    let mut db = chain_database();
+    message(&db, 40, "user", "任务说明：整理资料");
+    message(&db, 20, "user", "与任务无关的私聊");
+    let ex = enqueue(&mut db, delegate(40, 60, "help", "请提供资料")).unwrap();
+    assert!(!ex.report_to_user, "任务请来的协助是任务资料，默认内部协作，由任务自己最终交付");
+    assert!(has_open_owned(&db, 40).unwrap());
+    assert!(!has_open_owned(&db, 20).unwrap());
+    assert_eq!(stop_owned(&db, 40).unwrap(), vec![ex.id]);
+    let stopped = reread(&db, ex.id);
+    assert_eq!((stopped.state.as_str(), stopped.receipt_state), ("stopped", None));
+    assert!(!has_open_owned(&db, 40).unwrap());
+}
+
+/// 同一助手从独立任务会话绕到联系人会话也构成循环：按助手身份判断，而不只比较会话 ID。
+#[test]
+fn test_butler_peer_loop_is_detected_by_assistant_identity_across_conversations() {
+    let mut db = chain_database();
+    // 任务会话 40 的执行助手是 3（审稿），联系人 30 也是审稿助手 3。
+    message(&db, 40, "user", "任务说明：核对资料");
+    let from_task = enqueue(&mut db, delegate(40, 60, "ask", "请提供资料")).unwrap();
+    assert!(claim(&db, &from_task).unwrap());
+    write_input(&mut db, from_task.id, "request", 60, "请提供资料", 1, "model").unwrap();
+    let error = enqueue(&mut db, NewRequest { recipient: "审稿", ..delegate(60, 30, "back", "回头问审稿") })
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("循环"), "{error}");
+    // 链外的其他助手仍可协助。
+    assert!(enqueue(&mut db, delegate(60, 70, "other", "请排版")).is_ok());
+}
+
+/// 同一条链的后续轮次沿用首次确定的有效期；独立任务发起的协作挂到派出它的工作上，共享预算与有效期。
+#[test]
+fn test_butler_peer_chain_expiry_and_budget_are_inherited_not_restarted() {
+    let mut db = chain_database();
+    let root = message(&db, 10, "user", "多轮工作");
+    let first = enqueue(&mut db, NewRequest { limit: 3, ..delegate(10, 20, "r1", "第一轮") }).unwrap();
+    // 模拟时间流逝：首轮有效期较早。
+    let early = Utc::now() + chrono::Duration::minutes(5);
+    db.execute("UPDATE butler_peer_exchange SET expires_at=?1 WHERE id=?2", params![early, first.id]).unwrap();
+    assert!(claim(&db, &first).unwrap());
+    write_input(&mut db, first.id, "request", 20, "第一轮", 1, "model").unwrap();
+    message(&db, 20, "response", "第一轮结果");
+    settle(&db, &reread(&db, first.id), false).unwrap();
+    let back = reread(&db, first.id);
+    assert!(claim(&db, &back).unwrap());
+    write_input(&mut db, first.id, "reply", 10, "第一轮结果", 1, "model").unwrap();
+    let second = enqueue(&mut db, delegate(10, 30, "r2", "第二轮")).unwrap();
+    assert_eq!(second.chain, root);
+    assert_eq!(second.expires_at, Some(early), "后续轮次不能重新计时");
+    // 派出的独立任务属于同一项工作：任务里发起的协作计入同一条链的预算与有效期。
+    link_task(&db, 40, root, None).unwrap();
+    message(&db, 40, "user", "任务说明");
+    let from_task = enqueue(&mut db, delegate(40, 60, "t1", "任务里请资料")).unwrap();
+    assert_eq!((from_task.chain, from_task.expires_at, from_task.round_no), (root, Some(early), 3));
+    let over = enqueue(&mut db, delegate(40, 70, "t2", "超出预算")).unwrap_err().to_string();
+    assert!(over.contains("3 轮"), "{over}");
+    assert_eq!(linked_tasks(&db, root).unwrap(), vec![40]);
+}
+
+/// 当前这一轮属于哪项工作：请求方向是该协作，回送方向是继续处理的上级协作；只停止某项委托及其下级，不误停并行工作。
+#[test]
+fn test_butler_peer_turn_work_and_subtree_stop_spare_parallel_work() {
+    let mut db = chain_database();
+    message(&db, 10, "user", "同时交给写作和审稿");
+    let to_writer = enqueue(&mut db, delegate(10, 20, "w", "写稿")).unwrap();
+    let to_reviewer = enqueue(&mut db, delegate(10, 30, "r", "审另一份")).unwrap();
+    for ex in [&to_writer, &to_reviewer] {
+        assert!(claim(&db, ex).unwrap());
+        write_input(&mut db, ex.id, "request", ex.target, "开始", 1, "model").unwrap();
+    }
+    assert_eq!(turn_work(&db, 20).unwrap(), Some(TurnWork { root: to_writer.root, exchange: Some(to_writer.id) }));
+    let help = enqueue(&mut db, delegate(20, 60, "h", "请资料")).unwrap();
+    assert!(claim(&db, &help).unwrap());
+    write_input(&mut db, help.id, "request", 60, "请资料", 1, "model").unwrap();
+    message(&db, 60, "response", "资料");
+    settle(&db, &reread(&db, help.id), false).unwrap();
+    assert!(claim(&db, &reread(&db, help.id)).unwrap());
+    write_input(&mut db, help.id, "reply", 20, "资料", 1, "model").unwrap();
+    assert_eq!(turn_work(&db, 20).unwrap().unwrap().exchange, Some(to_writer.id), "回送后仍在处理上级委托");
+
+    let stopped = stop_subtree(&db, to_writer.id).unwrap();
+    assert_eq!(stopped, vec![to_writer.id, help.id]);
+    assert_eq!(reread(&db, to_writer.id).state, "stopped");
+    assert_eq!(reread(&db, to_reviewer.id).state, "waiting", "同一轮并行交给审稿的工作不受影响");
+    set_stop_note(&db, &stopped, "写作：已停止正在进行的回合").unwrap();
+    assert_eq!(reread(&db, to_writer.id).stop_note.as_deref(), Some("写作：已停止正在进行的回合"));
+    assert!(reread(&db, to_reviewer.id).stop_note.is_none());
+    assert_eq!(chain_roots(&db, to_writer.chain).unwrap(), vec![to_writer.root]);
+    let mut conversations = chain_conversations(&db, to_writer.chain).unwrap();
+    conversations.sort();
+    assert_eq!(conversations, vec![10, 20, 30, 60]);
+}
+
+#[test]
+fn test_butler_peer_old_goal_output_cannot_be_settled_as_success() {
+    let mut db=database();
+    db.execute("ALTER TABLE message ADD COLUMN parent_id INTEGER",[]).unwrap();
+    super::super::butler_goal::schema(&db).unwrap();
+    message(&db,20,"user","review");
+    let ex=enqueue(&mut db,request("old-goal","review old goal")).unwrap();
+    assert!(claim(&db,&ex).unwrap());
+    let input=write_input(&mut db,ex.id,"request",30,"old",1,"model").unwrap();
+    super::super::butler_goal::bind_turn(&db,30,input,1).unwrap();
+    let output=message(&db,30,"response","old answer");
+    db.execute("UPDATE message SET parent_id=?1 WHERE id=?2",params![input,output]).unwrap();
+    super::super::butler_goal::bind_output(&db,30,output).unwrap();
+    db.execute("INSERT INTO butler_goal VALUES(30,2,'replacement',0)",[]).unwrap();
+    assert!(settle(&db,&reread(&db,ex.id),false).unwrap());
+    assert_eq!(reread(&db,ex.id).state,"failed");
+    assert_eq!(db.query_row("SELECT content FROM message WHERE id=?1",[output],|r|r.get::<_,String>(0)).unwrap(),"old answer");
+}
+
+#[test]
+fn test_queued_owner_controls_block_claim_and_delivery_without_hiding_replies() {
+    for action in ["pause", "stop_delegation", "cancel"] {
+        let mut db = database();
+        message(&db, 20, "user", "审稿");
+        let ex = enqueue(&mut db, request("controlled", "稿件")).unwrap();
+        crate::db::butler_control::set(&db,20,action).unwrap();
+        assert!(!claim(&db,&ex).unwrap(), "owner {action} must prevent queued delivery");
+        // Simulate the interval between claiming and the final delivery transaction.
+        db.execute("UPDATE butler_peer_exchange SET state='sending' WHERE id=?1",[ex.id]).unwrap();
+        assert!(write_input(&mut db,ex.id,"request",30,"稿件",1,"model").is_err());
+        let count:i64=db.query_row("SELECT count(*) FROM message WHERE conversation_id=30",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+    }
+    let mut db=database();
+    message(&db,20,"user","审稿");
+    let ex=enqueue(&mut db,request("reply","稿件")).unwrap();
+    assert!(claim(&db,&ex).unwrap());
+    write_input(&mut db,ex.id,"request",30,"稿件",1,"model").unwrap();
+    crate::db::butler_control::set(&db,20,"stop_delegation").unwrap();
+    db.execute("UPDATE butler_peer_exchange SET state='returning',reply='结论' WHERE id=?1",[ex.id]).unwrap();
+    assert!(claim(&db,&reread(&db,ex.id)).unwrap());
+    assert!(write_input(&mut db,ex.id,"reply",20,"结论",1,"model").is_ok());
+}
+
+#[test]
+fn test_queued_owner_resume_and_unrelated_work_remain_eligible() {
+    let mut db=database();message(&db,20,"user","审稿");
+    let ex=enqueue(&mut db,request("resume","稿件")).unwrap();
+    crate::db::butler_control::set(&db,40,"cancel").unwrap();
+    crate::db::butler_control::set(&db,20,"pause").unwrap();
+    assert!(!claim(&db,&ex).unwrap());
+    crate::db::butler_control::set(&db,20,"resume").unwrap();
+    assert!(claim(&db,&ex).unwrap());
+    assert!(write_input(&mut db,ex.id,"request",30,"稿件",1,"model").is_ok());
 }

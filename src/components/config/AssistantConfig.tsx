@@ -1,3 +1,5 @@
+import AssistantItemContextMenu, { type AssistantItemAction } from "./assistant/AssistantItemContextMenu";
+import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -75,13 +77,20 @@ const normalizePluginAssistantFieldValue = (
 };
 
 /** Clone form values so later edits cannot mutate the discard snapshot. */
-const cloneFormSnapshot = (values: Record<string, unknown>): Record<string, unknown> => ({
-    ...values,
-});
+const cloneFormSnapshot = <T extends Record<string, any>>(values: T): T =>
+    structuredClone(values);
 
 const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateTo }) => {
     const form = useForm();
-    const [leavePrompt, setLeavePrompt] = useState<null | { proceed: () => void }>(null);
+    const [leavePrompt, setLeavePromptState] = useState<null | { proceed: () => void }>(null);
+    const leavePromptRef = useRef<typeof leavePrompt>(null);
+    const setLeavePrompt = useCallback((prompt: typeof leavePrompt) => {
+        // Update immediately so a canceled/replaced prompt cannot navigate when
+        // an older save resolves before the next render.
+        leavePromptRef.current = prompt;
+        setLeavePromptState(prompt);
+    }, []);
+    useEffect(() => () => { leavePromptRef.current = null; }, []);
     /** Last loaded/saved form values — discard must restore this, not empty useForm defaults. */
     const loadedFormSnapshotRef = useRef<Record<string, unknown>>({});
     // Dirty = current values differ from the loaded/saved baseline (not RHF isDirty, see assistantFormDirty).
@@ -91,6 +100,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         [form]
     );
     const [isDirty, setIsDirty] = useState(false);
+    // Do not mount a new assistant's Controllers against the previous assistant's values.
+    const [formAssistantId, setFormAssistantId] = useState<number | null>(null);
+    const [isSaving, setIsSaving] = useState(false);
+    const saveInFlightRef = useRef<Promise<void> | null>(null);
     const dirtyCheckQueuedRef = useRef(false);
     const scheduleDirtyCheck = useCallback(() => {
         if (dirtyCheckQueuedRef.current) return;
@@ -394,6 +407,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                 ? `${assistantDetail.model[0].model_code}%%${assistantDetail.model[0].provider_id}`
                                 : "",
                         prompt: assistantDetail.prompts[0]?.prompt ?? "",
+                        tool_review_mode: "off",
                         ...assistantDetail.model_configs.reduce((acc, config) => {
                             acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
                             return acc;
@@ -427,6 +441,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         ...pluginConfigValues,
                     });
                     commitFormBaseline(form.getValues());
+                    setFormAssistantId(assistantDetail.assistant.id);
                     if (
                         assistantDetail.assistant.assistant_type === 4
                         && (assistantDetail.model[0]?.provider_id ?? 0) > 0
@@ -499,6 +514,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 setCurrentAssistant(null);
                 setPluginAssistantConfigValues({});
                 form.reset({});
+                setFormAssistantId(null);
                 commitFormBaseline({});
             }
         },
@@ -603,10 +619,13 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     });
 
     // 保存助手 — returns a Promise so leave-save can await before proceed
-    const handleAssistantFormSave = useCallback(async () => {
+    const performAssistantFormSave = useCallback(async () => {
         if (!currentAssistant) return;
 
-        const values = form.getValues();
+        const values = cloneFormSnapshot(form.getValues());
+        const selection = selectionRequestRef.current;
+        const isSameSelection = () => selection === selectionRequestRef.current;
+        const canRefreshSavedValues = () => isSameSelection() && !isAssistantFormDirty(form.getValues(), values);
 
         try {
             await saveAssistant({
@@ -770,17 +789,30 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 )
             );
             toast.success("保存成功");
-            await loadAssistantDetail(currentAssistant.assistant.id);
-            await loadPluginAssistantConfigValues(currentAssistant.assistant.id);
-            // 保存后以当前表单值作为干净基线，保证界面选择与持久化一致
-            const snapshot = form.getValues();
-            form.reset(snapshot);
-            commitFormBaseline(snapshot);
+            // Only the submitted values were persisted. Later edits stay dirty and must
+            // not be replaced by a delayed detail/plugin refresh.
+            if (isSameSelection()) commitFormBaseline(values);
+            if (canRefreshSavedValues()) {
+                await loadAssistantDetail(currentAssistant.assistant.id, canRefreshSavedValues);
+                await loadPluginAssistantConfigValues(currentAssistant.assistant.id, canRefreshSavedValues);
+            }
         } catch (error) {
             toast.error("保存失败: " + error);
             throw error;
         }
     }, [currentAssistant, form, saveAssistant, assistantTypeCustomField, loadAssistantDetail, loadPluginAssistantConfigValues, pluginAssistantFormFields, commitFormBaseline]);
+
+    // Every save entry point shares one in-flight operation, including leave-save.
+    const handleAssistantFormSave = useCallback((): Promise<void> => {
+        if (saveInFlightRef.current) return saveInFlightRef.current;
+        setIsSaving(true);
+        const pending = performAssistantFormSave().finally(() => {
+            saveInFlightRef.current = null;
+            setIsSaving(false);
+        });
+        saveInFlightRef.current = pending;
+        return pending;
+    }, [performAssistantFormSave]);
 
     // 删除助手
     const handleDelete = useCallback(() => {
@@ -822,6 +854,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                         : "-1",
                 agent_model: "",
                 prompt: assistantDetail.prompts[0]?.prompt || "",
+                tool_review_mode: "off",
                 ...assistantDetail.model_configs.reduce((acc, config) => {
                     acc[config.name] = config.value_type === "boolean" ? config.value == "true" : config.value;
                     return acc;
@@ -837,8 +870,12 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 codex_approvals_reviewer: "default",
             });
             commitFormBaseline(form.getValues());
+            setFormAssistantId(assistantDetail.assistant.id);
+            if (assistantDetail.assistant.assistant_type === 4) {
+                void handleChooseAssistant(assistantDetail.assistant, true);
+            }
         },
-        [addAssistant, form, invalidateSelection, commitFormBaseline]
+        [addAssistant, form, invalidateSelection, commitFormBaseline, handleChooseAssistant]
     );
 
     // 分享助手
@@ -877,15 +914,18 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
     );
 
     const handleLeaveSave = useCallback(async () => {
-        const proceed = leavePrompt?.proceed;
+        const prompt = leavePromptRef.current;
+        if (!prompt) return;
         try {
             await handleAssistantFormSave();
+            // Cancellation or a newer destination supersedes this leave request.
+            if (leavePromptRef.current !== prompt || isFormDirtyNow()) return;
             setLeavePrompt(null);
-            proceed?.();
+            prompt.proceed();
         } catch {
             // Stay on the page with the dialog open; toast already shown by save.
         }
-    }, [leavePrompt, handleAssistantFormSave]);
+    }, [handleAssistantFormSave, isFormDirtyNow, setLeavePrompt]);
 
     const handleLeaveDiscard = useCallback(() => {
         const proceed = leavePrompt?.proceed;
@@ -933,13 +973,26 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
         );
     }, [assistants, searchQuery, pinyinReady]);
 
+    const itemActions = useAssistantItemActions({
+        onCopied: async detail => {
+            invalidateSelection();
+            await loadAssistants();
+            await handleChooseAssistant(detail.assistant, true);
+        },
+    });
+    const handleItemAction = (assistant: AssistantListItem, action: AssistantItemAction) => {
+        const proceed = () => { void itemActions.run(assistant, action); };
+        if (isFormDirtyNow()) { setLeavePrompt({ proceed }); return; }
+        proceed();
+    };
+
     // 侧边栏内容 - 使用 useMemo 避免重复创建
     const sidebar = useMemo(() => (
         <SidebarList title="助手列表" description="选择助手进行配置" icon={<Bot className="h-5 w-5" />} addButton={addButton}
             searchValue={searchQuery} onSearchChange={setSearchQuery} searchPlaceholder="搜索助手...">
             {filteredAssistants.map((assistant) => (
+                <AssistantItemContextMenu key={assistant.id} assistant={assistant} onAction={handleItemAction}>
                 <ListItemButton
-                    key={assistant.id}
                     isSelected={currentAssistant?.assistant.id === assistant.id}
                     onClick={() => {
                         if (isFormDirtyNow() && currentAssistant && currentAssistant.assistant.id !== assistant.id) {
@@ -951,9 +1004,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 >
                     <span className="font-medium truncate">{assistant.name}</span>
                 </ListItemButton>
+                </AssistantItemContextMenu>
             ))}
         </SidebarList>
-    ), [filteredAssistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton, searchQuery, isFormDirtyNow]);
+    ), [filteredAssistants, currentAssistant?.assistant.id, handleChooseAssistant, addButton, searchQuery, isFormDirtyNow, handleItemAction]);
 
     // 右侧内容 - 使用 useMemo 避免重复创建（必须在条件返回之前）
     const content = useMemo(() => currentAssistant ? (
@@ -962,8 +1016,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             formConfig={formConfig}
             form={form}
             isDirty={isDirty}
+            isSaving={isSaving}
+            isLoading={formAssistantId !== currentAssistant.assistant.id}
             assistantConfigApi={assistantConfigApi}
-            onSave={handleAssistantFormSave}
+            onSave={() => { void handleAssistantFormSave().catch(() => undefined); }}
             onCopy={currentAssistant.assistant.id === 1 ? undefined : handleCopyAssistant}
             onDelete={currentAssistant.assistant.id === 1 ? undefined : openConfirmDeleteDialog}
             onEdit={openUpdateFormDialog}
@@ -975,10 +1031,10 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
             title="选择一个助手"
             description="从左侧列表中选择一个助手开始配置"
         />
-    ), [currentAssistant, formConfig, form, isDirty, assistantConfigApi, handleAssistantFormSave, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
+    ), [currentAssistant, formConfig, form, isDirty, isSaving, formAssistantId, assistantConfigApi, handleAssistantFormSave, handleCopyAssistant, openConfirmDeleteDialog, openUpdateFormDialog, handleShareAssistant]);
 
     const leaveDialog = (
-        <AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
+        <>{itemActions.dialogs}<AlertDialog open={!!leavePrompt} onOpenChange={(open) => { if (!open) setLeavePrompt(null); }}>
             <AlertDialogContent data-aipp-slot="assistant-leave-dialog">
                 <AlertDialogHeader>
                     <AlertDialogTitle>有未保存的助手配置</AlertDialogTitle>
@@ -988,11 +1044,11 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                     <Button type="button" variant="outline" onClick={() => setLeavePrompt(null)}>取消</Button>
-                    <Button type="button" variant="secondary" onClick={handleLeaveDiscard}>放弃</Button>
-                    <Button type="button" onClick={() => { void handleLeaveSave(); }}>保存</Button>
+                    <Button type="button" variant="secondary" disabled={isSaving} onClick={handleLeaveDiscard}>放弃</Button>
+                    <Button type="button" disabled={isSaving} onClick={() => { void handleLeaveSave(); }}>{isSaving ? "保存中…" : "保存"}</Button>
                 </AlertDialogFooter>
             </AlertDialogContent>
-        </AlertDialog>
+        </AlertDialog></>
     );
 
     if (!initialLoaded) {

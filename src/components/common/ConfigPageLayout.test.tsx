@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ConfigPageLayout, { SelectOption } from "./ConfigPageLayout";
+import { registerConfigBeforeLeave } from "@/lib/configLeaveGuard";
 import { backConfigSection, ConfigSectionContext, useConfigSectionDetailTitle } from "@/lib/configSectionNav";
 
 const platform = vi.hoisted(() => ({ mobile: true }));
@@ -75,5 +76,22 @@ describe("ConfigPageLayout mobile list → detail", () => {
         const { rerender } = render(<Harness />);
         rerender(<Harness detailRequest={1} />);
         expect(screen.getByText("detail content")).toBeTruthy();
+    });
+});
+
+
+describe("ConfigPageLayout detail leave protection", () => {
+    it("should keep detail open until the shared leave guard approves returning to the list", () => {
+        let proceed: (() => void) | undefined;
+        const unregister = registerConfigBeforeLeave((next) => { proceed = next; });
+        try {
+            render(<Harness />);
+            fireEvent.click(screen.getByText("显示"));
+            act(() => { expect(backConfigSection("feature")).toBe(true); });
+            expect(screen.getByText("detail content")).toBeInTheDocument();
+            expect(screen.getByTestId("detail-title")).toHaveTextContent("显示");
+            act(() => { proceed?.(); });
+            expect(screen.queryByText("detail content")).toBeNull();
+        } finally { unregister(); }
     });
 });

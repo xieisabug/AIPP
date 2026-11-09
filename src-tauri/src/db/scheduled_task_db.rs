@@ -226,6 +226,25 @@ impl ScheduledTaskDatabase {
 
         self.with_write_lock(|| migrate_scheduled_run_missed(conn))?;
 
+        // Keep the full outcome separate from the public run/list response. Recovery
+        // needs details and notification diagnostics that do not fit the summary.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS scheduled_task_run_outcome (
+                run_id TEXT PRIMARY KEY NOT NULL,
+                outcome_json TEXT NOT NULL
+            )",
+            [],
+        )?;
+        // Explicit cleanup also works for connections with foreign_keys disabled,
+        // including the existing scheduled-task and remote deletion paths.
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS scheduled_task_run_delete_outcome
+             AFTER DELETE ON scheduled_task_run
+             BEGIN
+                 DELETE FROM scheduled_task_run_outcome WHERE run_id = OLD.run_id;
+             END;",
+        )?;
+
         debug!("Scheduled task tables ensured");
         Ok(())
     }
@@ -317,6 +336,21 @@ impl ScheduledTaskDatabase {
     }
 
     #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn delete_approved_task(&self, id: i64, expected: &serde_json::Value) -> Result<()> {
+        self.with_write_lock(|| {
+            let tx = self.conn.unchecked_transaction()?;
+            // Acquire the write reservation before reading the approval snapshot.
+            tx.execute("UPDATE scheduled_task SET id=id WHERE id=?1", [id])?;
+            let task = self.read_task(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            let current = serde_json::to_value(task).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            if &current != expected {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other("定时任务已变化，请重新批准"))));
+            }
+            super::cascade_delete::delete(&tx, "scheduled_task", id)?;
+            tx.commit()
+        })
+    }
+
     pub fn delete_task(&self, id: i64) -> Result<()> {
         self.with_write_lock(|| super::cascade_delete::delete(&self.conn, "scheduled_task", id))
     }
@@ -387,6 +421,18 @@ impl ScheduledTaskDatabase {
             stmt.query_map(params![task_id, limit], |row| scheduled_task_run_from_row(row))?;
         let runs: Vec<ScheduledTaskRun> = rows.collect::<Result<Vec<_>>>()?;
         Ok(runs)
+    }
+
+    #[instrument(level = "debug", skip(self), fields(run_id))]
+    pub fn read_run(&self, run_id: &str) -> Result<Option<ScheduledTaskRun>> {
+        self.conn
+            .query_row(
+                "SELECT id, task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status
+                 FROM scheduled_task_run WHERE run_id = ?",
+                [run_id],
+                scheduled_task_run_from_row,
+            )
+            .optional()
     }
 
     #[instrument(level = "debug", skip(self), fields(task_id))]
@@ -469,6 +515,66 @@ impl ScheduledTaskDatabase {
         })
     }
 
+    /// Persist the terminal run fields, complete recovery payload and initial
+    /// Butler report eligibility together. A failed payload write must not leave
+    /// a terminal record that recovery can only reconstruct from a short summary.
+    #[instrument(
+        level = "debug",
+        skip(self, summary, error_message, finished_time, outcome_json),
+        fields(run_id, status)
+    )]
+    pub fn save_run_outcome(
+        &self,
+        run_id: &str,
+        status: &str,
+        notify: bool,
+        summary: Option<&str>,
+        error_message: Option<&str>,
+        finished_time: Option<DateTime<Utc>>,
+        outcome_json: &str,
+    ) -> Result<()> {
+        self.with_write_lock(|| {
+            let tx = self.conn.unchecked_transaction()?;
+            let updated = tx.execute(
+                "UPDATE scheduled_task_run
+                 SET status = ?1, notify = ?2, summary = ?3, error_message = ?4, finished_time = ?5,
+                     butler_followup_status = CASE
+                         WHEN butler_followup_status IS NULL AND EXISTS (
+                             SELECT 1 FROM scheduled_task
+                             WHERE id = scheduled_task_run.task_id AND butler_conversation_id IS NOT NULL
+                         ) THEN 'pending'
+                         ELSE butler_followup_status
+                     END
+                 WHERE run_id = ?6 AND EXISTS (
+                     SELECT 1 FROM scheduled_task WHERE id = scheduled_task_run.task_id
+                 )",
+                params![status, notify, summary, error_message, finished_time, run_id],
+            )?;
+            if updated == 0 {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "运行记录或所属定时任务已删除，拒绝保存完整结果 run={run_id}"
+                )));
+            }
+            tx.execute(
+                "INSERT INTO scheduled_task_run_outcome (run_id, outcome_json) VALUES (?1, ?2)
+                 ON CONFLICT(run_id) DO UPDATE SET outcome_json = excluded.outcome_json",
+                params![run_id, outcome_json],
+            )?;
+            tx.commit()
+        })
+    }
+
+    #[instrument(level = "debug", skip(self), fields(run_id))]
+    pub fn read_run_outcome(&self, run_id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT outcome_json FROM scheduled_task_run_outcome WHERE run_id = ?",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     /// List scheduled tasks created from Butler context.
     #[instrument(level = "debug", skip(self))]
     pub fn list_butler_tasks(&self) -> Result<Vec<ScheduledTask>> {
@@ -479,6 +585,30 @@ impl ScheduledTaskDatabase {
              ORDER BY created_time DESC",
         )?;
         let rows = stmt.query_map([], |row| scheduled_task_from_row(row))?;
+        rows.collect()
+    }
+
+    /// 启动时收尾上一个进程遗留的 running 记录：标为失败并返回被收尾的记录（状态已更新）。
+    /// `skip_run_ids` 为本进程仍在执行的 run，不会被改写。
+    pub fn mark_interrupted_runs(
+        &self,
+        skip_run_ids: &[String],
+        error_message: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ScheduledTaskRun>> {
+        self.with_write_lock(|| mark_interrupted_runs_in_connection(&self.conn, skip_run_ids, error_message, now))
+    }
+
+    /// 已结束但管家回报尚未确认完成的运行。兼容旧版本遗留的 failed，
+    /// exhausted 表示已用尽重试次数，不再自动加入恢复队列。
+    pub fn list_runs_awaiting_butler_followup(&self) -> Result<Vec<ScheduledTaskRun>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status
+             FROM scheduled_task_run
+             WHERE status != 'running' AND butler_followup_status IN ('pending', 'continuing', 'failed', 'retry')
+             ORDER BY started_time ASC",
+        )?;
+        let rows = stmt.query_map([], |row| scheduled_task_run_from_row(row))?;
         rows.collect()
     }
 
@@ -494,6 +624,50 @@ impl ScheduledTaskDatabase {
         })
     }
 }
+
+pub(crate) fn mark_interrupted_runs_in_connection(
+    conn: &Connection,
+    skip_run_ids: &[String],
+    error_message: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<ScheduledTaskRun>> {
+    let tx = conn.unchecked_transaction()?;
+    let candidates: Vec<ScheduledTaskRun> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, task_id, run_id, status, notify, summary, error_message, started_time, finished_time, butler_followup_status
+             FROM scheduled_task_run WHERE status = 'running' AND finished_time IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| scheduled_task_run_from_row(row))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    let mut interrupted = Vec::new();
+    for run in candidates {
+        if skip_run_ids.iter().any(|id| id == &run.run_id) {
+            continue;
+        }
+        let message = format!(
+            "{error_message}（run_id={}，开始于 {}）",
+            run.run_id,
+            run.started_time.to_rfc3339()
+        );
+        let changed = tx.execute(
+            "UPDATE scheduled_task_run SET status = 'failed', error_message = ?1, finished_time = ?2
+             WHERE run_id = ?3 AND status = 'running'",
+            params![message, now, run.run_id],
+        )?;
+        if changed == 1 {
+            interrupted.push(ScheduledTaskRun {
+                status: "failed".to_string(),
+                error_message: Some(message),
+                finished_time: Some(now),
+                ..run
+            });
+        }
+    }
+    tx.commit()?;
+    Ok(interrupted)
+}
+
 
 /// Rebuild only the known legacy status constraint, retaining the table's other schema,
 /// columns, explicit indexes, triggers and AUTOINCREMENT high-water mark.
@@ -612,6 +786,20 @@ mod tests {
             created_time: now,
             updated_time: now,
         }
+    }
+
+    #[test]
+    fn approved_delete_rejects_modified_resource_and_consumes_once() {
+        let db=build_test_db();
+        let task=db.create_task(&build_task("original",Some(10))).unwrap();
+        let snapshot=serde_json::to_value(db.read_task(task.id).unwrap().unwrap()).unwrap();
+        db.conn.execute("UPDATE scheduled_task SET task_prompt='different recipient' WHERE id=?1",[task.id]).unwrap();
+        assert!(db.delete_approved_task(task.id,&snapshot).is_err());
+        assert!(db.read_task(task.id).unwrap().is_some());
+        let current=serde_json::to_value(db.read_task(task.id).unwrap().unwrap()).unwrap();
+        db.delete_approved_task(task.id,&current).unwrap();
+        assert!(db.read_task(task.id).unwrap().is_none());
+        assert!(db.delete_approved_task(task.id,&current).is_err());
     }
 
     #[test]

@@ -1,4 +1,8 @@
 mod profile_lock;
+pub(crate) mod verification;
+mod native_window;
+#[cfg(windows)]
+mod orphan_recovery;
 
 pub mod browser_pool;
 pub mod fetcher;

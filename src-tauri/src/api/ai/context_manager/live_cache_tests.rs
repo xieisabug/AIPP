@@ -5,6 +5,7 @@ use crate::errors::AppError;
 use std::sync::Mutex;
 
 impl persistence::CheckpointStore for Mutex<MessageRepository> {
+    fn ensure_execution(&self, _: i64, _: Option<i64>) -> Result<(), AppError> { Ok(()) }
     fn save(&self, conversation: i64, header: &str, content: &str) -> Result<String, AppError> {
         Ok(self.lock().unwrap().get_or_create_checkpoint(conversation, header, content)?)
     }
@@ -49,7 +50,8 @@ async fn test_live_butler_checkpoint_cache() {
     let budget = ContextBudget { context_window_size: estimate_total(&history,&[]), output_reserve: 0, tool_call_reserve: 0,
         tail_ratio: 0.25, compaction_threshold: 0.90, enabled: true };
     let result = fit_to_budget_with_compaction(history.clone(), &budget, &[], CompactionContext {
-        client: &client, model_name: &model, conversation_id: 1, checkpoint_store: &store, is_butler: true,
+        source_message_id: None, cancel_token: None,
+        client: &client, model_name: &model, conversation_id: 1, checkpoint_store: &store, summary_role: super::summarizer::SummaryRole::ButlerChief, require_complete_summary: true,
         message_ids: (1..=history.len() as i64).collect(),
     }).await.unwrap();
     assert!(result.compacted);

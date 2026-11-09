@@ -149,13 +149,33 @@ it("fits the mobile shell to the visual viewport and restores it when the keyboa
     // Shell owns geometry: zero keyboard inset on the shell to prevent chat double-lift
     expect(shell.style.getPropertyValue("--aipp-keyboard-inset-bottom")).toBe("0px");
     expect(shell.dataset.aippShellKeyboardOffset).toBe("true");
+    expect(shell.dataset.aippKeyboardCompact).toBeUndefined();
     Object.defineProperty(viewport, "height", { value: window.innerHeight });
     act(() => viewport.dispatchEvent(new Event("resize")));
     expect(shell.style.height).toBe("");
     expect(shell.style.transform).toBe("");
     expect(shell.style.getPropertyValue("--aipp-keyboard-inset-bottom")).toBe("");
     expect(shell.dataset.aippShellKeyboardOffset).toBeUndefined();
+    expect(shell.dataset.aippKeyboardCompact).toBeUndefined();
     unmount();
     if (original) Object.defineProperty(window, "visualViewport", original);
     else Reflect.deleteProperty(window, "visualViewport");
+});
+
+it("compacts the shell chrome when a landscape keyboard leaves little visible height", () => {
+    const originalViewport = Object.getOwnPropertyDescriptor(window, "visualViewport");
+    const originalHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
+    const viewport = new EventTarget() as VisualViewport;
+    Object.defineProperties(viewport, { height: { value: 148, writable: true }, offsetTop: { value: 54, writable: true } });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 384 });
+    const { container, unmount } = render(<MobileShell />);
+    const shell = container.querySelector<HTMLElement>("[data-aipp-mobile-shell]")!;
+    expect(shell.style.height).toBe("148px");
+    expect(shell.style.transform).toBe("translateY(54px)");
+    expect(shell.dataset.aippKeyboardCompact).toBe("true");
+    unmount();
+    if (originalViewport) Object.defineProperty(window, "visualViewport", originalViewport);
+    else Reflect.deleteProperty(window, "visualViewport");
+    if (originalHeight) Object.defineProperty(window, "innerHeight", originalHeight);
 });

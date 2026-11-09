@@ -1,3 +1,10 @@
+pub mod butler_approval;
+pub mod butler_group;
+pub mod butler_goal;
+
+pub mod butler_execution;
+pub mod butler_control;
+pub mod butler_question_history;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -14,7 +21,11 @@ use tracing::{debug, error, info, instrument, warn};
 
 pub mod assistant_db;
 pub mod butler_history;
+pub mod butler_result_refs;
+pub mod butler_resume;
+pub mod butler_check;
 pub mod butler_peer;
+pub mod butler_work;
 pub mod butler_timeline;
 pub mod butler_exchange_context;
 pub mod connection;
@@ -619,3 +630,6 @@ fn special_logic_0_0_11(
     info!("special_logic_0_0_11 done: llm_model_request_mode_preference 表初始化完成");
     Ok(())
 }
+
+#[cfg(test)]
+mod butler_cross_feature_tests;

@@ -2366,9 +2366,12 @@ fn read_local_snapshots_from_db(
             remember_natural_key(sync_conn, spec, &id, &raw_values)?;
             id
         } else if is_official_row && spec.object_type == "llm.provider"
-            && raw_values.get("api_type").and_then(JsonValue::as_str) == Some("opencode_go")
+            && matches!(raw_values.get("api_type").and_then(JsonValue::as_str), Some("opencode_go" | "magpie"))
         {
-            let identity = crate::api::opencode_go::BUILTIN_SYNC_ID;
+            let identity = match raw_values.get("api_type").and_then(JsonValue::as_str) {
+                Some("magpie") => crate::api::magpie::BUILTIN_SYNC_ID,
+                _ => crate::api::opencode_go::BUILTIN_SYNC_ID,
+            };
             remap_sync_object_map(sync_conn, spec.object_type, spec.table, local_id, identity)?;
             identity.to_owned()
         } else if is_official_row {
@@ -2927,7 +2930,8 @@ fn embedded_provider_value(object_type: &str, fields: &Map<String, JsonValue>) -
                 ("conversation_summary", "title_model" | "form_autofill_model" | "memory_summary_model"
                     | "auto_review_model" | "conversation_summary_model")
                 | ("experimental", "butler_model_id" | "mcp_summarizer_model_id"
-                    | "assistant_summarizer_model_id" | "conversation_summary_model") => true,
+                    | "assistant_summarizer_model_id" | "conversation_summary_model"
+                    | "butler_helper_model_id") => true,
                 _ => return None,
             }
         }
@@ -3117,10 +3121,17 @@ fn apply_change_to_db_inner(
     // Only the confirmed version/sequence above is an application receipt.
 
     // Link the built-in provider even when the first pull precedes the first local scan.
-    if spec.object_type == "llm.provider" && change.object_id == crate::api::opencode_go::BUILTIN_SYNC_ID {
-        if let Some(id) = conn.query_row("SELECT id FROM llm_provider WHERE api_type='opencode_go' AND is_official=1 LIMIT 1",
-            [], |row| row.get::<_, i64>(0)).optional().map_err(|e| e.to_string())? {
-            remap_sync_object_map(sync_conn, spec.object_type, spec.table, id, &change.object_id)?;
+    if spec.object_type == "llm.provider" {
+        let builtin = match change.object_id.as_str() {
+            id if id == crate::api::opencode_go::BUILTIN_SYNC_ID => Some("opencode_go"),
+            id if id == crate::api::magpie::BUILTIN_SYNC_ID => Some("magpie"),
+            _ => None,
+        };
+        if let Some(api_type) = builtin {
+            if let Some(id) = conn.query_row("SELECT id FROM llm_provider WHERE api_type=?1 AND is_official=1 LIMIT 1",
+                [api_type], |row| row.get::<_, i64>(0)).optional().map_err(|e| e.to_string())? {
+                remap_sync_object_map(sync_conn, spec.object_type, spec.table, id, &change.object_id)?;
+            }
         }
     }
 

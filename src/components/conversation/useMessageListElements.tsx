@@ -1,6 +1,10 @@
-import React, { useMemo, useRef } from "react";
+import React, { useContext, useMemo, useRef } from "react";
+import { ButlerResultsOnlyContext } from "../butler/ButlerPresentationContext";
+import { StreamRetryAttemptSections } from "./StreamRetryAttemptSections";
+import { groupMessagesByStreamRetryAttempt, parseStreamRetryMeta, shouldShowStreamRetryGrouping } from "@/utils/streamRetryAttempts";
 
 import MessageItem from "../MessageItem";
+import ButlerProgressRow from "@/components/butler/ButlerProgressRow";
 import ButlerExchangeRow from "../butler/ButlerExchangeRow";
 import VersionPagination from "../VersionPagination";
 import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
@@ -76,11 +80,60 @@ function exchangeEntry(message: Message): MessageElementEntry {
     if (message.message_type === "butler_processing") {
         return {
             messageId: message.id, groupControl: null, estimatedHeight: 32,
-            messageElement: <div role="status" data-aipp-slot="butler-processing"
-                className="butler-exchange flex justify-center text-xs text-muted-foreground">正在处理…</div>,
+            messageElement: <ButlerProgressRow conversationId={message.conversation_id} />,
         };
     }
     return { messageId: message.id, messageElement: <ButlerExchangeRow posts={message.butler_posts!} conversationId={message.conversation_id} />, groupControl: null };
+}
+
+/** Keep individual bubbles, but put consecutive attempts from one retry session
+ * behind the same accessible diagnostics UI as merged mode. Plain history stays
+ * as separate virtualized rows; never group across user/plan/exchange boundaries.
+ */
+export function groupUnmergedRetryEntries(
+    messages: Message[],
+    entries: MessageElementEntry[],
+): MessageElementEntry[] {
+    const result: MessageElementEntry[] = [];
+    let start = 0;
+    while (start < messages.length) {
+        const first = messages[start];
+        const meta = parseStreamRetryMeta(first);
+        const eligible = (message: Message) => message.message_type !== "user"
+            && message.message_type !== "agent_plan"
+            && message.message_type !== "butler_processing" && !message.butler_posts;
+        let end = start + 1;
+        if (meta && eligible(first)) {
+            // Each retry can allocate a new generation UUID. The persisted retry
+            // session, not generation_group_id, identifies the whole attempt chain.
+            while (end < messages.length && eligible(messages[end])
+                && messages[end].conversation_id === first.conversation_id
+                && parseStreamRetryMeta(messages[end])?.sessionId === meta.sessionId) {
+                end += 1;
+            }
+        }
+        const run = messages.slice(start, end);
+        const rows = entries.slice(start, end);
+        if (meta && eligible(first) && shouldShowStreamRetryGrouping(groupMessagesByStreamRetryAttempt(run))) {
+            const rowById = new Map(rows.map(row => [row.messageId, row]));
+            const last = rows[rows.length - 1];
+            result.push({
+                messageId: last.messageId,
+                messageIds: run.map(message => message.id),
+                estimatedHeight: rows.reduce((height, row) => height + (row.estimatedHeight ?? 0), 0),
+                groupControl: last.groupControl,
+                messageElement: <StreamRetryAttemptSections
+                    key={`unmerged-retry-${first.id}`}
+                    messages={run}
+                    renderMessages={chunk => <>{chunk.map(message => rowById.get(message.id)?.messageElement)}</>}
+                />,
+            });
+        } else {
+            result.push(...rows);
+        }
+        start = end;
+    }
+    return result;
 }
 
 export interface RenderableConversationItem {
@@ -421,10 +474,12 @@ export function useMessageListElements({
         isMobilePlatform,
     ]);
 
+    const resultsOnly = useContext(ButlerResultsOnlyContext);
+
     const messageElements = useMemo(() => {
         if (!isMergeAssistantMessages) {
             // 非合并模式：每条消息单独渲染
-            return allDisplayMessages.map((message) => {
+            const entries = allDisplayMessages.map((message) => {
                 if (message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
                 const streamEvent = streamingMessages.get(message.id);
                 const groupControl = getGenerationGroupControl(message);
@@ -471,6 +526,7 @@ export function useMessageListElements({
                     groupControl,
                 } satisfies MessageElementEntry;
             });
+            return resultsOnly ? entries : groupUnmergedRetryEntries(allDisplayMessages, entries);
         }
 
         // 合并模式：将连续的非 user 消息合并到一个气泡中
@@ -642,6 +698,7 @@ export function useMessageListElements({
         isMergeAssistantMessages,
         pendingMessageId,
         resendMessageToFeishuDebug,
+        resultsOnly,
         renderMessageActions,
         actionableAgentPlanMessageId,
         agentPlanModeSwitching,
@@ -780,7 +837,7 @@ export function useMessageListElements({
                 pushMessageWithVersion(entry);
             });
 
-            const lastGroupMessageIds = lastGroup.map((entry) => entry.messageId);
+            const lastGroupMessageIds = lastGroup.flatMap((entry) => entry.messageIds ?? [entry.messageId]);
             const lastGroupEstimatedHeight = Math.max(
                 0,
                 lastGroup.reduce((sum, entry) => {
@@ -871,6 +928,23 @@ export function useMessageListElements({
                     virtualizationMode: "live",
                 });
             });
+
+            // 与 last-reply 容器一致：桌面端输入框悬浮在列表上方，尾部需要留出空间。
+            if (!isMobile && items.length > 0) {
+                items.push({
+                    key: "chat-bottom-spacer",
+                    messageId: null,
+                    estimatedHeight: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX,
+                    element: (
+                        <div
+                            className="flex-none"
+                            style={{ height: LAST_REPLY_CONTAINER_BOTTOM_SPACER_PX }}
+                            data-aipp-slot="chat-bottom-spacer"
+                        />
+                    ),
+                    virtualizationMode: "live",
+                });
+            }
         }
 
         return items;

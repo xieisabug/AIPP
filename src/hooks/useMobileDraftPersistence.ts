@@ -12,9 +12,22 @@ export interface MobileDraftAttachmentDto {
     thumbnail?: string | null;
 }
 
+export interface MobileDraftMissingAttachmentDto {
+    id: number;
+    name: string;
+}
+
 export interface MobileDraftDto {
     content: string;
     attachments: MobileDraftAttachmentDto[];
+    /** 草稿记录过但这次无法恢复的附件，需要提示用户重新选择。旧后端可能不返回。 */
+    missing_attachments?: MobileDraftMissingAttachmentDto[];
+}
+
+export function draftMissingAttachments(draft: Partial<MobileDraftDto> | null | undefined): MobileDraftMissingAttachmentDto[] {
+    const missing = Array.isArray(draft?.missing_attachments) ? draft.missing_attachments : [];
+    return missing.filter((item) => Number.isFinite(item?.id) && item.id > 0)
+        .map((item) => ({ id: item.id, name: item.name || `attachment-${item.id}` }));
 }
 
 const writes = new Map<string, Promise<unknown>>();
@@ -41,6 +54,10 @@ export function draftAttachmentsToFileInfo(attachments: MobileDraftAttachmentDto
     });
 }
 
+export interface DraftRestoreOptions {
+    preserveAttachments?: boolean;
+}
+
 type DraftPayload = { content: string; attachmentIds: number[] };
 
 /**
@@ -50,11 +67,12 @@ type DraftPayload = { content: string; attachmentIds: number[] };
  */
 export function useMobileDraftPersistence(
     key: string,
-    restore: (draft: MobileDraftDto) => void,
+    restore: (draft: MobileDraftDto, options?: DraftRestoreOptions) => void,
     onReady?: () => void,
 ) {
     const mobile = useIsMobilePlatform();
-    const revisions = useRef(new Map<string, number>());
+    const contentRevisions = useRef(new Map<string, number>());
+    const attachmentRevisions = useRef(new Map<string, number>());
     const hydrateReady = useRef(new Map<string, boolean>());
     const pendingWrite = useRef(new Map<string, boolean>());
     const latestRestore = useRef(restore);
@@ -93,7 +111,8 @@ export function useMobileDraftPersistence(
         let disposed = false;
         hydrateReady.current.set(key, false);
         pendingWrite.current.set(key, false);
-        const revision = revisions.current.get(key) ?? 0;
+        const contentRevision = contentRevisions.current.get(key) ?? 0;
+        const attachmentRevision = attachmentRevisions.current.get(key) ?? 0;
         void Promise.resolve(writes.get(key))
             .then(() => invoke<MobileDraftDto>("get_mobile_draft", { conversationKey: key }))
             .then((draft) => {
@@ -101,28 +120,22 @@ export function useMobileDraftPersistence(
                 const attachments = Array.isArray(draft?.attachments) ? draft.attachments : [];
                 const content = typeof draft?.content === "string" ? draft.content : "";
                 const attachmentIds = attachments.map((item) => item.id).filter((id) => id > 0);
-                if ((revisions.current.get(key) ?? 0) === revision) {
-                    latestPayload.current.set(key, { content, attachmentIds });
-                    latestRestore.current({ content, attachments });
-                } else {
-                    // User edited during hydrate: keep typed content, seed attachments from
-                    // storage when the in-memory payload still has none (never wipe them).
-                    const current = latestPayload.current.get(key) ?? {
-                        content: "",
-                        attachmentIds: [] as number[],
-                    };
-                    const mergedIds =
-                        current.attachmentIds.length > 0 ? current.attachmentIds : attachmentIds;
-                    latestPayload.current.set(key, {
-                        content: current.content,
-                        attachmentIds: mergedIds,
-                    });
-                    if (mergedIds.length > 0) {
-                        latestRestore.current({
-                            content: current.content,
-                            attachments,
-                        });
-                    }
+                const missing_attachments = draftMissingAttachments(draft);
+                const contentChanged = (contentRevisions.current.get(key) ?? 0) !== contentRevision;
+                const attachmentsChanged = (attachmentRevisions.current.get(key) ?? 0) !== attachmentRevision;
+                const current = latestPayload.current.get(key);
+                const restoredContent = contentChanged ? current?.content ?? "" : content;
+                latestPayload.current.set(key, {
+                    content: restoredContent,
+                    // An explicit clear is an edit too; never infer it from array length.
+                    attachmentIds: attachmentsChanged ? current?.attachmentIds ?? [] : attachmentIds,
+                });
+                if (attachmentsChanged) {
+                    // The UI already owns the newly selected files, including their metadata.
+                    // Restore untouched text only; stale attachment DTOs must not replace them.
+                    latestRestore.current({ content: restoredContent, attachments: [] }, { preserveAttachments: true });
+                } else if (!contentChanged || attachments.length > 0 || missing_attachments.length > 0) {
+                    latestRestore.current({ content: restoredContent, attachments, missing_attachments });
                 }
             })
             .catch((error) => {
@@ -155,7 +168,12 @@ export function useMobileDraftPersistence(
                 attachmentIds: next.attachmentIds ?? previous.attachmentIds,
             };
             latestPayload.current.set(key, payload);
-            revisions.current.set(key, (revisions.current.get(key) ?? 0) + 1);
+            if (next.content !== undefined) {
+                contentRevisions.current.set(key, (contentRevisions.current.get(key) ?? 0) + 1);
+            }
+            if (next.attachmentIds !== undefined) {
+                attachmentRevisions.current.set(key, (attachmentRevisions.current.get(key) ?? 0) + 1);
+            }
             if (!hydrateReady.current.get(key)) {
                 // Gate disk writes until hydrate finishes so we never persist a
                 // pre-restore empty attachmentIds that would skip restore.

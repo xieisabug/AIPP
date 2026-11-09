@@ -161,7 +161,7 @@ impl BrowserPool {
         // 创建新页面
         let page_result = {
             let browser_guard = browser.lock().await;
-            browser_guard.new_page("about:blank").await
+            browser_guard.new_page(super::native_window::page_params(self.config.headless)).await
         };
 
         let page = match page_result {
@@ -176,7 +176,7 @@ impl BrowserPool {
                     browser = self.recreate_browser().await?;
                     let retry_result = {
                         let browser_guard = browser.lock().await;
-                        browser_guard.new_page("about:blank").await
+                        browser_guard.new_page(super::native_window::page_params(self.config.headless)).await
                     };
                     retry_result.map_err(|retry_error| {
                         format!(
@@ -289,11 +289,13 @@ impl BrowserPool {
 
         let mut builder = BrowserConfig::builder()
             .user_data_dir(&user_data_dir)
-            .no_sandbox()
-            .launch_timeout(Duration::from_secs(60));
+            .launch_timeout(Duration::from_millis(super::super::recovery::SEARCH_TIMEOUT_MS as u64));
 
-        if !self.config.headless {
-            builder = builder.with_head();
+        if self.config.headless {
+            builder = builder.no_sandbox();
+        } else {
+            // Manual Chrome uses normal browser settings, not the headless automation flags/viewport.
+            builder = builder.with_head().disable_default_args().viewport(None);
         }
 
         let browser_path_exists = self.config.browser_path.exists();
@@ -455,7 +457,11 @@ impl Drop for PooledPage {
     fn drop(&mut self) {
         if let Some(page) = self.page.take() {
             if let Some(pool) = self.pool.take() {
-                pool.return_page(page);
+                if pool.config.headless {
+                    pool.return_page(page);
+                } else {
+                    super::native_window::close(page);
+                }
             }
         }
         self.permit.take();

@@ -1,8 +1,7 @@
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
-    probe_acp_session_config_options, refresh_acp_config_signature,
-    refresh_acp_selected_mcp_tools_payload, resolve_acp_cli_path, spawn_agent_idle_reaper_once,
-    spawn_acp_session_task, AcpSessionConfigOptionPayload, AcpSessionEntry,
+    probe_acp_session_config_options, resolve_acp_cli_path,
+    AcpSessionConfigOptionPayload,
 };
 use crate::api::ai::codex_app_server::{
     extract_codex_app_server_config, probe_codex_model_options, CODEX_APP_SERVER_API_TYPE,
@@ -753,6 +752,21 @@ pub async fn save_assistant(
     Ok(())
 }
 
+fn resolve_new_assistant_model(
+    models: Vec<(String, String, i64, i64)>,
+    selection: &str,
+    assistant_type: i64,
+) -> Result<(i64, String), String> {
+    let (_, code, model_id, provider_id) = models.into_iter()
+        .find(|(_, code, _, provider)| format!("{code}%%{provider}") == selection)
+        .ok_or_else(|| format!("新增助手失败：所选模型不可用或不适用于助手类型 {assistant_type}，请重新选择模型"))?;
+    Ok((provider_id, if assistant_type == 4 && model_id == 0 { String::new() } else { code }))
+}
+
+#[cfg(test)]
+#[path = "assistant_creation_tests.rs"]
+mod assistant_creation_tests;
+
 #[tauri::command]
 #[instrument(skip(app_handle, name, description), fields(assistant_type))]
 pub fn add_assistant(
@@ -760,9 +774,18 @@ pub fn add_assistant(
     name: String,
     description: String,
     assistant_type: i64,
+    model_selection: Option<String>,
 ) -> Result<AssistantDetail, String> {
     info!("add assistant start");
     reject_reserved_butler_assistant_name(&name)?;
+    // Validate before creating any rows; never silently substitute another model.
+    let (provider_id, model_code) = if let Some(selection) = model_selection {
+        let models = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?
+            .get_filtered_models_for_select(assistant_type)?;
+        resolve_new_assistant_model(models, &selection, assistant_type)?
+    } else {
+        (0, String::new())
+    };
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
 
     // Add a default assistant
@@ -786,7 +809,7 @@ pub fn add_assistant(
     }];
 
     let model_id =
-        assistant_db.add_assistant_model(assistant_id, 0, "", "").map_err(|e| e.to_string())?;
+        assistant_db.add_assistant_model(assistant_id, provider_id, &model_code, "").map_err(|e| e.to_string())?;
     debug!(model_id, "added default model");
 
     // Add default model configs
@@ -850,8 +873,8 @@ pub fn add_assistant(
     let model = vec![AssistantModel {
         id: model_id,
         assistant_id,
-        provider_id: 0,
-        model_code: "".to_string(),
+        provider_id,
+        model_code,
         alias: "".to_string(),
     }];
     let prompt_params = Vec::new();
@@ -1164,126 +1187,40 @@ pub async fn ensure_acp_session_connected(
     conversation_id: i64,
     assistant_id: i64,
 ) -> Result<Option<serde_json::Value>, String> {
-    spawn_agent_idle_reaper_once(app_handle.clone());
-
-    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
-
-    if assistant.assistant_type != Some(4) {
-        return Ok(None);
-    }
-
-    // 移动端不能启动本机 CLI Agent 进程（MOB-02）
+    let _ = (&acp_session_state, &codex_session_state, &claude_session_state);
+    use crate::api::ai::agent_driver::{lifecycle, registry, AgentTurnRequest};
+    let assistant = get_assistant(app_handle.clone(), assistant_id)?;
+    if assistant.assistant.assistant_type != Some(4) { return Ok(None); }
     if cfg!(mobile) {
         return Err(crate::api::system_api::mobile_unsupported_error("本地 CLI Agent（Codex/Claude/ACP）"));
     }
-
-    // ask_ai may have just created the authoritative Claude session using a
-    // per-message provider/model override. Never auto-connect a second session
-    // for the same conversation and replace its state.
-    if let Some(entry) = claude_session_state.sessions.lock().await.get(&conversation_id) {
-        return Ok(Some(serde_json::to_value(entry.snapshot.clone()).unwrap_or(serde_json::Value::Null)));
+    let _gate = lifecycle::lock_conversation(&app_handle, conversation_id).await.map_err(|error| error.to_string())?;
+    if let Some(session) = lifecycle::lookup_session(&app_handle, conversation_id).await.map_err(|error| error.to_string())? {
+        let driver = registry::registry().driver(session.handle.metadata().id).map_err(|error| error.to_string())?;
+        return driver.session_capabilities(&session.snapshot).and_then(|caps| caps.attach_to_snapshot(session.snapshot)).map(Some).map_err(|error| error.to_string());
     }
-
-    let model_configs =
-        assistant_db.get_assistant_model_configs(assistant_id).map_err(|e| e.to_string())?;
-    let assistant_models =
-        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-    let (provider_api_type, provider_configs) = if let Some(provider_id) =
-        resolve_acp_provider_id(&assistant_models, &model_configs)
-    {
-        let llm_db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-        let provider = llm_db.get_llm_provider(provider_id).map_err(|error| match error {
-            rusqlite::Error::QueryReturnedNoRows => format!(
-                "Agent 助手 {assistant_id} 引用的提供商 ID {provider_id} 不存在，请在助手配置中重新选择提供商"
-            ),
-            other => other.to_string(),
-        })?;
-        let configs = llm_db.get_llm_provider_config(provider_id).map_err(|e| e.to_string())?;
-        (provider.api_type, configs)
-    } else {
-        return Err("Agent 助手尚未配置模型提供商".to_string());
-    };
-
-    // Claude Code's stream-json process is demand-driven by ask_ai because the
-    // selected provider/model can be overridden per message. Auto-connect must
-    // not start a default process that can race with and replace that session.
-    if is_claude_code_provider(&provider_api_type, &provider_configs) {
+    // A selected actor may have exited or been reaped. Do not reconnect the
+    // assistant default over that explicit provider selection; ask_ai owns the
+    // next requested start/resume.
+    if lifecycle::session_binding(&app_handle, conversation_id).map_err(|error| error.to_string())?.is_some() {
         return Ok(None);
     }
-
-    // 自动连接只负责填补空会话。ask_ai 可能已按本次消息的模型覆盖创建了权威会话，
-    // 此处绝不能用助手默认配置替换它，否则会中断正在执行的 Codex turn。
-    if provider_api_type == CODEX_APP_SERVER_API_TYPE {
-        let sessions = codex_session_state.sessions.lock().await;
-        return Ok(sessions.get(&conversation_id).map(|entry| {
-            serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)
-        }));
-    }
-
-    let proxy_enabled = provider_configs
-        .iter()
-        .find(|config| config.name == "proxy_enabled")
-        .and_then(|config| config.value.parse::<bool>().ok())
-        .unwrap_or(false);
-
-    let feature_config_state = app_handle.state::<FeatureConfigState>();
-    let config_feature_map = feature_config_state.config_feature_map.lock().await.clone();
-    let network_proxy =
-        proxy_enabled.then(|| get_network_proxy_from_config(&config_feature_map)).flatten();
-
-    let mut acp_config = extract_acp_config(&model_configs, &provider_configs)
-        .map_err(|e| e.to_string())?;
-    acp_config.model = assistant_models
-        .first()
-        .map(|model| model.model_code.trim())
-        .filter(|model| !model.is_empty())
-        .map(str::to_string);
-    if let Some(proxy_url) = network_proxy.as_deref() {
-        apply_network_proxy_to_env_vars(&mut acp_config.env_vars, proxy_url);
-    }
-    refresh_acp_selected_mcp_tools_payload(&app_handle, assistant_id, Some(conversation_id), &mut acp_config)?;
-    refresh_acp_config_signature(&mut acp_config);
-
-    let handle = {
-        let mut sessions = acp_session_state.sessions.lock().await;
-        if sessions
-            .get(&conversation_id)
-            .is_some_and(|entry| entry.config_signature == acp_config.session_signature)
-        {
-            let entry = sessions.get_mut(&conversation_id).expect("checked above");
-            entry.touch();
-            entry.handle.clone()
-        } else {
-            if sessions.contains_key(&conversation_id) {
-                info!(
-                    conversation_id,
-                    "ACP session config changed during auto-connect; replacing existing session"
-                );
-            }
-            let handle = spawn_acp_session_task(
-                app_handle.clone(),
-                conversation_id,
-                acp_config.clone(),
-            );
-            sessions.insert(
-                conversation_id,
-                AcpSessionEntry::new(
-                    handle.clone(),
-                    conversation_id,
-                    acp_config.session_signature.clone(),
-                ),
-            );
-            handle
-        }
+    let provider_id = resolve_acp_provider_id(&assistant.model, &assistant.model_configs)
+        .ok_or_else(|| "Agent 助手尚未配置模型提供商".to_string())?;
+    let database = LLMDatabase::new(&app_handle).map_err(|error| error.to_string())?;
+    let provider = database.get_llm_provider(provider_id).map_err(|error| format!("Agent provider {provider_id} lookup failed: {error}"))?;
+    let configs = database.get_llm_provider_config(provider_id).map_err(|error| error.to_string())?;
+    let instance = registry::registry().resolve_provider(provider_id, &provider.api_type, configs).map_err(|error| error.to_string())?;
+    let driver = registry::registry().driver(&instance.driver_id).map_err(|error| error.to_string())?;
+    let feature_state = app_handle.state::<FeatureConfigState>();
+    let features = feature_state.config_feature_map.lock().await.clone();
+    let overrides = None;
+    let request = AgentTurnRequest { source_message_id: None,
+        assistant: &assistant, conversation_id, prompt: String::new(), display_prompt: String::new(),
+        override_model_id: None, overrides: &overrides, feature_configs: &features, messages: &[],
     };
-
-    handle.start(window).await.map_err(|error| error.to_string())?;
-
-    let sessions = acp_session_state.sessions.lock().await;
-    Ok(sessions
-        .get(&conversation_id)
-        .map(|entry| serde_json::to_value(&entry.snapshot).unwrap_or(serde_json::Value::Null)))
+    let session = driver.warmup(&app_handle, window, &request, &instance).await.map_err(|error| error.to_string())?;
+    session.map(|session| driver.session_capabilities(&session.snapshot).and_then(|caps| caps.attach_to_snapshot(session.snapshot)).map_err(|error| error.to_string())).transpose()
 }
 
 #[tauri::command]

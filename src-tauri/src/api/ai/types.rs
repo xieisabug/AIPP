@@ -26,6 +26,20 @@ pub struct AiRequest {
     pub max_tokens: Option<u32>,
     pub stream: Option<bool>,
     pub attachment_list: Option<Vec<i64>>,
+    /// 管家会话中用户引用的结果（稳定身份），后台据此关联原工作并带入必要上下文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<WorkQuote>,
+    #[serde(default)]
+    pub butler_intent: Option<String>,
+    #[serde(default)]
+    pub butler_goal_revision: Option<i64>,
+}
+
+/// 聊天式引用回复携带的稳定身份：`message`（某条回复）、`task`（任务交付）、`exchange`（助手间委托）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WorkQuote {
+    pub kind: String,
+    pub id: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

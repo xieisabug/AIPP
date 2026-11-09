@@ -198,6 +198,20 @@ export function ConversationStatsDialog({
                                 showPercentage={true}
                             />
 
+                            {stats.delegated && stats.delegated.run_count > 0 && (
+                                <div
+                                    className="flex justify-between text-sm text-muted-foreground"
+                                    data-aipp-slot="conversation-stats-delegated"
+                                >
+                                    <span>
+                                        其中助手协作（{formatNumber(stats.delegated.run_count)} 次委派）
+                                    </span>
+                                    <span className="font-medium text-foreground">
+                                        {formatNumber(stats.delegated.total_tokens)} tokens
+                                    </span>
+                                </div>
+                            )}
+
                             {stats.opencode_go_allowance != null && (
                                 <div className="flex justify-between text-sm">
                                     <span>OpenCode Go 订阅额度累计扣减</span>

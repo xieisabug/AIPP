@@ -40,6 +40,39 @@ describe("useScrollManagement", () => {
         vi.unstubAllGlobals();
     });
 
+    it("keeps the reading position when hidden geometry collapses and stable scrolling is requested", () => {
+        const shell = document.createElement("div");
+        shell.setAttribute("data-aipp-mobile-shell", "");
+        const page = document.createElement("div");
+        const container = document.createElement("div");
+        shell.append(page); page.append(container); document.body.append(shell);
+        let top = 900;
+        Object.defineProperties(container, {
+            scrollHeight: { get: () => page.hidden ? 0 : 2400 },
+            clientHeight: { get: () => page.hidden ? 0 : 400 },
+            scrollTop: { get: () => page.hidden ? 0 : top, set: value => { top = value; } },
+        });
+        container.scrollTo = vi.fn();
+        const { result, unmount } = renderHook(() => useScrollManagement());
+        act(() => {
+            result.current.scrollContainerRef.current = container;
+            result.current.syncScrollState();
+        });
+        page.hidden = true;
+        act(() => {
+            result.current.syncScrollState();
+            result.current.scrollToBottomStable();
+        });
+        page.hidden = false;
+        act(() => result.current.smartScroll());
+        expect(container.scrollTo).not.toHaveBeenCalled();
+        container.scrollTop = 2000;
+        act(() => result.current.syncScrollState());
+        act(() => result.current.smartScroll());
+        expect(container.scrollTo).toHaveBeenCalled();
+        unmount(); shell.remove();
+    });
+
     it("does not execute queued scrolling after the mobile page becomes hidden", () => {
         const frames: FrameRequestCallback[] = [];
         vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
