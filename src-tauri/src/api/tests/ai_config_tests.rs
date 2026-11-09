@@ -293,7 +293,7 @@ async fn test_prompt_cache_invalid_ttl_fails_before_http_without_substitution() 
         auth: genai::resolver::AuthData::from_single("local-test-key"),
         model: genai::ModelIden::new(genai::adapter::AdapterKind::OpenAIResp, "gpt-6.1-sol"),
     };
-    let err = genai::Client::default().exec_chat(target, genai::chat::ChatRequest::from_user("test"), Some(&options)).await.unwrap_err();
+    let err = genai::Client::new().unwrap().exec_chat(target, genai::chat::ChatRequest::from_user("test"), Some(&options)).await.unwrap_err();
     assert!(matches!(&err, genai::Error::PromptCacheTtlParsing { actual } if actual == "24h"));
     assert!(err.to_string().contains("prompt_cache_options.ttl"));
 }
