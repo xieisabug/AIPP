@@ -318,6 +318,19 @@ impl<'a> Tables<'a> {
         }
         // Some legacy profiles do not have quick assistant 1 yet.
         let quick_exists = self.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {} WHERE id=1 AND id!=?1)", self.names["assistant"]), [id], |r| r.get::<_, bool>(0))?;
+        // Before reassigning retained chats, detach private provenance and fence old runs.
+        if let (Some(memory),Some(messages),Some(conversations)) =
+            (self.names.get("butler_memory"),self.names.get("message"),self.names.get("conversation")) {
+            self.conn.execute(&format!("UPDATE {memory} SET source_message_id=NULL WHERE source_message_id IN
+                (SELECT m.id FROM {messages} m JOIN {conversations} c ON c.id=m.conversation_id WHERE c.assistant_id=?1)"),[id])?;
+        }
+        if let (Some(goals),Some(conversations)) = (self.names.get("butler_goal"),self.names.get("conversation")) {
+            self.conn.execute(&format!("INSERT INTO {goals}(conversation_id,revision,goal,stopped)
+                SELECT id,1,'',0 FROM {conversations} WHERE assistant_id=?1
+                  AND conversation_kind IN ('butler_main','butler_contact','butler_task')
+                ON CONFLICT(conversation_id) DO UPDATE SET revision=revision+1"),[id])?;
+        }
+        self.remove("butler_memory", "scope_type='assistant' AND scope_id=?1", id)?;
         self.update("conversation", "assistant_id", if quick_exists { "1" } else { "NULL" }, "assistant_id=?1", id)?;
         self.update("artifacts_collection", "assistant_id", "NULL", "assistant_id=?1", id)?;
         self.remove("PluginAssistantConfigurations", "assistant_id=?1", id)?;
