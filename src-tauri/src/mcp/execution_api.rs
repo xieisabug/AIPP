@@ -3444,13 +3444,13 @@ async fn execute_builtin_tool(
 
     // 定义实际的执行逻辑
     let execution = async {
-        execute_aipp_builtin_tool(
+        crate::api::butler_memory::TOOL_CANCEL.scope(cancel_token.clone(), execute_aipp_builtin_tool(
             app_handle.clone(),
             command.clone(),
             tool_name.to_string(),
             normalize_parameters_json(parameters),
             conversation_id,
-        )
+        ))
         .await
     };
 
