@@ -100,4 +100,17 @@ describe("ExperimentalConfigForm", () => {
         expect(screen.getByText("主工作区").closest("details")).toBeNull();
     });
 
+    it("should show helper model and workspace settings in basic config when advanced config is collapsed", () => {
+        render(<ButlerScopeHarness enabled />);
+        expect(screen.getByText("高级配置").closest("details")).not.toHaveAttribute("open");
+        expect(screen.getByText("小型辅助模型").closest("details")).toBeNull();
+        expect(screen.queryByText("辅助模型")).toBeNull();
+        expect(screen.getByText("信任任何工作区").closest("details")).toBeNull();
+        expect(screen.getByText("额外可信工作区").closest("details")).toBeNull();
+        expect(screen.getByText("额外可信工作区").closest("section")).toBe(
+            screen.getByText("主工作区").closest("section")
+        );
+        expect(screen.queryByText("工作区权限")).toBeNull();
+    });
+
 });

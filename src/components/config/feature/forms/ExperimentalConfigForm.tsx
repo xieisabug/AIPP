@@ -1102,6 +1102,52 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                     />
                                     <Controller
                                         control={form.control}
+                                        name="butler_helper_model_id"
+                                        render={({ field }) => (
+                                            <FormItem className={settingRowClassName}>
+                                                <SettingRowText
+                                                    label={
+                                                        <span className="inline-flex items-center gap-1">
+                                                            小型辅助模型
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <CircleHelp aria-label="小型辅助模型说明" className="size-3.5 cursor-help text-muted-foreground" />
+                                                                </TooltipTrigger>
+                                                                <TooltipContent className="max-w-xs text-xs">
+                                                                    用于总结之类的辅助任务，例如助手做事时把进展浓缩成一句话，显示在聊天区和左侧联系人中。建议选择便宜、响应快的小模型；不选择时只显示「正在处理…」。
+                                                                </TooltipContent>
+                                                            </Tooltip>
+                                                        </span>
+                                                    }
+                                                    description="可不选。选择后，助手执行任务时会显示一句进度总结。"
+                                                />
+                                                <div className="w-64 shrink-0 space-y-1">
+                                                    <FormControl>
+                                                        <Select
+                                                            value={field.value || HELPER_MODEL_NONE}
+                                                            onValueChange={(value) => field.onChange(value === HELPER_MODEL_NONE ? "" : value)}
+                                                            disabled={modelsLoading}
+                                                        >
+                                                            <SelectTrigger className="w-full">
+                                                                <SelectValue placeholder={modelsLoading ? "加载中..." : "不使用"} />
+                                                            </SelectTrigger>
+                                                            <SelectContent>
+                                                                <SelectItem value={HELPER_MODEL_NONE}>不使用</SelectItem>
+                                                                {modelOptions.map((option) => (
+                                                                    <SelectItem key={option.value} value={option.value}>
+                                                                        {option.label}
+                                                                    </SelectItem>
+                                                                ))}
+                                                            </SelectContent>
+                                                        </Select>
+                                                    </FormControl>
+                                                    <FormMessage />
+                                                </div>
+                                            </FormItem>
+                                        )}
+                                    />
+                                    <Controller
+                                        control={form.control}
                                         name="butler_display_name"
                                         render={({ field }) => (
                                             <FormItem className={settingRowClassName}>
@@ -1151,64 +1197,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                             <p className="text-xs text-destructive">请先配置主工作区</p>
                                         ) : null}
                                     </div>
-
-                                </SettingsGroup>
-                                <OptionalConfigSection title="高级配置" description="按需调整辅助模型、执行开关和工作区信任范围。">
-                                <SettingsGroup title="管家能力开关" description="发生异常时可单独关闭新执行，保留记录、结果查看与停止操作。关闭不会撤销已发生的外部操作；重新开启后，未过期的排队工作可以继续。">
-                                    {renderToggleRow("butler_task_dispatch_enabled", "新建独立任务", "允许管家派发需要独立上下文的工作。")}
-                                    {renderToggleRow("butler_peer_collaboration_enabled", "发起成员协作", "关闭后不启动新的协作请求；已有答复与失败回执仍可返回。")}
-                                    {renderToggleRow("butler_work_continuation_enabled", "继续执行已有工作", "关闭后保留排队的续接要求，不再启动后续执行。")}
-                                    {renderToggleRow("butler_background_checks_enabled", "后台检查", "关闭后不启动管家绑定的检查，不影响普通定时任务。")}
-                                </SettingsGroup>
-                                <SettingsGroup title="辅助模型">
-                                    <Controller
-                                        control={form.control}
-                                        name="butler_helper_model_id"
-                                        render={({ field }) => (
-                                            <FormItem className={settingRowClassName}>
-                                                <SettingRowText
-                                                    label={
-                                                        <span className="inline-flex items-center gap-1">
-                                                            小型辅助模型
-                                                            <Tooltip>
-                                                                <TooltipTrigger asChild>
-                                                                    <CircleHelp aria-label="小型辅助模型说明" className="size-3.5 cursor-help text-muted-foreground" />
-                                                                </TooltipTrigger>
-                                                                <TooltipContent className="max-w-xs text-xs">
-                                                                    用于总结之类的辅助任务，例如助手做事时把进展浓缩成一句话，显示在聊天区和左侧联系人中。建议选择便宜、响应快的小模型；不选择时只显示「正在处理…」。
-                                                                </TooltipContent>
-                                                            </Tooltip>
-                                                        </span>
-                                                    }
-                                                    description="可不选。选择后，助手执行任务时会显示一句进度总结。"
-                                                />
-                                                <div className="w-64 shrink-0 space-y-1">
-                                                    <FormControl>
-                                                        <Select
-                                                            value={field.value || HELPER_MODEL_NONE}
-                                                            onValueChange={(value) => field.onChange(value === HELPER_MODEL_NONE ? "" : value)}
-                                                            disabled={modelsLoading}
-                                                        >
-                                                            <SelectTrigger className="w-full">
-                                                                <SelectValue placeholder={modelsLoading ? "加载中..." : "不使用"} />
-                                                            </SelectTrigger>
-                                                            <SelectContent>
-                                                                <SelectItem value={HELPER_MODEL_NONE}>不使用</SelectItem>
-                                                                {modelOptions.map((option) => (
-                                                                    <SelectItem key={option.value} value={option.value}>
-                                                                        {option.label}
-                                                                    </SelectItem>
-                                                                ))}
-                                                            </SelectContent>
-                                                        </Select>
-                                                    </FormControl>
-                                                    <FormMessage />
-                                                </div>
-                                            </FormItem>
-                                        )}
-                                    />
-                                </SettingsGroup>
-                                <SettingsGroup title="工作区权限">
                                     {renderToggleRow(
                                         "butler_trust_all_workspaces",
                                         <span className="flex items-center gap-2">
@@ -1287,6 +1275,13 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                             )}
                                         </div>
                                     )}
+                                </SettingsGroup>
+                                <OptionalConfigSection title="高级配置" description="按需调整执行开关和飞书接入。">
+                                <SettingsGroup title="管家能力开关" description="发生异常时可单独关闭新执行，保留记录、结果查看与停止操作。关闭不会撤销已发生的外部操作；重新开启后，未过期的排队工作可以继续。">
+                                    {renderToggleRow("butler_task_dispatch_enabled", "新建独立任务", "允许管家派发需要独立上下文的工作。")}
+                                    {renderToggleRow("butler_peer_collaboration_enabled", "发起成员协作", "关闭后不启动新的协作请求；已有答复与失败回执仍可返回。")}
+                                    {renderToggleRow("butler_work_continuation_enabled", "继续执行已有工作", "关闭后保留排队的续接要求，不再启动后续执行。")}
+                                    {renderToggleRow("butler_background_checks_enabled", "后台检查", "关闭后不启动管家绑定的检查，不影响普通定时任务。")}
                                 </SettingsGroup>
 
                                 <SettingsGroup title="飞书">

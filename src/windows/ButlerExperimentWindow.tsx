@@ -27,6 +27,7 @@ import {
     ChevronLeft,
     ChevronRight,
     Clock,
+    ExternalLink,
     History,
     Loader2,
     MessageSquareText,
@@ -963,6 +964,14 @@ function ButlerExperimentWindow() {
             });
     }, [butlerSettingsForm, loadFeatureConfig]);
 
+    // 总管家设置只覆盖 Butler 相关项；模型、助手等通用配置在 AIPP 主设置窗口里
+    const handleOpenAppSettings = useCallback(() => {
+        invoke("open_config_window").catch((error) => {
+            console.error("[ButlerExperimentWindow] Failed to open AIPP settings window:", error);
+            toast.error(`打开 AIPP 设置窗口失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+    }, []);
+
     const handleSaveButlerSettings = useCallback(async () => {
         await saveExperimentalConfigValues(saveFeatureConfig, butlerSettingsForm.getValues());
     }, [butlerSettingsForm, saveFeatureConfig]);
@@ -1298,7 +1307,16 @@ function ButlerExperimentWindow() {
                         <DialogHeader className="border-b px-6 py-4">
                             <DialogTitle>总管家实验设置</DialogTitle>
                             <DialogDescription>
-                                在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。
+                                {"在当前工作台内调整 Butler 相关实验配置，包括模型、上下文压缩、可信工作区和飞书接入。其他通用配置请前往"}
+                                <button
+                                    type="button"
+                                    onClick={handleOpenAppSettings}
+                                    className="ml-1 inline-flex items-center gap-1 align-baseline font-medium text-foreground underline underline-offset-4 hover:text-foreground/80"
+                                    data-aipp-slot="butler-settings-open-app-settings"
+                                >
+                                    AIPP 设置
+                                    <ExternalLink className="h-3 w-3" />
+                                </button>
                             </DialogDescription>
                         </DialogHeader>
                         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
