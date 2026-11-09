@@ -1662,7 +1662,7 @@ pub async fn execute_aipp_builtin_tool(
                     serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
                 }
                 "message_bot" | "search_bot_history" | "read_bot_message_context"
-                | "read_work_context" | "continue_work" | "resume_work"
+                | "read_work_context" | "continue_work" | "resume_work" | "butler_memory"
                 | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" | "stop_assistant_exchange" => {
                     let id = conversation_id.ok_or("此工具需要管家联系人会话")?;
                     let result = crate::api::butler_peer::tool(&app_handle, id, &tool_name, &args)
