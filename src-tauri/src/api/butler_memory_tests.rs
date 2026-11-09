@@ -14,7 +14,7 @@ fn save(c:&mut Connection, scope:&str)->Value {
 fn test_memory_api_remember_recall_update_forget_across_own_conversations() {
     let mut c=fixture();let entry=save(&mut c,"assistant");let id=entry["id"].as_i64().unwrap();
     assert_eq!(entry["source_message_id"],1);
-    assert_eq!(execute(&mut c,21,None,&json!({"action":"recall","query":"中文"})).unwrap()["memories"].as_array().unwrap().len(),1);
+    assert_eq!(execute(&mut c,21,Some(5),&json!({"action":"recall","query":"中文"})).unwrap()["memories"].as_array().unwrap().len(),1);
     let changed=execute(&mut c,20,Some(2),&json!({"action":"update","id":id,"revision":1,"content":"回复简短"})).unwrap();
     assert_eq!(changed["memory"]["revision"],2);
     assert!(execute(&mut c,20,Some(2),&json!({"action":"forget","id":id,"revision":1})).is_err());
@@ -25,17 +25,17 @@ fn test_memory_api_remember_recall_update_forget_across_own_conversations() {
 #[test]
 fn test_memory_api_global_read_does_not_reveal_private_source() {
     let mut c=fixture();let entry=save(&mut c,"global");let id=entry["id"].as_i64().unwrap();
-    assert_eq!(execute(&mut c,30,None,&json!({"action":"recall"})).unwrap()["memories"].as_array().unwrap().len(),1);
-    assert_eq!(execute(&mut c,30,None,&json!({"action":"source","id":id})).unwrap()["status"],"unavailable");
-    assert_eq!(execute(&mut c,20,None,&json!({"action":"source","id":id})).unwrap()["status"],"available");
+    assert_eq!(execute(&mut c,30,Some(3),&json!({"action":"recall"})).unwrap()["memories"].as_array().unwrap().len(),1);
+    assert_eq!(execute(&mut c,30,Some(3),&json!({"action":"source","id":id})).unwrap()["status"],"unavailable");
+    assert_eq!(execute(&mut c,20,Some(2),&json!({"action":"source","id":id})).unwrap()["status"],"available");
 }
 #[test]
 fn test_memory_api_private_get_update_forget_and_source_isolation() {
     let mut c=fixture();let entry=save(&mut c,"assistant");let id=entry["id"].as_i64().unwrap();
-    assert!(execute(&mut c,30,None,&json!({"action":"get","id":id})).unwrap()["memory"].is_null());
+    assert!(execute(&mut c,30,Some(3),&json!({"action":"get","id":id})).unwrap()["memory"].is_null());
     assert!(execute(&mut c,30,Some(3),&json!({"action":"update","id":id,"revision":1,"content":"不允许"})).is_err());
     assert_eq!(execute(&mut c,30,Some(3),&json!({"action":"forget","id":id,"revision":1})).unwrap()["deleted"],false);
-    assert!(execute(&mut c,30,None,&json!({"action":"source","id":id})).is_err());
+    assert!(execute(&mut c,30,Some(3),&json!({"action":"source","id":id})).is_err());
 }
 #[test]
 fn test_memory_api_rejects_untrusted_and_stale_sources() {
@@ -61,8 +61,8 @@ fn test_memory_api_deleted_chat_retains_memory_but_source_is_unavailable() {
     let mut c=fixture();let entry=save(&mut c,"assistant");let id=entry["id"].as_i64().unwrap();
     c.execute("DELETE FROM message WHERE conversation_id=20",[]).unwrap();
     c.execute("DELETE FROM conversation WHERE id=20",[]).unwrap();
-    assert_eq!(execute(&mut c,21,None,&json!({"action":"source","id":id})).unwrap()["status"],"deleted");
-    assert_eq!(execute(&mut c,21,None,&json!({"action":"get","id":id})).unwrap()["memory"]["content"],"回复使用中文");
+    assert_eq!(execute(&mut c,21,Some(5),&json!({"action":"source","id":id})).unwrap()["status"],"deleted");
+    assert_eq!(execute(&mut c,21,Some(5),&json!({"action":"get","id":id})).unwrap()["memory"]["content"],"回复使用中文");
 }
 #[test]
 fn test_memory_api_rejects_group_forged_identity_and_foreign_source() {
@@ -79,4 +79,13 @@ fn test_memory_api_cancelled_runtime_token_does_not_write() {
     let mut c=fixture();let cancel=CancellationToken::new();cancel.cancel();
     assert!(execute_checked(&mut c,20,Some(2),&json!({"action":"remember","content":"不应保存"}),&cancel).is_err());
     assert_eq!(c.query_row("SELECT count(*) FROM butler_memory",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+}
+
+#[test]
+fn test_memory_api_reassigned_assistant_cannot_borrow_old_read_or_write_turn() {
+    let mut c=fixture();crate::db::butler_goal::schema(&c).unwrap();
+    c.execute_batch("INSERT INTO butler_goal VALUES(20,2,'new owner',0);INSERT INTO butler_goal_turn VALUES(1,20,1);UPDATE conversation SET assistant_id=1 WHERE id=20").unwrap();
+    for args in [json!({"action":"recall"}),json!({"action":"remember","content":"old run"})] {
+        assert!(execute(&mut c,20,Some(2),&args).is_err());
+    }
 }
