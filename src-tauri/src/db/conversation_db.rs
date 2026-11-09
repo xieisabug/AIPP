@@ -1881,6 +1881,7 @@ impl ConversationDatabase {
         // Codex threads can coexist for one conversation without overwriting
         // each other. Existing rows are ACP sessions for backward compatibility.
         ensure_agent_session_table(&conn)?;
+        super::butler_memory::init(&conn)?;
 
         // 添加迁移逻辑：如果新增列不存在，则按需补齐
         let mut stmt = conn.prepare("PRAGMA table_info(message)")?;
