@@ -86,9 +86,11 @@ fn execute_checked(conn: &mut Connection, current: i64, anchor: Option<i64>, arg
     let (actor,kind):(Option<i64>,String)=tx.query_row("SELECT assistant_id,conversation_kind FROM conversation WHERE id=?1",[current],|r|Ok((r.get(0)?,r.get(1)?)))?;
     let actor=actor.filter(|id|*id>0).context("当前会话没有有效助手")?;
     ensure!(matches!(kind.as_str(),"butler_main"|"butler_contact"|"butler_task"),"记忆仅在管家会话使用");
+    let anchor=anchor.context("记忆操作缺少运行时回合身份")?;
+    let source_exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM message WHERE id=?1 AND conversation_id=?2)",params![anchor,current],|r|r.get(0))?;
+    ensure!(source_exists,"记忆操作的原始回合已删除或不属于当前会话");
+    crate::db::butler_control::ensure_execution(&tx,current,Some(anchor))?;
     let user=if writing {
-        let anchor=anchor.context("记忆写入缺少运行时回合身份")?;
-        crate::db::butler_control::ensure_execution(&tx,current,Some(anchor))?;
         Some(direct_user(&tx,current,anchor)?)
     } else {None};
     let result=match action {
