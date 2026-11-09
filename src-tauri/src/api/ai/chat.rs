@@ -246,7 +246,7 @@ fn apply_stream_retry_metadata(
 }
 
 
-fn merge_chat_response_metadata(
+pub(crate) fn merge_chat_response_metadata(
     existing_metadata_json: Option<&str>,
     usage: Option<&Usage>,
     response_id: Option<&str>,

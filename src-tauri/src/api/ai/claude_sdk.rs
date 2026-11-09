@@ -446,17 +446,35 @@ fn persist(app: &tauri::AppHandle, id: i64, content: &str, done: bool) {
     }
 }
 
+/// Claude Code 的 usage 是 Anthropic 口径：`input_tokens` 不含缓存读取与缓存写入。
+/// 换成全应用统一口径（输入含缓存读写），缓存命中/写入另记，统计与缓存命中率才能和其他通道对齐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeUsageCounts {
+    pub input: i64,
+    pub output: i64,
+    pub total: i64,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+}
+
+pub(crate) fn claude_usage_counts(usage: &Value) -> ClaudeUsageCounts {
+    let get = |key: &str| usage.get(key).and_then(Value::as_i64).map(|value| value.max(0));
+    let cache_read = get("cache_read_input_tokens");
+    let cache_write = get("cache_creation_input_tokens");
+    let input = get("input_tokens").unwrap_or(0) + cache_read.unwrap_or(0) + cache_write.unwrap_or(0);
+    let output = get("output_tokens").unwrap_or(0);
+    ClaudeUsageCounts { input, output, total: input + output, cache_read, cache_write }
+}
+
 fn persist_usage(app: &tauri::AppHandle, id: i64, usage: &Value) {
     let Ok(db) = ConversationDatabase::new(app) else { return };
     let Ok(repo) = db.message_repo() else { return };
     let Ok(Some(mut message)) = repo.read(id) else { return };
-    let input = usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0) as i32;
-    let output = usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0) as i32;
-    let total =
-        usage.get("total_tokens").and_then(Value::as_i64).unwrap_or((input + output) as i64) as i32;
-    message.input_token_count = input;
-    message.output_token_count = output;
-    message.token_count = total;
+    let counts = claude_usage_counts(usage);
+    let clamp = |value: i64| i32::try_from(value).unwrap_or(i32::MAX);
+    message.input_token_count = clamp(counts.input);
+    message.output_token_count = clamp(counts.output);
+    message.token_count = clamp(counts.total);
     let mut metadata = message
         .metadata_json
         .as_deref()
@@ -464,6 +482,15 @@ fn persist_usage(app: &tauri::AppHandle, id: i64, usage: &Value) {
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     metadata.insert("usage_source".into(), json!("reported"));
+    if let Some(cache_read) = counts.cache_read {
+        metadata.insert("cached_input_tokens".into(), json!(cache_read));
+        metadata.insert("cached_read_tokens".into(), json!(cache_read));
+    }
+    if let Some(cache_write) = counts.cache_write {
+        metadata.insert("cached_write_tokens".into(), json!(cache_write));
+        metadata.insert("cache_creation_tokens".into(), json!(cache_write));
+    }
+    // 原始 usage 保留下来，便于核对归一前的数字。
     metadata.insert("claude_usage".into(), usage.clone());
     message.metadata_json = Some(Value::Object(metadata).to_string());
     let _ = repo.update(&message);

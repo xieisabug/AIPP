@@ -121,7 +121,9 @@ use crate::sync::{
     trigger_sync_now,
 };
 use crate::api::todo_api::get_todos;
-use crate::api::token_statistics_api::{get_conversation_token_stats, get_message_token_stats};
+use crate::api::token_statistics_api::{
+    get_butler_group_token_stats, get_conversation_token_stats, get_message_token_stats,
+};
 use crate::api::updater_api::{
     check_update, check_update_with_proxy, download_and_install_update,
     download_and_install_update_with_proxy, get_app_version,
@@ -1297,6 +1299,7 @@ pub fn run() {
             delete_skill,
             // Token statistics commands
             get_conversation_token_stats,
+            get_butler_group_token_stats,
             get_message_token_stats,
             // Autostart commands
             get_autostart_state,

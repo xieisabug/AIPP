@@ -286,7 +286,8 @@ impl<'a> Tables<'a> {
         self.calls("conversation_id=?1", id)?;
         for table in ["tool_review_log", "conversation_mcp_loaded_tool", "PluginHookAuditLog",
             "external_channel_message_delivery", "external_channel_relay_scope", "external_channel_message_link",
-            "acp_session", "queued_conversation_message", "conversation_summary", "conversation_todo"] {
+            "acp_session", "queued_conversation_message", "conversation_summary", "conversation_todo",
+            "model_usage_record"] {
             self.remove(table, "conversation_id=?1", id)?;
         }
         self.remove("butler_task_result", "task_conversation_id=?1", id)?;
@@ -358,6 +359,7 @@ impl<'a> Tables<'a> {
             self.remove("llm_model_request_mode_preference", &format!("(llm_provider_id, model_code) IN (SELECT llm_provider_id, code FROM {models} WHERE id=?1)"), id)?;
         }
         self.update("message", "llm_model_id", "NULL", "llm_model_id=?1", id)?;
+        self.update("model_usage_record", "llm_model_id", "NULL", "llm_model_id=?1", id)?;
         self.remove("llm_model", "id=?1", id)
     }
 

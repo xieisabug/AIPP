@@ -10,26 +10,108 @@ import {
 } from "@/components/ui/dialog";
 import IconButton from "../IconButton";
 import { Info } from "lucide-react";
-import { tokenStatisticsService } from "@/services/tokenStatisticsService";
+import { describeInvokeError, tokenStatisticsService } from "@/services/tokenStatisticsService";
 import type { AcpConversationSessionState, ConversationTokenStats } from "@/data/Conversation";
 import { TokenUsageDisplay } from "./TokenUsageDisplay";
 import { formatUsageDollars } from "./formatUsageDollars";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 
 interface ConversationStatsDialogProps {
-    conversationId: string;
+    /** 单个会话的统计；与 groupId 二选一 */
+    conversationId?: string;
+    /** 管家群聊的统计：成员执行会话 + 调度模型调用 */
+    groupId?: number;
     showCacheActivity?: boolean;
     externalOpen?: boolean;
     onExternalOpenChange?: (open: boolean) => void;
 }
 
+type CacheActivityRow = { id: number; checkpoint: boolean; input: number; cached: number | null };
+
+const AUXILIARY_LABELS: Record<string, string> = {
+    context_compaction: "上下文压缩",
+    group_dispatch: "群聊调度",
+};
+
+const formatNumber = (num: number) => new Intl.NumberFormat("en-US").format(num);
+
+const formatDateTime = (date: Date | string | null | undefined) => {
+    if (!date) return "未知";
+    const d = date instanceof Date ? date : new Date(date);
+    return d.toLocaleString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+    });
+};
+
+const formatCurrency = (amount: number, currency: string) => {
+    try {
+        return new Intl.NumberFormat("en-US", {
+            style: "currency",
+            currency,
+            maximumFractionDigits: 4,
+        }).format(amount);
+    } catch {
+        return `${amount.toFixed(4)} ${currency}`;
+    }
+};
+
+function formatDuration(ms: number): string {
+    if (ms < 1000) return `${ms.toFixed(0)}ms`;
+    return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function formatCacheActivity(row: CacheActivityRow): string {
+    if (row.checkpoint) return "上下文检查点";
+    if (row.cached == null) return `#${row.id} · 未提供缓存命中量（输入 ${row.input.toLocaleString()}）`;
+    const rate = (100 * Math.min(row.cached, row.input)) / row.input;
+    return `#${row.id} · 缓存命中 ${row.cached.toLocaleString()} / 输入 ${row.input.toLocaleString()}（${rate.toFixed(1)}%）`;
+}
+
+/** 总量的构成：本会话自身 + 委派 + 辅助调用，各项互不重叠 */
+function usageComposition(stats: ConversationTokenStats, isGroup: boolean) {
+    const auxiliary = stats.auxiliary ?? [];
+    const delegatedTokens = stats.delegated?.run_count ? stats.delegated.total_tokens : 0;
+    const auxiliaryTokens = auxiliary.reduce((sum, entry) => sum + entry.total_tokens, 0);
+    const rows = [
+        {
+            key: "own",
+            label: isGroup ? "成员回复" : "本会话回复",
+            value: Math.max(stats.total_tokens - delegatedTokens - auxiliaryTokens, 0),
+        },
+    ];
+    if (stats.delegated && stats.delegated.run_count > 0) {
+        rows.push({
+            key: "delegated",
+            label: `助手协作（${formatNumber(stats.delegated.run_count)} 次委派，含多层转派）`,
+            value: stats.delegated.total_tokens,
+        });
+    }
+    for (const entry of auxiliary) {
+        rows.push({
+            key: `auxiliary-${entry.purpose}`,
+            label: `${AUXILIARY_LABELS[entry.purpose] ?? entry.purpose}（${formatNumber(entry.call_count)} 次调用）`,
+            value: entry.total_tokens,
+        });
+    }
+    return rows;
+}
+
 export function ConversationStatsDialog({
     conversationId,
+    groupId,
     showCacheActivity = false,
     externalOpen,
     onExternalOpenChange,
 }: ConversationStatsDialogProps) {
-    const [activity, setActivity] = useState<Array<{ id: number; checkpoint: boolean; input: number; cached: number | null }>>([]);
+    const isGroup = groupId !== undefined;
+    const [activity, setActivity] = useState<CacheActivityRow[]>([]);
     const [activityError, setActivityError] = useState("");
     const [internalOpen, setInternalOpen] = useState(false);
     const open = externalOpen !== undefined ? externalOpen : internalOpen;
@@ -40,70 +122,48 @@ export function ConversationStatsDialog({
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        if (!open || !showCacheActivity) return;
+        if (!open || !showCacheActivity || !conversationId || isGroup) return;
         let current = true;
         setActivity([]);
         setActivityError("");
-        invoke<typeof activity>("get_butler_cache_activity", { conversationId: Number(conversationId) })
+        invoke<CacheActivityRow[]>("get_butler_cache_activity", { conversationId: Number(conversationId) })
             .then(rows => { if (current) setActivity(rows); })
-            .catch(error => { if (current) setActivityError(String(error)); });
+            .catch(error => { if (current) setActivityError(describeInvokeError(error, "读取缓存命中记录失败")); });
         return () => { current = false; };
-    }, [open, conversationId, showCacheActivity]);
+    }, [open, conversationId, showCacheActivity, isGroup]);
 
     useEffect(() => {
-        if (open && conversationId) {
-            setLoading(true);
-            setError(null);
-            Promise.all([
-                tokenStatisticsService.getConversationTokenStats(conversationId),
-                invoke<AcpConversationSessionState | null>("get_acp_session_state", {
-                    conversationId: Number(conversationId),
-                }).catch(() => null),
-            ])
-                .then(([statsData, acpState]) => {
-                    setStats(statsData);
-                    setAcpSessionState(acpState);
-                    setLoading(false);
-                })
-                .catch((err) => {
-                    console.error("Failed to load conversation stats:", err);
-                    setError(err.message || "Failed to load statistics");
-                    setLoading(false);
-                });
-        } else if (!open) {
+        if (!open) {
             setAcpSessionState(null);
+            return;
         }
-    }, [open, conversationId]);
-
-    const formatNumber = (num: number) => {
-        return new Intl.NumberFormat("en-US").format(num);
-    };
-
-    const formatDateTime = (date: Date | null | undefined) => {
-        if (!date) return "未知";
-        const d = date instanceof Date ? date : new Date(date);
-        return d.toLocaleString('zh-CN', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        });
-    };
-
-    const formatCurrency = (amount: number, currency: string) => {
-        try {
-            return new Intl.NumberFormat("en-US", {
-                style: "currency",
-                currency,
-                maximumFractionDigits: 4,
-            }).format(amount);
-        } catch {
-            return `${amount.toFixed(4)} ${currency}`;
-        }
-    };
+        if (!isGroup && !conversationId) return;
+        let current = true;
+        setLoading(true);
+        setError(null);
+        const statsRequest = groupId !== undefined
+            ? tokenStatisticsService.getGroupTokenStats(groupId)
+            : tokenStatisticsService.getConversationTokenStats(conversationId!);
+        const acpRequest = isGroup
+            ? Promise.resolve(null)
+            : invoke<AcpConversationSessionState | null>("get_acp_session_state", {
+                conversationId: Number(conversationId),
+            }).catch(() => null);
+        Promise.all([statsRequest, acpRequest])
+            .then(([statsData, acpState]) => {
+                if (!current) return;
+                setStats(statsData);
+                setAcpSessionState(acpState);
+                setLoading(false);
+            })
+            .catch((err) => {
+                if (!current) return;
+                console.error("Failed to load conversation stats:", err);
+                setError(describeInvokeError(err, isGroup ? "加载群聊用量统计失败" : "加载对话用量统计失败"));
+                setLoading(false);
+            });
+        return () => { current = false; };
+    }, [open, conversationId, groupId, isGroup]);
 
     const hasAcpSessionUsage =
         acpSessionState?.context_tokens_used !== null
@@ -111,16 +171,34 @@ export function ConversationStatsDialog({
         && acpSessionState?.context_window_size !== null
         && acpSessionState?.context_window_size !== undefined;
 
+    const context = stats?.context ?? null;
+    const contextPercent = context && context.context_window_size > 0
+        ? (context.latest_input_tokens / context.context_window_size) * 100
+        : 0;
+    const composition = stats ? usageComposition(stats, isGroup) : [];
+    const messageTypes = stats ? [
+        { label: "系统", value: stats.system_message_count },
+        { label: "用户", value: stats.user_message_count },
+        { label: "AI回复", value: stats.response_message_count },
+        { label: "推理", value: stats.reasoning_message_count },
+        { label: "工具结果", value: stats.tool_result_message_count },
+        { label: "错误", value: stats.error_message_count ?? 0 },
+        ...((stats.other_message_count ?? 0) > 0 ? [{ label: "其他", value: stats.other_message_count ?? 0 }] : []),
+    ] : [];
+    const hasTtft = stats?.avg_ttft_ms !== null && stats?.avg_ttft_ms !== undefined;
+    const hasTps = stats?.avg_tps !== null && stats?.avg_tps !== undefined;
+    const title = isGroup ? "群聊用量" : "对话信息";
+
     return (
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
-                <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} border />
+                <IconButton icon={<Info className="h-4 w-4 text-icon" />} onClick={() => { }} border title={title} />
             </DialogTrigger>
             <DialogContent className="max-h-[85vh] flex flex-col sm:min-w-2xl sm:max-w-[50vw]">
                 <DialogHeader>
-                    <DialogTitle>对话信息</DialogTitle>
+                    <DialogTitle>{title}</DialogTitle>
                     <DialogDescription>
-                        该对话的详细信息和统计
+                        {isGroup ? "该群聊所有成员的执行记录与调度用量" : "该对话的详细信息和统计"}
                     </DialogDescription>
                 </DialogHeader>
 
@@ -143,7 +221,7 @@ export function ConversationStatsDialog({
                                 <div>
                                     <h3 className="text-lg font-semibold">Token 用量</h3>
                                     <p className="text-sm text-muted-foreground">
-                                        对话级 token、缓存与会话 usage 统计
+                                        输入含缓存读写，输出含思考；总量含助手协作与辅助模型调用
                                     </p>
                                 </div>
                                 {stats.estimated_message_count > 0 && (
@@ -153,41 +231,30 @@ export function ConversationStatsDialog({
                                 )}
                             </div>
 
-                            {/* 时间戳信息 */}
                             {(stats.start_time || stats.finish_time) && (
                                 <div className="pt-4 border-t">
                                     <h4 className="text-sm font-medium mb-3">时间信息</h4>
                                     <div className="grid grid-cols-2 gap-3">
                                         <div className="text-center">
-                                            <p className="text-xs text-muted-foreground mb-1">
-                                                开始时间
-                                            </p>
-                                            <p className="text-sm font-semibold">
-                                                {formatDateTime(stats.start_time)}
-                                            </p>
+                                            <p className="text-xs text-muted-foreground mb-1">开始时间</p>
+                                            <p className="text-sm font-semibold">{formatDateTime(stats.start_time)}</p>
                                         </div>
                                         <div className="text-center">
-                                            <p className="text-xs text-muted-foreground mb-1">
-                                                完成时间
-                                            </p>
-                                            <p className="text-sm font-semibold">
-                                                {formatDateTime(stats.finish_time)}
-                                            </p>
+                                            <p className="text-xs text-muted-foreground mb-1">最近完成时间</p>
+                                            <p className="text-sm font-semibold">{formatDateTime(stats.finish_time)}</p>
                                         </div>
                                     </div>
                                 </div>
                             )}
 
-                            {/* Total Token Usage Display */}
-                            {showCacheActivity && <div className="mb-3 text-xs">
+                            {showCacheActivity && !isGroup && <div className="mb-3 text-xs" data-aipp-slot="conversation-stats-cache-activity">
                                 <h3 className="mb-2 font-medium">最近请求的缓存命中</h3>
                                 {activityError || (!activity.length && "暂无请求记录")}
                                 <div className="max-h-40 overflow-y-auto space-y-1">
-                                    {activity.map(row => <div key={row.id}>
-                                        {row.checkpoint ? "上下文检查点" : `#${row.id} · ${row.cached == null ? "未提供命中量" : `${row.cached.toLocaleString()} / ${row.input.toLocaleString()} 输入 tokens（${(100 * row.cached / row.input).toFixed(1)}%）`}`}
-                                    </div>)}
+                                    {activity.map(row => <div key={row.id}>{formatCacheActivity(row)}</div>)}
                                 </div>
                             </div>}
+
                             <TokenUsageDisplay
                                 total={stats.total_tokens}
                                 input={stats.input_tokens}
@@ -198,17 +265,21 @@ export function ConversationStatsDialog({
                                 showPercentage={true}
                             />
 
-                            {stats.delegated && stats.delegated.run_count > 0 && (
-                                <div
-                                    className="flex justify-between text-sm text-muted-foreground"
-                                    data-aipp-slot="conversation-stats-delegated"
-                                >
-                                    <span>
-                                        其中助手协作（{formatNumber(stats.delegated.run_count)} 次委派）
-                                    </span>
-                                    <span className="font-medium text-foreground">
-                                        {formatNumber(stats.delegated.total_tokens)} tokens
-                                    </span>
+                            {composition.length > 1 && (
+                                <div className="space-y-1.5 text-sm" data-aipp-slot="conversation-stats-composition">
+                                    <p className="text-xs font-medium text-muted-foreground">总量构成</p>
+                                    {composition.map((row) => (
+                                        <div
+                                            key={row.key}
+                                            className="flex justify-between text-muted-foreground"
+                                            data-aipp-slot={row.key === "delegated" ? "conversation-stats-delegated" : undefined}
+                                        >
+                                            <span>其中{row.label}</span>
+                                            <span className="font-medium text-foreground">
+                                                {formatNumber(row.value)} tokens
+                                            </span>
+                                        </div>
+                                    ))}
                                 </div>
                             )}
 
@@ -219,7 +290,40 @@ export function ConversationStatsDialog({
                                 </div>
                             )}
 
-                            {hasAcpSessionUsage && (
+                            {context && (
+                                <div className="space-y-3 rounded-lg border p-4" data-aipp-slot="conversation-stats-context">
+                                    <div className="flex items-center justify-between">
+                                        <h4 className="text-sm font-medium">当前上下文</h4>
+                                        <span className="text-xs text-muted-foreground">
+                                            按最近一次请求的输入计算
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between text-sm">
+                                        <span className="text-muted-foreground">最近一次请求输入 / 上下文窗口</span>
+                                        <span className="font-medium">
+                                            {formatNumber(context.latest_input_tokens)} / {formatNumber(context.context_window_size)}
+                                            <span className="ml-1 text-muted-foreground">({contextPercent.toFixed(1)}%)</span>
+                                        </span>
+                                    </div>
+                                    <Progress value={Math.min(contextPercent, 100)} className="h-2" />
+                                    <div className="grid grid-cols-2 gap-3 text-sm">
+                                        <div className="flex justify-between">
+                                            <span className="text-muted-foreground">自动压缩</span>
+                                            <span className="font-medium">
+                                                {context.compaction_enabled
+                                                    ? `超过 ${formatNumber(context.compaction_trigger)} 触发`
+                                                    : "已关闭"}
+                                            </span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span className="text-muted-foreground">已压缩</span>
+                                            <span className="font-medium">{formatNumber(context.checkpoint_count)} 次</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {!isGroup && hasAcpSessionUsage && (
                                 <div className="space-y-3 rounded-lg border p-4">
                                     <div className="flex items-center justify-between">
                                         <h4 className="text-sm font-medium">ACP 会话 Usage</h4>
@@ -257,34 +361,25 @@ export function ConversationStatsDialog({
                                 </div>
                             )}
 
-                            {/* Breakdown by Model */}
                             {stats.by_model.length > 0 && (
                                 <div className="space-y-4">
-                                    <h3 className="text-lg font-semibold">
-                                        模型
-                                    </h3>
+                                    <h3 className="text-lg font-semibold">模型</h3>
                                     <div className="space-y-3">
                                         {stats.by_model.map((model) => (
                                             <div
-                                                key={model.model_id}
+                                                key={`${model.model_id ?? "none"}-${model.model_name}`}
                                                 className="border rounded-lg p-4"
                                             >
                                                 <div className="flex justify-between items-start mb-3">
                                                     <div>
-                                                        <p className="font-medium">
-                                                            {model.model_name ||
-                                                                `模型 ${model.model_id}`}
-                                                        </p>
+                                                        <p className="font-medium">{model.model_name}</p>
                                                         <p className="text-sm text-muted-foreground">
-                                                            {formatNumber(model.message_count)}{" "}
-                                                            条消息
+                                                            {formatNumber(model.request_count)} 次调用
                                                         </p>
                                                     </div>
                                                     <div className="text-right">
                                                         <p className="text-2xl font-bold">
-                                                            {formatNumber(
-                                                                model.total_tokens,
-                                                            )}
+                                                            {formatNumber(model.total_tokens)}
                                                         </p>
                                                         <p className="text-sm text-muted-foreground">
                                                             {(model.percentage || 0).toFixed(1)}% 占总计
@@ -307,111 +402,62 @@ export function ConversationStatsDialog({
                                 </div>
                             )}
 
-                            {/* Summary Statistics */}
                             <div className="grid grid-cols-2 gap-4 pt-4 border-t">
                                 <div className="text-center">
-                                    <p className="text-sm text-muted-foreground mb-1">
-                                        模型
-                                    </p>
-                                    <p className="text-xl font-semibold">
-                                        {stats.by_model.length}
-                                    </p>
+                                    <p className="text-sm text-muted-foreground mb-1">模型</p>
+                                    <p className="text-xl font-semibold">{stats.by_model.length}</p>
                                 </div>
                                 <div className="text-center">
                                     <p className="text-sm text-muted-foreground mb-1">
-                                        总消息数
+                                        {isGroup ? "成员执行记录消息" : "本会话消息"}
                                     </p>
-                                    <p className="text-xl font-semibold">
-                                        {formatNumber(stats.message_count)}
-                                    </p>
+                                    <p className="text-xl font-semibold">{formatNumber(stats.message_count)}</p>
                                 </div>
                             </div>
 
-                            {/* Message Type Breakdown */}
                             <div className="pt-4 border-t">
-                                <h4 className="text-sm font-medium mb-3">消息类型统计</h4>
-                                <div className="grid grid-cols-5 gap-3">
+                                <h4 className="text-sm font-medium mb-1">消息类型统计</h4>
+                                <p className="mb-3 text-xs text-muted-foreground">只统计{isGroup ? "成员执行会话" : "本会话"}自身的消息，不含协作对象的消息</p>
+                                <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${messageTypes.length}, minmax(0, 1fr))` }}>
+                                    {messageTypes.map((item) => (
+                                        <div key={item.label} className="text-center">
+                                            <p className="text-xs text-muted-foreground mb-1">{item.label}</p>
+                                            <p className="text-lg font-semibold">{formatNumber(item.value)}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="pt-4 border-t" data-aipp-slot="conversation-stats-performance">
+                                <h4 className="text-sm font-medium mb-1">性能指标</h4>
+                                <p className="mb-3 text-xs text-muted-foreground">
+                                    含助手协作的回复；Agent 回合包含工具执行时间，不计入生成速度
+                                </p>
+                                <div className="grid grid-cols-2 gap-3">
                                     <div className="text-center">
-                                        <p className="text-xs text-muted-foreground mb-1">
-                                            系统
-                                        </p>
+                                        <p className="text-xs text-muted-foreground mb-1">平均首字延迟</p>
                                         <p className="text-lg font-semibold">
-                                            {formatNumber(stats.system_message_count)}
+                                            {hasTtft ? formatDuration(stats.avg_ttft_ms!) : "—"}
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                            {hasTtft ? `${formatNumber(stats.ttft_sample_count ?? 0)} 次请求` : "暂无数据"}
                                         </p>
                                     </div>
                                     <div className="text-center">
-                                        <p className="text-xs text-muted-foreground mb-1">
-                                            用户
-                                        </p>
+                                        <p className="text-xs text-muted-foreground mb-1">平均生成速度</p>
                                         <p className="text-lg font-semibold">
-                                            {formatNumber(stats.user_message_count)}
+                                            {hasTps ? `${stats.avg_tps!.toFixed(1)} tok/s` : "—"}
                                         </p>
-                                    </div>
-                                    <div className="text-center">
-                                        <p className="text-xs text-muted-foreground mb-1">
-                                            AI回复
-                                        </p>
-                                        <p className="text-lg font-semibold">
-                                            {formatNumber(stats.response_message_count)}
-                                        </p>
-                                    </div>
-                                    <div className="text-center">
-                                        <p className="text-xs text-muted-foreground mb-1">
-                                            推理
-                                        </p>
-                                        <p className="text-lg font-semibold">
-                                            {formatNumber(
-                                                stats.reasoning_message_count,
-                                            )}
-                                        </p>
-                                    </div>
-                                    <div className="text-center">
-                                        <p className="text-xs text-muted-foreground mb-1">
-                                            工具结果
-                                        </p>
-                                        <p className="text-lg font-semibold">
-                                            {formatNumber(
-                                                stats.tool_result_message_count,
-                                            )}
+                                        <p className="text-xs text-muted-foreground">
+                                            {hasTps ? `${formatNumber(stats.tps_sample_count ?? 0)} 次请求，按输出总量 ÷ 生成总时长` : "暂无数据"}
                                         </p>
                                     </div>
                                 </div>
                             </div>
-
-                            {/* Performance Metrics */}
-                            {(stats.avg_ttft_ms !== undefined || stats.avg_tps !== undefined) && (
-                                <div className="pt-4 border-t">
-                                    <h4 className="text-sm font-medium mb-3">性能指标 (响应消息)</h4>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <div className="text-center">
-                                            <p className="text-xs text-muted-foreground mb-1">
-                                                平均首字延迟
-                                            </p>
-                                            <p className="text-lg font-semibold">
-                                                {formatDuration(stats.avg_ttft_ms ?? 0)}
-                                            </p>
-                                        </div>
-                                        <div className="text-center">
-                                            <p className="text-xs text-muted-foreground mb-1">
-                                                平均生成速度
-                                            </p>
-                                            <p className="text-lg font-semibold">
-                                                {`${(stats.avg_tps ?? 0).toFixed(1)} tok/s`}
-                                            </p>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
                         </div>
                     </div>
                 )}
             </DialogContent>
         </Dialog>
     );
-}
-
-// 辅助函数：格式化持续时间
-function formatDuration(ms: number): string {
-    if (ms < 1000) return `${ms.toFixed(0)}ms`;
-    return `${(ms / 1000).toFixed(2)}s`;
 }

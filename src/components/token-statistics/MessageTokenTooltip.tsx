@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { formatUsageDollars } from "./formatUsageDollars";
 import IconButton from "../IconButton";
 import { Info } from "lucide-react";
-import { tokenStatisticsService } from "@/services/tokenStatisticsService";
+import { describeInvokeError, tokenStatisticsService } from "@/services/tokenStatisticsService";
 import type { MessageTokenStats } from "@/data/Conversation";
 
 interface MessageTokenTooltipProps {
@@ -33,7 +33,7 @@ function useMessageTokenStats(messageId: number, active: boolean) {
                 setLoading(false);
             })
             .catch((err) => {
-                setError(err.message || "加载失败");
+                setError(describeInvokeError(err, "加载消息用量失败"));
                 setLoading(false);
             });
     }, [active, messageId]);

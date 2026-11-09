@@ -104,7 +104,7 @@ src-tauri/
 -   `butler_group.rs` / `butler_group_runtime.rs` / `butler_group_router.rs`: group chat commands, the per-member reply dispatcher and automatic responder selection.
 -   `export_api.rs`: Markdown to PDF / DOCX export helpers
 -   `plugin_api.rs`: Plugin registry, lifecycle, config and data storage
--   `token_statistics_api.rs`: Conversation/message token statistics
+-   `token_statistics_api.rs`: Conversation/group/message token statistics; aggregation rules live in `db/token_stats.rs` (delegation recursion, auxiliary model usage in `model_usage_record`)
 -   `copilot_api.rs` & `copilot_lsp.rs`: GitHub Copilot auth and LSP lifecycle
 -   `mcp/registry_api.rs`, `mcp/execution_api.rs`, `mcp/detection.rs`: MCP server/tool orchestration
 -   `sync.rs`: Self-hosted sync client (settings/token, outbox push, cursor pull, conflict/dead-letter handling, domain change events); server side lives in `sync-server/` (FastAPI + SQLite, alembic migrations); 设计见 `docs/sync-remediation-plan.md`

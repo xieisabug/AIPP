@@ -2114,6 +2114,42 @@ fn build_acp_prompt_blocks(
     Ok(blocks)
 }
 
+/// ACP 只规定 `usage` 是本轮用量，输入是否含缓存、思考是否计入输出由各 agent 自行决定
+/// （例如 Claude 系 agent 的输入不含缓存读写）。按 `total` 恰好等于哪种组合来识别，
+/// 统一成全应用口径：输入含缓存读写、输出含思考、总量 = 输入 + 输出。返回 (输入, 输出, 总量)。
+pub(crate) fn normalize_acp_usage(
+    total: i64,
+    input: i64,
+    output: i64,
+    thought: i64,
+    cache_read: i64,
+    cache_write: i64,
+) -> (i64, i64, i64) {
+    let cache = cache_read + cache_write;
+    let composes = |cache_separate: bool, thought_separate: bool| {
+        total
+            == input
+                + output
+                + if cache_separate { cache } else { 0 }
+                + if thought_separate { thought } else { 0 }
+    };
+    let exact: Vec<(bool, bool)> = [(false, false), (false, true), (true, false), (true, true)]
+        .into_iter()
+        .filter(|&(cache_separate, thought_separate)| composes(cache_separate, thought_separate))
+        .collect();
+    // 命中缓存比输入还多，说明输入肯定不含缓存；多种组合都对得上时优先这个信号。
+    let cache_must_be_separate = cache_read > input;
+    let (cache_separate, thought_separate) = exact
+        .iter()
+        .copied()
+        .find(|&(cache_separate, _)| cache_separate == cache_must_be_separate)
+        .or_else(|| exact.first().copied())
+        .unwrap_or((cache_must_be_separate, false));
+    let input = if cache_separate { input + cache } else { input };
+    let output = if thought_separate { output + thought } else { output };
+    (input, output, input + output)
+}
+
 fn summarize_acp_prompt_usage(
     prompt_response: &acp::PromptResponse,
     prompt_blocks: &[acp::ContentBlock],
@@ -2121,10 +2157,18 @@ fn summarize_acp_prompt_usage(
     reasoning_content: &str,
 ) -> AcpPromptUsageSummary {
     if let Some(usage) = prompt_response.usage.as_ref() {
+        let (input_tokens, output_tokens, total_tokens) = normalize_acp_usage(
+            usage.total_tokens as i64,
+            usage.input_tokens as i64,
+            usage.output_tokens as i64,
+            usage.thought_tokens.unwrap_or(0) as i64,
+            usage.cached_read_tokens.unwrap_or(0) as i64,
+            usage.cached_write_tokens.unwrap_or(0) as i64,
+        );
         return AcpPromptUsageSummary {
-            total_tokens: usage.total_tokens as i64,
-            input_tokens: usage.input_tokens as i64,
-            output_tokens: usage.output_tokens as i64,
+            total_tokens,
+            input_tokens,
+            output_tokens,
             thought_tokens: usage.thought_tokens.map(|value| value as i64),
             cached_read_tokens: usage.cached_read_tokens.map(|value| value as i64),
             cached_write_tokens: usage.cached_write_tokens.map(|value| value as i64),
@@ -2136,10 +2180,11 @@ fn summarize_acp_prompt_usage(
         .iter()
         .map(estimate_tokens_for_content_block)
         .sum::<usize>() as i64;
-    let output_tokens = estimate_by_content(final_content) as i64;
     let thought_tokens = (!reasoning_content.trim().is_empty())
         .then(|| estimate_by_content(reasoning_content) as i64);
-    let total_tokens = input_tokens + output_tokens + thought_tokens.unwrap_or(0);
+    // 与其他通道一致：思考计入输出，总量 = 输入 + 输出。
+    let output_tokens = estimate_by_content(final_content) as i64 + thought_tokens.unwrap_or(0);
+    let total_tokens = input_tokens + output_tokens;
 
     AcpPromptUsageSummary {
         total_tokens,
@@ -6046,7 +6091,7 @@ mod tests {
         build_acp_launch_plan, build_prompt_to_send, extract_acp_config, extract_content_text,
         get_claude_model_override,
         load_claude_settings_env_vars_from_path, session_config_option_payload,
-        merge_acp_usage_metadata, summarize_acp_prompt_usage, AcpPromptUsageSummary,
+        merge_acp_usage_metadata, normalize_acp_usage, summarize_acp_prompt_usage, AcpPromptUsageSummary,
         AcpElicitationDecision, AcpElicitationState,
         AcpPermissionDecision, AcpPermissionRequestEvent, AcpPermissionState, AcpSessionEntry,
         AcpSessionHandle,
@@ -6923,9 +6968,10 @@ mod tests {
             "reasoning",
         );
 
+        // total 120 = 40 + 50 + 缓存 10 + 思考 20：归一后输入含缓存、输出含思考
         assert_eq!(summary.total_tokens, 120);
-        assert_eq!(summary.input_tokens, 40);
-        assert_eq!(summary.output_tokens, 50);
+        assert_eq!(summary.input_tokens, 50);
+        assert_eq!(summary.output_tokens, 70);
         assert_eq!(summary.thought_tokens, Some(20));
         assert_eq!(summary.cached_read_tokens, Some(8));
         assert_eq!(summary.cached_write_tokens, Some(2));
@@ -6951,12 +6997,23 @@ mod tests {
         assert!(summary.input_tokens > 0);
         assert!(summary.output_tokens > 0);
         assert!(summary.thought_tokens.unwrap_or(0) > 0);
-        assert_eq!(
-            summary.total_tokens,
-            summary.input_tokens + summary.output_tokens + summary.thought_tokens.unwrap_or(0)
-        );
+        assert!(summary.output_tokens > summary.thought_tokens.unwrap_or(0));
+        assert_eq!(summary.total_tokens, summary.input_tokens + summary.output_tokens);
         assert_eq!(summary.cached_read_tokens, None);
         assert_eq!(summary.cached_write_tokens, None);
+    }
+
+    #[test]
+    fn test_normalize_acp_usage_recognizes_agent_conventions() {
+        // Claude 系：输入不含缓存，total 把缓存另外加上
+        assert_eq!(normalize_acp_usage(48812, 12, 800, 0, 45000, 3000), (48012, 800, 48812));
+        // OpenAI 系：输入已含缓存，输出已含思考
+        assert_eq!(normalize_acp_usage(1100, 1000, 100, 30, 200, 0), (1000, 100, 1100));
+        // Gemini 系：输入含缓存，思考单独计
+        assert_eq!(normalize_acp_usage(1400, 1000, 100, 300, 200, 0), (1000, 400, 1400));
+        // total 对不上任何组合时，只有缓存超过输入才能断定输入不含缓存
+        assert_eq!(normalize_acp_usage(0, 10, 5, 0, 50, 0), (60, 5, 65));
+        assert_eq!(normalize_acp_usage(0, 100, 5, 0, 50, 0), (100, 5, 105));
     }
 
     #[test]

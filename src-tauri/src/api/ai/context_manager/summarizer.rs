@@ -173,6 +173,7 @@ pub async fn generate_summary(
     require_complete: bool,
     validate_execution: &(dyn Fn() -> Result<(), AppError> + Sync),
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    record_usage: &(dyn Fn(&genai::chat::Usage) + Sync),
 ) -> Result<String, AppError> {
     let body_text = format_messages_for_summary(body_messages);
     let body_token_hint = body_text.len() / 3; // rough estimate
@@ -199,9 +200,12 @@ pub async fn generate_summary(
 
     let chat_request = ChatRequest::new(messages);
     let response = guarded_summary_request(validate_execution, cancel_token, async {
-        client.exec_chat(model_name, chat_request, None).await.map_err(|e| {
+        let response = client.exec_chat(model_name, chat_request, None).await.map_err(|e| {
             AppError::UnknownError(format!("context compaction LLM call failed: {}", e))
-        })
+        })?;
+        // 模型已经消耗了 token：无论摘要之后是否被采用（校验失败、执行已取消），都要计入用量。
+        record_usage(&response.usage);
+        Ok(response)
     }).await?;
 
     if require_complete {

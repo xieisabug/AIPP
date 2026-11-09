@@ -16,6 +16,7 @@ import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import type { AssistantListItem } from "@/data/Assistant";
 import { type ButlerGroupDetail, type ButlerGroupMember, type ButlerGroupMessage } from "@/data/ButlerGroup";
 import * as groups from "@/services/butlerGroupService";
+import { ConversationStatsDialog } from "@/components/token-statistics";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
@@ -335,7 +336,8 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                     <span className={`truncate text-[11px] leading-[14px] ${running.length || discussion ? "text-foreground/70" : "text-muted-foreground"}`}>{subtitle}</span>
                 </span>
             </button>
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-end gap-1">
+                <ConversationStatsDialog groupId={groupId} />
                 <IconButton icon={<Users className="h-4 w-4 text-icon" />} border title="群成员"
                     onClick={() => { setNameDraft(detail.name); setPanelOpen(true); }} />
             </div>

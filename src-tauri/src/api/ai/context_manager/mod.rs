@@ -35,6 +35,8 @@ pub struct CompactionContext<'a> {
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
     pub client: &'a Client,
     pub model_name: &'a str,
+    /// 压缩所用模型的 id，用于把摘要调用的用量记到对应模型下。
+    pub model_id: Option<i64>,
     pub conversation_id: i64,
     pub checkpoint_store: &'a dyn persistence::CheckpointStore,
     pub summary_role: summarizer::SummaryRole,
@@ -179,7 +181,10 @@ pub async fn fit_to_budget_with_compaction(
         .ok_or_else(|| crate::errors::AppError::UnknownError(format!("会话 {} 无法定位完整的压缩来源", ctx.conversation_id)))?;
     let mut summary_input=body_messages.to_vec();
     if let Some(goal)=&goal_snapshot {summary_input.push(("system".into(),goal.clone(),vec![]));}
-    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.summary_role, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref())
+    let record_usage = |usage: &genai::chat::Usage| {
+        ctx.checkpoint_store.record_summary_usage(ctx.conversation_id, ctx.model_id, ctx.model_name, usage);
+    };
+    let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.summary_role, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref(), &record_usage)
         .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
 
     // Assemble compacted message list: Head + Summary + Tail

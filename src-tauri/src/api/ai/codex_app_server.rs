@@ -1652,15 +1652,89 @@ fn generic_item_notification(method: &str, params: &Value) -> Option<Value> {
 }
 
 fn codex_turn_usage(params: &Value) -> Option<CodexTurnUsage> {
-    let last = params.pointer("/tokenUsage/last")?;
-    Some(CodexTurnUsage {
-        input_tokens: last.get("inputTokens")?.as_i64()?.try_into().ok()?,
-        output_tokens: last.get("outputTokens")?.as_i64()?.try_into().ok()?,
-        reasoning_tokens: last.get("reasoningOutputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
-        cached_input_tokens: last.get("cachedInputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
-        cache_write_input_tokens: last.get("cacheWriteInputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
-        total_tokens: last.get("totalTokens")?.as_i64()?.try_into().ok()?,
-    })
+    CodexTurnUsage::from_breakdown(params.pointer("/tokenUsage/last")?)
+}
+
+impl CodexTurnUsage {
+    fn from_breakdown(value: &Value) -> Option<Self> {
+        Some(CodexTurnUsage {
+            input_tokens: value.get("inputTokens")?.as_i64()?.try_into().ok()?,
+            output_tokens: value.get("outputTokens")?.as_i64()?.try_into().ok()?,
+            reasoning_tokens: value.get("reasoningOutputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
+            cached_input_tokens: value.get("cachedInputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
+            cache_write_input_tokens: value.get("cacheWriteInputTokens").and_then(Value::as_i64).unwrap_or(0).try_into().ok()?,
+            total_tokens: value.get("totalTokens")?.as_i64()?.try_into().ok()?,
+        })
+    }
+
+    fn saturating_sub(self, other: Self) -> Self {
+        let sub = |a: i32, b: i32| a.saturating_sub(b).max(0);
+        CodexTurnUsage {
+            input_tokens: sub(self.input_tokens, other.input_tokens),
+            output_tokens: sub(self.output_tokens, other.output_tokens),
+            reasoning_tokens: sub(self.reasoning_tokens, other.reasoning_tokens),
+            cached_input_tokens: sub(self.cached_input_tokens, other.cached_input_tokens),
+            cache_write_input_tokens: sub(self.cache_write_input_tokens, other.cache_write_input_tokens),
+            total_tokens: sub(self.total_tokens, other.total_tokens),
+        }
+    }
+}
+
+/// 汇总一轮 Codex 的用量。
+///
+/// `thread/tokenUsage/updated` 的 `last` 只是最近一次模型请求，一轮里调用工具会发出多次请求，
+/// 只取最后一条会漏掉前面的请求。本轮用量 = 最后一条通知的累计 `total` − 本轮开始前的累计 `total`。
+/// 每次请求开始时 Codex 会随限流信息带着上一次的旧数据再推一条，所以模型开始输出前收到的通知只作基线；
+/// 没有这类通知时，用第一条新通知的 `total − last` 推出基线。
+#[derive(Debug, Default)]
+struct CodexTurnUsageTracker {
+    model_activity: bool,
+    baseline: Option<CodexTurnUsage>,
+    first: Option<(CodexTurnUsage, CodexTurnUsage)>,
+    latest_total: Option<CodexTurnUsage>,
+    latest_last: Option<CodexTurnUsage>,
+}
+
+impl CodexTurnUsageTracker {
+    /// 用户消息条目在请求发出前就会推送，不代表模型已经开始输出。
+    fn note_notification(&mut self, method: &str, params: &Value) {
+        if self.model_activity || !method.starts_with("item/") {
+            return;
+        }
+        let user_message = matches!(method, "item/started" | "item/completed")
+            && params.pointer("/item/type").and_then(Value::as_str) == Some("userMessage");
+        if !user_message {
+            self.model_activity = true;
+        }
+    }
+
+    fn observe(&mut self, params: &Value) {
+        let total = params.pointer("/tokenUsage/total").and_then(CodexTurnUsage::from_breakdown);
+        let last = codex_turn_usage(params);
+        if !self.model_activity {
+            if total.is_some() {
+                self.baseline = total;
+            }
+            return;
+        }
+        if let (Some(total), Some(last)) = (total, last) {
+            self.first.get_or_insert((total, last));
+        }
+        if total.is_some() {
+            self.latest_total = total;
+        }
+        if last.is_some() {
+            self.latest_last = last;
+        }
+    }
+
+    fn turn_usage(&self) -> Option<CodexTurnUsage> {
+        let base = self.baseline.or_else(|| self.first.map(|(total, last)| total.saturating_sub(last)));
+        match (self.latest_total, base) {
+            (Some(latest), Some(base)) => Some(latest.saturating_sub(base)),
+            _ => self.latest_last,
+        }
+    }
 }
 
 /// 取 item 首次出现时已输出的正文字符数（Unicode 字符计），后续更新沿用同一偏移
@@ -1784,6 +1858,15 @@ fn persist_response(
                             map.insert("cached_read_tokens".to_string(), json!(usage.cached_input_tokens));
                             map.insert("cached_write_tokens".to_string(), json!(usage.cache_write_input_tokens));
                             map.insert("cache_creation_tokens".to_string(), json!(usage.cache_write_input_tokens));
+                        }
+                        message.metadata_json = serde_json::to_string(&metadata).ok();
+                    } else {
+                        // 没有收到用量通知时输出按字数估算，必须标明是估算，对话信息才会提示。
+                        let mut metadata = message.metadata_json.as_deref()
+                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                            .filter(Value::is_object).unwrap_or_else(|| json!({}));
+                        if let Some(map) = metadata.as_object_mut() {
+                            map.insert("usage_source".to_string(), json!("estimated"));
                         }
                         message.metadata_json = serde_json::to_string(&metadata).ok();
                     }
@@ -2313,7 +2396,7 @@ async fn run_session(
                 let mut reasoning = String::new();
                 let mut reasoning_message_id: Option<i64> = None;
                 let mut first_any_token_time: Option<chrono::DateTime<chrono::Utc>> = None;
-                let mut turn_usage: Option<CodexTurnUsage> = None;
+                let mut usage_tracker = CodexTurnUsageTracker::default();
                 let mut turn_error: Option<String> = None;
                 let mut sequence = 0_u64;
                 let mut activity_items = HashMap::<String, Value>::new();
@@ -2406,6 +2489,7 @@ async fn run_session(
                     }
                     let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
                     let params = frame.get("params").cloned().unwrap_or(Value::Null);
+                    usage_tracker.note_notification(method, &params);
                     match method {
                                 "turn/started" => {
                                     turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string).or(turn_id);
@@ -2554,7 +2638,7 @@ async fn run_session(
                                     .await;
                                 }
                                 "thread/tokenUsage/updated" => {
-                                    turn_usage = codex_turn_usage(&params).or(turn_usage);
+                                    usage_tracker.observe(&params);
                                 }
                                 "turn/completed" => {
                                     let turn = params.get("turn").unwrap_or(&params);
@@ -2596,6 +2680,7 @@ async fn run_session(
                                 }
                     }
                     }
+                let turn_usage = usage_tracker.turn_usage();
                 if turn_error.is_none() && content.is_empty() && reasoning.is_empty() && plan_messages.is_empty() {
                     turn_error = Some("Codex 本轮未返回任何内容".to_string());
                 }
@@ -3056,6 +3141,52 @@ mod tests {
         .unwrap();
         assert_eq!(item["id"], "future-1");
         assert_eq!(item["type"], "futureFeature/progress");
+    }
+
+    fn usage_notification(total: (i64, i64, i64, i64), last: (i64, i64, i64, i64)) -> Value {
+        let breakdown = |(input, cached, output, total): (i64, i64, i64, i64)| json!({
+            "inputTokens": input, "cachedInputTokens": cached, "outputTokens": output,
+            "reasoningOutputTokens": 0, "totalTokens": total
+        });
+        json!({"threadId": "t", "turnId": "u", "tokenUsage": {"total": breakdown(total), "last": breakdown(last)}})
+    }
+
+    #[test]
+    fn test_codex_turn_usage_sums_every_request_in_turn() {
+        let mut tracker = CodexTurnUsageTracker::default();
+        tracker.note_notification("item/started", &json!({"item": {"type": "userMessage"}}));
+        // 第一次请求开始时带着上一轮的旧数据
+        tracker.observe(&usage_notification((1000, 800, 100, 1100), (300, 200, 40, 340)));
+        tracker.note_notification("item/started", &json!({"item": {"type": "reasoning"}}));
+        // 第一次请求完成：调用了工具
+        tracker.observe(&usage_notification((1500, 1200, 150, 1650), (500, 400, 50, 550)));
+        // 第二次请求开始时又推了一遍同样的数据
+        tracker.observe(&usage_notification((1500, 1200, 150, 1650), (500, 400, 50, 550)));
+        tracker.note_notification("item/agentMessage/delta", &json!({"delta": "ok"}));
+        tracker.observe(&usage_notification((2100, 1700, 230, 2330), (600, 500, 80, 680)));
+
+        let usage = tracker.turn_usage().unwrap();
+        assert_eq!((usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, usage.total_tokens),
+            (1100, 900, 130, 1230));
+    }
+
+    #[test]
+    fn test_codex_turn_usage_derives_baseline_without_stale_notification() {
+        let mut tracker = CodexTurnUsageTracker::default();
+        tracker.note_notification("item/agentMessage/delta", &json!({"delta": "a"}));
+        tracker.observe(&usage_notification((1500, 1200, 150, 1650), (500, 400, 50, 550)));
+        tracker.observe(&usage_notification((2100, 1700, 230, 2330), (600, 500, 80, 680)));
+        let usage = tracker.turn_usage().unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens, usage.total_tokens), (1100, 130, 1230));
+    }
+
+    #[test]
+    fn test_codex_turn_usage_without_total_falls_back_to_last() {
+        let mut tracker = CodexTurnUsageTracker::default();
+        tracker.note_notification("item/agentMessage/delta", &json!({"delta": "a"}));
+        tracker.observe(&json!({"tokenUsage": {"last": {"inputTokens": 12, "outputTokens": 7, "totalTokens": 19}}}));
+        assert_eq!(tracker.turn_usage().map(|u| u.total_tokens), Some(19));
+        assert!(CodexTurnUsageTracker::default().turn_usage().is_none());
     }
 
     #[test]

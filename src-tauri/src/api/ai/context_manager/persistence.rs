@@ -33,9 +33,23 @@ pub trait CheckpointStore: Sync {
         self.save(conversation_id,header,content)
     }
     fn save(&self, conversation_id: i64, header: &str, content: &str) -> Result<String, AppError>;
+    /// 摘要调用的用量不落在 message 表里，单独记录供对话信息统计。
+    fn record_summary_usage(&self, _conversation_id: i64, _model_id: Option<i64>, _model_name: &str, _usage: &genai::chat::Usage) {}
 }
 
 impl CheckpointStore for ConversationDatabase {
+    fn record_summary_usage(&self, conversation_id: i64, model_id: Option<i64>, model_name: &str, usage: &genai::chat::Usage) {
+        crate::api::token_statistics_api::record_auxiliary_usage(
+            self,
+            crate::api::token_statistics_api::auxiliary_usage_from_genai(
+                conversation_id,
+                crate::db::token_stats::PURPOSE_CONTEXT_COMPACTION,
+                model_id,
+                model_name,
+                usage,
+            ),
+        );
+    }
     fn ensure_execution(&self, conversation_id: i64, source: Option<i64>) -> Result<(), AppError> {
         crate::db::butler_control::ensure_execution(&self.get_connection()?, conversation_id, source)
             .map_err(|e| AppError::UnknownError(e.to_string()))

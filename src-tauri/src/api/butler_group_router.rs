@@ -176,6 +176,13 @@ pub(super) async fn choose(app: &AppHandle, group_id: i64, group: &str, members:
     ).chat_request;
     let response = client.exec_chat(&detail.model.code, request, None).await
         .map_err(|e| format!("{source}调用失败（provider={provider}, model={code}）：{e}"))?;
+    // 调度调用不产生聊天消息，用量记在群聊自身的会话上，供群聊信息统计。
+    match crate::db::conversation_db::ConversationDatabase::new(app) {
+        Ok(db) => crate::api::token_statistics_api::record_auxiliary_usage(&db,
+            crate::api::token_statistics_api::auxiliary_usage_from_genai(group_id,
+                crate::db::token_stats::PURPOSE_GROUP_DISPATCH, Some(detail.model.id), &detail.model.name, &response.usage)),
+        Err(error) => tracing::warn!(group_id, error = %error, "failed to open conversation db for dispatch usage"),
+    }
     let text = response.first_text().unwrap_or_default();
     parse_plan(text, &candidates, fixed)
 }

@@ -395,6 +395,7 @@ export enum AttachmentType { // 添加AttachmentType枚举
 }
 
 // Token统计相关类型
+// 口径：输入含缓存读写，输出含思考，总量 = 输入 + 输出；总量含委派工作与辅助模型调用。
 export interface ConversationTokenStats {
     opencode_go_allowance?: number | null;
     total_tokens: number;
@@ -406,21 +407,28 @@ export interface ConversationTokenStats {
     cached_write_tokens: number;
     by_model: ModelTokenBreakdown[];
     estimated_message_count: number;
+    /** 以下消息数只统计本会话（群聊为成员执行会话）自身的消息，不含委派 */
     message_count: number;
-    // 按消息类型统计
     system_message_count: number;
     user_message_count: number;
     response_message_count: number;
     reasoning_message_count: number;
     tool_result_message_count: number;
-    // 性能指标统计
-    avg_ttft_ms?: number;
-    avg_tps?: number;
-    // 时间戳信息
+    error_message_count?: number;
+    other_message_count?: number;
+    /** 覆盖本会话与委派工作中带用量的回复；没有样本时为 null */
+    avg_ttft_ms?: number | null;
+    avg_tps?: number | null;
+    ttft_sample_count?: number;
+    tps_sample_count?: number;
     start_time?: Date | null;
     finish_time?: Date | null;
-    /** 已计入上述总量的助手协作用量（管家任务、Bot 间协作） */
+    /** 已计入上述总量的助手协作用量（管家任务、Bot 间协作，含多层转派） */
     delegated?: DelegatedTokenUsage;
+    /** 已计入上述总量的辅助模型调用（上下文压缩、群聊调度） */
+    auxiliary?: AuxiliaryTokenUsage[];
+    /** 普通模型会话的当前上下文占用；Agent 会话与群聊为 null */
+    context?: ContextUsage | null;
 }
 
 export interface DelegatedTokenUsage {
@@ -435,6 +443,24 @@ export interface DelegatedTokenUsage {
     estimated_message_count: number;
 }
 
+export interface AuxiliaryTokenUsage {
+    purpose: "context_compaction" | "group_dispatch" | string;
+    call_count: number;
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+}
+
+export interface ContextUsage {
+    latest_input_tokens: number;
+    latest_message_id: number;
+    context_window_size: number;
+    effective_input_limit: number;
+    compaction_trigger: number;
+    compaction_enabled: boolean;
+    checkpoint_count: number;
+}
+
 export interface ModelTokenBreakdown {
     model_id: number | null;
     model_name: string;
@@ -445,11 +471,9 @@ export interface ModelTokenBreakdown {
     cached_input_tokens?: number;
     cached_read_tokens: number;
     cached_write_tokens: number;
-    message_count: number;
+    /** 带用量的调用次数（一次模型请求或一个 Agent 回合记一次） */
+    request_count: number;
     percentage?: number; // 用于UI显示的百分比
-    // 性能指标统计
-    avg_ttft_ms?: number;
-    avg_tps?: number;
 }
 
 export interface OpenCodeGoBilling {

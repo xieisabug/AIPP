@@ -37,6 +37,7 @@ pub mod plugin_db;
 pub mod scheduled_task_db;
 pub mod skill_db;
 pub mod system_db;
+pub mod token_stats;
 
 #[cfg(test)]
 mod tests;
