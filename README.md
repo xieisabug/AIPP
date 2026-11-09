@@ -19,7 +19,6 @@
 
 <br/>
 
-<!-- 📸 图 1 hero.png：主界面大图。Chat 窗口正在对话，画面里最好有代码块 + 工具调用卡片 + 左侧对话列表；浅色主题；建议 1600×1000 -->
 <img src="docs/readme/hero.png" alt="AIPP 主界面" width="880" />
 
 </div>
@@ -32,7 +31,6 @@
 <tr>
 <td width="56%">
 
-<!-- 📸 图 2 butler-group.png：管家群聊。左侧联系人列表（带头像）+ 右侧群聊，最好能看到 @成员、多位成员同时回复或「讨论中 · 第 N/M 轮」；建议 1200×800 -->
 <img src="docs/readme/butler-group.png" alt="管家群聊" />
 
 </td>
@@ -126,12 +124,10 @@ HTML、React、Vue、Mermaid、Draw.io 即时预览，Python / Shell 脚本直�
 
 ## 📸 看一看
 
-<!-- 📸 下面三张图尺寸保持一致，建议都是 1200×750（16:10）-->
 <table>
 <tr>
 <td width="33%" align="center">
 
-<!-- 📸 图 3 agent.png：本地 Agent 对话。Codex 或 Claude Code 正在干活，能看到计划卡片 / 工具审批卡片 -->
 <img src="docs/readme/agent.png" alt="本地 Agent" />
 
 **本地 Agent**
@@ -139,7 +135,6 @@ HTML、React、Vue、Mermaid、Draw.io 即时预览，Python / Shell 脚本直�
 </td>
 <td width="33%" align="center">
 
-<!-- 📸 图 4 artifacts.png：Artifact 预览。React 组件或 Draw.io 图表在预览窗口中渲染 -->
 <img src="docs/readme/artifacts.png" alt="Artifacts 预览" />
 
 **Artifacts 预览**
@@ -147,7 +142,6 @@ HTML、React、Vue、Mermaid、Draw.io 即时预览，Python / Shell 脚本直�
 </td>
 <td width="33%" align="center">
 
-<!-- 📸 图 5 mobile.png：Android。2～3 张手机截图拼在同尺寸横版画布上（聊天 / 设置 / 管家） -->
 <img src="docs/readme/mobile.png" alt="Android" />
 
 **Android**
