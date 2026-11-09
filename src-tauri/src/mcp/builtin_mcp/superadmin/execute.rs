@@ -24,7 +24,7 @@ pub(crate) fn approval_gate_error(meta: &ActionMeta, dry_run: bool) -> Option<St
 /// call silently become an unrestricted ordinary schedule (including batch calls).
 fn schedule_origin_error(action: &str, dry_run: bool, kind: Option<&str>) -> Option<String> {
     if action == "schedule.create" && !dry_run
-        && matches!(kind, Some("butler_main" | "butler_contact" | "butler_task")) {
+        && matches!(kind, Some("butler_main" | "butler_contact" | "butler_task" | "butler_group_member")) {
         Some("管家不能通过旧版 schedule.create 创建无归属的日程。请使用 schedule_task 的 create 操作并绑定当前总管家主会话；创建后须由用户确认来源、模式和期限才会启用。".into())
     } else { None }
 }
@@ -58,11 +58,6 @@ pub async fn handle_execute(
     let meta = &registered.meta;
 
     let origin_check = (|| -> Result<(), String> {
-        if let Some(id) = butler_conversation_id {
-            let conn = ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
-            let source = crate::api::butler_peer::TOOL_MESSAGE.try_with(|v|*v).ok().flatten();
-            super::group_scope::check(&conn,id,&request.action_id,&request.args,source).map_err(|e|e.to_string())?;
-        }
         if request.action_id != "schedule.create" || request.dry_run { return Ok(()); }
         if let Some(id) = butler_conversation_id {
             use crate::db::conversation_db::Repository;

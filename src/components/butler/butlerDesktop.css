@@ -12,3 +12,10 @@
 /* 输入区按钮是 fixed 定位，偏移量按主聊天窗口内容区的 m-2（8px）外边距校准；
    管家窗口内容区贴边，这里把输入框同样上移、左移 8px，与按钮对齐。 */
 [data-aipp-slot="butler-main-content"] .input-area.bottom:not(.mobile) { bottom: 38px; right: 8px; }
+/* 群聊“正在输入”：三个依次淡入淡出的点 */
+.butler-typing-dots { display:inline-flex; align-items:center; gap:3px; height:1rem; }
+.butler-typing-dots i { width:5px; height:5px; border-radius:9999px; background:currentColor; opacity:.3; animation:butler-typing 1.2s infinite ease-in-out; }
+.butler-typing-dots i:nth-child(2) { animation-delay:.15s; }
+.butler-typing-dots i:nth-child(3) { animation-delay:.3s; }
+@keyframes butler-typing { 0%,60%,100% { opacity:.3; transform:translateY(0); } 30% { opacity:.9; transform:translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .butler-typing-dots i { animation:none; opacity:.6; } }

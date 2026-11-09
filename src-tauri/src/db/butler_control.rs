@@ -43,10 +43,6 @@ pub fn ensure_turn(conn: &Connection,id:i64)->anyhow::Result<()> {
 /// A tool result continues the original turn; it cannot resume a paused/stopped
 /// task or borrow a newer goal. Recheck at the provider boundary after async prep.
 pub fn ensure_execution(conn: &Connection, id: i64, source: Option<i64>) -> anyhow::Result<()> {
-    if super::butler_group_delivery::is_member_conversation(conn,id)? {
-        ensure_turn(conn,id)?;
-        return super::butler_group_delivery::ensure_execution(conn,id,source);
-    }
     if !super::butler_goal::is_butler(conn, id)? { return Ok(()); }
     ensure_turn(conn, id)?;
     super::butler_goal::assert_message_current(conn, id, source)

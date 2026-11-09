@@ -22,7 +22,7 @@ impl NativeApprovalGuard {
  pub(crate) fn capture(app:&AppHandle,conversation:i64,source:Option<i64>,action:&str,args:serde_json::Value)->Result<Option<Self>,String>{
   let conn=ConversationDatabase::new(app).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
   let kind:String=conn.query_row("SELECT conversation_kind FROM conversation WHERE id=?1",[conversation],|r|r.get(0)).map_err(|e|e.to_string())?;
-  if !matches!(kind.as_str(),"butler_main"|"butler_contact"|"butler_task"|"butler_group_member"|"butler_group_task") {return Ok(None)}
+  if !matches!(kind.as_str(),"butler_main"|"butler_contact"|"butler_task"|"butler_group_member") {return Ok(None)}
   let request=ApprovalRequest{action_id:action.into(),args};
   let frozen=binding_from_connection(&conn,conversation,&request,chrono::Utc::now().timestamp()+APPROVAL_TIMEOUT_SECONDS as i64,source)?;
   Ok(Some(Self{frozen,request,source}))
@@ -39,7 +39,7 @@ pub(crate) fn operation_binding(app: &AppHandle, conversation: Option<i64>, oper
  let db = ConversationDatabase::new(app).map_err(|e| e.to_string())?;
  let kind = db.conversation_repo().map_err(|e| e.to_string())?.read(id)
      .map_err(|e| e.to_string())?.ok_or("操作对应的会话不存在")?.conversation_kind;
- if !matches!(kind.as_str(), "butler_main" | "butler_contact" | "butler_task" | "butler_group_member" | "butler_group_task") { return Ok(None); }
+ if !matches!(kind.as_str(), "butler_main" | "butler_contact" | "butler_task" | "butler_group_member") { return Ok(None); }
  let request = ExecuteRequest { action_id: format!("operation.{operation}"),
      args: serde_json::json!({"path":path}), dry_run:false, reason:None };
  let expires = chrono::Utc::now().timestamp() + APPROVAL_TIMEOUT_SECONDS as i64;

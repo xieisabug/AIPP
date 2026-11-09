@@ -28,13 +28,7 @@ fn bound_goal_revision(current: Option<i64>, source: Option<i64>) -> Result<Opti
 }
 pub(crate) fn binding_from_connection(conn:&rusqlite::Connection,id:i64,request:&ApprovalRequest,expires_at:i64,source_message:Option<i64>)->Result<ApprovalBinding,String>{
  let (kind,status):(String,Option<String>)=conn.query_row("SELECT conversation_kind,butler_task_status FROM conversation WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
- if !matches!(kind.as_str(),"butler_main"|"butler_contact"|"butler_task"|"butler_group_member"|"butler_group_task") {return Err("管理批准仅适用于管家工作".into())}
- if matches!(kind.as_str(),"butler_group_member"|"butler_group_task") {
-  super::butler_group_delivery::ensure_execution(conn,id,source_message).map_err(|e|e.to_string())?;
-  let packet:i64=conn.query_row("SELECT p.id FROM butler_group_packet p WHERE p.conversation_id=?1 AND p.state='running'",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
-  let input:Option<i64>=conn.query_row("SELECT input_message_id FROM butler_group_packet WHERE id=?1",[packet],|r|r.get(0)).map_err(|e|e.to_string())?;
-  return Ok(ApprovalBinding{conversation:id,action:request.action_id.clone(),args:request.args.clone(),goal_revision:Some(packet),latest_user:input,expires_at});
- }
+ if !matches!(kind.as_str(),"butler_main"|"butler_contact"|"butler_task"|"butler_group_member") {return Err("管理批准仅适用于管家工作".into())}
  if matches!(status.as_deref(),Some("cancelled"|"failed"|"succeeded"|"interrupted")) {return Err("对应工作已结束，批准失效".into())}
  crate::db::butler_control::ensure_turn(conn,id).map_err(|e|e.to_string())?;
  let current=crate::db::butler_goal::current_revision(conn,id).map_err(|e|e.to_string())?;

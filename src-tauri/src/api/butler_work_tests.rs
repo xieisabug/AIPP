@@ -119,21 +119,11 @@ fn test_resume_guidance_uses_normal_dialogue_and_preserves_user_authority() {
 fn test_current_time_prefix_only_for_butler_conversations() {
     use chrono::TimeZone;
     let now = chrono::FixedOffset::east_opt(8 * 3600).unwrap().with_ymd_and_hms(2026, 11, 8, 9, 5, 0).unwrap();
-    for kind in ["butler_main", "butler_contact", "butler_task"] {
+    for kind in ["butler_main", "butler_contact", "butler_task", "butler_group_member"] {
         assert_eq!(
             current_time_prefix(kind, now).as_deref(),
             Some("<current_time>2026-11-08 09:05 (UTC+08:00) 周日</current_time>")
         );
     }
     assert!(current_time_prefix("normal", now).is_none(), "普通聊天不注入");
-}
-
-#[test]
-fn test_group_frozen_input_has_no_runtime_time_prefix() {
-    use chrono::TimeZone;
-    let now = chrono::Utc.with_ymd_and_hms(2026, 11, 9, 0, 0, 0).unwrap();
-    for kind in ["butler_group", "butler_group_member", "butler_group_task"] {
-        assert!(current_time_prefix(kind, now).is_none(),
-            "{kind}: frozen group packets must reach dispatch byte-for-byte unchanged");
-    }
 }

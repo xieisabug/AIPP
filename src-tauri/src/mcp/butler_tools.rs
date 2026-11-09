@@ -3,7 +3,7 @@ use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
 use crate::db::conversation_db::{ConversationDatabase, Repository};
 use crate::db::mcp_db::MCPDatabase;
 use crate::errors::AppError;
-use super::builtin_mcp::templates::{get_builtin_tools_for_command, is_butler_conversation_kind};
+use super::builtin_mcp::templates::{get_builtin_tools_for_command, is_butler_conversation_kind, GROUP_MEMBER_KIND};
 use super::prompt::{collect_mcp_info_for_assistant, MCPInfoForAssistant};
 
 pub fn conversation_kind(app: &tauri::AppHandle, id: Option<i64>) -> Result<String, AppError> {
@@ -15,9 +15,7 @@ pub fn conversation_kind(app: &tauri::AppHandle, id: Option<i64>) -> Result<Stri
 pub fn is_direct_tool(kind: &str, command: Option<&str>, tool: &str) -> bool {
     cfg!(desktop) && is_butler_conversation_kind(kind) && match command {
         Some("aipp:superadmin") => matches!(tool,"superadmin_catalog"|"superadmin_inspect"|"superadmin_execute"|"superadmin_batch"|"superadmin_undo"|"superadmin_audit_query"),
-        Some("aipp:agent") => if matches!(kind,"butler_group_member"|"butler_group_task") {
-            crate::api::butler_group_tools::is_tool(tool)
-        } else { crate::api::butler_peer::is_peer_tool(tool) },
+        Some("aipp:agent") => kind != GROUP_MEMBER_KIND && crate::api::butler_peer::is_peer_tool(tool),
         // 受托助手在自己的会话里向用户提问，问题绑定当前回合（即当前这项委托或任务）。
         Some("aipp:ui_interaction") => tool == "ask_user_question",
         _ => false,
@@ -29,11 +27,12 @@ pub fn merge_tools(servers: &mut Vec<MCPServerWithTools>, required: Vec<MCPServe
         servers.retain(|s| s.command.as_deref() != Some("aipp:superadmin"));
     }
     for server in servers.iter_mut() {
-        if server.command.as_deref() == Some("aipp:agent") && is_butler_conversation_kind(kind) {
-            server.tools.retain(|t| super::builtin_mcp::templates::is_agent_tool_visible_in_butler(kind,&t.name));
-        }
         if server.command.as_deref() == Some("aipp:agent") && !is_butler_conversation_kind(kind) {
             server.tools.retain(|t| !super::builtin_mcp::templates::is_butler_only_agent_tool(&t.name));
+        }
+        // 群成员即使在助手配置里勾选了联系人协作工具，也不在群聊里暴露（提示词与原生通道保持一致）。
+        if server.command.as_deref() == Some("aipp:agent") && kind == GROUP_MEMBER_KIND {
+            server.tools.retain(|t| super::builtin_mcp::templates::is_agent_tool_visible_in_butler(kind, &t.name));
         }
     }
     if !cfg!(desktop) || !is_butler_conversation_kind(kind) { return; }

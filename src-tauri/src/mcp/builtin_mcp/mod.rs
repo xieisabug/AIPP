@@ -1656,12 +1656,6 @@ pub async fn execute_aipp_builtin_tool(
             let handler = AgentHandler::new(app_handle.clone());
 
             match tool_name.as_str() {
-                name if crate::api::butler_group_tools::is_tool(name) => {
-                    let id = conversation_id.ok_or("群工具需要当前执行会话")?;
-                    let result = crate::api::butler_group_tools::tool(&app_handle,id,name,&args).await
-                        .map_err(|e|format!("{name} conversation={id}: {e:#}"))?;
-                    serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
-                }
                 "search_own_history" if args["scope"] == "all_bots" => {
                     let id = conversation_id.ok_or("此工具需要管家联系人会话")?;
                     let result = crate::api::butler_peer::tool(&app_handle,id,"search_bot_history",&args).await

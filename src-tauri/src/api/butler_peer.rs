@@ -34,16 +34,6 @@ pub(super) async fn admit_turn(id: i64) -> tokio::sync::MutexGuard<'static, ()> 
     ADMISSION[id.rem_euclid(64) as usize].lock().await
 }
 
-/// Batch control acquires distinct admission shards in order; two conversations
-/// sharing a shard must not deadlock a group-wide goal replacement.
-pub(super) async fn admit_turns(ids:&[i64]) -> Vec<tokio::sync::MutexGuard<'static,()>> {
-    let mut slots=ids.iter().map(|id|id.rem_euclid(64) as usize).collect::<Vec<_>>();
-    slots.sort_unstable(); slots.dedup();
-    let mut guards=Vec::new();
-    for slot in slots { guards.push(ADMISSION[slot].lock().await); }
-    guards
-}
-
 pub(super) async fn defer_if_busy(app: &AppHandle, id: i64, origin: &str) -> anyhow::Result<bool> {
     let Some(peer) = origin.strip_prefix("butler_peer/") else { return Ok(false) };
     if !busy(app, id).await? {
@@ -109,8 +99,8 @@ pub async fn tool(
     ensure_butler_enabled(app).await.map_err(anyhow::Error::msg)?;
     let db = ConversationDatabase::new(app)?;
     let owner = db.conversation_repo()?.read(current)?.context("找不到当前管家会话")?;
-    ensure!(!matches!(owner.conversation_kind.as_str(),"butler_group_member"|"butler_group_task"),
-        "群内协作请使用 group_members/group_read/group_post/group_discuss；联系人工具不能读取群外上下文");
+    ensure!(owner.conversation_kind != crate::mcp::builtin_mcp::templates::GROUP_MEMBER_KIND,
+        "群聊里请直接在回复中 @ 成员协作；联系人协作工具只在私聊和独立任务中可用");
     ensure!(
         cfg!(desktop)
             && crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&owner.conversation_kind),
@@ -608,12 +598,11 @@ pub(crate) async fn halt_turn(app: &AppHandle, conversation: i64, assistant: Str
             report.questions_cancelled += 1;
         }
     }
-    // Clear structured native questions even when their actor has already
-    // disappeared; otherwise reopening the group would restore a dead form.
-    let forms=app.state::<crate::api::ai::acp::AcpElicitationState>()
+    // 原生通道的结构化提问也要一起撤销，否则重新打开群聊或私聊时会恢复已停止工作的表单。
+    let forms = app.state::<crate::api::ai::acp::AcpElicitationState>()
         .cancel_requests_for_conversation(conversation).await;
-    report.questions_cancelled+=forms.len();
-    crate::api::ai::acp::notify_cancelled_acp_elicitation_requests(app,forms).await;
+    report.questions_cancelled += forms.len();
+    crate::api::ai::acp::notify_cancelled_acp_elicitation_requests(app, forms).await;
     let operations = app.state::<OperationState>();
     for request in operations.list_permission_requests_for_conversation(conversation).await {
         if operations

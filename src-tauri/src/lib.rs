@@ -898,7 +898,7 @@ pub fn run() {
             #[cfg(desktop)]
             crate::api::butler_peer::start(app_handle.clone());
             #[cfg(desktop)]
-            crate::api::butler_group_runtime::start(app_handle.clone());
+            crate::api::butler_group_runtime::start_runtime(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );
@@ -1082,17 +1082,11 @@ pub fn run() {
             crate::api::butler_group::get_butler_group,
             crate::api::butler_group::list_butler_group_messages,
             crate::api::butler_group::post_butler_group_message,
-            crate::api::butler_group::add_butler_group_member,
+            crate::api::butler_group::stop_butler_group_replies,
+            crate::api::butler_group::add_butler_group_members,
             crate::api::butler_group::remove_butler_group_member,
-            crate::api::butler_group::share_butler_group_history,
-            crate::api::butler_group::start_butler_group_round,
-            crate::api::butler_group::stop_butler_group,
-            crate::api::butler_group::stop_butler_group_member,
-            crate::api::butler_group::start_butler_group_task,
-            crate::api::butler_group::stop_butler_group_task,
-            crate::api::butler_group::replace_butler_group_goal,
-            crate::api::butler_group::get_butler_group_member_capabilities,
-            crate::api::butler_group::set_butler_group_wait_limit,
+            crate::api::butler_group::rename_butler_group,
+            crate::api::butler_group::delete_butler_group,
             crate::api::butler_work::list_butler_contact_task_questions,
             crate::mcp::builtin_mcp::interaction::list_recoverable_butler_questions,
             crate::api::butler_work::answer_butler_task_question,

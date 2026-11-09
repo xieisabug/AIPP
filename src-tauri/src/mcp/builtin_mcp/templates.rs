@@ -53,7 +53,6 @@ const BUTLER_ONLY_AGENT_TOOLS: &[&str] =
 /// Returns true if the given tool from `aipp:agent` is butler-only.
 pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
     BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name) || crate::api::butler_peer::is_peer_tool(tool_name)
-        || crate::api::butler_group_tools::is_tool(tool_name)
 }
 
 /// 只在总管家主会话可用的工具（派发/操作独立任务、定时任务）。成员会话调用必然失败，因此不向其暴露。
@@ -61,10 +60,15 @@ pub fn is_butler_main_only_agent_tool(tool_name: &str) -> bool {
     BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
 }
 
-/// 管家会话中某个 `aipp:agent` 工具是否可见：主会话全部可见，成员会话（联系人/任务）去掉总管家专用工具。
+/// 群聊成员会话：成员之间在群里用 @ 协作，不提供联系人协作工具（否则结果会绕开群聊回到私聊）。
+pub const GROUP_MEMBER_KIND: &str = "butler_group_member";
+
+/// 管家会话中某个 `aipp:agent` 工具是否可见：主会话全部可见，成员会话（联系人/任务）去掉总管家专用工具，
+/// 群聊成员会话再去掉联系人协作工具。
 pub fn is_agent_tool_visible_in_butler(kind: &str, tool_name: &str) -> bool {
-    if crate::api::butler_group_tools::is_tool(tool_name) { return matches!(kind,"butler_group_member"|"butler_group_task"); }
-    if matches!(kind,"butler_group_member"|"butler_group_task") && crate::api::butler_peer::is_peer_tool(tool_name) { return false; }
+    if kind == GROUP_MEMBER_KIND && crate::api::butler_peer::is_peer_tool(tool_name) {
+        return false;
+    }
     kind == "butler_main" || !is_butler_main_only_agent_tool(tool_name)
 }
 
@@ -83,7 +87,7 @@ pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_
 
 /// Returns true if the conversation is in butler mode.
 pub fn is_butler_conversation_kind(kind: &str) -> bool {
-    matches!(kind, "butler_main" | "butler_contact" | "butler_task" | "butler_group_member" | "butler_group_task")
+    matches!(kind, "butler_main" | "butler_contact" | "butler_task" | GROUP_MEMBER_KIND)
 }
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
@@ -383,8 +387,7 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
 
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
-        Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter()
-            .chain(crate::api::butler_group_tools::definitions()).chain(vec![
+        Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
             BuiltinToolInfo {
                 name: "message_bot".into(),
                 description: "Send a self-contained request (goal, materials, expected result) to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting, or when you need another member's help for your current work. The receipt is not its answer. End this turn; its answer wakes you later. Never send acknowledgements. deliver_to decides who receives the answer: \"user\" means the receiver delivers results or asks questions to the user in its own conversation under its own name and you must not restate it; \"sender\" means the answer comes back only to you as material for your own work or for a summary the user asked for. Default: \"user\" when you act on a user message; \"sender\" while handling another assistant's request or executing an independent task. Chains are limited in depth, rounds and lifetime, and assistants already in the chain cannot be messaged again (loop).".into(),

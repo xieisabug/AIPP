@@ -138,29 +138,3 @@ fn error_result(message: &str) -> serde_json::Value {
         "isError": true
     })
 }
-
-pub async fn handle_scoped_query(app:&AppHandle,args:&serde_json::Value,conversation:i64) -> serde_json::Value {
-    let app = app.clone();
-    let args = args.clone();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
-        let conn = ConversationDatabase::new(&app)?.get_connection()?;
-        crate::db::butler_group::scope(&conn,conversation)?;
-        let limit = args["limit"].as_i64().unwrap_or(20).clamp(1,100);
-        let offset = args["offset"].as_i64().unwrap_or(0).max(0);
-        let mut stmt = conn.prepare("SELECT audit_id FROM superadmin_audit_log WHERE butler_conversation_id=?1
-            AND (?2 IS NULL OR action_id=?2) AND (?3 IS NULL OR domain=?3)
-            AND (?4=0 OR success=1) AND (?5=0 OR (success=1 AND dry_run=0 AND is_undone=0 AND before_snapshot_json IS NOT NULL))
-            ORDER BY id DESC LIMIT ?6 OFFSET ?7")?;
-        let ids = stmt.query_map(rusqlite::params![conversation,args["action_id"].as_str(),args["domain"].as_str(),
-            args["success_only"].as_bool().unwrap_or(false),args["undoable_only"].as_bool().unwrap_or(false),limit+1,offset],|r|r.get::<_,String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let more = ids.len() > limit as usize;
-        let entries = ids.iter().take(limit as usize).map(|id|audit::get_audit_entry(&conn,id)).collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(json!({"entries":entries,"has_more":more,"conversation_id":conversation}))
-    }).await;
-    match result {
-        Ok(Ok(value)) => json!({"content":[{"type":"json","json":value}],"isError":false}),
-        Ok(Err(error)) => error_result(&format!("群审计读取失败：{error:#}")),
-        Err(error) => error_result(&format!("群审计读取调度失败：{error}")),
-    }
-}

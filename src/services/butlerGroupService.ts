@@ -1,65 +1,39 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
-    ButlerGroup, ButlerGroupDetail, ButlerGroupMember, ButlerGroupMessage,
-    ButlerGroupPost, ButlerGroupRound, ButlerGroupStopResult, ButlerGroupTaskRequest,
+    ButlerGroupDetail, ButlerGroupMessage, ButlerGroupStopSummary, ButlerGroupSummary,
 } from "@/data/ButlerGroup";
 
-export const listButlerGroups = () => invoke<ButlerGroup[]>("list_butler_groups");
+export const BUTLER_GROUP_CHANGED_EVENT = "butler_group_changed";
 
-export const createButlerGroup = (name: string, goal: string, assistantIds: number[]) =>
-    invoke<{ group: ButlerGroup; members: ButlerGroupMember[] }>("create_butler_group", { name, goal, assistantIds });
+export const listButlerGroups = () => invoke<ButlerGroupSummary[]>("list_butler_groups");
 
-export const getButlerGroup = (groupId: number) =>
-    invoke<ButlerGroupDetail>("get_butler_group", { groupId });
+export const getButlerGroup = (groupId: number) => invoke<ButlerGroupDetail>("get_butler_group", { groupId });
 
-export const listButlerGroupMessages = (groupId: number, after = 0, limit = 100) =>
-    invoke<ButlerGroupMessage[]>("list_butler_group_messages", { groupId, after, limit });
+export const listOlderButlerGroupMessages = (groupId: number, before: number, limit = 80) =>
+    invoke<ButlerGroupMessage[]>("list_butler_group_messages", { groupId, before, limit });
 
-export const postButlerGroupMessage = (groupId: number, message: ButlerGroupPost) =>
-    invoke<ButlerGroupMessage>("post_butler_group_message", { groupId, message });
+export const createButlerGroup = (name: string, assistantIds: number[], includeChief: boolean) =>
+    invoke<ButlerGroupSummary>("create_butler_group", { name: name.trim() || null, assistantIds, includeChief });
 
-export const addButlerGroupMember = (groupId: number, assistantId: number) =>
-    invoke<ButlerGroupMember>("add_butler_group_member", { groupId, assistantId });
+/** 相同 requestKey 的重试不会重复发送。 */
+export const postButlerGroupMessage = (groupId: number, requestKey: string, body: string, replyTo: number | null) =>
+    invoke<ButlerGroupMessage>("post_butler_group_message", { groupId, requestKey, body, replyTo });
+
+export const stopButlerGroupReplies = (groupId: number) =>
+    invoke<ButlerGroupStopSummary>("stop_butler_group_replies", { groupId });
+
+export const addButlerGroupMembers = (groupId: number, assistantIds: number[], includeChief: boolean) =>
+    invoke<void>("add_butler_group_members", { groupId, assistantIds, includeChief });
 
 export const removeButlerGroupMember = (groupId: number, memberId: number) =>
-    invoke<ButlerGroupStopResult>("remove_butler_group_member", { groupId, memberId });
+    invoke<void>("remove_butler_group_member", { groupId, memberId });
 
-export const shareButlerGroupHistory = (groupId: number, memberId: number, messageSeqs: number[], requestKey: string) =>
-    invoke<void>("share_butler_group_history", { groupId, memberId, messageSeqs, requestKey });
+export const renameButlerGroup = (groupId: number, name: string) =>
+    invoke<void>("rename_butler_group", { groupId, name });
 
-export const startButlerGroupRound = (groupId: number, messageSeq: number, memberIds: number[], requestKey: string) =>
-    invoke<ButlerGroupRound>("start_butler_group_round", { groupId, messageSeq, memberIds, requestKey });
+export const deleteButlerGroup = (groupId: number) => invoke<void>("delete_butler_group", { groupId });
 
-export const stopButlerGroup = (groupId: number) =>
-    invoke<ButlerGroupStopResult[]>("stop_butler_group", { groupId });
-
-export const stopButlerGroupMember = (groupId: number, memberId: number) =>
-    invoke<ButlerGroupStopResult>("stop_butler_group_member", { groupId, memberId });
-
-export const startButlerGroupTask = (groupId: number, request: ButlerGroupTaskRequest) =>
-    invoke("start_butler_group_task", { groupId, request });
-
-export const stopButlerGroupTask = (groupId: number, conversationId: number) =>
-    invoke<ButlerGroupStopResult[]>("stop_butler_group_task", { groupId, conversationId });
-
-export const replaceButlerGroupGoal = (groupId: number, goal: string, requestKey: string) =>
-    invoke<ButlerGroupStopResult[]>("replace_butler_group_goal", { groupId, goal, requestKey });
-
-export const setButlerGroupWaitLimit = (groupId: number, seconds: number, requestKey: string) =>
-    invoke<void>("set_butler_group_wait_limit", { groupId, seconds, requestKey });
-
-export interface GroupCapabilities {
-    member_id: number;
-    dynamic_loading: boolean;
-    connectivity_verified: boolean;
-    servers: { id: number; name: string; summary: string; tools: { name: string; description: string; is_enabled: boolean }[] }[];
-}
-export const getButlerGroupMemberCapabilities = (groupId: number, memberId: number) =>
-    invoke<GroupCapabilities>("get_butler_group_member_capabilities", { groupId, memberId });
-
-/** Subscription is bound to the selected group, not a mutable global selection. */
-export const onButlerGroupChanged = (groupId: number, refresh: () => void) =>
-    listen<{ group_id: number }>("butler_group_changed", ({ payload }) => {
-        if (payload.group_id === groupId) refresh();
-    });
+/** 任一群发生变化时回调；groupId 为变化的群。 */
+export const onButlerGroupChanged = (callback: (groupId: number) => void) =>
+    listen<{ group_id: number }>(BUTLER_GROUP_CHANGED_EVENT, ({ payload }) => callback(payload.group_id));

@@ -30,49 +30,20 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
 }
 
 #[test]
-fn test_group_tools_remain_scoped_and_stable_across_repeated_configuration_merge() {
-    for kind in ["butler_group_member","butler_group_task"] {
-        let mut configured=vec![server(1,"aipp:agent"),server(2,"aipp:superadmin")];
-        let required=||vec![server(1,"aipp:agent"),server(2,"aipp:superadmin"),server(3,"aipp:ui_interaction")];
-        merge_tools(&mut configured,required(),kind);
-        let first=serde_json::to_value(&configured).unwrap();
-        merge_tools(&mut configured,required(),kind);
-        assert_eq!(first,serde_json::to_value(&configured).unwrap());
-        let agent=configured.iter().find(|s|s.command.as_deref()==Some("aipp:agent")).unwrap();
-        for definition in crate::api::butler_group_tools::definitions() {
-            let tool=agent.tools.iter().find(|tool|tool.name==definition.name).unwrap();
-            assert!(tool.is_enabled);
-            assert!(!tool.is_auto_run);
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&tool.parameters).unwrap(),definition.input_schema);
-            assert!(super::super::builtin_mcp::templates::is_dynamic_loading_fixed_tool(Some("aipp:agent"),&tool.name,true));
-        }
-        assert!(!agent.tools.iter().any(|tool|crate::api::butler_peer::is_peer_tool(&tool.name)
-            ||super::super::builtin_mcp::templates::is_butler_main_only_agent_tool(&tool.name)));
+fn test_butler_tools_group_member_keeps_admin_and_questions_without_contact_collaboration() {
+    // 助手配置里勾选了协作工具，在群里也不会出现：群内协作通过 @ 完成。
+    let mut configured=vec![server(1,"aipp:agent")];
+    for tool in &mut configured[0].tools { tool.is_enabled=true; }
+    merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin"),server(3,"aipp:ui_interaction")],"butler_group_member");
+    let names:Vec<_>=configured.iter().flat_map(|s|s.tools.iter()).map(|t|t.name.as_str()).collect();
+    for expected in ["superadmin_execute","superadmin_undo","ask_user_question"] {
+        assert!(names.contains(&expected),"group member missing {expected}");
     }
-    for kind in ["normal","butler_main","butler_contact","butler_task"] {
-        let mut configured=vec![server(1,"aipp:agent")];
-        merge_tools(&mut configured,vec![server(1,"aipp:agent")],kind);
-        assert!(!configured.iter().flat_map(|server|&server.tools).any(|tool|crate::api::butler_group_tools::is_tool(&tool.name)),"group tools leaked into {kind}");
+    for hidden in ["message_bot","list_assistants","search_bot_history","spawn_task_conversation"] {
+        assert!(!names.contains(&hidden),"group member should not see {hidden}");
     }
-}
-
-#[tokio::test]
-async fn test_group_tools_native_bridge_and_prompt_expose_same_group_schemas() {
-    for kind in ["butler_group_member","butler_group_task"] {
-        let mut servers=Vec::new();
-        merge_tools(&mut servers,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin")],kind);
-        let payload=crate::api::ai::acp::selected_tools_payload(servers.clone()).unwrap();
-        let native:serde_json::Value=serde_json::from_str(&payload).unwrap();
-        let names=native.as_array().unwrap().iter().flat_map(|server|server["tools"].as_array().unwrap())
-            .map(|tool|tool["tool_name"].as_str().unwrap()).collect::<Vec<_>>();
-        let info=MCPInfoForAssistant {enabled_servers:servers,use_native_toolcall:false,dynamic_loading_enabled:true};
-        let prompt=super::super::prompt::format_mcp_prompt(String::new(),&info).await;
-        for tool in crate::api::butler_group_tools::definitions() {
-            assert!(names.contains(&tool.name.as_str()));
-            assert!(prompt.contains(&tool.name));
-        }
-        assert!(!names.iter().any(|name|crate::api::butler_peer::is_peer_tool(name)));
-    }
+    assert!(!is_direct_tool("butler_group_member",Some("aipp:agent"),"message_bot"));
+    assert!(is_direct_tool("butler_group_member",Some("aipp:superadmin"),"superadmin_execute"));
 }
 
 #[test]

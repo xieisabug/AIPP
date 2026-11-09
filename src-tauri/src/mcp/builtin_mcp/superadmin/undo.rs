@@ -49,12 +49,6 @@ pub async fn handle_undo(
     };
 
     // 3. Validate undoability
-    match super::group_scope::current(app_handle,butler_conversation_id) {
-        Ok(Some(id)) if entry.butler_conversation_id != Some(id) =>
-            return error_result("群成员只能撤销自己本群执行产生的操作"),
-        Err(error) => return error_result(&format!("撤销来源失效：{error:#}")),
-        _ => (),
-    }
     if !entry.success {
         return error_result(&format!(
             "Cannot undo audit_id={}: the original action failed (success=false)",

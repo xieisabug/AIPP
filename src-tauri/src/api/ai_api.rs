@@ -997,46 +997,17 @@ fn filter_butler_tools_for_kind(mcp_info: MCPInfoForAssistant, kind: Option<&str
     MCPInfoForAssistant { enabled_servers, ..mcp_info }
 }
 
-/// Called only by application-owned tool continuations, after persistence of
-/// the whole batch. Native drivers retain their own session delivery protocol.
-async fn append_group_tool_boundary(app:&tauri::AppHandle,conversation:i64,source:Option<i64>)->Result<(),AppError> {
-    let app=app.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let db=ConversationDatabase::new(&app)?;
-        let mut conn=db.get_connection()?;
-        if !crate::db::butler_group_delivery::is_member_conversation(&conn,conversation)? { return Ok(()); }
-        let source=source.ok_or_else(||anyhow::anyhow!("群工具边界缺少原执行消息：conversation={conversation}"))?;
-        crate::db::butler_group_delivery::ensure_execution(&conn,conversation,Some(source))?;
-        let calls=crate::db::mcp_db::MCPDatabase::new(&app)?.get_mcp_tool_calls_by_message(source)?;
-        if calls.is_empty() { return Ok(()); }
-        let messages=db.message_repo()?.list_by_conversation_id(conversation)?;
-        for call in calls {
-            // A finished sibling is not enough: no user message may split a
-            // still-open tool-call/result group in the provider protocol.
-            anyhow::ensure!(call.conversation_id==conversation && matches!(call.status.as_str(),"success"|"failed"),
-                "群工具批次尚未全部结束：conversation={conversation}, source={source}, tool={}",call.id);
-            let history_id=call.llm_call_id.unwrap_or_else(||format!("mcp_tool_call_{}",call.id));
-            anyhow::ensure!(find_existing_tool_result_message(&messages,&history_id).is_some_and(|m|m.finish_time.is_some()),
-                "群工具结果尚未完整保存：conversation={conversation}, source={source}, tool={history_id}");
-        }
-        crate::db::butler_group_delivery::append_tool_boundary(&mut conn,conversation,source)?;
-        Ok(())
-    }).await.map_err(|e|AppError::UnknownError(format!("群工具边界调度失败：conversation={conversation}; {e}")))?
-        .map_err(|e|AppError::UnknownError(format!("群工具边界投递失败：conversation={conversation}; {e:#}")))
-}
-
 /// 摘要角色：总管家主会话、管家成员会话（联系人/任务）与普通会话各自保留不同的信息。
-fn context_summary_role(conversation_db: &ConversationDatabase, conversation_id: i64, is_chief: bool) -> Result<SummaryRole, AppError> {
-    let conversation = conversation_db.conversation_repo()
-        .and_then(|repo| Ok(repo.read(conversation_id)?))
-        .map_err(|error| AppError::UnknownError(format!("读取上下文摘要身份失败：conversation={conversation_id}; {error:#}")))?
-        .ok_or_else(|| AppError::UnknownError(format!("读取上下文摘要身份失败：conversation={conversation_id} 不存在")))?;
-    Ok(match conversation.conversation_kind.as_str() {
-        "butler_group_member" | "butler_group_task" => SummaryRole::ButlerGroup,
+fn context_summary_role(conversation_db: &ConversationDatabase, conversation_id: i64, is_chief: bool) -> SummaryRole {
+    let kind = conversation_db.conversation_repo().and_then(|repo| Ok(repo.read(conversation_id)?))
+        .ok().flatten().map(|conversation| conversation.conversation_kind);
+    match kind.as_deref() {
+        // 群聊成员会话（包括总管家在群里的会话）按群聊记录压缩，不套用主会话的派工摘要。
+        Some(crate::db::butler_group::MEMBER_KIND) => SummaryRole::ButlerGroup,
         _ if is_chief => SummaryRole::ButlerChief,
-        "butler_contact" | "butler_task" => SummaryRole::ButlerMember,
+        Some("butler_contact" | "butler_task") => SummaryRole::ButlerMember,
         _ => SummaryRole::General,
-    })
+    }
 }
 
 /// 管家主会话、成员会话与任务会话压缩时要求完整摘要（读取失败时按要求完整处理，宁可不压缩也不用半截摘要）。
@@ -1321,10 +1292,11 @@ pub async fn ask_ai(
 
     // 处理 @assistant_name 提取和消息清理
     let peer_turn = relay_origin.as_deref().is_some_and(|s| s.starts_with("butler_peer/"));
-    let group_packet = relay_origin.as_deref().and_then(|s|s.strip_prefix("butler_group/"))
-        .map(|s|s.parse::<i64>().map_err(|e|AppError::UnknownError(format!("群输入来源无效：{e}"))))
+    // 群聊回复：输入是群里的聊天记录，其中的 @成员名、斜杠和模板语法都是原话，不能被当成指令改写。
+    let group_turn = relay_origin.as_deref().and_then(|s| s.strip_prefix("butler_group/"))
+        .map(|s| s.parse::<i64>().map_err(|e| AppError::UnknownError(format!("群聊回复来源无效：{s}；{e}"))))
         .transpose()?;
-    let (actual_assistant_id, cleaned_prompt) = if peer_turn || group_packet.is_some() {
+    let (actual_assistant_id, cleaned_prompt) = if peer_turn || group_turn.is_some() {
         (request.assistant_id, request.prompt.clone())
     } else {
         extract_assistant_from_message(&assistants, &request.prompt, request.assistant_id).await?
@@ -1332,11 +1304,15 @@ pub async fn ask_ai(
     crate::api::mobile_capability::ensure_assistant_execution(
         &app_handle, actual_assistant_id, "send_preflight", &request.conversation_id,
     ).await.map_err(AppError::UnknownError)?;
-    let slash_parse_result = if group_packet.is_some() {
+    let slash_parse_result = if group_turn.is_some() {
         crate::slash::types::SlashParseResult {
-            display_prompt:cleaned_prompt.clone(),runtime_user_prompt:cleaned_prompt.clone(),active_skills:vec![],
+            display_prompt: cleaned_prompt.clone(),
+            runtime_user_prompt: cleaned_prompt.clone(),
+            active_skills: vec![],
         }
-    } else { parse_slash_prompt(&app_handle, &cleaned_prompt).await? };
+    } else {
+        parse_slash_prompt(&app_handle, &cleaned_prompt).await?
+    };
 
     debug!(?actual_assistant_id, ?cleaned_prompt, "assistant extraction result");
 
@@ -1387,7 +1363,7 @@ pub async fn ask_ai(
 
     // 管家会话的用户消息：引用了某份结果时带入对应工作的必要上下文；未引用时提供近期工作清单以便判断指代。
     // 只作为本轮运行时前缀发给模型，不写进用户可见的消息正文。
-    let work_context = match (peer_turn || group_packet.is_some() || relay_origin.as_deref() == Some("internal"), processed_request.conversation_id.parse::<i64>()) {
+    let work_context = match (peer_turn || group_turn.is_some() || relay_origin.as_deref() == Some("internal"), processed_request.conversation_id.parse::<i64>()) {
         (false, Ok(id)) => crate::api::butler_work::turn_context(&app_handle, id, processed_request.quote.as_ref())
             .unwrap_or_else(|error| {
                 warn!(conversation_id = id, error = %format!("{error:#}"), "failed to build butler work context");
@@ -1549,20 +1525,28 @@ pub async fn ask_ai(
     };
 
     let _need_generate_title = processed_request.conversation_id.is_empty();
-    let request_prompt_result = if group_packet.is_some() { request.prompt.clone() } else { compose_user_message_with_active_skills(
-        &template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await,
-        &slash_parse_result.active_skills,
-    ) };
+    let request_prompt_result = if group_turn.is_some() {
+        processed_request.prompt.clone()
+    } else {
+        compose_user_message_with_active_skills(
+            &template_engine.parse(&slash_parse_result.runtime_user_prompt, &template_context).await,
+            &slash_parse_result.active_skills,
+        )
+    };
     let runtime_prompt_result = runtime_user_prompt_prefix
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|prefix| format!("{}\n\n{}", prefix, request_prompt_result))
         .unwrap_or_else(|| request_prompt_result.clone());
-    let display_prompt_result = if group_packet.is_some() { request.prompt.clone() } else { compose_user_message_with_active_skills(
-        &template_engine.parse(&slash_parse_result.display_prompt, &template_context).await,
-        &slash_parse_result.active_skills,
-    ) };
+    let display_prompt_result = if group_turn.is_some() {
+        processed_request.prompt.clone()
+    } else {
+        compose_user_message_with_active_skills(
+            &template_engine.parse(&slash_parse_result.display_prompt, &template_context).await,
+            &slash_parse_result.active_skills,
+        )
+    };
     let active_skill_attachments = persist_active_skill_attachments(
         &app_handle,
         build_active_skill_attachments(&slash_parse_result.active_skills)?,
@@ -1573,24 +1557,18 @@ pub async fn ask_ai(
     // task admission lock used by scoped cancellation until token/runtime publication
     // finishes, so an old input cannot cancel a newly admitted task-window turn.
     let _task_admission = if let Some(task) = existing_conversation.as_ref()
-        .filter(|c| matches!(c.conversation_kind.as_str(),"butler_task"|"butler_group_member"|"butler_group_task")) {
+        .filter(|c| matches!(c.conversation_kind.as_str(), "butler_task" | crate::db::butler_group::MEMBER_KIND)) {
         Some(crate::api::butler_peer::admit_turn(task.id).await)
     } else { None };
-    if let Some(member) = existing_conversation.as_ref().filter(|c|matches!(c.conversation_kind.as_str(),"butler_group_member"|"butler_group_task")) {
-        let packet = group_packet.ok_or_else(||AppError::UnknownError("群成员只能通过所属群的投递队列启动，不能直接发送私聊输入".into()))?;
-        if processed_request.prompt != request.prompt || runtime_prompt_result != request.prompt
-            || processed_request.attachment_list.as_ref().is_some_and(|v|!v.is_empty())
-            || !active_skill_attachments.is_empty() {
-            return Err(AppError::UnknownError(format!("群输入包不能被提示词、附件或插件改写：packet={packet}")));
-        }
-        let db = ConversationDatabase::new(&app_handle)?;
-        crate::db::butler_group_delivery::validate_dispatch(&db.get_connection()?,packet,member.id,
-            processed_request.assistant_id,&processed_request.prompt).map_err(|e|AppError::UnknownError(e.to_string()))?;
-        if crate::api::butler_peer::busy(&app_handle,member.id).await.map_err(|e|AppError::UnknownError(e.to_string()))? {
-            return Err(AppError::UnknownError(format!("群成员仍在执行，输入保留在队列：conversation={}",member.id)));
-        }
-    } else if group_packet.is_some() {
-        return Err(AppError::UnknownError("群输入来源只能投递到所属群成员会话".into()));
+    // 群成员会话只接收群聊调度写入的聊天记录；群聊调度也只能写入群成员会话。
+    let is_group_member = existing_conversation.as_ref()
+        .is_some_and(|c| c.conversation_kind == crate::db::butler_group::MEMBER_KIND);
+    if is_group_member != group_turn.is_some() {
+        return Err(AppError::UnknownError(if is_group_member {
+            "这是群聊成员的执行会话，只能在群聊里发言".to_string()
+        } else {
+            format!("群聊回复只能发送给群成员会话：conversation={}", processed_request.conversation_id)
+        }));
     }
     if let Some(task) = existing_conversation.as_ref().filter(|c| c.conversation_kind == "butler_task") {
         let db = ConversationDatabase::new(&app_handle)?;
@@ -1678,7 +1656,7 @@ pub async fn ask_ai(
         &app_handle,
         conversation_id,
         user_message_id.saturating_sub(1),
-        if peer_turn { Some("internal") } else { relay_origin.as_deref() },
+        if peer_turn || group_turn.is_some() { Some("internal") } else { relay_origin.as_deref() },
     )
     .await
     {
@@ -1952,7 +1930,7 @@ pub async fn ask_ai(
             model_name: &chat_config.model_name,
             conversation_id,
             checkpoint_store: &conversation_db,
-            summary_role: context_summary_role(&conversation_db, conversation_id, is_butler)?,
+            summary_role: context_summary_role(&conversation_db, conversation_id, is_butler),
             require_complete_summary: is_butler || requires_complete_context_summary(&conversation_db, conversation_id),
             message_ids: init_message_ids,
         };
@@ -2273,8 +2251,6 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         &db.get_connection()?, conversation_id_i64, source_message_id,
     ).map_err(|e| AppError::UnknownError(e.to_string()))?;
 
-    append_group_tool_boundary(&app_handle,conversation_id_i64,source_message_id).await?;
-
     // Get all existing messages
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id_i64)?;
 
@@ -2496,7 +2472,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         model_name: &chat_config.model_name,
         conversation_id: conversation_id_i64,
         checkpoint_store: &conversation_db,
-        summary_role: context_summary_role(&conversation_db, conversation_id_i64, is_butler_cont)?,
+        summary_role: context_summary_role(&conversation_db, conversation_id_i64, is_butler_cont),
         require_complete_summary: is_butler_cont || requires_complete_context_summary(&conversation_db, conversation_id_i64),
         message_ids: init_metadata.message_ids,
     };
@@ -2678,8 +2654,6 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
     crate::db::butler_control::ensure_execution(
         &db.get_connection()?, conversation_id, source_message_id,
     ).map_err(|e| AppError::UnknownError(e.to_string()))?;
-
-    append_group_tool_boundary(&app_handle,conversation_id,source_message_id).await?;
 
     // Get all existing messages (including the just-created tool_result messages)
     let all_messages = db.message_repo().unwrap().list_by_conversation_id(conversation_id)?;
@@ -2892,7 +2866,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         model_name: &chat_config.model_name,
         conversation_id,
         checkpoint_store: &conversation_db,
-        summary_role: context_summary_role(&conversation_db, conversation_id, is_butler_batch)?,
+        summary_role: context_summary_role(&conversation_db, conversation_id, is_butler_batch),
         require_complete_summary: is_butler_batch || requires_complete_context_summary(&conversation_db, conversation_id),
         message_ids: init_metadata.message_ids,
     };
@@ -3436,7 +3410,7 @@ pub async fn regenerate_ai(
             model_name: &chat_config.model_name,
             conversation_id,
             checkpoint_store: &conversation_db,
-            summary_role: context_summary_role(&conversation_db, conversation_id, is_butler_regen)?,
+            summary_role: context_summary_role(&conversation_db, conversation_id, is_butler_regen),
             require_complete_summary: is_butler_regen || requires_complete_context_summary(&conversation_db, conversation_id),
             message_ids: init_metadata.message_ids,
         };
@@ -3854,12 +3828,13 @@ async fn initialize_conversation(
         let runtime_user_prompt_with_context =
             build_prompt_with_attachment_context(&runtime_user_prompt, &context);
         // 添加用户消息
-        let user_message = if let Some(packet) = origin.and_then(|s|s.strip_prefix("butler_group/")) {
-            let packet = packet.parse::<i64>().map_err(|e|AppError::UnknownError(format!("群输入来源无效：{e}")))?;
-            let input = crate::db::butler_group_delivery::activate(&mut db.get_connection()?,packet,
-                conversation_id,assistant_detail.assistant.id,&runtime_user_prompt_with_context)
-                .map_err(|e|AppError::UnknownError(format!("群输入写入失败：packet={packet}, conversation={conversation_id}; {e:#}")))?;
-            db.message_repo()?.read(input)?.ok_or_else(||AppError::UnknownError(format!("群输入写入后丢失：packet={packet}, message={input}")))?
+        let user_message = if let Some(turn) = origin.and_then(|s| s.strip_prefix("butler_group/")) {
+            let turn = turn.parse::<i64>().map_err(|e| AppError::UnknownError(format!("群聊回复来源无效：{turn}；{e}")))?;
+            // 写入前再确认这次回复仍在进行：用户已停止或成员已移出时，不把消息送进成员会话。
+            let input = crate::db::butler_group::write_turn_input(&mut db.get_connection()?, turn, conversation_id,
+                &display_user_prompt_with_context, Some(assistant_detail.model[0].id), Some(&assistant_detail.model[0].model_code))
+                .map_err(|e| AppError::UnknownError(format!("群聊回复 #{turn} 写入成员会话 #{conversation_id} 失败：{e:#}")))?;
+            db.message_repo()?.read(input)?.ok_or_else(|| AppError::UnknownError(format!("群聊消息 {input} 写入后丢失")))?
         } else if let Some(peer) = origin.and_then(|s| s.strip_prefix("butler_peer/")) {
             let (id, leg) = peer.split_once('/').ok_or_else(|| AppError::UnknownError("协作来源格式无效".into()))?;
             let id = id.parse::<i64>().map_err(|e| AppError::UnknownError(e.to_string()))?;
