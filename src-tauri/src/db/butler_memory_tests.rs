@@ -99,7 +99,7 @@ fn test_memory_uses_literal_chinese_search() {
     assert_eq!(recall(&conn, 1, "中文").unwrap(), vec![item.clone()]);
     assert_eq!(recall(&conn, 1, "%_").unwrap(), vec![item]);
     assert!(recall(&conn, 1, "不存在").unwrap().is_empty());
-    assert!(recall(&conn, 1, &"字".repeat(201)).is_err());
+    assert!(recall(&conn, 1, &"字".repeat(513)).is_err());
 }
 
 #[test]
