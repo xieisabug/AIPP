@@ -69,7 +69,7 @@ pub(super) fn updated(app: &AppHandle) {
     let _ = app.emit("butler_peer_changed", ());
 }
 pub fn is_peer_tool(name: &str) -> bool {
-    super::butler_assistant_tools::is_tool(name) || super::butler_work::is_tool(name) || matches!(
+    name == "butler_memory" || super::butler_assistant_tools::is_tool(name) || super::butler_work::is_tool(name) || matches!(
         name,
         "message_bot" | "search_own_history" | "search_bot_history" | "read_bot_message_context"
     )
@@ -106,6 +106,9 @@ pub async fn tool(
     );
     if super::butler_assistant_tools::is_tool(name) {
         return super::butler_assistant_tools::tool(app,current,name,args).await;
+    }
+    if name == "butler_memory" {
+        return super::butler_memory::tool(app, current, args).await;
     }
     if super::butler_work::is_tool(name) {
         return super::butler_work::tool(app, current, name, args).await;
