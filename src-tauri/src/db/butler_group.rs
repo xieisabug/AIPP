@@ -9,6 +9,8 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::Serialize;
 
+use crate::utils::reply_quote;
+
 pub const GROUP_KIND: &str = "butler_group";
 pub const MEMBER_KIND: &str = "butler_group_member";
 pub const MAX_MEMBERS: usize = 30;
@@ -25,6 +27,8 @@ const INPUT_CHAR_LIMIT: usize = 60_000;
 const INPUT_PER_MESSAGE_CHARS: usize = 20_000;
 /// 引用别人消息时，在成员输入里保留的原文片段长度。
 const QUOTE_EXCERPT_CHARS: usize = 60;
+/// 成员引用原话时，向前查找的群消息条数。
+const QUOTE_SEARCH_LIMIT: i64 = 200;
 pub const EVERYONE_MENTIONS: [&str; 2] = ["所有人", "全体成员"];
 
 const SCHEMA: &str = "
@@ -718,7 +722,19 @@ pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<O
     let mut finished = Finished::default();
     match outcome {
         Outcome::Reply(body) => {
-            let reply = append(&tx, t.group_id, Sender::Member(&m), "message", &body, None, None, false)?;
+            // 回复开头的 `[[QUOTE:原话]]` 是成员在引用某条群消息：去掉标记，找到那条消息后记为回复对象。
+            let (body, reply_to) = match reply_quote::split(&body) {
+                Some((fragment, rest)) => {
+                    let quoted = quoted_seq(&tx, &t, &m, fragment)?;
+                    if quoted.is_none() {
+                        tracing::warn!(group_id = t.group_id, turn_id = id, member = %m.name, fragment,
+                            "group member quoted text that matches no visible group message; showing the reply without a quote");
+                    }
+                    (rest.to_string(), quoted)
+                }
+                None => (body, None),
+            };
+            let reply = append(&tx, t.group_id, Sender::Member(&m), "message", &body, reply_to, None, false)?;
             let source: Option<i64> = match t.input_message_id {
                 Some(input) => tx.query_row("SELECT id FROM message WHERE conversation_id=?1 AND id>?2
                     AND message_type IN ('response','assistant') AND finish_time IS NOT NULL ORDER BY id DESC LIMIT 1",
@@ -743,6 +759,18 @@ pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<O
     finished.relayed.extend(advance_discussion(&tx, &t)?);
     tx.commit()?;
     Ok(Some(finished))
+}
+
+/// 成员引用的原话出自哪条群消息：只在它这次回复时能看到的发言（加入之后、本次输入上界之内）里，从近到远找。
+fn quoted_seq(tx: &Connection, t: &Turn, m: &Member, fragment: &str) -> Result<Option<i64>> {
+    let through = match t.input_through {
+        Some(through) => through,
+        None => get(tx, t.group_id)?.seq,
+    };
+    let candidates = collect(tx, &format!("SELECT {MESSAGE_COLUMNS} FROM butler_chat_group_message
+        WHERE group_id=?1 AND kind='message' AND seq>?2 AND seq<=?3 ORDER BY seq DESC LIMIT ?4"),
+        params![t.group_id, m.joined_after, through, QUOTE_SEARCH_LIMIT], message_row)?;
+    Ok(candidates.into_iter().find(|message| reply_quote::matches(fragment, &message.body)).map(|message| message.seq))
 }
 
 fn discussion_members(tx: &Connection, t: &Turn, round: Option<i64>) -> Result<Vec<i64>> {

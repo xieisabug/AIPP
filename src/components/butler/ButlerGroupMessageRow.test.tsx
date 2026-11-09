@@ -1,9 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ButlerGroupMessage } from "@/data/ButlerGroup";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
-import { ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
+import { ButlerQuoteContext, ButlerQuoteJumpContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import ButlerGroupMessageRow, { toChatMessage } from "./ButlerGroupMessageRow";
 
 // 只替换渲染成本高的叶子组件；MessageItem、右键菜单、悬浮操作与引用标签用真实实现。
@@ -43,8 +43,26 @@ describe("ButlerGroupMessageRow", () => {
         expect(toChatMessage(7, { ...memberReply, source_message_id: null, source_conversation_id: null }))
             .toMatchObject({ id: -3, conversation_id: 7, message_type: "assistant" });
         expect(toChatMessage(7, userReply, memberReply)).toMatchObject({
-            id: -4, message_type: "user", metadata_json: JSON.stringify({ quote: { label: "写作助手：初稿如下 [代码]" } }),
+            id: -4, message_type: "user",
+            metadata_json: JSON.stringify({ quote: { label: "写作助手：初稿如下 [代码]", kind: "message", id: 3 } }),
         });
+    });
+
+    it("should label a member reply that quotes the user and jump to the quoted message", () => {
+        const question: ButlerGroupMessage = { ...base, seq: 2, body: "明天的评审几点开始？" };
+        const answer: ButlerGroupMessage = { ...memberReply, seq: 5, body: "下午两点。", reply_to: 2 };
+        expect(toChatMessage(7, answer, question)).toMatchObject({
+            message_type: "response", metadata_json: null, reply_quote: { label: "我：明天的评审几点开始？", target: 2 },
+        });
+        const jump = vi.fn();
+        render(<AntiLeakageProvider enabled={false}><ButlerQuoteJumpContext.Provider value={jump}>
+            <ButlerGroupMessageRow groupId={7} message={answer} quoted={question} />
+        </ButlerQuoteJumpContext.Provider></AntiLeakageProvider>);
+        const label = document.querySelector('[data-aipp-slot="butler-message-quote"]') as HTMLElement;
+        expect(label).toHaveTextContent("我：明天的评审几点开始？");
+        expect(label.className).toContain("justify-start");
+        fireEvent.click(within(label).getByRole("button"));
+        expect(jump).toHaveBeenCalledWith(2);
     });
 
     it("should open the same right-click menu as private chats on a member reply", async () => {

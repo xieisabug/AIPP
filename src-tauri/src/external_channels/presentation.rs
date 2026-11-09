@@ -139,6 +139,8 @@ fn render_user_message(content: &str, context: &RenderContext<'_>) -> Option<Str
 }
 
 fn render_assistant_message(content: &str, context: &RenderContext<'_>) -> Vec<String> {
+    // 管家助手回复开头的引用标记只在 AIPP 界面里显示成引用，外部渠道只发正文。
+    let content = crate::utils::reply_quote::strip(content);
     let tool_calls = parse_tool_calls_from_response(content);
     let clean_text = sanitize_plain_text(content);
     let registry = ToolPresentationRegistry::new();
@@ -2032,6 +2034,16 @@ mod tests {
         } else {
             Some(parts.join("\n"))
         }
+    }
+
+    #[test]
+    fn renders_response_without_reply_quote_marker() {
+        let message = build_message("response", "[[QUOTE:明天几点开会]]\n下午三点。");
+        let rendered =
+            render_joined(&message, &RenderContext { channel: "feishu", relay_origin: "aipp" })
+                .unwrap();
+
+        assert_eq!(rendered, "下午三点。");
     }
 
     #[test]

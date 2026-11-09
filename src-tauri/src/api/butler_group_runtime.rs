@@ -173,6 +173,8 @@ fn route(app: &AppHandle, state: &Shared, message: group::Message) {
 /// 每轮都附带的说话方式提醒：写在本轮输入旁边比只写在系统提示里更容易被遵守，
 /// 也让在规则调整前就加入的成员同样生效。
 const STYLE_REMINDER: &str = "说话方式：像在工作群里聊天。通常一两段、每段两三句，先说结论或态度；分段说，一个意思一段。用自然的句子，不要拆成 1、2、3 逐条列点，不加标题和成片的加粗。不客套、不预告、不总结全场，不重复别人说过的。需要完整报告或文件时照常产出，群里只说结论和产物位置。";
+/// 引用回复的写法同样每轮提醒：规则加入前创建的成员会话，系统提示里没有这一条。
+const QUOTE_REMINDER: &str = "要回应较早的某条消息或某人的某句话时，回复第一行只写 [[QUOTE:原话片段]]（从那条消息里原样抄 5～20 个字），第二行起写回复；直接接最新消息时不用。";
 
 fn turn_situation(turn: &group::Turn, peers: &[String]) -> Option<String> {
     let together = (!peers.is_empty()).then(|| format!("{} 也在同时回复，你看不到他们正在写的内容，只说你自己的看法。", peers.join("、")));
@@ -205,7 +207,7 @@ fn context_prefix(room: &group::Group, me: &group::Member, members: &[group::Mem
         }
     }).collect::<Vec<_>>().join("、");
     let situation = turn_situation(turn, peers).map(|line| format!("{line}\n")).unwrap_or_default();
-    format!("<group_chat name=\"{}\" you=\"{}\">\n当前成员：{names}\n{situation}{STYLE_REMINDER}\n</group_chat>", room.name, me.name)
+    format!("<group_chat name=\"{}\" you=\"{}\">\n当前成员：{names}\n{situation}{STYLE_REMINDER}\n{QUOTE_REMINDER}\n</group_chat>", room.name, me.name)
 }
 
 async fn dispatch(app: &AppHandle, turn: &group::Turn, member: &group::Member, room: &group::Group, input: String, peers: Vec<String>) -> Result<(), String> {

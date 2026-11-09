@@ -92,4 +92,25 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([attachment, example]).map(m => m.id)).toEqual([2, 5]);
         expect(butlerTranscript([example])[0].content).toBe(example.content);
     });
+
+    it("should show a reply's leading quote marker as a quote of the earlier message it matches", () => {
+        const review = message(1, "user", "明天的评审几点开始？");
+        const budget = message(2, "user", "另外预算表谁来做？");
+        const reply = message(3, "response", "[[QUOTE:评审几点开始]]\n下午两点，在三楼。");
+        const [, , shown] = butlerTranscript([review, budget, reply]);
+        expect(shown).toMatchObject({ id: 3, content: "下午两点，在三楼。", reply_quote: { label: "我：明天的评审几点开始？", target: 1 } });
+        expect(reply.content).toContain("[[QUOTE:"); // 只改显示，历史记录本身不变
+        // 引用自己之前的回复时不加“我：”
+        const later = message(5, "response", "[[QUOTE:下午两点]]\n改到三点了。");
+        expect(butlerTranscript([review, reply, message(4, "user", "确定吗"), later])[3].reply_quote)
+            .toEqual({ label: "下午两点，在三楼。", target: 3 });
+    });
+
+    it("should drop a quote marker that matches no shown message instead of inventing a quote", () => {
+        const internal = message(1, "user", "评审几点开始", { metadata_json: '{"origin":"internal"}' });
+        const reply = message(2, "response", "[[QUOTE:评审几点开始]]\n下午两点。");
+        const [shown] = butlerTranscript([internal, reply]);
+        expect(shown.content).toBe("下午两点。");
+        expect(shown.reply_quote).toBeUndefined();
+    });
 });

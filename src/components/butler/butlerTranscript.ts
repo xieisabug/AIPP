@@ -1,5 +1,7 @@
 import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
 import type { Message } from "@/data/Conversation";
+import { quoteExcerpt } from "./ButlerQuote";
+import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
 
 // Kept in sync with BUTLER_SILENT_REPLY in src-tauri/src/api/butler_api.rs.
 export const BUTLER_SILENT_REPLY = "[[NO_REPLY]]";
@@ -51,8 +53,20 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
                 result.push({ ...message, content: "", tool_calls_json: null, large_message_preview: null });
             }
         } else {
-            result.push(message);
+            result.push(withReplyQuote(message, result));
         }
     }
     return result;
+}
+
+/** 回复开头的 `[[QUOTE:原话]]` 显示成引用标签（指向已显示的那条消息），正文里不再出现标记。 */
+function withReplyQuote(message: Message, earlier: Message[]): Message {
+    const parts = splitReplyQuote(message.content);
+    if (!parts) return message;
+    const quoted = findQuotedMessage(parts.fragment, earlier);
+    const reply_quote = quoted && {
+        label: `${quoted.message_type === "user" ? "我：" : ""}${quoteExcerpt(quoted.content, 40)}`,
+        target: quoted.id,
+    };
+    return { ...message, content: parts.body, reply_quote };
 }

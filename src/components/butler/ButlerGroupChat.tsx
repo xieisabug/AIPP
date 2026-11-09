@@ -20,7 +20,7 @@ import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker } from "./ButlerGroupMessageRow";
-import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
+import { ButlerQuoteChip, ButlerQuoteContext, ButlerQuoteJumpContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "./butlerProgress";
 import {
     applyMention, findMentionQuery, formatDivider, groupReadKey, mentionOptions, mergeMessages,
@@ -104,6 +104,19 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const listRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const stickToBottom = useRef(true);
+    // 点击引用标签跳到被引用的群消息（按序号定位）并短暂高亮，和私聊的引用定位一致。
+    const [highlightSeq, setHighlightSeq] = useState<number | null>(null);
+    const jumpToQuoted = useCallback((seq: number) => {
+        const target = listRef.current?.querySelector<HTMLElement>(`[data-aipp-group-seq="${seq}"]`);
+        if (!target) return;
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        setHighlightSeq(seq);
+    }, []);
+    useEffect(() => {
+        if (highlightSeq === null) return;
+        const timer = window.setTimeout(() => setHighlightSeq(null), 2000);
+        return () => window.clearTimeout(timer);
+    }, [highlightSeq]);
     const revision = useRef(0);
 
     const refresh = useCallback(async () => {
@@ -329,6 +342,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         </div>
 
         <ButlerQuoteContext.Provider value={quoteState}>
+        <ButlerQuoteJumpContext.Provider value={jumpToQuoted}>
         {/* 与私聊（ConversationUI）同样的 p-6 与整行宽度，不再收窄成居中一栏。 */}
         <div ref={listRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto p-6" aria-label="群聊记录" data-aipp-slot="butler-group-messages">
             <div className="flex flex-col gap-4">
@@ -348,17 +362,19 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                             </div>
                         </div>;
                     }
-                    return <div key={key}>
+                    return <div key={key} data-aipp-group-seq={message.seq}>
                         {time}
                         <ButlerGroupMessageRow groupId={groupId} message={message}
                             quoted={message.reply_to ? quotedBySeq.get(message.reply_to) : undefined}
-                            sender={message.sender_member ? byId.get(message.sender_member) : undefined} />
+                            sender={message.sender_member ? byId.get(message.sender_member) : undefined}
+                            highlighted={highlightSeq === message.seq} />
                     </div>;
                 })}
                 {running.map(member => <TypingRow key={`typing-${member.id}`} member={member} />)}
                 {members.map(member => <MemberQuestion key={`question-${member.id}`} member={member} />)}
             </div>
         </div>
+        </ButlerQuoteJumpContext.Provider>
 
         <div className="flex-none px-6 pb-4 pt-2" data-aipp-slot="butler-group-input">
             {quote && <div className="mb-2 flex"><ButlerQuoteChip quote={quote} onClear={() => setQuote(null)} /></div>}

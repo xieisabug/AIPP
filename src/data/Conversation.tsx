@@ -49,6 +49,14 @@ export interface Message {
     large_message_preview?: LargeMessagePreviewMetadata | null;
     /** Display-only: an ungrouped error followed by a new reply in the same turn. */
     isSupersededError?: boolean;
+    /** Display-only: the earlier message an assistant reply answers (Butler chats, from its leading `[[QUOTE:…]]`). */
+    reply_quote?: MessageReplyQuote;
+}
+
+export interface MessageReplyQuote {
+    label: string;
+    /** Displayed id of the quoted message, used to jump to it. */
+    target?: number;
 }
 
 export interface LargeMessagePreviewMetadata {

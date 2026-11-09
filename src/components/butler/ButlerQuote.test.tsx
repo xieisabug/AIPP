@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { Message } from "@/data/Conversation";
 import {
-    ButlerMessageQuoteLabel, ButlerQuoteButton, ButlerQuoteChip, ButlerQuoteContext,
+    ButlerMessageQuoteLabel, ButlerQuoteButton, ButlerQuoteChip, ButlerQuoteContext, ButlerQuoteJumpContext,
     isQuotableMessage, quoteExcerpt, readMessageQuote,
 } from "./ButlerQuote";
 
@@ -24,6 +24,21 @@ describe("Butler quote reply", () => {
         expect(readMessageQuote(message({ message_type: "user", metadata_json: "{bad" }))).toBeNull();
         render(<ButlerMessageQuoteLabel message={quoted} />);
         expect(screen.getByText("任务《周报》")).toBeVisible();
+    });
+
+    it("should label an assistant reply's quote on its own side and jump to the quoted message", () => {
+        const reply = message({ reply_quote: { label: "我：明天几点开会", target: 3 } });
+        expect(readMessageQuote(reply)).toEqual({ label: "我：明天几点开会", target: 3 });
+        const jump = vi.fn();
+        render(<ButlerQuoteJumpContext.Provider value={jump}><ButlerMessageQuoteLabel message={reply} /></ButlerQuoteJumpContext.Provider>);
+        const label = screen.getByTitle("查看被引用的消息");
+        expect(label.closest('[data-aipp-slot="butler-message-quote"]')?.className).toContain("justify-start");
+        fireEvent.click(label);
+        expect(jump).toHaveBeenCalledWith(3);
+        // 用户引用的是本会话的某条回复时同样可以跳过去；没有可跳转的目标时只显示文字
+        const quotedReply = message({ message_type: "user", metadata_json: JSON.stringify({ quote: { kind: "message", id: 9, label: "引用回复" } }) });
+        expect(readMessageQuote(quotedReply)).toEqual({ label: "引用回复", target: 9 });
+        expect(readMessageQuote(message({}))).toBeNull();
     });
 
     it("should set the quote from a reply and clear it from the input chip", () => {

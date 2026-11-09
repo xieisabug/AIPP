@@ -159,12 +159,35 @@ pub(crate) fn turn_context_with(conn: &Connection, conversation: i64, quote: Opt
 }
 
 pub(crate) fn turn_context(app: &AppHandle, conversation: i64, quote: Option<&WorkQuote>) -> anyhow::Result<TurnContext> {
-    let mut context = turn_context_with(&connection(app)?, conversation, quote)?;
+    user_turn_context(&connection(app)?, conversation, quote)
+}
+
+/// 用户消息这一轮发给模型的完整补充上下文：工作引用/近期工作、恢复工作的说明，以及私聊里的引用回复写法。
+pub(crate) fn user_turn_context(conn: &Connection, conversation: i64, quote: Option<&WorkQuote>) -> anyhow::Result<TurnContext> {
+    let mut context = turn_context_with(conn, conversation, quote)?;
     if let Some(prefix) = context.prefix.as_mut() {
         prefix.push_str("\n");
         prefix.push_str(RESUME_GUIDANCE);
     }
+    if is_private_chat(conn, conversation)? {
+        context.prefix = Some(match context.prefix.take() {
+            Some(prefix) => format!("{prefix}\n\n{REPLY_QUOTE_HINT}"),
+            None => REPLY_QUOTE_HINT.to_string(),
+        });
+    }
     Ok(context)
+}
+
+/// 管家私聊（联系人与总管家）里助手引用回复的写法。系统提示词在会话首轮就固定了，
+/// 所以随每条用户消息提醒，规则加入前创建的会话同样生效。
+/// 界面按原话片段找到被引用的消息（`src/components/butler/butlerReplyQuote.ts`）。
+pub(crate) const REPLY_QUOTE_HINT: &str = "<reply_quote>要回应的不是用户最新这条（例如用户连着发了几条，或要回到之前说过的某句话）时，可以引用：回复第一行只写 [[QUOTE:原话片段]]，片段从那条消息里原样抄 5～20 个字，第二行起写回复，界面会显示成引用。一次只引一条；直接回答最新这条时不用引用。</reply_quote>";
+
+fn is_private_chat(conn: &Connection, conversation: i64) -> anyhow::Result<bool> {
+    let kind: Option<String> = conn
+        .query_row("SELECT conversation_kind FROM conversation WHERE id=?1", [conversation], |r| r.get(0))
+        .optional()?;
+    Ok(matches!(kind.as_deref(), Some("butler_contact" | "butler_main")))
 }
 
 pub async fn tool(app: &AppHandle, current: i64, name: &str, args: &Value) -> anyhow::Result<Value> {

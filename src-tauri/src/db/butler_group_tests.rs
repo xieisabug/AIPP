@@ -388,3 +388,31 @@ fn test_group_discussion_round_waits_for_a_member_still_answering() {
     assert!(finish_turn(&mut conn, running.id, Outcome::Reply("迟到".into())).unwrap().is_none());
     assert!(open_turns(&conn, group.id).unwrap().is_empty());
 }
+
+#[test]
+fn test_group_member_quote_marker_becomes_reply_to_visible_message() {
+    let mut conn = setup();
+    let (group, members) = group_with(&mut conn, &["张三", "李四"]);
+    let (zhang, li) = (&members[0], &members[1]);
+    let review = post_user(&mut conn, group.id, "q1", "明天的评审几点开始？", None).unwrap();
+    let sheet = post_user(&mut conn, group.id, "q2", "另外预算表谁来做？", None).unwrap();
+    let turns = route(&mut conn, group.id, sheet.seq, &[zhang.id], 1).unwrap();
+    let (turn, _, _) = run(&mut conn, turns[0]);
+    // 张三开始回复之后才出现的消息，他没看到，不能被他引用
+    let later = post_user(&mut conn, group.id, "q3", "评审几点开始我也想知道", None).unwrap();
+    let published = finish_turn(&mut conn, turn.id, Outcome::Reply("[[QUOTE:评审几点开始]]\n下午两点。".into()))
+        .unwrap().unwrap().reply.unwrap();
+    assert_eq!(published.reply_to, Some(review.seq));
+    assert_eq!(published.body, "下午两点。", "引用标记不出现在群消息正文里");
+    // 其他成员读到的聊天记录里能看出张三回复的是哪一条
+    let again = route(&mut conn, group.id, later.seq, &[li.id], 1).unwrap();
+    let (_, _, input) = run(&mut conn, again[0]);
+    assert!(input.contains("张三（回复 用户：「明天的评审几点开始？」）：下午两点。"), "{input}");
+    // 对不上任何消息的引用只去掉标记，不挂到别的消息上
+    let ask = post_user(&mut conn, group.id, "q4", "@张三 再确认一下", None).unwrap();
+    let third = route(&mut conn, group.id, ask.seq, &[zhang.id], 1).unwrap();
+    let (turn, _, _) = run(&mut conn, third[0]);
+    let unmatched = finish_turn(&mut conn, turn.id, Outcome::Reply("[[QUOTE:没人说过这句话]]\n确认。".into()))
+        .unwrap().unwrap().reply.unwrap();
+    assert_eq!((unmatched.reply_to, unmatched.body.as_str()), (None, "确认。"));
+}

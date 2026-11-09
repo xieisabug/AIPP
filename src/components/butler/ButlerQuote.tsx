@@ -23,6 +23,12 @@ export const ButlerQuoteContext = createContext<ButlerQuoteState | null>(null);
 
 export const useButlerQuote = () => useContext(ButlerQuoteContext);
 
+/**
+ * 点击引用标签时跳到被引用的那条消息。参数是标签上的 target：私聊里是消息 id，群聊里是群消息序号，
+ * 由提供方各自解释。没有提供时标签只显示文字、不可点击。
+ */
+export const ButlerQuoteJumpContext = createContext<((target: number) => void) | null>(null);
+
 export function quoteExcerpt(text: string, limit = 60): string {
     const plain = text
         .replace(/<!--[\s\S]*?-->/g, "")
@@ -39,14 +45,26 @@ export function isQuotableMessage(message: Message): boolean {
         && message.id > 0 && message.finish_time !== null && message.content.trim() !== "";
 }
 
-/** 用户消息上保存的引用身份（发送时写入 metadata，重进或重启后仍可显示）。 */
-export function readMessageQuote(message: Message): { label: string; unavailable?: string } | null {
-    if (message.message_type !== "user" || !message.metadata_json) return null;
+export interface MessageQuoteLabel {
+    label: string;
+    unavailable?: string;
+    /** 被引用消息在当前列表里的 id，可跳转。 */
+    target?: number;
+}
+
+/**
+ * 消息上显示的引用：用户消息读发送时写入 metadata 的引用身份（重进或重启后仍可显示）；
+ * 助手回复读显示时从开头 `[[QUOTE:…]]` 解析出的 `reply_quote`。
+ */
+export function readMessageQuote(message: Message): MessageQuoteLabel | null {
+    if (message.message_type !== "user") return message.reply_quote ?? null;
+    if (!message.metadata_json) return null;
     try {
         const quote = JSON.parse(message.metadata_json)?.quote;
         if (!quote) return null;
         if (quote.unavailable) return { label: "引用的记录不可用", unavailable: String(quote.unavailable) };
-        return typeof quote.label === "string" ? { label: quote.label } : null;
+        if (typeof quote.label !== "string") return null;
+        return quote.kind === "message" && typeof quote.id === "number" ? { label: quote.label, target: quote.id } : { label: quote.label };
     } catch {
         return null;
     }
@@ -90,11 +108,20 @@ export function ButlerQuoteChip({ quote, onClear }: { quote: ButlerQuoteTarget; 
 }
 
 export function ButlerMessageQuoteLabel({ message }: { message: Message }) {
+    const jump = useContext(ButlerQuoteJumpContext);
     const quote = readMessageQuote(message);
     if (!quote) return null;
-    return <div className="mb-1 flex items-center justify-end gap-1 text-xs text-muted-foreground" data-aipp-slot="butler-message-quote"
-        title={quote.unavailable}>
-        <Quote className="h-3 w-3" />
+    const align = message.message_type === "user" ? "justify-end" : "justify-start";
+    const content = <>
+        <Quote className="h-3 w-3 shrink-0" />
         <span className="truncate">{quote.label}</span>
+    </>;
+    const target = quote.target;
+    return <div className={`mb-1 flex min-w-0 ${align} text-xs text-muted-foreground`} data-aipp-slot="butler-message-quote"
+        title={quote.unavailable}>
+        {target !== undefined && jump
+            ? <button type="button" title="查看被引用的消息" onClick={() => jump(target)}
+                className="inline-flex min-w-0 items-center gap-1 rounded hover:text-foreground">{content}</button>
+            : <span className="inline-flex min-w-0 items-center gap-1">{content}</span>}
     </div>;
 }

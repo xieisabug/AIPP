@@ -25,13 +25,16 @@ export function ButlerGroupSpeaker({ assistantId, chief, label, children }: {
 /**
  * 把群消息转成私聊使用的消息结构，交给同一个 MessageItem 渲染（Markdown、代码预览、右键菜单、悬浮操作）。
  * 成员发言指向它执行会话里的那条最终回复，“消息信息”和代码运行都落在真实会话上；
- * 用户发言没有对应的会话消息，用负数序号作为本地标识。引用以私聊相同的引用标签显示。
+ * 用户发言没有对应的会话消息，用负数序号作为本地标识。
+ * 引用（用户引用或成员引用）以私聊相同的引用标签显示，标签指向被引用消息的群序号，点击可跳过去。
  */
 export function toChatMessage(groupId: number, message: ButlerGroupMessage, quoted?: ButlerGroupMessage): Message {
     const time = parseGroupTime(message.created_at);
     const fromUser = isUserGroupMessage(message);
-    const quote = message.reply_to === null ? null
-        : { label: quoted ? `${groupSpeaker(quoted)}：${quoteExcerpt(quoted.body, 40)}` : "引用的消息" };
+    const quote = message.reply_to === null ? null : {
+        label: quoted ? `${groupSpeaker(quoted)}：${quoteExcerpt(quoted.body, 40)}` : "引用的消息",
+        target: quoted ? quoted.seq : undefined,
+    };
     return {
         id: !fromUser && message.source_message_id ? message.source_message_id : -message.seq,
         conversation_id: message.source_conversation_id ?? groupId,
@@ -46,7 +49,10 @@ export function toChatMessage(groupId: number, message: ButlerGroupMessage, quot
         output_token_count: 0,
         regenerate: null,
         attachment_list: [],
-        metadata_json: quote ? JSON.stringify({ quote }) : null,
+        metadata_json: fromUser && quote
+            ? JSON.stringify({ quote: quote.target === undefined ? { label: quote.label } : { label: quote.label, kind: "message", id: quote.target } })
+            : null,
+        reply_quote: !fromUser && quote ? quote : undefined,
     };
 }
 
@@ -55,9 +61,11 @@ interface Props {
     message: ButlerGroupMessage;
     quoted?: ButlerGroupMessage;
     sender?: ButlerGroupMember;
+    /** 从引用标签跳过来时短暂高亮。 */
+    highlighted?: boolean;
 }
 
-function ButlerGroupMessageRow({ groupId, message, quoted, sender }: Props) {
+function ButlerGroupMessageRow({ groupId, message, quoted, sender, highlighted = false }: Props) {
     const chatMessage = useMemo(() => toChatMessage(groupId, message, quoted), [groupId, message, quoted]);
     const quoteAction = useMemo(() => <ButlerQuoteButton variant="toolbar" target={{
         kind: "message", id: message.seq, label: groupSpeaker(message), excerpt: quoteExcerpt(message.body),
@@ -68,7 +76,7 @@ function ButlerGroupMessageRow({ groupId, message, quoted, sender }: Props) {
             .catch(error => toast.error(`运行失败：${String(error)}`));
     }, [message.source_conversation_id]);
     const item = <MessageItem message={chatMessage} conversationId={chatMessage.conversation_id}
-        onCodeRun={runCode} messageActions={quoteAction} />;
+        onCodeRun={runCode} messageActions={quoteAction} shouldShowShineBorder={highlighted} />;
     if (isUserGroupMessage(message)) {
         return <div data-aipp-slot="butler-group-user-message">{item}</div>;
     }

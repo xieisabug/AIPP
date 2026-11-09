@@ -543,6 +543,7 @@ const MessageItem = React.memo<MessageItemProps>(
         if (mergedMode && !isUserMessage) {
             return (
                 <div data-message-item data-message-id={message.id} data-message-type={message.message_type}>
+                    <ButlerMessageQuoteLabel message={message} />
                     {messageBodyContent}
                     <ImageAttachments
                         attachments={message.attachment_list}
@@ -581,7 +582,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     />
                 )}
 
-                {isUserMessage && <ButlerMessageQuoteLabel message={message} />}
+                <ButlerMessageQuoteLabel message={message} />
                 {speakerLabel && (
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
                         {speakerLabel}
@@ -653,6 +654,8 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
     if (prevProps.message.content !== nextProps.message.content) return false;
     if (prevProps.message.message_type !== nextProps.message.message_type) return false;
     if (prevProps.message.metadata_json !== nextProps.message.metadata_json) return false;
+    if (prevProps.message.reply_quote?.label !== nextProps.message.reply_quote?.label
+        || prevProps.message.reply_quote?.target !== nextProps.message.reply_quote?.target) return false;
     if (prevProps.message.large_message_preview !== nextProps.message.large_message_preview) {
         return false;
     }

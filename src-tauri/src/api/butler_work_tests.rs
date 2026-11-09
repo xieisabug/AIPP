@@ -127,3 +127,16 @@ fn test_current_time_prefix_only_for_butler_conversations() {
     }
     assert!(current_time_prefix("normal", now).is_none(), "普通聊天不注入");
 }
+
+#[test]
+fn test_user_turn_context_teaches_reply_quotes_only_in_private_butler_chats() {
+    let conn = fixture();
+    // 总管家主会话与联系人私聊都带引用回复的写法，有近期工作时附在工作上下文之后
+    let main = user_turn_context(&conn, 10, None).unwrap().prefix.unwrap();
+    assert!(main.contains("[[QUOTE:原话片段]]"));
+    let contact = user_turn_context(&conn, 20, None).unwrap().prefix.unwrap();
+    assert!(contact.contains("task:41") && contact.ends_with(REPLY_QUOTE_HINT));
+    // 普通聊天和独立任务不提供
+    assert_eq!(user_turn_context(&conn, 50, None).unwrap(), TurnContext::default());
+    assert!(user_turn_context(&conn, 41, None).unwrap().prefix.map_or(true, |p| !p.contains("[[QUOTE:")));
+}

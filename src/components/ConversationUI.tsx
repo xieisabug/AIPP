@@ -58,7 +58,7 @@ import { previewMobile } from "@/mobile/navigation";
 import { useTextSelection } from "@/hooks/useTextSelection";
 import { useAssistantRuntime } from "@/hooks/useAssistantRuntime";
 import { ButlerResultsOnlyContext } from "./butler/ButlerPresentationContext";
-import { ButlerQuoteButton, ButlerQuoteChip, isQuotableMessage, quoteExcerpt, useButlerQuote } from "./butler/ButlerQuote";
+import { ButlerQuoteButton, ButlerQuoteChip, ButlerQuoteJumpContext, isQuotableMessage, quoteExcerpt, useButlerQuote } from "./butler/ButlerQuote";
 import { hasPublishedReply, withButlerProcessing, withPeerTimeline } from "@/components/butler/butlerTimeline";
 import { useLinger } from "@/hooks/useStablePresence";
 import ButlerHeldToolCalls from "@/components/butler/ButlerHeldToolCalls";
@@ -1023,6 +1023,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         smartScrollRef.current = smartScroll;
         const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
         const [pendingScrollAlign, setPendingScrollAlign] = useState<MessageScrollAlign>("center");
+        // 点击引用标签：滚到被引用的那条消息并闪烁提示（与消息定位共用同一条滚动链路）。
+        const jumpToQuotedMessage = useCallback((messageId: number) => {
+            setPendingScrollAlign("center");
+            setPendingScrollMessageId(messageId);
+        }, []);
 
         // ============= Chat Sidebar 数据提取 =============
 
@@ -2195,6 +2200,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             style={{ overflowAnchor: "none" }}
                         >
                             <ButlerResultsOnlyContext.Provider value={resultOnly}>
+                            <ButlerQuoteJumpContext.Provider value={jumpToQuotedMessage}>
                             <ConversationContent
                                 isMobile={isMobile}
                                 conversationId={conversationId}
@@ -2241,6 +2247,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 selectedSandbox={selectedAgentSandbox}
                                 onAgentConfigChange={handleAgentConfigChange}
                             />
+                            </ButlerQuoteJumpContext.Provider>
                             </ButlerResultsOnlyContext.Provider>
                             <div ref={messagesEndRef} data-aipp-slot="chat-messages-end-anchor" />
                         </div>

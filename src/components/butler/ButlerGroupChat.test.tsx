@@ -108,6 +108,28 @@ describe("ButlerGroupChat", () => {
         expect(api.postButlerGroupMessage).not.toHaveBeenCalled();
     });
 
+    it("should jump to the user message a member reply quotes", async () => {
+        const base = detail();
+        api.getButlerGroup.mockResolvedValue({ ...base, messages: [...base.messages, {
+            group_id: 7, seq: 4, sender_member: 1, sender_assistant: 11, sender_name: "总管家", kind: "message", body: "周报我来汇总",
+            reply_to: 2, created_at: "2026-11-09 08:04:00", source_conversation_id: 101, source_message_id: 9002,
+        }] });
+        const scrolled = vi.fn();
+        const original = HTMLElement.prototype.scrollIntoView;
+        HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { scrolled(this.dataset.aippGroupSeq); };
+        try {
+            renderChat();
+            const reply = await screen.findByText("周报我来汇总");
+            const label = within(reply.closest("[data-aipp-slot='butler-group-member-message']") as HTMLElement)
+                .getByTitle("查看被引用的消息");
+            expect(label).toHaveTextContent("我：帮我写周报");
+            fireEvent.click(label);
+            expect(scrolled).toHaveBeenCalledWith("2");
+        } finally {
+            HTMLElement.prototype.scrollIntoView = original;
+        }
+    });
+
     it("should quote a member reply with the private chat quote button and chip", async () => {
         renderChat();
         const reply = await screen.findByText("初稿如下");

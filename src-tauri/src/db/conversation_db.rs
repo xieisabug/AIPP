@@ -317,7 +317,9 @@ impl ConversationRepository {
              WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id")?;
         let rows = stmt.query_map([], |row| Ok(serde_json::json!({
             "assistantId":row.get::<_,i64>(0)?, "conversationId":row.get::<_,i64>(1)?,
-            "messageId":row.get::<_,Option<i64>>(2)?, "preview":row.get::<_,Option<String>>(3)?,
+            "messageId":row.get::<_,Option<i64>>(2)?,
+            // 助手引用回复的标记只在聊天里显示成引用，摘要只显示正文。
+            "preview":row.get::<_,Option<String>>(3)?.map(|text| crate::utils::reply_quote::strip(&text).to_string()),
         })))?;
         rows.collect()
     }
