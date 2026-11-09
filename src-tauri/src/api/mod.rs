@@ -28,6 +28,7 @@ pub mod llm_api;
 pub mod mobile_capability;
 pub mod mobile_recovery;
 pub mod mobile_tasks;
+pub(crate) mod magpie;
 pub(crate) mod opencode_go;
 pub mod operation_api;
 pub mod plugin_api;

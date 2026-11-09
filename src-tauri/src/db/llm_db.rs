@@ -32,6 +32,9 @@ pub fn resolve_request_mode_or_default(
     if api_type == "opencode_go" {
         return crate::api::opencode_go::mode(request_mode).unwrap_or("unsupported");
     }
+    if api_type == "magpie" {
+        return crate::api::magpie::mode(request_mode).unwrap_or("chat_completions");
+    }
     match request_mode {
         Some("responses") => "responses",
         Some("chat_completions") => "chat_completions",
@@ -97,6 +100,10 @@ impl LLMDatabase {
             let modes = crate::api::opencode_go::available_modes(self, code, saved.as_deref())?;
             return Ok(crate::api::opencode_go::selected_mode(&modes, saved.as_ref()));
         }
+        if api_type == "magpie" {
+            let modes = crate::api::magpie::available_modes(self, provider_id, code, saved.as_deref())?;
+            return Ok(crate::api::magpie::selected_mode(&modes, saved.as_ref()));
+        }
         Ok(resolve_request_mode_or_default(api_type, code, saved.as_deref()).into())
     }
 
@@ -149,7 +156,8 @@ impl LLMDatabase {
         )?;
 
         self.conn.execute_batch("CREATE TABLE IF NOT EXISTS builtin_provider_migrations (name TEXT PRIMARY KEY);
-            CREATE TABLE IF NOT EXISTS opencode_go_protocols (model TEXT NOT NULL, mode TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(model, mode));")?;
+            CREATE TABLE IF NOT EXISTS opencode_go_protocols (model TEXT NOT NULL, mode TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(model, mode));
+            CREATE TABLE IF NOT EXISTS magpie_protocols (provider_id INTEGER NOT NULL, model TEXT NOT NULL, mode TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(provider_id, model, mode));")?;
         if let Err(err) = self.init_llm_provider() {
             warn!(error = ?err, "init_llm_provider failed (may already be initialized)");
         }
@@ -158,6 +166,11 @@ impl LLMDatabase {
             tx.execute("INSERT INTO llm_provider (name,api_type,description,is_official)
                 SELECT 'OpenCode Go','opencode_go','OpenCode Go API',1
                 WHERE NOT EXISTS (SELECT 1 FROM llm_provider WHERE api_type='opencode_go' AND is_official=1)", [])?;
+        }
+        if tx.execute("INSERT OR IGNORE INTO builtin_provider_migrations VALUES ('magpie')", [])? == 1 {
+            tx.execute("INSERT INTO llm_provider (name,api_type,description,is_official)
+                SELECT 'Magpie','magpie','本机 Magpie 网关',1
+                WHERE NOT EXISTS (SELECT 1 FROM llm_provider WHERE api_type='magpie' AND is_official=1)", [])?;
         }
         tx.commit()?;
         Ok(())

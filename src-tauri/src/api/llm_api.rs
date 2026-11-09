@@ -57,12 +57,35 @@ pub struct LlmProviderConfig {
     pub is_addition: Option<bool>,
 }
 
+fn protocol_choice(db: &LLMDatabase, api_type: &str, provider_id: i64, code: &str, saved: Option<&String>) -> Result<(Option<Vec<String>>, String), String> {
+    if api_type == "opencode_go" {
+        let modes = crate::api::opencode_go::available_modes(db, code, saved.map(String::as_str)).map_err(|e| e.to_string())?;
+        let request_mode = crate::api::opencode_go::selected_mode(&modes, saved);
+        return Ok((Some(modes), request_mode));
+    }
+    if api_type == crate::api::magpie::PROVIDER {
+        let modes = crate::api::magpie::available_modes(db, provider_id, code, saved.map(String::as_str)).map_err(|e| e.to_string())?;
+        let request_mode = crate::api::magpie::selected_mode(&modes, saved);
+        return Ok((Some(modes), request_mode));
+    }
+    Ok((None, resolve_request_mode_or_default(api_type, code, saved.map(String::as_str)).to_string()))
+}
+
+fn provider_setting<'a>(configs: &'a [crate::db::llm_db::LLMProviderConfig], name: &str) -> Option<&'a str> {
+    configs.iter().find(|config| config.name == name).map(|config| config.value.as_str())
+}
+
 pub(crate) fn validate_request_mode(db: &LLMDatabase, provider: &crate::db::llm_db::LLMProvider, code: &str, request_mode: &str) -> Result<(), String> {
     if provider.api_type == "opencode_go" {
         let saved = db.get_model_request_mode(provider.id, code).map_err(|e| e.to_string())?;
         let modes = crate::api::opencode_go::available_modes(db, code, saved.as_deref()).map_err(|e| e.to_string())?;
         if modes.contains(&request_mode.to_owned()) { return Ok(()); }
         return Err(format!("OpenCode Go 模型 {code} 不支持协议 {request_mode}，请刷新模型目录"));
+    }
+    if provider.api_type == crate::api::magpie::PROVIDER {
+        return crate::api::magpie::mode(Some(request_mode)).map(|_| ()).ok_or_else(|| {
+            format!("Magpie 模型 {code} 不支持协议 {request_mode}")
+        });
     }
     match request_mode {
         "chat_completions" | "responses" => Ok(()),
@@ -219,14 +242,7 @@ pub async fn get_llm_models(
     {
         let saved = request_mode_map.get(&code);
         let api_type = provider_api_type.as_deref().unwrap_or("");
-        let available_modes = if api_type == "opencode_go" {
-            Some(crate::api::opencode_go::available_modes(&db, &code, saved.map(String::as_str))
-                .map_err(|e| e.to_string())?)
-        } else { None };
-        let request_mode = match &available_modes {
-            Some(modes) => crate::api::opencode_go::selected_mode(modes, saved),
-            None => resolve_request_mode_or_default(api_type, &code, saved.map(String::as_str)).into(),
-        };
+        let (available_modes, request_mode) = protocol_choice(&db, api_type, llm_provider_id, &code, saved)?;
         result.push(LlmModel {
             available_modes,
             id,
@@ -265,9 +281,16 @@ pub async fn fetch_model_list(
         .unwrap_or(false);
     let effective_network_proxy = proxy_enabled.then_some(network_proxy).flatten();
 
-    if llm_provider.api_type == "opencode_go" {
+    if llm_provider.api_type == "opencode_go" || llm_provider.api_type == crate::api::magpie::PROVIDER {
         drop(config_feature_map);
-        let models = crate::api::opencode_go::catalog(&app_handle, llm_provider_id, effective_network_proxy.as_deref()).await?;
+        let models = if llm_provider.api_type == crate::api::magpie::PROVIDER {
+            crate::api::magpie::catalog(&app_handle, llm_provider_id,
+                provider_setting(&llm_provider_config, "endpoint"),
+                provider_setting(&llm_provider_config, "api_key"),
+                effective_network_proxy.as_deref()).await?
+        } else {
+            crate::api::opencode_go::catalog(&app_handle, llm_provider_id, effective_network_proxy.as_deref()).await?
+        };
         db.replace_llm_models(llm_provider_id, &models.iter().map(persisted_model).collect::<Vec<_>>(), true).map_err(|e| e.to_string())?;
         crate::sync::schedule_sync_after_local_change(&app_handle);
         emit_llm_provider_changed(&app_handle);
@@ -353,13 +376,7 @@ pub async fn add_llm_model(
     let llm_provider = db.get_llm_provider(llm_provider_id).map_err(|e| e.to_string())?;
     let code_str = code.clone();
     let saved = db.get_model_request_mode(llm_provider_id, &code).map_err(|e| e.to_string())?;
-    let available_modes = if llm_provider.api_type == "opencode_go" {
-        Some(crate::api::opencode_go::available_modes(&db, &code, saved.as_deref()).map_err(|e| e.to_string())?)
-    } else { None };
-    let request_mode = match &available_modes {
-        Some(modes) => crate::api::opencode_go::selected_mode(modes, saved.as_ref()),
-        None => resolve_request_mode_or_default(&llm_provider.api_type, &code, saved.as_deref()).into(),
-    };
+    let (available_modes, request_mode) = protocol_choice(&db, &llm_provider.api_type, llm_provider_id, &code, saved.as_ref())?;
     let tx = db.conn.unchecked_transaction().map_err(|e| e.to_string())?;
     db.add_llm_model(&code_str, llm_provider_id, &code_str, &code_str, false, false, false)
         .map_err(|e| e.to_string())?;
@@ -458,9 +475,16 @@ pub async fn preview_model_list(
         "preview_model_list proxy config"
     );
 
-    if llm_provider.api_type == "opencode_go" {
+    if llm_provider.api_type == "opencode_go" || llm_provider.api_type == crate::api::magpie::PROVIDER {
         drop(config_feature_map);
-        let models = crate::api::opencode_go::catalog(&app_handle, llm_provider_id, effective_network_proxy.as_deref()).await?;
+        let models = if llm_provider.api_type == crate::api::magpie::PROVIDER {
+            crate::api::magpie::catalog(&app_handle, llm_provider_id,
+                provider_setting(&llm_provider_config, "endpoint"),
+                provider_setting(&llm_provider_config, "api_key"),
+                effective_network_proxy.as_deref()).await?
+        } else {
+            crate::api::opencode_go::catalog(&app_handle, llm_provider_id, effective_network_proxy.as_deref()).await?
+        };
         let mut missing = existing_model_codes.clone();
         let available_models = models.into_iter().map(|m| {
             let is_selected = missing.remove(&m.code);
