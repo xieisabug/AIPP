@@ -2,6 +2,8 @@ import { createContext, useContext } from "react";
 import { Quote, X } from "lucide-react";
 import type { Message } from "@/data/Conversation";
 import IconButton from "@/components/IconButton";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { useMessageActionSurface } from "@/components/message-item/messageActionSurface";
 
 /** 聊天式引用回复的对象：后台按 kind + id（稳定身份）关联原工作，不靠文字或时间猜测。 */
 export interface ButlerQuoteTarget {
@@ -56,7 +58,14 @@ export function readMessageQuote(message: Message): { label: string; unavailable
  */
 export function ButlerQuoteButton({ target, variant = "inline" }: { target: ButlerQuoteTarget; variant?: "inline" | "toolbar" }) {
     const state = useButlerQuote();
+    const surface = useMessageActionSurface();
     if (!state) return null;
+    // 右键菜单里和其他菜单项一致：图标 + 文字，占满一行。
+    if (surface === "menu") {
+        return <DropdownMenuItem className="basis-full" data-aipp-slot="butler-quote-reply" onSelect={() => state.setQuote(target)}>
+            <Quote className="h-4 w-4" />引用回复
+        </DropdownMenuItem>;
+    }
     if (variant === "toolbar") {
         return <IconButton icon={<Quote size={16} className="text-icon" />} title="引用回复"
             dataAippSlot="butler-quote-reply" onClick={() => state.setQuote(target)} />;

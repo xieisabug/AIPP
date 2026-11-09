@@ -12,6 +12,7 @@ import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { MessageTokenStatsDialog } from "../token-statistics";
 import MessageExportDialog from "./MessageExportDialog";
 import type { MessageActionButtonsProps } from "./MessageActionButtons";
+import { MessageActionSurfaceContext } from "./messageActionSurface";
 
 interface Props {
     /** 与悬浮操作条同一份参数：右键菜单与悬浮条的可用操作始终一致。null 时不接管右键。 */
@@ -115,10 +116,12 @@ export default function MessageContextMenu({ actions, children }: Props) {
                         {hasPluginActions && (
                             <>
                                 <DropdownMenuSeparator />
-                                {/* 插件按钮（含「引用回复」）原样复用，点击后收起菜单。 */}
-                                <div className="flex flex-wrap items-center gap-0.5 px-1 py-0.5"
+                                {/* 插件按钮原样复用，点击后收起菜单；内置操作（如「引用回复」）在菜单里渲染成整行菜单项。 */}
+                                <div className="flex flex-wrap items-center gap-0.5"
                                     data-aipp-slot="message-context-menu-plugins" onClick={() => setMenu(null)}>
-                                    {pluginActions}
+                                    <MessageActionSurfaceContext.Provider value="menu">
+                                        {pluginActions}
+                                    </MessageActionSurfaceContext.Provider>
                                 </div>
                             </>
                         )}

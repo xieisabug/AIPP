@@ -53,9 +53,14 @@ describe("ButlerGroupMessageRow", () => {
         for (const label of ["复制消息", "消息信息", "导出消息"]) {
             expect(await screen.findByRole("menuitem", { name: label })).toBeInTheDocument();
         }
-        const menu = document.querySelector('[data-aipp-slot="message-context-menu"]') as HTMLElement;
-        fireEvent.click(menu.querySelector('[data-aipp-slot="butler-quote-reply"]') as HTMLElement);
+        // 引用回复与其他菜单项一致：图标 + 文字的菜单项，点击后收起菜单
+        const quoteItem = await screen.findByRole("menuitem", { name: "引用回复" });
+        expect(quoteItem).toHaveAttribute("data-aipp-slot", "butler-quote-reply");
+        expect(quoteItem).toHaveTextContent("引用回复");
+        expect(quoteItem.querySelector("svg")).not.toBeNull();
+        fireEvent.click(quoteItem);
         expect(setQuote).toHaveBeenCalledWith({ kind: "message", id: 3, label: "写作助手", excerpt: "初稿如下 [代码]" });
+        await waitFor(() => expect(document.querySelector('[data-aipp-slot="message-context-menu"]')).toBeNull());
     });
 
     it("should show token info of the source message from the menu", async () => {
