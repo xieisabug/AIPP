@@ -3,66 +3,6 @@ use crate::{Error, Result};
 use serde_json::Value;
 use value_ext::JsonValueExt;
 
-#[derive(Debug)]
-pub struct RespOutputParts {
-	pub content: Vec<ContentPart>,
-	pub reasoning_content: Option<String>,
-	pub thought_signatures: Vec<String>,
-}
-
-pub fn parse_resp_output(output: Vec<Value>) -> Result<RespOutputParts> {
-	let mut content = Vec::new();
-	let mut reasoning_parts = Vec::new();
-	let mut thought_signatures = Vec::new();
-
-	for output_item in output {
-		if output_item.x_get_str("type").ok() == Some("reasoning") {
-			if let Some(reasoning_text) = extract_reasoning_text(&output_item) {
-				reasoning_parts.push(reasoning_text);
-			}
-			if let Ok(encrypted_content) = output_item.x_get_str("encrypted_content") {
-				thought_signatures.push(encrypted_content.to_string());
-			}
-			continue;
-		}
-
-		content.extend(ContentPart::from_resp_output_item(output_item)?);
-	}
-
-	Ok(RespOutputParts {
-		content,
-		reasoning_content: (!reasoning_parts.is_empty()).then(|| reasoning_parts.join("\n")),
-		thought_signatures,
-	})
-}
-
-pub fn extract_reasoning_text(item: &Value) -> Option<String> {
-	let summary = item.get("summary")?.as_array()?;
-	let mut texts = Vec::new();
-
-	for entry in summary {
-		if let Some(text) = entry.as_str() {
-			texts.push(text.to_string());
-			continue;
-		}
-
-		if let Some(text) = entry.get("text").and_then(Value::as_str) {
-			texts.push(text.to_string());
-			continue;
-		}
-
-		if let Some(content_parts) = entry.get("content").and_then(Value::as_array) {
-			for content_part in content_parts {
-				if let Some(text) = content_part.get("text").and_then(Value::as_str) {
-					texts.push(text.to_string());
-				}
-			}
-		}
-	}
-
-	(!texts.is_empty()).then(|| texts.join("\n"))
-}
-
 /// Convert a OpenAI response output Item to a ContentPart
 ///
 /// NOTE: At this point this is infallible, will ignore item that cannot be transformed
@@ -78,15 +18,10 @@ impl ContentPart {
 				if let Ok(content) = item_value.x_remove::<Vec<Value>>("content") {
 					// each content item {}
 					for mut content_item in content {
-						match content_item.x_get_str("type") {
-							Ok("output_text" | "refusal") => {
-								if let Ok(text) = content_item.x_remove::<String>("text")
-									&& !text.is_empty()
-								{
-									parts.push(text.into());
-								}
-							}
-							_ => {}
+						if let Ok("output_text") = content_item.x_get_str("type")
+							&& let Ok(text) = content_item.x_remove::<String>("text")
+						{
+							parts.push(text.into())
 						}
 					}
 				}
@@ -109,6 +44,27 @@ impl ContentPart {
 
 				parts.push(tool_call.into());
 			}
+			ItemType::CustomToolCall => {
+				let fn_name = item_value.x_remove::<String>("name")?;
+				let call_id = item_value.x_remove::<String>("call_id")?;
+				let input = item_value.x_remove::<String>("input")?;
+				parts.push(
+					ToolCall {
+						call_id,
+						fn_name,
+						fn_arguments: Value::String(input),
+						thought_signatures: None,
+					}
+					.into(),
+				);
+			}
+			ItemType::Reasoning => {
+				if let Ok(encrypted) = item_value.x_remove::<String>("encrypted_content")
+					&& !encrypted.is_empty()
+				{
+					parts.push(ContentPart::ThoughtSignature(encrypted));
+				}
+			}
 			ItemType::ImageGenerationCall => {
 				if let Some(binary) = binary_from_image_generation_item(&mut item_value)? {
 					parts.push(binary.into());
@@ -120,12 +76,43 @@ impl ContentPart {
 	}
 }
 
+pub fn extract_resp_reasoning_texts(item_value: &Value) -> Vec<String> {
+	let mut texts = Vec::new();
+	if item_value.x_get_str("type").ok() != Some("reasoning") {
+		return texts;
+	}
+	if let Some(summary) = item_value.get("summary").and_then(Value::as_array) {
+		for entry in summary {
+			if entry.x_get_str("type").ok() == Some("summary_text")
+				&& let Ok(text) = entry.x_get_str("text")
+				&& !text.is_empty()
+			{
+				texts.push(text.to_string());
+			}
+		}
+	}
+	if let Some(content) = item_value.get("content").and_then(Value::as_array) {
+		for entry in content {
+			if entry.x_get_str("type").ok() == Some("reasoning_text")
+				&& let Ok(text) = entry.x_get_str("text")
+				&& !text.is_empty()
+			{
+				texts.push(text.to_string());
+			}
+		}
+	}
+	texts
+}
+
 // region:    --- Support Type
 
 /// The managed
 enum ItemType {
 	Message,
 	FunctionCall,
+	CustomToolCall,
+	Reasoning,
+	/// `type: "image_generation_call"` — emitted by the image generation tool.
 	ImageGenerationCall,
 }
 
@@ -135,12 +122,19 @@ impl ItemType {
 		match typ {
 			"message" => Some(ItemType::Message),
 			"function_call" => Some(ItemType::FunctionCall),
+			"custom_tool_call" => Some(ItemType::CustomToolCall),
+			"reasoning" => Some(ItemType::Reasoning),
 			"image_generation_call" => Some(ItemType::ImageGenerationCall),
 			_ => None,
 		}
 	}
 }
 
+// endregion: --- Support Type
+
+// region:    --- Image Generation Support
+
+/// Default content type derived from the provider's `output_format` field.
 fn image_content_type(output_format: Option<&str>) -> String {
 	match output_format.unwrap_or("png").trim().to_ascii_lowercase().as_str() {
 		"jpg" | "jpeg" => "image/jpeg".to_string(),
@@ -154,6 +148,12 @@ fn image_content_type(output_format: Option<&str>) -> String {
 	}
 }
 
+/// Turns an `image_generation_call` output item into a [`Binary`].
+///
+/// Handles all three shapes seen in the wild:
+/// - `result` holding raw base64 (the plain Responses API shape)
+/// - `result` holding a `data:` URL
+/// - `image_url` holding either a string or `{ "url": ... }`
 fn binary_from_image_generation_item(item_value: &mut Value) -> Result<Option<Binary>> {
 	let output_format = item_value.x_get_str("output_format").ok().map(str::to_string);
 
@@ -204,6 +204,7 @@ fn binary_from_image_reference(image_reference: String, output_format: Option<&s
 	Binary::from_base64(image_content_type(output_format), image_reference, None)
 }
 
+/// Splits a `data:<mime>;base64,<payload>` URL into `(mime, payload)`.
 fn parse_base64_data_url(data_url: &str) -> Option<(String, &str)> {
 	let value = data_url.strip_prefix("data:")?;
 	let (meta, data) = value.split_once(',')?;
@@ -233,32 +234,57 @@ fn infer_image_url_content_type(image_url: &str, output_format: Option<&str>) ->
 	}
 }
 
+// endregion: --- Image Generation Support
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	#[test]
-	fn test_from_resp_output_item_image_generation_call() {
-		let item = serde_json::json!({
-			"type": "image_generation_call",
-			"output_format": "png",
-			"result": "aGVsbG8="
-		});
-
-		let parts = ContentPart::from_resp_output_item(item).expect("image generation item should parse");
-		assert_eq!(parts.len(), 1);
-		let binary = parts[0].as_binary().expect("part should be binary");
-		assert_eq!(binary.content_type, "image/png");
+	fn decodes_custom_tool_call_as_raw_string_input() {
+		let parts = ContentPart::from_resp_output_item(serde_json::json!({
+			"type": "custom_tool_call",
+			"call_id": "call_patch",
+			"name": "apply_patch",
+			"input": "*** Begin Patch\n*** End Patch\n",
+		}))
+		.unwrap();
+		let ContentPart::ToolCall(call) = &parts[0] else {
+			panic!("expected a tool call");
+		};
+		assert_eq!(call.call_id, "call_patch");
+		assert_eq!(call.fn_name, "apply_patch");
+		assert_eq!(
+			call.fn_arguments,
+			Value::String("*** Begin Patch\n*** End Patch\n".to_string())
+		);
 	}
 
 	#[test]
-	fn test_from_resp_output_item_image_generation_data_url() {
-		let item = serde_json::json!({
+	fn decodes_image_generation_call_raw_base64() {
+		let parts = ContentPart::from_resp_output_item(serde_json::json!({
+			"type": "image_generation_call",
+			"result": "iVBORw0KGgo=",
+			"output_format": "png",
+		}))
+		.unwrap();
+
+		let binary = parts[0].as_binary().expect("part should be binary");
+		assert_eq!(binary.content_type, "image/png");
+		match &binary.source {
+			crate::chat::BinarySource::Base64(data) => assert_eq!(&**data, "iVBORw0KGgo="),
+			crate::chat::BinarySource::Url(_) => panic!("raw base64 should stay base64"),
+		}
+	}
+
+	#[test]
+	fn decodes_image_generation_call_data_url() {
+		let parts = ContentPart::from_resp_output_item(serde_json::json!({
 			"type": "image_generation_call",
 			"result": "data:image/webp;base64,UklGRg=="
-		});
+		}))
+		.unwrap();
 
-		let parts = ContentPart::from_resp_output_item(item).expect("data url image should parse");
 		let binary = parts[0].as_binary().expect("part should be binary");
 		assert_eq!(binary.content_type, "image/webp");
 		match &binary.source {
@@ -268,39 +294,20 @@ mod tests {
 	}
 
 	#[test]
-	fn test_from_resp_output_item_image_generation_image_url() {
-		let item = serde_json::json!({
+	fn decodes_image_generation_call_image_url_object() {
+		let parts = ContentPart::from_resp_output_item(serde_json::json!({
 			"type": "image_generation_call",
-			"image_url": {"url": "https://example.com/generated.webp"}
-		});
+			"image_url": { "url": "https://example.com/generated.webp" }
+		}))
+		.unwrap();
 
-		let parts = ContentPart::from_resp_output_item(item).expect("image url should parse");
 		let binary = parts[0].as_binary().expect("part should be binary");
 		assert_eq!(binary.content_type, "image/webp");
 		match &binary.source {
-			crate::chat::BinarySource::Url(url) => assert_eq!(url, "https://example.com/generated.webp"),
-			crate::chat::BinarySource::Base64(_) => panic!("remote image_url should stay as url"),
+			crate::chat::BinarySource::Url(url) => {
+				assert_eq!(url, "https://example.com/generated.webp")
+			}
+			crate::chat::BinarySource::Base64(_) => panic!("remote image_url should stay a url"),
 		}
 	}
-
-	#[test]
-	fn test_parse_resp_output_extracts_reasoning_summary() {
-		let parsed = parse_resp_output(vec![serde_json::json!({
-			"type": "reasoning",
-			"summary": [
-				{"text": "First thought"},
-				{"content": [{"text": "Second thought"}]}
-			],
-			"encrypted_content": "enc_123"
-		})])
-		.expect("reasoning item should parse");
-
-		assert_eq!(
-			parsed.reasoning_content.as_deref(),
-			Some("First thought\nSecond thought")
-		);
-		assert_eq!(parsed.thought_signatures, vec!["enc_123"]);
-	}
 }
-
-// endregion: --- Support Type

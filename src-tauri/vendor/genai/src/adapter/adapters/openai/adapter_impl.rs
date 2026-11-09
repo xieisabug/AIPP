@@ -1,185 +1,47 @@
-use crate::adapter::adapters::support::get_api_key;
-use crate::adapter::model_capabilities::ModelCapabilities;
-use crate::adapter::openai::OpenAIStreamer;
+use super::OpenAIStreamer;
 use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
-	ChatOptionsSet, ChatRequest, ChatResponse, ChatStream, ChatStreamResponse, MessageContent, StopReason, ToolCall,
+	ChatOptionsSet, ChatRequest, ChatResponse, ChatStream, ChatStreamResponse, ContentPart, MessageContent, StopReason,
+	ToolCall,
 };
-use crate::common::{Modality, ReasoningEffortType};
 use crate::resolver::{AuthData, Endpoint};
-use crate::webc::{EventSourceStream, WebResponse};
-use crate::{Error, Headers, Model, Result};
+use crate::webc::StreamRequest as RequestBuilder;
+use crate::webc::{EventSourceStream, WebClient, WebResponse};
+use crate::{Error, Result};
 use crate::{ModelIden, ServiceTarget};
-use reqwest::RequestBuilder;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
 use value_ext::JsonValueExt;
 
 pub struct OpenAIAdapter;
 
 impl OpenAIAdapter {
 	pub const API_KEY_DEFAULT_ENV_NAME: &str = "OPENAI_API_KEY";
-	pub const BASE_URL_DEFAULT_ENV_NAME: &str = "OPENAI_BASE_URL";
-
-	/// 将 OpenAI API 返回的模型数据转换为统一的 Model 结构
-	fn parse_openai_model_to_model(model_id: String, mut model_data: Value) -> Result<Model> {
-		let model_name: crate::ModelName = model_id.clone().into();
-
-		// 从 OpenAI API 获取的基本信息
-		let _created: Option<u64> = model_data.x_take("created").ok();
-		let _owned_by: Option<String> = model_data.x_take("owned_by").ok();
-
-		// 根据模型名称推断能力和限制
-		let mut model = Model::new(model_name, model_id.clone());
-
-		// 根据模型名称设置 token 限制
-		let (max_input_tokens, max_output_tokens) = Self::infer_token_limits(&model_id);
-		model = model
-			.with_max_input_tokens(max_input_tokens)
-			.with_max_output_tokens(max_output_tokens);
-
-		// 设置支持的功能
-		let supports_streaming = Self::supports_streaming(&model_id);
-		let supports_tool_calls = Self::supports_tool_calls(&model_id);
-		let supports_json_mode = Self::supports_json_mode(&model_id);
-		let supports_reasoning = Self::supports_reasoning(&model_id);
-
-		model = model
-			.with_streaming(supports_streaming)
-			.with_tool_calls(supports_tool_calls)
-			.with_json_mode(supports_json_mode)
-			.with_reasoning(supports_reasoning);
-
-		// 设置支持的模态
-		let input_modalities = Self::infer_input_modalities(&model_id);
-		let output_modalities = Self::infer_output_modalities(&model_id);
-
-		model = model
-			.with_input_modalities(input_modalities)
-			.with_output_modalities(output_modalities);
-
-		// 设置推理能力等级
-		if supports_reasoning {
-			let reasoning_efforts = Self::infer_reasoning_efforts(&model_id);
-			model = model.with_reasoning_efforts(reasoning_efforts);
-		}
-
-		Ok(model)
-	}
-
-	/// 根据模型名称推断 token 限制
-	fn infer_token_limits(model_id: &str) -> (Option<u32>, Option<u32>) {
-		ModelCapabilities::infer_token_limits(AdapterKind::OpenAI, model_id)
-	}
-
-	/// 根据模型名称推断是否支持流式输出
-	fn supports_streaming(model_id: &str) -> bool {
-		ModelCapabilities::supports_streaming(AdapterKind::OpenAI, model_id)
-	}
-
-	/// 根据模型名称推断是否支持工具调用
-	fn supports_tool_calls(model_id: &str) -> bool {
-		ModelCapabilities::supports_tool_calls(AdapterKind::OpenAI, model_id)
-	}
-
-	/// 根据模型名称推断是否支持 JSON 模式
-	fn supports_json_mode(model_id: &str) -> bool {
-		ModelCapabilities::supports_json_mode(AdapterKind::OpenAI, model_id)
-	}
-
-	/// 根据模型名称推断是否支持推理模式
-	fn supports_reasoning(model_id: &str) -> bool {
-		ModelCapabilities::supports_reasoning(AdapterKind::OpenAI, model_id)
-	}
-
-	/// 根据模型名称推断支持的输入模态
-	fn infer_input_modalities(model_id: &str) -> HashSet<Modality> {
-		ModelCapabilities::infer_input_modalities(AdapterKind::OpenAI, model_id)
-	}
-
-	/// 根据模型名称推断支持的输出模态  
-	fn infer_output_modalities(model_id: &str) -> HashSet<Modality> {
-		ModelCapabilities::infer_output_modalities(AdapterKind::OpenAI, model_id)
-	}
-
-	/// 根据模型名称推断支持的推理努力等级
-	fn infer_reasoning_efforts(model_id: &str) -> Vec<ReasoningEffortType> {
-		ModelCapabilities::infer_reasoning_efforts(AdapterKind::OpenAI, model_id)
-	}
 }
 
 impl Adapter for OpenAIAdapter {
 	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
 
-	fn default_auth() -> AuthData {
+	fn default_auth(_kind: AdapterKind) -> AuthData {
 		match Self::DEFAULT_API_KEY_ENV_NAME {
 			Some(env_name) => AuthData::from_env(env_name),
 			None => AuthData::None,
 		}
 	}
 
-	fn default_endpoint() -> Endpoint {
+	fn default_endpoint(_kind: AdapterKind) -> Endpoint {
 		const BASE_URL: &str = "https://api.openai.com/v1/";
-		let mut base_url = std::env::var(Self::BASE_URL_DEFAULT_ENV_NAME).unwrap_or_else(|_| BASE_URL.to_string());
-
-		// 确保 base_url 以 / 结尾
-		if !base_url.ends_with('/') {
-			base_url.push('/');
-		}
-
-		Endpoint::from_owned(base_url)
+		crate::adapter::adapters::support::endpoint_from_env("OPENAI_BASE_URL", BASE_URL)
 	}
 
 	/// Note: Currently returns the common models (see above)
-	async fn all_model_names(kind: AdapterKind, endpoint: Endpoint, auth: AuthData) -> Result<Vec<String>> {
-		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth).await
-	}
-
-	async fn all_models(
+	async fn all_model_names(
 		kind: AdapterKind,
-		target: ServiceTarget,
-		web_client: &crate::webc::WebClient,
-	) -> Result<Vec<Model>> {
-		// 使用默认的认证和端点配置
-		let auth = target.auth;
-		let endpoint = target.endpoint;
-
-		// 构建一个临时的 ModelIden 用于获取服务 URL
-		let model_iden = ModelIden::new(kind, "temp");
-
-		// 获取 models API 的 URL
-		let url = Self::util_get_service_url(&model_iden, ServiceType::Models, endpoint)?;
-
-		// 获取 API key
-		let api_key = get_api_key(auth, &model_iden)?;
-
-		// 构建请求头
-		let headers = Headers::from(vec![("Authorization".to_string(), format!("Bearer {api_key}"))]);
-
-		// 使用传入的 WebClient 发送请求
-		let mut web_response = web_client
-			.do_get(&url, &headers)
-			.await
-			.map_err(|webc_error| Error::WebAdapterCall {
-				adapter_kind: kind,
-				webc_error,
-			})?;
-
-		// 解析响应
-		let mut models: Vec<Model> = Vec::new();
-
-		if let Value::Array(models_data) = web_response.body.x_take("data")? {
-			for mut model_data in models_data {
-				let model_id: String = model_data.x_take("id")?;
-
-				// 解析模型的基本信息
-				let model = Self::parse_openai_model_to_model(model_id, model_data)?;
-				models.push(model);
-			}
-		}
-
-		Ok(models)
+		endpoint: Endpoint,
+		auth: AuthData,
+		web_client: &WebClient,
+	) -> Result<Vec<String>> {
+		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth, web_client).await
 	}
 
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {
@@ -240,6 +102,34 @@ impl Adapter for OpenAIAdapter {
 				})
 				.map(|s| s.trim().to_string());
 
+			// -- Capture reasoning_details as Custom parts, verbatim (OpenRouter)
+			// OpenRouter returns the provider's own reasoning blocks — signed text
+			// (Anthropic), encrypted content (OpenAI), summaries — as a `reasoning_details`
+			// array beside the plaintext `reasoning`, and requires that array back
+			// verbatim and in order for a multi-turn tool round trip to keep the
+			// model's continuity token. Each entry is carried as a `Custom` part, the
+			// same way an unrecognised Anthropic block is, so nothing in it is lost;
+			// the request side echoes them into `reasoning_details` again. They lead
+			// the content, ahead of the text and tool calls, which is the order they
+			// were produced in.
+			if let Ok(Some(details)) = first_choice.x_take::<Option<Vec<Value>>>("/message/reasoning_details") {
+				for detail in details.into_iter().filter(|detail| detail.is_object()) {
+					content.push(ContentPart::from_custom(detail, Some(model_iden.clone())));
+				}
+			}
+
+			// Mistral reasoning models return `content` as typed chunks, with the
+			// reasoning in `thinking` chunks
+			if let Some(content_value) = first_choice.pointer_mut("/message/content")
+				&& let Value::Array(chunks) = content_value
+			{
+				let (text, reasoning) = super::adapter_shared::split_content_chunks(chunks);
+				if reasoning_content.is_none() {
+					reasoning_content = reasoning.map(|r| r.trim().to_string());
+				}
+				*content_value = text.map(Value::String).unwrap_or(Value::Null);
+			}
+
 			// -- Push eventual text message
 			if let Ok(Some(mut text_content)) = first_choice.x_take::<Option<String>>("/message/content") {
 				text_content = text_content.trim().to_string();
@@ -287,7 +177,8 @@ impl Adapter for OpenAIAdapter {
 	) -> Result<ChatStreamResponse> {
 		let event_source = EventSourceStream::new(reqwest_builder);
 		let openai_stream = OpenAIStreamer::new(event_source, model_iden.clone(), options_sets);
-		let chat_stream = ChatStream::from_inter_stream(openai_stream);
+		let frame_tap = openai_stream.frame_tap();
+		let chat_stream = ChatStream::from_inter_stream(openai_stream).with_frame_tap(frame_tap);
 
 		Ok(ChatStreamResponse {
 			model_iden,
@@ -454,5 +345,102 @@ mod tests {
 			.expect("chat response");
 
 		assert_eq!(response.stop_reason, None);
+	}
+
+	/// Mistral's reasoning models answer with `content` as typed chunks (shape
+	/// captured from a live `mistral-large-4` response). The text must still come
+	/// through, and the `thinking` chunk becomes `reasoning_content`.
+	#[test]
+	fn test_to_chat_response_splits_mistral_thinking_chunks() {
+		let web_response = WebResponse {
+			status: StatusCode::OK,
+			body: serde_json::json!({
+				"id": "7043ccd4",
+				"model": "mistral-large-4",
+				"usage": {"prompt_tokens": 10, "completion_tokens": 554, "total_tokens": 564, "prompt_tokens_details": {"cached_tokens": 0}},
+				"choices": [{
+					"finish_reason": "stop",
+					"message": {
+						"role": "assistant",
+						"tool_calls": null,
+						"content": [
+							{"type": "thinking", "thinking": [{"type": "text", "text": "17 x 23 = 391."}], "closed": true},
+							{"type": "text", "text": "No, 391 = 17 x 23."}
+						]
+					}
+				}]
+			}),
+		};
+		let model = ModelIden::new(AdapterKind::Mistral, "mistral-large-4");
+
+		let response =
+			OpenAIAdapter::to_chat_response(model, web_response, ChatOptionsSet::default()).expect("chat response");
+
+		assert_eq!(response.first_text(), Some("No, 391 = 17 x 23."));
+		assert_eq!(response.reasoning_content.as_deref(), Some("17 x 23 = 391."));
+	}
+
+	/// OpenRouter returns the provider's own reasoning blocks — signed text,
+	/// encrypted content, summaries — as `reasoning_details` beside the
+	/// plaintext `reasoning`, and needs them back verbatim on the next turn.
+	/// Each entry becomes a `Custom` part, ahead of the text and tool calls,
+	/// tagged with the model; the plaintext still lands in `reasoning_content`.
+	#[test]
+	fn test_to_chat_response_captures_reasoning_details_as_custom_parts() {
+		// -- Setup & Fixtures
+		let web_response = WebResponse {
+			status: StatusCode::OK,
+			body: serde_json::json!({
+				"id": "gen-test",
+				"model": "anthropic/claude-sonnet-4-6",
+				"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+				"choices": [{
+					"finish_reason": "tool_calls",
+					"message": {
+						"role": "assistant",
+						"content": "",
+						"reasoning": "Read the file first.",
+						"reasoning_details": [
+							{"type": "reasoning.text", "text": "Read the file first.", "signature": "sig-1", "format": "anthropic-claude-v1", "index": 0},
+							{"type": "reasoning.encrypted", "data": "opaque-bytes", "format": "openai-responses-v1", "index": 1}
+						],
+						"tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\":\"/runbook\"}"}}]
+					}
+				}]
+			}),
+		};
+		let model = ModelIden::new(AdapterKind::OpenRouter, "anthropic/claude-sonnet-4-6");
+
+		// -- Exec
+		let response =
+			OpenAIAdapter::to_chat_response(model, web_response, ChatOptionsSet::default()).expect("chat response");
+
+		// -- Check
+		assert_eq!(response.reasoning_content.as_deref(), Some("Read the file first."));
+		let parts = response.content.parts();
+		let kinds: Vec<&str> = parts
+			.iter()
+			.map(|part| match part {
+				ContentPart::Custom(custom) => custom.typ().unwrap_or("custom"),
+				ContentPart::ToolCall(_) => "tool_call",
+				ContentPart::Text(_) => "text",
+				_ => "other",
+			})
+			.collect();
+		assert_eq!(
+			kinds,
+			["reasoning.text", "reasoning.encrypted", "tool_call"],
+			"every entry, in order, ahead of the tool call; an empty content string adds no text part"
+		);
+		let ContentPart::Custom(signed) = &parts[0] else {
+			panic!("first part is the signed block");
+		};
+		assert_eq!(signed.data()["signature"], "sig-1");
+		assert_eq!(signed.data()["format"], "anthropic-claude-v1");
+		assert_eq!(
+			signed.model_iden.as_ref().map(|m| m.model_name.to_string()).as_deref(),
+			Some("anthropic/claude-sonnet-4-6"),
+			"tagged with the model that produced it"
+		);
 	}
 }

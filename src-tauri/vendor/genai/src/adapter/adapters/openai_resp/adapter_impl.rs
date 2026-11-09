@@ -1,22 +1,40 @@
-use crate::adapter::ModelCapabilities;
+use super::{OpenAIRespStreamer, RespResponse, extract_resp_reasoning_texts};
+use crate::adapter::adapters::openai::OpenAIAdapter;
+use crate::adapter::adapters::openai::cache_policy::{
+	OpenAiPromptCachePolicy, OpenAiProtocol, openai_prompt_cache_policy, requires_explicit_cache,
+	supports_openai_responses_prompt_cache_options,
+};
+use crate::adapter::adapters::openai::schema::{
+	OpenAiResponseFormatPlan, response_format_plan, tool_parameters_schema,
+};
 use crate::adapter::adapters::support::get_api_key;
-use crate::adapter::openai::OpenAIAdapter;
-use crate::adapter::openai_resp::OpenAIRespStreamer;
-use crate::adapter::openai_resp::resp_types::{RespResponse, parse_resp_output};
 use crate::adapter::{Adapter, AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
-	CacheControl, ChatOptionsSet, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatStream,
-	ChatStreamResponse, ContentPart, MessageContent, ReasoningEffort, StopReason, Tool, ToolConfig, ToolName, Usage,
+	CacheControl, ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamResponse, ContentPart,
+	MessageContent, ReasoningEffort, StopReason, Tool, ToolChoice, ToolConfig, ToolName, Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
-use crate::webc::{EventSourceStream, WebResponse};
+use crate::webc::StreamRequest as RequestBuilder;
+use crate::webc::{EventSourceStream, WebClient, WebResponse};
 use crate::{Error, Headers, Result};
-use crate::{Model, ModelIden, ServiceTarget};
-use reqwest::RequestBuilder;
+use crate::{ModelIden, ServiceTarget};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 use value_ext::JsonValueExt;
 
 pub struct OpenAIRespAdapter;
+
+fn openai_resp_tool_choice(tool_choice: Option<&ToolChoice>) -> Option<Value> {
+	match tool_choice? {
+		ToolChoice::Auto => Some(json!("auto")),
+		ToolChoice::None => Some(json!("none")),
+		ToolChoice::Required => Some(json!("required")),
+		ToolChoice::Tool { name } => Some(json!({
+			"type": "function",
+			"name": name
+		})),
+	}
+}
 
 impl OpenAIRespAdapter {
 	pub const API_KEY_DEFAULT_ENV_NAME: &str = "OPENAI_API_KEY";
@@ -25,55 +43,27 @@ impl OpenAIRespAdapter {
 impl Adapter for OpenAIRespAdapter {
 	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
 
-	fn default_auth() -> AuthData {
+	fn default_auth(_kind: AdapterKind) -> AuthData {
 		match Self::DEFAULT_API_KEY_ENV_NAME {
 			Some(env_name) => AuthData::from_env(env_name),
 			None => AuthData::None,
 		}
 	}
 
-	fn default_endpoint() -> Endpoint {
+	fn default_endpoint(_kind: AdapterKind) -> Endpoint {
 		const BASE_URL: &str = "https://api.openai.com/v1/";
 		Endpoint::from_static(BASE_URL)
 	}
 
 	/// Note: Currently returns the common models (see above)
-	async fn all_model_names(kind: AdapterKind, endpoint: Endpoint, auth: AuthData) -> Result<Vec<String>> {
-		//
-		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth).await
-	}
-
-	async fn all_models(
+	async fn all_model_names(
 		kind: AdapterKind,
-		target: ServiceTarget,
-		_web_client: &crate::webc::WebClient,
-	) -> Result<Vec<Model>> {
-		let names = Self::all_model_names(kind, target.endpoint, target.auth).await?;
-		let mut models: Vec<Model> = Vec::new();
-		for id in names {
-			let model_name: crate::ModelName = id.clone().into();
-			let mut model = Model::new(model_name, id.clone());
-			let (max_input_tokens, max_output_tokens) = ModelCapabilities::infer_token_limits(kind, &id);
-			let supports_reasoning = ModelCapabilities::supports_reasoning(kind, &id);
-			model = model
-				.with_max_input_tokens(max_input_tokens)
-				.with_max_output_tokens(max_output_tokens)
-				.with_streaming(ModelCapabilities::supports_streaming(kind, &id))
-				.with_tool_calls(ModelCapabilities::supports_tool_calls(kind, &id))
-				.with_json_mode(ModelCapabilities::supports_json_mode(kind, &id))
-				.with_reasoning(supports_reasoning);
-			let input_modalities = ModelCapabilities::infer_input_modalities(kind, &id);
-			let output_modalities = ModelCapabilities::infer_output_modalities(kind, &id);
-			model = model
-				.with_input_modalities(input_modalities)
-				.with_output_modalities(output_modalities);
-			if supports_reasoning {
-				let reasoning_efforts = ModelCapabilities::infer_reasoning_efforts(kind, &id);
-				model = model.with_reasoning_efforts(reasoning_efforts);
-			}
-			models.push(model);
-		}
-		Ok(models)
+		endpoint: Endpoint,
+		auth: AuthData,
+		web_client: &WebClient,
+	) -> Result<Vec<String>> {
+		//
+		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth, web_client).await
 	}
 
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {
@@ -97,6 +87,13 @@ impl Adapter for OpenAIRespAdapter {
 		let ServiceTarget { model, auth, endpoint } = target;
 		let (_, model_name) = model.model_name.namespace_and_name();
 		let adapter_kind = model.adapter_kind;
+		let protocol = OpenAiProtocol::Responses;
+		let prompt_cache_policy = if supports_openai_responses_prompt_cache_options(&endpoint) {
+			openai_prompt_cache_policy(adapter_kind, model_name, &chat_req, &chat_options, protocol)
+		} else {
+			None
+		};
+		let response_format_plan = response_format_plan(&chat_options);
 
 		// -- api_key
 		let api_key = get_api_key(auth, &model)?;
@@ -112,7 +109,7 @@ impl Adapter for OpenAIRespAdapter {
 		// -- compute reasoning_effort and eventual trimmed model_name
 		// For now, just for openai AdapterKind
 		let (reasoning_effort, model_name): (Option<ReasoningEffort>, &str) =
-			if matches!(adapter_kind, AdapterKind::OpenAIResp) {
+			if matches!(adapter_kind, AdapterKind::OpenAIResp | AdapterKind::CopilotResp) {
 				let (reasoning_effort, model_name) = chat_options
 					.reasoning_effort()
 					.cloned()
@@ -142,7 +139,7 @@ impl Adapter for OpenAIRespAdapter {
 		let OpenAIRespRequestParts {
 			input_items: messages,
 			tools,
-		} = Self::into_openai_request_parts(&model, chat_req)?;
+		} = Self::into_openai_request_parts(&model, chat_req, prompt_cache_policy.as_ref())?;
 
 		// Store: always opt-in. If not explicitly set, default is false.
 		// Privacy first: we never implicitly set store=true, even when previous_response_id is set.
@@ -158,9 +155,16 @@ impl Adapter for OpenAIRespAdapter {
 		let mut payload = json!({
 			"store": store,
 			"model": model_name,
-			"input": messages,
 			"stream": stream,
 		});
+
+		if let Some(policy) = prompt_cache_policy.as_ref() {
+			let mut prompt_cache_options = json!({"mode": "explicit"});
+			if let Some(ttl) = policy.ttl {
+				prompt_cache_options.x_insert("ttl", ttl)?;
+			}
+			payload.x_insert("prompt_cache_options", prompt_cache_options)?;
+		}
 
 		// -- System prompt as instructions
 		if let Some(instructions) = &instructions {
@@ -172,20 +176,38 @@ impl Adapter for OpenAIRespAdapter {
 			payload.x_insert("previous_response_id", prev_id.as_str())?;
 		}
 
-		// -- Set reasoning effort
-		if let Some(reasoning_effort) = reasoning_effort
-			&& let Some(keyword) = reasoning_effort.as_keyword()
-		{
-			let mut reasoning_obj = json!({"effort": keyword});
+		// -- Set reasoning options
+		//
+		// The `reasoning` object on the request controls two things:
+		//   * `.effort` — how much reasoning the model should do
+		//   * `.summary` — whether a text summary of the reasoning is
+		//     returned in the response (required to populate
+		//     `ChatResponse.reasoning_content` for the Responses API)
+		//
+		// Either half is sufficient to warrant inserting the object;
+		// previously the object was only emitted when `reasoning_effort`
+		// was set, which silently defeated `capture_reasoning_content(true)`
+		// on its own — callers asking for reasoning capture got no
+		// `summary=detailed` opt-in, and every response came back with
+		// empty `reasoning_content`.
+		let capture_reasoning = chat_options.capture_reasoning_content() == Some(true);
+		let effort_keyword = reasoning_effort.and_then(|effort| match effort {
+			ReasoningEffort::Zero => Some("none"),
+			_ => effort.as_keyword(),
+		});
 
-			// Opt-in: only request detailed reasoning summaries when the caller
-			// explicitly asks for reasoning content capture.
-			if chat_options.capture_reasoning_content() == Some(true) {
+		if effort_keyword.is_some() || capture_reasoning {
+			let mut reasoning_obj = json!({});
+			if let Some(keyword) = effort_keyword {
+				reasoning_obj
+					.x_insert("effort", keyword)
+					.map_err(|e| Error::Internal(format!("reasoning effort insert: {e}")))?;
+			}
+			if capture_reasoning {
 				reasoning_obj
 					.x_insert("summary", "detailed")
 					.map_err(|e| Error::Internal(format!("reasoning summary insert: {e}")))?;
 			}
-
 			payload.x_insert("reasoning", reasoning_obj)?;
 		}
 
@@ -195,28 +217,27 @@ impl Adapter for OpenAIRespAdapter {
 			payload.x_insert("include", json!(["reasoning.encrypted_content"]))?;
 		}
 
-		// -- Tools
+		// -- Tools (before messages)
 		if let Some(tools) = tools {
 			payload.x_insert("/tools", tools)?;
 		}
+		if let Some(tool_choice) = openai_resp_tool_choice(chat_options.tool_choice()) {
+			payload.x_insert("tool_choice", tool_choice)?;
+		}
+
+		// -- Messages (after tools)
+		payload.x_insert("input", messages)?;
 
 		// -- Compute response format
-		let response_format = if let Some(response_format) = chat_options.response_format() {
-			match response_format {
-				ChatResponseFormat::JsonMode => Some(json!({"type": "json_object"})),
-				ChatResponseFormat::JsonSpec(st_json) => {
-					// Flatten for OpenAI Responses
-					Some(json!({
-						"type": "json_schema",
-						"name": st_json.name.clone(),
-						"strict": true,
-						// TODO: add description
-						"schema": st_json.schema_with_additional_properties_false(),
-					}))
-				}
-			}
-		} else {
-			None
+		let response_format = match response_format_plan {
+			OpenAiResponseFormatPlan::None => None,
+			OpenAiResponseFormatPlan::JsonMode => Some(json!({"type": "json_object"})),
+			OpenAiResponseFormatPlan::JsonSchema { name, schema } => Some(json!({
+				"type": "json_schema",
+				"name": name,
+				"strict": true,
+				"schema": schema,
+			})),
 		};
 
 		// -- Get verbosity
@@ -239,8 +260,10 @@ impl Adapter for OpenAIRespAdapter {
 			payload.x_insert("temperature", temperature)?;
 		}
 
+		// The Responses API has no `stop` parameter; sending it is an HTTP 400.
+		// (Callers who know their backend accepts it can still set it with `extra_body`.)
 		if !chat_options.stop_sequences().is_empty() {
-			payload.x_insert("stop", chat_options.stop_sequences())?;
+			tracing::warn!("stop sequences are not supported by the OpenAI Responses API and were not sent");
 		}
 
 		if let Some(max_tokens) = chat_options.max_tokens() {
@@ -249,8 +272,9 @@ impl Adapter for OpenAIRespAdapter {
 		if let Some(top_p) = chat_options.top_p() {
 			payload.x_insert("top_p", top_p)?;
 		}
-		if let Some(seed) = chat_options.seed() {
-			payload.x_insert("seed", seed)?;
+		// Same for `seed`: the Responses API does not accept it.
+		if chat_options.seed().is_some() {
+			tracing::warn!("seed is not supported by the OpenAI Responses API and was not sent");
 		}
 
 		// -- OpenAI prompt cache options
@@ -261,8 +285,13 @@ impl Adapter for OpenAIRespAdapter {
 			if !matches!(ttl, "30m" | "12h") {
 				return Err(Error::PromptCacheTtlParsing { actual: ttl.to_string() });
 			}
-			payload.x_insert("prompt_cache_options", json!({ "ttl": ttl }))?;
-		} else if let Some(cache_control) = chat_options.cache_control() {
+			// Preserve the upstream explicit-cache mode when present.
+			let mut options = payload.get("prompt_cache_options").cloned().unwrap_or_else(|| json!({}));
+			options.x_insert("ttl", ttl)?;
+			payload.x_insert("prompt_cache_options", options)?;
+		} else if !requires_explicit_cache(model_name)
+			&& let Some(cache_control) = chat_options.cache_control()
+		{
 			let prompt_cache_retention = match cache_control {
 				CacheControl::Memory | CacheControl::Ephemeral => Some("in_memory"),
 				CacheControl::Ephemeral24h => Some("24h"),
@@ -273,6 +302,11 @@ impl Adapter for OpenAIRespAdapter {
 			}
 		}
 
+		// -- Provider-specific payload extension
+		// Merged last so callers can intentionally override previously set fields.
+		if let Some(extra_body) = chat_options.extra_body() {
+			payload.x_merge(extra_body.clone())?;
+		}
 		Ok(WebRequestData { url, headers, payload })
 	}
 
@@ -286,6 +320,7 @@ impl Adapter for OpenAIRespAdapter {
 		let captured_raw_body = options_set.capture_raw_body().unwrap_or_default().then(|| body.clone());
 
 		let resp: RespResponse = serde_json::from_value(body)?;
+		let stop_reason = StopReason::from(resp.stop_reason_raw());
 
 		// -- Capture the provider_model_iden
 		let provider_model_iden = model_iden.from_name(&resp.model);
@@ -293,16 +328,34 @@ impl Adapter for OpenAIRespAdapter {
 		// -- Capture the usage
 		let usage = resp.usage.map(Usage::from).unwrap_or_default();
 
-		let parsed_output = parse_resp_output(resp.output)?;
-		let content = MessageContent::from_parts(parsed_output.content);
-		let reasoning_content = parsed_output.reasoning_content;
+		// -- Capture the content
+		let mut content: MessageContent = MessageContent::default();
+		let mut reasoning_parts: Vec<String> = Vec::new();
+
+		// -- Extract the content message
+		for output_item in resp.output {
+			reasoning_parts.extend(extract_resp_reasoning_texts(&output_item));
+			let parts = ContentPart::from_resp_output_item(output_item)?;
+			content.extend(parts);
+		}
+
+		let thought_signatures = content.thought_signatures().into_iter().map(str::to_string).collect::<Vec<_>>();
+		if !thought_signatures.is_empty()
+			&& let Some(tool_call) = content.iter_mut().find_map(|part| match part {
+				ContentPart::ToolCall(tool_call) => Some(tool_call),
+				_ => None,
+			}) {
+			tool_call.thought_signatures.get_or_insert(thought_signatures);
+		}
+
+		let reasoning_content = (!reasoning_parts.is_empty()).then(|| reasoning_parts.join("\n"));
 
 		Ok(ChatResponse {
 			content,
 			reasoning_content,
 			model_iden,
 			provider_model_iden,
-			stop_reason: Some(StopReason::from(resp.status)),
+			stop_reason: Some(stop_reason),
 			usage,
 			captured_raw_body,
 			response_id: Some(resp.id),
@@ -316,7 +369,8 @@ impl Adapter for OpenAIRespAdapter {
 	) -> Result<ChatStreamResponse> {
 		let event_source = EventSourceStream::new(reqwest_builder);
 		let openai_stream = OpenAIRespStreamer::new(event_source, model_iden.clone(), options_sets);
-		let chat_stream = ChatStream::from_inter_stream(openai_stream);
+		let frame_tap = openai_stream.frame_tap();
+		let chat_stream = ChatStream::from_inter_stream(openai_stream).with_frame_tap(frame_tap);
 
 		Ok(ChatStreamResponse {
 			model_iden,
@@ -363,8 +417,7 @@ impl OpenAIRespAdapter {
 
 		let suffix = match service_type {
 			ServiceType::Chat | ServiceType::ChatStream => "responses",
-			ServiceType::Embed => "embeddings", // Not really supported; kept for completeness
-			ServiceType::Models => "models",
+			ServiceType::Embed => "embeddings", // TODO: Probably needs to say not supported
 		};
 		let mut full_url = base_url.join(suffix).map_err(|err| {
 			Error::Internal(format!(
@@ -379,8 +432,21 @@ impl OpenAIRespAdapter {
 	/// - `genai::ChatRequest.system`, if present, is added as the first message with role 'system'.
 	/// - All messages get added with the corresponding roles (tools are not supported for now)
 	///
-	fn into_openai_request_parts(_model_iden: &ModelIden, chat_req: ChatRequest) -> Result<OpenAIRespRequestParts> {
+	fn into_openai_request_parts(
+		model_iden: &ModelIden,
+		chat_req: ChatRequest,
+		cache_policy: Option<&OpenAiPromptCachePolicy>,
+	) -> Result<OpenAIRespRequestParts> {
 		let mut input_items: Vec<Value> = Vec::new();
+		let custom_tool_names = chat_req
+			.tools
+			.as_ref()
+			.into_iter()
+			.flatten()
+			.filter(|tool| tool.custom_format.is_some())
+			.map(|tool| tool.name.as_str().to_string())
+			.collect::<BTreeSet<_>>();
+		let mut custom_call_ids = BTreeSet::new();
 
 		// -- Process the system
 		if let Some(system_msg) = chat_req.system {
@@ -391,12 +457,25 @@ impl OpenAIRespAdapter {
 
 		// -- Process the messages
 		for msg in chat_req.messages {
+			let cache_controlled = cache_policy.is_some()
+				&& msg
+					.options
+					.as_ref()
+					.and_then(|options| options.cache_control.as_ref())
+					.is_some();
+
 			// Note: Will handle more types later
 			match msg.role {
 				// For now, system and tool messages go to the system
 				ChatRole::System => {
 					if let Some(content) = msg.content.into_joined_texts() {
-						input_items.push(json!({"role": "system", "content": content}))
+						if cache_controlled {
+							let mut values = vec![json!({"type": "input_text", "text": content})];
+							apply_resp_cache_breakpoint(model_iden, &mut values, "message")?;
+							input_items.push(json!({"role": "system", "content": values}));
+						} else {
+							input_items.push(json!({"role": "system", "content": content}))
+						}
 					}
 					// TODO: Probably need to warn if it is a ToolCalls type of content
 				}
@@ -404,7 +483,7 @@ impl OpenAIRespAdapter {
 				// User - For now support Text and Binary
 				ChatRole::User => {
 					// -- If we have only text, then, we jjust returned the joined_texts
-					if msg.content.is_text_only() {
+					if msg.content.is_text_only() && !cache_controlled {
 						// NOTE: for now, if no content, just return empty string (respect current logic)
 						let content = json!(msg.content.joined_texts().unwrap_or_else(String::new));
 						input_items.push(json! ({"role": "user", "content": content}));
@@ -471,6 +550,9 @@ impl OpenAIRespAdapter {
 								ContentPart::Custom(_) => {}
 							}
 						}
+						if cache_controlled {
+							apply_resp_cache_breakpoint(model_iden, &mut values, "message")?;
+						}
 						input_items.push(json! ({"role": "user", "content": values}));
 					}
 				}
@@ -480,6 +562,43 @@ impl OpenAIRespAdapter {
 					// Here we make sure if multiple text content part, we keep them in the same assistant message
 					// In the new OpenAI Responses API, the tool call are just items out of assistant message
 					let mut item_message_content: Vec<Value> = Vec::new();
+
+					// Pre-pass: encrypted reasoning blobs from prior turns must be
+					// carried back as top-level `{type: "reasoning"}` input items
+					// to keep the Responses-API prefix cache warm. Without this,
+					// even a verbatim resend of a prior turn re-processes every
+					// token. They precede the assistant message they belong to,
+					// mirroring the order the API emits them in the streaming
+					// response. The blobs ride in on `ContentPart::ThoughtSignature`
+					// parts (from `StreamEnd::captured_content`) or on
+					// `ToolCall::thought_signatures` (rust-genai's streamer stashes
+					// captured blobs there when there are tool calls).
+					let mut has_top_level_thought_signatures = false;
+					for part in msg.content.iter() {
+						if let ContentPart::ThoughtSignature(blob) = part {
+							has_top_level_thought_signatures = true;
+							input_items.push(json!({
+								"type": "reasoning",
+								"encrypted_content": blob,
+								"summary": [],
+							}));
+						}
+					}
+					if !has_top_level_thought_signatures {
+						for part in msg.content.iter() {
+							if let ContentPart::ToolCall(tool_call) = part
+								&& let Some(sigs) = tool_call.thought_signatures.as_ref()
+							{
+								for blob in sigs {
+									input_items.push(json!({
+										"type": "reasoning",
+										"encrypted_content": blob,
+										"summary": [],
+									}));
+								}
+							}
+						}
+					}
 
 					for part in msg.content {
 						match part {
@@ -499,18 +618,34 @@ impl OpenAIRespAdapter {
 									}));
 									item_message_content = Vec::new();
 								}
-								// NOTE: Flatten for OpenAI Responsess API
-								input_items.push(json!({
-									"type": "function_call",
-									"call_id": tool_call.call_id,
-									"name": tool_call.fn_name,
-									"arguments": tool_call.fn_arguments.to_string(),
-								}))
+								if custom_tool_names.contains(&tool_call.fn_name) {
+									let input = tool_call
+										.fn_arguments
+										.as_str()
+										.map_or_else(|| tool_call.fn_arguments.to_string(), str::to_string);
+									custom_call_ids.insert(tool_call.call_id.clone());
+									input_items.push(json!({
+										"type": "custom_tool_call",
+										"call_id": tool_call.call_id,
+										"name": tool_call.fn_name,
+										"input": input,
+									}));
+								} else {
+									// NOTE: Flatten for OpenAI Responses API.
+									input_items.push(json!({
+										"type": "function_call",
+										"call_id": tool_call.call_id,
+										"name": tool_call.fn_name,
+										"arguments": tool_call.fn_arguments.to_string(),
+									}));
+								}
 							}
 
 							// TODO: Probably need towarn on this one (probably need to add binary here)
 							ContentPart::Binary(_) => {}
 							ContentPart::ToolResponse(_) => {}
+							// ThoughtSignature and ReasoningContent are emitted as
+							// top-level `type:reasoning` items in the pre-pass above.
 							ContentPart::ThoughtSignature(_) => {}
 							ContentPart::ReasoningContent(_) => {}
 							// Custom are ignored for this logic
@@ -532,11 +667,16 @@ impl OpenAIRespAdapter {
 				ChatRole::Tool => {
 					for part in msg.content {
 						if let ContentPart::ToolResponse(tool_response) = part {
+							let response_type = if custom_call_ids.contains(&tool_response.call_id) {
+								"custom_tool_call_output"
+							} else {
+								"function_call_output"
+							};
 							input_items.push(json!({
-								"type": "function_call_output",
+								"type": response_type,
 								"call_id": tool_response.call_id,
 								"output": tool_response.content,
-							}))
+							}));
 						}
 					}
 
@@ -559,8 +699,10 @@ impl OpenAIRespAdapter {
 			name,
 			description,
 			schema,
+			custom_format,
 			strict,
 			config,
+			..
 		} = tool;
 
 		let name = match name {
@@ -568,48 +710,49 @@ impl OpenAIRespAdapter {
 			ToolName::Custom(name) => name,
 		};
 
-		let tool_value = match name.as_ref() {
-			"web_search" => {
-				let mut tool_value = json!({"type": "web_search"});
-				match config {
-					Some(ToolConfig::WebSearch(_ws_config)) => {
-						// FIXME: Implement what is posible in filters
-					}
-					Some(ToolConfig::Custom(config_value)) => {
-						// IMPORTANT: Here like anthropic, we merge it on top of the toll value
-						//            (and not as value of "name" as this would not fit that api)
-						//            Gemini does a `{name: config}` which fit that API
-						tool_value.x_merge(config_value)?;
-					}
-					None => (),
-				};
-				tool_value
-			}
-			name => {
-				let strict = strict.unwrap_or(false);
-				let mut parameters = schema;
-
-				// When strict mode is enabled, OpenAI requires `additionalProperties: false`
-				// on every object node in the schema.
-				if strict && let Some(ref mut schema_val) = parameters {
-					schema_val.x_walk(|parent_map, prop_name| {
-						if prop_name == "type" {
-							let typ = parent_map.get("type").and_then(|v| v.as_str()).unwrap_or("");
-							if typ == "object" {
-								parent_map.insert("additionalProperties".to_string(), false.into());
-							}
+		let tool_value = if let Some(format) = custom_format {
+			json!({
+				"type": "custom",
+				"name": name,
+				"description": description,
+				"format": format,
+			})
+		} else {
+			match name.as_ref() {
+				"web_search" => {
+					let mut tool_value = json!({"type": "web_search"});
+					match config {
+						Some(ToolConfig::WebSearch(_ws_config)) => {
+							// FIXME: Implement what is posible in filters
 						}
-						true
-					});
+						Some(ToolConfig::Custom(config_value)) => {
+							// IMPORTANT: Here like anthropic, we merge it on top of the toll value
+							//            (and not as value of "name" as this would not fit that api)
+							//            Gemini does a `{name: config}` which fit that API
+							tool_value.x_merge(config_value)?;
+						}
+						None => (),
+					};
+					tool_value
 				}
+				name => {
+					let parameters = tool_parameters_schema(schema, strict == Some(true));
 
-				json!({
-					"type": "function",
-					"name": name,
-					"description": description,
-					"parameters": parameters,
-					"strict": strict,
-				})
+					let mut tool_value = json!({
+						"type": "function",
+						"name": name,
+						"parameters": parameters,
+					});
+					if let Some(description) = description {
+						tool_value.x_insert("description", description)?;
+					}
+					// Unset `strict` is left out, so the Responses API default applies
+					// (strict when the schema allows it, non-strict otherwise).
+					if let Some(strict) = strict {
+						tool_value.x_insert("strict", strict)?;
+					}
+					tool_value
+				}
 			}
 		};
 
@@ -623,64 +766,26 @@ struct OpenAIRespRequestParts {
 	tools: Option<Vec<Value>>,
 }
 
+fn apply_resp_cache_breakpoint(_model_iden: &ModelIden, content: &mut [Value], _scope: &'static str) -> Result<()> {
+	let Some(content_block) = content.iter_mut().rev().find(|value| {
+		matches!(
+			value.get("type").and_then(Value::as_str),
+			Some("input_text" | "input_image" | "input_file")
+		)
+	}) else {
+		return Ok(());
+	};
+
+	content_block.x_insert("prompt_cache_breakpoint", json!({"mode": "explicit"}))?;
+	Ok(())
+}
+
 // endregion: --- Support
 
 // region:    --- Tests
 
 #[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::adapter::AdapterKind;
-	use crate::chat::ChatMessage;
-
-	/// Test that assistant message text content uses "output_text" type (not "input_text").
-	///
-	/// This is required by OpenAI's Responses API - assistant content is model output,
-	/// so it must use "output_text". Using "input_text" causes:
-	/// "Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'."
-	#[test]
-	fn test_assistant_message_uses_output_text_content_type() {
-		let model_iden = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5-codex");
-
-		// Create a chat request with an assistant message
-		let chat_req = ChatRequest::default()
-			.with_system("You are a helpful assistant.")
-			.append_message(ChatMessage::user("What's the weather?"))
-			.append_message(ChatMessage::assistant("The weather is sunny."));
-
-		// Serialize to OpenAI Responses API format
-		let parts =
-			OpenAIRespAdapter::into_openai_request_parts(&model_iden, chat_req).expect("Should serialize successfully");
-
-		// Find the assistant message in input_items
-		let assistant_msg = parts
-			.input_items
-			.iter()
-			.find(|item| {
-				item.get("type").and_then(|t| t.as_str()) == Some("message")
-					&& item.get("role").and_then(|r| r.as_str()) == Some("assistant")
-			})
-			.expect("Should have an assistant message");
-
-		// Check the content uses "output_text" type
-		let content = assistant_msg
-			.get("content")
-			.and_then(|c| c.as_array())
-			.expect("Assistant message should have content array");
-
-		assert!(!content.is_empty(), "Content should not be empty");
-
-		let first_content = &content[0];
-		let content_type = first_content
-			.get("type")
-			.and_then(|t| t.as_str())
-			.expect("Content should have a type");
-
-		assert_eq!(
-			content_type, "output_text",
-			"Assistant message content should use 'output_text' type, not 'input_text'"
-		);
-	}
-}
+#[path = "adapter_impl_tests.rs"]
+mod tests;
 
 // endregion: --- Tests

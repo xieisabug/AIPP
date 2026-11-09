@@ -167,11 +167,8 @@ pub fn to_embed_request_data(
 	};
 
 	// Get the service URL and modify it for batch requests
-	let mut url = <crate::adapter::gemini::GeminiAdapter as Adapter>::get_service_url(
-		&model,
-		ServiceType::Embed,
-		service_target.endpoint,
-	)?;
+	let mut url =
+		<super::GeminiAdapter as Adapter>::get_service_url(&model, ServiceType::Embed, service_target.endpoint)?;
 
 	// For batch requests, change :embedContent to :batchEmbedContents
 	if is_batch {
@@ -192,14 +189,15 @@ pub fn to_embed_response(
 	let embedding_vectors = if let Ok(single_res) = serde_json::from_value::<GeminiEmbedResponse>(body.clone()) {
 		// Single embedding response
 		vec![single_res.embedding.values]
-	} else if let Ok(batch_res) = serde_json::from_value::<GeminiBatchEmbedResponse>(body.clone()) {
-		// Batch embedding response
-		batch_res.embeddings.into_iter().map(|e| e.values).collect()
 	} else {
-		return Err(Error::StreamParse {
-			model_iden: model_iden.clone(),
-			serde_error: serde_json::from_str::<()>("").unwrap_err(), // Create a dummy serde error
-		});
+		// Batch embedding response
+		let batch_res = serde_json::from_value::<GeminiBatchEmbedResponse>(body.clone()).map_err(|serde_error| {
+			Error::StreamParse {
+				model_iden: model_iden.clone(),
+				serde_error,
+			}
+		})?;
+		batch_res.embeddings.into_iter().map(|e| e.values).collect()
 	};
 
 	// Convert to our format
@@ -211,7 +209,6 @@ pub fn to_embed_response(
 
 	// Create usage information - Gemini doesn't provide token counts in embedding responses
 	let usage = Usage {
-		billing: Default::default(),
 		prompt_tokens: None, // Gemini doesn't provide token counts for embeddings
 		completion_tokens: None,
 		total_tokens: None,

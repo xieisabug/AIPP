@@ -326,12 +326,12 @@ pub fn create_client_with_config(
             }
         }
     }
-    Ok(build_client(adapter_kind, final_endpoint_url, api_key, go_model, session, web_config, custom_headers))
+    build_client(adapter_kind, final_endpoint_url, api_key, go_model, session, web_config, custom_headers)
 }
 
 fn build_client(adapter_kind: AdapterKind, endpoint_url: String, api_key: String,
     go_model: Option<String>, session: Option<uuid::Uuid>, mut web_config: WebConfig,
-    custom_headers: std::collections::HashMap<String, String>) -> Client {
+    custom_headers: std::collections::HashMap<String, String>) -> Result<Client, AppError> {
     if !custom_headers.is_empty() || session.is_some() {
         let mut headers = HeaderMap::new();
         for (key, value) in custom_headers {
@@ -371,6 +371,7 @@ fn build_client(adapter_kind: AdapterKind, endpoint_url: String, api_key: String
         .with_service_target_resolver(target_resolver)
         .with_web_config(web_config)
         .build()
+        .map_err(|error| AppError::ProviderError(format!("Failed to build genai client: {error}")))
 }
 
 

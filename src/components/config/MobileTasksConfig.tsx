@@ -42,6 +42,19 @@ export default function MobileTasksConfig() {
     const [title, setTitle] = useState("");
     const [goal, setGoal] = useState("");
     const [assistantId, setAssistantId] = useState("");
+    const [capability, setCapability] = useState<{ id: string; available: boolean; reason: string }>();
+    useDataRefresh({
+        initial: true,
+        identity: assistantId,
+        events: ["assistant_list_changed", "mcp_state_changed"],
+        onInvalidate: () => setCapability(undefined),
+        refresh: async isCurrent => {
+            if (!assistantId) return;
+            const result = await invoke<{ available: boolean; issues: { reason: string }[] }>("get_assistant_execution_capability", { assistantId: Number(assistantId) });
+            if (isCurrent()) setCapability({ id: assistantId, available: result.available, reason: result.issues.map(issue => issue.reason).join("；") });
+        },
+        onError: error => setCapability({ id: assistantId, available: false, reason: `助手 ${assistantId} 执行能力检查失败：${String(error)}` }),
+    });
     const [detail, setDetail] = useState<{ taskId: number; data: ButlerTaskDetailResponse }>();
     const [selectedSchedule, setSelectedSchedule] = useState<number>();
     const [runs, setRuns] = useState<MobileTaskRun[]>([]);
@@ -61,7 +74,7 @@ export default function MobileTasksConfig() {
     };
     const refresh = useDataRefresh({
         initial: true,
-        events: ["butler_task_created", "butler_task_updated", "butler_task_permission_state_changed", "operation-permission-request", "operation-permission-resolved", "scheduled_task_run_updated", "scheduled_task_run_created", "butler_feishu_status_changed"],
+        events: ["assistant_list_changed", "butler_task_created", "butler_task_updated", "butler_task_permission_state_changed", "operation-permission-request", "operation-permission-resolved", "scheduled_task_run_updated", "scheduled_task_run_created", "butler_feishu_status_changed"],
         refresh: async isCurrent => {
             const results = await Promise.allSettled([
                 invoke<Overview>("get_mobile_butler_overview"), invoke<Schedule[]>("list_scheduled_tasks"),
@@ -96,10 +109,11 @@ export default function MobileTasksConfig() {
         {actionError && <p role="alert" className="break-all text-sm">{actionError}</p>}
         <section className="space-y-3"><h2 className="text-sm font-medium">Butler 任务</h2>
             {overview?.main_conversation_id == null ? <Button disabled={busy || !overview} className="min-h-11" onClick={() => void act("初始化 Butler", () => invoke("load_butler_main_conversation", { reconcile: false }))}>初始化本机任务入口</Button> : <>
-                <label className="block">执行助手<select className="block w-full min-h-11 border rounded bg-background" value={assistantId} onChange={event => setAssistantId(event.target.value)}><option value="">请选择助手</option>{assistants.filter(a => !a.assistant_type).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
+                <label className="block">执行助手<select className="block w-full min-h-11 border rounded bg-background" value={assistantId} onChange={event => setAssistantId(event.target.value)}><option value="">请选择助手</option>{assistants.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
+                {assistantId && (capability?.id !== assistantId ? <p role="status" className="text-sm">正在检查本机执行能力…</p> : !capability.available ? <p role="status" className="text-sm break-words">此助手无法在本机执行：{capability.reason}</p> : null)}
                 <Input aria-label="任务标题" value={title} onChange={event => setTitle(event.target.value)} placeholder="任务标题" />
                 <Textarea aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} placeholder="任务目标" />
-                <Button className="min-h-11" disabled={busy || !title.trim() || !goal.trim() || !assistantId} onClick={() => void act("派发任务", async () => {
+                <Button className="min-h-11" disabled={busy || !title.trim() || !goal.trim() || capability?.id !== assistantId || !capability?.available} onClick={() => void act("派发任务", async () => {
                     await invoke("spawn_butler_task_conversation", { request: { butler_conversation_id: overview.main_conversation_id, title, goal, executor_assistant_id: Number(assistantId) } });
                     setTitle(""); setGoal("");
                 })}>在本机派发</Button>

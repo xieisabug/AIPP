@@ -1,11 +1,18 @@
-use crate::adapter::openai::{OpenAIAdapter, ToWebRequestCustom};
+use crate::adapter::adapters::openai::{OpenAIAdapter, ToWebRequestDataOptions};
 use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{ChatOptionsSet, ChatRequest, ChatResponse, ChatStreamResponse};
 use crate::resolver::{AuthData, Endpoint};
-use crate::webc::WebResponse;
-use crate::{Model, ModelIden};
+use crate::webc::StreamRequest as RequestBuilder;
+use crate::webc::{WebClient, WebResponse};
+use crate::{ModelIden, ModelName};
 use crate::{Result, ServiceTarget};
-use reqwest::RequestBuilder;
+
+const CTX_MAX_DEFAULT: u32 = 512_000;
+
+// NOTE: Meta muse-glimmer-30b, have max tokens of `131072` but this seems to include prompt,
+//       and will throw error if the sum of the two exceed that limit.
+//       So, here, we put at 68k (not perfect, but until we find a better solution)
+const CTX_MAX_DEFAULT_MUSE: u32 = 68_000;
 
 /// The Fireworks API is mostly compatible with the OpenAI API.
 ///
@@ -21,38 +28,28 @@ use reqwest::RequestBuilder;
 /// However, if the model name has a `/`, then it is assumed to be one recognized by the fireworks.ai service.
 pub struct FireworksAdapter;
 
-impl FireworksAdapter {
-	pub const API_KEY_DEFAULT_ENV_NAME: &str = "FIREWORKS_API_KEY";
-}
-
 impl Adapter for FireworksAdapter {
-	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
+	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some("FIREWORKS_API_KEY");
 
-	fn default_endpoint() -> Endpoint {
+	fn default_endpoint(_kind: AdapterKind) -> Endpoint {
 		const BASE_URL: &str = "https://api.fireworks.ai/inference/v1/";
 		Endpoint::from_static(BASE_URL)
 	}
 
-	fn default_auth() -> AuthData {
+	fn default_auth(_kind: AdapterKind) -> AuthData {
 		match Self::DEFAULT_API_KEY_ENV_NAME {
 			Some(env_name) => AuthData::from_env(env_name),
 			None => AuthData::None,
 		}
 	}
 
-	async fn all_model_names(kind: AdapterKind, endpoint: Endpoint, auth: AuthData) -> Result<Vec<String>> {
-		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth).await
-	}
-
-	async fn all_models(
-		_kind: AdapterKind,
-		_target: ServiceTarget,
-		_web_client: &crate::webc::WebClient,
-	) -> Result<Vec<Model>> {
-		// For fireworks, there are too many models to list.
-		// The models are handled dynamically based on the model name.
-		// Return empty vector for now since the MODELS constant is empty.
-		Ok(Vec::new())
+	async fn all_model_names(
+		kind: AdapterKind,
+		endpoint: Endpoint,
+		auth: AuthData,
+		web_client: &WebClient,
+	) -> Result<Vec<String>> {
+		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth, web_client).await
 	}
 
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {
@@ -78,14 +75,10 @@ impl Adapter for FireworksAdapter {
 		//       See: https://fireworks.ai/docs/faq-new/models-inference/what-are-the-maximum-completion-token-limits-for-models-and-can-they-be-increase
 		// NOTE: The `genai` strategy is to set a large max_tokens value, letting the model enforce its own lower limit by default to avoid unpleasant and confusing surprises.
 		//       Users can use [`ChatOptions`] to specify a specific max_tokens value.
-		// NOTE: As mentioned in the Fireworks FAQ above, typically, for Fireworks-hosted models the top max_tokens is equal to the context window.
-		//       Since, Qwen3 models are at 256k, so we will use this upper bound (without going to the 1M/10M of Llama 4) for non-streaming.
-		//       However, since anything over 5k requires streaming API, we cap the default to 5k for non-streaming here so that the request doesn't fail.
-		let custom = ToWebRequestCustom {
-			default_max_tokens: match service_type {
-				ServiceType::ChatStream => Some(256_000),
-				_ => Some(5_000),
-			},
+		// NOTE: Some models, like the muse-glimmer-30b, requires to have strict max token, so, we have the get_default_max_token now.
+		let custom = ToWebRequestDataOptions {
+			default_max_tokens: Some(get_default_max_token(&target.model.model_name)),
+			..Default::default()
 		};
 
 		OpenAIAdapter::util_to_web_request_data(target, service_type, chat_req, chat_options, Some(custom))
@@ -121,5 +114,13 @@ impl Adapter for FireworksAdapter {
 		options_set: crate::embed::EmbedOptionsSet<'_, '_>,
 	) -> Result<crate::embed::EmbedResponse> {
 		OpenAIAdapter::to_embed_response(model_iden, web_response, options_set)
+	}
+}
+
+fn get_default_max_token(model: &ModelName) -> u32 {
+	if model.contains("muse-glimmer-30b") {
+		CTX_MAX_DEFAULT_MUSE
+	} else {
+		CTX_MAX_DEFAULT
 	}
 }

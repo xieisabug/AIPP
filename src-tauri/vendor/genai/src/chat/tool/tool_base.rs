@@ -1,9 +1,12 @@
 use super::{ToolConfig, ToolName};
+use crate::chat::CacheControl;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_with::skip_serializing_none;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Tool metadata used for function calling by LLMs.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
 	/// Normalized tool identifier.
 	/// Example: `ToolName::Custom("get_weather".to_string())`.
@@ -37,9 +40,20 @@ pub struct Tool {
 	/// ```
 	pub schema: Option<Value>,
 
+	/// Provider-native freeform custom-tool format.
+	///
+	/// OpenAI Responses uses values such as
+	/// `{ "type": "grammar", "syntax": "lark", "definition": "..." }`.
+	/// When present, the OpenAI Responses adapter emits a `type: "custom"`
+	/// tool instead of a JSON-schema function tool.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub custom_format: Option<Value>,
+
 	/// When `true`, the provider enforces strict schema validation on tool-call arguments.
-	/// For OpenAI this sets `"strict": true` and auto-injects `"additionalProperties": false`
-	/// on every `"type": "object"` node in the schema.
+	/// For OpenAI and Anthropic this sets `"strict": true` and sanitizes the schema for
+	/// the provider's constrained-decoding dialect.
+	/// When unset, the OpenAI Responses and Anthropic adapters leave `strict` out, so the
+	/// provider's default applies.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub strict: Option<bool>,
 
@@ -47,6 +61,17 @@ pub struct Tool {
 	///
 	/// Useful with embedded provider tools (e.g., Google Search for Gemini).
 	pub config: Option<ToolConfig>,
+
+	/// Optional cache control hint for prompt caching.
+	/// Anthropic: set on the last tool to cache the entire tool list prefix.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub cache_control: Option<CacheControl>,
+
+	/// Anthropic fine-grained tool streaming (GA): when `true`, sets
+	/// `eager_input_streaming` on the tool so the provider streams tool-call
+	/// input without server-side JSON buffering (token-granular `input_json_delta`).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub eager_input_streaming: Option<bool>,
 }
 
 /// Computed accessors
@@ -69,6 +94,11 @@ impl Tool {
 			.map(|s| serde_json::to_string(s).map(|j| j.len()).unwrap_or_default())
 			.unwrap_or_default();
 		size += self
+			.custom_format
+			.as_ref()
+			.map(|f| serde_json::to_string(f).map(|j| j.len()).unwrap_or_default())
+			.unwrap_or_default();
+		size += self
 			.config
 			.as_ref()
 			.map(|c| match c {
@@ -88,8 +118,11 @@ impl Tool {
 			name: name.into(),
 			description: None,
 			schema: None,
+			custom_format: None,
 			strict: None,
 			config: None,
+			cache_control: None,
+			eager_input_streaming: None,
 		}
 	}
 
@@ -114,8 +147,13 @@ impl Tool {
 		self
 	}
 
-	/// Enable strict schema validation for tool-call arguments.
-	/// When `true`, OpenAI enforces exact schema conformance.
+	/// Configure this as a provider-native freeform custom tool.
+	pub fn with_custom_format(mut self, format: Value) -> Self {
+		self.custom_format = Some(format);
+		self
+	}
+
+	/// Enable strict schema validation for tool-call arguments on providers that support it.
 	pub fn with_strict(mut self, strict: bool) -> Self {
 		self.strict = Some(strict);
 		self
@@ -124,6 +162,21 @@ impl Tool {
 	/// Set provider-specific configuration (if any). Returns self for chaining.
 	pub fn with_config(mut self, config: impl Into<ToolConfig>) -> Self {
 		self.config = Some(config.into());
+		self
+	}
+
+	/// Set cache control for prompt caching. Returns self for chaining.
+	/// On Anthropic, set this on the last tool to cache the entire tool list prefix.
+	pub fn with_cache_control(mut self, cache_control: impl Into<CacheControl>) -> Self {
+		self.cache_control = Some(cache_control.into());
+		self
+	}
+
+	/// Enable Anthropic fine-grained tool streaming (`eager_input_streaming`).
+	/// The provider streams tool-call input without buffering the full JSON —
+	/// useful for rendering tool arguments progressively as they arrive.
+	pub fn with_eager_input_streaming(mut self, eager: bool) -> Self {
+		self.eager_input_streaming = Some(eager);
 		self
 	}
 }

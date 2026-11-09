@@ -14,7 +14,6 @@ use super::types::{SearchRequest, SearchResponse};
 #[cfg(desktop)]
 use super::types::SearchResultType;
 use anyhow::Result;
-#[cfg(desktop)]
 use std::collections::HashMap;
 #[cfg(desktop)]
 use std::fs;
@@ -88,6 +87,12 @@ pub struct SearchHandler {
 }
 
 impl SearchHandler {
+    pub async fn search_http(&self, query: &str, limit: usize) -> Result<serde_json::Value, String> {
+        let env = load_search_config_from_db(&self.app_handle, self.server_id)?;
+        let config = super::http_search::HttpSearchConfig::from_env(&env)?;
+        super::http_search::search(&config, query, limit).await
+    }
+
     pub fn new(app_handle: AppHandle, server_id: Option<i64>) -> Self {
         debug!(?server_id, "Creating SearchHandler");
         Self { app_handle, server_id }
@@ -450,7 +455,6 @@ impl SearchHandler {
     }
 }
 
-#[cfg(desktop)]
 fn load_search_config_from_db(app_handle: &AppHandle, server_id: Option<i64>) -> Result<HashMap<String, String>, String> {
     use crate::db::mcp_db::MCPDatabase;
     let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
@@ -468,7 +472,7 @@ fn load_search_config_from_db(app_handle: &AppHandle, server_id: Option<i64>) ->
         }
     }
     if let Some(legacy_browser_type) = config.remove("BROWSER_TYPE") {
-        warn!(
+        tracing::warn!(
             browser_type = %legacy_browser_type,
             "Ignoring deprecated BROWSER_TYPE config in chromiumoxide mode"
         );

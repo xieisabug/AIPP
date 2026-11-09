@@ -1,3 +1,5 @@
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { visibleSearchTools } from "@/lib/mobileUnsupported";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import { invoke } from "@tauri-apps/api/core";
@@ -51,6 +53,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
     onClose,
     onConfigChange
 }) => {
+    const isMobilePlatform = useIsMobilePlatform();
     const [availableServers, setAvailableServers] = useState<MCPServerInfo[]>([]);
     const [expandedServers, setExpandedServers] = useState<Set<number>>(new Set());
     const [serverTools, setServerTools] = useState<Map<number, MCPToolInfo[]>>(new Map());
@@ -309,18 +312,21 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
 
     const enabledServers = availableServers.filter(server => server.is_enabled);
 
+    const visibleServerTools = useMemo(() => new Map(Array.from(serverTools, ([id, tools]) =>
+        [id, visibleSearchTools(tools, availableServers.find(server => server.id === id)?.command, isMobilePlatform)])), [serverTools, availableServers, isMobilePlatform]);
+
     // 按搜索词过滤服务器（穿透到工具名称，支持拼音）
     const filteredServers = useMemo(() => {
         if (!searchQuery.trim()) return availableServers;
         return availableServers.filter(server => {
             if (PinyinFilter.matches(server.name, searchQuery)) return true;
-            const tools = serverTools.get(server.id) || [];
+            const tools = visibleServerTools.get(server.id) || [];
             return tools.some(tool => PinyinFilter.matches(tool.name, searchQuery));
         });
-    }, [availableServers, serverTools, searchQuery, pinyinReady]);
+    }, [availableServers, visibleServerTools, searchQuery, pinyinReady]);
 
     // 统计有效启用的工具数量：只有服务器启用时，其工具才算有效启用
-    const totalEnabledTools = Array.from(serverTools.entries())
+    const totalEnabledTools = Array.from(visibleServerTools.entries())
         .filter(([serverId]) => availableServers.find(s => s.id === serverId)?.is_enabled)
         .flatMap(([, tools]) => tools)
         .filter(tool => tool.is_enabled).length;
@@ -365,7 +371,7 @@ const AssistantMCPConfigDialog: React.FC<AssistantMCPConfigDialogProps> = ({
 
                                 {filteredServers.map(server => {
                                     const isExpanded = expandedServers.has(server.id);
-                                    const serverToolsList = serverTools.get(server.id) || [];
+                                    const serverToolsList = visibleServerTools.get(server.id) || [];
                                     const isLoadingTools = false; // 不再需要加载状态，因为数据已预加载
                                     const enabledToolsCount = serverToolsList.filter(t => t.is_enabled).length;
 

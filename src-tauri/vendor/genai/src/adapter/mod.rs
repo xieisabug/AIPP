@@ -9,6 +9,8 @@
 
 // region:    --- Modules
 
+mod macros;
+
 mod adapter_kind;
 mod adapter_types;
 mod adapters;
@@ -16,16 +18,19 @@ mod dispatcher;
 mod model_capabilities;
 
 // -- Flatten (private, crate, public)
-use adapters::*;
+// use adapters::*;
 
 pub(crate) use adapter_types::*;
 pub(crate) use dispatcher::*;
+pub(crate) use model_capabilities::*;
 
 pub use adapter_kind::*;
 
+pub mod gemini_ix {
+	pub use super::adapters::gemini_ix::{EnrichedEvent, GroundingToolCount, UrlCitation};
+}
+
 // -- Crate modules
 pub(crate) mod inter_stream;
-
-pub(crate) use model_capabilities::*;
 
 // endregion: --- Modules

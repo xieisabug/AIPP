@@ -1,25 +1,43 @@
-use crate::Headers;
-use crate::Model;
-use crate::ModelIden;
 use crate::adapter::AdapterKind;
 use crate::chat::{ChatOptionsSet, ChatRequest, ChatResponse, ChatStreamResponse};
 use crate::embed::{EmbedOptionsSet, EmbedRequest, EmbedResponse};
 use crate::resolver::{AuthData, Endpoint};
+use crate::webc::StreamRequest as RequestBuilder;
 use crate::webc::{WebClient, WebResponse};
+use crate::{Headers, Model, ModelIden};
 use crate::{Result, ServiceTarget};
-use reqwest::RequestBuilder;
 use serde_json::Value;
 
 pub trait Adapter {
 	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str>;
 
-	fn default_auth() -> AuthData;
+	fn default_auth(kind: AdapterKind) -> AuthData;
 
-	fn default_endpoint() -> Endpoint;
+	fn default_endpoint(_kind: AdapterKind) -> Endpoint;
 
 	// NOTE: Adapter is a crate trait, so it is acceptable to use async fn here.
-	async fn all_model_names(kind: AdapterKind, endpoint: Endpoint, auth: AuthData) -> Result<Vec<String>>;
-	async fn all_models(kind: AdapterKind, target: ServiceTarget, web_client: &WebClient) -> Result<Vec<Model>>;
+	async fn all_model_names(
+		kind: AdapterKind,
+		endpoint: Endpoint,
+		auth: AuthData,
+		web_client: &WebClient,
+	) -> Result<Vec<String>>;
+
+	/// Returns the richer [`Model`] descriptions for this adapter kind.
+	///
+	/// The default implementation derives them from [`Adapter::all_model_names`]
+	/// combined with [`crate::adapter::ModelCapabilities`], which is correct for
+	/// any adapter that can enumerate its model names. Adapters exposing richer
+	/// provider metadata (e.g. a models endpoint) can override this.
+	async fn all_models(
+		kind: AdapterKind,
+		endpoint: Endpoint,
+		auth: AuthData,
+		web_client: &WebClient,
+	) -> Result<Vec<Model>> {
+		let names = Self::all_model_names(kind, endpoint, auth, web_client).await?;
+		Ok(names.into_iter().map(|name| Model::from_capabilities(kind, name)).collect())
+	}
 
 	/// The base service URL for this AdapterKind for the given service type.
 	/// NOTE: For some services, the URL will be further updated in the to_web_request_data method.
@@ -69,7 +87,6 @@ pub enum ServiceType {
 	Chat,
 	ChatStream,
 	Embed,
-	Models,
 }
 
 // endregion: --- ServiceType

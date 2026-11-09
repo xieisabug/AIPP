@@ -231,7 +231,7 @@ async fn prompt_cache_request_payload(options: &genai::chat::ChatOptions) -> ser
     });
     let client = genai::Client::builder().with_reqwest(
         reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build().unwrap()
-    ).build();
+    ).build().unwrap();
     let target = genai::ServiceTarget {
         endpoint: genai::resolver::Endpoint::from_owned(endpoint),
         auth: genai::resolver::AuthData::from_single("local-test-key"),

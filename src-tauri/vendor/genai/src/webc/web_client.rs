@@ -5,27 +5,22 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::Value;
 
 /// A simple reqwest client wrapper for this library.
+/// Here are some good default
+/// ```rust
+/// let reqwest_client = reqwest::Client::builder()
+///    .tcp_nodelay(true)
+///    .gzip(true)
+///    .pool_max_idle_per_host(4)
+///    .http2_keep_alive_interval(Some(Duration::from_secs(20)))
+///    .http2_keep_alive_timeout(Duration::from_secs(10))
+///    .http2_keep_alive_while_idle(true)
+///    .http2_adaptive_window(true)
+///    .build()
+///    .map_err(Error::Reqwest)?;
+/// ```
 #[derive(Debug)]
 pub struct WebClient {
 	reqwest_client: reqwest::Client,
-}
-
-// Implements Default with performance optimizations
-impl Default for WebClient {
-	fn default() -> Self {
-		use std::time::Duration;
-		let reqwest_client = reqwest::Client::builder()
-			.tcp_nodelay(true)
-			.gzip(true)
-			.pool_max_idle_per_host(4)
-			.http2_keep_alive_interval(Some(Duration::from_secs(20)))
-			.http2_keep_alive_timeout(Duration::from_secs(10))
-			.http2_keep_alive_while_idle(true)
-			.http2_adaptive_window(true)
-			.build()
-			.expect("Failed to build default reqwest client");
-		WebClient { reqwest_client }
-	}
 }
 
 // region:    --- Constructors

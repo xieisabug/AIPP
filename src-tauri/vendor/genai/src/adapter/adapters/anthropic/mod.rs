@@ -6,10 +6,19 @@
 
 // region:    --- Modules
 
+mod ant_model;
+mod ant_reasoning;
+mod ant_reasoning_legacy; // unused, until confident nothing to loss from older way
+
 mod adapter_impl;
+mod adapter_shared;
 mod streamer;
 
 pub use adapter_impl::*;
+pub(in crate::adapter::adapters) use adapter_shared::*;
+// For hosts that wrap the Messages API (e.g., Bedrock Converse's `additionalModelRequestFields`).
+pub(in crate::adapter::adapters) use ant_model::AnthropicModel;
+pub(in crate::adapter::adapters) use ant_reasoning::insert_anthropic_reasoning;
 pub use streamer::*;
 
 // endregion: --- Modules

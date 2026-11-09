@@ -69,7 +69,7 @@ open class RustPlugin : Plugin<Project> {
                     ).apply {
                         group = TASK_GROUP
                         description = "Build dynamic library in $profile mode for $targetArch"
-                        rootDirRel = config.rootDirRel
+                        workingDirectory = project.file(config.rootDirRel).absolutePath
                         target = targetName
                         release = profile == "release"
                     }

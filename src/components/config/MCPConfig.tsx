@@ -33,7 +33,7 @@ import { MCPTemplate } from "../../data/MCPTemplates";
 import { useSkillsMcpValidation, DisableOperationMcpCheckResult, AGENT_MCP_COMMAND } from "../../hooks/useSkillsMcpValidation";
 import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
-import { MOBILE_UNEXECUTABLE_LABEL, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
+import { visibleSearchTools, MOBILE_UNEXECUTABLE_LABEL, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
 
 const MCPConfig: React.FC = () => {
     const isMobilePlatform = useIsMobilePlatform();
@@ -42,14 +42,18 @@ const MCPConfig: React.FC = () => {
     const isMobileLayout = isMobilePlatform || isNarrow;
     const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
     const [selectedServer, setSelectedServer] = useState<MCPServer | null>(null);
-    const [serverTools, setServerTools] = useState<MCPServerTool[]>([]);
+    const [rawServerTools, setServerTools] = useState<MCPServerTool[]>([]);
     const [serverResources, setServerResources] = useState<MCPServerResource[]>([]);
     const [serverPrompts, setServerPrompts] = useState<MCPServerPrompt[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
     // 有搜索输入时才动态加载 pinyin-pro，加载完成后触发重新过滤
     const pinyinReady = usePinyinReady(searchQuery.trim().length > 0);
     // 所有服务器的工具缓存，用于搜索穿透
-    const [allServerTools, setAllServerTools] = useState<Map<number, MCPServerTool[]>>(new Map());
+    const [rawAllServerTools, setAllServerTools] = useState<Map<number, MCPServerTool[]>>(new Map());
+
+    const serverTools = useMemo(() => visibleSearchTools(rawServerTools, selectedServer?.command, isMobilePlatform), [rawServerTools, selectedServer?.command, isMobilePlatform]);
+    const allServerTools = useMemo(() => new Map(Array.from(rawAllServerTools, ([id, tools]) =>
+        [id, visibleSearchTools(tools, mcpServers.find(server => server.id === id)?.command, isMobilePlatform)])), [rawAllServerTools, mcpServers, isMobilePlatform]);
 
     // Dialog states
     const [serverDialogOpen, setServerDialogOpen] = useState(false);

@@ -250,8 +250,9 @@ fn merge_chat_response_metadata(
     existing_metadata_json: Option<&str>,
     usage: Option<&Usage>,
     response_id: Option<&str>,
+    billing: Option<&serde_json::Value>,
 ) -> Option<String> {
-    if usage.is_none() && response_id.and_then(|id| (!id.trim().is_empty()).then_some(id)).is_none()
+    if usage.is_none() && billing.is_none() && response_id.and_then(|id| (!id.trim().is_empty()).then_some(id)).is_none()
     {
         return existing_metadata_json.map(ToOwned::to_owned);
     }
@@ -262,6 +263,9 @@ fn merge_chat_response_metadata(
         map.insert("response_id".to_string(), serde_json::json!(response_id));
     }
 
+    if let Some(billing) = billing.and_then(crate::api::opencode_go::billing_metadata) {
+        map.insert("opencode_go".into(), billing);
+    }
     let Some(usage) = usage else {
         return serde_json::to_string(&serde_json::Value::Object(map)).ok();
     };
@@ -284,9 +288,6 @@ fn merge_chat_response_metadata(
 
     if usage.total_tokens.is_some() || usage.prompt_tokens.is_some() || usage.completion_tokens.is_some() {
         map.insert("usage_source".into(), serde_json::json!("reported"));
-    }
-    if let Some(billing) = crate::api::opencode_go::billing_metadata(usage) {
-        map.insert("opencode_go".into(), billing);
     }
 
     if let Some(value) = thought_tokens {
@@ -1221,7 +1222,6 @@ mod tests {
     #[test]
     fn test_merge_chat_usage_metadata_records_cache_and_reasoning() {
         let usage = Usage {
-            billing: Default::default(),
             prompt_tokens: Some(120),
             prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
                 cache_creation_tokens: Some(5),
@@ -1240,7 +1240,7 @@ mod tests {
         };
 
         let merged =
-            merge_chat_response_metadata(Some(r#"{"existing":true}"#), Some(&usage), None)
+            merge_chat_response_metadata(Some(r#"{"existing":true}"#), Some(&usage), None, None)
                 .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
 
@@ -1258,7 +1258,7 @@ mod tests {
         let existing = r#"{"thought_tokens":12,"cached_input_tokens":30,"cached_read_tokens":30,"cached_write_tokens":5}"#;
 
         let merged =
-            merge_chat_response_metadata(Some(existing), None, Some("resp_123")).unwrap();
+            merge_chat_response_metadata(Some(existing), None, Some("resp_123"), None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
 
         assert_eq!(parsed["response_id"], "resp_123");
@@ -3034,6 +3034,7 @@ async fn attempt_stream_chat(
     let stream_request_start_time = chrono::Utc::now();
 
     ensure_model_execution_current(conversation_db, conversation_id)?;
+    let (chat_options, billing_capture) = crate::api::opencode_go::capture_billing(chat_options.clone());
     let chat_stream_response = match client
         .exec_chat_stream(model_name, chat_request.clone(), Some(&chat_options))
         .await
@@ -3088,7 +3089,7 @@ async fn attempt_stream_chat(
         match stream_result {
             Some(Ok(stream_event)) => {
                 match stream_event {
-                    ChatStreamEvent::Start => {}
+                    ChatStreamEvent::Start | ChatStreamEvent::Heartbeat => {}
                     ChatStreamEvent::Chunk(chunk) => {
                         response_chunk_count += 1;
                         response_char_count += chunk.content.chars().count();
@@ -3413,7 +3414,8 @@ async fn attempt_stream_chat(
                         let captured_response_id = end_event.captured_response_id.clone();
 
                         let received_end = chrono::Utc::now();
-                        let normalized = end_event.captured_usage.take().map(crate::api::opencode_go::normalize_usage);
+                        let billing = billing_capture.lock().expect("billing capture lock").clone();
+                        let normalized = end_event.captured_usage.take().map(|usage| crate::api::opencode_go::normalize_usage(usage, &billing));
                         let usage = normalized.as_ref();
                         let mut captured_binaries: Vec<Binary> = Vec::new();
 
@@ -3745,7 +3747,7 @@ async fn attempt_stream_chat(
                             let output = usage.and_then(|u| u.completion_tokens);
                             let total = usage.and_then(|u| u.total_tokens).or_else(|| input.zip(output).map(|(i, o)| i + o));
                             let tps = output.zip(generation_ms).map(|(n, ms)| f64::from(n) * 1000.0 / ms as f64);
-                            let metadata = merge_chat_response_metadata(None, usage, captured_response_id.as_deref());
+                            let metadata = merge_chat_response_metadata(None, usage, captured_response_id.as_deref(), Some(&billing));
                             let mut patch = metadata_object_from_raw(metadata.as_deref());
                             if let Some(ms) = generation_ms {
                                 patch.insert("generation_duration_ms".into(), ms.into());
@@ -4143,7 +4145,8 @@ pub async fn handle_non_stream_chat(
     // 非流式：强制捕获工具调用，便于将工具以 UI 注释形式插入
     let non_stream_options = chat_options.clone()
         .with_capture_tool_calls(true)
-        .with_capture_reasoning_content(true);
+        .with_capture_reasoning_content(true)
+        .with_capture_raw_body(true);
 
     debug!("non_stream chat_request messages");
     for (i, msg) in chat_request.messages.iter().enumerate() {
@@ -4271,7 +4274,8 @@ pub async fn handle_non_stream_chat(
             let response_binaries = chat_response.content.clone().into_binaries();
 
             // Extract token usage data
-            let normalized = crate::api::opencode_go::normalize_usage(chat_response.usage.clone());
+            let billing = chat_response.captured_raw_body.as_ref().map(crate::api::opencode_go::raw_billing).unwrap_or_default();
+            let normalized = crate::api::opencode_go::normalize_usage(chat_response.usage.clone(), &billing);
             let usage = &normalized;
             let input_tokens = usage.prompt_tokens.unwrap_or(0);
             let output_tokens = usage.completion_tokens.unwrap_or(0);
@@ -4281,7 +4285,12 @@ pub async fn handle_non_stream_chat(
                 chat_response.reasoning_content.as_deref().unwrap_or(""),
                 chat_response.tool_calls().len(),
                 response_binaries.len(),
-                merge_chat_response_metadata(None, Some(usage), chat_response.response_id.as_deref()),
+                merge_chat_response_metadata(
+                    None,
+                    Some(usage),
+                    chat_response.response_id.as_deref(),
+                    Some(&billing),
+                ),
             );
 
             // 现在才创建响应消息（在有实际内容后）

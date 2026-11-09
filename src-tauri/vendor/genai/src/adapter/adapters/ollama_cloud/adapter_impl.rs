@@ -1,5 +1,4 @@
 use crate::Headers;
-use crate::adapter::ModelCapabilities;
 use crate::adapter::adapters::ollama::OllamaAdapter;
 use crate::adapter::adapters::ollama::OllamaRequestParts;
 use crate::adapter::adapters::support::get_api_key;
@@ -7,9 +6,9 @@ use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{ChatOptionsSet, ChatRequest, ChatResponse, ChatStreamResponse};
 use crate::embed::{EmbedOptionsSet, EmbedRequest, EmbedResponse};
 use crate::resolver::{AuthData, Endpoint};
-use crate::webc::WebResponse;
-use crate::{Model, ModelIden, Result, ServiceTarget};
-use reqwest::RequestBuilder;
+use crate::webc::StreamRequest as RequestBuilder;
+use crate::webc::{WebClient, WebResponse};
+use crate::{ModelIden, Result, ServiceTarget};
 use serde_json::json;
 use value_ext::JsonValueExt;
 
@@ -22,53 +21,24 @@ impl OllamaCloudAdapter {
 impl Adapter for OllamaCloudAdapter {
 	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
 
-	fn default_endpoint() -> Endpoint {
+	fn default_endpoint(_kind: AdapterKind) -> Endpoint {
 		const BASE_URL: &str = "https://ollama.com/";
 		Endpoint::from_static(BASE_URL)
 	}
 
-	fn default_auth() -> AuthData {
+	fn default_auth(_kind: AdapterKind) -> AuthData {
 		AuthData::from_env(Self::API_KEY_DEFAULT_ENV_NAME)
 	}
 
-	async fn all_model_names(adapter_kind: AdapterKind, endpoint: Endpoint, auth: AuthData) -> Result<Vec<String>> {
+	async fn all_model_names(
+		adapter_kind: AdapterKind,
+		endpoint: Endpoint,
+		auth: AuthData,
+		web_client: &WebClient,
+	) -> Result<Vec<String>> {
 		let api_key = get_api_key(auth, &ModelIden::new(adapter_kind, ""))?;
 		let headers = Headers::from(vec![("Authorization", format!("Bearer {api_key}"))]);
-		OllamaAdapter::list_model_names(adapter_kind, endpoint, headers).await
-	}
-
-	async fn all_models(
-		kind: AdapterKind,
-		target: ServiceTarget,
-		_web_client: &crate::webc::WebClient,
-	) -> Result<Vec<Model>> {
-		let ids = Self::all_model_names(kind, target.endpoint, target.auth).await?;
-		let mut models = Vec::new();
-
-		for id in ids {
-			let model_name: crate::ModelName = id.clone().into();
-			let mut model = Model::new(model_name, id.clone());
-			let (max_input_tokens, max_output_tokens) = ModelCapabilities::infer_token_limits(kind, &id);
-			let supports_reasoning = ModelCapabilities::supports_reasoning(kind, &id);
-
-			model = model
-				.with_max_input_tokens(max_input_tokens)
-				.with_max_output_tokens(max_output_tokens)
-				.with_streaming(ModelCapabilities::supports_streaming(kind, &id))
-				.with_tool_calls(ModelCapabilities::supports_tool_calls(kind, &id))
-				.with_json_mode(ModelCapabilities::supports_json_mode(kind, &id))
-				.with_reasoning(supports_reasoning)
-				.with_input_modalities(ModelCapabilities::infer_input_modalities(kind, &id))
-				.with_output_modalities(ModelCapabilities::infer_output_modalities(kind, &id));
-
-			if supports_reasoning {
-				model = model.with_reasoning_efforts(ModelCapabilities::infer_reasoning_efforts(kind, &id));
-			}
-
-			models.push(model);
-		}
-
-		Ok(models)
+		OllamaAdapter::list_model_names(adapter_kind, endpoint, headers, web_client).await
 	}
 
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {
@@ -110,7 +80,6 @@ impl Adapter for OllamaCloudAdapter {
 
 		let mut payload = json!({
 			"model": model_name,
-			"messages": messages,
 			"stream": stream,
 		});
 
@@ -118,14 +87,16 @@ impl Adapter for OllamaCloudAdapter {
 			payload.x_insert("options", options)?;
 		}
 
+		// -- Tools (before messages)
 		if let Some(tools) = tools {
 			payload.x_insert("tools", tools)?;
 		}
 
-		if let Some(format) = chat_options.response_format()
-			&& matches!(format, crate::chat::ChatResponseFormat::JsonMode)
-		{
-			payload.x_insert("format", "json")?;
+		// -- Messages (after tools)
+		payload.x_insert("messages", messages)?;
+
+		if let Some(format) = chat_options.response_format() {
+			payload.x_insert("format", OllamaAdapter::response_format_to_format(format))?;
 		}
 
 		let mut headers = Headers::default();

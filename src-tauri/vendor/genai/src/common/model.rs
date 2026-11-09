@@ -266,7 +266,7 @@ impl ReasoningEffortType {
 	/// Convert from ReasoningEffort.
 	pub fn from_reasoning_effort(effort: &ReasoningEffort) -> Self {
 		match effort {
-			ReasoningEffort::None => ReasoningEffortType::Low,
+			ReasoningEffort::Zero => ReasoningEffortType::Low,
 			ReasoningEffort::Minimal => ReasoningEffortType::Low,
 			ReasoningEffort::Low => ReasoningEffortType::Low,
 			ReasoningEffort::Medium => ReasoningEffortType::Medium,
@@ -275,5 +275,37 @@ impl ReasoningEffortType {
 			ReasoningEffort::Max => ReasoningEffortType::High,
 			ReasoningEffort::Budget(_) => ReasoningEffortType::Budget,
 		}
+	}
+}
+
+/// Capability-derived constructors
+impl Model {
+	/// Build a [`Model`] for the given adapter kind, inferring every capability
+	/// from the model id via [`crate::adapter::ModelCapabilities`].
+	///
+	/// This is what adapters without richer provider metadata fall back to.
+	pub fn from_capabilities(adapter_kind: crate::adapter::AdapterKind, id: impl Into<String>) -> Self {
+		use crate::adapter::ModelCapabilities;
+
+		let id = id.into();
+		let (max_input_tokens, max_output_tokens) = ModelCapabilities::infer_token_limits(adapter_kind, &id);
+		let reasoning_efforts = ModelCapabilities::infer_reasoning_efforts(adapter_kind, &id);
+		let input_modalities = ModelCapabilities::infer_input_modalities(adapter_kind, &id);
+		let output_modalities = ModelCapabilities::infer_output_modalities(adapter_kind, &id);
+		let supports_streaming = ModelCapabilities::supports_streaming(adapter_kind, &id);
+		let supports_tool_calls = ModelCapabilities::supports_tool_calls(adapter_kind, &id);
+		let supports_json_mode = ModelCapabilities::supports_json_mode(adapter_kind, &id);
+		let supports_reasoning = ModelCapabilities::supports_reasoning(adapter_kind, &id);
+
+		Self::new(id.clone(), id)
+			.with_max_input_tokens(max_input_tokens)
+			.with_max_output_tokens(max_output_tokens)
+			.with_input_modalities(input_modalities)
+			.with_output_modalities(output_modalities)
+			.with_streaming(supports_streaming)
+			.with_tool_calls(supports_tool_calls)
+			.with_json_mode(supports_json_mode)
+			.with_reasoning_efforts(reasoning_efforts)
+			.with_reasoning(supports_reasoning)
 	}
 }

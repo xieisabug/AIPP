@@ -46,6 +46,12 @@ impl ModelCapabilities {
 		match kind {
 			AdapterKind::OllamaCloud => Some((AdapterKind::Ollama, model_id)),
 			AdapterKind::Vertex => AdapterKind::from_model(model_id).ok().map(|kind| (kind, model_id)),
+			AdapterKind::Copilot | AdapterKind::CopilotResp => {
+				let (_, provider_model_id) = model_id.split_once("::").unwrap_or(("", model_id));
+				AdapterKind::from_model(provider_model_id)
+					.ok()
+					.map(|kind| (kind, provider_model_id))
+			}
 			AdapterKind::GithubCopilot => {
 				let (_, provider_model_id) = model_id.split_once('/').unwrap_or(("", model_id));
 				AdapterKind::from_model(provider_model_id)
@@ -144,7 +150,11 @@ impl ModelCapabilities {
 		match kind {
 			AdapterKind::OpenAI => Some(Self::openai_supports_streaming(model_id)),
 			AdapterKind::OpenAIResp => Some(Self::openai_supports_streaming(model_id)),
-			AdapterKind::OllamaCloud | AdapterKind::Vertex | AdapterKind::GithubCopilot => {
+			AdapterKind::OllamaCloud
+			| AdapterKind::Vertex
+			| AdapterKind::GithubCopilot
+			| AdapterKind::Copilot
+			| AdapterKind::CopilotResp => {
 				let (delegated_kind, delegated_model_id) = Self::delegated_capability_target(kind, model_id)?;
 				Self::provider_supports_streaming(delegated_kind, delegated_model_id)
 			}
@@ -161,9 +171,9 @@ impl ModelCapabilities {
 			| AdapterKind::Zai
 			| AdapterKind::Mimo
 			| AdapterKind::BigModel
-			| AdapterKind::Aliyun
-			| AdapterKind::Copilot
-			| AdapterKind::CopilotResp => Some(true),
+			| AdapterKind::Aliyun => Some(true),
+			// Catch-all: pass-through/OpenAI-compatible providers added upstream default to streaming.
+			_ => Some(true),
 		}
 	}
 
@@ -171,7 +181,11 @@ impl ModelCapabilities {
 		match kind {
 			AdapterKind::OpenAI => Some(Self::openai_supports_json_mode(model_id)),
 			AdapterKind::OpenAIResp => Some(Self::openai_supports_json_mode(model_id)),
-			AdapterKind::OllamaCloud | AdapterKind::Vertex | AdapterKind::GithubCopilot => {
+			AdapterKind::OllamaCloud
+			| AdapterKind::Vertex
+			| AdapterKind::GithubCopilot
+			| AdapterKind::Copilot
+			| AdapterKind::CopilotResp => {
 				let (delegated_kind, delegated_model_id) = Self::delegated_capability_target(kind, model_id)?;
 				Self::provider_supports_json_mode(delegated_kind, delegated_model_id)
 			}
@@ -187,9 +201,9 @@ impl ModelCapabilities {
 			| AdapterKind::Zai
 			| AdapterKind::Mimo
 			| AdapterKind::BigModel
-			| AdapterKind::Aliyun
-			| AdapterKind::Copilot
-			| AdapterKind::CopilotResp => Some(true),
+			| AdapterKind::Aliyun => Some(true),
+			// Catch-all: pass-through/OpenAI-compatible providers added upstream.
+			_ => Some(Self::openai_supports_json_mode(model_id)),
 		}
 	}
 
@@ -197,7 +211,11 @@ impl ModelCapabilities {
 		match kind {
 			AdapterKind::OpenAI => Some(Self::openai_supports_reasoning(model_id)),
 			AdapterKind::OpenAIResp => Some(Self::openai_supports_reasoning(model_id)),
-			AdapterKind::OllamaCloud | AdapterKind::Vertex | AdapterKind::GithubCopilot => {
+			AdapterKind::OllamaCloud
+			| AdapterKind::Vertex
+			| AdapterKind::GithubCopilot
+			| AdapterKind::Copilot
+			| AdapterKind::CopilotResp => {
 				let (delegated_kind, delegated_model_id) = Self::delegated_capability_target(kind, model_id)?;
 				Self::provider_supports_reasoning(delegated_kind, delegated_model_id)
 			}
@@ -225,7 +243,11 @@ impl ModelCapabilities {
 
 	fn provider_input_modalities(kind: AdapterKind, model_id: &str) -> Option<HashSet<Modality>> {
 		match kind {
-			AdapterKind::OllamaCloud | AdapterKind::Vertex | AdapterKind::GithubCopilot => {
+			AdapterKind::OllamaCloud
+			| AdapterKind::Vertex
+			| AdapterKind::GithubCopilot
+			| AdapterKind::Copilot
+			| AdapterKind::CopilotResp => {
 				let (delegated_kind, delegated_model_id) = Self::delegated_capability_target(kind, model_id)?;
 				Self::provider_input_modalities(delegated_kind, delegated_model_id)
 			}
@@ -297,7 +319,11 @@ impl ModelCapabilities {
 
 	fn provider_output_modalities(kind: AdapterKind, model_id: &str) -> Option<HashSet<Modality>> {
 		match kind {
-			AdapterKind::OllamaCloud | AdapterKind::Vertex | AdapterKind::GithubCopilot => {
+			AdapterKind::OllamaCloud
+			| AdapterKind::Vertex
+			| AdapterKind::GithubCopilot
+			| AdapterKind::Copilot
+			| AdapterKind::CopilotResp => {
 				let (delegated_kind, delegated_model_id) = Self::delegated_capability_target(kind, model_id)?;
 				Self::provider_output_modalities(delegated_kind, delegated_model_id)
 			}
@@ -309,7 +335,11 @@ impl ModelCapabilities {
 	fn provider_reasoning_efforts(kind: AdapterKind, model_id: &str) -> Option<Vec<ReasoningEffortType>> {
 		match kind {
 			AdapterKind::OpenAI => Some(Self::openai_infer_reasoning_efforts(model_id)),
-			AdapterKind::OllamaCloud | AdapterKind::Vertex | AdapterKind::GithubCopilot => {
+			AdapterKind::OllamaCloud
+			| AdapterKind::Vertex
+			| AdapterKind::GithubCopilot
+			| AdapterKind::Copilot
+			| AdapterKind::CopilotResp => {
 				let (delegated_kind, delegated_model_id) = Self::delegated_capability_target(kind, model_id)?;
 				Self::provider_reasoning_efforts(delegated_kind, delegated_model_id)
 			}
@@ -378,13 +408,16 @@ impl ModelCapabilities {
 		match kind {
 			AdapterKind::OpenAI => Self::openai_specific_token_limits(model_id),
 			AdapterKind::OpenAIResp => Self::openai_specific_token_limits(model_id),
-			AdapterKind::OllamaCloud | AdapterKind::Vertex | AdapterKind::GithubCopilot => {
+			AdapterKind::OllamaCloud
+			| AdapterKind::Vertex
+			| AdapterKind::GithubCopilot
+			| AdapterKind::Copilot
+			| AdapterKind::CopilotResp => {
 				let (delegated_kind, delegated_model_id) = Self::delegated_capability_target(kind, model_id)?;
 				Self::provider_token_limits(delegated_kind, delegated_model_id)
 			}
 			AdapterKind::Anthropic => Self::anthropic_token_limits(model_id),
 			AdapterKind::Cohere => Self::cohere_token_limits(model_id),
-			AdapterKind::Copilot | AdapterKind::CopilotResp => Self::openai_specific_token_limits(model_id),
 			AdapterKind::DeepSeek => Self::deepseek_token_limits(model_id),
 			AdapterKind::Fireworks => Self::openai_specific_token_limits(model_id),
 			AdapterKind::Gemini => Self::gemini_token_limits(model_id),
@@ -397,6 +430,8 @@ impl ModelCapabilities {
 			AdapterKind::Aliyun => Self::openai_specific_token_limits(model_id),
 			AdapterKind::BigModel => Self::zai_token_limits(model_id),
 			AdapterKind::Zai => Self::zai_token_limits(model_id),
+			// Catch-all: pass-through/OpenAI-compatible providers added upstream.
+			_ => Self::openai_specific_token_limits(model_id),
 		}
 	}
 

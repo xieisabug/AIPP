@@ -1,13 +1,17 @@
 //! This is support implementation of the OpenAI Adapter which can also be called by other OpenAI Adapter Variants
 
-use crate::adapter::adapters::support::get_api_key;
-use crate::adapter::openai::OpenAIAdapter;
+use super::cache_policy::{
+	OpenAiPromptCachePolicy, OpenAiProtocol, openai_prompt_cache_policy, requires_explicit_cache,
+};
+use super::schema::{OpenAiResponseFormatPlan, response_format_plan, tool_parameters_schema};
+use crate::adapter::adapters::openai::OpenAIAdapter;
+use crate::adapter::adapters::support::{get_api_key, is_reasoning_detail};
 use crate::adapter::{AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
-	BinarySource, CacheControl, ChatOptionsSet, ChatRequest, ChatResponseFormat, ChatRole, ContentPart,
-	ReasoningEffort, Usage,
+	BinarySource, CacheControl, ChatOptionsSet, ChatRequest, ChatRole, ContentPart, ReasoningEffort, ToolChoice, Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
+use crate::webc::WebClient;
 use crate::{Error, Headers, Result};
 use crate::{ModelIden, ServiceTarget};
 use serde_json::{Value, json};
@@ -17,11 +21,12 @@ use value_ext::JsonValueExt;
 
 fn insert_openai_reasoning_effort(payload: &mut Value, effort: &ReasoningEffort) -> Result<()> {
 	let keyword = match effort {
-		ReasoningEffort::None => "none",
+		ReasoningEffort::Zero => "none",
 		ReasoningEffort::Low => "low",
 		ReasoningEffort::Medium => "medium",
 		ReasoningEffort::High => "high",
-		ReasoningEffort::XHigh | ReasoningEffort::Max => "xhigh",
+		ReasoningEffort::XHigh => "xhigh",
+		ReasoningEffort::Max => "max",
 		ReasoningEffort::Minimal => "minimal",
 		ReasoningEffort::Budget(_) => return Ok(()),
 	};
@@ -29,6 +34,18 @@ fn insert_openai_reasoning_effort(payload: &mut Value, effort: &ReasoningEffort)
 	payload.x_insert("reasoning_effort", keyword)?;
 
 	Ok(())
+}
+
+fn openai_tool_choice(tool_choice: Option<&ToolChoice>) -> Option<Value> {
+	match tool_choice? {
+		ToolChoice::Auto => Some(json!("auto")),
+		ToolChoice::None => Some(json!("none")),
+		ToolChoice::Required => Some(json!("required")),
+		ToolChoice::Tool { name } => Some(json!({
+			"type": "function",
+			"function": { "name": name }
+		})),
+	}
 }
 
 /// Support functions for other adapters that share OpenAI APIs
@@ -48,7 +65,6 @@ impl OpenAIAdapter {
 		let suffix = match service_type {
 			ServiceType::Chat | ServiceType::ChatStream => "chat/completions",
 			ServiceType::Embed => "embeddings",
-			ServiceType::Models => "models",
 		};
 		let mut full_url = base_url.join(suffix).map_err(|err| {
 			Error::Internal(format!(
@@ -60,53 +76,84 @@ impl OpenAIAdapter {
 	}
 
 	/// Shared OpenAI to_web_request_data for various OpenAI compatible adapters
+	/// NOTE: `messages` is inserted after tool fields to improve prompt-cache utilization.
+	///        See PR 262: https://github.com/jeremychone/rust-genai/pull/262
 	pub(in crate::adapter::adapters) fn util_to_web_request_data(
 		target: ServiceTarget,
 		service_type: ServiceType,
 		chat_req: ChatRequest,
 		options_set: ChatOptionsSet<'_, '_>,
-		custom: Option<ToWebRequestCustom>,
+		custom: Option<ToWebRequestDataOptions>,
 	) -> Result<WebRequestData> {
 		let ServiceTarget { model, auth, endpoint } = target;
 		let (_, model_name) = model.model_name.namespace_and_name();
-		let adapter_kind = model.adapter_kind;
+		let protocol = OpenAiProtocol::ChatCompletions;
+		let prompt_cache_policy =
+			openai_prompt_cache_policy(model.adapter_kind, model_name, &chat_req, &options_set, protocol);
+		let response_format_plan = response_format_plan(&options_set);
 
 		// -- url
 		let url = AdapterDispatcher::get_service_url(&model, service_type, endpoint)?;
 
 		// -- api_key / headers
-		let api_key = get_api_key(auth, &model)?;
-		let headers = Headers::from(("Authorization".to_string(), format!("Bearer {api_key}")));
+		// NOTE: useful for local providers
+		let allow_anonymous = matches!(auth, AuthData::None) && custom.as_ref().is_some_and(|c| c.allow_no_api_key);
+
+		let headers = if !allow_anonymous {
+			let api_key = get_api_key(auth, &model)?;
+			Headers::from(("Authorization".to_string(), format!("Bearer {api_key}")))
+		} else {
+			Headers::default()
+		};
 
 		let stream = matches!(service_type, ServiceType::ChatStream);
+		let managed_body_thinking = custom.as_ref().is_some_and(|custom| custom.managed_body_thinking);
 
 		// -- compute reasoning_effort and eventual trimmed model_name
 		// For now, just for openai AdapterKind
-		let (reasoning_effort, model_name): (Option<ReasoningEffort>, &str) =
-			if matches!(adapter_kind, AdapterKind::OpenAI) {
-				let (reasoning_effort, model_name) = options_set
-					.reasoning_effort()
-					.cloned()
-					.map(|v| (Some(v), model_name))
-					.unwrap_or_else(|| ReasoningEffort::from_model_name(model_name));
+		let (reasoning_effort, model_name): (Option<ReasoningEffort>, &str) = {
+			let (reasoning_effort, model_name) = options_set
+				.reasoning_effort()
+				.cloned()
+				.map(|v| (Some(v), model_name))
+				.unwrap_or_else(|| ReasoningEffort::from_model_name(model_name));
 
-				(reasoning_effort, model_name)
-			} else {
-				(None, model_name)
-			};
+			(reasoning_effort, model_name)
+		};
 
 		// -- Build the basic payload
 
-		let OpenAIRequestParts { messages, tools } = Self::into_openai_request_parts(&model, chat_req)?;
+		let OpenAIRequestParts { messages, tools } =
+			Self::into_openai_request_parts(&model, chat_req, prompt_cache_policy.as_ref())?;
 		let mut payload = json!({
 			"model": model_name,
-			"messages": messages,
 			"stream": stream
 		});
 
+		if let Some(policy) = prompt_cache_policy.as_ref() {
+			let mut prompt_cache_options = json!({"mode": "explicit"});
+			if let Some(ttl) = policy.ttl {
+				prompt_cache_options["ttl"] = json!(ttl);
+			}
+			payload.x_insert("prompt_cache_options", prompt_cache_options)?;
+		}
+
 		// -- Set reasoning effort
-		if let Some(reasoning_effort) = reasoning_effort {
-			insert_openai_reasoning_effort(&mut payload, &reasoning_effort)?;
+		if let Some(reasoning_effort) = reasoning_effort.as_ref() {
+			if managed_body_thinking {
+				let thinking_type = if matches!(reasoning_effort, ReasoningEffort::Zero) {
+					"disabled"
+				} else {
+					"enabled"
+				};
+				payload.x_insert("thinking", json!({"type": thinking_type}))?;
+
+				if !matches!(reasoning_effort, ReasoningEffort::Zero) {
+					insert_openai_reasoning_effort(&mut payload, reasoning_effort)?;
+				}
+			} else {
+				insert_openai_reasoning_effort(&mut payload, reasoning_effort)?;
+			}
 		}
 
 		// -- Set verbosity
@@ -116,30 +163,29 @@ impl OpenAIAdapter {
 			payload.x_insert("verbosity", keyword)?;
 		}
 
-		// -- Tools
+		// -- Tools (before messages)
 		if let Some(tools) = tools {
 			payload.x_insert("/tools", tools)?;
 		}
+		if let Some(tool_choice) = openai_tool_choice(options_set.tool_choice()) {
+			payload.x_insert("tool_choice", tool_choice)?;
+		}
+
+		// -- Messages (after tools)
+		payload.x_insert("messages", messages)?;
 
 		// -- Add options
-		let response_format = if let Some(response_format) = options_set.response_format() {
-			match response_format {
-				ChatResponseFormat::JsonMode => Some(json!({"type": "json_object"})),
-				ChatResponseFormat::JsonSpec(st_json) => {
-					// "type": "json_schema", "json_schema": {...}
-					Some(json!({
-						"type": "json_schema",
-						"json_schema": {
-							"name": st_json.name.clone(),
-							"strict": true,
-							// TODO: add description
-							"schema": st_json.schema_with_additional_properties_false(),
-						}
-					}))
+		let response_format = match response_format_plan {
+			OpenAiResponseFormatPlan::None => None,
+			OpenAiResponseFormatPlan::JsonMode => Some(json!({"type": "json_object"})),
+			OpenAiResponseFormatPlan::JsonSchema { name, schema } => Some(json!({
+				"type": "json_schema",
+				"json_schema": {
+					"name": name,
+					"strict": true,
+					"schema": schema,
 				}
-			}
-		} else {
-			None
+			})),
 		};
 
 		if let Some(response_format) = response_format {
@@ -159,8 +205,9 @@ impl OpenAIAdapter {
 			payload.x_insert("stop", options_set.stop_sequences())?;
 		}
 
-		// GPT-5.x and o-series models require "max_completion_tokens" instead of "max_tokens"
+		// GPT-5.x, GPT-6.x and o-series models require "max_completion_tokens" instead of "max_tokens"
 		let max_tokens_key = if model_name.starts_with("gpt-5")
+			|| model_name.starts_with("gpt-6")
 			|| model_name.starts_with("o1")
 			|| model_name.starts_with("o3")
 			|| model_name.starts_with("o4")
@@ -180,7 +227,13 @@ impl OpenAIAdapter {
 			payload.x_insert("top_p", top_p)?;
 		}
 		if let Some(seed) = options_set.seed() {
-			payload.x_insert("seed", seed)?;
+			// Mistral names it `random_seed` and 422s on an unknown `seed`.
+			let seed_key = if matches!(model.adapter_kind, AdapterKind::Mistral) {
+				"random_seed"
+			} else {
+				"seed"
+			};
+			payload.x_insert(seed_key, seed)?;
 		}
 		if let Some(service_tier) = options_set.service_tier()
 			&& let Some(keyword) = service_tier.as_keyword()
@@ -192,7 +245,9 @@ impl OpenAIAdapter {
 		if let Some(prompt_cache_key) = options_set.prompt_cache_key() {
 			payload.x_insert("prompt_cache_key", prompt_cache_key)?;
 		}
-		if let Some(cache_control) = options_set.cache_control() {
+		if !requires_explicit_cache(model_name)
+			&& let Some(cache_control) = options_set.cache_control()
+		{
 			let prompt_cache_retention = match cache_control {
 				CacheControl::Memory | CacheControl::Ephemeral => Some("in_memory"),
 				CacheControl::Ephemeral24h => Some("24h"),
@@ -203,11 +258,21 @@ impl OpenAIAdapter {
 			}
 		}
 
+		// -- Provider-specific payload extension
+		// Merged last so callers can intentionally override previously set fields.
+		if let Some(extra_body) = options_set.extra_body() {
+			payload.x_merge(extra_body.clone())?;
+		}
+
 		Ok(WebRequestData { url, headers, payload })
 	}
 
 	/// Note: Needs to be called from super::streamer as well
 	pub(super) fn into_usage(adapter: AdapterKind, usage_value: Value) -> Usage {
+		if usage_value.is_null() {
+			return Usage::default();
+		}
+
 		// NOTE: here we make sure we do not fail since we do not want to break a response because usage parsing fail
 		let usage = serde_json::from_value(usage_value).map_err(|err| {
 			error!("Fail to deserialize usage. Cause: {err}");
@@ -236,7 +301,11 @@ impl OpenAIAdapter {
 	/// Takes the genai ChatMessages and builds the OpenAIChatRequestParts
 	/// - `genai::ChatRequest.system`, if present, is added as the first message with role 'system'.
 	/// - All messages get added with the corresponding roles (tools are not supported for now)
-	fn into_openai_request_parts(_model_iden: &ModelIden, chat_req: ChatRequest) -> Result<OpenAIRequestParts> {
+	fn into_openai_request_parts(
+		model_iden: &ModelIden,
+		chat_req: ChatRequest,
+		cache_policy: Option<&OpenAiPromptCachePolicy>,
+	) -> Result<OpenAIRequestParts> {
 		let mut messages: Vec<Value> = Vec::new();
 
 		// -- Process the system
@@ -246,12 +315,25 @@ impl OpenAIAdapter {
 
 		// -- Process the messages
 		for msg in chat_req.messages {
+			let cache_controlled = cache_policy.is_some()
+				&& msg
+					.options
+					.as_ref()
+					.and_then(|options| options.cache_control.as_ref())
+					.is_some();
+
 			// Note: Will handle more types later
 			match msg.role {
 				// For now, system and tool messages go to the system
 				ChatRole::System => {
 					if let Some(content) = msg.content.into_joined_texts() {
-						messages.push(json!({"role": "system", "content": content}))
+						if cache_controlled {
+							let mut values = vec![json!({"type": "text", "text": content})];
+							apply_chat_cache_breakpoint(model_iden, &mut values, "message")?;
+							messages.push(json!({"role": "system", "content": values}));
+						} else {
+							messages.push(json!({"role": "system", "content": content}))
+						}
 					}
 					// TODO: Probably need to warn if it is a ToolCalls type of content
 				}
@@ -259,7 +341,7 @@ impl OpenAIAdapter {
 				// User - For now support Text and Binary
 				ChatRole::User => {
 					// -- If we have only text, then, we jjust returned the joined_texts
-					if msg.content.is_text_only() {
+					if msg.content.is_text_only() && !cache_controlled {
 						// NOTE: for now, if no content, just return empty string (respect current logic)
 						let content = json!(msg.content.joined_texts().unwrap_or_else(String::new));
 						messages.push(json! ({"role": "user", "content": content}));
@@ -301,6 +383,11 @@ impl OpenAIAdapter {
 									} else if is_image {
 										let image_url = binary.into_url();
 										values.push(json!({"type": "image_url", "image_url": {"url": image_url}}));
+									} else if binary.is_video() {
+										// OpenAI-compatible providers that support video (e.g. Alibaba qwen)
+										// accept it as a `video_url` content part, symmetric to `image_url`.
+										let video_url = binary.into_url();
+										values.push(json!({"type": "video_url", "video_url": {"url": video_url}}));
 									} else if matches!(&binary.source, BinarySource::Url(_)) {
 										// TODO: Need to return error
 										warn!("OpenAI doesn't support file from URL, need to handle it gracefully");
@@ -327,6 +414,9 @@ impl OpenAIAdapter {
 								ContentPart::Custom(_) => {}
 							}
 						}
+						if cache_controlled {
+							apply_chat_cache_breakpoint(model_iden, &mut values, "message")?;
+						}
 						messages.push(json! ({"role": "user", "content": values}));
 					}
 				}
@@ -336,6 +426,7 @@ impl OpenAIAdapter {
 					let mut texts: Vec<String> = Vec::new();
 					let mut tool_calls: Vec<Value> = Vec::new();
 					let mut reasoning_parts: Vec<String> = Vec::new();
+					let mut reasoning_details: Vec<Value> = Vec::new();
 					for part in msg.content {
 						match part {
 							ContentPart::Text(text) => texts.push(text),
@@ -357,12 +448,31 @@ impl OpenAIAdapter {
 							ContentPart::Binary(_) => (),
 							ContentPart::ToolResponse(_) => (),
 							ContentPart::ThoughtSignature(_) => {}
-							// Custom are ignored for this logic
+							// OpenRouter's reasoning blocks, captured verbatim by the response path,
+							// go back verbatim: a signed or encrypted block cannot be rebuilt from
+							// the plaintext, and the gateway requires the original sequence. Blocks
+							// from another adapter stay behind: strict providers refuse the field
+							// (Groq with a 400, Mistral with a 422).
+							ContentPart::Custom(custom) if is_reasoning_detail(&custom) => {
+								if custom.adapter_kind().is_none_or(|kind| kind == model_iden.adapter_kind) {
+									reasoning_details.push(custom.data)
+								}
+							}
+							// Other Custom parts are ignored for this logic
 							ContentPart::Custom(_) => {}
 						}
 					}
-					let content = texts.join("\n\n");
-					let mut message = json!({"role": "assistant", "content": content});
+					let mut message = if cache_controlled {
+						let mut values = texts
+							.into_iter()
+							.map(|text| json!({"type": "text", "text": text}))
+							.collect::<Vec<Value>>();
+						apply_chat_cache_breakpoint(model_iden, &mut values, "message")?;
+						json!({"role": "assistant", "content": values})
+					} else {
+						let content = texts.join("\n\n");
+						json!({"role": "assistant", "content": content})
+					};
 					if !tool_calls.is_empty() {
 						message.x_insert("tool_calls", tool_calls)?;
 					}
@@ -370,7 +480,20 @@ impl OpenAIAdapter {
 					// Note: In practice there is at most one ReasoningContent part per message,
 					//       but we join defensively in case multiple parts are present.
 					if !reasoning_parts.is_empty() {
-						message.x_insert("reasoning_content", reasoning_parts.join("\n"))?;
+						if matches!(model_iden.adapter_kind, AdapterKind::Mistral) {
+							// Mistral rejects a `reasoning_content` field (422, extra fields are
+							// forbidden) and takes the reasoning back the way it sent it: as a
+							// `thinking` chunk leading the content.
+							prepend_mistral_thinking(&mut message, reasoning_parts.join("\n"));
+						} else {
+							message.x_insert("reasoning_content", reasoning_parts.join("\n"))?;
+						}
+					}
+					// Echo reasoning_details back for OpenRouter, which needs the provider's
+					// signed/encrypted blocks — not just the plaintext — to keep a model's
+					// continuity across a tool round trip. Both fields may be present at once.
+					if !reasoning_details.is_empty() {
+						message.x_insert("reasoning_details", reasoning_details)?;
 					}
 					messages.push(message);
 				}
@@ -398,21 +521,7 @@ impl OpenAIAdapter {
 				.into_iter()
 				.map(|tool| {
 					let strict = tool.strict.unwrap_or(false);
-					let mut parameters = tool.schema;
-
-					// When strict mode is enabled, OpenAI requires `additionalProperties: false`
-					// on every object node in the schema.
-					if strict && let Some(ref mut schema_val) = parameters {
-						schema_val.x_walk(|parent_map, prop_name| {
-							if prop_name == "type" {
-								let typ = parent_map.get("type").and_then(|v| v.as_str()).unwrap_or("");
-								if typ == "object" {
-									parent_map.insert("additionalProperties".to_string(), false.into());
-								}
-							}
-							true
-						});
-					}
+					let parameters = tool_parameters_schema(tool.schema, strict);
 
 					json!({
 						"type": "function",
@@ -434,23 +543,29 @@ impl OpenAIAdapter {
 		kind: AdapterKind,
 		endpoint: Endpoint,
 		auth: AuthData,
+		web_client: &WebClient,
 	) -> Result<Vec<String>> {
 		// -- url
 		let base_url = endpoint.base_url();
 		let url = format!("{base_url}models");
 
 		// -- auth / headers
+		// NOTE: In this case, we accept it if the API key is not defined, and let the provider complain.
+		//       This is compared to web request data that requires it before the request, except if the options say otherwise.
+		//       Will need to align at some point.
 		let api_key = auth.single_key_value().ok();
 		let headers = api_key
 			.map(|api_key| Headers::from(("Authorization".to_string(), format!("Bearer {api_key}"))))
 			.unwrap_or_default();
 
 		// -- Exec request
-		let web_c = crate::webc::WebClient::default();
-		let mut res = web_c.do_get(&url, &headers).await.map_err(|webc_error| Error::WebAdapterCall {
-			adapter_kind: kind,
-			webc_error,
-		})?;
+		let mut res = web_client
+			.do_get(&url, &headers)
+			.await
+			.map_err(|webc_error| Error::WebAdapterCall {
+				adapter_kind: kind,
+				webc_error,
+			})?;
 
 		// -- Format result
 		let mut models: Vec<String> = Vec::new();
@@ -471,8 +586,37 @@ impl OpenAIAdapter {
 
 /// Custom OpenAI structure for Adapters to use to customize
 /// the default [`OpenAIAdapter::util_to_web_request_data`]
-pub struct ToWebRequestCustom {
+///
+/// These options are supplied by adapter implementations to describe
+/// provider-specific request-body behavior. They are not general chat
+/// settings, and each field is opt-in.
+#[derive(Default)]
+pub struct ToWebRequestDataOptions {
+	/// Optional fallback for providers that requires max tokens.
+	///
+	/// The Fireworks adapter uses this only when no effective `max_tokens` option
+	/// was supplied. Other adapter paths leave this fallback unset.
 	pub default_max_tokens: Option<u32>,
+
+	/// Allows a provider request to be built without an API key.
+	///
+	/// When this is true and authentication is `AuthData::None`, the shared
+	/// builder omits the `Authorization` header instead of requiring a key.
+	/// This is intended for local or otherwise anonymous OpenAI-compatible
+	/// endpoints. It affects only adapter paths that explicitly enable it and
+	/// remains false for normal remote providers.
+	pub allow_no_api_key: bool,
+
+	/// Enables provider-specific `thinking.type` serialization coordinated with `reasoning_effort`.
+	///
+	/// `DeepSeekAdapter` is currently the only adapter that opts in. Its
+	/// OpenAI-compatible endpoint receives `thinking.type = "disabled"` for
+	/// explicit zero effort, or `"enabled"` for non-zero effort, while the
+	/// existing reasoning-effort serialization is retained where supported.
+	/// `Budget(_)` continues to follow the existing serializer behavior and
+	/// does not become a keyword value. Other OpenAI-compatible adapters leave
+	/// this false, so their payloads do not gain a `thinking` field.
+	pub managed_body_thinking: bool,
 }
 
 // region:    --- Support
@@ -482,65 +626,73 @@ struct OpenAIRequestParts {
 	tools: Option<Vec<Value>>,
 }
 
+fn apply_chat_cache_breakpoint(_model_iden: &ModelIden, content: &mut [Value], _scope: &'static str) -> Result<()> {
+	let Some(content_block) = content.iter_mut().rev().find(|value| {
+		matches!(
+			value.get("type").and_then(Value::as_str),
+			Some("text" | "image_url" | "input_audio" | "file" | "refusal")
+		)
+	}) else {
+		return Ok(());
+	};
+
+	content_block.x_insert("prompt_cache_breakpoint", json!({"mode": "explicit"}))?;
+	Ok(())
+}
+
 // endregion: --- Support
 
 // region:    --- Tests
 
 #[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::adapter::AdapterKind;
-	use crate::chat::{ChatMessage, ContentPart, MessageContent, ToolCall};
-
-	fn test_model() -> ModelIden {
-		ModelIden::new(AdapterKind::OpenAI, "test-model")
-	}
-
-	/// When an assistant message carries reasoning_content, it must appear
-	/// in the serialized JSON so providers that require it (Kimi, DeepSeek)
-	/// don't reject the request.
-	#[test]
-	fn test_reasoning_content_serialized_on_assistant_message() {
-		let tool_call = ToolCall {
-			call_id: "call_1".to_string(),
-			fn_name: "get_weather".to_string(),
-			fn_arguments: serde_json::json!({"city": "Paris"}),
-			thought_signatures: None,
-		};
-
-		let assistant_msg = ChatMessage::assistant(MessageContent::from_parts(vec![
-			ContentPart::Text("Let me check.".to_string()),
-			ContentPart::ToolCall(tool_call),
-		]))
-		.with_reasoning_content(Some("I should look up the weather.".to_string()));
-
-		let chat_req = ChatRequest::new(vec![ChatMessage::user("What's the weather in Paris?"), assistant_msg]);
-
-		let parts = OpenAIAdapter::into_openai_request_parts(&test_model(), chat_req).expect("should serialize");
-
-		// The assistant message is the second message (after user)
-		let assistant_json = &parts.messages[1];
-		assert_eq!(assistant_json["role"], "assistant");
-		assert_eq!(
-			assistant_json["reasoning_content"], "I should look up the weather.",
-			"reasoning_content should be present in serialized assistant message"
-		);
-	}
-
-	/// When reasoning_content is None, the field should not appear in the JSON.
-	#[test]
-	fn test_no_reasoning_content_when_absent() {
-		let chat_req = ChatRequest::new(vec![ChatMessage::user("Hello"), ChatMessage::assistant("Hi there!")]);
-
-		let parts = OpenAIAdapter::into_openai_request_parts(&test_model(), chat_req).expect("should serialize");
-
-		let assistant_json = &parts.messages[1];
-		assert_eq!(assistant_json["role"], "assistant");
-		assert!(
-			assistant_json.get("reasoning_content").is_none(),
-			"reasoning_content should be absent when not set"
-		);
-	}
-}
+#[path = "adapter_shared_tests.rs"]
+// The shared builder test uses neutral model names because this checks the
+// shared reasoning suffix parser, not GPT-specific request behavior.
+mod tests;
 
 // endregion: --- Tests
+
+/// Turn an assistant message's `content` into Mistral's chunk array with a
+/// `thinking` chunk first. A plain string becomes a `text` chunk; an empty one
+/// (a tool-call-only turn) is dropped.
+fn prepend_mistral_thinking(message: &mut Value, reasoning: String) {
+	let thinking = json!({"type": "thinking", "thinking": [{"type": "text", "text": reasoning}]});
+	let mut chunks = vec![thinking];
+	match message.get_mut("content").map(Value::take) {
+		Some(Value::String(text)) if !text.is_empty() => chunks.push(json!({"type": "text", "text": text})),
+		Some(Value::Array(values)) => chunks.extend(values),
+		_ => {}
+	}
+	message["content"] = Value::Array(chunks);
+}
+
+/// Split a chunked `content` array — Mistral's reasoning-model shape,
+/// `[{"type":"thinking","thinking":[{"type":"text","text":…}]}, {"type":"text","text":…}]` —
+/// into `(text, reasoning)`. Either side is `None` when no chunk of that kind had text.
+pub(super) fn split_content_chunks(chunks: &[Value]) -> (Option<String>, Option<String>) {
+	let mut text = String::new();
+	let mut reasoning = String::new();
+	for chunk in chunks {
+		match chunk.get("type").and_then(Value::as_str) {
+			Some("text") => {
+				if let Some(t) = chunk.get("text").and_then(Value::as_str) {
+					text.push_str(t);
+				}
+			}
+			Some("thinking") => match chunk.get("thinking") {
+				Some(Value::Array(inner)) => {
+					for part in inner {
+						if let Some(t) = part.get("text").and_then(Value::as_str) {
+							reasoning.push_str(t);
+						}
+					}
+				}
+				Some(Value::String(t)) => reasoning.push_str(t),
+				_ => {}
+			},
+			_ => {}
+		}
+	}
+	let non_empty = |s: String| (!s.is_empty()).then_some(s);
+	(non_empty(text), non_empty(reasoning))
+}

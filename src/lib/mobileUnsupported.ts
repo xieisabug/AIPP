@@ -62,6 +62,9 @@ export const MOBILE_UNSUPPORTED_FEATURES: ReadonlySet<MobileUnsupportedFeature> 
  * 移动端配置界面隐藏这些字段，保留搜索引擎等普通配置。
  */
 export const BROWSER_SEARCH_ENV_KEYS: ReadonlySet<string> = new Set([
+    "SEARCH_ENGINE",
+    "PROXY_SERVER",
+    "KAGI_SESSION_URL",
     "USER_DATA_DIR",
     "HEADLESS",
     "WAIT_SELECTORS",
@@ -175,4 +178,13 @@ export function isMobileUnexecutableBuiltinTool(
     if (!command) return false
     const key = command.trim().split(/\s+/)[0]
     return MOBILE_UNEXECUTABLE_BUILTIN_TOOLS[key]?.has(toolName) ?? false
+}
+
+
+/** Presentation-only filtering; never changes persisted desktop tool settings. */
+export function visibleSearchTools<T extends { name?: string; tool_name?: string }>(
+    tools: T[], command: string | null | undefined, isMobilePlatform: boolean,
+): T[] {
+    if (!isMobilePlatform || command?.trim().split(/\s+/)[0] !== "aipp:search") return tools;
+    return tools.filter(tool => !isMobileUnexecutableBuiltinTool(command, tool.tool_name ?? tool.name ?? ""));
 }

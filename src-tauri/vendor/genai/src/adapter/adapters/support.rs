@@ -2,8 +2,9 @@
 //! It should be private to the `crate::adapter::adapters` module.
 
 use crate::ModelIden;
-use crate::chat::{ChatOptionsSet, Usage};
+use crate::chat::{ChatOptionsSet, FrameCtx, Usage};
 use crate::resolver::AuthData;
+use crate::webc::FrameTap;
 use crate::{Error, Result};
 
 pub fn get_api_key(auth: AuthData, model: &ModelIden) -> Result<String> {
@@ -11,6 +12,12 @@ pub fn get_api_key(auth: AuthData, model: &ModelIden) -> Result<String> {
 		model_iden: model.clone(),
 		resolver_error,
 	})
+}
+
+/// Builds the tap that feeds a user `ChatFrameSink`, when one is configured.
+pub fn new_frame_tap(model_iden: &ModelIden, options_set: &ChatOptionsSet<'_, '_>) -> Option<FrameTap> {
+	let sink = options_set.raw_frame_sink()?;
+	Some(FrameTap::new(sink, FrameCtx::new(model_iden.clone())))
 }
 
 // region:    --- StreamerChatOptions
@@ -48,6 +55,22 @@ pub struct StreamerCapturedData {
 	pub reasoning_content: Option<String>,
 	pub tool_calls: Option<Vec<crate::chat::ToolCall>>,
 	pub thought_signatures: Option<Vec<String>>,
+	/// Non-text structured content (e.g. generated images) captured at stream end.
+	pub content_parts: Option<Vec<crate::chat::ContentPart>>,
 }
 
 // endregion: --- Streamer Captured Data
+
+/// Is this `Custom` part one of OpenRouter's `reasoning_details` entries
+/// (`reasoning.text`, `reasoning.encrypted`, `reasoning.summary`, …)?
+pub fn is_reasoning_detail(custom: &crate::chat::CustomPart) -> bool {
+	custom.typ().is_some_and(|typ| typ.starts_with("reasoning."))
+}
+
+/// Legacy endpoint defaults. Explicit provider/target configuration takes precedence.
+pub fn endpoint_from_env(name: &str, fallback: &'static str) -> crate::resolver::Endpoint {
+	match std::env::var(name).ok().filter(|value| !value.trim().is_empty()) {
+		Some(value) => crate::resolver::Endpoint::from_owned(format!("{}/", value.trim().trim_end_matches('/'))),
+		None => crate::resolver::Endpoint::from_static(fallback),
+	}
+}

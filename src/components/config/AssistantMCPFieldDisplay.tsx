@@ -1,3 +1,5 @@
+import { useIsMobilePlatform } from "@/hooks/use-platform";
+import { visibleSearchTools } from "@/lib/mobileUnsupported";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import React, { useCallback, useState } from 'react';
 import { invoke } from "@tauri-apps/api/core";
@@ -23,6 +25,7 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
     onConfigChange,
     navigateTo
 }) => {
+    const isMobilePlatform = useIsMobilePlatform();
     const [mcpSummary, setMcpSummary] = useState<MCPSummary>({
         totalServers: 0,
         enabledServers: 0,
@@ -40,7 +43,7 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
             setError(null);
 
             // 使用新的接口一次性获取所有服务器和工具信息
-            const serversWithTools = await invoke<{id: number, name: string, is_enabled: boolean, tools: {id: number, name: string, is_enabled: boolean, is_auto_run: boolean}[]}[]>(
+            const serversWithTools = await invoke<{id: number, command?: string, name: string, is_enabled: boolean, tools: {id: number, name: string, is_enabled: boolean, is_auto_run: boolean}[]}[]>(
                 'get_assistant_mcp_servers_with_tools',
                 { assistantId }
             );
@@ -53,10 +56,11 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
             let enabledTools = 0;
 
             for (const server of serversWithTools) {
-                totalTools += server.tools.length;
+                const tools = visibleSearchTools(server.tools, server.command, isMobilePlatform);
+                totalTools += tools.length;
                 // 只有服务器启用时，工具才算有效启用
                 if (server.is_enabled) {
-                    enabledTools += server.tools.filter(tool => tool.is_enabled).length;
+                    enabledTools += tools.filter(tool => tool.is_enabled).length;
                 }
             }
 
@@ -73,11 +77,11 @@ const AssistantMCPFieldDisplay: React.FC<AssistantMCPFieldDisplayProps> = ({
         } finally {
             if (isCurrent()) setLoading(false);
         }
-    }, [assistantId]);
+    }, [assistantId, isMobilePlatform]);
 
     useDataRefresh({
         events: ["assistant_list_changed", "mcp_state_changed"],
-        identity: assistantId,
+        identity: `${assistantId}:${isMobilePlatform}`,
         initial: true,
         refresh: async (isCurrent) => { await fetchMCPSummary(isCurrent); },
     });

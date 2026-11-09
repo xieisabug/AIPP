@@ -5,7 +5,22 @@
 //!
 //! NOTE: This might be removed at some point as it may not be needed, and we could go directly to the GenAI stream.
 
-use crate::chat::{ContentPart, StopReason, Usage};
+use crate::chat::{CustomPart, StopReason, Usage};
+
+/// One provider reasoning block, in original block order.
+///
+/// This remains internal so providers can preserve block pairing without
+/// flattening multiple reasoning blocks into a single string.
+#[derive(Debug)]
+pub enum InterStreamThoughtBlock {
+	/// A reasoning block with its opaque continuation signature.
+	Signed {
+		reasoning_content: Option<String>,
+		signature: String,
+	},
+	/// A provider-native block replayed as is (e.g. Anthropic `redacted_thinking`).
+	Custom(CustomPart),
+}
 
 #[derive(Debug, Default)]
 pub struct InterStreamEnd {
@@ -18,17 +33,21 @@ pub struct InterStreamEnd {
 	// When `ChatOptions..capture_content == true`
 	pub captured_text_content: Option<String>,
 
-	// When the provider returns final structured content (e.g. images/binary) at stream end.
-	pub captured_content_parts: Option<Vec<ContentPart>>,
-
 	// When `ChatOptions..capture_reasoning_content == true`
 	pub captured_reasoning_content: Option<String>,
 
 	// When `ChatOptions..capture_tool_calls == true`
 	pub captured_tool_calls: Option<Vec<crate::chat::ToolCall>>,
 
-	// When `ChatOptions..capture_thought_signatures == true` (implied or explicit)
+	/// When the provider returns final structured content (e.g. generated images/binary)
+	/// at stream end. Adapters merge these into [`crate::chat::StreamEnd::captured_content`].
+	pub captured_content_parts: Option<Vec<crate::chat::ContentPart>>,
+
+	// Provider continuation metadata captured whenever the provider emits it.
 	pub captured_thought_signatures: Option<Vec<String>>,
+
+	// Paired provider reasoning/signature blocks and custom blocks in original block order.
+	pub captured_thought_blocks: Option<Vec<InterStreamThoughtBlock>>,
 
 	// Response ID for stateful sessions (OpenAI Responses API).
 	pub captured_response_id: Option<String>,
@@ -42,5 +61,6 @@ pub enum InterStreamEvent {
 	ReasoningChunk(String),
 	ThoughtSignatureChunk(String),
 	ToolCallChunk(crate::chat::ToolCall),
+	Heartbeat,
 	End(InterStreamEnd),
 }

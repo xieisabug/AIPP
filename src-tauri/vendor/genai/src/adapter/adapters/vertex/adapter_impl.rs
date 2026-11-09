@@ -1,14 +1,13 @@
-use crate::adapter::ModelCapabilities;
+use crate::adapter::adapters::anthropic::AnthropicAdapter;
+use crate::adapter::adapters::gemini::GeminiAdapter;
 use crate::adapter::adapters::support::get_api_key;
-use crate::adapter::anthropic::{AnthropicAdapter, AnthropicRequestParts};
-use crate::adapter::gemini::GeminiAdapter;
 use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{ChatOptionsSet, ChatRequest, ChatResponse, ChatStreamResponse};
 use crate::resolver::{AuthData, Endpoint};
-use crate::webc::WebResponse;
-use crate::{Error, Headers, Model, ModelIden, Result, ServiceTarget};
-use reqwest::RequestBuilder;
-use serde_json::json;
+use crate::webc::StreamRequest as RequestBuilder;
+use crate::webc::{WebClient, WebResponse};
+use crate::{Error, Headers, ModelIden, Result, ServiceTarget};
+use serde_json::Value;
 use tracing::warn;
 use value_ext::JsonValueExt;
 
@@ -55,7 +54,7 @@ impl VertexPublisher {
 impl Adapter for VertexAdapter {
 	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
 
-	fn default_endpoint() -> Endpoint {
+	fn default_endpoint(_kind: AdapterKind) -> Endpoint {
 		let project_id = std::env::var("VERTEX_PROJECT_ID").unwrap_or_else(|_| {
 			warn!("VERTEX_PROJECT_ID env var is not set; Vertex AI requests will use a malformed URL");
 			String::new()
@@ -70,69 +69,31 @@ impl Adapter for VertexAdapter {
 		};
 		Endpoint::from_owned(base_url)
 	}
-	fn default_auth() -> AuthData {
+	fn default_auth(_kind: AdapterKind) -> AuthData {
 		match Self::DEFAULT_API_KEY_ENV_NAME {
 			Some(env_name) => AuthData::from_env(env_name),
 			None => AuthData::None,
 		}
 	}
 
-	async fn all_model_names(_kind: AdapterKind, _endpoint: Endpoint, _auth: AuthData) -> Result<Vec<String>> {
+	async fn all_model_names(
+		_kind: AdapterKind,
+		_endpoint: Endpoint,
+		_auth: AuthData,
+		_web_client: &WebClient,
+	) -> Result<Vec<String>> {
 		Ok(vec![
-			"gemini-2.5-pro".to_string(),
-			"gemini-2.5-flash".to_string(),
-			"gemini-2.5-flash-lite".to_string(),
+			"gemini-3.8-flash".to_string(),
 			"claude-sonnet-4-6".to_string(),
 			"claude-opus-4-6".to_string(),
 			"claude-haiku-4-5".to_string(),
 		])
 	}
 
-	async fn all_models(
-		kind: AdapterKind,
-		target: ServiceTarget,
-		_web_client: &crate::webc::WebClient,
-	) -> Result<Vec<Model>> {
-		let ids = Self::all_model_names(kind, target.endpoint, target.auth).await?;
-		let mut models = Vec::new();
-
-		for id in ids {
-			let model_name: crate::ModelName = id.clone().into();
-			let mut model = Model::new(model_name, id.clone());
-			let (max_input_tokens, max_output_tokens) = ModelCapabilities::infer_token_limits(kind, &id);
-			let supports_reasoning = ModelCapabilities::supports_reasoning(kind, &id);
-
-			model = model
-				.with_max_input_tokens(max_input_tokens)
-				.with_max_output_tokens(max_output_tokens)
-				.with_streaming(ModelCapabilities::supports_streaming(kind, &id))
-				.with_tool_calls(ModelCapabilities::supports_tool_calls(kind, &id))
-				.with_json_mode(ModelCapabilities::supports_json_mode(kind, &id))
-				.with_reasoning(supports_reasoning)
-				.with_input_modalities(ModelCapabilities::infer_input_modalities(kind, &id))
-				.with_output_modalities(ModelCapabilities::infer_output_modalities(kind, &id));
-
-			if supports_reasoning {
-				model = model.with_reasoning_efforts(ModelCapabilities::infer_reasoning_efforts(kind, &id));
-			}
-
-			models.push(model);
-		}
-
-		Ok(models)
-	}
-
 	/// Note: An unrecognized model prefix falls back to `VertexPublisher::Google` with a warning.
 	/// In practice, `to_web_request_data` validates the publisher first and will return
 	/// an error before this fallback is ever reached.
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {
-		if matches!(service_type, ServiceType::Models) {
-			return Err(Error::AdapterNotSupported {
-				adapter_kind: AdapterKind::Vertex,
-				feature: "models".to_string(),
-			});
-		}
-
 		let base_url = endpoint.base_url();
 		let (_, model_name) = model.model_name.namespace_and_name();
 		let publisher = VertexPublisher::from_model_name(model_name).unwrap_or_else(|_| {
@@ -145,17 +106,16 @@ impl Adapter for VertexAdapter {
 			VertexPublisher::Google => match service_type {
 				ServiceType::Chat => format!("{base_url}{publisher_path}/models/{model_name}:generateContent"),
 				ServiceType::ChatStream => {
-					format!("{base_url}{publisher_path}/models/{model_name}:streamGenerateContent")
+					format!("{base_url}{publisher_path}/models/{model_name}:streamGenerateContent?alt=sse")
 				}
 				ServiceType::Embed => format!("{base_url}{publisher_path}/models/{model_name}:predict"),
-				ServiceType::Models => unreachable!("handled before publisher dispatch"),
 			},
 			VertexPublisher::Anthropic => match service_type {
-				ServiceType::Chat | ServiceType::ChatStream => {
-					format!("{base_url}{publisher_path}/models/{model_name}:rawPredict")
+				ServiceType::Chat => format!("{base_url}{publisher_path}/models/{model_name}:rawPredict"),
+				ServiceType::ChatStream => {
+					format!("{base_url}{publisher_path}/models/{model_name}:streamRawPredict")
 				}
 				ServiceType::Embed => format!("{base_url}{publisher_path}/models/{model_name}:predict"),
-				ServiceType::Models => unreachable!("handled before publisher dispatch"),
 			},
 		};
 
@@ -187,15 +147,9 @@ impl Adapter for VertexAdapter {
 				chat_req,
 				options_set,
 			),
-			VertexPublisher::Anthropic => Self::to_anthropic_web_request_data(
-				model,
-				&model_name,
-				endpoint,
-				headers,
-				service_type,
-				chat_req,
-				options_set,
-			),
+			VertexPublisher::Anthropic => {
+				Self::to_anthropic_web_request_data(model, endpoint, headers, service_type, chat_req, options_set)
+			}
 		}
 	}
 
@@ -279,49 +233,18 @@ impl VertexAdapter {
 impl VertexAdapter {
 	fn to_anthropic_web_request_data(
 		model: ModelIden,
-		model_name: &str,
 		endpoint: Endpoint,
 		headers: Headers,
 		service_type: ServiceType,
 		chat_req: ChatRequest,
 		options_set: ChatOptionsSet<'_, '_>,
 	) -> Result<WebRequestData> {
-		let AnthropicRequestParts {
-			system,
-			messages,
-			tools,
-		} = AnthropicAdapter::into_anthropic_request_parts(chat_req)?;
-
-		// Vertex Anthropic: model is in URL, not body; anthropic_version goes in body
-		let stream = matches!(service_type, ServiceType::ChatStream);
-		let mut payload = json!({
-			"anthropic_version": VERTEX_ANTHROPIC_VERSION,
-			"messages": messages,
-			"stream": stream,
-		});
-
-		if let Some(system) = system {
-			payload.x_insert("system", system)?;
-		}
-
-		if let Some(tools) = tools {
-			payload.x_insert("/tools", tools)?;
-		}
-
-		if let Some(temperature) = options_set.temperature() {
-			payload.x_insert("temperature", temperature)?;
-		}
-
-		if !options_set.stop_sequences().is_empty() {
-			payload.x_insert("stop_sequences", options_set.stop_sequences())?;
-		}
-
-		let max_tokens = AnthropicAdapter::resolve_max_tokens(model_name, &options_set);
-		payload.x_insert("max_tokens", max_tokens)?; // required for Anthropic
-
-		if let Some(top_p) = options_set.top_p() {
-			payload.x_insert("top_p", top_p)?;
-		}
+		// Same body as the direct Anthropic adapter (tool_choice, effort, JSON schema, extra_body...).
+		// Vertex Anthropic: model is in URL, not body; anthropic_version goes in body.
+		let mut payload =
+			AnthropicAdapter::build_anthropic_request_payload(&model, service_type, chat_req, options_set)?;
+		payload.x_remove::<Value>("model")?;
+		payload.x_insert("anthropic_version", VERTEX_ANTHROPIC_VERSION)?;
 
 		let url = Self::get_service_url(&model, service_type, endpoint)?;
 
@@ -330,3 +253,11 @@ impl VertexAdapter {
 }
 
 // endregion: --- Anthropic Publisher Support
+
+// region:    --- Tests
+
+#[cfg(test)]
+#[path = "adapter_impl_tests.rs"]
+mod tests;
+
+// endregion: --- Tests

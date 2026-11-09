@@ -15,8 +15,6 @@ pub struct WebConfig {
 	pub read_timeout: Option<Duration>,
 	pub default_headers: Option<reqwest::header::HeaderMap>,
 	pub proxy: Option<reqwest::Proxy>,
-	/// Disable SSL certificate verification (useful for debugging with tools like Burp Suite)
-	pub danger_accept_invalid_certs: bool,
 	/// Enable gzip response decompression. Default: true.
 	pub gzip: bool,
 	/// Enable TCP_NODELAY (disable Nagle's algorithm). Default: true.
@@ -31,7 +29,6 @@ impl Default for WebConfig {
 			read_timeout: None,
 			default_headers: None,
 			proxy: None,
-			danger_accept_invalid_certs: false,
 			gzip: true,
 			tcp_nodelay: true,
 		}
@@ -51,7 +48,7 @@ impl WebConfig {
 		self
 	}
 
-	/// Sets the read timeout.
+	/// Sets the timeout for each network read, independently of the total request timeout.
 	pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
 		self.read_timeout = Some(timeout);
 		self
@@ -90,16 +87,6 @@ impl WebConfig {
 		Ok(self)
 	}
 
-	/// Disables SSL certificate verification.
-	///
-	/// # Warning
-	/// This should only be used for debugging purposes (e.g., with Burp Suite).
-	/// Never use this in production!
-	pub fn with_danger_accept_invalid_certs(mut self, accept: bool) -> Self {
-		self.danger_accept_invalid_certs = accept;
-		self
-	}
-
 	/// Applies this config to a reqwest::ClientBuilder.
 	pub fn apply_to_builder(&self, mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
 		if let Some(timeout) = self.timeout {
@@ -111,14 +98,11 @@ impl WebConfig {
 		if let Some(read_timeout) = self.read_timeout {
 			builder = builder.read_timeout(read_timeout);
 		}
-		if let Some(ref headers) = self.default_headers {
+		if let Some(headers) = self.default_headers.as_ref() {
 			builder = builder.default_headers(headers.clone());
 		}
-		if let Some(ref proxy) = self.proxy {
+		if let Some(proxy) = self.proxy.as_ref() {
 			builder = builder.proxy(proxy.clone());
-		}
-		if self.danger_accept_invalid_certs {
-			builder = builder.danger_accept_invalid_certs(true);
 		}
 		// Performance optimizations
 		if self.gzip {
@@ -135,19 +119,5 @@ impl WebConfig {
 			.http2_keep_alive_while_idle(true)
 			.http2_adaptive_window(true);
 		builder
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::WebConfig;
-	use std::time::Duration;
-
-	#[test]
-	fn with_read_timeout_sets_read_timeout() {
-		let timeout = Duration::from_secs(60);
-		let config = WebConfig::default().with_read_timeout(timeout);
-
-		assert_eq!(config.read_timeout, Some(timeout));
 	}
 }

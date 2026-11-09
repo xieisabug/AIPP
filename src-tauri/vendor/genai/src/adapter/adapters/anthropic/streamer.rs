@@ -1,10 +1,13 @@
-use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions};
-use crate::adapter::anthropic::parse_cache_creation_details;
-use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
-use crate::chat::{ChatOptionsSet, PromptTokensDetails, StopReason, ToolCall, Usage};
+use super::parse_cache_creation_details;
+use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions, new_frame_tap};
+use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent, InterStreamThoughtBlock};
+use crate::chat::{
+	ChatOptionsSet, CompletionTokensDetails, CustomPart, PromptTokensDetails, StopReason, ToolCall, Usage,
+};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde_json::{Map, Value};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use value_ext::JsonValueExt;
@@ -18,24 +21,79 @@ pub struct AnthropicStreamer {
 	done: bool,
 
 	captured_data: StreamerCapturedData,
+	captured_thought_blocks: Vec<InterStreamThoughtBlock>,
 	in_progress_block: InProgressBlock,
+	pending_events: VecDeque<InterStreamEvent>,
+	/// Ensures the unreplayable-thinking warning is emitted at most once per stream.
+	warned_unreplayable_thinking: bool,
 }
 
 enum InProgressBlock {
 	Text,
 	ToolUse { id: String, name: String, input: String },
-	Thinking,
+	Thinking(ThinkingBlock),
+}
+
+#[derive(Default)]
+struct ThinkingBlock {
+	/// `None` when the caller did not opt into reasoning content capture.
+	reasoning: Option<String>,
+	/// `None` when the caller opted out of every capture this block feeds.
+	signature: Option<String>,
+}
+
+impl ThinkingBlock {
+	fn new(reasoning: Option<String>, signature: Option<String>) -> Self {
+		Self { reasoning, signature }
+	}
+
+	fn append_reasoning(&mut self, reasoning: &str) {
+		if let Some(captured) = &mut self.reasoning {
+			captured.push_str(reasoning);
+		}
+	}
+
+	/// Append one `signature_delta` chunk.
+	///
+	/// Anthropic sends a block signature as `content_block_start.content_block.signature`
+	/// (which seeds this buffer) followed by zero or more `signature_delta` chunks that
+	/// concatenate. Signatures are opaque base64 blobs, so this must stay a plain append:
+	/// any attempt to detect resends or overlapping chunks can match by coincidence and
+	/// silently corrupt the signature, which Anthropic then rejects.
+	fn append_signature_delta(&mut self, delta: &str) {
+		if let Some(signature) = &mut self.signature {
+			signature.push_str(delta);
+		}
+	}
+
+	fn into_thought_block(self) -> Option<InterStreamThoughtBlock> {
+		let signature = self.signature.filter(|signature| !signature.is_empty())?;
+		Some(InterStreamThoughtBlock::Signed {
+			reasoning_content: self.reasoning,
+			signature,
+		})
+	}
 }
 
 impl AnthropicStreamer {
 	pub fn new(inner: EventSourceStream, model_iden: ModelIden, options_set: ChatOptionsSet<'_, '_>) -> Self {
+		let frame_tap = new_frame_tap(&model_iden, &options_set);
+
 		Self {
-			inner,
+			inner: inner.with_frame_tap(frame_tap),
 			done: false,
 			options: StreamerOptions::new(model_iden, options_set),
 			captured_data: Default::default(),
+			captured_thought_blocks: Vec::new(),
 			in_progress_block: InProgressBlock::Text,
+			pending_events: VecDeque::new(),
+			warned_unreplayable_thinking: false,
 		}
+	}
+
+	/// Clones the frame tap (if any), so `ChatStream` can fire the terminal sink hooks.
+	pub fn frame_tap(&self) -> Option<crate::webc::FrameTap> {
+		self.inner.frame_tap()
 	}
 }
 
@@ -45,6 +103,9 @@ impl futures::Stream for AnthropicStreamer {
 	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
 		if self.done {
 			return Poll::Ready(None);
+		}
+		if let Some(event) = self.pending_events.pop_front() {
+			return Poll::Ready(Some(Ok(event)));
 		}
 
 		while let Poll::Ready(event) = Pin::new(&mut self.inner).poll_next(cx) {
@@ -78,7 +139,61 @@ impl futures::Stream for AnthropicStreamer {
 
 							match data.x_get_str("/content_block/type") {
 								Ok("text") => self.in_progress_block = InProgressBlock::Text,
-								Ok("thinking") => self.in_progress_block = InProgressBlock::Thinking,
+								Ok("thinking") => {
+									let thinking = data.x_take::<String>("/content_block/thinking").unwrap_or_default();
+									let signature =
+										data.x_take::<String>("/content_block/signature").unwrap_or_default();
+
+									if self.options.capture_reasoning_content && !thinking.is_empty() {
+										match self.captured_data.reasoning_content {
+											Some(ref mut reasoning) => reasoning.push_str(&thinking),
+											None => self.captured_data.reasoning_content = Some(thinking.clone()),
+										}
+									}
+
+									// The signature is the replayable half of a thinking block, so it
+									// follows the same opt-in as the reasoning text it belongs to.
+									// Callers replaying a signed assistant turn must set
+									// `capture_reasoning_content`, otherwise Anthropic rejects the
+									// continuation.
+									self.warn_if_thinking_is_not_captured();
+
+									let capture_block = self.options.capture_reasoning_content;
+									let captured_reasoning = capture_block.then_some(thinking.clone());
+									let captured_signature = capture_block.then(|| signature.clone());
+									self.in_progress_block = InProgressBlock::Thinking(ThinkingBlock::new(
+										captured_reasoning,
+										captured_signature,
+									));
+
+									if !signature.is_empty() {
+										self.pending_events
+											.push_back(InterStreamEvent::ThoughtSignatureChunk(signature));
+									}
+									if !thinking.is_empty() {
+										self.pending_events.push_back(InterStreamEvent::ReasoningChunk(thinking));
+									}
+									if let Some(event) = self.pending_events.pop_front() {
+										return Poll::Ready(Some(Ok(event)));
+									}
+								}
+								Ok("redacted_thinking") => {
+									// A redacted block arrives whole, with its encrypted `data` and no
+									// deltas, and is replayed as is. Under the same opt-in as a signed
+									// block, it is kept in its place among the thinking blocks, as the
+									// custom part a non-streamed answer makes of it.
+									self.warn_if_thinking_is_not_captured();
+									if self.options.capture_reasoning_content
+										&& let Ok(block) = data.x_take::<Value>("/content_block")
+									{
+										let model_iden = Some(self.options.model_iden.clone());
+										let custom_part = CustomPart {
+											model_iden,
+											data: block,
+										};
+										self.captured_thought_blocks.push(InterStreamThoughtBlock::Custom(custom_part));
+									}
+								}
 								Ok("tool_use") => {
 									let id: String = data.x_take("/content_block/id")?;
 									let name: String = data.x_take("/content_block/name")?;
@@ -119,7 +234,11 @@ impl futures::Stream for AnthropicStreamer {
 
 							match &mut self.in_progress_block {
 								InProgressBlock::Text => {
-									let content: String = data.x_take("/delta/text")?;
+									// Server-tool blocks (`server_tool_use`, `web_search_tool_result`) and
+									// `citations_delta` events carry no text: skip them, keep streaming.
+									let Ok(content) = data.x_take::<String>("/delta/text") else {
+										continue;
+									};
 
 									// Add to the captured_content if chat options say so
 									if self.options.capture_content {
@@ -146,8 +265,9 @@ impl futures::Stream for AnthropicStreamer {
 
 									return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tc))));
 								}
-								InProgressBlock::Thinking => {
+								InProgressBlock::Thinking(thinking_block) => {
 									if let Ok(thinking) = data.x_take::<String>("/delta/thinking") {
+										thinking_block.append_reasoning(&thinking);
 										// Add to the captured_thinking if chat options say so
 										if self.options.capture_reasoning_content {
 											match self.captured_data.reasoning_content {
@@ -158,6 +278,7 @@ impl futures::Stream for AnthropicStreamer {
 
 										return Poll::Ready(Some(Ok(InterStreamEvent::ReasoningChunk(thinking))));
 									} else if let Ok(signature) = data.x_take::<String>("/delta/signature") {
+										thinking_block.append_signature_delta(&signature);
 										return Poll::Ready(Some(Ok(InterStreamEvent::ThoughtSignatureChunk(
 											signature,
 										))));
@@ -177,24 +298,11 @@ impl futures::Stream for AnthropicStreamer {
 									// ToolCallChunks were already emitted incrementally
 									// during content_block_start and content_block_delta.
 									// Here we only finalize capture with parsed arguments.
-									if self.options.capture_tool_calls {
-										let fn_arguments = if input.is_empty() {
-											Value::Object(Map::new())
-										} else {
-											serde_json::from_str(&input)?
-										};
-
-										let tc = ToolCall {
-											call_id: id,
-											fn_name: name,
-											fn_arguments,
-											thought_signatures: None,
-										};
-
-										match self.captured_data.tool_calls {
-											Some(ref mut t) => t.push(tc),
-											None => self.captured_data.tool_calls = Some(vec![tc]),
-										}
+									self.capture_tool_call(id, name, input, false);
+								}
+								InProgressBlock::Thinking(thinking_block) => {
+									if let Some(block) = thinking_block.into_thought_block() {
+										self.captured_thought_blocks.push(block);
 									}
 								}
 								_ => {
@@ -210,6 +318,15 @@ impl futures::Stream for AnthropicStreamer {
 							// NOTE: This way, the last MessageStop event is still sent,
 							//       but then, on the next poll, it will be stopped.
 							self.done = true;
+
+							// A `tool_use` block cut short (e.g., by `max_tokens`) gets no
+							// `content_block_stop`, so its call is captured here, with its
+							// input as far as it got.
+							if let InProgressBlock::ToolUse { id, name, input } =
+								std::mem::replace(&mut self.in_progress_block, InProgressBlock::Text)
+							{
+								self.capture_tool_call(id, name, input, true);
+							}
 
 							// Capture the usage
 							let captured_usage = if self.options.capture_usage {
@@ -230,10 +347,12 @@ impl futures::Stream for AnthropicStreamer {
 								captured_usage,
 								captured_stop_reason: self.captured_data.stop_reason.take().map(StopReason::from),
 								captured_text_content: self.captured_data.content.take(),
-								captured_content_parts: None,
 								captured_reasoning_content: self.captured_data.reasoning_content.take(),
 								captured_tool_calls: self.captured_data.tool_calls.take(),
 								captured_thought_signatures: None,
+								captured_thought_blocks: (!self.captured_thought_blocks.is_empty())
+									.then(|| std::mem::take(&mut self.captured_thought_blocks)),
+								captured_content_parts: None,
 								captured_response_id: None,
 							};
 
@@ -241,8 +360,24 @@ impl futures::Stream for AnthropicStreamer {
 							return Poll::Ready(Some(Ok(InterStreamEvent::End(inter_stream_end))));
 						}
 
-						"ping" => continue, // Loop to the next event
-						other => tracing::warn!("UNKNOWN MESSAGE TYPE: {other}"),
+						"ping" => {
+							// Map ping events to Heartbeat events to indicate the stream is still active
+							return Poll::Ready(Some(Ok(InterStreamEvent::Heartbeat)));
+						}
+						"error" => {
+							// Anthropic may emit an `event: error` mid-stream (e.g. overloaded_error,
+							// rate_limit, internal_server_error). Propagate it as a typed error so the
+							// caller can surface the real cause instead of silently ending the stream.
+							tracing::warn!("Anthropic stream error event, data: {}", message.data);
+							let body: Value = serde_json::from_str(&message.data)
+								.unwrap_or_else(|_| Value::String(message.data.clone()));
+							self.done = true;
+							return Poll::Ready(Some(Err(Error::ChatResponse {
+								model_iden: self.options.model_iden.clone(),
+								body,
+							})));
+						}
+						other => tracing::warn!("UNKNOWN MESSAGE TYPE: {other}, data: {}", message.data),
 					}
 				}
 				Some(Err(err)) => {
@@ -264,13 +399,12 @@ impl futures::Stream for AnthropicStreamer {
 impl AnthropicStreamer {
 	fn capture_usage(&mut self, message_type: &str, message_data: &str) -> Result<()> {
 		if self.options.capture_usage {
-			let data = self.parse_message_data(message_data)?;
-			// TODO: Might want to exit early if usage is not found
+			let mut data = self.parse_message_data(message_data)?;
 
-			let (input_path, output_path) = if message_type == "message_start" {
-				("/message/usage/input_tokens", "/message/usage/output_tokens")
+			let usage_path = if message_type == "message_start" {
+				"/message/usage"
 			} else if message_type == "message_delta" {
-				("/usage/input_tokens", "/usage/output_tokens")
+				"/usage"
 			} else {
 				// TODO: Use tracing
 				tracing::debug!(
@@ -279,70 +413,32 @@ impl AnthropicStreamer {
 				return Ok(()); // For now permissive
 			};
 
-			if let Some(raw) = data.pointer(if message_type == "message_start" { "/message/usage" } else { "/usage" }) {
-				let billing = crate::chat::UsageBilling::from_usage(raw);
-				if billing.cost.is_some() || billing.opencode.is_some() {
-					self.captured_data.usage.get_or_insert_with(Usage::default).billing = billing;
-				}
-			}
+			// NOTE: Permissive on this one; if the usage object is absent, treat it as nonexistent (for now)
+			let Ok(usage_value) = data.x_take::<Value>(usage_path) else {
+				return Ok(());
+			};
 
-			// -- Capture/Add the eventual input_tokens
-			// NOTE: Permissive on this one; if an error occurs, treat it as nonexistent (for now)
-			if let Ok(input_tokens) = data.x_get::<i32>(input_path) {
-				let val = self
-					.captured_data
-					.usage
-					.get_or_insert(Usage::default())
-					.prompt_tokens
-					.get_or_insert(0);
-				*val += input_tokens;
-			}
-
-			if let Ok(output_tokens) = data.x_get::<i32>(output_path) {
-				let val = self
-					.captured_data
-					.usage
-					.get_or_insert(Usage::default())
-					.completion_tokens
-					.get_or_insert(0);
-				*val += output_tokens;
-			}
-
-			// -- Capture cache tokens (only present in message_start)
-			// NOTE: Anthropic's input_tokens does NOT include cached tokens, so we must add them.
-			// See also: AnthropicAdapter::into_usage() for non-streaming equivalent.
-			if message_type == "message_start" {
-				let cache_creation: i32 = data.x_get("/message/usage/cache_creation_input_tokens").unwrap_or(0);
-				let cache_read: i32 = data.x_get("/message/usage/cache_read_input_tokens").unwrap_or(0);
-
-				// Parse cache_creation breakdown if present (TTL-specific breakdown)
-				// Use x_get with JSON pointer to navigate to /message/usage/cache_creation
-				let cache_creation_details = data
-					.x_get::<Value>("/message/usage/cache_creation")
-					.ok()
-					.as_ref()
-					.and_then(parse_cache_creation_details);
-
-				if cache_creation > 0 || cache_read > 0 || cache_creation_details.is_some() {
-					let usage = self.captured_data.usage.get_or_insert(Usage::default());
-
-					// Add cache tokens to prompt_tokens (same as into_usage does)
-					if let Some(ref mut pt) = usage.prompt_tokens {
-						*pt += cache_creation + cache_read;
-					}
-
-					// Set prompt_tokens_details (match into_usage behavior: always Some(value))
-					usage.prompt_tokens_details = Some(PromptTokensDetails {
-						cache_creation_tokens: Some(cache_creation),
-						cache_creation_details,
-						cached_tokens: Some(cache_read),
-						audio_tokens: None,
-					});
-				}
-			}
+			merge_usage_snapshot(&mut self.captured_data.usage, usage_value);
 		}
 
 		Ok(())
+	}
+
+	/// A thinking block is only replayable together with the reasoning it signs (or, when
+	/// redacted, as a whole), so capturing tool calls alone silently yields a continuation
+	/// Anthropic rejects. Surface that once rather than failing later at the provider.
+	fn warn_if_thinking_is_not_captured(&mut self) {
+		if self.options.capture_tool_calls
+			&& !self.options.capture_reasoning_content
+			&& !self.warned_unreplayable_thinking
+		{
+			self.warned_unreplayable_thinking = true;
+			tracing::warn!(
+				"anthropic - thinking block received with capture_tool_calls but not \
+				 capture_reasoning_content; thought signatures will not be captured and \
+				 the tool continuation will be missing its thinking blocks"
+			);
+		}
 	}
 
 	/// Simple wrapper for now, with the corresponding map_err.
@@ -352,5 +448,191 @@ impl AnthropicStreamer {
 			model_iden: self.options.model_iden.clone(),
 			serde_error,
 		})
+	}
+
+	/// Moves a `tool_use` block's call into `captured_data` (when capturing tool calls),
+	/// parsing its input when it is JSON. A block `cut_off` before its `content_block_stop`
+	/// (e.g., by `max_tokens`) keeps its input as far as it got, left as a string when it
+	/// does not parse, an empty one included.
+	fn capture_tool_call(&mut self, id: String, name: String, input: String, cut_off: bool) {
+		if !self.options.capture_tool_calls {
+			return;
+		}
+
+		let fn_arguments = if input.is_empty() && !cut_off {
+			Value::Object(Map::new())
+		} else {
+			serde_json::from_str(&input).unwrap_or_else(|e| {
+				if !cut_off {
+					tracing::warn!(
+						"Anthropic streamer: failed to parse tool-call input JSON ({} bytes): {e}",
+						input.len()
+					);
+				}
+				Value::String(input)
+			})
+		};
+
+		let tc = ToolCall {
+			call_id: id,
+			fn_name: name,
+			fn_arguments,
+			thought_signatures: None,
+		};
+
+		match self.captured_data.tool_calls {
+			Some(ref mut t) => t.push(tc),
+			None => self.captured_data.tool_calls = Some(vec![tc]),
+		}
+	}
+}
+
+/// Merges one Anthropic `message_start` / `message_delta` usage snapshot into the captured usage.
+///
+/// Mirrors `AnthropicAdapter::into_usage()` for the non-streaming path.
+fn merge_usage_snapshot(captured: &mut Option<Usage>, mut usage_value: Value) {
+	// -- Capture the eventual input/output tokens
+	let input_tokens = usage_value.x_take::<i32>("input_tokens").ok();
+	let output_tokens = usage_value.x_take::<i32>("output_tokens").ok();
+
+	// -- Capture the thinking share of `output_tokens` (`output_tokens_details.thinking_tokens`),
+	// mapped to `completion_tokens_details.reasoning_tokens` like `AnthropicAdapter::into_usage()`.
+	let thinking_tokens = usage_value
+		.get("output_tokens_details")
+		.and_then(|details| details.get("thinking_tokens"))
+		.and_then(Value::as_i64)
+		.map(|tokens| tokens as i32)
+		.filter(|&tokens| tokens > 0);
+
+	// -- Capture cache tokens.
+	// Standard Anthropic reports them in `message_start` and repeats them in `message_delta`;
+	// some gateways (e.g. Alibaba DashScope / Qwen) report them only in `message_delta`.
+	// NOTE: Anthropic's input_tokens does NOT include cached tokens, so we must add them.
+	// See also: AnthropicAdapter::into_usage() for non-streaming equivalent.
+	let cache_creation: i32 = usage_value.x_get("cache_creation_input_tokens").unwrap_or(0);
+	let cache_read: i32 = usage_value.x_get("cache_read_input_tokens").unwrap_or(0);
+
+	// Parse cache_creation breakdown if present (TTL-specific breakdown)
+	let cache_creation_details = usage_value
+		.x_get::<Value>("cache_creation")
+		.ok()
+		.as_ref()
+		.and_then(parse_cache_creation_details);
+
+	let has_cache = cache_creation > 0 || cache_read > 0 || cache_creation_details.is_some();
+
+	// Nothing to capture from this snapshot, leave `usage` as-is (possibly None).
+	if input_tokens.is_none() && output_tokens.is_none() && thinking_tokens.is_none() && !has_cache {
+		return;
+	}
+
+	let usage = captured.get_or_insert(Usage::default());
+
+	if let Some(input_tokens) = input_tokens {
+		usage.prompt_tokens = Some(input_tokens + cache_creation + cache_read);
+	}
+	// NOTE: Cache tokens without `input_tokens` (gateway shape) are deliberately NOT added
+	// to `prompt_tokens`, since gateway token accounting is provider-specific.
+
+	if let Some(output_tokens) = output_tokens {
+		usage.completion_tokens = Some(output_tokens);
+	}
+
+	if let Some(reasoning_tokens) = thinking_tokens {
+		usage.completion_tokens_details = Some(CompletionTokensDetails {
+			accepted_prediction_tokens: None,
+			rejected_prediction_tokens: None,
+			reasoning_tokens: Some(reasoning_tokens),
+			audio_tokens: None,
+		});
+	}
+
+	if has_cache {
+		// Anthropic sends the `cache_creation` breakdown only in `message_start`, while
+		// `message_delta` repeats the totals without it. Keep the earlier breakdown so the
+		// later snapshot does not erase it.
+		let cache_creation_details = cache_creation_details.or_else(|| {
+			usage
+				.prompt_tokens_details
+				.as_ref()
+				.and_then(|details| details.cache_creation_details.clone())
+		});
+
+		// Set prompt_tokens_details (match into_usage behavior: always Some(value))
+		usage.prompt_tokens_details = Some(PromptTokensDetails {
+			cache_creation_tokens: Some(cache_creation),
+			cache_creation_details,
+			cached_tokens: Some(cache_read),
+			audio_tokens: None,
+		});
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{ThinkingBlock, merge_usage_snapshot};
+	use crate::adapter::inter_stream::InterStreamThoughtBlock;
+	use crate::chat::Usage;
+	use serde_json::json;
+
+	fn signature(start: &str, deltas: &[&str]) -> Option<String> {
+		let mut block = ThinkingBlock::new(None, Some(start.to_string()));
+		for delta in deltas {
+			block.append_signature_delta(delta);
+		}
+		match block.into_thought_block()? {
+			InterStreamThoughtBlock::Signed { signature, .. } => Some(signature),
+			InterStreamThoughtBlock::Custom(_) => None,
+		}
+	}
+
+	#[test]
+	fn split_signature_deltas_form_one_logical_block_signature() {
+		assert_eq!(
+			signature("", &["signed-", "fragmented"]).as_deref(),
+			Some("signed-fragmented")
+		);
+	}
+
+	#[test]
+	fn start_and_delta_signature_variants_form_one_logical_signature() {
+		// A start-only signature is kept as-is.
+		assert_eq!(signature("start-only", &[]).as_deref(), Some("start-only"));
+		// A non-empty start seeds the buffer and later deltas append to it.
+		assert_eq!(signature("signed-", &["suffix"]).as_deref(), Some("signed-suffix"));
+		// Chunks concatenate verbatim, including when a chunk repeats earlier bytes.
+		// Signatures are opaque base64, so no resend/overlap collapsing is applied.
+		assert_eq!(signature("ab", &["ab"]).as_deref(), Some("abab"));
+		assert_eq!(signature("", &["QUJD", "QUJD"]).as_deref(), Some("QUJDQUJD"));
+	}
+
+	#[test]
+	fn stream_usage_captures_thinking_tokens_as_reasoning_tokens() {
+		let mut usage: Option<Usage> = None;
+		merge_usage_snapshot(&mut usage, json!({"input_tokens": 25, "output_tokens": 1}));
+		merge_usage_snapshot(
+			&mut usage,
+			json!({"output_tokens": 120, "output_tokens_details": {"thinking_tokens": 80}}),
+		);
+
+		let usage = usage.expect("usage");
+		assert_eq!(usage.prompt_tokens, Some(25));
+		assert_eq!(usage.completion_tokens, Some(120));
+		assert_eq!(
+			usage.completion_tokens_details.and_then(|details| details.reasoning_tokens),
+			Some(80)
+		);
+	}
+
+	#[test]
+	fn stream_usage_without_thinking_tokens_has_no_completion_details() {
+		let mut usage: Option<Usage> = None;
+		merge_usage_snapshot(&mut usage, json!({"input_tokens": 25, "output_tokens": 10}));
+		merge_usage_snapshot(
+			&mut usage,
+			json!({"output_tokens": 12, "output_tokens_details": {"thinking_tokens": 0}}),
+		);
+
+		assert!(usage.expect("usage").completion_tokens_details.is_none());
 	}
 }

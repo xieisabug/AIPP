@@ -1,6 +1,5 @@
-//! Types for chat responses. `ChatStream` is defined separately.
-
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 
 use crate::ModelIden;
 use crate::chat::{ChatMessage, ChatStream, MessageContent, ToolCall, Usage};
@@ -14,9 +13,9 @@ use crate::chat::{ChatMessage, ChatStream, MessageContent, ToolCall, Usage};
 /// | StopReason      | Provider strings                                                         |
 /// |-----------------|--------------------------------------------------------------------------|
 /// | `Completed`     | `stop`, `end_turn`, `STOP`, `COMPLETE`, `completed`                      |
-/// | `MaxTokens`     | `length`, `max_tokens`, `MAX_TOKENS`, `incomplete`                       |
+/// | `MaxTokens`     | `length`, `max_tokens`, `MAX_TOKENS`, `incomplete`, `max_output_tokens`, `model_context_window_exceeded`, `model_length` |
 /// | `ToolCall`      | `tool_calls`, `tool_use`, `function_call`                                |
-/// | `ContentFilter` | `content_filter`, `SAFETY`, `RECITATION`, `BLOCKLIST`, …                 |
+/// | `ContentFilter` | `content_filter`, `refusal`, `SAFETY`, `RECITATION`, `BLOCKLIST`, …      |
 /// | `StopSequence`  | `stop_sequence`, `STOP_SEQUENCE`                                         |
 /// | `Other(s)`      | anything else (`failed`, `cancelled`, `ERROR`, `load`, …)                |
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,14 +41,30 @@ impl From<String> for StopReason {
 			"stop" | "end_turn" | "STOP" | "COMPLETE" | "completed" => Self::Completed(reason),
 
 			// -- Truncated by token limit
-			"length" | "max_tokens" | "MAX_TOKENS" | "incomplete" => Self::MaxTokens(reason),
+			"length"
+			| "max_tokens"
+			| "MAX_TOKENS"
+			| "incomplete"
+			| "max_output_tokens"
+			| "model_context_window_exceeded"
+			| "model_length" => Self::MaxTokens(reason),
 
 			// -- Tool invocation
 			"tool_calls" | "tool_use" | "function_call" => Self::ToolCall(reason),
 
 			// -- Content / safety filter
-			"content_filter" | "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
-			| "IMAGE_SAFETY" | "ERROR_TOXIC" => Self::ContentFilter(reason),
+			"content_filter"
+			| "refusal"
+			| "SAFETY"
+			| "RECITATION"
+			| "BLOCKLIST"
+			| "PROHIBITED_CONTENT"
+			| "SPII"
+			| "IMAGE_SAFETY"
+			| "IMAGE_PROHIBITED_CONTENT"
+			| "IMAGE_RECITATION"
+			| "LANGUAGE"
+			| "ERROR_TOXIC" => Self::ContentFilter(reason),
 
 			// -- Stop sequence
 			"stop_sequence" | "STOP_SEQUENCE" => Self::StopSequence(reason),
@@ -99,6 +114,7 @@ impl std::fmt::Display for StopReason {
 // region:    --- ChatResponse
 
 /// Response returned by a non-streaming chat request.
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
 	/// Message content returned by the assistant.
@@ -117,14 +133,13 @@ pub struct ChatResponse {
 	/// Set explicitly by construction code; no implicit defaulting at the type level.
 	pub provider_model_iden: ModelIden,
 
-	/// Normalised stop reason (see [`StopReason`]).
+	/// Normalized provider stop reason.
 	pub stop_reason: Option<StopReason>,
 
 	/// Token usage reported by the provider.
 	pub usage: Usage,
 
-	/// IMPORTANT: (since 0.5.3) This is populated at the client.exec_chat when the options capture_raw_body is set to true
-	/// Raw response body (only if asked via options.capture_raw_body)
+	/// Raw response body when raw-body capture is enabled.
 	pub captured_raw_body: Option<serde_json::Value>,
 
 	/// Response ID for stateful sessions (OpenAI Responses API).
@@ -134,7 +149,7 @@ pub struct ChatResponse {
 }
 
 impl ChatResponse {
-	/// Set response_id (builder pattern for adapter construction).
+	/// Sets the response ID returned for stateful continuation.
 	pub fn with_response_id(mut self, id: Option<String>) -> Self {
 		self.response_id = id;
 		self
@@ -153,45 +168,51 @@ impl ChatResponse {
 		self.content.into_first_text()
 	}
 
-	/// Returns all text segments (first per content item).
+	/// Returns all text segments.
 	pub fn texts(&self) -> Vec<&str> {
 		self.content.texts()
 	}
 
-	/// Consumes self and returns all text segments (first per content item).
+	/// Consumes the response and returns all text segments.
 	pub fn into_texts(self) -> Vec<String> {
 		self.content.into_texts()
 	}
 
-	/// Returns all captured tool calls.
+	/// Returns all tool calls in the response content.
 	pub fn tool_calls(&self) -> Vec<&ToolCall> {
 		self.content.tool_calls()
 	}
 
-	/// Consumes self and returns all captured tool calls.
+	/// Consumes the response and returns all tool calls.
 	pub fn into_tool_calls(self) -> Vec<ToolCall> {
 		self.content.into_tool_calls()
 	}
 
-	/// Builds an assistant history message for a tool-use continuation, preserving
-	/// the full assistant content plus any extracted reasoning content.
+	/// Builds a tool-use assistant message without consuming the response.
 	pub fn assistant_message_for_tool_use(&self) -> Option<ChatMessage> {
-		if !self.content.contains_tool_call() {
+		let content = &self.content;
+		if content.tool_calls().is_empty() {
 			return None;
 		}
-
-		Some(ChatMessage::assistant(self.content.clone()).with_reasoning_content(self.reasoning_content.clone()))
+		let mut message = ChatMessage::assistant(content.clone());
+		if !content.contains_reasoning_content() {
+			message = message.with_reasoning_content(self.reasoning_content.clone());
+		}
+		Some(message)
 	}
 
-	/// Consumes self and builds an assistant history message for a tool-use
-	/// continuation, preserving the full assistant content plus any extracted
-	/// reasoning content.
+	/// Consume the response and build an assistant message for a tool-use handoff.
+	/// Provider continuation metadata and all assistant content are retained.
 	pub fn into_assistant_message_for_tool_use(self) -> Option<ChatMessage> {
-		if !self.content.contains_tool_call() {
+		if self.content.tool_calls().is_empty() {
 			return None;
 		}
-
-		Some(ChatMessage::assistant(self.content).with_reasoning_content(self.reasoning_content))
+		let contains_reasoning = self.content.contains_reasoning_content();
+		let mut message = ChatMessage::assistant(self.content);
+		if !contains_reasoning {
+			message = message.with_reasoning_content(self.reasoning_content);
+		}
+		Some(message)
 	}
 }
 
@@ -214,71 +235,6 @@ impl ChatResponse {
 
 // endregion: --- ChatResponse
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::adapter::AdapterKind;
-	use crate::chat::{ContentPart, ToolCall};
-
-	fn test_model_iden() -> ModelIden {
-		ModelIden::new(AdapterKind::OpenAI, "test-model")
-	}
-
-	fn test_tool_call() -> ToolCall {
-		ToolCall {
-			call_id: "call_1".to_string(),
-			fn_name: "get_weather".to_string(),
-			fn_arguments: serde_json::json!({"city": "Paris"}),
-			thought_signatures: None,
-		}
-	}
-
-	#[test]
-	fn test_assistant_message_for_tool_use_preserves_reasoning_content() {
-		let chat_res = ChatResponse {
-			content: MessageContent::from_parts(vec![
-				ContentPart::Text("Let me check.".to_string()),
-				ContentPart::ToolCall(test_tool_call()),
-			]),
-			reasoning_content: Some("I should inspect the weather tool first.".to_string()),
-			model_iden: test_model_iden(),
-			provider_model_iden: test_model_iden(),
-			stop_reason: None,
-			usage: Usage::default(),
-			captured_raw_body: None,
-			response_id: None,
-		};
-
-		let assistant_msg = chat_res
-			.assistant_message_for_tool_use()
-			.expect("assistant tool-use message should exist");
-
-		assert_eq!(assistant_msg.role.to_string(), "Assistant");
-		assert_eq!(assistant_msg.content.first_text(), Some("Let me check."));
-		assert_eq!(assistant_msg.content.tool_calls().len(), 1);
-		assert_eq!(
-			assistant_msg.content.joined_reasoning_content().as_deref(),
-			Some("I should inspect the weather tool first.")
-		);
-	}
-
-	#[test]
-	fn test_assistant_message_for_tool_use_requires_tool_calls() {
-		let chat_res = ChatResponse {
-			content: MessageContent::from_text("No tools here."),
-			reasoning_content: Some("Reasoning should not matter without tool calls.".to_string()),
-			model_iden: test_model_iden(),
-			provider_model_iden: test_model_iden(),
-			stop_reason: None,
-			usage: Usage::default(),
-			captured_raw_body: None,
-			response_id: None,
-		};
-
-		assert!(chat_res.assistant_message_for_tool_use().is_none());
-	}
-}
-
 // region:    --- ChatStreamResponse
 
 /// Result of a streaming chat request.
@@ -291,3 +247,52 @@ pub struct ChatStreamResponse {
 }
 
 // endregion: --- ChatStreamResponse
+
+// region:    --- Tests
+
+#[cfg(test)]
+mod tests {
+	use super::StopReason;
+
+	/// `StopReason`'s `PartialEq` ignores the raw string, so compare the variant name explicitly.
+	fn kind(raw: &str) -> &'static str {
+		match StopReason::from(raw.to_string()) {
+			StopReason::Completed(_) => "Completed",
+			StopReason::MaxTokens(_) => "MaxTokens",
+			StopReason::ToolCall(_) => "ToolCall",
+			StopReason::ContentFilter(_) => "ContentFilter",
+			StopReason::StopSequence(_) => "StopSequence",
+			StopReason::Other(_) => "Other",
+		}
+	}
+
+	#[test]
+	fn test_stop_reason_maps_refusals_to_content_filter() {
+		// Anthropic `refusal`, Gemini image / language filters
+		for raw in ["refusal", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "LANGUAGE"] {
+			assert_eq!(kind(raw), "ContentFilter", "{raw}");
+		}
+	}
+
+	#[test]
+	fn test_stop_reason_maps_context_window_limits_to_max_tokens() {
+		// Anthropic `model_context_window_exceeded`, Mistral `model_length`
+		for raw in ["model_context_window_exceeded", "model_length"] {
+			assert_eq!(kind(raw), "MaxTokens", "{raw}");
+		}
+	}
+
+	#[test]
+	fn test_stop_reason_keeps_the_raw_string_and_the_existing_mappings() {
+		assert_eq!(StopReason::from("refusal".to_string()).raw(), "refusal");
+		assert_eq!(kind("end_turn"), "Completed");
+		assert_eq!(kind("max_tokens"), "MaxTokens");
+		assert_eq!(kind("tool_use"), "ToolCall");
+		assert_eq!(kind("SAFETY"), "ContentFilter");
+		assert_eq!(kind("stop_sequence"), "StopSequence");
+		// `pause_turn` asks the caller to continue the turn, it is neither a filter nor a limit
+		assert_eq!(kind("pause_turn"), "Other");
+	}
+}
+
+// endregion: --- Tests

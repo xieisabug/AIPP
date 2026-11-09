@@ -34,10 +34,36 @@ pub fn route(value: Option<&str>) -> Option<(AdapterKind, &'static str)> {
     }
 }
 
+/// Keep only gateway accounting, never the response text or tool arguments.
+pub fn raw_billing(body: &serde_json::Value) -> serde_json::Value {
+    for value in [Some(body), body.get("usage"), body.get("usageMetadata"),
+        body.pointer("/response/usage"), body.pointer("/message/usage")] .into_iter().flatten() {
+        if value.get("opencode").is_some() {
+            return serde_json::json!({"opencode": value["opencode"], "cost": value.get("cost")});
+        }
+    }
+    serde_json::Value::Null
+}
+
+pub fn capture_billing(options: genai::chat::ChatOptions) ->
+    (genai::chat::ChatOptions, std::sync::Arc<std::sync::Mutex<serde_json::Value>>) {
+    let billing = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+    let captured = billing.clone();
+    let previous_sink = options.raw_frame_sink.clone();
+    let options = options.with_raw_frame_fn(move |ctx, frame| {
+        if let Some(sink) = &previous_sink { sink.on_frame(ctx, frame); }
+        if let Some(body) = frame.json() {
+            let value = raw_billing(&body);
+            if !value.is_null() { *captured.lock().expect("billing capture lock") = value; }
+        }
+    });
+    (options, billing)
+}
+
 /// Only persist accounting that the gateway actually returned. A zero cost
 /// can coexist with a positive subscription allowance.
-pub fn billing_metadata(usage: &genai::chat::Usage) -> Option<serde_json::Value> {
-    let raw = usage.billing.opencode.as_ref()?.as_object()?;
+pub fn billing_metadata(usage: &serde_json::Value) -> Option<serde_json::Value> {
+    let raw = usage.get("opencode")?.as_object()?;
     let mut billing = serde_json::Map::new();
     if let Some(source) = raw.get("billing_source").and_then(|v| v.as_str()) {
         billing.insert("billing_source".into(), source.into());
@@ -47,7 +73,7 @@ pub fn billing_metadata(usage: &genai::chat::Usage) -> Option<serde_json::Value>
             billing.insert(field.into(), value.clone());
         }
     }
-    if let Some(value) = usage.billing.cost.as_ref().filter(|v| v.is_number()) {
+    if let Some(value) = usage.get("cost").filter(|v| v.is_number()) {
         billing.insert("cost".into(), value.clone());
     }
     if let Some(estimated) = raw.get("estimated").and_then(|v| v.as_bool()) {
@@ -57,8 +83,8 @@ pub fn billing_metadata(usage: &genai::chat::Usage) -> Option<serde_json::Value>
 }
 
 /// The gateway also reports billed tokens across all four wire formats.
-pub fn normalize_usage(mut usage: genai::chat::Usage) -> genai::chat::Usage {
-    let Some(tokens) = usage.billing.opencode.as_ref().and_then(|v| v.get("tokens")) else {
+pub fn normalize_usage(mut usage: genai::chat::Usage, billing: &serde_json::Value) -> genai::chat::Usage {
+    let Some(tokens) = billing.get("opencode").and_then(|v| v.get("tokens")) else {
         return usage;
     };
     let count = |key: &str| tokens.get(key)?.as_u64()?.try_into().ok();

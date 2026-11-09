@@ -1,9 +1,11 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::path::Path;
 use std::sync::Arc;
 
 /// Binary payload attached to a message (e.g., image or PDF).
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Binary {
 	/// MIME type, such as "image/png" or "application/pdf".
@@ -98,6 +100,11 @@ impl Binary {
 	/// Returns true if this binary is a PDF (content_type equals "application/pdf").
 	pub fn is_pdf(&self) -> bool {
 		self.content_type.trim().eq_ignore_ascii_case("application/pdf")
+	}
+
+	/// Returns true if this binary is a video (content_type starts with "video/").
+	pub fn is_video(&self) -> bool {
+		self.content_type.trim().to_ascii_lowercase().starts_with("video/")
 	}
 
 	/// Generate the web or data url from this binary

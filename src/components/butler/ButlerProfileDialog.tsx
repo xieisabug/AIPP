@@ -32,6 +32,7 @@ function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: Butler
 }
 
 interface Props {
+    appearanceOnly?: boolean;
     name: string;
     appearance?: ButlerAppearance;
     description?: string;
@@ -39,7 +40,7 @@ interface Props {
     onSave: (name: string, appearance: ButlerAppearance, description?: string) => Promise<void>;
 }
 
-export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, onClose, onSave }: Props) {
+export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, onClose, onSave, appearanceOnly = false }: Props) {
     const [name, setName] = useState(initialName);
     const [description, setDescription] = useState(initialDescription ?? "");
     const [appearance, setAppearance] = useState(initialAppearance ?? defaultAppearance);
@@ -91,8 +92,8 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
     return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
         <DialogContent className="sm:max-w-[720px] max-h-[90vh] overflow-y-auto" showCloseButton={!saving}>
             <DialogHeader>
-                <DialogTitle>{initialDescription === undefined ? "名字与形象" : "名字、描述与形象"}</DialogTitle>
-                <DialogDescription>为助手选一个名字，搭配属于它的颜色。</DialogDescription>
+                <DialogTitle>{appearanceOnly ? "助手头像" : initialDescription === undefined ? "名字与形象" : "名字、描述与形象"}</DialogTitle>
+                <DialogDescription>{appearanceOnly ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。" : "为助手选一个名字，搭配属于它的颜色。"}</DialogDescription>
             </DialogHeader>
             <form onSubmit={event => { event.preventDefault(); void save(); }} className="space-y-6">
                 <fieldset disabled={saving} className="grid gap-6 sm:grid-cols-[220px_1fr]">
@@ -103,11 +104,11 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
                         <span className="max-w-full break-words text-center font-medium">{name.trim() || "助手"}</span>
                     </div>
                     <div className="min-w-0 space-y-5">
-                        <div className="space-y-2">
+                        {!appearanceOnly && <div className="space-y-2">
                             <label htmlFor="butler-profile-name" className="text-sm font-medium">助手名称</label>
                             <Input id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
-                        </div>
-                        {initialDescription !== undefined && <div className="space-y-2">
+                        </div>}
+                        {!appearanceOnly && initialDescription !== undefined && <div className="space-y-2">
                             <label htmlFor="assistant-profile-description" className="text-sm font-medium">描述（选填）</label>
                             <Input id="assistant-profile-description" value={description} onChange={event => setDescription(event.target.value)} />
                         </div>}

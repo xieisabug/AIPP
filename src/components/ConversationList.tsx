@@ -18,6 +18,9 @@ import {
 } from "./ui/dropdown-menu";
 import { Button } from "./ui/button";
 import ConfirmDialog from "./ConfirmDialog";
+import ButlerAvatar from "./butler/ButlerAvatar";
+import { appearanceKey, defaultAppearance, parseAppearance, type ButlerAppearance } from "./butler/butlerAppearance";
+import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 
 const LONG_PRESS_DELAY_MS = 500;
@@ -86,6 +89,7 @@ function useLongPress(enabled: boolean, onLongPress: () => void) {
 }
 
 interface ConversationItemProps {
+    appearance?: ButlerAppearance;
     conversation: Conversation;
     isSelected: boolean;
     status: ConversationListItemStatus;
@@ -96,6 +100,7 @@ interface ConversationItemProps {
 
 const ConversationItem = memo(function ConversationItem({
     conversation,
+    appearance,
     isSelected,
     status,
     onSelect,
@@ -119,6 +124,11 @@ const ConversationItem = memo(function ConversationItem({
             data-aipp-slot="chat-conversation-list-item"
             data-status={status}
             {...longPress.handlers}
+            onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                openMenu();
+            }}
             onClick={() => {
                 if (longPress.consumeClick()) return;
                 onSelect(conversation.id.toString());
@@ -127,8 +137,9 @@ const ConversationItem = memo(function ConversationItem({
             <div className="overflow-hidden text-ellipsis whitespace-nowrap font-medium" data-aipp-slot="chat-conversation-item-title">
                 {displayName}
             </div>
-            <div className="text-xs overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground" data-aipp-slot="chat-conversation-item-subtitle">
-                {displayAssistantName}
+            <div className="flex min-w-0 items-center gap-1.5 pr-8 text-xs text-muted-foreground" data-aipp-slot="chat-conversation-item-subtitle">
+                <ButlerAvatar id={conversation.assistant_id ?? 0} size={18} appearance={appearance ?? defaultAppearance} />
+                <span className="truncate">{displayAssistantName}</span>
             </div>
 
             <div className="absolute right-2 top-1/2 size-9 -translate-y-1/2">
@@ -154,7 +165,7 @@ const ConversationItem = memo(function ConversationItem({
                         <Button
                             variant="link"
                             size="icon"
-                            className="invisible absolute inset-0 h-9 w-9 p-0 group-hover:visible transition-opacity duration-200"
+                            className="invisible absolute inset-0 h-9 w-9 p-0 group-hover:visible focus-visible:visible data-[state=open]:visible transition-opacity duration-200"
                             aria-label="会话操作"
                             data-aipp-slot="chat-conversation-item-menu-trigger"
                             onClick={(e) => {
@@ -210,6 +221,7 @@ const ConversationList = memo(function ConversationList({
     conversationId,
 }: ConversationListProps) {
     const { getItemStatus } = useConversationListStatus(conversationId);
+    const { featureConfig } = useFeatureConfig();
     const [conversations, setConversations] = useState<Array<Conversation>>([]);
 
     const [isLoading, setIsLoading] = useState(false);
@@ -377,6 +389,7 @@ const ConversationList = memo(function ConversationList({
                     <ConversationItem
                         key={conversation.id}
                         conversation={conversation}
+                        appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(conversation.assistant_id ?? 0)))}
                         isSelected={conversationId === conversation.id.toString()}
                         status={getItemStatus(conversation.id)}
                         onSelect={onSelectConversation}

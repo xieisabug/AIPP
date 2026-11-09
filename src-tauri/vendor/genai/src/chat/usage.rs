@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, skip_serializing_none};
+use serde_with::skip_serializing_none;
 
 /// Normalized token usage across providers (OpenAI-compatible).
 ///
@@ -10,13 +10,9 @@ use serde_with::{serde_as, skip_serializing_none};
 /// - Gemini: `candidatesTokenCount` excludes "thoughts" (reasoning) tokens. We normalize:
 ///   `completion_tokens = candidatesTokenCount + thoughts_token_count`, and
 ///   `completion_tokens_details.reasoning_tokens = thoughts_token_count`.
-#[serde_as]
 #[skip_serializing_none]
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-	/// Gateway billing extensions, when included alongside the normal token counts.
-	#[serde(flatten)]
-	pub billing: UsageBilling,
 	/// Total input tokens (formerly `input_tokens`).
 	pub prompt_tokens: Option<i32>,
 	pub prompt_tokens_details: Option<PromptTokensDetails>,
@@ -28,22 +24,6 @@ pub struct Usage {
 	/// Total tokens as reported by the API, or computed as prompt + completion
 	/// (including cache read/creation tokens when applicable).
 	pub total_tokens: Option<i32>,
-}
-
-#[skip_serializing_none]
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct UsageBilling {
-	pub cost: Option<serde_json::Value>,
-	pub opencode: Option<serde_json::Value>,
-}
-
-impl UsageBilling {
-	pub(crate) fn from_usage(value: &serde_json::Value) -> Self {
-		Self {
-			cost: value.get("cost").filter(|v| v.is_number()).cloned(),
-			opencode: value.get("opencode").filter(|v| v.is_object()).cloned(),
-		}
-	}
 }
 
 impl Usage {
@@ -60,9 +40,8 @@ impl Usage {
 }
 
 /// Breakdown of cache creation tokens by TTL.
-#[serde_as]
 #[skip_serializing_none]
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheCreationDetails {
 	/// Tokens written to 5-minute ephemeral cache.
 	#[serde(default, deserialize_with = "crate::support::zero_as_none")]
@@ -79,13 +58,12 @@ impl CacheCreationDetails {
 	}
 }
 
-#[serde_as]
 #[skip_serializing_none]
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptTokensDetails {
 	/// Anthropic: `cache_creation_input_tokens`.
 	/// Tokens used to build the cache (not yet cached). These may incur a small surcharge; subsequent requests benefit via `cached_tokens`.
-	#[serde(default, deserialize_with = "crate::support::zero_as_none")]
+	#[serde(alias = "cache_write_tokens", default, deserialize_with = "crate::support::zero_as_none")]
 	pub cache_creation_tokens: Option<i32>,
 	/// Breakdown of cache creation tokens by TTL (5m vs 1h).
 	/// Only populated when the provider returns TTL-specific breakdown.
@@ -107,9 +85,8 @@ impl PromptTokensDetails {
 	}
 }
 
-#[serde_as]
 #[skip_serializing_none]
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionTokensDetails {
 	#[serde(default, deserialize_with = "crate::support::zero_as_none")]
 	pub accepted_prediction_tokens: Option<i32>,
@@ -131,18 +108,59 @@ impl CompletionTokensDetails {
 	}
 }
 
+// region:    --- Tests
+
 #[cfg(test)]
-mod billing_tests {
-	use super::*;
+mod tests {
+	use super::Usage;
+	use serde_json::json;
 
 	#[test]
-	fn preserves_gateway_allowance_and_zero_balance_cost() {
-		let usage: Usage = serde_json::from_value(serde_json::json!({
-			"prompt_tokens":39, "completion_tokens":16, "total_tokens":55,
-			"cost":0, "opencode":{"billing_source":"go","allowance":0.00000927}
-		})).unwrap();
-		assert_eq!(usage.total_tokens, Some(55));
-		assert_eq!(usage.billing.cost, Some(serde_json::json!(0)));
-		assert_eq!(usage.billing.opencode.unwrap()["allowance"], 0.00000927);
+	fn test_deserializes_openai_cache_write_tokens() -> Result<(), serde_json::Error> {
+		let usage: Usage = serde_json::from_value(json!({
+			"prompt_tokens_details": {
+				"cache_write_tokens": 123,
+				"cached_tokens": 456
+			}
+		}))?;
+
+		assert_eq!(
+			usage
+				.prompt_tokens_details
+				.as_ref()
+				.and_then(|details| details.cache_creation_tokens),
+			Some(123)
+		);
+		assert_eq!(
+			usage.prompt_tokens_details.as_ref().and_then(|details| details.cached_tokens),
+			Some(456)
+		);
+
+		let serialized = serde_json::to_value(&usage)?;
+		assert_eq!(serialized["prompt_tokens_details"]["cache_creation_tokens"], 123);
+		assert!(serialized["prompt_tokens_details"].get("cache_write_tokens").is_none());
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_openai_cache_write_tokens_zero_is_none() -> Result<(), serde_json::Error> {
+		let usage: Usage = serde_json::from_value(json!({
+			"prompt_tokens_details": {
+				"cache_write_tokens": 0
+			}
+		}))?;
+
+		assert!(
+			usage
+				.prompt_tokens_details
+				.as_ref()
+				.and_then(|details| details.cache_creation_tokens)
+				.is_none()
+		);
+
+		Ok(())
 	}
 }
+
+// endregion: --- Tests
