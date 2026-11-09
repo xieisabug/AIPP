@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS butler_chat_group_message (
     reply_to INTEGER,
     request_key TEXT,
     route_state TEXT CHECK(route_state IN ('pending','done','failed','cancelled')),
+    source_conversation_id INTEGER,
+    source_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(group_id, seq)
 );
@@ -127,6 +129,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     // 早期版本按顺序串行回复（after_turn），现在同一轮并发回复、多轮讨论按 round/rounds 推进。
     ensure_column(conn, "butler_chat_group_turn", "round", "INTEGER NOT NULL DEFAULT 1")?;
     ensure_column(conn, "butler_chat_group_turn", "rounds", "INTEGER NOT NULL DEFAULT 1")?;
+    // 成员发言对应它执行会话里的那条最终回复，界面据此复用私聊的消息信息、代码预览与附件。
+    ensure_column(conn, "butler_chat_group_message", "source_conversation_id", "INTEGER")?;
+    ensure_column(conn, "butler_chat_group_message", "source_message_id", "INTEGER")?;
     if !table_exists(conn, "butler_group_event")? {
         return Ok(());
     }
@@ -185,6 +190,9 @@ pub struct Message {
     pub body: String,
     pub reply_to: Option<i64>,
     pub created_at: String,
+    /// 成员发言来自哪个执行会话的哪条回复；用户发言和系统提示为空。
+    pub source_conversation_id: Option<i64>,
+    pub source_message_id: Option<i64>,
 }
 
 impl Message {
@@ -213,7 +221,7 @@ pub struct Turn {
 
 const GROUP_COLUMNS: &str = "id,name,seq,created_at,updated_at";
 const MEMBER_COLUMNS: &str = "id,group_id,assistant_id,name,conversation_id,joined_after,delivered_through,active";
-const MESSAGE_COLUMNS: &str = "group_id,seq,sender_member,sender_assistant,sender_name,kind,body,reply_to,created_at";
+const MESSAGE_COLUMNS: &str = "group_id,seq,sender_member,sender_assistant,sender_name,kind,body,reply_to,created_at,source_conversation_id,source_message_id";
 const TURN_COLUMNS: &str = "id,group_id,member_id,trigger_seq,origin_seq,depth,round,rounds,state,input_through,input_message_id,reply_seq,error";
 
 fn group_row(r: &Row<'_>) -> rusqlite::Result<Group> {
@@ -229,6 +237,7 @@ fn message_row(r: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         group_id: r.get(0)?, seq: r.get(1)?, sender_member: r.get(2)?, sender_assistant: r.get(3)?,
         sender_name: r.get(4)?, kind: r.get(5)?, body: r.get(6)?, reply_to: r.get(7)?, created_at: r.get(8)?,
+        source_conversation_id: r.get(9)?, source_message_id: r.get(10)?,
     })
 }
 fn turn_row(r: &Row<'_>) -> rusqlite::Result<Turn> {
@@ -710,6 +719,15 @@ pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<O
     match outcome {
         Outcome::Reply(body) => {
             let reply = append(&tx, t.group_id, Sender::Member(&m), "message", &body, None, None, false)?;
+            let source: Option<i64> = match t.input_message_id {
+                Some(input) => tx.query_row("SELECT id FROM message WHERE conversation_id=?1 AND id>?2
+                    AND message_type IN ('response','assistant') AND finish_time IS NOT NULL ORDER BY id DESC LIMIT 1",
+                    params![m.conversation_id, input], |r| r.get(0)).optional()?,
+                None => None,
+            };
+            tx.execute("UPDATE butler_chat_group_message SET source_conversation_id=?3, source_message_id=?4 WHERE group_id=?1 AND seq=?2",
+                params![t.group_id, reply.seq, m.conversation_id, source])?;
+            let reply = message(&tx, t.group_id, reply.seq)?;
             tx.execute("UPDATE butler_chat_group_turn SET state='done', reply_seq=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, reply.seq])?;
             finished.relayed = relay(&tx, &t, &m, &reply)?;
             finished.reply = Some(reply);

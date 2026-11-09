@@ -7,7 +7,7 @@ import {
 const member = (id: number, name: string): ButlerGroupMember => ({ id, assistant_id: id + 10, name, conversation_id: id + 100, is_chief: false });
 const message = (seq: number, patch: Partial<ButlerGroupMessage> = {}): ButlerGroupMessage => ({
     group_id: 1, seq, sender_member: null, sender_assistant: null, sender_name: "我", kind: "message",
-    body: `消息 ${seq}`, reply_to: null, created_at: "2026-11-09 08:00:00", ...patch,
+    body: `消息 ${seq}`, reply_to: null, created_at: "2026-11-09 08:00:00", source_conversation_id: null, source_message_id: null, ...patch,
 });
 
 describe("butlerGroupModel", () => {

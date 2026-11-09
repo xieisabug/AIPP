@@ -19,6 +19,9 @@ export interface ButlerGroupMessage {
     body: string;
     reply_to: number | null;
     created_at: string;
+    /** 成员发言来自哪个执行会话的哪条回复；用户发言、系统提示和迁移前的旧消息为空。 */
+    source_conversation_id: number | null;
+    source_message_id: number | null;
 }
 
 export interface ButlerGroupSummary {

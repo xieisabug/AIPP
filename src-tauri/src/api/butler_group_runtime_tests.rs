@@ -41,7 +41,7 @@ fn member(id: i64, name: &str) -> group::Member {
 fn message(seq: i64, sender: Option<i64>, body: &str) -> group::Message {
     group::Message { group_id: 1, seq, sender_member: sender, sender_assistant: sender.map(|id| id + 10),
         sender_name: if sender.is_some() { "成员".into() } else { "我".into() }, kind: "message".into(),
-        body: body.into(), reply_to: None, created_at: String::new() }
+        body: body.into(), reply_to: None, created_at: String::new(), source_conversation_id: None, source_message_id: None }
 }
 
 #[test]

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowUp, Copy, Loader2, Reply, Square, Trash2, UserMinus, UserPlus, Users, X } from "lucide-react";
+import { ArrowUp, Loader2, Square, Trash2, UserMinus, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
-import UnifiedMarkdown from "@/components/UnifiedMarkdown";
 import IconButton from "@/components/IconButton";
 import { AskUserQuestionCard } from "@/components/InlineInteractionCards";
 import { Button } from "@/components/ui/button";
@@ -15,14 +14,16 @@ import {
 import { useAskUserQuestion } from "@/hooks/useInlineInteraction";
 import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import type { AssistantListItem } from "@/data/Assistant";
-import { isUserGroupMessage, type ButlerGroupDetail, type ButlerGroupMember, type ButlerGroupMessage } from "@/data/ButlerGroup";
+import { type ButlerGroupDetail, type ButlerGroupMember, type ButlerGroupMessage } from "@/data/ButlerGroup";
 import * as groups from "@/services/butlerGroupService";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
+import ButlerGroupMessageRow from "./ButlerGroupMessageRow";
+import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "./butlerProgress";
 import {
-    applyMention, excerpt, findMentionQuery, formatDivider, groupReadKey, mentionOptions, mergeMessages,
+    applyMention, findMentionQuery, formatDivider, groupReadKey, mentionOptions, mergeMessages,
     showTimeDivider, type MentionQuery,
 } from "./butlerGroupModel";
 
@@ -83,28 +84,15 @@ function MemberQuestion({ member }: { member: ButlerGroupMember }) {
     </div>;
 }
 
-function MessageActions({ message, onQuote }: { message: ButlerGroupMessage; onQuote: (message: ButlerGroupMessage) => void }) {
-    return <span className="flex shrink-0 items-center gap-0.5 self-end opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-        <button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" title="引用" aria-label="引用"
-            onClick={() => onQuote(message)}><Reply className="size-3.5" /></button>
-        <button type="button" className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" title="复制" aria-label="复制"
-            onClick={() => void navigator.clipboard.writeText(message.body).then(() => toast.success("已复制"))}><Copy className="size-3.5" /></button>
-    </span>;
-}
-
-function QuoteLine({ quoted }: { quoted?: ButlerGroupMessage }) {
-    return <div className="mb-1.5 border-l-2 border-border pl-2 text-xs text-muted-foreground line-clamp-2">
-        {quoted ? `${isUserGroupMessage(quoted) ? "我" : quoted.sender_name}：${excerpt(quoted.body, 80)}` : "引用的消息"}
-    </div>;
-}
-
 export default function ButlerGroupChat({ groupId, chiefName, assistants, onDeleted }: Props) {
     const [detail, setDetail] = useState<ButlerGroupDetail | null>(null);
     const [older, setOlder] = useState<ButlerGroupMessage[]>([]);
     const [hasMoreOlder, setHasMoreOlder] = useState<boolean | null>(null);
     const [loadError, setLoadError] = useState("");
     const [draft, setDraft] = useState("");
-    const [quote, setQuote] = useState<ButlerGroupMessage | null>(null);
+    // 引用与私聊共用同一套组件：悬浮条/右键菜单的“引用回复”写入这里，输入框上方显示引用标签。id 是群消息序号。
+    const [quote, setQuote] = useState<ButlerQuoteTarget | null>(null);
+    const quoteState = useMemo(() => ({ quote, setQuote }), [quote]);
     const [sending, setSending] = useState(false);
     const [stopping, setStopping] = useState(false);
     const [inputError, setInputError] = useState("");
@@ -210,7 +198,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const send = async () => {
         const body = draft.trim();
         if (!body || sending) return;
-        const replyTo = quote?.seq ?? null;
+        const replyTo = quote?.id ?? null;
         const signature = JSON.stringify([body, replyTo]);
         if (pendingPost.current?.signature !== signature) {
             pendingPost.current = { signature, key: crypto.randomUUID() };
@@ -342,8 +330,9 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             </div>
         </div>
 
+        <ButlerQuoteContext.Provider value={quoteState}>
         <div ref={listRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-5 py-4" aria-label="群聊记录" data-aipp-slot="butler-group-messages">
-            <div className="mx-auto flex max-w-4xl flex-col gap-3">
+            <div className="mx-auto flex max-w-4xl flex-col gap-4">
                 {canLoadOlder && <button type="button" className="self-center rounded-full px-3 py-1 text-xs text-muted-foreground hover:bg-muted"
                     onClick={() => void loadOlder()}>查看更早的消息</button>}
                 {messages.map((message, index) => {
@@ -360,35 +349,11 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                             </div>
                         </div>;
                     }
-                    const quoted = message.reply_to ? quotedBySeq.get(message.reply_to) : undefined;
-                    if (isUserGroupMessage(message)) {
-                        return <div key={key}>
-                            {time}
-                            <div className="group flex items-start justify-end gap-1" data-aipp-slot="butler-group-user-message">
-                                <MessageActions message={message} onQuote={setQuote} />
-                                <div className="max-w-[70%] rounded-2xl border border-border bg-background px-4 py-2.5 text-sm">
-                                    {message.reply_to && <QuoteLine quoted={quoted} />}
-                                    <div className="whitespace-pre-wrap break-words">{message.body}</div>
-                                </div>
-                            </div>
-                        </div>;
-                    }
-                    const sender = message.sender_member ? byId.get(message.sender_member) : undefined;
                     return <div key={key}>
                         {time}
-                        <div className="group flex items-start gap-2.5" data-aipp-slot="butler-group-member-message">
-                            <ButlerAvatar id={message.sender_assistant ?? 0} chief={sender?.is_chief ?? false} size={32} figure />
-                            <div className="min-w-0 flex-1">
-                                <div className="mb-1 text-xs text-muted-foreground">{message.sender_name}</div>
-                                <div className="flex items-end gap-1">
-                                    <div className="butler-peer-bubble min-w-0">
-                                        {message.reply_to && <QuoteLine quoted={quoted} />}
-                                        <UnifiedMarkdown>{message.body}</UnifiedMarkdown>
-                                    </div>
-                                    <MessageActions message={message} onQuote={setQuote} />
-                                </div>
-                            </div>
-                        </div>
+                        <ButlerGroupMessageRow groupId={groupId} message={message}
+                            quoted={message.reply_to ? quotedBySeq.get(message.reply_to) : undefined}
+                            sender={message.sender_member ? byId.get(message.sender_member) : undefined} />
                     </div>;
                 })}
                 {running.map(member => <TypingRow key={`typing-${member.id}`} member={member} />)}
@@ -398,13 +363,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
 
         <div className="flex-none px-4 pb-4 pt-2" data-aipp-slot="butler-group-input">
             <div className="mx-auto max-w-4xl">
-                {quote && <div className="mb-2 flex items-center gap-2 rounded-lg bg-muted/60 px-3 py-1.5 text-xs text-muted-foreground">
-                    <Reply className="size-3.5 shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">{isUserGroupMessage(quote) ? "我" : quote.sender_name}：{excerpt(quote.body, 80)}</span>
-                    <button type="button" aria-label="取消引用" className="rounded p-0.5 hover:bg-muted hover:text-foreground" onClick={() => setQuote(null)}>
-                        <X className="size-3.5" />
-                    </button>
-                </div>}
+                {quote && <div className="mb-2 flex"><ButlerQuoteChip quote={quote} onClear={() => setQuote(null)} /></div>}
                 <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-background px-3 py-2 focus-within:border-ring">
                     {mention && options.length > 0 && <div role="listbox" aria-label="点名成员"
                         className="absolute bottom-full left-2 mb-2 w-56 overflow-hidden rounded-lg border bg-popover p-1 shadow-md">
@@ -435,6 +394,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                 {inputError && <p role="alert" className="mt-1.5 whitespace-pre-wrap text-xs text-destructive">{inputError}</p>}
             </div>
         </div>
+        </ButlerQuoteContext.Provider>
 
         <Sheet open={panelOpen} onOpenChange={setPanelOpen}>
             <SheetContent className="w-80 gap-0 sm:max-w-sm">

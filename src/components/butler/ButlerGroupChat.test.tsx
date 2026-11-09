@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ButlerGroupDetail } from "@/data/ButlerGroup";
+import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
 import ButlerGroupChat from "./ButlerGroupChat";
 
 const api = vi.hoisted(() => ({
@@ -27,16 +28,18 @@ function detail(patch: Partial<ButlerGroupDetail> = {}): ButlerGroupDetail {
     return {
         id: 7, name: "周报小组", members, has_more: false, turns: [], routing: false,
         messages: [
-            { group_id: 7, seq: 1, sender_member: null, sender_assistant: null, sender_name: "系统", kind: "notice", body: "你邀请 总管家、写作助手 加入了群聊", reply_to: null, created_at: "2026-11-09 08:00:00" },
-            { group_id: 7, seq: 2, sender_member: null, sender_assistant: null, sender_name: "我", kind: "message", body: "帮我写周报", reply_to: null, created_at: "2026-11-09 08:01:00" },
-            { group_id: 7, seq: 3, sender_member: 2, sender_assistant: 12, sender_name: "写作助手", kind: "message", body: "初稿如下", reply_to: null, created_at: "2026-11-09 08:02:00" },
+            { group_id: 7, seq: 1, sender_member: null, sender_assistant: null, sender_name: "系统", kind: "notice", body: "你邀请 总管家、写作助手 加入了群聊", reply_to: null, created_at: "2026-11-09 08:00:00", source_conversation_id: null, source_message_id: null },
+            { group_id: 7, seq: 2, sender_member: null, sender_assistant: null, sender_name: "我", kind: "message", body: "帮我写周报", reply_to: null, created_at: "2026-11-09 08:01:00", source_conversation_id: null, source_message_id: null },
+            { group_id: 7, seq: 3, sender_member: 2, sender_assistant: 12, sender_name: "写作助手", kind: "message", body: "初稿如下", reply_to: null, created_at: "2026-11-09 08:02:00", source_conversation_id: 102, source_message_id: 9001 },
         ],
         ...patch,
     };
 }
 
 function renderChat() {
-    return render(<ButlerGroupChat groupId={7} chiefName="总管家" assistants={[{ id: 12, name: "写作助手", assistant_type: 0 }]} onDeleted={() => {}} />);
+    return render(<AntiLeakageProvider enabled={false}>
+        <ButlerGroupChat groupId={7} chiefName="总管家" assistants={[{ id: 12, name: "写作助手", assistant_type: 0 }]} onDeleted={() => {}} />
+    </AntiLeakageProvider>);
 }
 
 function memoryStorage() {
@@ -67,7 +70,7 @@ beforeEach(() => {
     api.onButlerGroupChanged.mockResolvedValue(() => {});
     api.postButlerGroupMessage.mockImplementation(async (_group: number, _key: string, body: string, replyTo: number | null) => {
         const message = { group_id: 7, seq: 4 + posted.length, sender_member: null, sender_assistant: null, sender_name: "我",
-            kind: "message" as const, body, reply_to: replyTo, created_at: "2026-11-09 08:03:00" };
+            kind: "message" as const, body, reply_to: replyTo, created_at: "2026-11-09 08:03:00", source_conversation_id: null, source_message_id: null };
         posted.push(message);
         return message;
     });
@@ -105,13 +108,17 @@ describe("ButlerGroupChat", () => {
         expect(api.postButlerGroupMessage).not.toHaveBeenCalled();
     });
 
-    it("should keep the quoted message when replying to a member", async () => {
+    it("should quote a member reply with the private chat quote button and chip", async () => {
         renderChat();
         const reply = await screen.findByText("初稿如下");
-        fireEvent.click(within(reply.closest("[data-aipp-slot='butler-group-member-message']") as HTMLElement).getByLabelText("引用"));
+        fireEvent.click(within(reply.closest("[data-aipp-slot='butler-group-member-message']") as HTMLElement).getByLabelText("引用回复"));
+        expect(document.querySelector('[data-aipp-slot="butler-quote-chip"]')).toHaveTextContent("写作助手初稿如下");
         fireEvent.change(screen.getByLabelText("群聊消息"), { target: { value: "第二段改短" } });
         fireEvent.click(screen.getByLabelText("发送"));
         await waitFor(() => expect(api.postButlerGroupMessage).toHaveBeenCalledWith(7, expect.any(String), "第二段改短", 3));
+        // 发出去的消息带着私聊同款的引用标签
+        await waitFor(() => expect(document.querySelector('[data-aipp-slot="butler-message-quote"]')).toHaveTextContent("写作助手：初稿如下"));
+        expect(document.querySelector('[data-aipp-slot="butler-quote-chip"]')).toBeNull();
     });
 
     it("should insert a member name when choosing an @ suggestion", async () => {
