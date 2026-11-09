@@ -424,3 +424,28 @@ fn test_cascade_delete_assistant_keeps_pending_request_and_rejects_silent_reassi
     assert_eq!(count(&db.conn,"aipp_delete_conversation.conversation",&format!("id=10 AND assistant_id={id}")),1);
     assert_eq!(db.conn.query_row("SELECT request_json FROM aipp_delete_conversation.queued_conversation_message WHERE id=42",[],|r|r.get::<_,String>(0)).unwrap(),payload);
 }
+
+#[test]
+fn test_cascade_delete_assistant_memory_stays_on_rejection_and_clears_on_success() {
+    let db=assistant_db(); let id=db.add_assistant("memory owner","",Some(0),false).unwrap();
+    let conversation=create_test_db();
+    crate::db::butler_memory::init(&conversation).unwrap();
+    crate::db::butler_goal::schema(&conversation).unwrap();
+    conversation.execute_batch("CREATE TABLE scheduled_task(id INTEGER,name TEXT,assistant_id INTEGER)").unwrap();
+    peer(&db.conn,"aipp_delete_conversation",&conversation);
+    db.conn.execute("INSERT INTO aipp_delete_conversation.conversation(id,name,assistant_id,conversation_kind,created_time) VALUES(10,'old chat',?1,'butler_contact','now')",[id]).unwrap();
+    db.conn.execute_batch("INSERT INTO aipp_delete_conversation.message(id,conversation_id,message_type,content,created_time) VALUES(10,10,'user','private source','now');
+        INSERT INTO aipp_delete_conversation.butler_goal VALUES(10,7,'old goal',0);
+        INSERT INTO aipp_delete_conversation.butler_goal_turn VALUES(10,10,7)").unwrap();
+    db.conn.execute("INSERT INTO aipp_delete_conversation.butler_memory(content,scope_type,scope_id,source_message_id,created_at,updated_at) VALUES('private','assistant',?1,10,0,0)",[id]).unwrap();
+    db.conn.execute("INSERT INTO aipp_delete_conversation.butler_memory(content,scope_type,source_message_id,created_at,updated_at) VALUES('global','global',10,0,0)",[]).unwrap();
+    db.conn.execute("INSERT INTO aipp_delete_conversation.scheduled_task(id,name,assistant_id) VALUES(42,'keep',?1)",[id]).unwrap();
+    assert!(db.delete_assistant(id).is_err());
+    assert_eq!(count(&db.conn,"aipp_delete_conversation.butler_memory","1=1"),2);
+    db.conn.execute("DELETE FROM aipp_delete_conversation.scheduled_task WHERE id=42",[]).unwrap();
+    db.delete_assistant(id).unwrap();
+    assert_eq!(count(&db.conn,"aipp_delete_conversation.butler_memory","scope_type='assistant'"),0);
+    assert_eq!(count(&db.conn,"aipp_delete_conversation.butler_memory","scope_type='global' AND source_message_id IS NULL"),1);
+    assert_eq!(count(&db.conn,"aipp_delete_conversation.butler_goal","conversation_id=10 AND revision=8"),1);
+    assert_eq!(count(&db.conn,"aipp_delete_conversation.butler_goal_turn","message_id=10 AND revision=7"),1);
+}
