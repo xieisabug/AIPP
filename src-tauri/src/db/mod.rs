@@ -20,6 +20,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 pub mod assistant_db;
 pub mod butler_history;
+pub mod butler_memory;
 pub mod butler_result_refs;
 pub mod butler_resume;
 pub mod butler_check;
