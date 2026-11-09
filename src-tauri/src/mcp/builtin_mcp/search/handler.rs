@@ -36,16 +36,19 @@ static GLOBAL_BROWSER_POOL: OnceCell<BrowserPool> = OnceCell::const_new();
 
 #[cfg(desktop)]
 pub fn cleanup_search_profile_locks(app_handle: &AppHandle) -> Result<(), String> {
-    let config = load_search_config_from_db(app_handle)?;
-    let user_data_dir = resolve_search_user_data_dir(app_handle, &config)?;
-    if let Err(e) = fs::create_dir_all(&user_data_dir) {
-        warn!(error = %e, dir = ?user_data_dir, "Failed to create user_data_dir for cleanup");
+    let db = crate::db::mcp_db::MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    for server in db.get_mcp_servers().map_err(|e| e.to_string())? {
+        if !server.is_builtin || server.command.as_deref() != Some("aipp:search") {
+            continue;
+        }
+        let config = load_search_config_from_db(app_handle, Some(server.id))?;
+        let user_data_dir = resolve_search_user_data_dir(app_handle, &config)?;
+        if let Err(e) = fs::create_dir_all(&user_data_dir) {
+            warn!(error = %e, dir = ?user_data_dir, "Failed to create user_data_dir for cleanup");
+        }
+        info!(server_id = server.id, user_data_dir = %user_data_dir.display(), "Preparing search profile lock cleanup");
+        cleanup_profile_locks(&user_data_dir, "app_startup");
     }
-    info!(
-        user_data_dir = %user_data_dir.display(),
-        "Preparing search profile lock cleanup"
-    );
-    cleanup_profile_locks(&user_data_dir, "app_startup");
     Ok(())
 }
 
@@ -81,12 +84,13 @@ fn is_timeout_like(error: &str) -> bool {
 #[derive(Clone)]
 pub struct SearchHandler {
     app_handle: AppHandle,
+    server_id: Option<i64>,
 }
 
 impl SearchHandler {
-    pub fn new(app_handle: AppHandle) -> Self {
-        debug!("Creating SearchHandler");
-        Self { app_handle }
+    pub fn new(app_handle: AppHandle, server_id: Option<i64>) -> Self {
+        debug!(?server_id, "Creating SearchHandler");
+        Self { app_handle, server_id }
     }
 
     /// 获取或创建浏览器池
@@ -115,10 +119,7 @@ impl SearchHandler {
                 .unwrap_or(10_000),
             user_data_dir: Some(user_data_dir.to_string_lossy().to_string()),
             browser_path,
-            headless: config
-                .get("HEADLESS")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
-                .unwrap_or(true),
+            headless: true, // Only the challenge handoff launches a headed browser.
             launch_args: FingerprintManager::get_stealth_launch_args(),
         };
 
@@ -359,7 +360,7 @@ impl SearchHandler {
     /// 从数据库加载搜索配置
     #[cfg(desktop)]
     fn load_search_config(&self) -> Result<HashMap<String, String>, String> {
-        load_search_config_from_db(&self.app_handle)
+        load_search_config_from_db(&self.app_handle, self.server_id)
     }
 
     /// 构建针对搜索引擎的抓取配置
@@ -376,17 +377,14 @@ impl SearchHandler {
         Ok(FetchConfig {
             user_data_dir: config.get("USER_DATA_DIR").cloned(),
             proxy_server: config.get("PROXY_SERVER").cloned(),
-            headless: config
-                .get("HEADLESS")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(true),
+            headless: true, // Only the challenge handoff launches a headed browser.
             user_agent: None,
             bypass_csp: false,
             wait_selectors,
             wait_timeout_ms: config
                 .get("WAIT_TIMEOUT_MS")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(15000),
+                .unwrap_or_else(|| FetchConfig::default().wait_timeout_ms),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
             debug_capture_empty_artifacts: config
                 .get("DEBUG_CAPTURE_EMPTY_ARTIFACTS")
@@ -430,17 +428,14 @@ impl SearchHandler {
         Ok(FetchConfig {
             user_data_dir: config.get("USER_DATA_DIR").cloned(),
             proxy_server: config.get("PROXY_SERVER").cloned(),
-            headless: config
-                .get("HEADLESS")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(true),
+            headless: true, // Only the challenge handoff launches a headed browser.
             user_agent: None,
             bypass_csp: false,
             wait_selectors,
             wait_timeout_ms: config
                 .get("WAIT_TIMEOUT_MS")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(15000),
+                .unwrap_or_else(|| FetchConfig::default().wait_timeout_ms),
             wait_poll_ms: config.get("WAIT_POLL_MS").and_then(|v| v.parse().ok()).unwrap_or(250),
             debug_capture_empty_artifacts: config
                 .get("DEBUG_CAPTURE_EMPTY_ARTIFACTS")
@@ -456,18 +451,10 @@ impl SearchHandler {
 }
 
 #[cfg(desktop)]
-fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, String>, String> {
+fn load_search_config_from_db(app_handle: &AppHandle, server_id: Option<i64>) -> Result<HashMap<String, String>, String> {
     use crate::db::mcp_db::MCPDatabase;
     let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
-    let mut stmt = db
-        .conn
-        .prepare(
-            "SELECT environment_variables FROM mcp_server WHERE command = ? AND is_builtin = 1 LIMIT 1",
-        )
-        .map_err(|e| format!("Database prepare error: {}", e))?;
-
-    let env_text: Option<String> =
-        stmt.query_row(["aipp:search"], |row| row.get::<_, Option<String>>(0)).unwrap_or(None);
+    let env_text = super::recovery::load_server_environment(&db.conn, server_id)?;
     let mut config = HashMap::new();
     if let Some(text) = env_text {
         for line in text.lines() {
@@ -486,7 +473,7 @@ fn load_search_config_from_db(app_handle: &AppHandle) -> Result<HashMap<String, 
             "Ignoring deprecated BROWSER_TYPE config in chromiumoxide mode"
         );
     }
-    debug!(?config, "Loaded search config");
+    debug!(?server_id, "Loaded search config");
     Ok(config)
 }
 

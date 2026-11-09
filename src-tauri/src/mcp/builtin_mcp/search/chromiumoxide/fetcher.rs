@@ -3,6 +3,7 @@ use super::super::engine_manager::SearchEngine;
 use super::super::engines::base::SearchEngineBase;
 use super::super::fingerprint::{FingerprintConfig, FingerprintManager, TimingConfig};
 use super::browser_pool::BrowserPool;
+use super::verification::{self, PageStatus};
 use super::launch_browser_recovering_stale_locks;
 use chromiumoxide_cdp::cdp::browser_protocol::{emulation, network, page as cdp_page};
 use futures::StreamExt;
@@ -51,7 +52,7 @@ impl Default for FetchConfig {
             user_agent: None,
             bypass_csp: false,
             wait_selectors: vec![],
-            wait_timeout_ms: 15000,
+            wait_timeout_ms: 60_000,
             wait_poll_ms: 250,
             debug_capture_empty_artifacts: false,
             debug_artifact_dir: None,
@@ -96,7 +97,7 @@ impl ContentFetcher {
     }
 
     fn should_retry_pooled_browser_error(error: &str, attempt: usize) -> bool {
-        attempt == 0 && BrowserPool::is_connection_closed_error(error)
+        attempt == 0 && !error.contains("Human verification") && BrowserPool::is_connection_closed_error(error)
     }
 
     pub fn new(app_handle: AppHandle, config: FetchConfig) -> Self {
@@ -787,6 +788,7 @@ impl ContentFetcher {
                 Ok(html)
             }
             Err(chromium_error) => {
+                if chromium_error.contains("Human verification") { return Err(chromium_error); }
                 warn!(
                     error = %chromium_error,
                     timeout_like = Self::is_timeout_like(&chromium_error),
@@ -844,7 +846,7 @@ impl ContentFetcher {
         let mut builder = BrowserConfig::builder()
             .user_data_dir(&user_data_dir)
             .no_sandbox()
-            .launch_timeout(Duration::from_millis(self.config.wait_timeout_ms.max(30_000)));
+            .launch_timeout(Duration::from_millis(super::super::recovery::SEARCH_TIMEOUT_MS as u64));
 
         if !self.config.headless {
             builder = builder.with_head();
@@ -923,9 +925,10 @@ impl ContentFetcher {
         });
 
         let page = browser
-            .new_page("about:blank")
+            .new_page(super::native_window::page_params(self.config.headless))
             .await
             .map_err(|e| format!("Failed to create page: {}", e))?;
+        let _native_page = super::native_window::PageGuard(page.clone());
 
         let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
@@ -940,6 +943,7 @@ impl ContentFetcher {
 
         // 等待页面加载完成
         self.wait_for_content(&page).await?;
+        if let Some(html) = self.wait_for_verified_results(&page, &[], self.config.wait_timeout_ms, Some(url)).await? { return Ok(html); }
 
         // 获取 HTML
         let html =
@@ -995,6 +999,7 @@ impl ContentFetcher {
 
                 // 等待页面加载完成
                 self.wait_for_content(page).await?;
+                if let Some(html) = self.wait_for_verified_results(page, &[], self.config.wait_timeout_ms, Some(url)).await? { return Ok(html); }
 
                 // 获取 HTML
                 let html = page
@@ -1034,7 +1039,7 @@ impl ContentFetcher {
                     return Ok(html);
                 }
                 Err(error) if Self::should_retry_pooled_browser_error(&error, attempt) => {
-                    drop(pooled_page.consume());
+                    super::native_window::close(pooled_page.consume());
                     warn!(
                         error = %error,
                         attempt = attempt + 1,
@@ -1096,65 +1101,41 @@ impl ContentFetcher {
         Ok(stdout)
     }
 
-    /// 等待搜索结果，使用指定的选择器列表
-    async fn wait_for_results_with_selectors(
+    async fn wait_for_verified_results(
         &self,
         page: &chromiumoxide::page::Page,
         selectors: &[String],
-    ) -> Result<(), String> {
-        let start = Instant::now();
-        let timeout = Duration::from_millis(self.config.wait_timeout_ms);
-        let selectors_json = serde_json::to_string(selectors).unwrap_or("[]".to_string());
-
-        let mut check_count = 0;
+        timeout_ms: u64,
+        resume_url: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let started = Instant::now();
         loop {
-            check_count += 1;
-
-            let found_selector_script = format!(
-                "() => {{ const sels = {}; for (const s of sels) {{ if (document.querySelector(s)) return s; }} return null; }}",
-                selectors_json
-            );
-
-            let found = page
-                .evaluate(found_selector_script.as_str())
-                .await
-                .ok()
-                .and_then(|val| val.value().and_then(|v| v.as_str().map(|s| s.to_string())));
-
-            if let Some(sel) = found {
-                info!(
-                    selector = %sel,
-                    check_count,
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    "✅ Results loaded"
-                );
-                let extra_wait = 500 + rand::random::<u64>() % 500;
-                sleep(Duration::from_millis(extra_wait)).await;
-                return Ok(());
+            let state = verification::inspect(page, selectors).await?;
+            match verification::classify(&state) {
+                PageStatus::HumanRequired => {
+                    let url = resume_url.ok_or("Human verification handoff missing original request URL")?;
+                    return super::native_window::fetch_after_challenge(&self.app_handle, url, selectors, self.config.proxy_server.as_deref()).await.map(Some);
+                },
+                PageStatus::Results if state.has_body && state.ready == "complete" => return Ok(None),
+                _ => {}
             }
-
-            if start.elapsed() >= timeout {
-                let current_url = page
-                    .evaluate("() => window.location.href")
-                    .await
-                    .ok()
-                    .and_then(|val| val.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-                    .unwrap_or_else(|| "unknown".to_string());
-                warn!(
-                    stage = "wait_for_results_selectors",
-                    timeout_ms = self.config.wait_timeout_ms,
-                    check_count,
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    %current_url,
-                    "Results wait timeout, continuing anyway"
-                );
-                break;
+            if started.elapsed() >= Duration::from_millis(timeout_ms) {
+                return Err(format!("Search results wait timed out after {}ms (url={}, title={}, readyState={}, results=false)", timeout_ms, state.url, state.title, state.ready));
             }
-
             sleep(Duration::from_millis(self.config.wait_poll_ms.max(250))).await;
         }
+    }
 
-        Ok(())
+    fn search_resume_url(engine: &SearchEngine, query: &str) -> String {
+        let base = match engine {
+            SearchEngine::Google => "https://www.google.com/search",
+            SearchEngine::Bing => "https://www.bing.com/search",
+            SearchEngine::DuckDuckGo => "https://duckduckgo.com/",
+            SearchEngine::Kagi => "https://kagi.com/search",
+        };
+        let mut url = reqwest::Url::parse(base).expect("constant search URL");
+        url.query_pairs_mut().append_pair("q", query);
+        url.to_string()
     }
 
     /// 执行人性化的搜索流程（模拟真实用户行为）
@@ -1191,6 +1172,11 @@ impl ContentFetcher {
         // 等待页面稳定
         sleep(Duration::from_millis(500 + rand::random::<u64>() % 500)).await;
 
+        let selectors = search_engine.default_wait_selectors();
+        if verification::classify(&verification::inspect(page, &selectors).await?) == PageStatus::HumanRequired {
+            return super::native_window::fetch_after_challenge(&self.app_handle, &Self::search_resume_url(search_engine, query), &selectors, self.config.proxy_server.as_deref()).await;
+        }
+
         // 人性化的输入框定位和填写
         let input_stage_start = Instant::now();
         self.humanized_search_input(page, query, search_engine).await.map_err(|e| {
@@ -1221,10 +1207,10 @@ impl ContentFetcher {
             format!("Search stage submit_search failed: {}", e)
         })?;
 
-        // 等待结果加载，使用配置的等待时间加随机延时
-        let wait_time = self.config.wait_timeout_ms + rand::random::<u64>() % 2000;
+        // 等待结果加载，严格使用配置的等待时限。
+        let wait_time = self.config.wait_timeout_ms;
         let wait_stage_start = Instant::now();
-        self.wait_for_results_with_timeout(page, wait_time, search_engine).await.map_err(|e| {
+        let verified_html = self.wait_for_verified_results(page, &search_engine.default_wait_selectors(), wait_time, Some(&Self::search_resume_url(search_engine, query))).await.map_err(|e| {
             let timeout_like = Self::is_timeout_like(&e);
             error!(
                 stage = "wait_search_results",
@@ -1236,6 +1222,7 @@ impl ContentFetcher {
             );
             format!("Search stage wait_search_results failed: {}", e)
         })?;
+        if let Some(html) = verified_html { return Ok(html); }
 
         // 增强的HTML提取，带重试机制
         let extract_stage_start = Instant::now();
@@ -1348,36 +1335,11 @@ impl ContentFetcher {
         ))
     }
 
-    /// 检查页面是否准备就绪
+    /// Result selectors are verified before extraction; only guard DOM availability here.
     async fn check_page_ready(&self, page: &chromiumoxide::page::Page) -> Result<bool, String> {
-        let body_ready = page
-            .evaluate("() => !!document.body && document.body.children.length > 0")
-            .await
-            .ok()
-            .and_then(|val| val.value().and_then(|v| v.as_bool()))
-            .unwrap_or(false);
-
-        if !body_ready {
-            return Ok(false);
-        }
-
-        let has_content = page
-            .evaluate(
-                "() => {
-                const indicators = [
-                    '#b_content', '#b_results', '.b_algo',
-                    '#search', '#main', '.g', '.tF2Cxc',
-                    '#results', '.result', '.web-result'
-                ];
-                return indicators.some(sel => document.querySelector(sel));
-            }",
-            )
-            .await
-            .ok()
-            .and_then(|val| val.value().and_then(|v| v.as_bool()))
-            .unwrap_or(false);
-
-        Ok(has_content)
+        let value = page.evaluate("() => document.readyState === 'complete' && !!document.body").await
+            .map_err(|e| format!("Page readiness evaluation failed: {e}"))?;
+        value.value().and_then(|v| v.as_bool()).ok_or_else(|| "Page readiness evaluation returned no boolean".to_string())
     }
 
     /// 带重试机制的页面导航
@@ -1816,88 +1778,6 @@ impl ContentFetcher {
         Err("Failed to submit search".to_string())
     }
 
-    /// 等待搜索结果，带超时处理
-    async fn wait_for_results_with_timeout(
-        &self,
-        page: &chromiumoxide::page::Page,
-        timeout_ms: u64,
-        search_engine: &SearchEngine,
-    ) -> Result<(), String> {
-        let start = Instant::now();
-        let timeout = Duration::from_millis(timeout_ms);
-
-        let selectors = search_engine.default_wait_selectors();
-        let selectors_json = serde_json::to_string(&selectors).unwrap_or("[]".to_string());
-
-        info!(
-            engine = search_engine.as_str(),
-            timeout_ms,
-            selectors = ?selectors,
-            "Waiting for search results"
-        );
-
-        let mut check_count = 0;
-        loop {
-            check_count += 1;
-
-            let current_url = page
-                .evaluate("() => window.location.href")
-                .await
-                .ok()
-                .and_then(|val| val.value().and_then(|v| v.as_str().map(|s| s.to_string())))
-                .unwrap_or_else(|| "unknown".to_string());
-
-            let found_selector_script = format!(
-                "() => {{ const sels = {}; for (const s of sels) {{ if (document.querySelector(s)) return s; }} return null; }}",
-                selectors_json
-            );
-
-            let found = page
-                .evaluate(found_selector_script.as_str())
-                .await
-                .ok()
-                .and_then(|val| val.value().and_then(|v| v.as_str().map(|s| s.to_string())));
-
-            if let Some(sel) = found {
-                info!(
-                    selector = %sel,
-                    check_count,
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    %current_url,
-                    "✅ Results loaded"
-                );
-                let extra_wait = 500 + rand::random::<u64>() % 500;
-                sleep(Duration::from_millis(extra_wait)).await;
-                return Ok(());
-            }
-
-            if start.elapsed() >= timeout {
-                let page_state = page
-                    .evaluate(
-                        "() => ({ url: window.location.href, title: document.title, readyState: document.readyState, bodyLength: document.body ? document.body.innerHTML.length : 0 })",
-                    )
-                    .await
-                    .ok()
-                    .and_then(|val| val.value().cloned())
-                    .unwrap_or_default();
-
-                warn!(
-                    stage = "wait_for_results_timeout",
-                    timeout_ms,
-                    check_count,
-                    elapsed_ms = start.elapsed().as_millis() as u64,
-                    ?page_state,
-                    "Search results wait timeout"
-                );
-                break;
-            }
-
-            sleep(Duration::from_millis(self.config.wait_poll_ms.max(250))).await;
-        }
-
-        Ok(())
-    }
-
     /// 使用 Chromiumoxide 执行搜索流程
     async fn fetch_search_with_chromiumoxide(
         &mut self,
@@ -1927,7 +1807,7 @@ impl ContentFetcher {
         let mut builder = BrowserConfig::builder()
             .user_data_dir(&user_data_dir)
             .no_sandbox()
-            .launch_timeout(Duration::from_millis(self.config.wait_timeout_ms.max(30_000)));
+            .launch_timeout(Duration::from_millis(super::super::recovery::SEARCH_TIMEOUT_MS as u64));
 
         if !self.config.headless {
             builder = builder.with_head();
@@ -1979,9 +1859,10 @@ impl ContentFetcher {
         });
 
         let page = browser
-            .new_page("about:blank")
+            .new_page(super::native_window::page_params(self.config.headless))
             .await
             .map_err(|e| format!("Failed to create page: {}", e))?;
+        let _native_page = super::native_window::PageGuard(page.clone());
 
         let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
@@ -2060,7 +1941,7 @@ impl ContentFetcher {
                     return Ok(html);
                 }
                 Err(error) if Self::should_retry_pooled_browser_error(&error, attempt) => {
-                    drop(pooled_page.consume());
+                    super::native_window::close(pooled_page.consume());
                     warn!(
                         error = %error,
                         attempt = attempt + 1,
@@ -2167,7 +2048,7 @@ impl ContentFetcher {
         let mut builder = BrowserConfig::builder()
             .user_data_dir(&user_data_dir)
             .no_sandbox()
-            .launch_timeout(Duration::from_millis(self.config.wait_timeout_ms.max(30_000)));
+            .launch_timeout(Duration::from_millis(super::super::recovery::SEARCH_TIMEOUT_MS as u64));
 
         if !self.config.headless {
             builder = builder.with_head();
@@ -2219,9 +2100,10 @@ impl ContentFetcher {
         });
 
         let page = browser
-            .new_page("about:blank")
+            .new_page(super::native_window::page_params(self.config.headless))
             .await
             .map_err(|e| format!("Failed to create page: {}", e))?;
+        let _native_page = super::native_window::PageGuard(page.clone());
 
         let fingerprint = self.fingerprint_manager.get_stable_fingerprint(None).clone();
 
@@ -2237,7 +2119,7 @@ impl ContentFetcher {
 
         // 等待 Kagi 搜索结果加载
         let kagi_selectors = super::super::engines::kagi::KagiEngine::default_wait_selectors();
-        self.wait_for_results_with_selectors(&page, &kagi_selectors).await?;
+        if let Some(html) = self.wait_for_verified_results(&page, &kagi_selectors, self.config.wait_timeout_ms, Some(&search_url)).await? { return Ok(html); }
 
         // 提取 HTML
         let html =
@@ -2289,7 +2171,7 @@ impl ContentFetcher {
                     // 等待 Kagi 搜索结果加载
                     let kagi_selectors =
                         super::super::engines::kagi::KagiEngine::default_wait_selectors();
-                    self.wait_for_results_with_selectors(page, &kagi_selectors).await?;
+                    if let Some(html) = self.wait_for_verified_results(page, &kagi_selectors, self.config.wait_timeout_ms, Some(search_url)).await? { return Ok(html); }
 
                     // 提取 HTML
                     let html = page
@@ -2326,7 +2208,7 @@ impl ContentFetcher {
                     return Ok(html);
                 }
                 Err(error) if Self::should_retry_pooled_browser_error(&error, attempt) => {
-                    drop(pooled_page.consume());
+                    super::native_window::close(pooled_page.consume());
                     warn!(
                         error = %error,
                         attempt = attempt + 1,
@@ -2342,6 +2224,10 @@ impl ContentFetcher {
         Err("Pooled Chromium Kagi session search retry exhausted".to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "fetcher_tests.rs"]
+mod timeout_tests;
 
 #[cfg(test)]
 mod tests {

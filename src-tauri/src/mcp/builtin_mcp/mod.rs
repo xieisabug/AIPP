@@ -1070,6 +1070,7 @@ pub async fn execute_aipp_builtin_tool(
     tool_name: String,
     parameters: String,
     conversation_id: Option<i64>,
+    server_id: Option<i64>,
 ) -> Result<String, String> {
     use search::types::{SearchRequest, SearchResponse, SearchResultType};
 
@@ -1085,7 +1086,7 @@ pub async fn execute_aipp_builtin_tool(
 
     let result_value = match cmd_id.as_str() {
         "search" => {
-            let handler = SearchHandler::new(app_handle.clone());
+            let handler = SearchHandler::new(app_handle.clone(), server_id);
             match tool_name.as_str() {
                 "search_web" => {
                     let query = args

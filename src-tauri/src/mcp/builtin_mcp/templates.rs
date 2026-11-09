@@ -175,7 +175,7 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
             description: "内置的网络搜索和网页访问工具，支持多种搜索引擎，基于 Chromium 内核抓取页面信息，并且可以调用访问工具进一步获取页面的具体信息".into(),
             command: "aipp:search".into(),
             transport_type: "stdio".into(),
-            default_timeout: Some(60000), // 60秒，搜索和抓取需要更多时间
+            default_timeout: Some(super::search::recovery::SEARCH_TIMEOUT_MS), // 搜索和抓取默认 60 秒
         required_envs: vec![
             BuiltinTemplateEnvVar {
                 key: "SEARCH_ENGINE".into(),
@@ -1461,6 +1461,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
     use tracing::info;
 
     let db = MCPDatabase::new(app_handle).context("Create MCPDatabase failed")?;
+    super::search::recovery::repair_search_servers(&db.conn).context("Repair legacy search servers failed")?;
     let templates = builtin_templates();
 
     for tpl in templates {
@@ -1485,7 +1486,7 @@ pub fn init_builtin_mcp_servers(app_handle: &AppHandle) -> Result<()> {
                     None,                   // environment_variables (用户可以后续配置)
                     None,                   // headers
                     None,                   // url (builtins use stdio)
-                    Some(20000),            // timeout
+                    if tpl.command == "aipp:search" { tpl.default_timeout } else { Some(20000) },
                     false,                  // is_long_running
                     true,                   // is_enabled
                     true,                   // is_builtin

@@ -3421,7 +3421,11 @@ async fn execute_builtin_tool(
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
     let command = server.command.clone().unwrap_or_default();
     // 获取超时配置，使用服务器配置的超时或默认值
-    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
+    let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or_else(|| {
+        if command == "aipp:search" {
+            crate::mcp::builtin_mcp::search::recovery::SEARCH_TIMEOUT_MS as u64
+        } else { DEFAULT_TIMEOUT_MS }
+    });
     // 部分内置工具有自己的等待/超时语义，不应被 MCP server 的外层超时抢先截断。
     let skip_outer_timeout = (command == "aipp:ui_interaction"
         && matches!(tool_name, "ask_user_question" | "preview_code"))
@@ -3450,6 +3454,7 @@ async fn execute_builtin_tool(
             tool_name.to_string(),
             normalize_parameters_json(parameters),
             conversation_id,
+            Some(server.id),
         )
         .await
     };
@@ -3464,6 +3469,17 @@ async fn execute_builtin_tool(
                 match result {
                     Ok(r) => r,
                     Err(e) => return Err(anyhow!("工具执行失败: {}", e)),
+                }
+            }
+        }
+    } else if command == "aipp:search" {
+        tokio::select! {
+            _ = cancel_token.cancelled() => return Err(anyhow!("Cancelled by user (server_id={}, tool={})", server.id, tool_name)),
+            result = crate::mcp::builtin_mcp::search::verification_budget::with_search_budget(std::time::Duration::from_millis(timeout_ms), execution) => {
+                match result {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(error)) => return Err(anyhow!("工具执行失败: {}", error)),
+                    Err(error) => return Err(anyhow!("{} (server_id={}, tool={}, conversation_id={:?})", error, server.id, tool_name, conversation_id)),
                 }
             }
         }

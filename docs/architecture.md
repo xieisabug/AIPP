@@ -28,6 +28,7 @@ The application uses multiple Tauri windows for different features:
 -   **Artifact Window**: Standalone artifact rendering window
 -   **ArtifactCollections Window**: Manage artifact collections
 -   **Plugin Window**: Plugin UI host window
+-   **Native Chrome verification** (desktop only): Normal searches remain headless. Only a detected challenge starts a separate headed Chrome instance using the persistent manual profile and original request URL. HTML is read from the verified headed target; cancellation/success/error shuts that instance down. A profile lease serializes manual sessions and is held until process shutdown. Human wait pauses the active-search budget; no screenshot relay or remote-site Tauri IPC is used.
 
 ## Frontend Structure
 

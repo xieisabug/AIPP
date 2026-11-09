@@ -133,6 +133,8 @@ where
     Fut: std::future::Future<Output = Result<T, String>>,
 {
     let _launch_guard = launch_lock().lock().await;
+    #[cfg(windows)]
+    super::orphan_recovery::recover_orphaned_browser(user_data_dir).await?;
     prepare_profile_for_launch(user_data_dir, context).await;
 
     match launch().await {

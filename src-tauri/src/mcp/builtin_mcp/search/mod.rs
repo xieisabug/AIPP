@@ -3,6 +3,8 @@ pub mod engine_manager;
 pub mod engines;
 pub mod fingerprint;
 pub mod handler;
+pub(crate) mod recovery;
+pub(crate) mod verification_budget;
 #[cfg(any(mobile, test))]
 mod mobile_http;
 pub mod types;
