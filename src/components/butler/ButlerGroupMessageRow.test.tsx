@@ -71,6 +71,16 @@ describe("ButlerGroupMessageRow", () => {
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("run_artifacts", { lang: "html", inputStr: "<b>hi</b>", conversationId: 502 }));
     });
 
+    it("should show the member name above a full-width reply like private chats", () => {
+        renderRow(memberReply);
+        const row = document.querySelector('[data-aipp-slot="butler-group-member-message"]') as HTMLElement;
+        const speaker = row.querySelector('[data-aipp-slot="butler-group-speaker"]') as HTMLElement;
+        expect(speaker).toHaveTextContent("写作助手");
+        // 发言人在上方单独一行，消息与私聊一样直接占整行，不再被左侧头像栏挤窄
+        expect(row.firstElementChild).toBe(speaker);
+        expect(row.querySelector(":scope > [data-message-item]")).not.toBeNull();
+    });
+
     it("should label a quoted user message like private chats", () => {
         renderRow(userReply, memberReply);
         expect(document.querySelector('[data-aipp-slot="butler-message-quote"]')).toHaveTextContent("写作助手：初稿如下 [代码]");

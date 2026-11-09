@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useMemo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import MessageItem from "@/components/MessageItem";
@@ -8,6 +8,19 @@ import ButlerAvatar from "./ButlerAvatar";
 import { ButlerQuoteButton, quoteExcerpt } from "./ButlerQuote";
 
 export const groupSpeaker = (message: ButlerGroupMessage) => isUserGroupMessage(message) ? "我" : message.sender_name;
+
+/** 群成员发言、正在输入、提问共用的发言人行：小头像 + 名字，放在内容上方，不占用左侧宽度。 */
+export function ButlerGroupSpeaker({ assistantId, chief, label, children }: {
+    assistantId: number;
+    chief: boolean;
+    label: string;
+    children?: ReactNode;
+}) {
+    return <div className="mb-1.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground" data-aipp-slot="butler-group-speaker">
+        {children ?? <ButlerAvatar id={assistantId} chief={chief} size={20} figure />}
+        <span className="truncate">{label}</span>
+    </div>;
+}
 
 /**
  * 把群消息转成私聊使用的消息结构，交给同一个 MessageItem 渲染（Markdown、代码预览、右键菜单、悬浮操作）。
@@ -59,12 +72,10 @@ function ButlerGroupMessageRow({ groupId, message, quoted, sender }: Props) {
     if (isUserGroupMessage(message)) {
         return <div data-aipp-slot="butler-group-user-message">{item}</div>;
     }
-    return <div className="flex items-start gap-2.5" data-aipp-slot="butler-group-member-message">
-        <ButlerAvatar id={message.sender_assistant ?? 0} chief={sender?.is_chief ?? false} size={32} figure />
-        <div className="min-w-0 flex-1">
-            <div className="mb-1 text-xs text-muted-foreground">{message.sender_name}</div>
-            {item}
-        </div>
+    // 与私聊同宽：气泡贴左边缘按整行宽度排版，只在上方多一行发言人（小头像 + 助手名）。
+    return <div data-aipp-slot="butler-group-member-message">
+        <ButlerGroupSpeaker assistantId={message.sender_assistant ?? 0} chief={sender?.is_chief ?? false} label={message.sender_name} />
+        {item}
     </div>;
 }
 

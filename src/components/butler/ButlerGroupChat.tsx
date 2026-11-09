@@ -19,7 +19,7 @@ import * as groups from "@/services/butlerGroupService";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
-import ButlerGroupMessageRow from "./ButlerGroupMessageRow";
+import ButlerGroupMessageRow, { ButlerGroupSpeaker } from "./ButlerGroupMessageRow";
 import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "./butlerProgress";
 import {
@@ -52,14 +52,13 @@ function useLiveProgress(conversationId: number) {
 
 function TypingRow({ member }: { member: ButlerGroupMember }) {
     const progress = useLiveProgress(member.conversation_id);
-    return <div className="flex items-start gap-2.5" role="status" aria-label={`${member.name} 正在输入`} data-aipp-slot="butler-group-typing">
-        <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={32} figure animated state="thinking" />
-        <div className="min-w-0">
-            <div className="mb-1 text-xs text-muted-foreground">{member.name}</div>
-            <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
-                <span className="butler-typing-dots" aria-hidden="true"><i /><i /><i /></span>
-                {progress && <span className="truncate text-xs">{progress}</span>}
-            </div>
+    return <div role="status" aria-label={`${member.name} 正在输入`} data-aipp-slot="butler-group-typing">
+        <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name}>
+            <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={20} figure animated state="thinking" />
+        </ButlerGroupSpeaker>
+        <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
+            <span className="butler-typing-dots" aria-hidden="true"><i /><i /><i /></span>
+            {progress && <span className="truncate text-xs">{progress}</span>}
         </div>
     </div>;
 }
@@ -69,10 +68,9 @@ function MemberQuestion({ member }: { member: ButlerGroupMember }) {
     const question = useAskUserQuestion({ conversationId: member.conversation_id });
     const elicitation = useAcpElicitation({ conversationId: member.conversation_id });
     if (!question.isDialogOpen && !elicitation.questionRequest && !elicitation.decisionError) return null;
-    return <div className="flex items-start gap-2.5" data-aipp-slot="butler-group-question">
-        <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={32} figure />
-        <div className="min-w-0 flex-1 max-w-[min(80%,48rem)]">
-            <div className="mb-1 text-xs text-muted-foreground">{member.name} 想问你</div>
+    return <div data-aipp-slot="butler-group-question">
+        <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={`${member.name} 想问你`} />
+        <div className="min-w-0 max-w-[min(65%,48rem)]">
             {question.isDialogOpen && <AskUserQuestionCard request={question.pendingRequest} isOpen={question.isDialogOpen}
                 viewMode={question.viewMode} completedAnswers={question.completedAnswers} readOnly={question.readOnly}
                 onSubmit={question.handleSubmit} onCancel={question.handleCancel} />}
@@ -331,8 +329,9 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         </div>
 
         <ButlerQuoteContext.Provider value={quoteState}>
-        <div ref={listRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-5 py-4" aria-label="群聊记录" data-aipp-slot="butler-group-messages">
-            <div className="mx-auto flex max-w-4xl flex-col gap-4">
+        {/* 与私聊（ConversationUI）同样的 p-6 与整行宽度，不再收窄成居中一栏。 */}
+        <div ref={listRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto p-6" aria-label="群聊记录" data-aipp-slot="butler-group-messages">
+            <div className="flex flex-col gap-4">
                 {canLoadOlder && <button type="button" className="self-center rounded-full px-3 py-1 text-xs text-muted-foreground hover:bg-muted"
                     onClick={() => void loadOlder()}>查看更早的消息</button>}
                 {messages.map((message, index) => {
@@ -361,38 +360,36 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             </div>
         </div>
 
-        <div className="flex-none px-4 pb-4 pt-2" data-aipp-slot="butler-group-input">
-            <div className="mx-auto max-w-4xl">
-                {quote && <div className="mb-2 flex"><ButlerQuoteChip quote={quote} onClear={() => setQuote(null)} /></div>}
-                <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-background px-3 py-2 focus-within:border-ring">
-                    {mention && options.length > 0 && <div role="listbox" aria-label="点名成员"
-                        className="absolute bottom-full left-2 mb-2 w-56 overflow-hidden rounded-lg border bg-popover p-1 shadow-md">
-                        {options.map((option, index) => <button key={option.key} type="button" role="option" aria-selected={index === mentionIndex}
-                            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${index === mentionIndex ? "bg-muted" : "hover:bg-muted"}`}
-                            onMouseDown={event => { event.preventDefault(); chooseMention(option.label); }}>
-                            {option.member ? <ButlerAvatar id={option.member.assistant_id} chief={option.member.is_chief} size={20} figure />
-                                : <Users className="size-4 text-muted-foreground" />}
-                            <span className="truncate">{option.label}</span>
-                        </button>)}
-                    </div>}
-                    <textarea ref={inputRef} rows={1} value={draft} aria-label="群聊消息"
-                        placeholder="发消息，输入 @ 可以点名"
-                        className="max-h-[200px] min-h-[24px] flex-1 resize-none bg-transparent py-1 text-sm outline-none placeholder:text-muted-foreground"
-                        onChange={event => { setDraft(event.target.value); updateMention(event.target.value, event.target.selectionStart ?? event.target.value.length); }}
-                        onSelect={event => updateMention(event.currentTarget.value, event.currentTarget.selectionStart ?? 0)}
-                        onBlur={() => setMention(null)}
-                        onKeyDown={onKeyDown} />
-                    {replying && <Button type="button" size="icon" variant="ghost" className="size-8 rounded-full" title="停止回复" aria-label="停止回复"
-                        disabled={stopping} onClick={() => void stop()}>
-                        {stopping ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-3.5 fill-current" />}
-                    </Button>}
-                    <Button type="button" size="icon" className="size-8 rounded-full" title="发送" aria-label="发送"
-                        disabled={!draft.trim() || sending} onClick={() => void send()}>
-                        {sending ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
-                    </Button>
-                </div>
-                {inputError && <p role="alert" className="mt-1.5 whitespace-pre-wrap text-xs text-destructive">{inputError}</p>}
+        <div className="flex-none px-6 pb-4 pt-2" data-aipp-slot="butler-group-input">
+            {quote && <div className="mb-2 flex"><ButlerQuoteChip quote={quote} onClear={() => setQuote(null)} /></div>}
+            <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-background px-3 py-2 focus-within:border-ring">
+                {mention && options.length > 0 && <div role="listbox" aria-label="点名成员"
+                    className="absolute bottom-full left-2 mb-2 w-56 overflow-hidden rounded-lg border bg-popover p-1 shadow-md">
+                    {options.map((option, index) => <button key={option.key} type="button" role="option" aria-selected={index === mentionIndex}
+                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${index === mentionIndex ? "bg-muted" : "hover:bg-muted"}`}
+                        onMouseDown={event => { event.preventDefault(); chooseMention(option.label); }}>
+                        {option.member ? <ButlerAvatar id={option.member.assistant_id} chief={option.member.is_chief} size={20} figure />
+                            : <Users className="size-4 text-muted-foreground" />}
+                        <span className="truncate">{option.label}</span>
+                    </button>)}
+                </div>}
+                <textarea ref={inputRef} rows={1} value={draft} aria-label="群聊消息"
+                    placeholder="发消息，输入 @ 可以点名"
+                    className="max-h-[200px] min-h-[24px] flex-1 resize-none bg-transparent py-1 text-sm outline-none placeholder:text-muted-foreground"
+                    onChange={event => { setDraft(event.target.value); updateMention(event.target.value, event.target.selectionStart ?? event.target.value.length); }}
+                    onSelect={event => updateMention(event.currentTarget.value, event.currentTarget.selectionStart ?? 0)}
+                    onBlur={() => setMention(null)}
+                    onKeyDown={onKeyDown} />
+                {replying && <Button type="button" size="icon" variant="ghost" className="size-8 rounded-full" title="停止回复" aria-label="停止回复"
+                    disabled={stopping} onClick={() => void stop()}>
+                    {stopping ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-3.5 fill-current" />}
+                </Button>}
+                <Button type="button" size="icon" className="size-8 rounded-full" title="发送" aria-label="发送"
+                    disabled={!draft.trim() || sending} onClick={() => void send()}>
+                    {sending ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+                </Button>
             </div>
+            {inputError && <p role="alert" className="mt-1.5 whitespace-pre-wrap text-xs text-destructive">{inputError}</p>}
         </div>
         </ButlerQuoteContext.Provider>
 
