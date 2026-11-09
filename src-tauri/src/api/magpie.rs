@@ -139,6 +139,8 @@ struct CatalogModel {
     #[serde(default)]
     display_name: String,
     #[serde(default)]
+    magpie_label: String,
+    #[serde(default)]
     owned_by: String,
     #[serde(default)]
     kind: String,
@@ -155,6 +157,21 @@ struct Modalities {
 }
 
 impl CatalogModel {
+    fn list_name(&self) -> String {
+        if !self.magpie_label.trim().is_empty() {
+            return self.magpie_label.clone();
+        }
+        let name = self.display_name.trim();
+        if name.is_empty() || name == self.id {
+            return self.id.clone();
+        }
+        // A routing group's owned_by may name its current upstream. The ID
+        // prefix identifies the route the user actually selects (e.g. auto).
+        let source = self.id.split_once('/').map(|(source, _)| source.trim())
+            .filter(|source| !source.is_empty()).unwrap_or(self.owned_by.trim());
+        if source.is_empty() { name.to_string() } else { format!("{name} · {source}") }
+    }
+
     fn is_chat(&self) -> bool {
         let kind = self.kind.trim();
         kind.is_empty() || kind == "chat" || kind == "model"
@@ -163,7 +180,7 @@ impl CatalogModel {
     fn into_model(self, provider_id: i64, saved: Option<&String>) -> LlmModel {
         let modes = modes_for(&self.native_endpoints);
         let supports = |kind: &str| self.modalities.input.iter().any(|value| value.split('/').next() == Some(kind));
-        let name = if self.display_name.trim().is_empty() { self.id.clone() } else { self.display_name };
+        let name = self.list_name();
         LlmModel {
             id: 0, llm_provider_id: provider_id,
             vision_support: supports("image"), audio_support: supports("audio"), video_support: supports("video"),
@@ -176,10 +193,20 @@ impl CatalogModel {
 pub(crate) fn parse_catalog(body: &str, provider_id: i64, saved: &HashMap<String, String>) -> Result<Vec<LlmModel>, String> {
     let catalog: Catalog = serde_json::from_str(body)
         .map_err(|e| format!("Magpie 模型目录无法解析: {e}"))?;
-    Ok(catalog.data.into_iter().filter(|model| model.is_chat() && !model.id.trim().is_empty()).map(|model| {
+    let mut models: Vec<_> = catalog.data.into_iter().filter(|model| model.is_chat() && !model.id.trim().is_empty()).map(|model| {
         let pref = saved.get(&model.id);
         model.into_model(provider_id, pref)
-    }).collect())
+    }).collect();
+    let mut name_counts = HashMap::new();
+    for model in &models {
+        *name_counts.entry(model.name.clone()).or_insert(0) += 1;
+    }
+    for model in &mut models {
+        if name_counts[&model.name] > 1 {
+            model.name = format!("{} ({})", model.name, model.code);
+        }
+    }
+    Ok(models)
 }
 
 pub(crate) fn hello_name(body: &str) -> Result<String, String> {

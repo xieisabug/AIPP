@@ -75,7 +75,7 @@ fn test_catalog_keeps_chat_models_and_native_protocol_first() {
     let saved = HashMap::from([("openai/gpt".into(), "responses".into())]);
     let models = parse_catalog(body, 7, &saved).unwrap();
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0].name, "Claude");
+    assert_eq!(models[0].name, "Claude · anthropic");
     assert_eq!(models[0].code, "anthropic/claude");
     assert!(models[0].vision_support);
     assert_eq!(models[0].request_mode, "anthropic_messages");
@@ -84,6 +84,86 @@ fn test_catalog_keeps_chat_models_and_native_protocol_first() {
     assert_eq!(models[1].name, "openai/gpt");
     assert_eq!(models[1].request_mode, "responses");
     assert_eq!(models[1].description, "openai");
+}
+
+/// 同名模型优先使用网关提供的来源标签，路由组与直连提供商保持独立。
+#[test]
+fn test_catalog_distinguishes_providers_and_routing_groups_with_labels() {
+    let body = r#"{"data":[
+        {"id":"auto/claude","display_name":"Claude","magpie_label":"Claude · routing group","owned_by":"claude-mine"},
+        {"id":"claude-mine/claude","display_name":"Claude","magpie_label":"Claude · 我的订阅","owned_by":"claude-mine"},
+        {"id":"other/claude","display_name":"Claude","magpie_label":"Claude · 另一个渠道","owned_by":"other"}
+    ]}"#;
+    let saved = HashMap::from([("other/claude".into(), "responses".into())]);
+    let models = parse_catalog(body, 7, &saved).unwrap();
+    assert_eq!(models.iter().map(|model| model.name.as_str()).collect::<Vec<_>>(),
+        ["Claude · routing group", "Claude · 我的订阅", "Claude · 另一个渠道"]);
+    assert_eq!(models.iter().map(|model| model.code.as_str()).collect::<Vec<_>>(),
+        ["auto/claude", "claude-mine/claude", "other/claude"]);
+    assert_eq!(models[0].request_mode, "chat_completions");
+    assert_eq!(models[1].request_mode, "chat_completions");
+    assert_eq!(models[2].request_mode, "responses");
+}
+
+/// 旧版目录缺少来源标签时使用路由前缀；名称缺失时保留完整 ID。
+#[test]
+fn test_catalog_names_without_labels_keep_route_identity() {
+    let body = r#"{"data":[
+        {"id":"auto/claude","display_name":"Claude","owned_by":"mine"},
+        {"id":"mine/claude","display_name":"Claude","magpie_label":"  ","owned_by":"mine"},
+        {"id":"other/claude","display_name":"Claude"},
+        {"id":"mine/gpt","display_name":"  ","owned_by":"mine"},
+        {"id":"mine/plain","display_name":"mine/plain","owned_by":"mine"},
+        {"id":"group","display_name":"My group"},
+        {"id":"legacy","display_name":"Legacy","owned_by":"vendor"}
+    ]}"#;
+    let models = parse_catalog(body, 7, &HashMap::new()).unwrap();
+    assert_eq!(models.iter().map(|model| model.name.as_str()).collect::<Vec<_>>(),
+        ["Claude · auto", "Claude · mine", "Claude · other", "mine/gpt", "mine/plain", "My group", "Legacy · vendor"]);
+}
+
+/// 提供商名称被隐藏或多个渠道使用相同标签时，仍可按完整模型 ID 区分。
+#[test]
+fn test_catalog_duplicate_labels_include_full_model_ids() {
+    let body = r#"{"data":[
+        {"id":"one/claude","display_name":"Claude","magpie_label":"Claude"},
+        {"id":"two/claude","display_name":"Claude","magpie_label":"Claude"},
+        {"id":"one/gpt","display_name":"GPT","magpie_label":"GPT · One"}
+    ]}"#;
+    let models = parse_catalog(body, 7, &HashMap::new()).unwrap();
+    assert_eq!(models.iter().map(|model| model.name.as_str()).collect::<Vec<_>>(),
+        ["Claude (one/claude)", "Claude (two/claude)", "GPT · One"]);
+}
+
+/// 重新获取模型列表后更新显示名，同时保留模型数据库 ID 和已选协议。
+#[test]
+fn test_catalog_refresh_preserves_model_identity_and_protocol() {
+    let db = LLMDatabase { conn: Connection::open_in_memory().unwrap() };
+    db.create_tables().unwrap();
+    let provider_id: i64 = db.conn.query_row("SELECT id FROM llm_provider WHERE api_type=?1", [PROVIDER], |row| row.get(0)).unwrap();
+    db.add_llm_model("Claude", provider_id, "mine/claude", "mine", false, false, false).unwrap();
+    let model_id = db.conn.last_insert_rowid();
+    db.upsert_model_request_mode(provider_id, "mine/claude", "responses").unwrap();
+    let saved = db.list_model_request_modes(provider_id).unwrap().into_iter().collect();
+    let models = parse_catalog(r#"{"data":[
+        {"id":"mine/claude","display_name":"Claude","magpie_label":"Claude · Mine","owned_by":"mine"}
+    ]}"#, provider_id, &saved).unwrap();
+    let persisted = models.into_iter().map(|model| crate::db::llm_db::LLMModel {
+        id: model.id, name: model.name, llm_provider_id: model.llm_provider_id,
+        code: model.code, description: model.description,
+        vision_support: model.vision_support, audio_support: model.audio_support,
+        video_support: model.video_support, request_mode: model.request_mode,
+    }).collect::<Vec<_>>();
+    db.replace_llm_models(provider_id, &persisted, true).unwrap();
+    let rows = db.get_llm_models(provider_id.to_string()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, model_id);
+    assert_eq!(rows[0].1, "Claude · Mine");
+    assert_eq!(rows[0].3, "mine/claude");
+    assert_eq!(db.effective_model_mode(PROVIDER, provider_id, "mine/claude").unwrap(), "responses");
+    db.conn.execute("UPDATE llm_provider SET is_enabled=1 WHERE id=?1", [provider_id]).unwrap();
+    let choices = db.get_models_for_select().unwrap();
+    assert!(choices.iter().any(|choice| choice.0 == "Magpie / Claude · Mine" && choice.2 == model_id));
 }
 
 #[test]
