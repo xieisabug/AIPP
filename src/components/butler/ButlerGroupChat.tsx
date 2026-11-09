@@ -318,7 +318,11 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const byId = new Map(members.map(member => [member.id, member]));
     const quotedBySeq = new Map(messages.map(message => [message.seq, message]));
     const canLoadOlder = hasMoreOlder ?? detail.has_more;
-    const subtitle = running.length ? `${running.map(member => member.name).join("、")} 正在输入…` : `${members.length} 位成员`;
+    const discussion = detail.turns.filter(turn => turn.rounds > 1).sort((a, b) => b.round - a.round)[0];
+    const typing = running.length ? `${running.map(member => member.name).join("、")} 正在输入…` : "";
+    const subtitle = discussion
+        ? [`讨论中 · 第 ${discussion.round}/${discussion.rounds} 轮`, typing].filter(Boolean).join(" · ")
+        : typing || `${members.length} 位成员`;
 
     return <div className="flex h-full min-h-0 flex-col" data-aipp-slot="butler-group-chat">
         <div className="grid flex-none grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-border px-3 py-2" data-aipp-slot="butler-group-header">
@@ -329,7 +333,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                 <ButlerGroupAvatar members={members} size={28} />
                 <span className="flex min-w-0 flex-col">
                     <span className="truncate text-sm font-medium leading-4">{detail.name}</span>
-                    <span className={`truncate text-[11px] leading-[14px] ${running.length ? "text-foreground/70" : "text-muted-foreground"}`}>{subtitle}</span>
+                    <span className={`truncate text-[11px] leading-[14px] ${running.length || discussion ? "text-foreground/70" : "text-muted-foreground"}`}>{subtitle}</span>
                 </span>
             </button>
             <div className="flex items-center justify-end">

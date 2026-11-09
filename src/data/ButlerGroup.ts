@@ -34,6 +34,9 @@ export interface ButlerGroupSummary {
 export interface ButlerGroupTurn {
     member_id: number;
     state: "queued" | "running";
+    /** 多轮讨论的进度；普通回复为 1/1。 */
+    round: number;
+    rounds: number;
 }
 
 export interface ButlerGroupDetail {

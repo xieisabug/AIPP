@@ -14,9 +14,11 @@ pub const MEMBER_KIND: &str = "butler_group_member";
 pub const MAX_MEMBERS: usize = 30;
 pub const MAX_NAME_CHARS: usize = 60;
 pub const MAX_BODY_CHARS: usize = 20_000;
-/// 成员之间 @ 接力的最大层数，以及同一条用户消息最多引出的回复次数，防止互相点名形成循环。
+/// 成员之间 @ 接力的最大层数，以及同一条用户消息最多引出的接力次数，防止互相点名形成循环。
 pub const MAX_RELAY_DEPTH: i64 = 3;
-pub const MAX_TURNS_PER_ORIGIN: i64 = 12;
+pub const MAX_RELAYS_PER_ORIGIN: i64 = 12;
+/// 用户要求成员讨论时最多进行的轮数。
+pub const MAX_DISCUSSION_ROUNDS: i64 = 5;
 /// 单次投递给成员的群消息上限；更早的消息只保留数量说明。
 const INPUT_MESSAGE_LIMIT: usize = 80;
 const INPUT_CHAR_LIMIT: usize = 60_000;
@@ -70,7 +72,8 @@ CREATE TABLE IF NOT EXISTS butler_chat_group_turn (
     trigger_seq INTEGER NOT NULL,
     origin_seq INTEGER NOT NULL,
     depth INTEGER NOT NULL DEFAULT 0,
-    after_turn INTEGER,
+    round INTEGER NOT NULL DEFAULT 1,
+    rounds INTEGER NOT NULL DEFAULT 1,
     state TEXT NOT NULL DEFAULT 'queued'
         CHECK(state IN ('queued','running','done','failed','cancelled','skipped')),
     input_through INTEGER,
@@ -110,8 +113,20 @@ fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |r| r.get(0))
 }
 
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> rusqlite::Result<()> {
+    let exists: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1)"),
+        [column], |r| r.get(0))?;
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+    }
+    Ok(())
+}
+
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)?;
+    // 早期版本按顺序串行回复（after_turn），现在同一轮并发回复、多轮讨论按 round/rounds 推进。
+    ensure_column(conn, "butler_chat_group_turn", "round", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_column(conn, "butler_chat_group_turn", "rounds", "INTEGER NOT NULL DEFAULT 1")?;
     if !table_exists(conn, "butler_group_event")? {
         return Ok(());
     }
@@ -186,7 +201,9 @@ pub struct Turn {
     pub trigger_seq: i64,
     pub origin_seq: i64,
     pub depth: i64,
-    pub after_turn: Option<i64>,
+    /// 多轮讨论的第几轮（从 1 开始）与计划轮数；普通回复为 1/1。
+    pub round: i64,
+    pub rounds: i64,
     pub state: String,
     pub input_through: Option<i64>,
     pub input_message_id: Option<i64>,
@@ -197,7 +214,7 @@ pub struct Turn {
 const GROUP_COLUMNS: &str = "id,name,seq,created_at,updated_at";
 const MEMBER_COLUMNS: &str = "id,group_id,assistant_id,name,conversation_id,joined_after,delivered_through,active";
 const MESSAGE_COLUMNS: &str = "group_id,seq,sender_member,sender_assistant,sender_name,kind,body,reply_to,created_at";
-const TURN_COLUMNS: &str = "id,group_id,member_id,trigger_seq,origin_seq,depth,after_turn,state,input_through,input_message_id,reply_seq,error";
+const TURN_COLUMNS: &str = "id,group_id,member_id,trigger_seq,origin_seq,depth,round,rounds,state,input_through,input_message_id,reply_seq,error";
 
 fn group_row(r: &Row<'_>) -> rusqlite::Result<Group> {
     Ok(Group { id: r.get(0)?, name: r.get(1)?, seq: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)? })
@@ -217,8 +234,8 @@ fn message_row(r: &Row<'_>) -> rusqlite::Result<Message> {
 fn turn_row(r: &Row<'_>) -> rusqlite::Result<Turn> {
     Ok(Turn {
         id: r.get(0)?, group_id: r.get(1)?, member_id: r.get(2)?, trigger_seq: r.get(3)?, origin_seq: r.get(4)?,
-        depth: r.get(5)?, after_turn: r.get(6)?, state: r.get(7)?, input_through: r.get(8)?,
-        input_message_id: r.get(9)?, reply_seq: r.get(10)?, error: r.get(11)?,
+        depth: r.get(5)?, round: r.get(6)?, rounds: r.get(7)?, state: r.get(8)?, input_through: r.get(9)?,
+        input_message_id: r.get(10)?, reply_seq: r.get(11)?, error: r.get(12)?,
     })
 }
 
@@ -290,14 +307,13 @@ pub fn running_turns(conn: &Connection) -> Result<Vec<Turn>> {
     collect(conn, &format!("SELECT {TURN_COLUMNS} FROM butler_chat_group_turn WHERE state='running' ORDER BY id"), [], turn_row)
 }
 
-/// 可以开始的回复：每个成员按先来后到一次只处理一项；需要等前一位成员说完的，等它结束后再开始。
+/// 可以开始的回复：不同成员同时回复，同一成员按先来后到一次只处理一项。
 pub fn runnable_turns(conn: &Connection) -> Result<Vec<Turn>> {
     collect(conn, &format!("SELECT {} FROM butler_chat_group_turn t
         JOIN butler_chat_group_member m ON m.id=t.member_id AND m.active=1
         WHERE t.state='queued'
           AND NOT EXISTS(SELECT 1 FROM butler_chat_group_turn o WHERE o.member_id=t.member_id
               AND (o.state='running' OR (o.state='queued' AND o.id<t.id)))
-          AND NOT EXISTS(SELECT 1 FROM butler_chat_group_turn a WHERE a.id=t.after_turn AND a.state IN ('queued','running'))
         ORDER BY t.id", TURN_COLUMNS.split(',').map(|c| format!("t.{c}")).collect::<Vec<_>>().join(",")), [], turn_row)
 }
 
@@ -484,15 +500,26 @@ pub fn post_notice(conn: &mut Connection, group: i64, kind: &str, body: &str) ->
     Ok(result)
 }
 
-fn insert_turn(tx: &Connection, group: i64, member: i64, trigger: i64, origin: i64, depth: i64, after: Option<i64>) -> Result<i64> {
-    tx.execute("INSERT INTO butler_chat_group_turn(group_id,member_id,trigger_seq,origin_seq,depth,after_turn) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![group, member, trigger, origin, depth, after])?;
+struct NewTurn {
+    group: i64,
+    member: i64,
+    trigger: i64,
+    origin: i64,
+    depth: i64,
+    round: i64,
+    rounds: i64,
+}
+
+fn insert_turn(tx: &Connection, turn: NewTurn) -> Result<i64> {
+    tx.execute("INSERT INTO butler_chat_group_turn(group_id,member_id,trigger_seq,origin_seq,depth,round,rounds) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![turn.group, turn.member, turn.trigger, turn.origin, turn.depth, turn.round, turn.rounds])?;
     Ok(tx.last_insert_rowid())
 }
 
-/// 记录调度结果：按给出的顺序依次发言，后一位等前一位说完，从而能看到前面的回复。
+/// 记录调度结果：被选中的成员同时回复（看不到彼此正在写的内容，之后的回复里会补上）。
+/// `rounds` 大于 1 表示用户要求成员讨论：每轮所有人说完后，带着彼此的新发言进入下一轮。
 /// 只处理仍在等待调度的消息，调度期间被停止的消息不会再派发。
-pub fn route(conn: &mut Connection, group: i64, seq: i64, responders: &[i64]) -> Result<Vec<i64>> {
+pub fn route(conn: &mut Connection, group: i64, seq: i64, responders: &[i64], rounds: i64) -> Result<Vec<i64>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let state: Option<String> = tx.query_row("SELECT route_state FROM butler_chat_group_message WHERE group_id=?1 AND seq=?2",
         params![group, seq], |r| r.get(0)).optional()?.flatten();
@@ -500,19 +527,18 @@ pub fn route(conn: &mut Connection, group: i64, seq: i64, responders: &[i64]) ->
         return Ok(Vec::new());
     }
     let active = active_members(&tx, group)?;
-    let mut previous = None;
-    let mut created = Vec::new();
-    let mut seen = Vec::new();
+    let mut selected = Vec::new();
     for id in responders {
-        if seen.contains(id) || !active.iter().any(|m| m.id == *id) {
-            continue;
+        if !selected.contains(id) && active.iter().any(|m| m.id == *id) {
+            selected.push(*id);
         }
-        seen.push(*id);
-        let turn = insert_turn(&tx, group, *id, seq, seq, 0, previous)?;
-        previous = Some(turn);
-        created.push(turn);
     }
-    ensure!(!created.is_empty(), "调度结果没有有效的群成员");
+    ensure!(!selected.is_empty(), "调度结果没有有效的群成员");
+    let rounds = if selected.len() > 1 { rounds.clamp(1, MAX_DISCUSSION_ROUNDS) } else { 1 };
+    let mut created = Vec::new();
+    for member in selected {
+        created.push(insert_turn(&tx, NewTurn { group, member, trigger: seq, origin: seq, depth: 0, round: 1, rounds })?);
+    }
     tx.execute("UPDATE butler_chat_group_message SET route_state='done' WHERE group_id=?1 AND seq=?2", params![group, seq])?;
     tx.commit()?;
     Ok(created)
@@ -531,7 +557,8 @@ pub fn fail_route(conn: &mut Connection, group: i64, seq: i64, reason: &str) -> 
 }
 
 pub enum Start {
-    Run { turn: Turn, member: Member, group: Group, input: String },
+    /// `peers` 是同一轮里同时回复的其他成员。
+    Run { turn: Turn, member: Member, group: Group, input: String, peers: Vec<String> },
     Skipped,
 }
 
@@ -544,7 +571,12 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
         return Ok(Start::Skipped);
     }
     let m = member(&tx, t.member_id)?;
-    let skip = |tx: &Connection, state: &str| tx.execute("UPDATE butler_chat_group_turn SET state=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, state]);
+    // 跳过的回复也算这一轮说完了，讨论可能因此进入下一轮。
+    let skip = |tx: &Connection, state: &str| -> Result<()> {
+        tx.execute("UPDATE butler_chat_group_turn SET state=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, state])?;
+        advance_discussion(tx, &t)?;
+        Ok(())
+    };
     if !m.active {
         skip(&tx, "cancelled")?;
         tx.commit()?;
@@ -567,8 +599,15 @@ pub fn start_turn(conn: &mut Connection, id: i64) -> Result<Start> {
     tx.execute("UPDATE butler_chat_group_turn SET state='running', input_through=?2, updated_at=CURRENT_TIMESTAMP WHERE id=?1",
         params![id, room.seq])?;
     let started = turn(&tx, id)?;
+    let peers = if t.depth == 0 {
+        collect(&tx, "SELECT m.name FROM butler_chat_group_turn o JOIN butler_chat_group_member m ON m.id=o.member_id
+            WHERE o.group_id=?1 AND o.origin_seq=?2 AND o.depth=0 AND o.round=?3 AND o.member_id!=?4 ORDER BY o.id",
+            params![t.group_id, t.origin_seq, t.round, t.member_id], |r| r.get(0))?
+    } else {
+        Vec::new()
+    };
     tx.commit()?;
-    Ok(Start::Run { turn: started, member: m, group: room, input })
+    Ok(Start::Run { turn: started, member: m, group: room, input, peers })
 }
 
 /// 把本次群消息写入成员会话。只有仍在进行的回复可以写入；写入成功后才推进成员的读取位置，
@@ -658,8 +697,8 @@ pub struct Finished {
     pub relayed: Vec<i64>,
 }
 
-/// 结束一次回复：公开最终回复，并按回复里的 @ 邀请其他成员接着说（受层数与次数上限约束）。
-/// 已被停止或移出的回复不会再公开迟到的结果。
+/// 结束一次回复：公开最终回复，并按回复里的 @ 邀请其他成员接着说（受层数与次数上限约束）；
+/// 讨论中的一轮全部说完后进入下一轮。已被停止或移出的回复不会再公开迟到的结果。
 pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<Option<Finished>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let t = turn(&tx, id)?;
@@ -683,29 +722,69 @@ pub fn finish_turn(conn: &mut Connection, id: i64, outcome: Outcome) -> Result<O
             notice(&tx, t.group_id, "error", &format!("{} 没能回复：{reason}", m.name))?;
         }
     }
+    finished.relayed.extend(advance_discussion(&tx, &t)?);
     tx.commit()?;
     Ok(Some(finished))
+}
+
+fn discussion_members(tx: &Connection, t: &Turn, round: Option<i64>) -> Result<Vec<i64>> {
+    collect(tx, "SELECT DISTINCT t.member_id FROM butler_chat_group_turn t
+        JOIN butler_chat_group_member m ON m.id=t.member_id AND m.active=1
+        WHERE t.group_id=?1 AND t.origin_seq=?2 AND t.depth=0 AND (?3 IS NULL OR t.round=?3) ORDER BY t.member_id",
+        params![t.group_id, t.origin_seq, round], |r| r.get(0))
+}
+
+/// 多轮讨论：一轮里所有人都说完（或跳过）后，参与者带着彼此的新发言进入下一轮。
+/// 这一轮没人再发言（都认为没有新内容）、到达计划轮数、用户插话或只剩一人时结束。
+fn advance_discussion(tx: &Connection, t: &Turn) -> Result<Vec<i64>> {
+    if t.depth != 0 || t.round >= t.rounds {
+        return Ok(Vec::new());
+    }
+    let (open, spoke): (bool, bool) = tx.query_row("SELECT
+            EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE group_id=?1 AND origin_seq=?2 AND depth=0 AND round=?3 AND state IN ('queued','running')),
+            EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE group_id=?1 AND origin_seq=?2 AND depth=0 AND round=?3 AND reply_seq IS NOT NULL)",
+        params![t.group_id, t.origin_seq, t.round], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if open || !spoke {
+        return Ok(Vec::new());
+    }
+    let interrupted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_message
+        WHERE group_id=?1 AND seq>?2 AND kind='message' AND sender_member IS NULL)", params![t.group_id, t.origin_seq], |r| r.get(0))?;
+    let next = t.round + 1;
+    let started: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE group_id=?1 AND origin_seq=?2 AND depth=0 AND round=?3)",
+        params![t.group_id, t.origin_seq, next], |r| r.get(0))?;
+    let members = discussion_members(tx, t, Some(t.round))?;
+    if interrupted || started || members.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let trigger = get(tx, t.group_id)?.seq;
+    members.into_iter().map(|member| insert_turn(tx, NewTurn {
+        group: t.group_id, member, trigger, origin: t.origin_seq, depth: 0, round: next, rounds: t.rounds,
+    })).collect()
 }
 
 fn relay(tx: &Connection, t: &Turn, from: &Member, reply: &Message) -> Result<Vec<i64>> {
     let active = active_members(tx, t.group_id)?;
     let others = active.iter().filter(|m| m.id != from.id).cloned().collect::<Vec<_>>();
+    // 讨论还有下一轮时，被 @ 的参与者会在下一轮回应，不再单独接力，避免同一人连说两次。
+    let discussing = if t.depth == 0 && t.round < t.rounds { discussion_members(tx, t, None)? } else { Vec::new() };
     let mut created = Vec::new();
     let mut blocked = Vec::new();
     for target in parse_mentions(&reply.body, &others) {
         let waiting: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM butler_chat_group_turn WHERE member_id=?1 AND state='queued')",
             [target], |r| r.get(0))?;
-        if waiting {
+        if waiting || discussing.contains(&target) {
             continue;
         }
-        let used: i64 = tx.query_row("SELECT count(*) FROM butler_chat_group_turn WHERE group_id=?1 AND origin_seq=?2",
+        let used: i64 = tx.query_row("SELECT count(*) FROM butler_chat_group_turn WHERE group_id=?1 AND origin_seq=?2 AND depth>0",
             params![t.group_id, t.origin_seq], |r| r.get(0))?;
         let name = others.iter().find(|m| m.id == target).map(|m| m.name.clone()).unwrap_or_default();
-        if t.depth + 1 > MAX_RELAY_DEPTH || used >= MAX_TURNS_PER_ORIGIN {
+        if t.depth + 1 > MAX_RELAY_DEPTH || used >= MAX_RELAYS_PER_ORIGIN {
             blocked.push(name);
             continue;
         }
-        created.push(insert_turn(tx, t.group_id, target, reply.seq, t.origin_seq, t.depth + 1, None)?);
+        created.push(insert_turn(tx, NewTurn {
+            group: t.group_id, member: target, trigger: reply.seq, origin: t.origin_seq, depth: t.depth + 1, round: 1, rounds: 1,
+        })?);
     }
     if !blocked.is_empty() {
         notice(tx, t.group_id, "notice", &format!("成员之间连续接力的次数已达上限，没有再请 {} 回复。需要的话可以直接 @ 对方。", join_names(&blocked)))?;

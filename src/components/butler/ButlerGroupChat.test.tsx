@@ -9,7 +9,11 @@ const api = vi.hoisted(() => ({
     renameButlerGroup: vi.fn(), deleteButlerGroup: vi.fn(), onButlerGroupChanged: vi.fn(),
 }));
 vi.mock("@/services/butlerGroupService", () => api);
-vi.mock("@/hooks/useInlineInteraction", () => ({ useAskUserQuestion: () => ({ isDialogOpen: false }) }));
+const askUser = vi.hoisted(() => vi.fn((_: { conversationId: number }) => ({ isDialogOpen: false } as Record<string, unknown>)));
+vi.mock("@/hooks/useInlineInteraction", () => ({ useAskUserQuestion: askUser }));
+vi.mock("@/components/InlineInteractionCards", () => ({
+    AskUserQuestionCard: ({ request }: { request: { questions: { question: string }[] } }) => <div>{request.questions[0].question}</div>,
+}));
 const elicitation = vi.hoisted(() => vi.fn((_: { conversationId: number }) => ({ questionRequest: null, decisionError: null })));
 vi.mock("@/hooks/useAcpElicitation", () => ({ useAcpElicitation: elicitation }));
 vi.mock("@/components/UnifiedMarkdown", () => ({ default: ({ children }: { children: string }) => <div>{children}</div> }));
@@ -53,6 +57,7 @@ afterEach(() => {
 
 beforeEach(() => {
     vi.clearAllMocks();
+    askUser.mockImplementation(() => ({ isDialogOpen: false }));
     vi.stubGlobal("localStorage", memoryStorage());
     const posted: ButlerGroupDetail["messages"] = [];
     api.getButlerGroup.mockImplementation(async () => {
@@ -119,12 +124,36 @@ describe("ButlerGroupChat", () => {
     });
 
     it("should show who is typing and offer stop when members are replying", async () => {
-        api.getButlerGroup.mockResolvedValue(detail({ turns: [{ member_id: 2, state: "running" }, { member_id: 1, state: "queued" }] }));
+        api.getButlerGroup.mockResolvedValue(detail({ turns: [
+            { member_id: 2, state: "running", round: 1, rounds: 1 }, { member_id: 1, state: "running", round: 1, rounds: 1 },
+        ] }));
         renderChat();
+        // 两位成员同时回复
         expect(await screen.findByRole("status", { name: "写作助手 正在输入" })).toBeInTheDocument();
-        expect(screen.getByText("写作助手 正在输入…")).toBeInTheDocument();
+        expect(screen.getByRole("status", { name: "总管家 正在输入" })).toBeInTheDocument();
+        expect(screen.getByText("总管家、写作助手 正在输入…")).toBeInTheDocument();
         fireEvent.click(screen.getByLabelText("停止回复"));
         await waitFor(() => expect(api.stopButlerGroupReplies).toHaveBeenCalledWith(7));
+    });
+
+    it("should show discussion progress when members are discussing in rounds", async () => {
+        api.getButlerGroup.mockResolvedValue(detail({ turns: [{ member_id: 2, state: "queued", round: 2, rounds: 3 }] }));
+        renderChat();
+        expect(await screen.findByText("讨论中 · 第 2/3 轮")).toBeInTheDocument();
+    });
+
+    it("should show a member question while other members keep replying after @everyone", async () => {
+        api.getButlerGroup.mockResolvedValue(detail({ turns: [
+            { member_id: 1, state: "running", round: 1, rounds: 1 }, { member_id: 2, state: "running", round: 1, rounds: 1 },
+        ] }));
+        askUser.mockImplementation(({ conversationId }) => conversationId === 102
+            ? { isDialogOpen: true, pendingRequest: { request_id: "q1", questions: [{ question: "周报发给谁？" }] }, viewMode: "questionnaire" }
+            : { isDialogOpen: false });
+        renderChat();
+        expect(await screen.findByText("写作助手 想问你")).toBeInTheDocument();
+        expect(screen.getByText("周报发给谁？")).toBeInTheDocument();
+        expect(screen.getByRole("status", { name: "总管家 正在输入" })).toBeInTheDocument();
+        expect(screen.queryByText("总管家 想问你")).toBeNull();
     });
 
     it("should listen for native questions from every member execution", async () => {

@@ -108,6 +108,9 @@ pub struct MemberView {
 pub struct TurnView {
     pub member_id: i64,
     pub state: String,
+    /// 多轮讨论的进度；普通回复为 1/1。
+    pub round: i64,
+    pub rounds: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,7 +184,7 @@ pub async fn get_butler_group(app_handle: AppHandle, group_id: i64) -> Result<Gr
     }
     Ok(GroupDetail {
         id: room.id, name: room.name, members: member_views(members, &roster), messages, has_more,
-        turns: turns.into_iter().map(|t| TurnView { member_id: t.member_id, state: t.state }).collect(),
+        turns: turns.into_iter().map(|t| TurnView { member_id: t.member_id, state: t.state, round: t.round, rounds: t.rounds }).collect(),
         routing,
     })
 }

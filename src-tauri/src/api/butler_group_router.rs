@@ -1,5 +1,6 @@
-//! 群聊发言调度：用户没有 @ 任何人时，判断由哪些成员回复。
+//! 群聊发言调度：判断由哪些成员回复，以及是否让他们多轮讨论。
 //!
+//! 用户没有 @ 人时决定发言名单；@ 了多位成员（含 @所有人）时名单已定，只判断是否需要讨论。
 //! 只做判断，不回答问题。优先使用管家设置里的「小型辅助模型」，未配置时由总管家的模型判断。
 //! 配置的模型不存在或调用失败时如实报错，不改用其他模型。
 use std::collections::HashMap;
@@ -7,7 +8,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, Manager};
 
 use super::butler_group::RosterEntry;
-use crate::db::butler_group::{Member, Message};
+use crate::db::butler_group::{Member, Message, MAX_DISCUSSION_ROUNDS};
 
 const RECENT_MESSAGES: usize = 12;
 const RECENT_EXCERPT_CHARS: usize = 300;
@@ -33,6 +34,13 @@ fn speaker(message: &Message) -> String {
     }
 }
 
+/// 调度结果：同时回复的成员，以及讨论轮数（1 表示各回复一次）。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Plan {
+    pub responders: Vec<i64>,
+    pub rounds: i64,
+}
+
 pub(super) struct Candidate<'a> {
     pub member: &'a Member,
     pub entry: Option<&'a RosterEntry>,
@@ -43,15 +51,31 @@ fn fallback_name(candidates: &[Candidate<'_>]) -> String {
         .map(|c| c.member.name.clone()).unwrap_or_default()
 }
 
-pub(super) fn build_prompt(group: &str, candidates: &[Candidate<'_>], recent: &[Message], latest: &Message) -> (String, String) {
-    let system = format!("你是群聊里的发言调度，只决定接下来由哪些成员回复用户的最新消息，不回答问题本身。
-规则：
-1. 用户叫了某些成员的名字（或“你们俩”之类明确指向），就选这些成员。
-2. 用户要求大家都发表意见（“大家”“你们都”“每个人”等），按成员列表顺序选出所有成员。
+fn names(candidates: &[Candidate<'_>], ids: &[i64]) -> String {
+    ids.iter().filter_map(|id| candidates.iter().find(|c| c.member.id == *id)).map(|c| c.member.name.as_str())
+        .collect::<Vec<_>>().join("、")
+}
+
+pub(super) fn build_prompt(group: &str, candidates: &[Candidate<'_>], recent: &[Message], latest: &Message, fixed: Option<&[i64]>) -> (String, String) {
+    let pick = match fixed {
+        Some(ids) => format!("用户已经点名：{}。responders 原样返回这些成员，只需要判断 rounds。", names(candidates, ids)),
+        None => format!("1. 用户叫了某些成员的名字（或“你们俩”之类明确指向），就选这些成员。
+2. 用户要大家都说说、都表个态，或者要求成员讨论，选出所有相关成员（“大家”“你们”指全部成员）。
 3. 用户在接着和某位成员说话（追问、回应对方刚才的问题），选那位成员。
-4. 其他情况选最适合回答的一位成员；只有问题明显需要几种不同专长时才选多位，按合理的发言顺序排列，最多 {MAX_AUTO_RESPONDERS} 位。
-5. 拿不准时选「{}」。
-只输出 JSON，例如 {{\"responders\":[\"成员名\"]}}，名字必须与成员列表中的完全一致。", fallback_name(candidates));
+4. 其他情况选最适合回答的一位；只有问题明显需要几种不同专长时才选多位，最多 {MAX_AUTO_RESPONDERS} 位。
+5. 拿不准时选「{}」。", fallback_name(candidates)),
+    };
+    let system = format!("你是群聊里的发言调度，只决定接下来由哪些成员回复用户的最新消息、要不要让他们多轮讨论，不回答问题本身。
+
+选人（responders）：
+{pick}
+
+讨论轮数（rounds）：
+- 默认 1：被选中的成员同时各回复一次。
+- 用户要求成员之间讨论、商量、辩论、互相评审、碰一碰、讨论出结论或方案时，rounds 取 3；用户说了轮数就按用户说的，最多 {MAX_DISCUSSION_ROUNDS}。
+- 只有一位成员回复时 rounds 为 1。
+
+只输出 JSON，例如 {{\"responders\":[\"成员名\"],\"rounds\":1}}，名字必须与成员列表中的完全一致。");
     let members = candidates.iter().map(|c| {
         let description = c.entry.map(|e| excerpt(&e.description, 80)).filter(|d| !d.is_empty());
         match description {
@@ -70,8 +94,9 @@ pub(super) fn build_prompt(group: &str, candidates: &[Candidate<'_>], recent: &[
     (system, user)
 }
 
-/// 解析调度模型的输出。名字按成员显示名匹配（容忍前导 @ 与空白），未知名字忽略。
-pub(super) fn parse_responders(text: &str, candidates: &[Candidate<'_>]) -> Result<Vec<i64>, String> {
+/// 解析调度模型的输出。名字按成员显示名匹配（容忍前导 @ 与空白），未知名字忽略；
+/// 名单已由用户点名确定时只采用轮数。
+pub(super) fn parse_plan(text: &str, candidates: &[Candidate<'_>], fixed: Option<&[i64]>) -> Result<Plan, String> {
     let start = text.find('{');
     let end = text.rfind('}');
     let json = match (start, end) {
@@ -79,6 +104,14 @@ pub(super) fn parse_responders(text: &str, candidates: &[Candidate<'_>]) -> Resu
         _ => return Err(format!("调度模型没有返回 JSON：{}", excerpt(text, 200))),
     };
     let value: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("调度模型返回的 JSON 无法解析（{e}）：{}", excerpt(text, 200)))?;
+    let rounds = value.get("rounds").and_then(|v| v.as_i64()).unwrap_or(1).clamp(1, MAX_DISCUSSION_ROUNDS);
+    let plan = |responders: Vec<i64>| {
+        let rounds = if responders.len() > 1 { rounds } else { 1 };
+        Plan { responders, rounds }
+    };
+    if let Some(ids) = fixed {
+        return Ok(plan(ids.to_vec()));
+    }
     let names = value.get("responders").and_then(|v| v.as_array())
         .ok_or_else(|| format!("调度模型的输出缺少 responders：{}", excerpt(text, 200)))?;
     let mut result = Vec::new();
@@ -95,7 +128,7 @@ pub(super) fn parse_responders(text: &str, candidates: &[Candidate<'_>]) -> Resu
     if result.is_empty() {
         return Err(format!("调度模型选择的成员不在群里：{}", excerpt(text, 200)));
     }
-    Ok(result)
+    Ok(plan(result))
 }
 
 fn parse_model(raw: &str) -> Option<(String, i64)> {
@@ -117,7 +150,7 @@ async fn model(app: &AppHandle) -> Result<(String, i64, &'static str), String> {
 }
 
 pub(super) async fn choose(app: &AppHandle, group_id: i64, group: &str, members: &[Member],
-    roster: &HashMap<i64, RosterEntry>, recent: &[Message], latest: &Message) -> Result<Vec<i64>, String> {
+    roster: &HashMap<i64, RosterEntry>, recent: &[Message], latest: &Message, fixed: Option<&[i64]>) -> Result<Plan, String> {
     let candidates = members.iter().map(|member| Candidate { member, entry: roster.get(&member.assistant_id) }).collect::<Vec<_>>();
     let (code, provider, source) = model(app).await?;
     let config = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
@@ -135,7 +168,7 @@ pub(super) async fn choose(app: &AppHandle, group_id: i64, group: &str, members:
         &detail.provider.api_type, Some(&detail.model.request_mode), proxy.as_deref(), false,
         Some(super::ai::config::get_request_timeout_from_config(&config)), false, &config)
         .map_err(|e| format!("创建{source}客户端失败（provider={provider}, model={code}）：{e}"))?;
-    let (system, user) = build_prompt(group, &candidates, recent, latest);
+    let (system, user) = build_prompt(group, &candidates, recent, latest, fixed);
     let request = super::ai::conversation::build_chat_request_from_messages(
         &[("system".to_string(), system, Vec::new()), ("user".to_string(), user, Vec::new())],
         super::ai::conversation::ToolCallStrategy::NonNative,
@@ -144,7 +177,7 @@ pub(super) async fn choose(app: &AppHandle, group_id: i64, group: &str, members:
     let response = client.exec_chat(&detail.model.code, request, None).await
         .map_err(|e| format!("{source}调用失败（provider={provider}, model={code}）：{e}"))?;
     let text = response.first_text().unwrap_or_default();
-    parse_responders(text, &candidates)
+    parse_plan(text, &candidates, fixed)
 }
 
 #[cfg(test)]

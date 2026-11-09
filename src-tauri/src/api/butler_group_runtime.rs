@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 use super::butler_group::{changed, database, roster, sync_roster, RosterEntry};
+use super::butler_group_router::Plan;
 use crate::db::butler_group::{self as group, Evidence, Outcome};
 
 static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
@@ -99,7 +100,35 @@ async fn settle(app: &AppHandle, state: &Shared, turn: group::Turn) -> anyhow::R
     Ok(())
 }
 
-async fn decide(app: &AppHandle, message: &group::Message) -> Result<Vec<i64>, String> {
+/// 不需要调度模型就能确定的情况，以及需要调度模型时已经确定的名单。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Routing {
+    Plan(Plan),
+    /// 交给调度模型：`Some` 表示名单已由用户点名确定，只判断是否需要多轮讨论。
+    Ask(Option<Vec<i64>>),
+}
+
+/// 谁来回复：@ 一位成员就由他回复；@ 多位（含 @所有人）时这些人同时回复，由调度判断是否需要多轮讨论；
+/// 引用成员消息时由原作者回复；只有一位成员时由他回复；其余交给调度模型。
+pub(super) fn quick_route(message: &group::Message, members: &[group::Member], quoted: Option<&group::Message>) -> Routing {
+    let single = |id: i64| Routing::Plan(Plan { responders: vec![id], rounds: 1 });
+    let mentioned = group::parse_mentions(&message.body, members);
+    if mentioned.len() == 1 {
+        return single(mentioned[0]);
+    }
+    if mentioned.len() > 1 {
+        return Routing::Ask(Some(mentioned));
+    }
+    if let Some(author) = quoted.and_then(|q| q.sender_member).filter(|id| members.iter().any(|m| m.id == *id)) {
+        return single(author);
+    }
+    if members.len() == 1 {
+        return single(members[0].id);
+    }
+    Routing::Ask(None)
+}
+
+async fn decide(app: &AppHandle, message: &group::Message) -> Result<Plan, String> {
     let roster = roster(app).await?;
     sync_roster(app, message.group_id, &roster).await?;
     let (group_id, seq, reply_to) = (message.group_id, message.seq, message.reply_to);
@@ -111,17 +140,11 @@ async fn decide(app: &AppHandle, message: &group::Message) -> Result<Vec<i64>, S
     if members.is_empty() {
         return Err("群里已经没有成员，请先邀请助手".into());
     }
-    let mentioned = group::parse_mentions(&message.body, &members);
-    if !mentioned.is_empty() {
-        return Ok(mentioned);
+    match quick_route(message, &members, quoted.as_ref()) {
+        Routing::Plan(plan) => Ok(plan),
+        Routing::Ask(fixed) => super::butler_group_router::choose(app, group_id, &room.name, &members, &roster, &recent, message,
+            fixed.as_deref()).await,
     }
-    if let Some(author) = quoted.and_then(|q| q.sender_member).filter(|id| members.iter().any(|m| m.id == *id)) {
-        return Ok(vec![author]);
-    }
-    if members.len() == 1 {
-        return Ok(vec![members[0].id]);
-    }
-    super::butler_group_router::choose(app, group_id, &room.name, &members, &roster, &recent, message).await
 }
 
 fn route(app: &AppHandle, state: &Shared, message: group::Message) {
@@ -135,7 +158,7 @@ fn route(app: &AppHandle, state: &Shared, message: group::Message) {
         let _release = release;
         let (group_id, seq) = key;
         let result = match decide(&app, &message).await {
-            Ok(responders) => database(&app, "安排回复", move |conn| group::route(conn, group_id, seq, &responders).map(|_| ())).await,
+            Ok(plan) => database(&app, "安排回复", move |conn| group::route(conn, group_id, seq, &plan.responders, plan.rounds).map(|_| ())).await,
             Err(reason) => Err(reason),
         };
         if let Err(reason) = result {
@@ -147,8 +170,28 @@ fn route(app: &AppHandle, state: &Shared, message: group::Message) {
     });
 }
 
-/// 每轮附带的群信息：当前成员名单只随本轮输入发给模型，不写进成员会话的历史。
-fn context_prefix(room: &group::Group, me: &group::Member, members: &[group::Member], roster: &HashMap<i64, RosterEntry>) -> String {
+/// 每轮都附带的说话方式提醒：写在本轮输入旁边比只写在系统提示里更容易被遵守，
+/// 也让在规则调整前就加入的成员同样生效。
+const STYLE_REMINDER: &str = "说话方式：像在工作群里聊天。通常一两段、每段两三句，先说结论或态度；分段说，一个意思一段。用自然的句子，不要拆成 1、2、3 逐条列点，不加标题和成片的加粗。不客套、不预告、不总结全场，不重复别人说过的。需要完整报告或文件时照常产出，群里只说结论和产物位置。";
+
+fn turn_situation(turn: &group::Turn, peers: &[String]) -> Option<String> {
+    let together = (!peers.is_empty()).then(|| format!("{} 也在同时回复，你看不到他们正在写的内容，只说你自己的看法。", peers.join("、")));
+    if turn.rounds <= 1 {
+        return together.map(|text| format!("本轮：{text}"));
+    }
+    let guidance = if turn.round == 1 {
+        format!("先亮出你的观点和理由，之后还会互相回应。{}", together.unwrap_or_default())
+    } else if turn.round < turn.rounds {
+        "针对别人刚说的具体观点回应：同意就简短表态并补充新理由，不同意就直说哪里不对；不要把自己的观点从头再讲一遍。没有新内容就只回复 [[NO_REPLY]]。".into()
+    } else {
+        "这是最后一轮：回应还没解决的分歧，尽量收敛出结论；已经一致或没有新内容就只回复 [[NO_REPLY]]。".into()
+    };
+    Some(format!("讨论：第 {}/{} 轮。{guidance}", turn.round, turn.rounds))
+}
+
+/// 每轮附带的群信息：当前成员名单、本轮情况和说话方式只随本轮输入发给模型，不写进成员会话的历史。
+fn context_prefix(room: &group::Group, me: &group::Member, members: &[group::Member], roster: &HashMap<i64, RosterEntry>,
+    turn: &group::Turn, peers: &[String]) -> String {
     let names = members.iter().map(|m| {
         if m.id == me.id {
             format!("{}（你）", m.name)
@@ -161,14 +204,15 @@ fn context_prefix(room: &group::Group, me: &group::Member, members: &[group::Mem
             }
         }
     }).collect::<Vec<_>>().join("、");
-    format!("<group_chat name=\"{}\" you=\"{}\">\n当前成员：{names}\n</group_chat>", room.name, me.name)
+    let situation = turn_situation(turn, peers).map(|line| format!("{line}\n")).unwrap_or_default();
+    format!("<group_chat name=\"{}\" you=\"{}\">\n当前成员：{names}\n{situation}{STYLE_REMINDER}\n</group_chat>", room.name, me.name)
 }
 
-async fn dispatch(app: &AppHandle, turn: &group::Turn, member: &group::Member, room: &group::Group, input: String) -> Result<(), String> {
+async fn dispatch(app: &AppHandle, turn: &group::Turn, member: &group::Member, room: &group::Group, input: String, peers: Vec<String>) -> Result<(), String> {
     let roster = roster(app).await?;
     let group_id = room.id;
     let members = database(app, "读取成员", move |conn| group::active_members(conn, group_id)).await?;
-    let prefix = context_prefix(room, member, &members, &roster);
+    let prefix = context_prefix(room, member, &members, &roster, turn, &peers);
     let window = super::butler_api::resolve_or_create_butler_execution_window(app)?;
     let result = super::ai_api::ask_ai(app.clone(), app.state(), app.state(), app.state(), app.state(), app.state(), window,
         super::ai::types::AiRequest {
@@ -197,26 +241,34 @@ async fn start(app: &AppHandle, state: &Shared, turn: group::Turn) -> anyhow::Re
     }
     let id = turn.id;
     let started = database(app, "开始回复", move |conn| group::start_turn(conn, id)).await.map_err(anyhow::Error::msg)?;
-    let group::Start::Run { turn, member, group: room, input } = started else {
+    let group::Start::Run { turn, member, group: room, input, peers } = started else {
         changed(app, turn.group_id);
         return Ok(());
     };
     lock(state).dispatching.insert(turn.id);
     changed(app, room.id);
-    let app = app.clone();
+    let (id, group_id, conversation) = (turn.id, room.id, member.conversation_id);
+    let worker = app.clone();
     let release = Release { state: state.clone(), routing: None, turn: Some(turn.id) };
-    tauri::async_runtime::spawn(async move {
+    // 和管家派发任务一样在大栈线程上驱动 ask_ai：原生通道会在这里跑完整轮次，工具调用还会再进入 ask_ai，
+    // debug 构建下这些 future 很深，tokio 工作线程默认 2MB 栈会溢出。
+    let spawned = crate::utils::async_thread::spawn_async_thread("aipp-group-turn", move || async move {
         let _release = release;
-        if let Err(error) = dispatch(&app, &turn, &member, &room, input).await {
-            let id = turn.id;
-            let reason = format!("{error}（会话 #{}，回复 #{id}）", member.conversation_id);
-            if let Err(save) = database(&app, "记录回复失败", move |conn| group::finish_turn(conn, id, Outcome::Failed(reason)).map(|_| ())).await {
-                tracing::error!(turn = id, error = %save, "failed to record group dispatch failure");
-            }
-            changed(&app, room.id);
+        if let Err(error) = dispatch(&worker, &turn, &member, &room, input, peers).await {
+            record_failure(&worker, id, room.id, format!("{error}（会话 #{}，回复 #{id}）", member.conversation_id)).await;
         }
     });
+    if let Err(error) = spawned {
+        record_failure(app, id, group_id, format!("启动回复线程失败：{error}（会话 #{conversation}，回复 #{id}）")).await;
+    }
     Ok(())
+}
+
+async fn record_failure(app: &AppHandle, id: i64, group_id: i64, reason: String) {
+    if let Err(save) = database(app, "记录回复失败", move |conn| group::finish_turn(conn, id, Outcome::Failed(reason)).map(|_| ())).await {
+        tracing::error!(turn = id, error = %save, "failed to record group dispatch failure");
+    }
+    changed(app, group_id);
 }
 
 async fn tick(app: &AppHandle, state: &Shared) -> anyhow::Result<()> {
@@ -260,3 +312,7 @@ pub fn start_runtime(app: AppHandle) {
         }
     });
 }
+
+#[cfg(test)]
+#[path = "butler_group_runtime_tests.rs"]
+mod tests;

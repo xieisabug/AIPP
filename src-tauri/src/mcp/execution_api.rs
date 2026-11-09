@@ -1308,16 +1308,15 @@ async fn dispatch_multi_tool_round(
     let window = window.clone();
     let conversation_id = tool_call.conversation_id;
     let ids = calls.iter().map(|call| call.id).collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
-            if let Err(error) = continue_tool_round(
-                &app, app.state::<crate::FeatureConfigState>(), window,
-                conversation_id, ids, allow_error,
-            ).await {
-                warn!(conversation_id, error = %error, "manual tool round continuation failed");
-            }
-        });
-    });
+    // 续写会再次进入 ask_ai 和工具执行，debug 构建下 future 很深，阻塞线程池默认 2MB 栈会溢出。
+    crate::utils::async_thread::spawn_async_thread("aipp-tool-round-continue", move || async move {
+        if let Err(error) = continue_tool_round(
+            &app, app.state::<crate::FeatureConfigState>(), window,
+            conversation_id, ids, allow_error,
+        ).await {
+            warn!(conversation_id, error = %error, "manual tool round continuation failed");
+        }
+    }).with_context(|| format!("启动工具轮次续写线程失败：conversation={conversation_id}"))?;
     Ok(true)
 }
 
@@ -2764,8 +2763,9 @@ async fn trigger_conversation_continuation(
             .clone()
     };
     let source_message_id=tool_call.assistant_message_id.or(tool_call.message_id);
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
+    // 续写会再次进入 ask_ai 和工具执行，放在大栈线程上，避免阻塞线程池默认 2MB 栈溢出。
+    crate::utils::async_thread::spawn_async_thread("aipp-tool-continue", move || async move {
+        {
             // 使用会话级锁保证续写串行，避免同一会话并发触发续写
             let _lock_guard = continuation_lock.lock().await;
             let feature_config_state = app_handle_clone.state::<crate::FeatureConfigState>();
@@ -2819,8 +2819,8 @@ async fn trigger_conversation_continuation(
                     "failed to drain queued batch continuations after serialized continuation"
                 );
             }
-        });
-    });
+        }
+    }).with_context(|| format!("启动工具续写线程失败：conversation={continuation_conversation_id}, call={continuation_call_id}"))?;
     Ok(())
 }
 
@@ -2900,8 +2900,9 @@ async fn trigger_conversation_continuation_with_error(
             .clone()
     };
     let source_message_id=tool_call.assistant_message_id.or(tool_call.message_id);
-    tauri::async_runtime::spawn_blocking(move || {
-        tauri::async_runtime::block_on(async move {
+    // 续写会再次进入 ask_ai 和工具执行，放在大栈线程上，避免阻塞线程池默认 2MB 栈溢出。
+    crate::utils::async_thread::spawn_async_thread("aipp-tool-continue-error", move || async move {
+        {
             // 使用会话级锁保证续写串行，避免同一会话并发触发续写
             let _lock_guard = continuation_lock.lock().await;
             let feature_config_state = app_handle_clone.state::<crate::FeatureConfigState>();
@@ -2955,8 +2956,8 @@ async fn trigger_conversation_continuation_with_error(
                     "failed to drain queued batch continuations after serialized error continuation"
                 );
             }
-        });
-    });
+        }
+    }).with_context(|| format!("启动工具错误续写线程失败：conversation={continuation_conversation_id}, call={continuation_call_id}"))?;
     Ok(())
 }
 
