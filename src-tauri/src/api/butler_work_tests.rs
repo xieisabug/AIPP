@@ -127,3 +127,13 @@ fn test_current_time_prefix_only_for_butler_conversations() {
     }
     assert!(current_time_prefix("normal", now).is_none(), "普通聊天不注入");
 }
+
+#[test]
+fn test_group_frozen_input_has_no_runtime_time_prefix() {
+    use chrono::TimeZone;
+    let now = chrono::Utc.with_ymd_and_hms(2026, 11, 9, 0, 0, 0).unwrap();
+    for kind in ["butler_group", "butler_group_member", "butler_group_task"] {
+        assert!(current_time_prefix(kind, now).is_none(),
+            "{kind}: frozen group packets must reach dispatch byte-for-byte unchanged");
+    }
+}

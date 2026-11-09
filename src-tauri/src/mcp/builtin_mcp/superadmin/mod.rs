@@ -9,6 +9,7 @@ pub mod inspect;
 pub mod registry;
 pub mod types;
 pub mod undo;
+pub mod group_scope;
 
 #[cfg(test)]
 mod tests;
@@ -80,6 +81,15 @@ pub async fn dispatch(
     conversation_id: Option<i64>,
 ) -> serde_json::Value {
     let registry = &*REGISTRY;
+    let group_member = match group_scope::current(app_handle,conversation_id) {
+        Ok(id) => id,
+        Err(error) => return error_response(&format!("群管理工具来源失效：{error:#}")),
+    };
+    if let Some(id) = group_member {
+        if tool_name == "superadmin_audit_query" {
+            return audit_query::handle_scoped_query(app_handle,args,id).await;
+        }
+    }
 
     match tool_name {
         "superadmin_catalog" => {

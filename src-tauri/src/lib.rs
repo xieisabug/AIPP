@@ -897,6 +897,8 @@ pub fn run() {
             crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
             #[cfg(desktop)]
             crate::api::butler_peer::start(app_handle.clone());
+            #[cfg(desktop)]
+            crate::api::butler_group_runtime::start(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );
@@ -1075,6 +1077,22 @@ pub fn run() {
             crate::api::butler_peer::list_butler_peer_posts,
             crate::api::butler_peer::get_butler_exchange_context,
             crate::api::butler_control::control_butler_task,
+            crate::api::butler_group::create_butler_group,
+            crate::api::butler_group::list_butler_groups,
+            crate::api::butler_group::get_butler_group,
+            crate::api::butler_group::list_butler_group_messages,
+            crate::api::butler_group::post_butler_group_message,
+            crate::api::butler_group::add_butler_group_member,
+            crate::api::butler_group::remove_butler_group_member,
+            crate::api::butler_group::share_butler_group_history,
+            crate::api::butler_group::start_butler_group_round,
+            crate::api::butler_group::stop_butler_group,
+            crate::api::butler_group::stop_butler_group_member,
+            crate::api::butler_group::start_butler_group_task,
+            crate::api::butler_group::stop_butler_group_task,
+            crate::api::butler_group::replace_butler_group_goal,
+            crate::api::butler_group::get_butler_group_member_capabilities,
+            crate::api::butler_group::set_butler_group_wait_limit,
             crate::api::butler_work::list_butler_contact_task_questions,
             crate::mcp::builtin_mcp::interaction::list_recoverable_butler_questions,
             crate::api::butler_work::answer_butler_task_question,
@@ -1251,6 +1269,7 @@ pub fn run() {
             confirm_agent_interaction,
             confirm_acp_permission,
             confirm_acp_elicitation,
+            crate::api::operation_api::list_acp_elicitation_requests,
             confirm_codex_permission,
             highlight_code,
             list_syntect_themes,

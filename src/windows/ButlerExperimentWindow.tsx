@@ -1,5 +1,6 @@
 import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
 import { clearButlerContactHistory } from "@/services/butlerContactService";
+import ButlerGroups from "@/components/butler/ButlerGroups";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -985,7 +986,7 @@ function ButlerExperimentWindow() {
                         ready={!!mainConversationId} previews={previews} mainConversationId={mainConversationId} plugins={pluginList}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
                         onSearch={() => setSearchOpen(true)} onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}/>
-
+                    <ButlerGroups assistants={assistants} />
                     {scheduledTasks.length > 0 && (
                         <div className="border-t border-border" data-aipp-slot="butler-scheduled-tasks">
                             <button

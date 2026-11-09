@@ -58,7 +58,9 @@ where
     Tz::Offset: std::fmt::Display,
 {
     use chrono::Datelike;
-    if !crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(kind) {
+    // Group inputs have already been frozen by the delivery queue. Adding a
+    // runtime prefix here changes their bytes and fails dispatch validation.
+    if !matches!(kind, "butler_main" | "butler_contact" | "butler_task") {
         return None;
     }
     let weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday().num_days_from_monday() as usize];

@@ -686,6 +686,7 @@ struct PendingAcpElicitationRequest {
     sender: oneshot::Sender<AcpElicitationDecision>,
     conversation_id: Option<i64>,
     scope: crate::api::ai::agent_driver::approval::AgentRequestScope,
+    form: Option<AcpElicitationRequestEvent>,
 }
 
 /// ACP elicitation 挂起请求状态，生命周期与 AcpPermissionState 对齐。
@@ -693,6 +694,10 @@ struct PendingAcpElicitationRequest {
 pub struct AcpElicitationState {
     pending_requests: TokioMutex<HashMap<String, PendingAcpElicitationRequest>>,
 }
+
+#[cfg(test)]
+#[path="acp_elicitation_tests.rs"]
+mod elicitation_tests;
 
 impl AcpElicitationState {
     pub async fn has_pending_request_for_conversation(&self, conversation_id: i64) -> bool {
@@ -727,8 +732,26 @@ impl AcpElicitationState {
         if pending.contains_key(&request_id) {
             return Err(format!("Elicitation request '{request_id}' is already pending"));
         }
-        pending.insert(request_id, PendingAcpElicitationRequest { sender, conversation_id, scope });
+        pending.insert(request_id, PendingAcpElicitationRequest { sender, conversation_id, scope, form:None });
         Ok(())
+    }
+
+    pub(crate) async fn attach_form(&self,event:AcpElicitationRequestEvent)->Result<(),String> {
+        let mut pending=self.pending_requests.lock().await;
+        let request=pending.get_mut(&event.request_id).ok_or_else(||format!("Elicitation request '{}' ended before form publication",event.request_id))?;
+        if request.conversation_id!=event.conversation_id || request.form.is_some() {
+            return Err(format!("Elicitation form identity mismatch or duplicate: {}",event.request_id));
+        }
+        request.form=Some(event);
+        Ok(())
+    }
+
+    pub(crate) async fn list_forms(&self,conversation:i64)->Vec<AcpElicitationRequestEvent> {
+        let pending=self.pending_requests.lock().await;
+        let mut forms=pending.values().filter(|request|request.conversation_id==Some(conversation))
+            .filter_map(|request|request.form.clone()).collect::<Vec<_>>();
+        forms.sort_by(|a,b|a.request_id.cmp(&b.request_id));
+        forms
     }
 
     pub async fn request_scope(&self, request_id: &str)
@@ -801,7 +824,7 @@ impl AcpElicitationState {
 
 /// 发送给前端的 elicitation 请求事件；`schema` 为 ACP `ElicitationSchema` 的 JSON 序列化。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AcpElicitationRequestEvent {
+pub struct AcpElicitationRequestEvent {
     pub(crate) request_id: String,
     pub(crate) conversation_id: Option<i64>,
     pub(crate) agent_kind: String,
@@ -809,7 +832,7 @@ pub(crate) struct AcpElicitationRequestEvent {
     pub(crate) schema: serde_json::Value,
 }
 
-async fn notify_cancelled_acp_elicitation_requests(
+pub(crate) async fn notify_cancelled_acp_elicitation_requests(
     app_handle: &tauri::AppHandle,
     resolutions: Vec<(String, AcpPermissionResolution)>,
 ) {
@@ -4185,6 +4208,10 @@ impl AcpTauriClient {
             crate::api::ai::agent_driver::approval::AgentRequestScope::native("acp", self.instance_id, self.conversation_id, self.run_id.clone()))
             .await.map_err(|error| acp::Error::internal_error().data(serde_json::json!(error)))?;
 
+        if let Err(error)=state.attach_form(event.clone()).await {
+            state.remove_request(&request_id).await;
+            return Err(acp::Error::internal_error().data(serde_json::json!(error)));
+        }
         if let Err(error) = emit_permission_request_event(
             &self.app_handle,
             crate::api::operation_api::ACP_ELICITATION_REQUEST_EVENT,

@@ -19,6 +19,14 @@ pub(crate) const ACP_PERMISSION_RESOLVED_EVENT: &str = "acp-permission-resolved"
 pub(crate) const ACP_ELICITATION_REQUEST_EVENT: &str = "acp-elicitation-request";
 pub(crate) const ACP_ELICITATION_RESOLVED_EVENT: &str = "acp-elicitation-resolved";
 
+#[tauri::command]
+pub async fn list_acp_elicitation_requests(
+    app_handle:AppHandle,conversation_id:i64,
+)->Result<Vec<crate::api::ai::acp::AcpElicitationRequestEvent>,String> {
+    if conversation_id<=0 {return Err("结构化提问读取需要有效会话编号".into());}
+    Ok(app_handle.state::<AcpElicitationState>().list_forms(conversation_id).await)
+}
+
 const BUTLER_WINDOW_LABEL: &str = "butler_experiment";
 const BUTLER_MAIN_KIND: &str = "butler_main";
 const BUTLER_TASK_KIND: &str = "butler_task";

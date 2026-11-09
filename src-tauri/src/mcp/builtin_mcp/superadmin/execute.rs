@@ -58,6 +58,11 @@ pub async fn handle_execute(
     let meta = &registered.meta;
 
     let origin_check = (|| -> Result<(), String> {
+        if let Some(id) = butler_conversation_id {
+            let conn = ConversationDatabase::new(app_handle).and_then(|db|db.get_connection()).map_err(|e|e.to_string())?;
+            let source = crate::api::butler_peer::TOOL_MESSAGE.try_with(|v|*v).ok().flatten();
+            super::group_scope::check(&conn,id,&request.action_id,&request.args,source).map_err(|e|e.to_string())?;
+        }
         if request.action_id != "schedule.create" || request.dry_run { return Ok(()); }
         if let Some(id) = butler_conversation_id {
             use crate::db::conversation_db::Repository;

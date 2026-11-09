@@ -22,7 +22,7 @@ The application uses multiple Tauri windows for different features:
 -   **Config Window**: Settings and configuration
 -   **ChatUI Window**: Main chat interface
 -   **Schedule Window**: Scheduled task management and run logs
--   **ButlerExperiment Window**: Butler main conversation, task board, approvals, Feishu status
+-   **ButlerExperiment Window**: Butler main conversation, task board, collaboration groups (in development), approvals, Feishu status
 -   **Sidebar Window**: Conversation side panel for todo/context/artifact preview
 -   **ArtifactPreview Window**: Content preview (HTML, SVG, components)
 -   **Artifact Window**: Standalone artifact rendering window
@@ -100,6 +100,7 @@ src-tauri/
 -   `scheduled_task_api.rs`: Scheduled task CRUD, structured scheduling, run, logs, cancellation
 -   `skill_api.rs`: Skill scanning/installing and assistant skill configuration
 -   `butler_api.rs`: Butler main conversation, task orchestration, task detail/result flow
+-   `butler_group.rs` / `butler_group_runtime.rs`: collaboration group commands and per-member durable dispatch; `butler_group_tools.rs` derives group scope from the executing conversation. `butler_group_summary.rs` summarizes only explicitly frozen public source fragments.
 -   `export_api.rs`: Markdown to PDF / DOCX export helpers
 -   `plugin_api.rs`: Plugin registry, lifecycle, config and data storage
 -   `token_statistics_api.rs`: Conversation/message token statistics
@@ -169,3 +170,25 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 Claude 当前保持 Rust 启动 CLI stream-json。Anthropic [官方 Agent SDK 文档](https://code.claude.com/docs/en/agent-sdk/overview)列出 TypeScript/Python，并建议其他语言使用 CLI 子进程；本次不引入额外语言运行时或 sidecar。
 
 Agent 驱动的测试场景、上游参考及明确未覆盖的边界见 [Agent 驱动测试场景对照](./agent-driver-testing.md)。
+
+### Collaboration group context (in development)
+
+`butler_group` is a hidden public-log container; each membership epoch owns a separate `butler_group_member` conversation. Public events and private model/tool messages are different storage domains. `db/butler_group_delivery.rs` persists inbox obligations and immutable input packets, then atomically appends input and advances the member cursor. Visible history, delivered history and answered work are separate states. Ordered seats fix their upper bound when admitted; independent opinions retain a common bound throughout their turns.
+
+`butler_group_execution` separates membership identity from private execution identity. A member has a main conversation and may own multiple hidden `butler_group_task` conversations, each with its own cursor, packets, approvals and questions. Inbox deduplication uses execution conversation IDs; schema migration preserves existing inbox/packet identities inside a savepoint. Legacy membership-based uniqueness is detected from SQLite index metadata rather than SQL text, then rebuilt as execution-based uniqueness. A conflicting active execution aborts and rolls back the migration instead of silently dropping work. Public task outputs retain `sender_conversation` for exact reply routing. Task creation and stop snapshots share the group lifecycle lock.
+
+`butler_group_dispatch` records the owning packet and exact target/reason for assistant-directed messages and discussion seats, including seats not yet queued. Response dependencies remain separate from delivery ownership. `butler_group_chain` derives ancestry from deliveries, dependencies, task parents and resumptions; it applies a shared 32-delegation budget, depth limit 8 and a 120-minute new-delegation window. Resumptions do not add depth or reset the original deadline. Dispatch identity is not permission to read another execution's private context.
+
+Public events retain `sender_packet` internally. An explicit upstream reply binds `return_to_packet` to that original input and uses the original `sender_conversation`, including isolated tasks. The return edge has zero delegation depth and is omitted when delivery supplements that same packet, preventing a parent/child cycle. New packets handling the reply inherit the original work root. Reply provenance never grants access to the sender's private messages.
+
+`butler_group_stop` traverses owned dispatches, inbox packets, resumptions and task parents to fence derived work. It cancels future owned discussion seats while preserving unrelated recipient queues. Prepared mixed packets can release unrelated obligations and their unsubmitted resume bindings; delivered mixed packets are indivisible and are cancelled with explicit diagnostics, without tool replay. Cancellation of a resumed packet also closes the original waiting obligation. Stop APIs lock group admissions before the final transactional snapshot and halt only the executions returned by that transaction.
+
+`butler_group_completion` classifies persisted records in the original input's message tree. Unfinished output and tool continuations remain pending; an unrelated branch's error cannot terminate the packet. Runtime idle duration is not terminal evidence. Native active-prompt snapshots supplement activity state; an absent bound actor without a terminal message produces an uncertain result with native identity, never an automatic retry. Missing terminal records otherwise retain the original execution and release an overdue discussion seat. Explicit `[[NO_REPLY]]` completion is recorded separately from failure.
+
+`butler_group_capability` fingerprints the actual conversation-scoped application tool configuration, after Butler/group filtering and required-tool injection. Initial observations, changes, read failures and recovery become bounded public notices with no response obligations. Identical sorted observations are deduplicated. Full configuration observations are kept separately from public summaries; notices do not assert connectivity or enumerate the native driver's complete abilities. Runtime checks each active group's roster and isolates member-specific failures. User posting records the current observation before fixing an independent discussion snapshot; later changes never rewrite prepared packets or delivered messages.
+
+Long public background is frozen in `butler_group_preparation` before any summary call. `butler_group_background_summary` records exact source fragments and the configured model/provider; required messages, quotes, shared history and recent/user content remain verbatim. Only a fully validated summary can produce an input packet. Configuration failures remain explicit and do not select another model. Stopping or replacing work invalidates pending preparations.
+
+Application-owned tool continuations verify the complete batch and persisted tool results before appending `butler_group_supplement` inputs. Original packets and message prefixes are immutable. Codex native steering persists `butler_group_native_input` with run/session/turn identity before sending, and commits delivery only after the matching `turn/steer` acknowledgment. Missing acknowledgments are fenced as uncertain. Steering stops once final-answer output begins; independent opinions never cross their frozen bound. Claude currently retains queued delivery in the original session. Pending input must not cause channel/session fallback. `butler_group_dependency` registers explicit result waiters, resumes the original request, and prevents passive public results from waking every observer. Recovery fences unknown executions before notifying registered waiters.
+
+Group tools and SuperAdmin scope checks deny private chat/other-group history. Group-isolated task execution and full native end-to-end acceptance are still outstanding; see `docs/butler-group-prd.md` and `tmp/worklog/butler-group-284.md` for scope and current validation evidence.

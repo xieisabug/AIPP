@@ -1,4 +1,8 @@
 pub mod butler_control;
+pub mod butler_group;
+pub mod butler_group_tools;
+pub mod butler_group_runtime;
+mod butler_group_summary;
 pub mod ai;
 pub mod ai_api;
 pub mod assistant_api;

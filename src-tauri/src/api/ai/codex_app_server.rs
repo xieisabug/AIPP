@@ -1409,6 +1409,88 @@ async fn read_rpc_response_with_approvals(
     read_codex_rpc_response(&requests, conversation_id, stdin, lines, expected_id, pending_notifications).await
 }
 
+fn group_steer_params(thread:&str,turn:&str,input:&crate::db::butler_group_native::NativeInput)->Value {
+    json!({"threadId":thread,"expectedTurnId":turn,
+        "input":[{"type":"text","text":input.payload}],
+        "clientUserMessageId":format!("aipp-group-input-{}",input.id)})
+}
+
+fn note_group_output_phase(method:&str,params:&Value,commentary:&mut std::collections::HashSet<String>,final_started:&mut bool) {
+    if method=="item/started" && params.pointer("/item/type").and_then(Value::as_str)==Some("agentMessage") {
+        if params.pointer("/item/phase").and_then(Value::as_str)==Some("commentary") {
+            if let Some(id)=params.pointer("/item/id").and_then(Value::as_str) {commentary.insert(id.to_owned());}
+        } else {
+            // Older servers may omit phase. Conservatively queue later input
+            // rather than claim it affected an answer already being produced.
+            *final_started=true;
+        }
+    }
+    if method=="item/agentMessage/delta" && !params.get("itemId").and_then(Value::as_str).is_some_and(|id|commentary.contains(id)) {
+        *final_started=true;
+    }
+}
+
+async fn send_group_steer_wire(
+    requests:&impl CodexServerRequests,conversation:i64,stdin:&mut tokio::process::ChildStdin,
+    lines:&mut Lines<BufReader<ChildStdout>>,pending:&mut VecDeque<Value>,request_id:u64,
+    thread:&str,turn:&str,input:&crate::db::butler_group_native::NativeInput,
+)->Result<Result<(),String>,String> {
+    write_frame(stdin,&json_rpc_request(request_id,"turn/steer",group_steer_params(thread,turn,input))).await?;
+    let response=tokio::time::timeout(std::time::Duration::from_secs(60),
+        read_codex_rpc_outcome(requests,conversation,stdin,lines,request_id,pending))
+        .await.map_err(|_|"Codex turn/steer 在 60 秒内未返回确认，无法确定远端是否接收".to_owned())??;
+    let response=match response {
+        Ok(response)=>response,
+        Err(error)=> {
+            if error.get("code").and_then(Value::as_i64).is_none() || error.get("message").and_then(Value::as_str).is_none() {
+                return Err(format!("Codex turn/steer 收到不完整的 RPC error，无法确认投递结果：{error}"));
+            }
+            return Ok(Err(format!("Codex turn/steer 明确返回 RPC error：{error}")));
+        },
+    };
+    if response.get("turnId").and_then(Value::as_str)!=Some(turn) {
+        return Err(format!("Codex turn/steer 返回了不匹配的 turnId：expected={turn}, response={response}"));
+    }
+    Ok(Ok(()))
+}
+
+async fn steer_group_input(
+    app:&tauri::AppHandle,conversation:i64,source:i64,run:&str,thread:&str,turn:&str,
+    request_id:&mut u64,stdin:&mut tokio::process::ChildStdin,
+    lines:&mut Lines<BufReader<ChildStdout>>,pending:&mut VecDeque<Value>,
+    cancellation:&CodexRequestCancellation,
+)->Result<(),String> {
+    use crate::api::butler_group::database;
+    use crate::db::butler_group_native;
+    let (r,s,t)=(run.to_owned(),thread.to_owned(),turn.to_owned());
+    let Some(input)=database(app,"native_group_reserve",move |conn|butler_group_native::reserve(conn,conversation,source,&r,&s,&t)).await? else {return Ok(())};
+    let id=input.id;
+    *request_id+=1;
+    let result=wait_codex_interaction(async {
+        let requests=DesktopCodexServerRequests {app_handle:app,conversation_id:conversation,cancellation:Some(cancellation)};
+        if let Err(rejection)=send_group_steer_wire(&requests,conversation,stdin,lines,pending,*request_id,thread,turn,&input).await? {
+            let diagnostic=format!("stage=codex_group_steer_rejected; conversation={conversation}; input={id}; run={run}; session={thread}; turn={turn}; {rejection}; 未重发；本轮此前已执行的工具不回滚");
+            let persisted=diagnostic.clone();
+            database(app,"native_group_rejected",move |conn|butler_group_native::rejected(conn,id,&persisted)).await
+                .map_err(|error|format!("{diagnostic}; 拒绝状态保存失败：{error}"))?;
+            return Ok(Some(diagnostic));
+        }
+        let (r,s,t)=(run.to_owned(),thread.to_owned(),turn.to_owned());
+        database(app,"native_group_ack",move |conn|butler_group_native::acknowledge(conn,id,&r,&s,&t)).await?;
+        Ok(None)
+    },Some(cancellation)).await;
+    if let Ok(Some(diagnostic))=&result {return Err(diagnostic.clone());}
+    if let Err(error)=result {
+        let diagnostic=format!("stage=codex_group_steer; conversation={conversation}; input={id}; run={run}; session={thread}; turn={turn}; {error}");
+        let persisted=diagnostic.clone();
+        if let Err(save_error)=database(app,"native_group_uncertain",move |conn|butler_group_native::uncertain(conn,id,&persisted)).await {
+            return Err(format!("{diagnostic}; 结果不明状态保存失败：{save_error}"));
+        }
+        return Err(diagnostic);
+    }
+    Ok(())
+}
+
 async fn read_codex_rpc_response(
     requests: &impl CodexServerRequests,
     conversation_id: i64,
@@ -1417,6 +1499,20 @@ async fn read_codex_rpc_response(
     expected_id: u64,
     pending_notifications: &mut VecDeque<Value>,
 ) -> Result<Value, String> {
+    read_codex_rpc_outcome(requests,conversation_id,stdin,lines,expected_id,pending_notifications).await?
+        .map_err(|error|format!("Codex app-server RPC error: {error}"))
+}
+
+// Keep a response error distinct from transport/protocol failure. Callers
+// deciding whether delivery is known must not classify formatted strings.
+async fn read_codex_rpc_outcome(
+    requests: &impl CodexServerRequests,
+    conversation_id: i64,
+    stdin: &mut tokio::process::ChildStdin,
+    lines: &mut Lines<BufReader<ChildStdout>>,
+    expected_id: u64,
+    pending_notifications: &mut VecDeque<Value>,
+) -> Result<Result<Value, Value>, String> {
     while let Some(line) = lines
         .next_line()
         .await
@@ -1445,9 +1541,12 @@ async fn read_codex_rpc_response(
         }
         if frame.get("id").and_then(Value::as_u64) == Some(expected_id) {
             if let Some(error) = frame.get("error") {
-                return Err(format!("Codex app-server RPC error: {error}"));
+                if frame.get("result").is_some() {
+                    return Err(format!("Codex app-server 响应同时包含 result 与 error：id={expected_id}; {frame}"));
+                }
+                return Ok(Err(error.clone()));
             }
-            return Ok(frame.get("result").cloned().unwrap_or(Value::Null));
+            return Ok(Ok(frame.get("result").cloned().unwrap_or(Value::Null)));
         }
         if frame.get("method").is_some() {
             pending_notifications.push_back(frame);
@@ -2320,11 +2419,18 @@ async fn run_session(
                 let mut plan_messages = HashMap::<String, AgentPlanMessage>::new();
                 // 记录每个 item 开始时的正文字符数，供前端把活动卡片穿插到正文对应位置
                 let mut item_content_offsets = HashMap::<String, u64>::new();
+                let group_input_enabled=crate::api::butler_group::database(&app_handle,"native_group_scope",move |conn|
+                    crate::db::butler_group_delivery::is_member_conversation(conn,conversation_id)).await?;
+                let mut group_input_tick=tokio::time::interval(std::time::Duration::from_millis(750));
+                group_input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut final_answer_started=false;
+                let mut commentary_items=std::collections::HashSet::<String>::new();
                 loop {
                     let frame = if let Some(frame) = pending_notifications.pop_front() {
                         frame
                     } else {
                         tokio::select! {
+                            biased;
                             maybe_command = receiver.recv() => {
                             match maybe_command {
                                 Some(CodexSessionCommand::CancelCurrentPrompt { response }) => {
@@ -2372,6 +2478,13 @@ async fn run_session(
                                 Err(error) => { warn!(error = %error, line = %line, "Invalid Codex app-server frame"); continue; }
                             }
                             }
+                            _=group_input_tick.tick(), if group_input_enabled && !final_answer_started && turn_id.is_some()=> {
+                                if let Some(active_turn)=turn_id.as_deref() {
+                                    steer_group_input(&app_handle,conversation_id,message_id,run_id,&thread_id,active_turn,
+                                        &mut request_id,&mut stdin,&mut lines,&mut pending_notifications,&request_cancellation).await?;
+                                }
+                                continue;
+                            }
                         }
                     };
                     if frame.get("id").is_some() && frame.get("method").is_some() {
@@ -2406,6 +2519,7 @@ async fn run_session(
                     }
                     let method = frame.get("method").and_then(Value::as_str).unwrap_or_default();
                     let params = frame.get("params").cloned().unwrap_or(Value::Null);
+                    note_group_output_phase(method,&params,&mut commentary_items,&mut final_answer_started);
                     match method {
                                 "turn/started" => {
                                     turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string).or(turn_id);
@@ -3267,6 +3381,10 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "codex_app_server_permission_tests.rs"]
 mod permission_tests;
+
+#[cfg(test)]
+#[path = "codex_app_server_group_tests.rs"]
+mod group_tests;
 
 #[cfg(all(test, unix))]
 #[path = "codex_app_server_protocol_tests.rs"]

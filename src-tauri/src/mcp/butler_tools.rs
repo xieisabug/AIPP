@@ -15,7 +15,9 @@ pub fn conversation_kind(app: &tauri::AppHandle, id: Option<i64>) -> Result<Stri
 pub fn is_direct_tool(kind: &str, command: Option<&str>, tool: &str) -> bool {
     cfg!(desktop) && is_butler_conversation_kind(kind) && match command {
         Some("aipp:superadmin") => matches!(tool,"superadmin_catalog"|"superadmin_inspect"|"superadmin_execute"|"superadmin_batch"|"superadmin_undo"|"superadmin_audit_query"),
-        Some("aipp:agent") => crate::api::butler_peer::is_peer_tool(tool),
+        Some("aipp:agent") => if matches!(kind,"butler_group_member"|"butler_group_task") {
+            crate::api::butler_group_tools::is_tool(tool)
+        } else { crate::api::butler_peer::is_peer_tool(tool) },
         // 受托助手在自己的会话里向用户提问，问题绑定当前回合（即当前这项委托或任务）。
         Some("aipp:ui_interaction") => tool == "ask_user_question",
         _ => false,
@@ -27,6 +29,9 @@ pub fn merge_tools(servers: &mut Vec<MCPServerWithTools>, required: Vec<MCPServe
         servers.retain(|s| s.command.as_deref() != Some("aipp:superadmin"));
     }
     for server in servers.iter_mut() {
+        if server.command.as_deref() == Some("aipp:agent") && is_butler_conversation_kind(kind) {
+            server.tools.retain(|t| super::builtin_mcp::templates::is_agent_tool_visible_in_butler(kind,&t.name));
+        }
         if server.command.as_deref() == Some("aipp:agent") && !is_butler_conversation_kind(kind) {
             server.tools.retain(|t| !super::builtin_mcp::templates::is_butler_only_agent_tool(&t.name));
         }

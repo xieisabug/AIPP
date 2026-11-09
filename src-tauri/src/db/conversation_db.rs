@@ -2183,6 +2183,7 @@ impl ConversationDatabase {
         // 回送领取标识：只有持有当前领取的执行者才能推进回送状态
         ensure_column_exists(&conn, "butler_task_result", "followup_claim_id", "TEXT")?;
         super::butler_peer::schema(&conn)?;
+        super::butler_group::schema(&conn)?;
         super::butler_work::schema(&conn)?;
 
         Ok(())

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -180,7 +180,8 @@ export function useAcpElicitation(options: UseAcpElicitationOptions = {}) {
     const [requestQueue, setRequestQueue] = useState<AcpElicitationRequest[]>([]);
     const [decisionError, setDecisionError] = useState<string | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const pendingRequest = requestQueue[0] ?? null;
+    const scopeVersion = useRef(0);
+    const pendingRequest = requestQueue.find(request => shouldHandleConversationRequest(request.conversation_id, conversationId, conversationIds)) ?? null;
 
     const questionRequest: AskUserQuestionRequest | null = useMemo(() => {
         if (!pendingRequest) return null;
@@ -206,56 +207,47 @@ export function useAcpElicitation(options: UseAcpElicitationOptions = {}) {
     }, []);
 
     useEffect(() => {
-        const unsubscribe = listen<AcpElicitationRequest>(
-            "acp-elicitation-request",
-            (event) => {
-                const request = event.payload;
-                if (
-                    !shouldHandleConversationRequest(
-                        request.conversation_id,
-                        conversationId,
-                        conversationIds
-                    )
-                ) {
-                    return;
+        let disposed = false;
+        ++scopeVersion.current;
+        const unlisten: (() => void)[] = [];
+        const resolved = new Set<string>();
+        setRequestQueue([]);
+        setDecisionError(null);
+        setIsSubmitting(false);
+        const enqueue = (requests: AcpElicitationRequest[]) => {
+            if (disposed) return;
+            setRequestQueue(previous => {
+                const next = previous.filter(request => !resolved.has(request.request_id));
+                for (const request of requests) {
+                    if (!resolved.has(request.request_id) && shouldHandleConversationRequest(request.conversation_id, conversationId, conversationIds)
+                        && !next.some(item => item.request_id === request.request_id)) next.push(request);
                 }
-
-                console.log("Received ACP elicitation request:", request);
-                setRequestQueue((prev) => {
-                    if (prev.some((item) => item.request_id === request.request_id)) {
-                        return prev;
-                    }
-                    if (prev.length === 0) {
-                        setDecisionError(null);
-                        setIsSubmitting(false);
-                    }
-                    return [...prev, request];
+                return next;
+            });
+        };
+        void (async () => {
+            try {
+                // Subscribe before taking the snapshot; a resolution received
+                // while it is in flight must not resurrect a finished form.
+                const stopResolved = await listen<AcpElicitationResolvedEvent>("acp-elicitation-resolved", event => {
+                    if (disposed || !event.payload?.request_id) return;
+                    resolved.add(event.payload.request_id);
+                    removeRequestById(event.payload.request_id);
                 });
+                if (disposed) { stopResolved(); return; }
+                unlisten.push(stopResolved);
+                const stopRequests = await listen<AcpElicitationRequest>("acp-elicitation-request", event => enqueue([event.payload]));
+                if (disposed) { stopRequests(); return; }
+                unlisten.push(stopRequests);
+                const ids = [...new Set([...(conversationIds ?? []), ...(conversationId ? [conversationId] : [])])];
+                const snapshots = await Promise.all(ids.map(id => invoke<AcpElicitationRequest[]>("list_acp_elicitation_requests", { conversationId: id })));
+                enqueue(snapshots.flat());
+            } catch (error) {
+                if (!disposed) setDecisionError(`读取待处理的原生提问失败：${getErrorMessage(error)}`);
             }
-        );
-
-        return () => {
-            unsubscribe.then((f) => f());
-        };
-    }, [conversationId, conversationIds]);
-
-    useEffect(() => {
-        const unsubscribe = listen<AcpElicitationResolvedEvent>(
-            "acp-elicitation-resolved",
-            (event) => {
-                const requestId = event.payload?.request_id;
-                if (!requestId) {
-                    return;
-                }
-                console.log("Received ACP elicitation resolution:", event.payload);
-                removeRequestById(requestId);
-            }
-        );
-
-        return () => {
-            unsubscribe.then((f) => f());
-        };
-    }, [removeRequestById]);
+        })();
+        return () => { disposed = true; ++scopeVersion.current; unlisten.forEach(stop => stop()); };
+    }, [conversationId, conversationIds, removeRequestById]);
 
     const sendDecision = useCallback(
         async (
@@ -267,6 +259,7 @@ export function useAcpElicitation(options: UseAcpElicitationOptions = {}) {
                 return;
             }
             setIsSubmitting(true);
+            const version = scopeVersion.current;
             try {
                 console.log("Sending ACP elicitation decision:", { requestId, action });
                 await invoke("confirm_acp_elicitation", {
@@ -274,9 +267,11 @@ export function useAcpElicitation(options: UseAcpElicitationOptions = {}) {
                     action,
                     values: action === "accept" ? values ?? {} : null,
                 });
+                if (version !== scopeVersion.current) return;
                 setDecisionError(null);
                 removeRequestById(requestId);
             } catch (error) {
+                if (version !== scopeVersion.current) return;
                 const message = getErrorMessage(error) || "提交结构化提问回复失败";
                 console.error("Failed to send ACP elicitation decision:", message);
                 if (isStaleAcpElicitationError(message)) {
