@@ -9,7 +9,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 pub const ACP_MCP_BRIDGE_ARG: &str = "--aipp-acp-mcp-bridge";
@@ -179,16 +178,14 @@ async fn execute_proxy_tool(
     let db = MCPDatabase::new(app_handle).map_err(|error| error.to_string())?;
     let server = db.get_mcp_server(server_id).map_err(|error| error.to_string())?;
     let parameters = serde_json::to_string(&arguments).map_err(|error| error.to_string())?;
-    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
     {
         let db = crate::db::conversation_db::ConversationDatabase::new(app_handle).map_err(|error| error.to_string())?;
         let conn = db.get_connection().map_err(|error| error.to_string())?;
         prompt.validate_connection(&conn)?;
     }
     prompt.ensure_active()?;
-    let execute = crate::mcp::execution_api::execute_tool_by_transport(
+    let execute = crate::mcp::execution_api::execute_tool_by_transport_on_large_stack(
         app_handle,
-        &feature_config_state,
         &server,
         tool_name,
         &parameters,

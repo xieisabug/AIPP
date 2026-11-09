@@ -4,7 +4,6 @@ use crate::db::conversation_db::Repository;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use tauri::Manager; // for AppHandle.state
 use tokio::sync::Mutex; // for repository.read
 use tracing::{debug, error, instrument, warn};
 
@@ -285,8 +284,7 @@ pub async fn detect_and_process_mcp_calls(
             let window = window.clone();
             let spawned = crate::utils::async_thread::spawn_async_thread("aipp-detected-tool-exec", move || async move {
                 if let Err(error) = crate::mcp::execution_api::execute_mcp_tool_call(
-                    app.clone(), app.state::<crate::AppState>(),
-                    app.state::<crate::FeatureConfigState>(), window, tool_call_id, true,
+                    app.clone(), window, tool_call_id, true,
                 ).await {
                     error!(call_id = tool_call_id, error = %error, "Auto-execute MCP tool failed");
                 }

@@ -1980,8 +1980,6 @@ async fn execute_and_continue_tool_calls(
     for call_id in &exec_ids {
         let future = crate::mcp::execution_api::execute_mcp_tool_call(
             app_handle.clone(),
-            state.clone(),
-            feature_config_state.clone(),
             window.clone(),
             *call_id,
             false, // 不触发续写（由批量续写统一处理）
@@ -2046,15 +2044,10 @@ async fn handle_captured_tool_calls_concurrent(
 
     // 非流式场景：内联执行（不含续写，由调用方处理）
     if !auto_run_ids.is_empty() {
-        let state = app_handle.state::<crate::AppState>();
-        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-
         let mut execute_futures = Vec::new();
         for call_id in &auto_run_ids {
             let future = crate::mcp::execution_api::execute_mcp_tool_call(
                 app_handle.clone(),
-                state.clone(),
-                feature_config_state.clone(),
                 window.clone(),
                 *call_id,
                 false,

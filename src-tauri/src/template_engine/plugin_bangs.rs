@@ -5,12 +5,11 @@ use crate::api::plugin_api::{
     PluginBangServerDefinition, ResolvedPluginManifest,
 };
 use crate::db::mcp_db::{MCPDatabase, MCPServer};
-use crate::mcp::execution_api::execute_tool_by_transport;
+use crate::mcp::execution_api::execute_tool_by_transport_on_large_stack;
 use futures::FutureExt;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use tauri::Manager;
 use tracing::warn;
 
 const DEFAULT_BUILTIN_COMMAND: &str = "aipp:operation";
@@ -165,10 +164,8 @@ async fn execute_runtime_bang(
 
     let conversation_id =
         context.get("conversation_id").and_then(|value| value.parse::<i64>().ok());
-    let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
-    match execute_tool_by_transport(
+    match execute_tool_by_transport_on_large_stack(
         app_handle,
-        &feature_config_state,
         &executor.server,
         &executor.tool_name,
         &JsonValue::Object(parameters).to_string(),

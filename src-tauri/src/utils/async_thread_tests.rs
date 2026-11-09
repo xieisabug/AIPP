@@ -69,3 +69,59 @@ fn test_no_backend_path_block_on_inside_blocking_pool() {
     visit(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut found);
     assert!(found.is_empty(), "这些位置在 2MB 栈的阻塞线程池里 block_on，改用 spawn_async_thread：\n{}", found.join("\n"));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_on_large_stack_returns_result_without_using_caller_stack() {
+    // 调用方是 2MB 栈的测试线程；8MB 局部数据只有在大栈线程上才能放下。
+    let result = super::async_thread::run_on_large_stack("aipp-test-large-stack", || async {
+        let buffer = std::hint::black_box([3u8; 8 * 1024 * 1024]);
+        (std::thread::current().name().map(str::to_string), buffer.iter().map(|&b| b as u64).sum::<u64>())
+    })
+    .await
+    .expect("large stack thread result");
+    assert_eq!(result, (Some("aipp-test-large-stack".to_string()), 3 * 8 * 1024 * 1024));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_run_on_large_stack_reports_panicked_thread() {
+    let error = super::async_thread::run_on_large_stack("aipp-test-panic", || async {
+        panic!("boom");
+    })
+    .await
+    .map(|_: ()| ())
+    .expect_err("panicked thread must surface an error");
+    assert!(error.contains("aipp-test-panic"), "{error}");
+}
+
+/// 工具执行链只能从大栈入口进入：`execute_mcp_tool_call`（Tauri 命令与内部调用共用）或
+/// `execute_tool_by_transport_on_large_stack`。直接调用底层执行函数的新入口一旦跑在 tokio 工作线程上，
+/// debug 构建会 STATUS_STACK_OVERFLOW（例如在界面上确认执行 write_file）。
+#[test]
+fn test_tool_execution_only_enters_through_large_stack_entry_points() {
+    fn visit(dir: &std::path::Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                visit(&path, found);
+                continue;
+            }
+            let allowed = path.ends_with("execution_api.rs") || path.ends_with("async_thread_tests.rs");
+            if !path.extension().is_some_and(|ext| ext == "rs") || allowed {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source file");
+            for (index, line) in source.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                if code.contains("execute_tool_by_transport(") || code.contains("execute_mcp_tool_call_on_current_thread(") {
+                    found.push(format!("{}:{}", path.display(), index + 1));
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    visit(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut found);
+    assert!(found.is_empty(), "这些位置绕过了大栈入口直接执行工具，改用 execute_mcp_tool_call 或 execute_tool_by_transport_on_large_stack：\n{}", found.join("\n"));
+}

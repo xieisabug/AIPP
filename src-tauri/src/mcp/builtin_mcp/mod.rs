@@ -424,8 +424,6 @@ fn spawn_task_conversation_mcp_tool_execution(
             let anchor_message_id = tool_call_anchor_message_id(&pending_tool_call);
             match crate::mcp::execution_api::execute_mcp_tool_call(
                 app_handle.clone(),
-                app_handle.state::<crate::AppState>(),
-                app_handle.state::<crate::FeatureConfigState>(),
                 window.clone(),
                 pending_tool_call.id,
                 false,

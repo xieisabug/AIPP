@@ -2002,13 +2002,115 @@ pub async fn create_mcp_tool_call_with_llm_id(
     .await
 }
 
+/// 调用方作用域里与工具执行相关的 task-local（工具所属消息、输出归属、续跑回送标记）。
+/// task-local 不会跟着换线程，换到大栈线程执行工具时要原样重新设置。
+struct ToolTaskLocals {
+    tool_message: Option<Option<i64>>,
+    output_source: Option<Option<i64>>,
+    followup_keys: Option<Vec<String>>,
+}
+
+impl ToolTaskLocals {
+    fn capture() -> Self {
+        Self {
+            tool_message: crate::api::butler_peer::TOOL_MESSAGE.try_with(|id| *id).ok(),
+            output_source: crate::db::butler_goal::OUTPUT_SOURCE.try_with(|id| *id).ok(),
+            followup_keys: crate::api::butler_api::FOLLOWUP_KEYS.try_with(|keys| keys.clone()).ok(),
+        }
+    }
+
+    async fn scope<'a, T: 'a>(self, future: impl std::future::Future<Output = T> + 'a) -> T {
+        let mut future: std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>> = Box::pin(future);
+        if let Some(keys) = self.followup_keys {
+            future = Box::pin(crate::api::butler_api::FOLLOWUP_KEYS.scope(keys, future));
+        }
+        if let Some(source) = self.output_source {
+            future = Box::pin(crate::db::butler_goal::OUTPUT_SOURCE.scope(source, future));
+        }
+        if let Some(message) = self.tool_message {
+            future = Box::pin(crate::api::butler_peer::TOOL_MESSAGE.scope(message, future));
+        }
+        future.await
+    }
+}
+
+/// 执行指定 ID 的工具调用（Tauri 命令，也是所有内部调用方的入口）。
+///
+/// 内置工具链的 future 在 debug 构建下很大，Tauri async 命令所在的 tokio 工作线程只有 2MB 栈，
+/// 直接执行会让整个进程 STATUS_STACK_OVERFLOW。这里统一换到大栈线程执行并等待结果。
 #[tauri::command]
+#[instrument(skip(app_handle, window), fields(call_id = call_id, trigger_continuation))]
+pub async fn execute_mcp_tool_call(
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+    call_id: i64,
+    trigger_continuation: bool,
+) -> std::result::Result<MCPToolCall, String> {
+    let locals = ToolTaskLocals::capture();
+    crate::utils::async_thread::run_on_large_stack("aipp-tool-call", move || async move {
+        let state = app_handle.state::<crate::AppState>();
+        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+        locals
+            .scope(execute_mcp_tool_call_on_current_thread(
+                app_handle.clone(),
+                state,
+                feature_config_state,
+                window,
+                call_id,
+                trigger_continuation,
+            ))
+            .await
+    })
+    .await
+    .map_err(|error| format!("执行工具调用 {call_id} 失败：{error}"))?
+}
+
+/// 在大栈线程上按传输类型执行工具，供不在 `spawn_async_thread` 线程里的调用方使用
+/// （ACP MCP 代理、定时任务、插件运行时 bang）。调用方放弃等待时会取消这次执行。
+pub async fn execute_tool_by_transport_on_large_stack(
+    app_handle: &tauri::AppHandle,
+    server: &MCPServer,
+    tool_name: &str,
+    parameters: &str,
+    conversation_id: Option<i64>,
+    cancel_token: Option<CancellationToken>,
+) -> std::result::Result<String, String> {
+    let locals = ToolTaskLocals::capture();
+    // 子令牌：调用方的取消照常传下去；调用方丢弃这个 future 时只取消这一次执行。
+    let token = cancel_token.map(|token| token.child_token()).unwrap_or_default();
+    let _cancel_on_drop = token.clone().drop_guard();
+    let app_handle = app_handle.clone();
+    let server_id = server.id;
+    let server = server.clone();
+    let tool_name = tool_name.to_string();
+    let parameters = parameters.to_string();
+    let thread_tool_name = tool_name.clone();
+    crate::utils::async_thread::run_on_large_stack("aipp-tool-transport", move || async move {
+        let feature_config_state = app_handle.state::<crate::FeatureConfigState>();
+        locals
+            .scope(execute_tool_by_transport(
+                &app_handle,
+                &feature_config_state,
+                &server,
+                &thread_tool_name,
+                &parameters,
+                conversation_id,
+                Some(token),
+            ))
+            .await
+    })
+    .await
+    .map_err(|error| format!("{error} (server_id={server_id}, tool={tool_name}, conversation_id={conversation_id:?})"))?
+}
+
 /// 执行指定 ID 的工具调用：
 /// 1. 原子更新状态到 executing
 /// 2. 按服务器传输类型派发执行
 /// 3. 持久化结果并触发续写
+///
+/// 只能在大栈线程上调用，外部请走 [`execute_mcp_tool_call`]。
 #[instrument(skip(app_handle,state,feature_config_state,window), fields(call_id=call_id, trigger_continuation))]
-pub async fn execute_mcp_tool_call(
+async fn execute_mcp_tool_call_on_current_thread(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
     feature_config_state: tauri::State<'_, crate::FeatureConfigState>,

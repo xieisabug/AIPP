@@ -406,7 +406,7 @@ async fn create_scheduled_tool_call_record(
     .map(|record| record.id)
 }
 
-/// 执行单个工具调用，直接调用底层 execute_tool_by_transport
+/// 执行单个工具调用；调度器在 2MB 栈的 tokio 工作线程上，工具本身换到大栈线程执行
 ///
 /// 返回 (is_success, result_or_error_text)
 async fn execute_single_tool(
@@ -482,7 +482,6 @@ async fn execute_single_tool(
         let _ = mcp_db.update_mcp_tool_call_status(call_db_id,"failed",None,Some(&error));
         return (false,error);
     }};
-    let feature_config_state = app_handle.state::<FeatureConfigState>();
     if let Some(token) = cancel_token.as_ref() {
         if token.is_cancelled() {
             let err = "Error: 工具执行已取消".to_string();
@@ -510,8 +509,8 @@ async fn execute_single_tool(
                 }
                 Ok(String::from_utf8_lossy(&bytes).into_owned())
             } else {
-                crate::mcp::execution_api::execute_tool_by_transport(
-                    app_handle, &feature_config_state, &server, &record.tool_name,
+                crate::mcp::execution_api::execute_tool_by_transport_on_large_stack(
+                    app_handle, &server, &record.tool_name,
                     &record.parameters, Some(record.conversation_id), cancel_token,
                 ).await.map_err(|e|e.to_string())
             }

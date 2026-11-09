@@ -35,3 +35,30 @@ where
         .stack_size(ASYNC_THREAD_STACK_SIZE)
         .spawn(f)
 }
+
+/// 在大栈线程上运行 `make_future()`，当前任务异步等待结果（不阻塞当前线程）。
+///
+/// 供运行在 tokio 工作线程上的入口使用：Tauri async 命令、`tauri::async_runtime::spawn`
+/// 的任务都跑在默认 2MB 栈的工作线程上，直接 poll 工具执行链会 STATUS_STACK_OVERFLOW。
+/// 当前 tracing span 会带到新线程，日志仍挂在调用方的 span 下。
+pub async fn run_on_large_stack<F, Fut, T>(name: &str, make_future: F) -> Result<T, String>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T> + 'static,
+    T: Send + 'static,
+{
+    use tracing::Instrument;
+
+    let span = tracing::Span::current();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    spawn_async_thread(name, move || {
+        async move {
+            let _ = sender.send(make_future().await);
+        }
+        .instrument(span)
+    })
+    .map_err(|error| format!("无法启动执行线程 {name}：{error}"))?;
+    receiver
+        .await
+        .map_err(|_| format!("执行线程 {name} 没有返回结果就结束了（线程内发生了 panic）"))
+}
