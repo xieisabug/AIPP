@@ -1,193 +1,209 @@
-# 🎉 AIPP v1.0.0 — 首个正式版发布
-
 <div align="center">
 
-**AI 助手平台 (AI Assistant Platform)**
+<img src="app-icon.png" alt="AIPP" width="120" />
 
-基于 Tauri 2.0 构建的跨平台桌面 AI 助手平台
+# AIPP
 
+### 你的 AI，你的平台，你的规则
+
+多模型对话 · 本地 Agent · MCP 工具 · Artifacts · 会拉群的 AI 管家
+
+[![Release](https://img.shields.io/github/v/release/xieisabug/AIPP?label=release&color=black)](https://github.com/xieisabug/AIPP/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Tauri](https://img.shields.io/badge/Tauri-2.7-24C8DB.svg)](https://tauri.app/)
-[![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://reactjs.org/)
-[![Rust](https://img.shields.io/badge/Rust-Latest-orange.svg)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2.11-24C8DB.svg)](https://tauri.app/)
+[![React](https://img.shields.io/badge/React-19-61DAFB.svg)](https://react.dev/)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
+![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-lightgrey.svg)
+
+[**⬇️ 下载**](https://github.com/xieisabug/AIPP/releases/latest) &nbsp;·&nbsp; [**🎉 1.5.0 更新**](https://github.com/xieisabug/AIPP/releases/tag/v1.5.0) &nbsp;·&nbsp; [**📚 文档**](docs/product/README.md)
+
+<br/>
+
+<!-- 📸 图 1 hero.png：主界面大图。Chat 窗口正在对话，画面里最好有代码块 + 工具调用卡片 + 左侧对话列表；浅色主题；建议 1600×1000 -->
+<img src="docs/readme/hero.png" alt="AIPP 主界面" width="880" />
 
 </div>
 
----
+<br/>
 
-经过 13 个迭代版本、**440+ 次提交**、**298 项新功能** 和 **91 项修复**，AIPP 正式迎来 **v1.0.0** 里程碑！从一个简单的"套壳"工具起步，AIPP 已经成长为一个功能丰富的 AI 助手平台，涵盖多模型对话、MCP 工具协议、插件系统、Butler 智能管家、飞书集成等完整能力矩阵。
+## 🎉 1.5.0：把助手们拉个群
 
----
+<table>
+<tr>
+<td width="56%">
 
-## ✨ 核心功能一览
+<!-- 📸 图 2 butler-group.png：管家群聊。左侧联系人列表（带头像）+ 右侧群聊，最好能看到 @成员、多位成员同时回复或「讨论中 · 第 N/M 轮」；建议 1200×800 -->
+<img src="docs/readme/butler-group.png" alt="管家群聊" />
 
-### 🤖 多模型 AI 对话
+</td>
+<td valign="top">
 
-- **多提供商支持**：统一接入 OpenAI、Anthropic (Claude)、Google (Gemini)、GitHub Copilot 等主流大语言模型提供商，一键切换模型
-- **流式响应**：完整的流式输出支持，包括原生工具调用的流式展示，配合 Shine Border 动画提供沉浸式交互体验
-- **模型请求方式切换**：支持在 OpenAI/Copilot 提供商下按模型级别切换 `chat_completions` 或 `responses` 请求方式
-- **思考过程展示**：支持 Claude 等模型的 Thinking/Reasoning 内容展示，可配置思考级别参数
-- **对话分支与重试**：完善的消息分支管理，支持消息重生成和对话分支选择
-- **对话搜索**：全文搜索对话历史，高亮显示匹配结果
-- **对话自动总结**：智能总结长对话内容，便于回顾
-- **防窥模式**：一键开启隐私保护，对话内容和标题脱敏处理
+**👥 管家群聊**<br/>
+@ 谁谁回答，不 @ 自动挑人；能一起回复，也能多轮讨论
 
-### 🔧 MCP 工具协议集成
+**🤝 助手互相协作**<br/>
+转交、请教、接力，谁接手谁直接跟你说
 
-- **完整 MCP 支持**：基于 rmcp crate 实现 Model Context Protocol，让 AI 能够调用外部工具
-- **动态工具加载**：支持运行时动态发现和加载 MCP 工具，无需重启应用
-- **原生工具调用流式展示**：工具调用过程中实时展示参数和状态，配合 Shine Border 动画
-- **工具超时与重试**：可配置工具执行超时时间，支持错误后自动继续对话
-- **批量工具执行**：支持多个工具调用的批量发送和续写
-- **工具调用权限管理**：精细化的工具执行权限控制
+**🤖 统一 Agent 驱动**<br/>
+Codex / Claude Code / ACP 走同一个入口
 
-### 🎨 Artifacts 预览系统
+**🌐 新模型来源**<br/>
+OpenCode Go 订阅、Magpie 本机网关
 
-- **实时内容预览**：支持 HTML、SVG、Mermaid 图表的实时渲染预览
-- **组件预览**：支持 React 和 Vue 组件的在线预览，开发即所见
-- **Draw.io 集成**：支持 Draw.io 图表的预览和导出保存
-- **独立预览窗口**：Artifact 在独立窗口中渲染，支持实时更新和状态恢复
-- **代码块元信息**：支持代码块中的元数据解析，增强展示效果
+**📱 Android APK**<br/>
+Release 页直接下载
 
-### 📜 脚本执行
+</td>
+</tr>
+</table>
 
-- **多语言脚本运行**：直接运行 Python、Bash/PowerShell、AppleScript 等脚本
-- **执行环境检测**：自动检测系统环境，支持 Bun、UV 等运行时
-- **内容抓取**：内置浏览器池（Chromiumoxide），支持并发网页内容抓取
+<p align="right"><a href="https://github.com/xieisabug/AIPP/releases/tag/v1.5.0">完整更新日志 →</a></p>
 
-### 🛠️ Skills 技能系统
+## ✨ 能做什么
 
-- **技能管理**：完整的技能扫描、安装、删除生命周期管理
-- **官方技能市场**：提供官方技能库，一键获取和安装
-- **安装向导**：支持从 GitHub 仓库和 ZIP 链接安装技能
-- **斜杠命令**：通过 `/` 斜杠命令快速调用已安装技能
+<table>
+<tr>
+<td width="33%" valign="top">
 
-### 🔌 插件系统
+### 💬 多模型对话
+OpenAI、Anthropic、DeepSeek、Ollama、Copilot、OpenCode Go、Magpie… 一个窗口随时切换，支持分支、重生成和思考过程展示。
 
-- **插件运行时**：沙箱化的插件执行环境，安全可靠
-- **主题插件**：支持自定义主题（如国风主题），包括全局和窗口级 CSS 定制
-- **Markdown 扩展**：插件可注册自定义 Markdown 标签，实现动态渲染
-- **Bang 命令扩展**：插件可注册 Bang 命令，扩展快捷操作
-- **Hook 系统**：插件可在关键生命周期节点挂接逻辑，增强可控性
+</td>
+<td width="33%" valign="top">
 
-### 🏠 Butler 总管家系统
+### 🧑‍💻 本地 Agent
+Codex、Claude Code，以及 Gemini / Kimi 等 ACP Agent 直接在 AIPP 里跑；计划、提问、审批都有专门的卡片。
 
-- **智能任务管家**：实验性的 Butler 系统，支持创建和管理 AI 驱动的自动化任务
-- **权限请求处理**：支持自动决策与人工审批相结合的权限管理
-- **Super Admin 工具集**：批量执行、目录查询、详情查看、审计日志、撤销操作等完整管理能力
-- **上下文预算管理**：智能上下文压缩，支持 LLM 驱动的对话摘要和 Token 预算控制
-- **任务状态追踪**：完整的任务生命周期管理，支持任务重新协调
+</td>
+<td width="33%" valign="top">
 
-### 💬 飞书集成
+### 🏠 AI 管家
+所有助手都是联系人：私聊、派活、拉群讨论，还能接到飞书里用。
 
-- **飞书渠道对接**：支持通过飞书发送和接收消息
-- **卡片消息**：使用飞书交互卡片展示工具调用状态和结果
-- **消息转发修饰**：智能转化不适合飞书阅读的内容格式
-- **飞书端审批**：支持通过飞书进行 Butler 任务的权限审批
-- **菜单事件**：支持飞书菜单事件处理，如新建会话
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🔧 MCP 工具
+工具按需动态加载，交给模型审核后再执行；内置搜索、网页抓取、文件读写和 Shell。
+
+</td>
+<td valign="top">
+
+### 🎨 Artifacts
+HTML、React、Vue、Mermaid、Draw.io 即时预览，Python / Shell 脚本直接运行。
+
+</td>
+<td valign="top">
+
+### 🔌 插件 & Skills
+主题、Bang 命令、ComfyUI 生图、用量面板… 技能一键安装。
+
+</td>
+</tr>
+<tr>
+<td valign="top">
 
 ### ⏰ 定时任务
+定点或周期性地让 AI 干活，结果值得说的时候才通知你。
 
-- **任务调度**：支持创建、编辑、删除定时任务
-- **运行记录**：完整的任务运行历史记录查看
-- **状态监控**：实时的任务运行状态更新和日志
+</td>
+<td valign="top">
 
-### 📤 对话导出
+### 🔒 本地优先
+数据存在本机 SQLite，零遥测；可选自建同步，API Key 端到端加密。
 
-- **多格式导出**：支持导出为 Markdown、Word (.docx)、PDF、PNG 格式
-- **单条消息导出**：支持导出单条消息
-- **暗色模式适配**：导出内容自动适配当前主题
-- **PDF 智能分页**：PDF 导出支持智能分页和消息分段渲染
+</td>
+<td valign="top">
 
----
+### 🖥️ 处处可用
+`Ctrl+Shift+I` 随手提问，托盘常驻；桌面三端 + Android。
 
-## 🖥️ 用户体验
+</td>
+</tr>
+</table>
 
-### 多窗口架构
-- **Ask 窗口**：全局快捷键 (`Ctrl+Shift+I`) 快速唤起 AI 查询
-- **Chat 窗口**：完整的对话界面，支持侧边栏、上下文预览
-- **Config 窗口**：集中式的设置和模型配置管理
-- **Artifact 预览窗口**：独立的内容渲染和组件预览
-- **Butler 窗口**：总管家任务管理实验界面
-- **Schedule 窗口**：定时任务管理
+## 📸 看一看
 
-### 界面与交互
-- **系统托盘**：常驻运行，点击 Dock/Tray 图标快速访问
-- **可拖拽侧边栏**：支持上下文列表、Artifact 列表等信息展示
-- **Shine Border 动画**：工具调用时的视觉反馈
-- **主题系统**：内置主题 + 插件主题扩展
-- **拼音搜索过滤**：配置对话框中支持拼音搜索
-- **快捷键配置**：自定义全局和窗口级快捷键
-- **开机自启动**：支持设置开机自动启动
+<!-- 📸 下面三张图尺寸保持一致，建议都是 1200×750（16:10）-->
+<table>
+<tr>
+<td width="33%" align="center">
 
----
+<!-- 📸 图 3 agent.png：本地 Agent 对话。Codex 或 Claude Code 正在干活，能看到计划卡片 / 工具审批卡片 -->
+<img src="docs/readme/agent.png" alt="本地 Agent" />
 
-## 🏗️ 技术架构
+**本地 Agent**
 
-| 层级 | 技术 |
-|------|------|
-| **后端** | Rust + Tauri 2.0, SQLite (rusqlite) |
-| **前端** | React 19 + TypeScript, Vite |
-| **UI** | shadcn/ui, Radix UI, Tailwind CSS v4 |
-| **AI 集成** | 自定义 fork genai crate，流式支持 |
-| **MCP** | rmcp crate |
-| **浏览器** | Chromiumoxide 浏览器池 |
+</td>
+<td width="33%" align="center">
 
-### 数据安全
-- 🔒 所有数据 **SQLite 本地存储**，不上传云端
-- 🔒 **零遥测**，无任何数据收集
-- 🔒 审计日志 + 快照级撤销能力
-- 🔒 可信工作区管理
+<!-- 📸 图 4 artifacts.png：Artifact 预览。React 组件或 Draw.io 图表在预览窗口中渲染 -->
+<img src="docs/readme/artifacts.png" alt="Artifacts 预览" />
 
----
+**Artifacts 预览**
 
-## 📦 支持平台
+</td>
+<td width="33%" align="center">
 
-| 平台 | 架构 |
-|------|------|
-| **Windows** | x86_64 |
-| **macOS** | x86_64, aarch64 (Apple Silicon) |
-| **Linux** | x86_64 (AppImage) |
+<!-- 📸 图 5 mobile.png：Android。2～3 张手机截图拼在同尺寸横版画布上（聊天 / 设置 / 管家） -->
+<img src="docs/readme/mobile.png" alt="Android" />
 
----
+**Android**
+
+</td>
+</tr>
+</table>
 
 ## 🚀 快速开始
 
-### 安装
+从 [Releases](https://github.com/xieisabug/AIPP/releases/latest) 下载安装包：
 
-从 [Releases](https://github.com/xieisabug/AIPP/releases/tag/v1.0.0) 页面下载对应平台的安装包。
+| Windows | macOS | Linux | Android |
+|:-:|:-:|:-:|:-:|
+| `.msi` | `.dmg`（Apple Silicon / Intel） | `.AppImage` | `.apk`（arm64） |
 
-### 从源码构建
+1. **设置 → 模型提供商**：添加提供商、填 API Key、勾选模型
+2. `Ctrl+Shift+O` 打开聊天，`Ctrl+Shift+I` 随时呼出快速提问
+3. 想用管家？托盘菜单打开「总管家（实验）」，跟着引导走
+
+<details>
+<summary><b>🧱 从源码构建</b></summary>
+
+<br/>
+
+环境要求：Node.js 20.19+ / 22.12+、pnpm 10、Rust stable、protoc，以及 [Tauri 2 平台依赖](https://tauri.app/start/prerequisites/)。
 
 ```bash
-# 克隆仓库
-git clone https://github.com/xieisabug/AIPP.git
-cd AIPP
-
-# 安装依赖
+git clone https://github.com/xieisabug/AIPP.git && cd AIPP
 pnpm install
 
-# 开发模式运行
-pnpm run tauri dev
-
-# 构建生产版本
-pnpm run build
+pnpm tauri dev    # 开发模式
+pnpm package      # 打包桌面安装包
+pnpm test         # 前端测试
+cargo test --manifest-path src-tauri/Cargo.toml   # 后端测试
 ```
 
-**环境要求**：Node.js 18+、Rust 1.70+、Tauri 平台依赖
+Android 需要 Android SDK / NDK 与 JDK 17，见 [`scripts/android-dev.ps1`](scripts/android-dev.ps1)。参与开发前请先读 [AGENTS.md](AGENTS.md) 和 [架构总览](docs/architecture.md)。
+
+| 层级 | 技术 |
+|------|------|
+| 后端 | Rust + Tauri 2 · SQLite（rusqlite）· Tokio |
+| 前端 | React 19 + TypeScript · Vite · shadcn/ui · Tailwind CSS v4 |
+| AI | genai fork · rmcp（MCP）· Codex / Claude Code / ACP |
+| 其他 | chromiumoxide（搜索抓取）· FastAPI 同步服务（[`sync-server/`](sync-server)） |
+
+</details>
+
+## 📚 文档
+
+[产品功能总览](docs/product/README.md) · [Butler 管家](docs/product/18-Butler任务系统.md) · [本地 Agent](docs/product/11-ACP集成.md) · [MCP 工具](docs/product/04-MCP工具系统.md) · [插件开发](docs/plugin.md) · [数据与同步](docs/product/15-数据存储.md)
 
 ---
 
-## 🙏 致谢
+<div align="center">
 
-感谢所有参与 AIPP 开发和测试的贡献者（其实就是我和 AI）！从 v0.1 到 v1.0.0，每一行代码都凝聚着对「让 AI 真正为我所用」的执着追求。
+基于 [Apache 2.0](LICENSE) 开源 · Made with ❤️ by xieisabug & AI
 
----
-
-## 📝 许可证
-
-AIPP 基于 [Apache 2.0](LICENSE) 开源许可证发布。
-
----
-
-> **AIPP** — 你的 AI，你的平台，你的规则。
+</div>
