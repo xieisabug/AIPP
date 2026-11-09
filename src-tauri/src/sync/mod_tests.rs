@@ -702,6 +702,19 @@ fn test_opencode_go_session_identity_across_devices_and_forks() {
 }
 
 #[test]
+fn test_magpie_seed_pull_preserves_local_provider_ids() {
+    let sync = sync_db();
+    let data = crate::db::llm_db::LLMDatabase { conn: Connection::open_in_memory().unwrap() };
+    data.create_tables().unwrap();
+    let local: i64 = data.conn.query_row("SELECT id FROM llm_provider WHERE api_type='magpie'", [], |r| r.get(0)).unwrap();
+    let id = crate::api::magpie::BUILTIN_SYNC_ID;
+    let event = change("llm.provider", id, 1, json!({"fields":{"name":"Magpie","api_type":"magpie","is_official":1,"is_enabled":1},"refs":{}}));
+    apply_change_to_db(&sync, &data.conn, &spec("llm.provider"), &event, "local", |_| Ok(())).unwrap();
+    assert_eq!(find_local_id_by_object_id(&sync, "llm.provider", id).unwrap(), Some(local));
+    assert!(data.get_llm_provider(local).unwrap().is_enabled);
+}
+
+#[test]
 fn test_opencode_go_seed_pull_preserves_local_provider_ids() {
     let sync = sync_db();
     let data = crate::db::llm_db::LLMDatabase { conn: Connection::open_in_memory().unwrap() };

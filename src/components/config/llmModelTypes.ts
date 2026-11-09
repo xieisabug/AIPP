@@ -32,7 +32,7 @@ export interface ModelSelectionResponse {
 export const DEFAULT_MODEL_REQUEST_MODE: ModelRequestMode = "chat_completions";
 
 export const supportsRequestModeToggle = (apiType: string): boolean =>
-    ["openai", "openai_api", "github_copilot", "opencode_go"].includes(apiType);
+    ["openai", "openai_api", "github_copilot", "opencode_go", "magpie"].includes(apiType);
 
 export const requestModeLabels: Record<string, string> = {
     chat_completions: "Chat Completions",

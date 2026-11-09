@@ -105,6 +105,7 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'cohere', label: 'Cohere API' },
         { value: 'deepseek', label: 'DeepSeek API' },
         { value: 'opencode_go', label: 'OpenCode Go' },
+        { value: 'magpie', label: 'Magpie' },
         { value: 'github_copilot', label: 'GitHub Copilot' },
         { value: 'acp', label: 'ACP (Agent Client Protocol)' },
         { value: 'codex_app_server', label: 'Codex' },

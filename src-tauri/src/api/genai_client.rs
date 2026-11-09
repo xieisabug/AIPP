@@ -1,6 +1,6 @@
 use crate::api::ai::config::get_custom_headers_from_config;
 use crate::errors::AppError;
-use super::opencode_go;
+use super::{magpie, opencode_go};
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{adapter::AdapterKind, ModelIden, ServiceTarget};
 use genai::{Client, WebConfig};
@@ -24,7 +24,7 @@ pub const DEFAULT_ENDPOINTS: &[(AdapterKind, &str)] = &[
 ];
 
 pub fn supports_model_request_mode(api_type: &str) -> bool {
-    matches!(api_type.to_lowercase().as_str(), "openai" | "openai_api" | "github_copilot" | "opencode_go")
+    matches!(api_type.to_lowercase().as_str(), "openai" | "openai_api" | "github_copilot" | "opencode_go" | "magpie")
 }
 
 pub fn normalize_request_mode(request_mode: Option<&str>) -> &'static str {
@@ -42,6 +42,9 @@ pub fn infer_adapter_kind(
 ) -> AdapterKind {
     if api_type == opencode_go::PROVIDER {
         if let Some((adapter, _)) = opencode_go::route(request_mode) { return adapter; }
+    }
+    if api_type == magpie::PROVIDER {
+        return magpie::adapter_kind(request_mode);
     }
     let request_mode = normalize_request_mode(request_mode);
     debug!(
@@ -211,7 +214,7 @@ pub fn create_client_with_config(
         std::collections::HashMap<String, crate::db::system_db::FeatureConfig>,
     >,
 ) -> Result<Client, AppError> {
-    let adapter_kind = infer_adapter_kind(model_name, api_type, request_mode);
+    let mut adapter_kind = infer_adapter_kind(model_name, api_type, request_mode);
 
     let mut api_key = String::new();
     let mut endpoint_raw: Option<String> = None;
@@ -230,6 +233,7 @@ pub fn create_client_with_config(
 
     // 在发起任何网络请求前 fail-closed：非空但非法的 Endpoint 不得静默回退到默认外网地址
     let resolved_endpoint = resolve_provider_endpoint(endpoint_raw.as_deref())?;
+    let mut skip_proxy = false;
     let (resolved_endpoint, session) = if api_type == opencode_go::PROVIDER {
         let (_, base) = opencode_go::route(request_mode).ok_or_else(|| AppError::ProviderError(
             format!("OpenCode Go 模型 {model_name} 的协议未受支持，请刷新模型目录")))?;
@@ -241,6 +245,16 @@ pub fn create_client_with_config(
         let sync_id = crate::sync::conversation_sync_id(app, id).map_err(|e| AppError::ProviderError(
             format!("OpenCode Go 会话 {id} 获取同步 UUID 失败: {e}")))?;
         (ProviderEndpointResolution::Custom(base.to_owned()), Some(opencode_go::session_id(&sync_id)))
+    } else if api_type == magpie::PROVIDER {
+        let origin = match &resolved_endpoint {
+            ProviderEndpointResolution::Custom(url) => magpie::origin_from_endpoint(url).map_err(AppError::ProviderError)?,
+            ProviderEndpointResolution::Unset => magpie::default_origin(),
+        };
+        let (kind, base) = magpie::route(request_mode, &origin).map_err(AppError::ProviderError)?;
+        adapter_kind = kind;
+        api_key = magpie::api_key_or_default(Some(api_key.as_str()));
+        skip_proxy = magpie::origin_is_loopback(&origin);
+        (ProviderEndpointResolution::Custom(base), None)
     } else { (resolved_endpoint, None) };
     let final_endpoint_url = effective_endpoint_url(&resolved_endpoint, adapter_kind);
     match &resolved_endpoint {
@@ -281,7 +295,7 @@ pub fn create_client_with_config(
         crate::api::ai::config::get_network_proxy_from_config(config_feature_map)
     } else { None };
     let network_proxy = go_proxy.as_deref().or(network_proxy);
-    if proxy_enabled || go_proxy.is_some() {
+    if !skip_proxy && (proxy_enabled || go_proxy.is_some()) {
         if let Some(proxy_url) = network_proxy {
             if !proxy_url.trim().is_empty() {
                 match web_config.clone().with_all_proxy_url(proxy_url) {
@@ -301,8 +315,18 @@ pub fn create_client_with_config(
     }
 
     let go_model = session.map(|_| model_name.to_owned());
-    Ok(build_client(adapter_kind, final_endpoint_url, api_key, go_model, session,
-        web_config, get_custom_headers_from_config(config_feature_map)))
+    let mut custom_headers = get_custom_headers_from_config(config_feature_map);
+    if api_type == magpie::PROVIDER {
+        custom_headers.insert("User-Agent".to_string(), magpie::USER_AGENT.to_string());
+        custom_headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
+        if let Some((app, id)) = conversation {
+            match crate::sync::conversation_sync_id(app, id) {
+                Ok(sync_id) => { custom_headers.insert("X-Magpie-Session".to_string(), sync_id); }
+                Err(e) => warn!(error = %e, conversation_id = id, "Magpie 会话标识不可用，本次请求不带 X-Magpie-Session"),
+            }
+        }
+    }
+    Ok(build_client(adapter_kind, final_endpoint_url, api_key, go_model, session, web_config, custom_headers))
 }
 
 fn build_client(adapter_kind: AdapterKind, endpoint_url: String, api_key: String,

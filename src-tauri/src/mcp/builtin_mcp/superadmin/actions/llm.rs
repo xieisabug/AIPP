@@ -479,6 +479,9 @@ impl ActionHandler for LlmListModelsHandler {
                 let request_mode = if api_type == "opencode_go" {
                     let modes = crate::api::opencode_go::available_modes(&db, &row.3, saved.map(String::as_str))?;
                     crate::api::opencode_go::selected_mode(&modes, saved)
+                } else if api_type == crate::api::magpie::PROVIDER {
+                    let modes = crate::api::magpie::available_modes(&db, row.2, &row.3, saved.map(String::as_str))?;
+                    crate::api::magpie::selected_mode(&modes, saved)
                 } else {
                     resolve_request_mode_or_default(api_type, &row.3, saved.map(String::as_str)).to_string()
                 };
@@ -559,7 +562,7 @@ impl ActionHandler for LlmAddModelHandler {
         )
         .map_err(|e| e.to_string())?;
         let model_id = db.conn.last_insert_rowid();
-        if request_mode.is_some() || (provider.api_type == "opencode_go" && effective_request_mode != "unsupported") {
+        if request_mode.is_some() || ((provider.api_type == "opencode_go" || provider.api_type == crate::api::magpie::PROVIDER) && effective_request_mode != "unsupported") {
             db.upsert_model_request_mode(provider_id, &code, &effective_request_mode).map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
