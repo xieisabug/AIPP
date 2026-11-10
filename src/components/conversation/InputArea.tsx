@@ -481,25 +481,22 @@ const InputArea = React.memo(
                 [hideSlashCompletion, setInputText, slashContext],
             );
 
+            // 胶囊高度由 JS 内联写入，任何影响高度的输入（正文/附件/引用条/聚焦）变化都要重算：
+            // 聚焦时按内容撑高，未聚焦时回到初始高度。未聚焦也必须同步——点发送钮会先失焦
+            // （按“有附件”的高度收起），随后附件被清空，若不重算胶囊会停在旧高度变成圆角矩形。
+            // 移动端失焦（点发送钮）后内容被清空也需要回缩，因此始终按内容调整
+            const hasTopChip = !!topChip;
             useEffect(() => {
                 if (textareaRef.current && !initialHeight) {
                     setInitialHeight(textareaRef.current.scrollHeight);
                 }
-                // Only adjust height when focused or when content changes
-                // 移动端失焦（点发送钮）后内容被清空也需要回缩，因此始终按内容调整
                 if (isFocused || isMobile) {
                     adjustTextareaHeight();
+                } else {
+                    restoreInitialHeight();
                 }
-            }, [inputText, initialHeight, fileInfoList, isFocused, isMobile]);
-
-            // 引用条出现或消失时同步输入框高度（未聚焦时按初始高度计算）
-            const hasTopChip = !!topChip;
-            useEffect(() => {
-                if (isMobile) return;
-                if (isFocused) adjustTextareaHeight();
-                else restoreInitialHeight();
                 // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [hasTopChip]);
+            }, [inputText, initialHeight, fileInfoList, hasTopChip, isFocused, isMobile]);
 
             useEffect(() => {
                 if (!isMobile || !window.visualViewport) return;
