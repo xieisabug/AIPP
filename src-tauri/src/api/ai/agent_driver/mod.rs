@@ -16,5 +16,6 @@ pub(crate) mod registry;
 
 pub(crate) mod lifecycle;
 mod native;
+pub(crate) mod native_agents;
 
 pub(crate) mod persistence;

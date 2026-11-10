@@ -250,6 +250,24 @@ pub async fn get_agent_model_options(
                 add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: code.clone(), provider_id, efforts: discovered_efforts, default_effort: configured_effort, is_default: true });
             }
         }
+        api_type if crate::api::ai::agent_driver::native_agents::is_native_agent(api_type) => {
+            use crate::api::ai::agent_driver::native_agents::{configuration, probe_models, DEFAULT_MODEL};
+            let mut config = configuration(&detail.model_configs, &provider_configs, None).map_err(|e|e.to_string())?;
+            crate::api::ai::agent_driver::native_agents::configure_instance(&app_handle, provider_id, api_type, &mut config).map_err(|e|e.to_string())?;
+            let models = probe_models(api_type, config).await?;
+            add_agent_model_option(&mut options, AgentModelOption { code: format!("{DEFAULT_MODEL}%%{provider_id}"),
+                name: "使用智能体本机默认模型".into(), provider_id, efforts: Vec::new(), default_effort: None,
+                is_default: current_model.is_none() || current_model.as_deref() == Some(DEFAULT_MODEL) });
+            for (code, name) in models {
+                let is_default = current_model.as_deref() == Some(code.as_str());
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name, provider_id,
+                    efforts: Vec::new(), default_effort: None, is_default });
+            }
+            if let Some(code) = current_model.filter(|code|code != DEFAULT_MODEL) {
+                add_agent_model_option(&mut options, AgentModelOption { code: format!("{code}%%{provider_id}"), name: format!("当前配置 · {code}"),
+                    provider_id, efforts: Vec::new(), default_effort: None, is_default: true });
+            }
+        }
         other => return Err(format!("不支持的 Agent 提供商类型：{other}")),
     }
     if options.is_empty() {
@@ -1129,6 +1147,10 @@ pub fn get_acp_working_directory(
         return Ok(claude_config.working_directory.display().to_string());
     }
 
+    if crate::api::ai::agent_driver::native_agents::is_native_agent(&provider_api_type) {
+        return crate::api::ai::agent_driver::native_agents::configuration(&model_configs, &provider_configs, None)
+            .map(|config|config.cwd.display().to_string()).map_err(|e|e.to_string());
+    }
     let acp_config = crate::api::ai::acp::extract_acp_config(&model_configs, &provider_configs)
         .map_err(|e| e.to_string())?;
 

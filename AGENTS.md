@@ -48,6 +48,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## Key Development Patterns
 
+**原生 Agent 扩展**：Pi/Cursor/OpenCode/Kiro/Antigravity 在 `api/ai/agent_driver/native_agents.rs` 注册，协议适配脚本位于同名目录；Pi 使用 RPC + extension、Cursor 使用官方 Node SDK、OpenCode 使用本机 HTTP/SSE，Kiro V3 与 Antigravity 使用官方原生 ACP（`acp-native.mjs`），身份不与通用 ACP 混用。Antigravity 登录入口在 `native_agents_auth.rs`，按 provider 实例隔离账号；普通对话不启动 OAuth。新增驱动复用统一 dispatch、实例归属、scoped MCP 和审批 stores。协议测试使用 `node --test src-tauri/src/api/ai/agent_driver/native_agents/native-agents.test.mjs`；安装与能力边界见 `docs/product/11-ACP集成.md`。
+
 ### Frontend-Backend Communication
 
 ```rust

@@ -5700,6 +5700,8 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
             }
         }
 
+        crate::api::ai::agent_driver::native_agents::release_conversation(conversation_id).await;
+
         if let (Some(session_id), Some(acp_config)) = (stored_session_id, acp_delete_config) {
             if let Err(error) = run_acp_session_delete(
                 &app_handle,
@@ -5720,7 +5722,7 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
 
         match ConversationDatabase::new(&app_handle) {
             Ok(db) => {
-                for agent_kind in ["acp", "codex_app_server", "claude_sdk"] {
+                for agent_kind in ["acp", "codex_app_server", "claude_sdk", "pi", "cursor", "opencode", "kiro", "antigravity"] {
                     if let Err(error) = db.delete_agent_session_id(conversation_id, agent_kind) {
                         warn!(
                             conversation_id,

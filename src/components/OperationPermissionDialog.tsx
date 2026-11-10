@@ -255,7 +255,7 @@ export function AcpPermissionDialog({
                         <Shield className="h-5 w-5 text-yellow-500" />
                         {request.agent_kind === "codex_app_server"
                             ? "Codex 执行权限请求"
-                            : "ACP 工具权限请求"}
+                            : `${({ pi: "Pi", cursor: "Cursor", opencode: "OpenCode", kiro: "Kiro", antigravity: "Antigravity", claude_sdk: "Claude Code" } as Record<string, string>)[request.agent_kind ?? ""] ?? "ACP"} 工具权限请求`}
                     </AlertDialogTitle>
                     <AlertDialogDescription asChild>
                         <div className={permissionDialogBodyClassName}>

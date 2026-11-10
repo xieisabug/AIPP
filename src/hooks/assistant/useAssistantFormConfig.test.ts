@@ -307,6 +307,34 @@ describe("useAssistantFormConfig Codex fields", () => {
     });
 });
 
+describe("native agent model selection", () => {
+    it.each(["pi", "cursor", "opencode", "kiro", "antigravity"])("should expose native models without Codex policies when provider is %s", async (apiType) => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_all_feature_config", () => []);
+        mockInvokeHandler("get_filtered_providers", () => [{ id: 7, name: apiType, api_type: apiType }]);
+        const onAgentModelChange = vi.fn();
+        const assistant: AssistantDetail = {
+            ...baseAssistantDetail,
+            assistant: { ...baseAssistantDetail.assistant, assistant_type: 4 },
+            model: [{ ...baseAssistantDetail.model[0], provider_id: 7, model_code: "provider/model" }],
+        };
+        const { result } = renderHook(() => useAssistantFormConfig({
+            currentAssistant: assistant, assistantTypeNameMap: new Map([[4, "Agent"]]),
+            assistantTypeCustomField: [], assistantTypeCustomLabel: new Map(), assistantTypeCustomTips: new Map(),
+            assistantTypeHideField: [], navigateTo: vi.fn(), onConfigChange: vi.fn(), onPromptChange: vi.fn(),
+            pluginAssistantFormFields: [], pluginAssistantConfigValues: {}, onPluginConfigChange: vi.fn(),
+            agentModelOptions: [{ code: "provider/model%%7", name: "Native model", provider_id: 7, efforts: [], is_default: true }],
+            agentModelLoading: false, agentModelError: null, onAgentProviderChange: vi.fn(), onAgentModelChange,
+        }));
+        await waitFor(() => expect(result.current.formConfig.some(field => field.key === "agent_model")).toBe(true));
+        expect(result.current.formConfig.some(field => field.key === "codex_sandbox")).toBe(false);
+        expect(result.current.formConfig.some(field => field.key === "reasoning_effort")).toBe(false);
+        expect(result.current.formConfig.find(field => field.key === "acp_additional_args")?.config.disabled).toBe(true);
+        result.current.formConfig.find(field => field.key === "agent_model")?.config.onChange?.("provider/model%%7");
+        expect(onAgentModelChange).toHaveBeenCalledWith("provider/model%%7", "");
+    });
+});
+
 describe("useAssistantFormConfig tool review mode", () => {
     beforeEach(() => {
         clearAllMockHandlers();

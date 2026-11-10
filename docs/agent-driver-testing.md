@@ -1,5 +1,17 @@
 # Agent 驱动测试场景对照
 
+## Pi / Cursor / OpenCode 补充（2026-11-10）
+
+新增协议参考 T3 Code `e2aa223229e42dd742b6dd05a9fad61775231d88`，独立于下文早期三通道的统计口径。
+
+追加阅读了这三个 provider 的上游测试，并按适用场景补充回归；具体来源、已验证边界和未覆盖项见 [Pi / Cursor / OpenCode 场景对照](testing/native-agents-t3-scenarios.md)。Node 测试现按 common、Pi、Cursor、OpenCode 拆分，统一入口保持不变。
+
+- `node --test src-tauri/src/api/ai/agent_driver/native_agents/native-agents.test.mjs`：直接测试生产适配器，通过可替换进程/SDK/HTTP 边界验证 NDJSON Unicode、精确恢复失败不重建、异步取消、模型 ID、SSE 文本与思考分离、用户消息过滤、权限与错误终态。
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib api::ai::agent_driver::`：统一层回归，含新驱动注册、环境变量、控制错误、活动事件序号与正文位置。资源不足时仅可调整测试包调试信息，不切换 target 目录。
+- `npm run test -- src/hooks/assistant/useAssistantFormConfig.test.ts src/components/NewChatComponent.test.tsx src/utils/agentCapabilities.test.ts`：模型选择与既有会话/能力界面回归。
+- 本机 Pi 1.5.1 与 OpenCode 1.3.15 已通过启动和模型发现；该冒烟没有发送模型 prompt。Cursor 官方 SDK 1.2.0 API 已核对并由替身测试验证；真实账号运行未验证。
+- 应用验收仍需分别执行：选定模型发消息、工具审批/拒绝、MCP 工具调用、等待提问时停止、继续同一会话、重启恢复、删除活跃会话。依赖或模型错误应保留原始原因，不切换协议或创建替代会话。此处不把协议单元测试视为完整桌面端到端验收。
+
 本轮按场景参考 t3code，不按测试数量宣称等价。参考版本固定为 [`d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4`](https://github.com/pingdotgg/t3code/tree/d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4)。没有复制上游代码。
 
 ## 范围与统计口径

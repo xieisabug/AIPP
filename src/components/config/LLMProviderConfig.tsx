@@ -34,7 +34,7 @@ interface LLMProvider {
     is_enabled: boolean;
 }
 
-const LOCAL_CLI_AGENT_API_TYPES: ReadonlySet<string> = new Set(['acp', 'codex_app_server', 'claude_sdk']);
+const LOCAL_CLI_AGENT_API_TYPES: ReadonlySet<string> = new Set(['acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode', 'kiro', 'antigravity']);
 
 /** 新增提供商名称。键盘「完成」和确认按钮共用：空或重名时返回提示，不创建。 */
 export function newProviderNameError(name: string, existingNames: readonly string[]): string | null {
@@ -110,6 +110,11 @@ const LLMProviderConfig: React.FC = () => {
         { value: 'acp', label: 'ACP (Agent Client Protocol)' },
         { value: 'codex_app_server', label: 'Codex' },
         { value: 'claude_sdk', label: 'Claude Code' },
+        { value: 'pi', label: 'Pi' },
+        { value: 'cursor', label: 'Cursor' },
+        { value: 'opencode', label: 'OpenCode' },
+        { value: 'kiro', label: 'Kiro' },
+        { value: 'antigravity', label: 'Antigravity' },
     ]
     // 本地 CLI Agent 类型仅桌面可新建；已有记录仍按 apiTypes 显示名称
     const localCliAgentAvailable = useFeatureAvailableOnPlatform("local_cli_agent");

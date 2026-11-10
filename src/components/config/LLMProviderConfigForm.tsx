@@ -6,6 +6,7 @@ import ReadOnlyModelList from "./ReadOnlyModelList";
 import ModelSelectionDialog from "./ModelSelectionDialog";
 import ConfigForm from "../ConfigForm";
 import ConfigPageLoading from "../common/ConfigPageLoading";
+import AntigravityLogin from "./AntigravityLogin";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { Switch } from "../ui/switch";
@@ -94,6 +95,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const isAcpProvider = apiType === "acp";
     const isCodexAppServerProvider = apiType === "codex_app_server";
     const isClaudeSdkProvider = apiType === "claude_sdk";
+    const isNativeAgentProvider = ["pi", "cursor", "opencode", "kiro", "antigravity"].includes(apiType);
 
     // API 类型显示标签映射
     const apiTypeLabels: Record<string, string> = {
@@ -108,6 +110,11 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'acp': 'ACP(Agent Client Protocol)',
         'codex_app_server': 'Codex',
         'claude_sdk': 'Claude Code',
+        'pi': 'Pi',
+        'cursor': 'Cursor',
+        'opencode': 'OpenCode',
+        'kiro': 'Kiro',
+        'antigravity': 'Antigravity',
     };
     const apiTypeLabel = apiTypeLabels[apiType] || apiType;
 
@@ -391,6 +398,32 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 表单字段定义
     const configFields = useMemo(() => {
+        if (isNativeAgentProvider) {
+            return [
+                { key: "apiType", config: { type: "static" as const, label: "提供商类型", value: apiTypeLabel } },
+                { key: "agent_node_command", config: { type: "input" as const, label: "Node.js 命令", value: "node", tooltip: "需要 Node.js 22.19 或更新版本" } },
+                ...(apiType === "cursor" ? [
+                    { key: "agent_sdk_directory", config: { type: "input" as const, label: "Cursor SDK 安装目录", value: "", tooltip: "填写包含 node_modules/@cursor/sdk 的目录；安装命令：npm install --prefix <目录> @cursor/sdk@1.2.0" } },
+                    { key: "cursor_runtime_notice", config: { type: "static" as const, label: "本机执行策略", value: "使用 Cursor SDK 自动审核；在下方环境变量中配置 CURSOR_API_KEY。" } },
+                ] : [
+                    { key: "agent_cli_command", config: { type: "input" as const, label: `${apiTypeLabel} CLI 命令`, value: apiType === "kiro" ? "kiro-cli" : apiType === "antigravity" ? "agy" : apiType, tooltip: "使用本机已安装的官方 CLI，也可填写可执行文件或 JavaScript 入口的绝对路径" } },
+                ]),
+                ...(apiType === "kiro" ? [
+                    { key: "kiro_login_notice", config: { type: "static" as const, label: "登录与权限", value: "请先在终端运行 kiro-cli login（自定义命令使用对应路径）。使用 V3 引擎，每次会话启动关闭 Autopilot。" } },
+                    { key: "kiro_agent", config: { type: "input" as const, label: "Kiro Agent", value: "", tooltip: "留空保留 Kiro 当前 Agent；填写原生 mode 选项中的 ID，不可用时明确报错" } },
+                    { key: "kiro_effort", config: { type: "input" as const, label: "Kiro 思考强度", value: "", tooltip: "留空保留模型默认值；填写模型公布的 effortLevel，不支持时明确报错" } },
+                ] : []),
+                ...(apiType === "antigravity" ? [
+                    { key: "antigravity_runtime", config: { type: "select" as const, label: "Antigravity 运行程序", value: "cli", options: [{ value: "cli", label: "官方 agy CLI（acp 子命令）" }, { value: "standalone", label: "独立 ACP 程序" }], tooltip: "推荐 agy 1.5.1 或更新版本；独立程序需将上方 CLI 命令改为其实际路径" } },
+                    { key: "antigravity_harness", config: { type: "input" as const, label: "配套 Harness 路径", value: "", tooltip: "仅独立 ACP 程序需要：填写相同版本 localharness_external 的绝对路径" } },
+                    { key: "antigravity_auth_method", config: { type: "select" as const, label: "认证方式", value: "oauth-personal", options: [{ value: "oauth-personal", label: "Google 个人账号" }, { value: "gemini-api-key", label: "Gemini API Key" }] } },
+                    { key: "antigravity_api_key", config: { type: "password" as const, label: "Gemini API Key", value: "", tooltip: "仅 Gemini API Key 认证使用；个人账号无需填写" } },
+                    { key: "antigravity_login", config: { type: "custom" as const, label: "认证", value: "", customRender: () => <AntigravityLogin key={id} providerId={id} settings={() => Object.fromEntries(Object.entries(form.getValues()).filter((entry): entry is [string, string] => typeof entry[1] === "string"))} /> } },
+                ] : []),
+                { key: "acp_working_directory", config: { type: "input" as const, label: "默认工作目录", value: "", tooltip: "留空使用用户主目录，助手可单独覆盖" } },
+                { key: "acp_env_vars", config: { type: "textarea" as const, label: "环境变量", value: "", placeholder: "KEY=VALUE", tooltip: apiType === "antigravity" ? "支持每行 KEY=VALUE 或 JSON；账号与认证目录由上方认证设置管理" : "支持每行 KEY=VALUE 或 JSON 对象；复用本机登录与配置" } },
+            ];
+        }
         // GitHub Copilot 提供商：特殊表单
         if (isCopilotProvider) {
             return [

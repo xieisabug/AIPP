@@ -13,6 +13,11 @@ pub enum AgentKind {
     Codex,
     ClaudeCode,
     Acp,
+    Pi,
+    Cursor,
+    OpenCode,
+    Kiro,
+    Antigravity,
 }
 
 impl AgentKind {
@@ -21,6 +26,11 @@ impl AgentKind {
             Self::Codex => "Codex",
             Self::ClaudeCode => "Claude Code",
             Self::Acp => "ACP",
+            Self::Pi => "Pi",
+            Self::Cursor => "Cursor",
+            Self::OpenCode => "OpenCode",
+            Self::Kiro => "Kiro",
+            Self::Antigravity => "Antigravity",
         }
     }
 }

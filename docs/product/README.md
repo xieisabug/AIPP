@@ -20,7 +20,7 @@ AIPP 是一个基于 Tauri 2.0 构建的跨平台桌面 AI 助手平台，支持
 | [子任务系统](./08-子任务系统.md) | ⚠️ 子任务定义与执行（即将删除） |
 | [定时任务](./09-定时任务.md) | 定时对话总结等任务 |
 | [插件系统](./10-插件系统.md) | 助手类型插件、界面插件、应用插件 |
-| [ACP 集成](./11-ACP集成.md) | Agent Client Protocol 集成 |
+| [Agent 与 ACP 集成](./11-ACP集成.md) | 统一 Agent 接入、Codex/Claude Code/Pi/Cursor/OpenCode/Kiro/Antigravity 原生通道、ACP |
 | [Token 统计](./12-Token统计.md) | Token 使用记录与展示 |
 | [GitHub Copilot 集成](./13-GitHub%20Copilot集成.md) | Copilot 认证与 LSP 集成 |
 | [多窗口架构](./14-多窗口架构.md) | Ask、ChatUI、Config 等多个功能窗口 |

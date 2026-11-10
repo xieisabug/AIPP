@@ -1058,6 +1058,8 @@ pub fn run() {
             get_assistants,
             get_assistant,
             get_agent_model_options,
+            api::ai::agent_driver::native_agents::auth::login_antigravity,
+            api::ai::agent_driver::native_agents::auth::cancel_antigravity_login,
             get_agent_runtime_info,
             get_codex_agent_defaults,
             get_assistant_field_value,
