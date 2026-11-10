@@ -237,6 +237,35 @@ fn test_filtered_models_for_acp_includes_provider_without_model() {
     assert_eq!(models[0].3, provider_id);
 }
 
+/// Dedicated native drivers must be selectable for Agent assistants even before
+/// model discovery, and never leak into normal LLM provider/model selection.
+#[test]
+fn test_native_agents_provider_and_model_filters() {
+    let db = create_llm_db();
+    for kind in ["kiro", "antigravity", "pi", "cursor", "opencode", "openai_api"] {
+        db.add_llm_provider(kind, kind, "", false, true).unwrap();
+    }
+    let agents = db.get_filtered_providers(4).unwrap();
+    assert_eq!(agents.len(), 5);
+    assert!(agents.iter().all(|provider| provider.2 != "openai_api"));
+    let regular = db.get_filtered_providers(0).unwrap();
+    assert_eq!(regular.len(), 1);
+    assert_eq!(regular[0].2, "openai_api");
+    let placeholders = db.get_filtered_models_for_select(4).unwrap();
+    assert_eq!(placeholders.len(), 5);
+    assert!(placeholders.iter().all(|model|model.1 == crate::api::ai::agent_driver::native_agents::DEFAULT_MODEL));
+    for (id, _, _, _, _, _) in db.get_llm_providers().unwrap() {
+        db.add_llm_model("model", id, "model-id", "", false, false, false).unwrap();
+    }
+    let regular_models = db.get_filtered_models_for_select(0).unwrap();
+    assert_eq!(regular_models.len(), 1);
+    assert_eq!(regular_models[0].3, regular[0].0);
+    assert_eq!(db.get_filtered_models_for_select(4).unwrap().len(), 5);
+    let kiro = agents.iter().find(|provider|provider.2 == "kiro").unwrap().0;
+    db.update_llm_provider(kiro, "kiro", "kiro", "", false).unwrap();
+    assert!(!db.get_filtered_models_for_select(4).unwrap().iter().any(|model|model.3 == kiro));
+}
+
 /// 测试 Model Detail 查询
 ///
 /// 验证内容：

@@ -308,7 +308,7 @@ describe("useAssistantFormConfig Codex fields", () => {
 });
 
 describe("native agent model selection", () => {
-    it.each(["pi", "cursor", "opencode"])("should expose native models without Codex policies when provider is %s", async (apiType) => {
+    it.each(["pi", "cursor", "opencode", "kiro", "antigravity"])("should expose native models without Codex policies when provider is %s", async (apiType) => {
         clearAllMockHandlers();
         mockInvokeHandler("get_all_feature_config", () => []);
         mockInvokeHandler("get_filtered_providers", () => [{ id: 7, name: apiType, api_type: apiType }]);

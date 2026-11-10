@@ -5722,7 +5722,7 @@ pub fn schedule_acp_session_delete(app_handle: &tauri::AppHandle, conversation_i
 
         match ConversationDatabase::new(&app_handle) {
             Ok(db) => {
-                for agent_kind in ["acp", "codex_app_server", "claude_sdk", "pi", "cursor", "opencode"] {
+                for agent_kind in ["acp", "codex_app_server", "claude_sdk", "pi", "cursor", "opencode", "kiro", "antigravity"] {
                     if let Err(error) = db.delete_agent_session_id(conversation_id, agent_kind) {
                         warn!(
                             conversation_id,

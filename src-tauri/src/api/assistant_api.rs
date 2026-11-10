@@ -252,7 +252,8 @@ pub async fn get_agent_model_options(
         }
         api_type if crate::api::ai::agent_driver::native_agents::is_native_agent(api_type) => {
             use crate::api::ai::agent_driver::native_agents::{configuration, probe_models, DEFAULT_MODEL};
-            let config = configuration(&detail.model_configs, &provider_configs, None).map_err(|e|e.to_string())?;
+            let mut config = configuration(&detail.model_configs, &provider_configs, None).map_err(|e|e.to_string())?;
+            crate::api::ai::agent_driver::native_agents::configure_instance(&app_handle, provider_id, api_type, &mut config).map_err(|e|e.to_string())?;
             let models = probe_models(api_type, config).await?;
             add_agent_model_option(&mut options, AgentModelOption { code: format!("{DEFAULT_MODEL}%%{provider_id}"),
                 name: "使用智能体本机默认模型".into(), provider_id, efforts: Vec::new(), default_effort: None,

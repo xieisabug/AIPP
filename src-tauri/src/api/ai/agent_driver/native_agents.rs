@@ -1,4 +1,4 @@
-//! Native Pi RPC, Cursor SDK and OpenCode HTTP/SSE adapters. The Node transport
+//! Native Pi RPC, Cursor SDK, OpenCode HTTP/SSE and Kiro/Antigravity ACP adapters. The Node transport
 //! is private to these drivers; all application routing uses the shared facade.
 use super::registry::{AgentDriver, AgentDriverMetadata, AgentInstanceConfig, AgentSessionLookup, AgentSessionHost, PreparedAgentSession, AgentConfigField, AgentConfigValueType};
 use super::session::{AgentSessionCapabilities, AgentSessionControl, AgentSessionHandle, AgentPromptContext};
@@ -16,8 +16,10 @@ use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex, OnceLock, atom
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::{mpsc, oneshot}, time::{timeout, Duration}};
 use tauri::Manager;
 
-pub const DRIVER_IDS: [&str; 3] = ["pi", "cursor", "opencode"];
+pub const DRIVER_IDS: [&str; 5] = ["pi", "cursor", "opencode", "kiro", "antigravity"];
 pub const DEFAULT_MODEL: &str = "__agent_default__";
+#[path = "native_agents_auth.rs"]
+pub(crate) mod auth;
 pub fn is_native_agent(id: &str) -> bool { DRIVER_IDS.contains(&id) }
 fn error(detail: impl std::fmt::Display) -> AppError { AppError::ProviderError(detail.to_string()) }
 
@@ -35,13 +37,14 @@ impl NativeDriver {
 #[async_trait::async_trait]
 impl AgentDriver for NativeDriver {
     fn metadata(&self) -> AgentDriverMetadata {
-        AgentDriverMetadata { id: self.0, display_name: match self.0 { "pi" => "Pi", "cursor" => "Cursor", _ => "OpenCode" },
+        AgentDriverMetadata { id: self.0, display_name: match self.0 { "pi" => "Pi", "cursor" => "Cursor", "kiro" => "Kiro", "antigravity" => "Antigravity", _ => "OpenCode" },
             message_model_name: self.0,
             operations: AgentSessionCapabilities { structured_attachments: false, cancel_prompt: true, set_config_option: true } }
     }
     fn matches_provider(&self, api_type: &str, _: &[LLMProviderConfig]) -> bool { api_type == self.0 }
     fn config_schema(&self) -> Vec<AgentConfigField> {
-        ["agent_node_command", "agent_cli_command", "agent_sdk_directory", "acp_working_directory", "acp_env_vars"]
+        ["agent_node_command", "agent_cli_command", "agent_sdk_directory", "acp_working_directory", "acp_env_vars",
+            "antigravity_runtime", "antigravity_harness", "antigravity_auth_method", "antigravity_api_key", "kiro_agent", "kiro_effort"]
             .iter().map(|name| AgentConfigField { name: name.to_string(), required: false, value_type: AgentConfigValueType::String }).collect()
     }
     fn capabilities(&self) -> AgentCapabilities { AgentCapabilities::baseline(self.0, self.declaration()) }
@@ -78,6 +81,12 @@ impl AgentDriver for NativeDriver {
 pub(crate) struct NativeConfig {
     node: String, pub cwd: PathBuf, env: HashMap<String, String>, wire: Value,
 }
+pub(crate) fn configure_instance(app: &tauri::AppHandle, provider_id: i64, driver: &str, config: &mut NativeConfig) -> Result<(), AppError> {
+    if driver == "antigravity" {
+        config.wire["profile"] = json!(app.path().app_data_dir().map_err(error)?.join("agent-profiles").join("antigravity").join(provider_id.to_string()));
+    }
+    Ok(())
+}
 pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], model: Option<String>) -> Result<NativeConfig, AppError> {
     let get = |key: &str| models.iter().find(|c| c.name == key).and_then(|c| c.value.clone())
         .or_else(|| providers.iter().find(|c| c.name == key).map(|c| c.value.clone())).filter(|s| !s.trim().is_empty());
@@ -92,8 +101,11 @@ pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMPro
         .chain(models.iter().filter(|c|c.name == "acp_env_vars").filter_map(|c|c.value.as_deref())) {
         env.extend(parse_environment(raw)?);
     }
-    if get("acp_additional_args").is_some() { return Err(error("Native Pi/Cursor/OpenCode adapters do not accept ACP additional arguments; remove acp_additional_args")); }
-    let wire = json!({ "cwd": cwd, "command": get("agent_cli_command"), "sdk_directory": get("agent_sdk_directory"), "model": model });
+    if get("acp_additional_args").is_some() { return Err(error("Dedicated native agent adapters do not accept generic ACP additional arguments; remove acp_additional_args")); }
+    if let Some(key) = get("antigravity_api_key") { env.insert("AIPP_ANTIGRAVITY_API_KEY".into(), key); }
+    let wire = json!({ "cwd": cwd, "command": get("agent_cli_command"), "sdk_directory": get("agent_sdk_directory"), "model": model,
+        "runtime": get("antigravity_runtime"), "harness": get("antigravity_harness"), "auth_method": get("antigravity_auth_method"),
+        "auth_key": get("antigravity_api_key"), "kiro_agent": get("kiro_agent"), "kiro_effort": get("kiro_effort") });
     Ok(NativeConfig { node: get("agent_node_command").unwrap_or_else(|| "node".into()), cwd, env, wire })
 }
 
@@ -105,6 +117,7 @@ struct Prepared {
 impl PreparedAgentSession for Prepared {
     fn metadata(&self) -> AgentDriverMetadata { self.driver.metadata() }
     async fn finalize(&mut self, app: &tauri::AppHandle, cid: i64, payload: String) -> Result<(), AppError> {
+        configure_instance(app, self.instance.provider_id, self.driver.0, &mut self.config)?;
         if payload.trim().is_empty() || payload.trim() == "[]" { return Ok(()); }
         use crate::acp_mcp_bridge::*;
         let proxy = ensure_proxy_server(app.clone()).await.map_err(error)?;
@@ -216,6 +229,8 @@ async fn bridge_files() -> Result<BridgeFiles, String> {
         ("pi-extension.mjs", include_str!("native_agents/pi-extension.mjs")),
         ("cursor.mjs", include_str!("native_agents/cursor.mjs")),
         ("opencode.mjs", include_str!("native_agents/opencode.mjs")),
+        ("acp-native.mjs", include_str!("native_agents/acp-native.mjs")),
+        ("auth-browser.mjs", include_str!("native_agents/auth-browser.mjs")),
     ] { tokio::fs::write(files.0.join(name), content).await.map_err(|e| e.to_string())?; }
     Ok(files)
 }
@@ -232,8 +247,12 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
     let mut active: Option<ActiveTurn> = None;
     let mut process = None;
     let mut stderr_task = None;
+    // Keep bridge-owned unpack directories alive until after process-tree
+    // termination; Windows cannot remove a running harness's files.
+    let bridge = bridge_files().await;
     let result: Result<(), String> = async {
-        let files = bridge_files().await?;
+        let files = bridge.as_ref().map_err(Clone::clone)?;
+        prepared.config.wire["temp_root"] = json!(files.0);
         let mut command = tokio::process::Command::new(&prepared.config.node);
         command.arg(files.0.join("bridge.mjs")).current_dir(&prepared.config.cwd).envs(&prepared.config.env)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -257,6 +276,9 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
         let native_session = frame["data"]["session"].as_str().filter(|s| !s.is_empty()).ok_or("Native bridge returned no session identity")?.to_string();
         identity = identity.clone().with_session(&native_session);
         snapshot.lock().unwrap()["session_id"] = json!(native_session);
+        if let Some(options) = frame["data"]["config_options"].as_array() {
+            snapshot.lock().unwrap()["config_options"] = json!(options);
+        }
         if ready.take().unwrap().send(Ok(())).is_err() { return Err("Session acquisition caller disappeared".into()); }
         let mut requests: HashMap<String, (Value, oneshot::Sender<Result<Value, String>>)> = HashMap::new();
         let mut next_id = 0u64;
@@ -316,6 +338,12 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                     let line = line.map_err(|e| e.to_string())?.ok_or("Native bridge stdout closed unexpectedly")?;
                     let frame: Value = serde_json::from_str(&line).map_err(|e| format!("Invalid native event JSON: {e}"))?;
                     if frame["type"] == "fatal" { return Err(frame["error"].as_str().unwrap_or("Native fatal frame omitted error detail").into()); }
+                    if frame["type"] == "config_options" {
+                        let options = frame["options"].as_array().ok_or("Native configuration update omitted options")?;
+                        snapshot.lock().unwrap()["config_options"] = json!(options);
+                        publish_snapshot(&app, &identity, driver, &snapshot)?;
+                        continue;
+                    }
                     if frame["type"] == "response" {
                         let result = if frame["ok"] == true { Ok(frame["data"].clone()) } else { Err(frame["error"].as_str().unwrap_or("Native response omitted error detail").to_string()) };
                         if let Some((wire, reply)) = frame["id"].as_str().and_then(|id| requests.remove(id)) {
@@ -380,7 +408,7 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                             let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"stream_complete".into(), data:json!({"conversation_id":cid,"response_message_id":turn.id,"has_response":!turn.text.is_empty()}) });
                             if !cancelled {
                                 use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
-                                let kind = match driver.0 { "pi" => AgentKind::Pi, "cursor" => AgentKind::Cursor, _ => AgentKind::OpenCode };
+                                let kind = match driver.0 { "pi" => AgentKind::Pi, "cursor" => AgentKind::Cursor, "kiro" => AgentKind::Kiro, "antigravity" => AgentKind::Antigravity, _ => AgentKind::OpenCode };
                                 handle_agent_success(&app, &turn.window, cid, &turn.text, turn.id, kind).await;
                             }
                             if let Some(manager) = app.try_state::<crate::state::activity_state::ConversationActivityManager>() { manager.clear_agent_focus(&app, &identity, false).await; }
@@ -460,9 +488,10 @@ async fn write_frame(stdin: &mut tokio::process::ChildStdin, frame: &Value) -> R
     stdin.flush().await.map_err(|e| e.to_string())
 }
 
-pub(crate) async fn probe_models(driver: &str, config: NativeConfig) -> Result<Vec<(String, String)>, String> {
+pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Result<Vec<(String, String)>, String> {
     if !is_native_agent(driver) { return Err(format!("Unknown native agent driver: {driver}")); }
     let files = bridge_files().await?;
+    config.wire["temp_root"] = json!(files.0);
     let mut command = tokio::process::Command::new(&config.node);
     command.arg(files.0.join("bridge.mjs")).current_dir(&config.cwd).envs(&config.env)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);

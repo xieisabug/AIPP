@@ -177,7 +177,7 @@ export const useAssistantFormConfig = ({
             const isCodexProvider =
                 agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ===
                 "codex_app_server";
-            const isNativeAgentProvider = ["pi", "cursor", "opencode"].includes(
+            const isNativeAgentProvider = ["pi", "cursor", "opencode", "kiro", "antigravity"].includes(
                 agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? ""
             );
 

@@ -349,7 +349,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                 form.setValue("codex_approvals_reviewer", "default");
             }
             if (
-                ["codex_app_server", "pi", "cursor", "opencode"].includes(apiType ?? "")
+                ["codex_app_server", "pi", "cursor", "opencode", "kiro", "antigravity"].includes(apiType ?? "")
                 && currentAssistant
                 && Number.isFinite(providerId)
                 && providerId > 0
@@ -451,7 +451,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
                                 assistantId: assistantDetail.assistant.id,
                             });
                             if (!isSelectionCurrent()) return;
-                            if (["codex_app_server", "pi", "cursor", "opencode"].includes(runtime.agent_kind)) {
+                            if (["codex_app_server", "pi", "cursor", "opencode", "kiro", "antigravity"].includes(runtime.agent_kind)) {
                                 await loadAgentModelOptions(assistantDetail, null, isSelectionCurrent);
                             } else {
                                 setAgentModelOptions([]);

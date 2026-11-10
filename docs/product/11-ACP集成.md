@@ -4,7 +4,23 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 ## 统一 Agent 调用
 
-Codex app-server、Claude Code、Pi、Cursor、OpenCode 与 ACP 共用 AIPP 的 Agent 驱动入口。模型、权限、MCP 与可用配置由对应 Agent 决定，各通道的能力并不完全相同。
+Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与 ACP 共用 AIPP 的 Agent 驱动入口。模型、权限、MCP 与可用配置由对应 Agent 决定，各通道的能力并不完全相同。
+
+### Kiro 与 Antigravity
+
+在设置中新增「Kiro」或「Antigravity」提供商，再在智能体助手中选择该提供商。两者使用官方原生 ACP 协议，拥有独立驱动身份、会话和权限归属；需要本机 Node.js 22.19 或更新版本，仅桌面支持。支持文本流、思考与工具活动、原生权限确认、选中的 AIPP MCP 工具、模型发现、停止和原会话恢复。恢复、模型或配置失败直接报错，不创建替代会话。
+
+**Kiro**：安装支持 V3 的官方 `kiro-cli`，先在终端运行 `kiro-cli login`。AIPP 固定启动 `kiro-cli acp --agent-engine=v3 --auth-method=cli`，每次新建或恢复会话均将 Autopilot 设为 `off`。提供商可以填写 Kiro Agent（原生 `mode` ID）和思考强度（`effortLevel`）；留空使用原生当前值，指定的值不受支持时直接报错。选择 Agent 后再应用模型和思考强度。Kiro 在新会话后才公布模型选项时，发现过程会短暂等待。
+
+Kiro 提供「本次允许」时，AIPP 不显示其持久化允许选项；只有原生没有本次允许时才提供持久化允许，并标注会保存权限规则。停止以原生 prompt 结束为准；刚发送 prompt 时的取消会等到开始信号或短暂等待后发送，避免 Kiro 忽略过早的取消。
+
+**Antigravity**：默认使用官方 `agy acp`，建议使用 1.5.1 或更新版本。也可显式选择「独立 ACP 程序」，填写其可执行文件路径和相同版本的 `localharness_external` 绝对路径。程序由用户自行安装，本次不包含 Registry 安装管理。
+
+认证支持 Google 个人账号和 Gemini API Key。在提供商设置填写当前配置后点击「登录 Antigravity」；个人账号出现「在浏览器中继续登录」按钮，完成 Google 认证后等待 AIPP 显示原生认证成功。可以取消登录，最多等待 5 分钟。API Key 使用专用密码字段；认证错误保留原生原因。普通聊天与模型发现不会自动开启登录，过期时提示返回设置登录。
+
+Antigravity 的账号保存在应用数据目录 `agent-profiles/antigravity/<provider-id>`，与 IDE 和其他提供商实例分离，不继承主机的 Google 凭据变量。运行时临时文件归属当前桥接进程并在关闭或取消后清理。使用真实 AIPP 客户端身份，只展示该账号和运行程序实际公布的模型。会话启动会设为原生 `default` 权限模式，不继承 `yolo` 或 `auto_edit`。原生 `interaction_` 选择题显示为 AIPP 问题卡片，答案必须匹配选项（当前卡片支持 2–4 项，超出时明确报错）；其他请求显示为权限卡片。
+
+当前未接入：Kiro steer/fork/compact、Antigravity 企业认证和 Agent Platform、多媒体输入、完整原生子代理执行树。真实登录、真实模型、工作区工具和 MCP 执行仍需在已安装运行程序的机器验收；协议回放测试不代表真实账号验证通过。
 
 ### Pi、Cursor 与 OpenCode
 

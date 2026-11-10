@@ -2,6 +2,11 @@ import { jsonLines } from './common.mjs';
 import { openPi } from './pi.mjs';
 import { openCursor } from './cursor.mjs';
 import { openOpenCode } from './opencode.mjs';
+import { openAcpNative } from './acp-native.mjs';
+
+const drivers = { pi: openPi, cursor: openCursor, opencode: openOpenCode,
+  kiro: (config, emit) => openAcpNative('kiro', config, emit),
+  antigravity: (config, emit) => openAcpNative('antigravity', config, emit) };
 
 const emit = event => process.stdout.write(`${JSON.stringify(event)}\n`);
 console.log = (...args) => console.error(...args);
@@ -11,18 +16,23 @@ jsonLines(process.stdin, request => {
   void (async () => {
     if (fatal) throw new Error('Native agent bridge has failed');
     let data;
-    if (request.type === 'probe') {
-      const open = { pi: openPi, cursor: openCursor, opencode: openOpenCode }[request.driver];
+    if (request.type === 'login') {
+      if (request.driver !== 'antigravity') throw new Error('Browser login is only supported by Antigravity');
+      const login = await drivers.antigravity({ ...request.config, login: true }, emit);
+      await login.close();
+      data = { authenticated: true };
+    } else if (request.type === 'probe') {
+      const open = drivers[request.driver];
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);
       const probe = await open({ ...request.config, probe: true }, emit);
       try { data = await probe.models(); } finally { await probe.close(); }
     } else if (request.type === 'init') {
       if (runtime || initializing) throw new Error('Native agent bridge already initialized');
       initializing = true;
-      const open = { pi: openPi, cursor: openCursor, opencode: openOpenCode }[request.driver];
+      const open = drivers[request.driver];
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);
       runtime = await open(request.config, emit);
-      data = { session: runtime.session };
+      data = { session: runtime.session, config_options: runtime.configOptions };
     } else {
       if (!runtime) throw new Error('Native agent bridge is not initialized');
       switch (request.type) {

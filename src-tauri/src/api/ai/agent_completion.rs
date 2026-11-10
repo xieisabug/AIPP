@@ -16,6 +16,8 @@ pub enum AgentKind {
     Pi,
     Cursor,
     OpenCode,
+    Kiro,
+    Antigravity,
 }
 
 impl AgentKind {
@@ -27,6 +29,8 @@ impl AgentKind {
             Self::Pi => "Pi",
             Self::Cursor => "Cursor",
             Self::OpenCode => "OpenCode",
+            Self::Kiro => "Kiro",
+            Self::Antigravity => "Antigravity",
         }
     }
 }
