@@ -300,13 +300,14 @@ impl ConversationRepository {
     }
 
     pub fn butler_contact_previews(&self) -> Result<Vec<serde_json::Value>> {
-        let mut stmt = self.conn.prepare(
+        // 用户消息只取原话，不带本轮附加上下文。
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT c.assistant_id, c.id, nullif(max(coalesce(p.anchor,0),coalesce(m.id,0)),0),
                     CASE WHEN p.anchor IS NOT NULL AND p.anchor >= coalesce(m.id,0) THEN substr(
                         CASE WHEN p.outgoing THEN '发给 ' ELSE '来自 ' END ||
                         CASE WHEN c.id=e.owner THEN e.recipient ELSE e.sender END || '：' ||
                         CASE WHEN p.leg='request' THEN e.body ELSE e.reply END,1,140)
-                    ELSE substr(m.content,1,140) END
+                    ELSE substr({visible},1,140) END
              FROM conversation c LEFT JOIN message m ON m.id=(
                  SELECT id FROM message WHERE conversation_id=c.id
                    AND message_type IN ('user','assistant','response') AND trim(content) NOT IN ('','[[NO_REPLY]]')
@@ -316,7 +317,9 @@ impl ConversationRepository {
                  ORDER BY id DESC LIMIT 1)
              LEFT JOIN butler_peer_post p ON p.id=(SELECT id FROM butler_peer_post WHERE conversation_id=c.id ORDER BY anchor DESC,id DESC LIMIT 1)
              LEFT JOIN butler_peer_exchange e ON e.id=p.exchange_id
-             WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id")?;
+             WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id",
+            visible = crate::utils::turn_context::visible_sql("m.content"),
+        ))?;
         let rows = stmt.query_map([], |row| Ok(serde_json::json!({
             "assistantId":row.get::<_,i64>(0)?, "conversationId":row.get::<_,i64>(1)?,
             "messageId":row.get::<_,Option<i64>>(2)?,
@@ -408,16 +411,17 @@ impl ConversationRepository {
             search.filter(|s| !s.trim().is_empty()).map(|s| format!("%{}%", s.trim()));
 
         let sql = if search_pattern.is_some() {
-            "SELECT DISTINCT c.id, c.name, c.assistant_id, c.created_time, c.updated_time,
+            // 用户消息只按原话匹配，本轮附加上下文（记忆、工作记录等）不参与搜索。
+            format!("SELECT DISTINCT c.id, c.name, c.assistant_id, c.created_time, c.updated_time,
                     c.conversation_kind, c.parent_butler_conversation_id, c.source_task_title,
                     c.is_hidden_from_normal_chat_list, c.channel_source, c.butler_task_status,
                     c.butler_task_summary, c.butler_task_finalized_at
                FROM conversation c
                LEFT JOIN message m ON m.conversation_id = c.id
               WHERE c.conversation_kind = ?1
-                AND (c.name LIKE ?2 COLLATE NOCASE OR m.content LIKE ?2 COLLATE NOCASE)
+                AND (c.name LIKE ?2 COLLATE NOCASE OR {} LIKE ?2 COLLATE NOCASE)
               ORDER BY c.updated_time DESC
-              LIMIT ?3 OFFSET ?4"
+              LIMIT ?3 OFFSET ?4", crate::utils::turn_context::visible_sql("m.content"))
         } else {
             "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
                     parent_butler_conversation_id, source_task_title,
@@ -426,10 +430,10 @@ impl ConversationRepository {
                FROM conversation
               WHERE conversation_kind = ?1
               ORDER BY updated_time DESC
-              LIMIT ?3 OFFSET ?4"
+              LIMIT ?3 OFFSET ?4".to_string()
         };
 
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let like_val = search_pattern.unwrap_or_default();
         let rows = stmt.query_map(rusqlite::params![kind, like_val, per_page, offset], |row| {
             Ok(Conversation {
@@ -1177,18 +1181,23 @@ impl MessageRepository {
 
     /// 在本会话中检索字面短语。联系人私聊同时检索该助手已归档的私聊，总管家主会话同时检索已归档的主会话；
     /// 来自归档会话的命中带 `archived: true` 与会话名，让模型知道那是用户重开会话前的旧记录。
+    /// 用户消息只在原话里查找，本轮附加上下文（记忆、工作记录等）不参与。
     pub fn search_own_history(&self, conversation_id: i64, query: &str) -> Result<Vec<serde_json::Value>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.message_type, substr(m.content, max(1, instr(m.content, ?2)-200), 1100), c.id, c.name
-             FROM conversation cur
-             JOIN conversation c ON c.id=cur.id
-                 OR (cur.conversation_kind='butler_contact' AND c.conversation_kind='butler_contact_archive'
-                     AND c.assistant_id=cur.assistant_id)
-                 OR (cur.conversation_kind='butler_main' AND c.conversation_kind='butler_main' AND c.id<>cur.id
-                     AND NOT EXISTS(SELECT 1 FROM butler_main_state s WHERE s.butler_conversation_id=c.id))
-             JOIN message m ON m.conversation_id=c.id
-             WHERE cur.id=?1 AND m.message_type IN ('user','assistant','response') AND instr(m.content, ?2)>0
-             ORDER BY m.id DESC LIMIT 6")?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, message_type, substr(text, max(1, instr(text, ?2)-200), 1100), source, source_name FROM (
+                SELECT m.id, m.message_type, {visible} AS text, c.id AS source, c.name AS source_name
+                FROM conversation cur
+                JOIN conversation c ON c.id=cur.id
+                    OR (cur.conversation_kind='butler_contact' AND c.conversation_kind='butler_contact_archive'
+                        AND c.assistant_id=cur.assistant_id)
+                    OR (cur.conversation_kind='butler_main' AND c.conversation_kind='butler_main' AND c.id<>cur.id
+                        AND NOT EXISTS(SELECT 1 FROM butler_main_state s WHERE s.butler_conversation_id=c.id))
+                JOIN message m ON m.conversation_id=c.id
+                WHERE cur.id=?1 AND m.message_type IN ('user','assistant','response'))
+             WHERE instr(text, ?2)>0
+             ORDER BY id DESC LIMIT 6",
+            visible = crate::utils::turn_context::visible_sql("m.content"),
+        ))?;
         let rows = stmt.query_map(rusqlite::params![conversation_id, query], |row| {
             let mut hit = serde_json::json!({
                 "message_id": row.get::<_,i64>(0)?, "role": row.get::<_,String>(1)?, "excerpt": row.get::<_,String>(2)?,

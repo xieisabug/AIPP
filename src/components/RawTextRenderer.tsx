@@ -6,15 +6,13 @@ import {
     REHYPE_PLUGINS,
     customUrlTransform,
 } from "@/constants/markdown";
+import { CUSTOM_TAG_PATTERN } from "@/utils/userMessageCollapse";
 
 interface RawTextRendererProps {
     content: string;
 }
 
 // Render raw text while still allowing custom tags to hydrate as React components.
-const CUSTOM_TAG_PATTERN =
-    /<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*>[\s\S]*?<\/\1>|<(fileattachment|skillattachment|bangwebtomarkdown|bangweb|tipscomponent)\b[^>]*\/>/gi;
-
 const BODYLESS_CUSTOM_TAG_PATTERN =
     /<(fileattachment|skillattachment)\b([^>]*)>[\s\S]*?<\/\1>/i;
 

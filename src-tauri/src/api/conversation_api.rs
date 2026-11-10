@@ -907,8 +907,9 @@ pub async fn search_conversations(
     let max_rows = limit.unwrap_or(50).min(200);
     let offset_rows = offset.unwrap_or(0);
 
+    let message_text = crate::utils::turn_context::visible_sql("m.content");
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT c.id, c.name, c.assistant_id, c.created_time, \
                 NULL as message_id, NULL as message_type, c.created_time as hit_time, \
                 c.name as hit_text, 'title' as hit_type \
@@ -928,15 +929,15 @@ pub async fn search_conversations(
              UNION ALL \
              SELECT c.id, c.name, c.assistant_id, c.created_time, \
                   m.id as message_id, m.message_type, m.created_time as hit_time, \
-                  m.content as hit_text, 'message' as hit_type \
+                  {message_text} as hit_text, 'message' as hit_type \
                FROM message m \
                JOIN conversation c ON m.conversation_id = c.id \
-               WHERE m.content LIKE ?1 COLLATE NOCASE \
+               WHERE {message_text} LIKE ?1 COLLATE NOCASE \
                  AND COALESCE(c.is_hidden_from_normal_chat_list, 0) = 0 \
                  AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'butler_task') \
                ORDER BY hit_time DESC \
                LIMIT ?2 OFFSET ?3",
-        )
+        ))
         .map_err(|e| e.to_string())?;
 
     let rows = stmt

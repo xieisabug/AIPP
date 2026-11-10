@@ -9,16 +9,17 @@ import {
 } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/utils/utils";
+import { visibleText } from "@/utils/turnContext";
 
 export interface TurnRailItem {
     id: number;
     preview: string;
 }
 
-// 从用户消息内容生成悬浮预览片段（私聊与群聊共用）
+// 从用户消息内容生成悬浮预览片段（私聊与群聊共用）；只取用户原话，不含本轮附加上下文
 const TURN_PREVIEW_MAX = 120;
 export function makeTurnPreview(content: string): string {
-    const collapsed = content.replace(/\s+/g, " ").trim();
+    const collapsed = visibleText(content).replace(/\s+/g, " ").trim();
     if (collapsed.length <= TURN_PREVIEW_MAX) {
         return collapsed;
     }

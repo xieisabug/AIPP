@@ -3052,7 +3052,7 @@ async fn enqueue_butler_task_attention_followup(
             .iter()
             .rev()
             .find(|message| message.message_type != "system")
-            .map(|message| trim_chars(message.content.trim(), 500))
+            .map(|message| trim_chars(crate::utils::turn_context::visible(&message.content).trim(), 500))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "无".to_string());
         let pending_mcp_tool_call_count = MCPDatabase::new(&app_handle)

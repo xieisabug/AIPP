@@ -2,6 +2,7 @@ import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
 import type { Message } from "@/data/Conversation";
 import { quoteExcerpt } from "./ButlerQuote";
 import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
+import { visibleText } from "@/utils/turnContext";
 
 // Kept in sync with BUTLER_SILENT_REPLY in src-tauri/src/api/butler_api.rs.
 export const BUTLER_SILENT_REPLY = "[[NO_REPLY]]";
@@ -65,7 +66,7 @@ function withReplyQuote(message: Message, earlier: Message[]): Message {
     if (!parts) return message;
     const quoted = findQuotedMessage(parts.fragment, earlier);
     const reply_quote = quoted && {
-        label: `${quoted.message_type === "user" ? "我：" : ""}${quoteExcerpt(quoted.content, 40)}`,
+        label: `${quoted.message_type === "user" ? "我：" : ""}${quoteExcerpt(visibleText(quoted.content), 40)}`,
         target: quoted.id,
     };
     return { ...message, content: parts.body, reply_quote };

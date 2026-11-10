@@ -25,6 +25,8 @@ import { maskContent } from "../utils/antiLeakage";
 import { recordMessageItemRender } from "../utils/messageItemRenderStats";
 import { splitClosedMarkdownBlocks } from "../utils/streamingMarkdownBlocks";
 import { resolveMessageDisplayContent } from "../utils/streamingOverlayHandoff";
+import { splitTurnContext } from "../utils/turnContext";
+import { collapseUserMessage } from "../utils/userMessageCollapse";
 import type { InlineInteractionItem } from "./ConversationUI";
 import { ChevronDown, ChevronUp, ListEnd, Loader2, Zap } from "lucide-react";
 import {
@@ -325,10 +327,17 @@ const MessageItem = React.memo<MessageItemProps>(
         const shouldMaskContent = antiLeakageEnabled && !isRevealed && !isLastMessage;
         // 防泄露模式：获取实际显示的内容
         // 流式中用 overlay；is_done 交接时取 overlay 与 message 的较长者，避免尾部字符丢失（LeaderAI #149）
+        // 用户消息末尾的本轮附加上下文（时间、记忆、工作记录等）只给模型看：气泡只显示原话。
+        const turnContext = useMemo(
+            () => message.message_type === "user"
+                ? splitTurnContext(resolveMessageDisplayContent(message.content, streamEvent))
+                : null,
+            [message.message_type, message.content, streamEvent],
+        );
         const displayContent = useMemo(() => {
-            const rawContent = resolveMessageDisplayContent(message.content, streamEvent);
+            const rawContent = turnContext ? turnContext.text : resolveMessageDisplayContent(message.content, streamEvent);
             return shouldMaskContent ? maskContent(rawContent) : rawContent;
-        }, [shouldMaskContent, message.content, streamEvent, maskContent]);
+        }, [turnContext, shouldMaskContent, message.content, streamEvent, maskContent]);
 
         const { copyIconState, handleCopy } = useCopyHandler(displayContent);
         const { isUserMessageMarkdownEnabled, isShowThinking } = useDisplayConfig();
@@ -342,15 +351,16 @@ const MessageItem = React.memo<MessageItemProps>(
         const isUserMessage = message.message_type === "user";
         const isStreaming = !!streamEvent && !streamEvent.is_done;
         const isMobilePlatform = useIsMobilePlatform();
-        const userMessageCharacters = useMemo(
-            () => isUserMessage ? Array.from(displayContent) : [],
+        // 只按显示出来的文字折叠；附件等标签整块保留，不会被截断成原文。
+        const collapsedUserContent = useMemo(
+            () => isUserMessage ? collapseUserMessage(displayContent, USER_MESSAGE_COLLAPSE_THRESHOLD) : null,
             [displayContent, isUserMessage],
         );
-        const shouldCollapseUserMessage = userMessageCharacters.length > USER_MESSAGE_COLLAPSE_THRESHOLD;
+        const shouldCollapseUserMessage = collapsedUserContent !== null;
         const isUserMessageExpanded = expandedUserMessage?.messageId === message.id
             && expandedUserMessage.content === displayContent;
-        const renderedDisplayContent = shouldCollapseUserMessage && !isUserMessageExpanded
-            ? `${userMessageCharacters.slice(0, USER_MESSAGE_COLLAPSE_THRESHOLD).join("")}…`
+        const renderedDisplayContent = collapsedUserContent !== null && !isUserMessageExpanded
+            ? collapsedUserContent
             : displayContent;
         const speakerLabel = useMemo(() => {
             if (!message.metadata_json) {
@@ -565,7 +575,7 @@ const MessageItem = React.memo<MessageItemProps>(
             onFork: onMessageFork,
             onResendToFeishuDebug: canResendToFeishuDebug ? handleFeishuDebugResend : undefined,
             isResendToFeishuDebugPending: isFeishuDebugSending,
-            messageContent: message.content,
+            messageContent: turnContext ? turnContext.text : message.content,
             pluginActions: messageActions,
         };
 

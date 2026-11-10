@@ -1,3 +1,4 @@
+import { visibleText } from "./turnContext";
 import type {
     ConversationWithMessages,
     Message,
@@ -322,7 +323,8 @@ export function formatAsMarkdown(
         lines.push(`## ${label}\n`);
 
         // 消息内容
-        const messageContent = message.content || "";
+        // 用户消息只导出原话，本轮附加上下文（记忆、工作记录等）不导出。
+        const messageContent = visibleText(message.content || "");
         const sanitizedContent = stripMcpToolCallMarkers(messageContent);
         const content = sanitizedContent.trim() || '(无内容)';
         lines.push(content);
@@ -536,7 +538,8 @@ export function generateExportHtml(
 
     for (const message of filteredMessages) {
         const label = getMessageTypeLabel(message.message_type);
-        const messageContent = message.content || "";
+        // 用户消息只导出原话，本轮附加上下文（记忆、工作记录等）不导出。
+        const messageContent = visibleText(message.content || "");
         const sanitizedContent = stripMcpToolCallMarkers(messageContent);
 
         html += `

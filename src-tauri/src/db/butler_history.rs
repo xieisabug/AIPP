@@ -12,10 +12,16 @@ const ROWS: &str = "SELECT m.id, c.id, c.conversation_kind, c.assistant_id, c.na
     m.created_time,
     c.conversation_kind='butler_contact_archive' OR (c.conversation_kind='butler_main'
         AND NOT EXISTS(SELECT 1 FROM butler_main_state s WHERE s.butler_conversation_id=c.id)), ";
-const FROM: &str = " FROM message m JOIN conversation c ON c.id=m.conversation_id
+/// 消息来源与可读范围。用户消息只取原话（去掉本轮附加上下文），检索和摘录都按 `m.text`。
+fn from_clause() -> String {
+    format!(
+        " FROM (SELECT *, {} AS text FROM message) m JOIN conversation c ON c.id=m.conversation_id
     WHERE c.conversation_kind IN ('butler_main','butler_contact','butler_contact_archive','butler_task')
-      AND m.message_type IN ('user','response','assistant','error') AND trim(m.content)!=''
-      AND CASE WHEN json_valid(m.metadata_json) THEN coalesce(json_extract(m.metadata_json,'$.origin'),'')!='internal' ELSE 1 END";
+      AND m.message_type IN ('user','response','assistant','error') AND trim(m.text)!=''
+      AND CASE WHEN json_valid(m.metadata_json) THEN coalesce(json_extract(m.metadata_json,'$.origin'),'')!='internal' ELSE 1 END",
+        crate::utils::turn_context::visible_sql("content")
+    )
+}
 const HUMAN: &str = " AND m.message_type='user' AND CASE WHEN json_valid(m.metadata_json)
     THEN coalesce(json_extract(m.metadata_json,'$.origin'),'') NOT IN ('internal','butler_peer','butler_task') ELSE 1 END
     AND NOT (c.conversation_kind='butler_task' AND m.id=(SELECT min(t.id) FROM message t WHERE t.conversation_id=c.id AND t.message_type='user'))";
@@ -55,9 +61,10 @@ pub fn search(
     bot_id: Option<i64>,
     before: Option<i64>,
 ) -> rusqlite::Result<Value> {
+    let from = from_clause();
     let sql = format!(
-        "{ROWS}substr(m.content,max(1,instr(lower(m.content),lower(?1))-180),900),
-        length(m.content)>900 {FROM} AND instr(lower(m.content),lower(?1))>0
+        "{ROWS}substr(m.text,max(1,instr(lower(m.text),lower(?1))-180),900),
+        length(m.text)>900 {from} AND instr(lower(m.text),lower(?1))>0
         AND (?2 IS NULL OR c.assistant_id=?2) AND (?3 IS NULL OR m.id<?3)
         ORDER BY m.id DESC LIMIT 13"
     );
@@ -77,10 +84,11 @@ pub fn context(
     id: i64,
     focus: Option<&str>,
 ) -> Result<Value, String> {
+    let from = from_clause();
     let read = || -> rusqlite::Result<Option<Value>> {
-        let base = format!("{ROWS}substr(m.content,1,1600),length(m.content)>1600 {FROM}");
+        let base = format!("{ROWS}substr(m.text,1,1600),length(m.text)>1600 {from}");
         let Some(hit) =
-            conn.query_row(&format!("{ROWS}substr(m.content,max(1,instr(lower(m.content),lower(?2))-300),1600),length(m.content)>1600 {FROM} AND m.id=?1"), params![id, focus.unwrap_or("")], |r| entry(r, names)).optional()?
+            conn.query_row(&format!("{ROWS}substr(m.text,max(1,instr(lower(m.text),lower(?2))-300),1600),length(m.text)>1600 {from} AND m.id=?1"), params![id, focus.unwrap_or("")], |r| entry(r, names)).optional()?
         else {
             return Ok(None);
         };
@@ -119,8 +127,9 @@ pub fn ui_search(
     limit: u32,
     offset: u32,
 ) -> rusqlite::Result<Vec<Value>> {
+    let from = from_clause();
     let sql = format!(
-        "{ROWS}m.content, 0 {FROM} AND instr(lower(m.content),lower(?1))>0
+        "{ROWS}m.text, 0 {from} AND instr(lower(m.text),lower(?1))>0
         ORDER BY m.id DESC LIMIT ?2 OFFSET ?3"
     );
     let mut stmt = conn.prepare(&sql)?;

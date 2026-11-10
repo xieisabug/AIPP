@@ -186,6 +186,16 @@ pub async fn fit_to_budget_with_compaction(
     };
     let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.summary_role, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref(), &record_usage)
         .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
+    // 管家会话：早期附带的长期记忆随原文一起被摘要替换，在摘要后面完整附带一次，
+    // 压缩这一轮就能看到，之后的用户消息也只需附带变化。附带失败不影响压缩，下一条用户消息会重新完整附带。
+    let summary = match ctx.checkpoint_store.memory_snapshot(ctx.conversation_id, &messages[body_end..]) {
+        Ok(Some(memory)) => format!("{summary}\n\n{memory}"),
+        Ok(None) => summary,
+        Err(error) => {
+            warn!(conversation_id = ctx.conversation_id, error = %error, "failed to attach long-term memory to compaction checkpoint");
+            summary
+        }
+    };
 
     // Assemble compacted message list: Head + Summary + Tail
     let mut compacted = Vec::with_capacity(head_count + 1 + tail_count);

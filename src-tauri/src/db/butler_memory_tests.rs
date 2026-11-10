@@ -132,6 +132,84 @@ fn test_memory_prompt_selection_empty_when_nothing_visible() {
     assert_eq!(selection, Selection { memories: vec![], omitted: 0 });
 }
 
+fn plan_for(conn: &Connection, text: &str, injected: &Injected, budget: usize) -> Delta {
+    let viewer = Viewer::Assistant(1);
+    plan(recent_for_prompt(conn, viewer).unwrap(), &visible_ids(conn, viewer).unwrap(), count(conn, viewer).unwrap(), text, injected, budget)
+}
+
+#[test]
+fn test_memory_plan_tops_up_relevant_old_memories_left_out_by_budget() {
+    let conn = db();
+    let deploy = add(&conn, Scope::Assistant(1), &format!("部署流程：{}", "先".repeat(150)));
+    let style = add(&conn, Scope::Assistant(1), &format!("回答风格：{}", "简".repeat(150)));
+    let first = plan_for(&conn, "你好", &Injected::default(), 200);
+    assert!(first.full);
+    assert_eq!(first.listed.len(), 1, "预算只放得下一条");
+    assert_eq!(first.omitted, 1);
+    let left_out = if first.listed[0].id == deploy.id { &style } else { &deploy };
+    let injected = Injected {
+        full: true,
+        as_of: now() + 1_000,
+        revisions: HashMap::from([(first.listed[0].id, Some(first.listed[0].revision))]),
+    };
+    // 没附带过、也不相关：不补带，避免每轮把无关记忆逐条塞进历史。
+    let unrelated = plan_for(&conn, "今天天气", &injected, 200);
+    assert!(unrelated.is_empty() && unrelated.omitted == 1, "{unrelated:?}");
+    // 和本轮相关时补带上。
+    let topic = if left_out.id == deploy.id { "部署流程怎么走" } else { "回答风格是什么" };
+    let relevant = plan_for(&conn, topic, &injected, 200);
+    assert_eq!(relevant.listed.iter().map(|m| m.id).collect::<Vec<_>>(), vec![left_out.id]);
+    assert!(!relevant.full && relevant.omitted == 0);
+}
+
+#[test]
+fn test_memory_plan_updates_ignore_budget_and_report_removals() {
+    let conn = db();
+    let long = add(&conn, Scope::Assistant(1), &"长".repeat(250));
+    let injected = Injected {
+        full: true,
+        as_of: now() + 1_000,
+        revisions: HashMap::from([(long.id, Some(long.revision)), (999, Some(1)), (998, None)]),
+    };
+    update(&conn, Some(Viewer::Assistant(1)), long.id, None, &"新".repeat(250), None).unwrap();
+    let delta = plan_for(&conn, "任意", &injected, 10);
+    assert_eq!(delta.updated.iter().map(|m| (m.id, m.revision)).collect::<Vec<_>>(), vec![(long.id, 2)], "更新必须替换旧版本，不受预算限制");
+    assert_eq!(delta.removed, vec![999], "已经告知删除过的（998）不再重复");
+}
+
+#[test]
+fn test_memory_plan_full_injection_skips_memories_already_seen_at_current_revision() {
+    let conn = db();
+    let seen = add(&conn, Scope::Assistant(1), "回答先给结论");
+    let stale = add(&conn, Scope::Assistant(1), "周报用表格");
+    let other = add(&conn, Scope::Assistant(1), "用户在做 AIPP 项目");
+    update(&conn, None, stale.id, None, "周报用表格和图", None).unwrap();
+    // 还没有完整附带，但模型已经从工具结果里看到 seen 的当前版本、stale 的旧版本。
+    let mut injected = Injected::default();
+    injected.saw(seen.id, Some(seen.revision));
+    injected.saw(stale.id, Some(stale.revision));
+    let delta = plan_for(&conn, "你好", &injected, 800);
+    assert!(delta.full);
+    assert_eq!(delta.updated.iter().map(|m| m.id).collect::<Vec<_>>(), vec![stale.id]);
+    assert_eq!(delta.listed.iter().map(|m| m.id).collect::<Vec<_>>(), vec![other.id]);
+    assert_eq!(delta.omitted, 0, "看到过的不算没附带");
+    // 全部都看到过：什么都不附带。
+    injected.saw(stale.id, Some(2));
+    injected.saw(other.id, Some(other.revision));
+    assert!(plan_for(&conn, "你好", &injected, 800).is_empty());
+}
+
+#[test]
+fn test_memory_injected_saw_merges_independent_of_order() {
+    let mut forward = Injected::default();
+    let mut backward = Injected::default();
+    let events = [(1, Some(1)), (1, Some(3)), (1, Some(2)), (2, Some(1)), (2, None), (3, Some(4))];
+    events.iter().for_each(|(id, revision)| forward.saw(*id, *revision));
+    events.iter().rev().for_each(|(id, revision)| backward.saw(*id, *revision));
+    assert_eq!(forward, backward);
+    assert_eq!(forward.revisions, HashMap::from([(1, Some(3)), (2, None), (3, Some(4))]), "删除优先，否则取较大版本");
+}
+
 #[test]
 fn test_memory_update_checks_revision_scope_and_duplicates() {
     let conn = db();

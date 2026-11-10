@@ -73,6 +73,7 @@ import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationExportDialog from "./conversation/ConversationExportDialog";
 import ConversationContent from "./conversation/ConversationContent";
 import ConversationTurnRail, { makeTurnPreview } from "./conversation/ConversationTurnRail";
+import { visibleText } from "../utils/turnContext";
 import MobileTurnScrubber from "./conversation/MobileTurnScrubber";
 import type { MessageScrollAlign } from "./conversation/scrollHighlight";
 import { ToolErrorContinueProvider } from "./McpToolCall";
@@ -2365,7 +2366,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                     <MessageEditDialog
                         isOpen={editDialogIsOpen}
-                        initialContent={editingMessage?.content || ""}
+                        initialContent={visibleText(editingMessage?.content || "")}
                         messageType={editingMessage?.message_type || ""}
                         onClose={closeEditDialog}
                         onSave={handleEditSave}

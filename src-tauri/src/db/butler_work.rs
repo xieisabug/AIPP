@@ -167,6 +167,7 @@ fn resolve_turn(conn: &Connection, conversation: i64, id: i64) -> anyhow::Result
         )
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("引用的对话 #{id} 已删除或不在当前会话"))?;
+    let content = crate::utils::turn_context::visible(&content).to_owned();
     Ok(WorkView {
         work_ref: format!("turn:{id}"),
         kind: "turn".into(),

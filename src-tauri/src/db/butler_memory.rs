@@ -6,7 +6,7 @@
 use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// 单条记忆字数上限：记忆应是一句事实或偏好，长内容放在文件或任务结果里。
 pub const MAX_CONTENT_CHARS: usize = 300;
@@ -306,18 +306,117 @@ pub struct Selection {
 /// 放不下的较长记录跳过，后面较短的仍可放入。
 pub fn select_for_prompt(conn: &Connection, viewer: Viewer, text: &str, budget: usize) -> Result<Selection> {
     let total = count(conn, viewer)?;
-    let mut used = 0;
-    let mut memories = Vec::new();
-    for memory in rank(recent(conn, viewer, SCAN_LIMIT)?, text, false) {
+    let memories = fill(rank(recent(conn, viewer, SCAN_LIMIT)?, text, false), budget, 0);
+    // count 与 recent 不在同一事务里，期间可能有新写入；用 saturating_sub 避免下溢。
+    Ok(Selection { omitted: total.saturating_sub(memories.len()), memories })
+}
+
+/// 按顺序放入预算：放不下的较长记录跳过，后面较短的仍可放入。`used` 为已占用的字数。
+fn fill(ranked: Vec<Memory>, budget: usize, mut used: usize) -> Vec<Memory> {
+    let mut picked = Vec::new();
+    for memory in ranked {
         let size = memory.content.chars().count();
         if used + size > budget {
             continue;
         }
         used += size;
-        memories.push(memory);
+        picked.push(memory);
     }
-    // count 与 recent 不在同一事务里，期间可能有新写入；用 saturating_sub 避免下溢。
-    Ok(Selection { omitted: total.saturating_sub(memories.len()), memories })
+    picked
+}
+
+/// 参与每轮附带打分的记忆（按最近更新排列，最多 SCAN_LIMIT 条）。
+pub fn recent_for_prompt(conn: &Connection, viewer: Viewer) -> Result<Vec<Memory>> {
+    recent(conn, viewer, SCAN_LIMIT)
+}
+
+/// 会话能看到的全部记忆编号（判断历史里附带过的记忆是否已删除或不再可见）。
+pub fn visible_ids(conn: &Connection, viewer: Viewer) -> Result<HashSet<i64>> {
+    let (kind, id) = viewer_params(viewer);
+    let mut stmt = conn.prepare(&format!("SELECT id FROM butler_memory WHERE {VISIBLE}"))?;
+    let ids = stmt.query_map(params![kind, id], |r| r.get(0))?.collect::<rusqlite::Result<HashSet<i64>>>()?;
+    Ok(ids)
+}
+
+/// 模型在这次要发出的历史里已经看到的记忆：附带过的记忆块（含压缩检查点里的），以及记忆工具返回给它的结果。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Injected {
+    /// 历史里有完整附带；没有时本轮完整附带一次。
+    pub full: bool,
+    /// 最近一次附带的时间（毫秒）；之后新建或更新的记忆算新增。
+    pub as_of: i64,
+    /// 每条记忆模型看到的最新版本；None 表示已经知道它被删除。
+    pub revisions: HashMap<i64, Option<i64>>,
+}
+
+impl Injected {
+    /// 记下模型看到的一条记忆。编号不复用、版本只增，所以删除优先、否则取较大的版本，与在历史里出现的先后无关。
+    pub fn saw(&mut self, id: i64, revision: Option<i64>) {
+        let merged = match (self.revisions.get(&id), revision) {
+            (Some(None), _) | (_, None) => None,
+            (Some(Some(old)), Some(new)) => Some((*old).max(new)),
+            (None, Some(new)) => Some(new),
+        };
+        self.revisions.insert(id, merged);
+    }
+}
+
+/// 本轮要附带的记忆变化。
+#[derive(Debug, Default, PartialEq)]
+pub struct Delta {
+    /// 历史里没有完整附带（会话首轮，或早期内容被压缩、换了分支且检查点里也没有），本轮完整附带一次。
+    pub full: bool,
+    /// 首次附带或补带的记忆。
+    pub listed: Vec<Memory>,
+    /// 版本变了的记忆，替换历史里的旧版本。
+    pub updated: Vec<Memory>,
+    /// 历史里看到过、现在已删除或不再可见的记忆编号。
+    pub removed: Vec<i64>,
+    /// 可见但到这一轮仍没有附带过的条数。
+    pub omitted: usize,
+}
+
+impl Delta {
+    pub fn is_empty(&self) -> bool {
+        self.listed.is_empty() && self.updated.is_empty() && self.removed.is_empty()
+    }
+}
+
+/// 规划本轮附带哪些记忆。模型已经看到且没有变化的不再重复，历史里的内容保持不动（缓存前缀稳定）。
+///
+/// 总是附带：更新过的（不占预算，必须替换旧版本）、已删除或不再可见的。此外：
+/// - 历史里没有完整附带：还没看到过的记忆按相关度、再按最近更新放入预算（完整附带）。
+/// - 否则只放入上次附带之后新建或更新的，以及与本轮相关但还没看到过的。
+///
+/// `memories` 按最近更新排列（[`recent_for_prompt`]），`visible` 为全部可见编号，`total` 为可见总数。
+pub fn plan(memories: Vec<Memory>, visible: &HashSet<i64>, total: usize, text: &str, injected: &Injected, budget: usize) -> Delta {
+    let mut removed: Vec<i64> = injected.revisions.iter()
+        .filter(|(id, revision)| revision.is_some() && !visible.contains(id))
+        .map(|(id, _)| *id)
+        .collect();
+    removed.sort_unstable();
+    let terms = terms(text);
+    let (mut updated, mut fresh, mut relevant, mut unchanged) = (Vec::new(), Vec::new(), Vec::new(), 0usize);
+    for memory in memories {
+        match injected.revisions.get(&memory.id) {
+            Some(Some(revision)) if memory.revision > *revision => updated.push(memory),
+            Some(Some(_)) => unchanged += 1,
+            _ if !injected.full || memory.updated_at > injected.as_of => fresh.push(memory),
+            _ if score(&memory.content, &terms) > 0 => relevant.push(memory),
+            _ => {}
+        }
+    }
+    let used = updated.iter().map(|m| m.content.chars().count()).sum();
+    let mut candidates = rank(fresh, text, false);
+    candidates.extend(rank(relevant, text, true));
+    let listed = fill(candidates, budget, used);
+    Delta {
+        full: !injected.full,
+        omitted: total.saturating_sub(unchanged + updated.len() + listed.len()),
+        listed,
+        updated,
+        removed,
+    }
 }
 
 fn ensure_revision(memory: &Memory, revision: Option<i64>) -> Result<()> {

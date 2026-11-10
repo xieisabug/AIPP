@@ -9,6 +9,7 @@ import useConversationManager from "./useConversationManager";
 import { useIsMobilePlatform } from "./use-platform";
 import { isMobileExecutableAssistantType } from "../lib/mobileUnsupported";
 import { AskAiResponse, describeAskAiError } from "../lib/askAiError";
+import { splitTurnContext, withTurnContext } from "../utils/turnContext";
 
 // 从 plugin.d.ts 导入的接口类型
 interface AiResponse {
@@ -181,8 +182,10 @@ export function useConversationOperations({
     }, []);
 
     const handleEditSave = useCallback(
-        (content: string) => {
+        (edited: string) => {
             if (!editingMessage) return;
+            // 编辑框里只有用户原话；保存时把原来的本轮附加上下文接回去，模型回放时仍然看得到当时附带的内容。
+            const content = withTurnContext(edited, splitTurnContext(editingMessage.content).block);
 
             invoke("update_message_content", {
                 messageId: editingMessage.id,
@@ -207,8 +210,9 @@ export function useConversationOperations({
     );
 
     const handleEditSaveAndRegenerate = useCallback(
-        (content: string) => {
+        (edited: string) => {
             if (!editingMessage) return;
+            const content = withTurnContext(edited, splitTurnContext(editingMessage.content).block);
 
             // 先更新消息内容
             invoke("update_message_content", {
