@@ -297,7 +297,7 @@ pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<
         return Err("系统内置工具集不可删除".to_string());
     }
 
-    crate::mcp::apps::disconnect_app_connection(app_handle.clone(), id).await?;
+    crate::mcp::apps::disconnect_app_connection(app_handle.clone(), id, None).await?;
 
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
@@ -384,7 +384,7 @@ pub async fn test_mcp_connection(
             }
         }
         "sse" => test_sse_connection(&server).await,
-        "http" => test_http_connection(&server).await,
+        "http" => test_http_connection(&app_handle, &server).await,
         _ => Err(format!("Unsupported transport type: {}", server.transport_type)),
     };
 
@@ -450,13 +450,14 @@ async fn test_sse_connection(_server: &MCPServer) -> Result<(), String> {
 }
 
 // 测试HTTP连接
-async fn test_http_connection(server: &MCPServer) -> Result<(), String> {
+async fn test_http_connection(app: &tauri::AppHandle, server: &MCPServer) -> Result<(), String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
         ServiceExt,
     };
 
-    let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(server, reqwest::Client::builder()).await?;
+    let builder = crate::mcp::http_transport::configured_http_builder(app, server).await?;
+    let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(server, builder).await?;
 
     // 创建客户端信息
     let client_info = ClientInfo {
@@ -738,7 +739,8 @@ async fn get_http_capabilities(
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
-            let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(&server, reqwest::Client::builder()).await
+            let builder = crate::mcp::http_transport::configured_http_builder(&app_handle, &server).await.map_err(anyhow::Error::msg)?;
+            let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(&server, builder).await
                 .map_err(anyhow::Error::msg)?;
 
             let client_info = ClientInfo {

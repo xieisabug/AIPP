@@ -251,6 +251,7 @@ impl<'a> Tables<'a> {
 
     fn calls(&self, predicate: &str, id: i64) -> Result<()> {
         if let Some(calls) = self.names.get("mcp_tool_call") {
+            self.remove("app_tool_call_binding", &format!("call_id IN (SELECT id FROM {calls} WHERE {predicate})"), id)?;
             self.remove("tool_review_log", &format!("mcp_tool_call_id IN (SELECT id FROM {calls} WHERE {predicate})"), id)?;
             self.remove("mcp_tool_call", predicate, id)?;
         }

@@ -1295,6 +1295,7 @@ pub fn run() {
             crate::mcp::apps::verify_app_connection,
             crate::mcp::apps::disconnect_app_connection,
             crate::mcp::apps::get_app_assistant_access,
+            crate::mcp::apps::get_app_authorization_url,
             load_skill_install_recipe_file,
             inspect_skill_archive_source,
             inspect_skill_install_recipe,

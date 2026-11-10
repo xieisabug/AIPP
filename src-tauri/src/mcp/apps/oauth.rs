@@ -16,6 +16,30 @@ pub struct Token {
     pub expires_in: Option<u64>,
 }
 
+pub struct OAuthHttp {
+    client: reqwest::Client,
+    #[cfg(test)]
+    loopback: bool,
+}
+
+impl OAuthHttp {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self { client: http()?, #[cfg(test)] loopback: false })
+    }
+    pub(super) fn endpoint(&self, value: &str) -> Result<reqwest::Url, String> {
+        #[cfg(test)]
+        if self.loopback {
+            let url = reqwest::Url::parse(value).map_err(|e| e.to_string())?;
+            if url.scheme() == "http" && url.host_str() == Some("127.0.0.1") { return Ok(url); }
+        }
+        public_https(value)
+    }
+    #[cfg(test)]
+    pub(super) fn loopback() -> Self {
+        Self { client: reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(3)).build().unwrap(), loopback: true }
+    }
+}
+
 pub fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(30))
         .build().map_err(|_| "无法建立授权 HTTP 客户端".into())
@@ -23,7 +47,6 @@ pub fn http() -> Result<reqwest::Client, String> {
 
 pub async fn json(response: reqwest::Response, stage: &str) -> Result<serde_json::Value, String> {
     let status = response.status();
-    if !status.is_success() { return Err(format!("{stage}失败：HTTP {status}（服务响应正文可能包含凭据，未记录）")); }
     if response.content_length().unwrap_or(0) > 1024 * 1024 { return Err(format!("{stage}响应过大")); }
     let mut response = response;
     let mut bytes = Vec::new();
@@ -31,13 +54,25 @@ pub async fn json(response: reqwest::Response, stage: &str) -> Result<serde_json
         if bytes.len() + chunk.len() > 1024 * 1024 { return Err(format!("{stage}响应超过上限")); }
         bytes.extend_from_slice(&chunk);
     }
+    if !status.is_success() {
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default();
+        let code = match value["error"].as_str() {
+            Some("invalid_grant") => "invalid_grant：授权已失效，需要重新登录",
+            Some("invalid_client") => "invalid_client：客户端注册无效，需要重新连接",
+            Some("access_denied") => "access_denied：服务商拒绝授权",
+            Some("invalid_scope") => "invalid_scope：服务不接受请求的权限范围",
+            Some("unsupported_token_type") => "unsupported_token_type：服务不支持撤销该令牌类型",
+            _ => "服务未提供可安全展示的错误代码",
+        };
+        return Err(format!("{stage}失败：HTTP {status}；{code}"));
+    }
     serde_json::from_slice(&bytes).map_err(|_| format!("{stage}返回无效 JSON"))
 }
 
-pub async fn exchange(endpoint: &str, form: &[(&str, &str)]) -> Result<Token, String> {
-    public_https(endpoint)?;
+pub(super) async fn exchange_with(http: &OAuthHttp, endpoint: &str, form: &[(&str, &str)]) -> Result<Token, String> {
+    http.endpoint(endpoint)?;
     let body = form.iter().map(|(key, value)| format!("{}={}", urlencoding::encode(key), urlencoding::encode(value))).collect::<Vec<_>>().join("&");
-    let response = http()?.post(endpoint).header("Content-Type", "application/x-www-form-urlencoded").body(body).send().await.map_err(|e| format!("OAuth 令牌请求失败：{}", e.without_url()))?;
+    let response = http.client.post(endpoint).header("Content-Type", "application/x-www-form-urlencoded").body(body).send().await.map_err(|e| format!("OAuth 令牌请求失败：{}", e.without_url()))?;
     let token: Token = serde_json::from_value(json(response, "OAuth 令牌交换/刷新").await?).map_err(|_| "OAuth 令牌响应字段缺失")?;
     if token.access_token.is_empty() || !token.token_type.eq_ignore_ascii_case("bearer") || token.expires_in.is_some_and(|v| v > 315360000) {
         return Err("OAuth 返回了不支持的令牌类型或有效期".into());
@@ -54,6 +89,7 @@ pub struct PendingLogin {
     pub client_id: String,
     pub token_endpoint: String,
     pub endpoint: String,
+    pub revocation_endpoint: Option<String>,
 }
 
 fn random() -> String {
@@ -77,29 +113,41 @@ pub fn callback(raw: &str, expected_state: &str) -> Result<String, String> {
 }
 
 pub async fn begin(endpoint: &str, client_id: Option<&str>, scopes: &[String]) -> Result<PendingLogin, String> {
-    let endpoint_url = public_https(endpoint)?;
-    let client = http()?;
+    begin_with(&OAuthHttp::new()?, endpoint, client_id, scopes).await
+}
+
+pub(super) async fn begin_with(http: &OAuthHttp, endpoint: &str, client_id: Option<&str>, scopes: &[String]) -> Result<PendingLogin, String> {
+    let endpoint_url = http.endpoint(endpoint)?;
+    let client = &http.client;
     let probe = client.get(endpoint).send().await.map_err(|e| format!("OAuth 发现请求失败：{}", e.without_url()))?;
     let challenge = probe.headers().get(reqwest::header::WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let metadata_url = challenge.split("resource_metadata=\"").nth(1).and_then(|v| v.split('"').next()).map(str::to_owned)
         .unwrap_or_else(|| format!("{}/.well-known/oauth-protected-resource{}", endpoint_url.origin().ascii_serialization(), endpoint_url.path().trim_end_matches('/')));
-    public_https(&metadata_url)?;
+    http.endpoint(&metadata_url)?;
     let resource = json(client.get(&metadata_url).send().await.map_err(|_| "OAuth 资源元数据请求失败")?, "OAuth 资源元数据").await?;
     if resource["resource"].as_str() != Some(endpoint) { return Err("OAuth 资源元数据与应用服务地址不匹配".into()); }
     let issuer = resource["authorization_servers"].as_array().and_then(|a| a.first()).and_then(|s| s.as_str()).ok_or("OAuth 资源未声明授权服务器")?;
-    let issuer_url = public_https(issuer)?;
+    let issuer_url = http.endpoint(issuer)?;
     let discovery = format!("{}/.well-known/oauth-authorization-server{}", issuer_url.origin().ascii_serialization(), issuer_url.path().trim_end_matches('/'));
     let metadata = json(client.get(discovery).send().await.map_err(|_| "OAuth 授权服务器元数据请求失败")?, "OAuth 授权服务器元数据").await?;
     if metadata["issuer"].as_str() != Some(issuer) { return Err("OAuth 授权服务器 issuer 不匹配".into()); }
+    if metadata["code_challenge_methods_supported"].as_array().is_some_and(|methods| !methods.iter().any(|m| m == "S256")) {
+        return Err("服务不支持 S256 PKCE，无法安全连接".into());
+    }
+    if metadata["token_endpoint_auth_methods_supported"].as_array().is_some_and(|methods| !methods.iter().any(|m| m == "none")) {
+        return Err("当前连接器需要公共客户端，服务要求私密客户端认证".into());
+    }
     let auth = metadata["authorization_endpoint"].as_str().ok_or("OAuth 缺少授权地址")?;
     let token_endpoint = metadata["token_endpoint"].as_str().ok_or("OAuth 缺少令牌地址")?.to_owned();
-    let mut auth_url = public_https(auth)?;
-    public_https(&token_endpoint)?;
+    let mut auth_url = http.endpoint(auth)?;
+    http.endpoint(&token_endpoint)?;
+    let revocation_endpoint = metadata["revocation_endpoint"].as_str().map(str::to_owned);
+    if let Some(endpoint) = &revocation_endpoint { http.endpoint(endpoint)?; }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| format!("OAuth 回调监听失败：{e}"))?;
     let redirect = format!("http://127.0.0.1:{}/oauth/callback", listener.local_addr().map_err(|e| e.to_string())?.port());
     let client_id = if let Some(id) = client_id.filter(|v| !v.trim().is_empty()) { id.to_owned() } else {
         let registration = metadata["registration_endpoint"].as_str().ok_or("服务不支持动态注册，请在应用目录配置已注册的 OAuth client_id")?;
-        public_https(registration)?;
+        http.endpoint(registration)?;
         let registered = json(client.post(registration).json(&serde_json::json!({
             "client_name":"AIPP", "redirect_uris":[redirect], "token_endpoint_auth_method":"none",
             "grant_types":["authorization_code","refresh_token"], "response_types":["code"]
@@ -115,10 +163,14 @@ pub async fn begin(endpoint: &str, client_id: Option<&str>, scopes: &[String]) -
         ("state", &state), ("code_challenge", &challenge), ("code_challenge_method", "S256"),
         ("resource", endpoint), ("scope", &scopes.join(" ")),
     ]);
-    Ok(PendingLogin { url: auth_url.to_string(), listener, state, verifier, redirect, client_id, token_endpoint, endpoint: endpoint.to_owned() })
+    Ok(PendingLogin { url: auth_url.to_string(), listener, state, verifier, redirect, client_id, token_endpoint, endpoint: endpoint.to_owned(), revocation_endpoint })
 }
 
 pub async fn finish(pending: PendingLogin) -> Result<Credential, String> {
+    finish_with(&OAuthHttp::new()?, pending).await
+}
+
+pub(super) async fn finish_with(http: &OAuthHttp, pending: PendingLogin) -> Result<Credential, String> {
     let code = tokio::time::timeout(Duration::from_secs(300), async {
         let (mut socket, _) = pending.listener.accept().await.map_err(|e| format!("OAuth 回调接收失败：{e}"))?;
         let mut bytes = Vec::new();
@@ -135,7 +187,7 @@ pub async fn finish(pending: PendingLogin) -> Result<Credential, String> {
         let _ = socket.write_all(response.as_bytes()).await;
         result
     }).await.map_err(|_| "OAuth 登录等待超时，请重新连接")??;
-    let token = exchange(&pending.token_endpoint, &[
+    let token = exchange_with(http, &pending.token_endpoint, &[
         ("grant_type", "authorization_code"), ("code", &code), ("client_id", &pending.client_id),
         ("redirect_uri", &pending.redirect), ("code_verifier", &pending.verifier), ("resource", &pending.endpoint),
     ]).await?;
@@ -143,5 +195,30 @@ pub async fn finish(pending: PendingLogin) -> Result<Credential, String> {
         client_id: pending.client_id, token_endpoint: pending.token_endpoint,
         access_token: token.access_token, refresh_token: token.refresh_token,
         expires_at: token.expires_in.map(|v| chrono::Utc::now().timestamp() + v as i64),
+        revocation_endpoint: pending.revocation_endpoint,
     }) })
 }
+
+pub async fn revoke(credential: &Credential) -> Result<bool, String> {
+    revoke_with(&OAuthHttp::new()?, credential).await
+}
+
+pub(super) async fn revoke_with(http: &OAuthHttp, credential: &Credential) -> Result<bool, String> {
+    let Some(oauth) = credential.oauth.as_ref() else { return Ok(false); };
+    let Some(endpoint) = oauth.revocation_endpoint.as_deref() else { return Ok(false); };
+    http.endpoint(endpoint)?;
+    let mut tokens = Vec::new();
+    if let Some(refresh) = oauth.refresh_token.as_deref() { tokens.push((refresh, "refresh_token")); }
+    tokens.push((oauth.access_token.as_str(), "access_token"));
+    for (token, hint) in tokens {
+        let body = format!("token={}&token_type_hint={hint}&client_id={}", urlencoding::encode(token), urlencoding::encode(&oauth.client_id));
+        let response = http.client.post(endpoint).header("Content-Type", "application/x-www-form-urlencoded").body(body).send().await
+            .map_err(|e| format!("服务商授权撤销请求失败：{}", e.without_url()))?;
+        if !response.status().is_success() { json(response, "服务商授权撤销").await?; }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+#[path = "oauth_tests.rs"]
+mod oauth_tests;

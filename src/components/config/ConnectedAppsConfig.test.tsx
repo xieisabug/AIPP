@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import ConnectedAppsConfig from './ConnectedAppsConfig';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -9,7 +10,7 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }));
 vi.mock('@/hooks/use-platform', () => ({ useIsMobilePlatform: () => false }));
 vi.mock('./MCPConfig', () => ({ default: ({ initialServerId }: { initialServerId: number }) => <div>管理实例 {initialServerId}</div> }));
-vi.mock('./MCPServerDialog', () => ({ default: () => null }));
+vi.mock('./MCPServerDialog', () => ({ default: ({ isOpen, initialConfig }: { isOpen: boolean; initialConfig?: { transport_type?: string } }) => isOpen ? <div>编辑 MCP {initialConfig?.transport_type}</div> : null }));
 vi.mock('./JSONImportDialog', () => ({ default: () => null }));
 vi.mock('./BuiltinToolDialog', () => ({ default: () => null }));
 
@@ -54,5 +55,61 @@ describe('ConnectedAppsConfig', () => {
         await user.click(screen.getByRole('tab', { name: '工具与管理' }));
         expect(await screen.findByText('管理实例 21')).toBeInTheDocument();
         expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'add_mcp_server')).toBe(false);
+    });
+    it('should distinguish undiscovered tools from zero tools when showing existing connections', async () => {
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await screen.findByText('搜索工具');
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        expect(await screen.findByRole('button', { name: /公司知识库/ })).toHaveTextContent('工具未检测');
+        expect(screen.getByRole('button', { name: /搜索工具/ })).toHaveTextContent('0 / 0 个工具');
+    });
+    it('should reopen the pending authorization without creating another connection when login is in progress', async () => {
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'connecting', error: null }];
+            if (command === 'get_app_authorization_url') return 'https://example.com/authorize?state=test';
+            return [];
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
+        await user.click(screen.getByRole('button', { name: '继续授权' }));
+        expect(openUrl).toHaveBeenCalledWith('https://example.com/authorize?state=test');
+        expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'connect_catalog_app')).toBe(false);
+    });
+    it('should retain quick templates and JSON import when adding a connection', async () => {
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('button', { name: '添加' }));
+        expect(screen.getByRole('menuitem', { name: '从 JSON 导入' })).toBeInTheDocument();
+        expect(screen.getByRole('menuitem', { name: 'Stdio MCP 模板' })).toBeInTheDocument();
+        await user.click(screen.getByRole('menuitem', { name: 'HTTP MCP 模板' }));
+        expect(screen.getByText('编辑 MCP http')).toBeInTheDocument();
+    });
+    it('should require an explicit local-only choice when remote revocation fails', async () => {
+        let status = 'available';
+        let error: string | null = null;
+        vi.mocked(invoke).mockImplementation(async (command, args) => {
+            if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: status === 'available' }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status, error }];
+            if (command === 'disconnect_app_connection') {
+                if ((args as { revokeRemote: boolean }).revokeRemote) {
+                    status = 'disconnected'; error = '服务商撤销未完成'; throw new Error(error);
+                }
+                error = null; return '已删除本机凭据';
+            }
+            return [];
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
+        await user.click(screen.getByRole('tab', { name: '连接配置' }));
+        expect(screen.queryByRole('button', { name: '仅删除本机凭据' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: '断开连接' }));
+        await user.click(await screen.findByRole('button', { name: '仅删除本机凭据' }));
+        expect(invoke).toHaveBeenCalledWith('disconnect_app_connection', { serverId: 21, revokeRemote: false });
     });
 });

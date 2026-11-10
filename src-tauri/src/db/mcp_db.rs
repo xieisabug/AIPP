@@ -1257,6 +1257,8 @@ impl MCPDatabase {
         llm_call_id: Option<&str>,
         assistant_message_id: Option<i64>,
     ) -> Result<MCPToolCall> {
+        crate::mcp::apps::init(&self.conn).map_err(DbError::InvalidParameterName)?;
+        let transaction = self.conn.unchecked_transaction()?;
         let mut stmt = self.conn.prepare(
             "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters, llm_call_id, assistant_message_id, subtask_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -1275,7 +1277,8 @@ impl MCPDatabase {
         ])?;
 
         let id = self.conn.last_insert_rowid();
-
+        self.conn.execute("INSERT INTO app_tool_call_binding(call_id,request_id) SELECT ?1,request_id FROM app_connection WHERE server_id=?2", params![id,server_id])?;
+        transaction.commit()?;
         self.get_mcp_tool_call(id)
     }
 

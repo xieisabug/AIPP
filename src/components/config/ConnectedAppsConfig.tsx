@@ -20,6 +20,9 @@ import JSONImportDialog from './JSONImportDialog';
 import BuiltinToolDialog from './BuiltinToolDialog';
 import AppConnectForm from './apps/AppConnectForm';
 import AppAssistantAccess from './apps/AppAssistantAccess';
+import AppRelatedSkills from './apps/AppRelatedSkills';
+import AppTransportSettings from './apps/AppTransportSettings';
+import { getQuickStartTemplates } from '@/data/MCPTemplates';
 
 interface Builtin { id: string; name: string; description: string; command: string }
 type Selection = { kind: 'app'; appId: string } | { kind: 'server'; serverId: number };
@@ -87,9 +90,13 @@ export default function ConnectedAppsConfig() {
     const categories = page === 'catalog' ? ['全部', '内置工具', ...new Set((catalog?.catalog?.apps ?? []).map(app => app.category))] : ['全部', '内置工具', '外部服务', '自定义 MCP'];
 
     const select = (value: Selection) => { setSelection(value); setDetailTab('overview'); setFormGeneration(v => v + 1); };
-    const action = async (id: number, command: string) => {
+    const action = async (id: number, command: string, revokeRemote = true) => {
         setBusyId(id);
-        try { await invoke(command, { serverId: id }); await refresh(); }
+        try {
+            const result = await invoke<unknown>(command, { serverId: id, revokeRemote });
+            if (typeof result === 'string') toast.success(result);
+            await refresh();
+        }
         catch (e) { toast.error(String(e)); await refresh().catch(() => {}); }
         finally { setBusyId(undefined); }
     };
@@ -111,6 +118,8 @@ export default function ConnectedAppsConfig() {
                 <div><h2 className="text-xl font-semibold">应用与工具</h2><p className="mt-1 text-sm text-muted-foreground">连接外部服务，管理助手可以使用的工具。</p></div>
                 <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline">添加</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
                     <DropdownMenuItem onSelect={() => { setInitialConfig(undefined); setConfigOpen(true); }}>自定义 MCP</DropdownMenuItem>
+                    {getQuickStartTemplates().filter(template => !mobile || isMobileExecutableMcpServer(template.template)).map(template =>
+                        <DropdownMenuItem key={template.id} onSelect={() => { setInitialConfig(template.template); setConfigOpen(true); }}>{template.name} 模板</DropdownMenuItem>)}
                     <DropdownMenuItem onSelect={() => setImportOpen(true)}>从 JSON 导入</DropdownMenuItem>
                 </DropdownMenuContent></DropdownMenu>
             </div>
@@ -136,7 +145,8 @@ export default function ConnectedAppsConfig() {
                         <AppIcon icon={app.icon} /><div className="min-w-0 flex-1"><div className="font-medium">{app.name}</div><p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{app.description}</p><p className="mt-2 text-xs text-muted-foreground">{app.publisher} · {app.category}</p></div><span className="shrink-0 text-sm">{count ? `已添加 ${count}` : '连接'}</span>
                     </button>;
                 })}</div></section>
-                {!catalogBusy && !filteredBuiltins.length && !filteredApps.length && <p className="py-8 text-center text-sm text-muted-foreground">没有匹配的应用。</p>}
+                {loading && <p className="py-8 text-center text-sm text-muted-foreground">正在读取应用…</p>}
+                {!loading && !catalogBusy && !filteredBuiltins.length && !filteredApps.length && <p className="py-8 text-center text-sm text-muted-foreground">没有匹配的应用。</p>}
             </> : <div className="divide-y rounded-xl border">
                 {loading && <p className="p-6 text-sm text-muted-foreground">正在读取应用…</p>}
                 {!loading && !filteredServers.length && <p className="p-6 text-sm text-muted-foreground">没有匹配的连接，可从应用目录或添加菜单开始。</p>}
@@ -146,7 +156,7 @@ export default function ConnectedAppsConfig() {
                     const supported = !mobile || isMobileExecutableMcpServer(server);
                     return <button key={server.id} className="flex w-full items-center gap-3 p-4 text-left hover:bg-muted/30" onClick={() => select({ kind: 'server', serverId: server.id })}>
                         <AppIcon builtin={server.is_builtin} icon={connection?.definition.icon} /><div className="min-w-0 flex-1"><div className="truncate font-medium">{connection?.label ?? server.name}</div><p className="truncate text-xs text-muted-foreground">{server.is_builtin ? '内置工具' : connection ? connection.definition.name : `自定义 MCP · ${server.transport_type}`}</p></div>
-                        <div className="text-right"><p className="text-sm">{!supported ? '此设备不可执行' : connection && ['connecting', 'auth_required', 'disconnected'].includes(connection.status) ? connectionStatus(connection.status) : !server.is_enabled ? '已停用' : connection ? connectionStatus(connection.status) : server.is_builtin ? '已启用' : '待验证'}</p><p className="mt-1 text-xs text-muted-foreground">{serverTools ? `${serverTools.filter(t => t.is_enabled).length} / ${serverTools.length} 个工具` : '工具未检测'}</p></div>
+                        <div className="text-right"><p className="text-sm">{!supported ? '此设备不可执行' : connection && ['connecting', 'auth_required', 'disconnected'].includes(connection.status) ? connectionStatus(connection.status) : !server.is_enabled ? '已停用' : connection ? connectionStatus(connection.status) : server.is_builtin ? '已启用' : '待验证'}</p><p className="mt-1 text-xs text-muted-foreground">{serverTools?.length || server.is_builtin || connection?.status === 'available' ? `${serverTools?.filter(t => t.is_enabled).length ?? 0} / ${serverTools?.length ?? 0} 个工具` : '工具未检测'}</p></div>
                     </button>;
                 })}
             </div>}
@@ -157,22 +167,24 @@ export default function ConnectedAppsConfig() {
                 <div className="space-y-5 px-5 pb-8">
                     {selectedConnection && <div className="space-y-2 rounded-lg border p-3"><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{['connecting', 'auth_required', 'disconnected'].includes(selectedConnection.status) ? connectionStatus(selectedConnection.status) : !selectedServer?.is_enabled ? '已停用' : connectionStatus(selectedConnection.status)}</Badge>
                         <Button size="sm" variant="outline" disabled={busyId !== undefined || !selectedServer?.is_enabled} onClick={() => void action(selectedConnection.server_id, 'verify_app_connection')}>测试连接</Button>
+                        {selectedConnection.status === 'connecting' && <Button size="sm" variant="outline" onClick={() => void invoke<string | null>('get_app_authorization_url', { serverId: selectedConnection.server_id }).then(url => { if (!url) throw new Error('授权已结束，请重新连接'); return openUrl(url); }).catch(e => toast.error(String(e)))}>继续授权</Button>}
                         <Button size="sm" variant="ghost" onClick={() => { setFormGeneration(v => v + 1); setDetailTab('settings'); }}>重新配置 / 登录</Button>
                     </div>{selectedConnection.error && <p role="alert" className="break-words text-sm text-destructive">{selectedConnection.error}</p>}</div>}
                     <Tabs value={detailTab} onValueChange={setDetailTab}>
                         <TabsList><TabsTrigger value="overview">概览</TabsTrigger>{selectedServer && <TabsTrigger value="tools">工具与管理</TabsTrigger>}{selectedServer && !selectedServer.is_builtin && <TabsTrigger value="access">助手授权</TabsTrigger>}{selectedApp && <TabsTrigger value="settings">{selectedServer ? '连接配置' : '连接'}</TabsTrigger>}</TabsList>
                         <TabsContent value="overview" className="space-y-5 pt-4">
-                            {selectedApp && <><p className="text-sm">{selectedApp.notice}</p><p className="text-xs text-muted-foreground">{selectedApp.publisher} · 版本 {selectedApp.version} · {selectedApp.category}</p>{selectedApp.homepage?.startsWith('https://') && <Button variant="link" className="px-0" onClick={() => void openUrl(selectedApp.homepage!).catch(e => toast.error(String(e)))}>服务说明 <ArrowUpRight className="ml-1 h-4 w-4" /></Button>}
+                            {selectedApp && <><p className="text-sm">{selectedApp.notice}</p><p className="text-sm text-muted-foreground">{selectedApp.connection.auth === 'oauth' ? `请求的授权范围：${selectedApp.connection.scopes?.join('、') || '由服务商决定'}。实际权限以授权页面为准。` : selectedApp.connection.auth === 'fields' ? '实际访问权限由你提供的密钥或令牌决定。' : '此应用不要求登录。'}</p><AppRelatedSkills key={selectedApp.id} ids={selectedApp.skill_ids ?? []} /><p className="text-xs text-muted-foreground">{selectedApp.publisher} · 版本 {selectedApp.version} · {selectedApp.category}</p>{selectedApp.homepage?.startsWith('https://') && <Button variant="link" className="px-0" onClick={() => void openUrl(selectedApp.homepage!).catch(e => toast.error(String(e)))}>服务说明 <ArrowUpRight className="ml-1 h-4 w-4" /></Button>}
                                 {!selectedServer && matchingConnections.map(connection => <Button key={connection.server_id} variant="outline" className="w-full justify-between" onClick={() => select({ kind: 'server', serverId: connection.server_id })}>{connection.label}<span>{connectionStatus(connection.status)}</span></Button>)}
                                 {!selectedServer && <Button disabled={!platformSupported(selectedApp)} onClick={() => setDetailTab('settings')}><Plug className="mr-2 h-4 w-4" />{matchingConnections.length ? '添加另一个连接' : '连接应用'}</Button>}
                                 {!platformSupported(selectedApp) && <p className="text-sm text-muted-foreground">此应用尚未支持当前设备的安全凭据存储，暂不能在此设备建立认证连接。</p>}</>}
-                            {selectedServer && <><div className="flex items-center gap-2 text-sm"><Boxes className="h-4 w-4 text-muted-foreground" />{tools.get(selectedServer.id)?.length ?? 0} 个已发现工具</div><Button variant="outline" onClick={() => setDetailTab('tools')}>管理工具和高级配置</Button>{selectedServer.is_builtin && <p className="text-sm text-muted-foreground">内置工具由 AIPP 提供。工具适用场景、平台限制和系统保护继续生效；总管家专用能力不会向普通助手开放。</p>}</>}
+                            {selectedServer && <><div className="flex items-center gap-2 text-sm"><Boxes className="h-4 w-4 text-muted-foreground" />{tools.get(selectedServer.id)?.length || selectedServer.is_builtin || selectedConnection?.status === 'available' ? `${tools.get(selectedServer.id)?.filter(t => t.is_enabled).length ?? 0} / ${tools.get(selectedServer.id)?.length ?? 0} 个工具已启用` : '工具尚未检测，连接验证后显示'}</div><Button variant="outline" onClick={() => setDetailTab('tools')}>管理工具和高级配置</Button>{selectedServer.is_builtin && <p className="text-sm text-muted-foreground">内置工具由 AIPP 提供。工具适用场景、平台限制和系统保护继续生效；总管家专用能力不会向普通助手开放。</p>}</>}
                         </TabsContent>
                         {selectedServer && <TabsContent value="tools" className="pt-4"><MCPConfig key={selectedServer.id} initialServerId={selectedServer.id} detailOnly onEditManaged={selectedConnection ? () => setDetailTab('settings') : undefined} /></TabsContent>}
                         {selectedServer && <TabsContent value="access" className="pt-4"><AppAssistantAccess serverId={selectedServer.id} /></TabsContent>}
                         {selectedApp && <TabsContent value="settings" className="space-y-6 pt-4">
                             {platformSupported(selectedApp) ? <AppConnectForm key={`${selectedApp.id}-${selectedServer?.id ?? 'new'}-${formGeneration}`} app={selectedApp} connection={selectedConnection} onConnected={onConnected} /> : <p className="text-sm text-muted-foreground">当前平台不支持此应用的认证连接。</p>}
-                            {selectedConnection && <div className="space-y-2 border-t pt-5"><Button variant="outline" disabled={busyId !== undefined} onClick={() => void action(selectedConnection.server_id, 'disconnect_app_connection')}>断开并删除本机凭据</Button><p className="text-xs text-muted-foreground">立即阻止新的凭据使用；已执行的操作不会撤回。本地断开不代表撤销服务商授权，请按需在服务商账户设置中撤销。</p></div>}
+                            {selectedConnection && selectedServer && <AppTransportSettings key={`${selectedServer.id}-${selectedServer.timeout}-${selectedServer.proxy_enabled}`} server={selectedServer} onSaved={() => { toast.success('网络设置已保存'); void refresh().catch(e => setError(String(e))); }} />}
+                            {selectedConnection && <div className="space-y-2 border-t pt-5"><Button variant="outline" disabled={busyId !== undefined} onClick={() => void action(selectedConnection.server_id, 'disconnect_app_connection')}>断开连接</Button>{selectedConnection.status === 'disconnected' && selectedConnection.error && <Button variant="ghost" disabled={busyId !== undefined} onClick={() => void action(selectedConnection.server_id, 'disconnect_app_connection', false)}>仅删除本机凭据</Button>}<p className="text-xs text-muted-foreground">先停用连接，再尝试撤销服务商支持的 OAuth 令牌并删除本机凭据。撤销失败会明确提示并保留重试；仅本机断开不会撤销服务商授权，已执行的操作不会撤回。</p></div>}
                         </TabsContent>}
                     </Tabs>
                 </div>

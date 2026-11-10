@@ -1,9 +1,21 @@
 use crate::db::mcp_db::MCPServer;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use tauri::Manager;
 use rmcp::transport::{
     streamable_http_client::StreamableHttpClientTransportConfig,
     StreamableHttpClientTransport,
 };
+
+pub(crate) async fn configured_http_builder(app: &tauri::AppHandle, server: &MCPServer) -> Result<reqwest::ClientBuilder, String> {
+    let mut builder = reqwest::Client::builder();
+    if server.proxy_enabled {
+        let state = app.try_state::<crate::FeatureConfigState>().ok_or("网络配置状态不可用")?;
+        let config = state.config_feature_map.lock().await;
+        let proxy = crate::api::ai::config::get_network_proxy_from_config(&config).filter(|value| !value.trim().is_empty()).ok_or("此连接启用了代理，但全局网络代理尚未配置")?;
+        builder = builder.proxy(reqwest::Proxy::all(&proxy).map_err(|_| "全局网络代理地址格式无效")?);
+    }
+    Ok(builder)
+}
 
 /// Preserve configured headers, including the complete Authorization scheme.
 /// rmcp's auth_header accepts a bare bearer token, not an HTTP header value.
