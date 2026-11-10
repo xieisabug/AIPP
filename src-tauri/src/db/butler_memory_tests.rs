@@ -108,33 +108,45 @@ fn test_memory_recall_ranks_by_overlap_then_recency_and_limits() {
     assert!(recent.windows(2).all(|pair| pair[0].id > pair[1].id), "same timestamp falls back to id");
 }
 
+fn plan_for(conn: &Connection, text: &str, injected: &Injected, budget: usize) -> Delta {
+    let viewer = Viewer::Assistant(1);
+    plan(recent_for_prompt(conn, viewer).unwrap(), &visible_ids(conn, viewer).unwrap(), count(conn, viewer).unwrap(), text, injected, budget)
+}
+
 #[test]
-fn test_memory_prompt_selection_prefers_relevant_within_budget() {
+fn test_memory_plan_initial_prefers_relevant_within_budget() {
     let conn = db();
     let relevant = add(&conn, Scope::Assistant(1), &format!("部署流程：{}", "先".repeat(250)));
     let filler: Vec<_> = (0..6).map(|i| add(&conn, Scope::Assistant(1), &format!("{i}{}", "无".repeat(199)))).collect();
     let short = add(&conn, Scope::Global, "回答使用中文");
     // 最旧的短记录排在所有长记录之后：长记录放不下被跳过后，它仍能放入。
     conn.execute("UPDATE butler_memory SET updated_at=0 WHERE id=?1", [short.id]).unwrap();
-    let selection = select_for_prompt(&conn, Viewer::Assistant(1), "今天的部署流程是什么", 600).unwrap();
-    assert_eq!(selection.memories[0].id, relevant.id, "relevant memory goes first even though it is oldest");
-    let used: usize = selection.memories.iter().map(|m| m.content.chars().count()).sum();
+    let delta = plan_for(&conn, "今天的部署流程是什么", &Injected::default(), 600);
+    assert!(delta.initial);
+    assert_eq!(delta.listed[0].id, relevant.id, "relevant memory goes first even though it is oldest");
+    let used: usize = delta.listed.iter().map(|m| m.content.chars().count()).sum();
     assert!(used <= 600);
-    assert!(selection.memories.iter().any(|m| m.id == short.id), "a short memory still fits after a long one is skipped");
-    assert_eq!(selection.omitted, filler.len() + 2 - selection.memories.len());
+    assert!(delta.listed.iter().any(|m| m.id == short.id), "a short memory still fits after a long one is skipped");
+    assert_eq!(delta.omitted, filler.len() + 2 - delta.listed.len(), "首次附带放不下的计入 omitted");
 }
 
 #[test]
-fn test_memory_prompt_selection_empty_when_nothing_visible() {
+fn test_memory_plan_empty_when_nothing_visible() {
     let conn = db();
     add(&conn, Scope::Assistant(2), "别人的记忆");
-    let selection = select_for_prompt(&conn, Viewer::Assistant(1), "任意", PROMPT_BUDGET_CHARS).unwrap();
-    assert_eq!(selection, Selection { memories: vec![], omitted: 0 });
+    let delta = plan_for(&conn, "任意", &Injected::default(), PROMPT_BUDGET_CHARS);
+    assert!(delta.is_empty() && delta.omitted == 0, "{delta:?}");
 }
 
-fn plan_for(conn: &Connection, text: &str, injected: &Injected, budget: usize) -> Delta {
-    let viewer = Viewer::Assistant(1);
-    plan(recent_for_prompt(conn, viewer).unwrap(), &visible_ids(conn, viewer).unwrap(), count(conn, viewer).unwrap(), text, injected, budget)
+#[test]
+fn test_memory_remember_duplicate_hits_unique_index_and_returns_existing() {
+    // 先插入再查重：重复内容由唯一索引拦下（并发保存同一句话也走这条路），返回已有记录而不是约束错误。
+    let conn = db();
+    let first = add(&conn, Scope::Global, "所有助手使用中文");
+    let (again, created) = remember(&conn, Scope::Global, "所有助手使用中文", None, Some(9)).unwrap();
+    assert!(!created);
+    assert_eq!(again, first, "已有记录保持原样（作者、来源不被覆盖）");
+    assert_eq!(count(&conn, Viewer::Assistant(1)).unwrap(), 1);
 }
 
 #[test]
@@ -143,12 +155,12 @@ fn test_memory_plan_tops_up_relevant_old_memories_left_out_by_budget() {
     let deploy = add(&conn, Scope::Assistant(1), &format!("部署流程：{}", "先".repeat(150)));
     let style = add(&conn, Scope::Assistant(1), &format!("回答风格：{}", "简".repeat(150)));
     let first = plan_for(&conn, "你好", &Injected::default(), 200);
-    assert!(first.full);
+    assert!(first.initial);
     assert_eq!(first.listed.len(), 1, "预算只放得下一条");
     assert_eq!(first.omitted, 1);
     let left_out = if first.listed[0].id == deploy.id { &style } else { &deploy };
     let injected = Injected {
-        full: true,
+        initial: true,
         as_of: now() + 1_000,
         revisions: HashMap::from([(first.listed[0].id, Some(first.listed[0].revision))]),
     };
@@ -159,7 +171,7 @@ fn test_memory_plan_tops_up_relevant_old_memories_left_out_by_budget() {
     let topic = if left_out.id == deploy.id { "部署流程怎么走" } else { "回答风格是什么" };
     let relevant = plan_for(&conn, topic, &injected, 200);
     assert_eq!(relevant.listed.iter().map(|m| m.id).collect::<Vec<_>>(), vec![left_out.id]);
-    assert!(!relevant.full && relevant.omitted == 0);
+    assert!(!relevant.initial && relevant.omitted == 0);
 }
 
 #[test]
@@ -167,7 +179,7 @@ fn test_memory_plan_updates_ignore_budget_and_report_removals() {
     let conn = db();
     let long = add(&conn, Scope::Assistant(1), &"长".repeat(250));
     let injected = Injected {
-        full: true,
+        initial: true,
         as_of: now() + 1_000,
         revisions: HashMap::from([(long.id, Some(long.revision)), (999, Some(1)), (998, None)]),
     };
@@ -178,18 +190,18 @@ fn test_memory_plan_updates_ignore_budget_and_report_removals() {
 }
 
 #[test]
-fn test_memory_plan_full_injection_skips_memories_already_seen_at_current_revision() {
+fn test_memory_plan_initial_injection_skips_memories_already_seen_at_current_revision() {
     let conn = db();
     let seen = add(&conn, Scope::Assistant(1), "回答先给结论");
     let stale = add(&conn, Scope::Assistant(1), "周报用表格");
     let other = add(&conn, Scope::Assistant(1), "用户在做 AIPP 项目");
     update(&conn, None, stale.id, None, "周报用表格和图", None).unwrap();
-    // 还没有完整附带，但模型已经从工具结果里看到 seen 的当前版本、stale 的旧版本。
+    // 还没有首次附带，但模型已经从工具结果里看到 seen 的当前版本、stale 的旧版本。
     let mut injected = Injected::default();
     injected.saw(seen.id, Some(seen.revision));
     injected.saw(stale.id, Some(stale.revision));
     let delta = plan_for(&conn, "你好", &injected, 800);
-    assert!(delta.full);
+    assert!(delta.initial);
     assert_eq!(delta.updated.iter().map(|m| m.id).collect::<Vec<_>>(), vec![stale.id]);
     assert_eq!(delta.listed.iter().map(|m| m.id).collect::<Vec<_>>(), vec![other.id]);
     assert_eq!(delta.omitted, 0, "看到过的不算没附带");

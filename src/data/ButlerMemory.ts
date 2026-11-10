@@ -25,3 +25,9 @@ export interface ButlerMemorySource {
 
 /** 单条记忆字数上限（与后端 `MAX_CONTENT_CHARS` 一致）。 */
 export const BUTLER_MEMORY_MAX_CHARS = 300;
+
+/**
+ * 记忆字数：去掉首尾空白后按字符（Unicode 码点）计，与后端 `chars().count()` 一致。
+ * 不能用 `string.length`（UTF-16 单元）：emoji 等会被算成两个字，和后端的上限对不上。
+ */
+export const butlerMemoryLength = (text: string) => Array.from(text.trim()).length;

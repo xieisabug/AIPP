@@ -212,7 +212,8 @@ fn test_memory_turn_block_lists_visible_memories_with_scope_tags() {
     remember_in(&mut c, 51, 61, "周五交付");
     let none = memory::Injected::default();
     let block = turn_block(&c, 21, "AIPP 的进度", &none, 1).unwrap().unwrap();
-    assert!(block.starts_with("<long_term_memory full=\"true\" as_of=\"1\">"), "{block}");
+    assert!(block.starts_with("<long_term_memory initial=\"true\" as_of=\"1\">"), "{block}");
+    assert!(block.contains("不一定是全部"), "首次附带不能让模型以为已经知道全部记忆：{block}");
     assert!(block.contains(&format!("- #{own} v1：用户在做 AIPP 项目")), "{block}");
     assert!(block.contains(&format!("- #{global} v1（全局）：回答使用中文")), "{block}");
     assert!(!block.contains("周五交付"), "{block}");
@@ -224,7 +225,7 @@ fn test_memory_turn_block_lists_visible_memories_with_scope_tags() {
 }
 
 #[test]
-fn test_memory_turn_block_only_adds_changes_after_full_injection() {
+fn test_memory_turn_block_only_adds_changes_after_initial_injection() {
     let mut c = fixture();
     let kept = remember_in(&mut c, 20, 2, "用户在做 AIPP 项目")["memory"]["id"].as_i64().unwrap();
     let edited = remember_in(&mut c, 20, 2, "回答先给结论")["memory"]["id"].as_i64().unwrap();
@@ -247,9 +248,9 @@ fn test_memory_turn_block_only_adds_changes_after_full_injection() {
 
     history.push(user(&second));
     assert!(turn_block(&c, 20, "你好", &seen(&history), 4).unwrap().is_none());
-    // 早期内容被压缩且检查点里没有记忆：完整附带一次，但历史里仍看得到的不重复。
+    // 早期内容被压缩且检查点里没有记忆：重新首次附带，但历史里仍看得到的不重复。
     let again = turn_block(&c, 20, "你好", &seen(&history[2..]), 5).unwrap().unwrap();
-    assert!(again.contains("full=\"true\""), "{again}");
+    assert!(again.contains("initial=\"true\""), "{again}");
     assert!(again.contains(&format!("- #{kept} v1：")) && !again.contains("已删除"), "{again}");
     assert!(!again.contains(&format!("#{edited} ")) && !again.contains(&format!("#{added} ")), "{again}");
 }
@@ -283,8 +284,8 @@ fn test_memory_turn_block_skips_what_the_memory_tool_already_returned() {
 #[test]
 fn test_memory_seen_in_history_reads_blocks_checkpoint_and_tool_results() {
     let history = vec![
-        ("system".to_string(), "系统提示 <long_term_memory full=\"true\" as_of=\"5\">\n- #8 v1：提示词里的不算\n</long_term_memory>".to_string()),
-        ("system".to_string(), "<context_summary>\n摘要转述：<long_term_memory as_of=\"6\">\n- #7 v1：摘要里转述的不算\n</long_term_memory>\n</context_summary>\n\n<long_term_memory full=\"true\" as_of=\"10\">\n- #1 v1：甲\n</long_term_memory>\n说明".to_string()),
+        ("system".to_string(), "系统提示 <long_term_memory initial=\"true\" as_of=\"5\">\n- #8 v1：提示词里的不算\n</long_term_memory>".to_string()),
+        ("system".to_string(), "<context_summary>\n摘要转述：<long_term_memory as_of=\"6\">\n- #7 v1：摘要里转述的不算\n</long_term_memory>\n</context_summary>\n\n<long_term_memory initial=\"true\" as_of=\"10\">\n- #1 v1：甲\n</long_term_memory>\n说明".to_string()),
         user("<long_term_memory as_of=\"20\">\n- #2 v3（全局）：乙\n- #1 v2（已更新，替换之前的版本）：甲二\n</long_term_memory>"),
         tool_result(&json!({"status":"saved","memory":{"id":3,"revision":1,"scope":"assistant","content":"丙"}})),
         tool_result(&json!({"status":"forgotten","id":2})),
@@ -293,11 +294,11 @@ fn test_memory_seen_in_history_reads_blocks_checkpoint_and_tool_results() {
         ("tool_result".to_string(), "Tool execution completed:\n\nTool Call ID: c\nTool: butler_memory\nServer: s\nParameters: {}\nResult:\nError: 写入失败".to_string()),
     ];
     let state = seen(&history);
-    assert!(state.full);
+    assert!(state.initial);
     assert_eq!(state.as_of, 20);
     assert_eq!(state.revisions, std::collections::HashMap::from([(1, Some(2)), (2, None), (3, Some(1)), (4, Some(2))]));
-    assert!(!seen(&history[..1]).full, "系统提示词里的不算完整附带");
-    let typed = "<long_term_memory full=\"true\" as_of=\"1\">\n- #1 v1：用户自己打的\n</long_term_memory>";
+    assert!(!seen(&history[..1]).initial, "系统提示词里的不算首次附带");
+    let typed = "<long_term_memory initial=\"true\" as_of=\"1\">\n- #1 v1：用户自己打的\n</long_term_memory>";
     assert_eq!(seen_in_history([("user", typed)]), memory::Injected::default(), "用户原话里的不算");
 }
 
@@ -307,22 +308,46 @@ fn test_memory_checkpoint_block_carries_memories_the_tail_does_not_show() {
     let old = remember_in(&mut c, 20, 2, "用户在做 AIPP 项目")["memory"]["id"].as_i64().unwrap();
     let saved = run(&mut c, 20, Some(2), json!({"action":"remember","content":"回答先给结论"})).unwrap();
     let recent = saved["memory"]["id"].as_i64().unwrap();
-    // 压缩后原样保留的近期消息里只有一次工具保存；早期的完整附带被摘要替换了。
+    // 压缩后原样保留的近期消息里只有一次工具保存；早期的首次附带被摘要替换了。
     let tail = vec![("user".to_string(), "AIPP 进度怎样".to_string()), tool_result(&saved), ("response".to_string(), "好".to_string())];
     let pairs: Vec<(&str, &str)> = tail.iter().map(|(kind, content)| (kind.as_str(), content.as_str())).collect();
     let block = checkpoint_block(&c, 20, &pairs, 7).unwrap().unwrap();
-    assert!(block.starts_with("<long_term_memory full=\"true\" as_of=\"7\">"), "{block}");
+    assert!(block.starts_with("<long_term_memory initial=\"true\" as_of=\"7\">"), "{block}");
     assert!(block.contains(&format!("- #{old} v1：")) && !block.contains(&format!("#{recent} ")), "{block}");
     // 检查点接在摘要后面存成 system 消息：之后的用户消息只附带变化，不会整批重带。
     let mut history = vec![("system".to_string(), format!("<context_summary>\n摘要\n</context_summary>\n\n{block}"))];
     history.extend(tail);
     assert!(turn_block(&c, 20, "你好", &seen(&history), 8).unwrap().is_none());
-    // 近期消息里已经有完整附带：检查点不用再带。
+    // 近期消息里已经有首次附带：检查点不用再带。
     let full = turn_block(&c, 20, "你好", &memory::Injected::default(), 1).unwrap().unwrap();
     let full_tail = [user(&full)];
     let pairs: Vec<(&str, &str)> = full_tail.iter().map(|(kind, content)| (kind.as_str(), content.as_str())).collect();
     assert!(checkpoint_block(&c, 20, &pairs, 9).unwrap().is_none());
     assert!(checkpoint_block(&c, 40, &[("user", "普通聊天")], 9).unwrap().is_none(), "普通会话没有长期记忆");
+}
+
+#[test]
+fn test_memory_without_memory_hides_attached_memory_from_the_summarizer() {
+    let mut c = fixture();
+    remember_in(&mut c, 20, 2, "用户希望回答先给结论");
+    let block = turn_block(&c, 20, "你好", &memory::Injected::default(), 1).unwrap().unwrap();
+    // 用户消息：附加上下文里的记忆块和说明去掉，时间等其他上下文与原话保留。
+    let (_, stored) = user(&format!("<current_time>t</current_time>\n\n{block}"));
+    let stripped = without_memory("user", &stored);
+    assert!(!stripped.contains("先给结论") && !stripped.contains("长期记忆"), "{stripped}");
+    assert_eq!(crate::utils::turn_context::visible(&stripped), "你好");
+    assert_eq!(crate::utils::turn_context::context(&stripped), Some("<current_time>t</current_time>"));
+    // 只有记忆的附加上下文整块去掉。
+    let (_, only_memory) = user(&block);
+    assert_eq!(without_memory("user", &only_memory), "你好");
+    // 旧检查点：摘要正文（包括其中的转述）保留，摘要后面附带的记忆块去掉。
+    let checkpoint = format!("<context_summary>\n摘要：用户要周报\n</context_summary>\n\n{block}");
+    assert_eq!(without_memory("system", &checkpoint), "<context_summary>\n摘要：用户要周报\n</context_summary>");
+    // 没有记忆块、或不是用户/检查点消息：原样返回，不复制。
+    let plain = "回答里引用 <long_term_memory>- #1 v1：x</long_term_memory>";
+    assert!(matches!(without_memory("response", plain), std::borrow::Cow::Borrowed(_)));
+    assert!(matches!(without_memory("user", "你好"), std::borrow::Cow::Borrowed(_)));
+    assert_eq!(without_memory("user", plain), plain, "用户原话里自己打的标签不动");
 }
 
 #[test]

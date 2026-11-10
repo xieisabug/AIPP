@@ -66,7 +66,7 @@ fn test_ui_search_paginates_case_insensitively() {
 #[test]
 fn test_search_ignores_turn_context_attached_to_user_messages() {
     let conn = database();
-    let block = crate::utils::turn_context::wrap(["<long_term_memory full=\"true\" as_of=\"1\">\n- #3 v1：用户喜欢流程图\n</long_term_memory>"]);
+    let block = crate::utils::turn_context::wrap(["<long_term_memory initial=\"true\" as_of=\"1\">\n- #3 v1：用户喜欢流程图\n</long_term_memory>"]);
     let stored = crate::utils::turn_context::append("帮我画个架构图", block.as_deref());
     let id = message(&conn, 20, "user", &stored, None);
     let names = HashMap::from([(2, "写作".to_string())]);

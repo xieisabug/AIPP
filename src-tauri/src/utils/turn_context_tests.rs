@@ -27,10 +27,35 @@ fn test_turn_context_requires_trailing_block() {
 }
 
 #[test]
+fn test_turn_context_ignores_tags_typed_by_the_user() {
+    // 用户原话以自己打的一对标签结尾、系统没有附带：整条都是原话。
+    let typed_pair = "解释一下 <aipp_turn_context>x</aipp_turn_context>";
+    assert_eq!(split(typed_pair), (typed_pair, None));
+    // 原话中间有用户打的一对标签、末尾是系统附带的块：只去掉系统的块，原话完整保留。
+    let body = "A <aipp_turn_context>示例</aipp_turn_context> B\n还有一句";
+    let block = wrap(["<current_time>t</current_time>"]).unwrap();
+    let stored = append(body, Some(block.as_str()));
+    assert_eq!(split(&stored), (body, Some("<current_time>t</current_time>")));
+    // 块里转述了一段带附加上下文的原文：以第一处块开头为准，转述的内容留在块里。
+    let quoted = append("问题", wrap([format!("<recent_work>{}</recent_work>", append("旧话", Some(block.as_str())))]).as_deref());
+    assert_eq!(visible(&quoted), "问题");
+    assert!(context(&quoted).unwrap().ends_with("</recent_work>"));
+}
+
+#[test]
 fn test_turn_context_sql_matches_rust() {
     let conn = Connection::open_in_memory().unwrap();
-    let stored = append("问题\n", wrap(["<current_time>t</current_time>"]).as_deref());
-    for text in [stored.as_str(), "没有附加上下文", "怎么用 <aipp_turn_context> 这个标签？", ""] {
+    let block = wrap(["<current_time>t</current_time>"]).unwrap();
+    let stored = append("问题\n", Some(block.as_str()));
+    let typed_then_block = append("A <aipp_turn_context>示例</aipp_turn_context> B", Some(block.as_str()));
+    for text in [
+        stored.as_str(),
+        typed_then_block.as_str(),
+        "没有附加上下文",
+        "怎么用 <aipp_turn_context> 这个标签？",
+        "解释一下 <aipp_turn_context>x</aipp_turn_context>",
+        "",
+    ] {
         let sql: String = conn
             .query_row(&format!("SELECT {}", visible_sql("?1")), [text], |r| r.get(0))
             .unwrap();
@@ -49,8 +74,8 @@ fn test_turn_context_elements_and_attributes() {
     ];
     assert_eq!(last_element(&contexts, &["recent_work", "available_work"]), Some("<available_work ref=\"task:2\">最新</available_work>"));
     assert_eq!(last_element(&contexts, &["current_butler_goal"]), None);
-    let memory = "<long_term_memory full=\"true\" as_of=\"1794300992374\">\n- #3 v1：x\n</long_term_memory>";
+    let memory = "<long_term_memory initial=\"true\" as_of=\"1794300992374\">\n- #3 v1：x\n</long_term_memory>";
     assert_eq!(attribute(memory, "as_of"), Some("1794300992374"));
-    assert_eq!(attribute(memory, "full"), Some("true"));
+    assert_eq!(attribute(memory, "initial"), Some("true"));
     assert_eq!(attribute(memory, "missing"), None);
 }

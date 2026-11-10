@@ -4,14 +4,16 @@
 //! 模型历史因此逐字回放当时实际发送的内容：缓存前缀保持稳定，工具续写、重新生成也不会丢掉这一轮的上下文，
 //! 模型也能看到自己之前收到过什么。
 //! 给人看或检索的地方（气泡、摘要、搜索、标题、外部渠道转发）只看用户原话，读取时用 [`visible`] 或 [`visible_sql`] 去掉。
-//! 只有以 `</aipp_turn_context>` 结尾的正文才算带附加上下文，用户自己打出这个标签不会被误判。
+//! 识别规则：正文以 `</aipp_turn_context>` 结尾，且含有 [`wrap`] 写出的块开头（开标签紧跟说明行），从第一处这样的开头算起。
+//! 只认开标签的话，用户自己打出 `<aipp_turn_context>…</aipp_turn_context>` 会把后面的原话当成附加上下文藏掉；
+//! 说明行只由系统写出，用户不会恰好打出这一整行。取第一处（而不是最后一处）是因为块里的工作记录、引用内容
+//! 可能转述带附加上下文的原文，SQL 也只能方便地找第一处，三端规则保持一致。
 //!
 //! 与 `src/utils/turnContext.ts` 保持一致。
 
-pub const OPEN: &str = "<aipp_turn_context>";
 pub const CLOSE: &str = "</aipp_turn_context>";
-/// 块内第一行，告诉模型这不是用户写的内容。
-const HEADER: &str = "以下是系统随这条消息附带的上下文，不是用户写的内容。";
+/// 块开头：开标签 + 换行 + 说明行（告诉模型这不是用户写的内容）。只由 [`wrap`] 写出，识别附加上下文以它为准。
+const START: &str = "<aipp_turn_context>\n以下是系统随这条消息附带的上下文，不是用户写的内容。";
 
 /// 把若干段上下文包成一块；全部为空时返回 None。
 pub fn wrap<I, S>(sections: I) -> Option<String>
@@ -27,7 +29,7 @@ where
     if body.is_empty() {
         return None;
     }
-    Some(format!("{OPEN}\n{HEADER}\n{}\n{CLOSE}", body.join("\n\n")))
+    Some(format!("{START}\n{}\n{CLOSE}", body.join("\n\n")))
 }
 
 /// 把附加上下文接在消息正文末尾。
@@ -42,12 +44,10 @@ pub fn append(content: &str, context: Option<&str>) -> String {
 /// 拆成（给人看的部分，附加上下文的正文）。没有附加上下文时原样返回。
 pub fn split(content: &str) -> (&str, Option<&str>) {
     let trimmed = content.trim_end();
-    let Some(at) = trimmed.strip_suffix(CLOSE).and_then(|_| trimmed.find(OPEN)) else {
+    let Some((at, body)) = trimmed.strip_suffix(CLOSE).and_then(|body| Some((body.find(START)?, body))) else {
         return (content, None);
     };
-    let inner = trimmed[at + OPEN.len()..trimmed.len() - CLOSE.len()].trim();
-    let inner = inner.strip_prefix(HEADER).unwrap_or(inner).trim();
-    (trimmed[..at].trim_end(), Some(inner))
+    (trimmed[..at].trim_end(), Some(body[at + START.len()..].trim()))
 }
 
 /// 用户消息给人看的部分。
@@ -62,9 +62,10 @@ pub fn context(content: &str) -> Option<&str> {
 
 /// SQL 表达式：某列给人看的部分，规则与 [`visible`] 相同，供检索和摘要在数据库里直接使用。
 pub fn visible_sql(column: &str) -> String {
+    // 块开头里的换行在 SQL 字符串字面量里原样保留，instr 按字符计位置，与 substr 一致。
     format!(
-        "(CASE WHEN instr({column},'{OPEN}')>0 AND substr(rtrim({column},char(9,10,13,32)),-{close_len})='{CLOSE}' \
-         THEN rtrim(substr({column},1,instr({column},'{OPEN}')-1),char(9,10,13,32)) ELSE {column} END)",
+        "(CASE WHEN instr({column},'{START}')>0 AND substr(rtrim({column},char(9,10,13,32)),-{close_len})='{CLOSE}' \
+         THEN rtrim(substr({column},1,instr({column},'{START}')-1),char(9,10,13,32)) ELSE {column} END)",
         close_len = CLOSE.chars().count(),
     )
 }

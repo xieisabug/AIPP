@@ -53,6 +53,20 @@ describe("ButlerMemoryPanel", () => {
         expect(api.listButlerMemories).toHaveBeenCalledTimes(2);
     });
 
+    it("should count characters like the backend when the draft contains emoji", async () => {
+        render(<ButlerMemoryPanel conversationId={20} scope="assistant" />);
+        await screen.findByText("所有回答使用中文");
+        fireEvent.click(within(item("所有回答使用中文")).getByRole("button", { name: "修改记忆 #2" }));
+        const editor = screen.getByLabelText("编辑记忆 #2");
+        // 300 个 emoji 是 600 个 UTF-16 单元，但后端按字符算正好 300 字，可以保存。
+        fireEvent.change(editor, { target: { value: "👍".repeat(300) } });
+        expect(screen.getByText("300 / 300")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+        fireEvent.change(editor, { target: { value: "👍".repeat(301) } });
+        expect(screen.getByText("301 / 300")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    });
+
     it("should delete only after confirmation and show the underlying error when it fails", async () => {
         api.deleteButlerMemory.mockRejectedValue("记忆 #1 已被修改（当前版本 2），请重新读取后再操作");
         render(<ButlerMemoryPanel conversationId={20} scope="assistant" />);

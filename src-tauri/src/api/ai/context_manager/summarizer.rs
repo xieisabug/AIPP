@@ -313,6 +313,7 @@ fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
 }
 
 /// Format messages into a readable text block for the summarization prompt.
+/// 附带的长期记忆不交给摘要模型：压缩后由检查点统一附带当前版本（`CheckpointStore::memory_snapshot`）。
 fn format_messages_for_summary(messages: &[MessageTuple]) -> String {
     let mut parts = Vec::with_capacity(messages.len());
     for (msg_type, content, _attachments) in messages {
@@ -324,9 +325,11 @@ fn format_messages_for_summary(messages: &[MessageTuple]) -> String {
             "reasoning" => "[推理]",
             _ => "[其他]",
         };
+        let content = crate::api::butler_memory::without_memory(msg_type, content);
+        let content: &str = &content;
         // Limit individual message preview to avoid blowing up the summarization prompt itself
         let truncated = if content.len() <= MESSAGE_PREVIEW_LIMIT {
-            content.clone()
+            content.to_owned()
         } else if msg_type == "user" {
             // 用户长指令的末尾常是限制条件，保留开头与结尾
             let head_end = floor_char_boundary(content, USER_HEAD_BYTES);
@@ -362,6 +365,20 @@ mod tests {
         assert!(result.contains("[用户] Hello"));
         assert!(result.contains("[助手] Hi!"));
         assert!(result.contains("---"));
+    }
+
+    #[test]
+    fn format_messages_leaves_attached_memory_to_the_checkpoint() {
+        use crate::utils::turn_context::{append, wrap};
+        let memory = "<long_term_memory initial=\"true\" as_of=\"1\">\n- #3 v1：用户希望回答先给结论\n</long_term_memory>";
+        let context = wrap(["<current_time>t</current_time>", memory]);
+        let msgs: Vec<MessageTuple> = vec![
+            ("user".into(), append("写周报", context.as_deref()), vec![]),
+            ("system".into(), format!("<context_summary>\n旧摘要\n</context_summary>\n\n{memory}"), vec![]),
+        ];
+        let result = format_messages_for_summary(&msgs);
+        assert!(result.contains("写周报") && result.contains("<current_time>t</current_time>") && result.contains("旧摘要"), "{result}");
+        assert!(!result.contains("先给结论"), "记忆由新检查点统一附带，不进摘要：{result}");
     }
 
     #[test]

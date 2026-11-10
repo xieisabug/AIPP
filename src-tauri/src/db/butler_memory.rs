@@ -156,25 +156,28 @@ fn source_columns(source: Option<Source>) -> (Option<i64>, Option<i64>, Option<i
 }
 
 /// 保存记忆。同一范围已有完全相同的内容时返回已有记录（`false` 表示未新建）。
+/// 先插入、撞上唯一索引再读已有记录：并发保存同一句话时也返回 already_exists，而不是把唯一约束错误交给模型。
 pub fn remember(conn: &Connection, scope: Scope, content: &str, source: Option<Source>, author: Option<i64>) -> Result<(Memory, bool)> {
     let content = normalize(content)?;
     let (kind, scope_id) = scope.parts();
     ensure!(scope_id.map_or(true, |id| id > 0), "记忆范围缺少有效编号");
+    let (message, group, seq) = source_columns(source);
+    let stamp = now();
+    // DO NOTHING 只针对唯一约束（idx_butler_memory_exact），CHECK 等其他约束仍照常报错。
+    let inserted = conn.execute(
+        "INSERT INTO butler_memory(content,scope_type,scope_id,author_assistant_id,source_message_id,source_group_id,source_group_seq,revision,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8,?8) ON CONFLICT DO NOTHING",
+        params![content, kind, scope_id, author, message, group, seq, stamp],
+    )?;
+    if inserted == 1 {
+        return Ok((get_any(conn, conn.last_insert_rowid())?.context("新记忆写入后读取失败")?, true));
+    }
     let existing = conn.query_row(
         &format!("SELECT {COLUMNS} FROM butler_memory WHERE scope_type=?1 AND scope_id IS ?2 AND content=?3"),
         params![kind, scope_id, content], row,
-    ).optional()?;
-    if let Some(memory) = existing {
-        return Ok((memory, false));
-    }
-    let (message, group, seq) = source_columns(source);
-    let stamp = now();
-    conn.execute(
-        "INSERT INTO butler_memory(content,scope_type,scope_id,author_assistant_id,source_message_id,source_group_id,source_group_seq,revision,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8,?8)",
-        params![content, kind, scope_id, author, message, group, seq, stamp],
-    )?;
-    Ok((get_any(conn, conn.last_insert_rowid())?.context("新记忆写入后读取失败")?, true))
+    ).optional()?
+        .with_context(|| format!("记忆写入被唯一约束拦下，但找不到同一范围（{kind} {scope_id:?}）里内容相同的记录"))?;
+    Ok((existing, false))
 }
 
 /// 按 id 读取，不检查范围（供界面与内部使用）。
@@ -295,22 +298,6 @@ pub fn recall(conn: &Connection, viewer: Viewer, query: &str) -> Result<Vec<Memo
     Ok(ranked)
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Selection {
-    pub memories: Vec<Memory>,
-    /// 可见但本轮没有附带的条数（预算放不下或超出打分范围）。
-    pub omitted: usize,
-}
-
-/// 每轮附带的记忆：与本轮内容越相关越靠前，相同时越新越靠前，正文总字数不超过 budget。
-/// 放不下的较长记录跳过，后面较短的仍可放入。
-pub fn select_for_prompt(conn: &Connection, viewer: Viewer, text: &str, budget: usize) -> Result<Selection> {
-    let total = count(conn, viewer)?;
-    let memories = fill(rank(recent(conn, viewer, SCAN_LIMIT)?, text, false), budget, 0);
-    // count 与 recent 不在同一事务里，期间可能有新写入；用 saturating_sub 避免下溢。
-    Ok(Selection { omitted: total.saturating_sub(memories.len()), memories })
-}
-
 /// 按顺序放入预算：放不下的较长记录跳过，后面较短的仍可放入。`used` 为已占用的字数。
 fn fill(ranked: Vec<Memory>, budget: usize, mut used: usize) -> Vec<Memory> {
     let mut picked = Vec::new();
@@ -341,8 +328,8 @@ pub fn visible_ids(conn: &Connection, viewer: Viewer) -> Result<HashSet<i64>> {
 /// 模型在这次要发出的历史里已经看到的记忆：附带过的记忆块（含压缩检查点里的），以及记忆工具返回给它的结果。
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Injected {
-    /// 历史里有完整附带；没有时本轮完整附带一次。
-    pub full: bool,
+    /// 历史里有首次附带（按相关度在预算内挑的一批，不保证是全部）；没有时本轮做一次首次附带。
+    pub initial: bool,
     /// 最近一次附带的时间（毫秒）；之后新建或更新的记忆算新增。
     pub as_of: i64,
     /// 每条记忆模型看到的最新版本；None 表示已经知道它被删除。
@@ -364,8 +351,9 @@ impl Injected {
 /// 本轮要附带的记忆变化。
 #[derive(Debug, Default, PartialEq)]
 pub struct Delta {
-    /// 历史里没有完整附带（会话首轮，或早期内容被压缩、换了分支且检查点里也没有），本轮完整附带一次。
-    pub full: bool,
+    /// 历史里没有首次附带（会话首轮，或早期内容被压缩、换了分支且检查点里也没有），本轮是首次附带。
+    /// 首次附带只是预算内最相关的一批，放不下的计入 `omitted`。
+    pub initial: bool,
     /// 首次附带或补带的记忆。
     pub listed: Vec<Memory>,
     /// 版本变了的记忆，替换历史里的旧版本。
@@ -385,7 +373,7 @@ impl Delta {
 /// 规划本轮附带哪些记忆。模型已经看到且没有变化的不再重复，历史里的内容保持不动（缓存前缀稳定）。
 ///
 /// 总是附带：更新过的（不占预算，必须替换旧版本）、已删除或不再可见的。此外：
-/// - 历史里没有完整附带：还没看到过的记忆按相关度、再按最近更新放入预算（完整附带）。
+/// - 历史里没有首次附带：还没看到过的记忆按相关度、再按最近更新放入预算（首次附带，放不下的不附带）。
 /// - 否则只放入上次附带之后新建或更新的，以及与本轮相关但还没看到过的。
 ///
 /// `memories` 按最近更新排列（[`recent_for_prompt`]），`visible` 为全部可见编号，`total` 为可见总数。
@@ -401,7 +389,7 @@ pub fn plan(memories: Vec<Memory>, visible: &HashSet<i64>, total: usize, text: &
         match injected.revisions.get(&memory.id) {
             Some(Some(revision)) if memory.revision > *revision => updated.push(memory),
             Some(Some(_)) => unchanged += 1,
-            _ if !injected.full || memory.updated_at > injected.as_of => fresh.push(memory),
+            _ if !injected.initial || memory.updated_at > injected.as_of => fresh.push(memory),
             _ if score(&memory.content, &terms) > 0 => relevant.push(memory),
             _ => {}
         }
@@ -411,7 +399,7 @@ pub fn plan(memories: Vec<Memory>, visible: &HashSet<i64>, total: usize, text: &
     candidates.extend(rank(relevant, text, true));
     let listed = fill(candidates, budget, used);
     Delta {
-        full: !injected.full,
+        initial: !injected.initial,
         omitted: total.saturating_sub(unchanged + updated.len() + listed.len()),
         listed,
         updated,

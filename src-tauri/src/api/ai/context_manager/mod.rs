@@ -186,8 +186,9 @@ pub async fn fit_to_budget_with_compaction(
     };
     let summary = summarizer::generate_summary(ctx.client, ctx.model_name, &summary_input, ctx.summary_role, ctx.require_complete_summary, &validate_execution, ctx.cancel_token.as_ref(), &record_usage)
         .await.map_err(|e| crate::errors::AppError::UnknownError(format!("会话 {} 上下文摘要失败：{}", ctx.conversation_id, e)))?;
-    // 管家会话：早期附带的长期记忆随原文一起被摘要替换，在摘要后面完整附带一次，
-    // 压缩这一轮就能看到，之后的用户消息也只需附带变化。附带失败不影响压缩，下一条用户消息会重新完整附带。
+    // 管家会话：早期附带的长期记忆随原文一起被摘要替换（摘要输入里已去掉记忆块，见 summarizer），
+    // 在摘要后面重新首次附带一次当前版本，压缩这一轮就能看到，之后的用户消息也只需附带变化。
+    // 附带失败不影响压缩，下一条用户消息会重新首次附带。
     let summary = match ctx.checkpoint_store.memory_snapshot(ctx.conversation_id, &messages[body_end..]) {
         Ok(Some(memory)) => format!("{summary}\n\n{memory}"),
         Ok(None) => summary,

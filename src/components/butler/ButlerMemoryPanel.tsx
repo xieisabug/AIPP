@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from "react"
 import { Brain, Loader2, Pencil, Quote, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { BUTLER_MEMORY_MAX_CHARS, type ButlerMemory, type ButlerMemorySource } from "@/data/ButlerMemory";
+import { BUTLER_MEMORY_MAX_CHARS, butlerMemoryLength, type ButlerMemory, type ButlerMemorySource } from "@/data/ButlerMemory";
 import * as memoryApi from "@/services/butlerMemoryService";
 
 interface Props {
@@ -140,16 +140,19 @@ export default function ButlerMemoryPanel({ conversationId, scope }: Props) {
     const item = (memory: ButlerMemory) => {
         const draft = editing && editing.id === memory.id ? editing.draft : null;
         const busy = busyId === memory.id;
+        // 不用 textarea 的 maxLength：它按 UTF-16 单元计数，和后端按字符计的上限不一致。
+        const draftLength = draft === null ? 0 : butlerMemoryLength(draft);
+        const tooLong = draftLength > BUTLER_MEMORY_MAX_CHARS;
         return <li key={memory.id} data-aipp-slot="butler-memory-item"
             className="group/memory rounded-lg border border-border bg-background px-4 py-3 transition-colors hover:border-foreground/20">
             {draft !== null ? <div className="space-y-2">
-                <Textarea aria-label={`编辑记忆 #${memory.id}`} value={draft} rows={3} maxLength={BUTLER_MEMORY_MAX_CHARS} autoFocus
+                <Textarea aria-label={`编辑记忆 #${memory.id}`} value={draft} rows={3} autoFocus aria-invalid={tooLong}
                     className="min-h-20 text-sm leading-6" onChange={event => setEditing({ id: memory.id, draft: event.target.value })} />
                 <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs tabular-nums text-muted-foreground">{draft.trim().length} / {BUTLER_MEMORY_MAX_CHARS}</span>
+                    <span className={`text-xs tabular-nums ${tooLong ? "text-destructive" : "text-muted-foreground"}`}>{draftLength} / {BUTLER_MEMORY_MAX_CHARS}</span>
                     <div className="flex gap-2">
                         <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>取消</Button>
-                        <Button type="button" size="sm" disabled={busy || !draft.trim()} onClick={() => void save(memory, draft)}>
+                        <Button type="button" size="sm" disabled={busy || !draft.trim() || tooLong} onClick={() => void save(memory, draft)}>
                             {busy && <Loader2 className="size-3.5 animate-spin" />}保存
                         </Button>
                     </div>
