@@ -15,6 +15,8 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 ## Essential Build Commands
 
+**genai 依赖**：AIPP 不内嵌 genai 源码，通过 `src-tauri/Cargo.toml` 的 GitHub Git 依赖和固定 `rev` 使用独立 `xieisabug/rust-genai` 仓库。Provider/协议实现与缓存协议补丁在该独立项目维护；AIPP 保留应用配置、持久化与使用策略。更新依赖前先推送库提交，再更新 `rev` 与 `Cargo.lock`，不得提交依赖本机目录的路径配置。
+
 ```bash
 # Verify frontend changes (includes TypeScript check)
 npm run build

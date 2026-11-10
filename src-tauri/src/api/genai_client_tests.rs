@@ -15,6 +15,50 @@ fn endpoint_config(endpoint: &str) -> Vec<LLMProviderConfig> {
     }]
 }
 
+/// AIPP supplies its identity and selected protocol to the independent provider.
+#[tokio::test]
+async fn test_magpie_client_uses_library_transport_with_aipp_identity() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1beta/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+            if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length: "))
+                    .map(|value| value.parse().unwrap()).unwrap_or(0);
+                if bytes.len() >= end + 4 + length { break; }
+            }
+        }
+        socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        String::from_utf8(bytes).unwrap()
+    });
+    let client = create_client_with_config(None, &endpoint_config(&endpoint), "auto/model", "magpie",
+        Some("responses"), Some("http://127.0.0.1:1"), true, Some(3), false, &HashMap::new()).unwrap();
+    let result = client.exec_chat("auto/model", genai::chat::ChatRequest::from_user("hello"), None).await;
+    assert!(result.is_err());
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+    assert!(request.starts_with("POST /v1/responses HTTP/1.1"), "{request}");
+    let headers = request.split("\r\n\r\n").next().unwrap().to_ascii_lowercase();
+    assert!(headers.contains("authorization: bearer magpie-aipp"));
+    assert!(headers.contains(&format!("user-agent: {}", crate::api::magpie::USER_AGENT.to_ascii_lowercase())));
+    assert!(!headers.contains("x-magpie-session:"));
+    let body: serde_json::Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["model"], "auto/model");
+}
+
+#[test]
+fn test_magpie_client_rejects_invalid_protocol_without_substitution() {
+    let error = create_client_with_config(None, &endpoint_config("http://127.0.0.1:1"), "auto/model", "magpie",
+        Some("future"), None, false, Some(1), false, &HashMap::new()).unwrap_err();
+    assert!(error.to_string().contains("future"));
+}
+
 /// Invalid inputs fail during client construction, before any transport exists.
 #[test]
 fn test_endpoint_invalid_fails_before_client_creation() {

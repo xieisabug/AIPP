@@ -15,7 +15,7 @@
 
 -   Core AI logic is in `ai_api.rs` with modular implementations in `ai/` subdirectory
 -   Stream processing uses genai client with event emission for real-time UI updates
--   genai 协议改动应修改 Cargo 实际引用的 `src-tauri/vendor/genai`，并更新其中的 `AIPP-PATCHES.md`；旧目录 `src-tauri/vendor/rust-genai` 未参与构建。
+-   genai 协议和 provider 改动在独立的 [rust-genai](https://github.com/xieisabug/rust-genai) 仓库完成。先推送通过验证的库提交，再更新 AIPP `src-tauri/Cargo.toml` 中 Git 依赖的固定 `rev` 和 `Cargo.lock`。AIPP 不保留库源码、本地协议补丁或依赖本机目录的路径配置，普通构建和 GitHub Actions 由 Cargo 获取同一提交。Magpie 网关发现、目录解析、四协议客户端和 Responses 缓存 TTL 序列化在库中维护；应用身份、模型偏好、数据库与同步仍在 AIPP。
 -   MCP tools are automatically detected via `mcp/detection.rs` and can be called natively
 -   All AI responses support versioning through `generation_group_id` and `parent_group_id`
 -   Built-in MCP tools are organized under `mcp/builtin_mcp/`

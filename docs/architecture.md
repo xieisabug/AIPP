@@ -7,7 +7,7 @@
 -   **Backend**: Rust with Tauri 2.0 framework, SQLite via rusqlite
 -   **Frontend**: React 19 with TypeScript, Vite build system
 -   **UI Framework**: shadcn/ui components, Radix UI primitives, Tailwind CSS v4
--   **AI Integration**: Custom forked genai client with streaming support, built from `src-tauri/vendor/genai`; upstream revision and local protocol patches are recorded in its `AIPP-PATCHES.md`.
+-   **AI Integration**: Custom forked genai client with streaming support, fetched from `https://github.com/xieisabug/rust-genai.git` at the fixed `rev` in `src-tauri/Cargo.toml` and `Cargo.lock`. Provider transport, Magpie integration and Responses cache TTL serialization belong there; AIPP owns configuration, persistence and application policy. No genai source is vendored in AIPP, and builds do not require a sibling checkout.
 -   **MCP Protocol**: rmcp crate for Model Context Protocol integration
 -   **State Management**: React hooks for frontend, Arc<TokioMutex<>> for Rust backend
 -   **Content Execution**: Support for HTML, SVG, React, Vue, Python, Bash/PowerShell, AppleScript

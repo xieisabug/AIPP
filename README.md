@@ -170,7 +170,8 @@ HTML、React、Vue、Mermaid、Draw.io 即时预览，Python / Shell 脚本直�
 环境要求：Node.js 20.19+ / 22.12+、pnpm 10、Rust stable、protoc，以及 [Tauri 2 平台依赖](https://tauri.app/start/prerequisites/)。
 
 ```bash
-git clone https://github.com/xieisabug/AIPP.git && cd AIPP
+git clone https://github.com/xieisabug/AIPP.git
+cd AIPP
 pnpm install
 
 pnpm tauri dev    # 开发模式
@@ -179,7 +180,7 @@ pnpm test         # 前端测试
 cargo test --manifest-path src-tauri/Cargo.toml   # 后端测试
 ```
 
-Android 需要 Android SDK / NDK 与 JDK 17，见 [`scripts/android-dev.ps1`](scripts/android-dev.ps1)。参与开发前请先读 [AGENTS.md](AGENTS.md) 和 [架构总览](docs/architecture.md)。
+Cargo 会从 GitHub 获取固定提交的独立 rust-genai 依赖，无须额外克隆或安排同级目录。Android 需要 Android SDK / NDK 与 JDK 17，见 [`scripts/android-dev.ps1`](scripts/android-dev.ps1)。参与开发前请先读 [AGENTS.md](AGENTS.md) 和 [架构总览](docs/architecture.md)。
 
 | 层级 | 技术 |
 |------|------|

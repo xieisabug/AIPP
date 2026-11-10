@@ -4,6 +4,7 @@ use super::{magpie, opencode_go};
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{adapter::AdapterKind, ModelIden, ServiceTarget};
 use genai::{Client, WebConfig};
+use genai::providers::magpie as magpie_provider;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -44,7 +45,9 @@ pub fn infer_adapter_kind(
         if let Some((adapter, _)) = opencode_go::route(request_mode) { return adapter; }
     }
     if api_type == magpie::PROVIDER {
-        return magpie::adapter_kind(request_mode);
+        // Actual client construction validates the protocol before transport.
+        return magpie_provider::route(request_mode, "http://127.0.0.1")
+            .map(|(kind, _)| kind).unwrap_or(AdapterKind::OpenAI);
     }
     let request_mode = normalize_request_mode(request_mode);
     debug!(
@@ -234,6 +237,7 @@ pub fn create_client_with_config(
     // 在发起任何网络请求前 fail-closed：非空但非法的 Endpoint 不得静默回退到默认外网地址
     let resolved_endpoint = resolve_provider_endpoint(endpoint_raw.as_deref())?;
     let mut skip_proxy = false;
+    let mut magpie_gateway = None;
     let (resolved_endpoint, session) = if api_type == opencode_go::PROVIDER {
         let (_, base) = opencode_go::route(request_mode).ok_or_else(|| AppError::ProviderError(
             format!("OpenCode Go 模型 {model_name} 的协议未受支持，请刷新模型目录")))?;
@@ -246,14 +250,16 @@ pub fn create_client_with_config(
             format!("OpenCode Go 会话 {id} 获取同步 UUID 失败: {e}")))?;
         (ProviderEndpointResolution::Custom(base.to_owned()), Some(opencode_go::session_id(&sync_id)))
     } else if api_type == magpie::PROVIDER {
-        let origin = match &resolved_endpoint {
-            ProviderEndpointResolution::Custom(url) => magpie::origin_from_endpoint(url).map_err(AppError::ProviderError)?,
-            ProviderEndpointResolution::Unset => magpie::default_origin(),
+        let endpoint = match &resolved_endpoint {
+            ProviderEndpointResolution::Custom(url) => Some(url.as_str()),
+            ProviderEndpointResolution::Unset => None,
         };
-        let (kind, base) = magpie::route(request_mode, &origin).map_err(AppError::ProviderError)?;
-        adapter_kind = kind;
         api_key = magpie::api_key_or_default(Some(api_key.as_str()));
-        skip_proxy = magpie::origin_is_loopback(&origin);
+        let gateway = magpie_provider::Gateway::new(endpoint, &api_key).map_err(AppError::ProviderError)?;
+        let (kind, base) = magpie_provider::route(request_mode, gateway.origin()).map_err(AppError::ProviderError)?;
+        adapter_kind = kind;
+        skip_proxy = magpie_provider::origin_is_loopback(gateway.origin());
+        magpie_gateway = Some(gateway);
         (ProviderEndpointResolution::Custom(base), None)
     } else { (resolved_endpoint, None) };
     let final_endpoint_url = effective_endpoint_url(&resolved_endpoint, adapter_kind);
@@ -315,16 +321,27 @@ pub fn create_client_with_config(
     }
 
     let go_model = session.map(|_| model_name.to_owned());
-    let mut custom_headers = get_custom_headers_from_config(config_feature_map);
-    if api_type == magpie::PROVIDER {
-        custom_headers.insert("User-Agent".to_string(), magpie::USER_AGENT.to_string());
-        custom_headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
-        if let Some((app, id)) = conversation {
-            match crate::sync::conversation_sync_id(app, id) {
-                Ok(sync_id) => { custom_headers.insert("X-Magpie-Session".to_string(), sync_id); }
-                Err(e) => warn!(error = %e, conversation_id = id, "Magpie 会话标识不可用，本次请求不带 X-Magpie-Session"),
-            }
+    let custom_headers = get_custom_headers_from_config(config_feature_map);
+    if let Some(gateway) = magpie_gateway {
+        let mut headers = HeaderMap::new();
+        for (key, value) in custom_headers {
+            let name = HeaderName::from_bytes(key.as_bytes()).map_err(|e|
+                AppError::ProviderError(format!("Magpie 自定义请求头名称无效: {e}")))?;
+            let value = HeaderValue::from_str(&value).map_err(|e|
+                AppError::ProviderError(format!("Magpie 自定义请求头 {key} 无效: {e}")))?;
+            headers.insert(name, value);
         }
+        let session = if let Some((app, id)) = conversation {
+            match crate::sync::conversation_sync_id(app, id) {
+                Ok(sync_id) => Some(sync_id),
+                Err(e) => {
+                    warn!(error = %e, conversation_id = id, "Magpie 会话标识不可用，本次请求不带 X-Magpie-Session");
+                    None
+                }
+            }
+        } else { None };
+        return gateway.client(request_mode, web_config.with_default_headers(headers),
+            magpie::USER_AGENT, session.as_deref()).map_err(AppError::ProviderError);
     }
     build_client(adapter_kind, final_endpoint_url, api_key, go_model, session, web_config, custom_headers)
 }
