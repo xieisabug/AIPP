@@ -1,4 +1,4 @@
-use super::http_transport::create_http_transport;
+use super::http_transport::{create_http_transport, ResponseRedactor};
 use crate::db::mcp_db::MCPServer;
 use rmcp::{model::ClientInfo, ServiceExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -105,4 +105,54 @@ fn test_http_transport_invalid_headers_return_error() {
         server.headers = Some(raw.into());
         assert!(create_http_transport(&server, reqwest::Client::builder()).is_err());
     }
+}
+
+/// JSON serialization must not make quoted or backslashed header credentials visible.
+#[test]
+fn test_response_redactor_serialized_content_and_schema() {
+    for secret in [r#"synthetic-quote-"-secret"#, r"synthetic-slash-\-secret", r#"synthetic-\"-secret"#] {
+        reqwest::header::HeaderValue::from_str(secret).unwrap();
+        let redactor = ResponseRedactor::new(vec![secret.to_owned()].into_iter());
+        let content = vec![rmcp::model::Content::text(format!("echo {secret}"))];
+        let cleaned = redactor.clean(&serde_json::to_string(&content).unwrap());
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&cleaned).unwrap(),
+            serde_json::json!([{"type": "text", "text": "echo [REDACTED]"}]));
+
+        let schema = serde_json::json!({"type": "object", "properties": {
+            "token": {"type": "string", "description": secret, "default": secret}
+        }});
+        let cleaned = redactor.clean(&serde_json::to_string(&schema).unwrap());
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&cleaned).unwrap(),
+            serde_json::json!({"type": "object", "properties": {
+                "token": {"type": "string", "description": "[REDACTED]", "default": "[REDACTED]"}
+            }}));
+    }
+}
+
+/// Error strings include literal, JSON-escaped and Debug-quoted credential echoes.
+#[test]
+fn test_response_redactor_formatted_errors_and_auth_schemes() {
+    let token = r#"synthetic-\"-token"#;
+    for scheme in ["Bearer ", "Basic ", ""] {
+        let header = format!("{scheme}{token}");
+        let redactor = ResponseRedactor::new(vec![header.clone()].into_iter());
+        let payload = serde_json::json!({"message": format!("rejected {header}; token {token}")});
+        let error = format!("HTTP tools/list failed: {payload}; raw {header}; debug {token:?}");
+        assert_eq!(redactor.clean(&error),
+            "HTTP tools/list failed: {\"message\":\"rejected [REDACTED]; token [REDACTED]\"}; raw [REDACTED]; debug \"[REDACTED]\"");
+        // serialize_tool_response formats server-reported tool errors with Debug.
+        let content = vec![rmcp::model::Content::text(format!("rejected {header}"))];
+        let expected = vec![rmcp::model::Content::text("rejected [REDACTED]")];
+        assert_eq!(redactor.clean(&format!("工具执行错误: {content:?}")),
+            format!("工具执行错误: {expected:?}"));
+    }
+}
+
+/// Existing literal matching and empty-secret behavior remain unchanged.
+#[test]
+fn test_response_redactor_plain_and_empty_values() {
+    let redactor = ResponseRedactor::new(vec![String::new(), "Bearer synthetic-token".into()].into_iter());
+    assert_eq!(redactor.clean("Bearer synthetic-token / synthetic-token / safe"),
+        "[REDACTED] / [REDACTED] / safe");
+    assert_eq!(ResponseRedactor::default().clean(r#"{"safe":true}"#), r#"{"safe":true}"#);
 }
