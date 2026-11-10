@@ -76,6 +76,7 @@ src-tauri/
 │   │   ├── copilot_api.rs & copilot_lsp.rs # GitHub Copilot 集成
 │   │   └── [other apis]...
 │   ├── mcp/                 # MCP 核心（注册/执行/检测/总结）
+│   │   ├── apps/            # helper 应用目录、连接实例、OAuth 与系统凭据存储
 │   │   ├── builtin_mcp/     # 内置 MCP 工具（agent/ui/search/operation/artifact）
 │   │   ├── registry_api.rs  # MCP server 管理
 │   │   ├── execution_api.rs # MCP tool call 执行与状态
@@ -139,7 +140,7 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 5.  Content Preview & Artifact Workspace
 6.  Script Execution（可配置环境）
 7.  System Tray + Multi-Window UX
-8.  MCP Integration（registry、tool-call 执行状态、内置工具套件）
+8.  MCP Integration（应用目录/我的应用、声明式连接表单、registry、tool-call 执行状态、内置工具套件；协议见 `docs/connected-apps-protocol.md`）
 9.  Scheduled Tasks（once/interval、run logs、notify、stop）
 10. Skills System（文件系统技能、安装、助手绑定）
 11. Plugin Runtime（加载/配置/数据 + 主题注册）

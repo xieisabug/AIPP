@@ -1,0 +1,185 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { Boxes, Code2, Globe, Notebook, Search, RefreshCw, Plug, Wrench, ArrowUpRight } from 'lucide-react';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { toast } from 'sonner';
+import { AppConnection, AppDefinition, CatalogResponse, connectionStatus } from '@/data/ConnectedApp';
+import { MCPServer, MCPServerRequest, MCPServerTool } from '@/data/MCP';
+import { useDataRefresh } from '@/hooks/useDataRefresh';
+import { useIsMobilePlatform } from '@/hooks/use-platform';
+import { isMobileExecutableMcpServer, visibleSearchTools } from '@/lib/mobileUnsupported';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import MCPConfig from './MCPConfig';
+import MCPServerDialog from './MCPServerDialog';
+import JSONImportDialog from './JSONImportDialog';
+import BuiltinToolDialog from './BuiltinToolDialog';
+import AppConnectForm from './apps/AppConnectForm';
+import AppAssistantAccess from './apps/AppAssistantAccess';
+
+interface Builtin { id: string; name: string; description: string; command: string }
+type Selection = { kind: 'app'; appId: string } | { kind: 'server'; serverId: number };
+
+function AppIcon({ icon, builtin = false }: { icon?: string | null; builtin?: boolean }) {
+    const Icon = builtin ? Wrench : icon === 'github' ? Code2 : icon === 'notebook' ? Notebook : Globe;
+    return <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border bg-muted/30"><Icon className="h-6 w-6 text-muted-foreground" /></span>;
+}
+
+export default function ConnectedAppsConfig() {
+    const mobile = useIsMobilePlatform();
+    const [page, setPage] = useState('catalog');
+    const [query, setQuery] = useState('');
+    const [category, setCategory] = useState('全部');
+    const [catalog, setCatalog] = useState<CatalogResponse>();
+    const [catalogBusy, setCatalogBusy] = useState(false);
+    const [servers, setServers] = useState<MCPServer[]>([]);
+    const [connections, setConnections] = useState<AppConnection[]>([]);
+    const [builtins, setBuiltins] = useState<Builtin[]>([]);
+    const [tools, setTools] = useState<Map<number, MCPServerTool[]>>(new Map());
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState('');
+    const [selection, setSelection] = useState<Selection>();
+    const [detailTab, setDetailTab] = useState('overview');
+    const [configOpen, setConfigOpen] = useState(false);
+    const [importOpen, setImportOpen] = useState(false);
+    const [initialConfig, setInitialConfig] = useState<Partial<MCPServerRequest>>();
+    const [builtinId, setBuiltinId] = useState<string>();
+    const [busyId, setBusyId] = useState<number>();
+    const [formGeneration, setFormGeneration] = useState(0);
+
+    const refresh = useCallback(async (isCurrent: () => boolean = () => true) => {
+        const [nextServers, nextConnections, nextBuiltins] = await Promise.all([
+            invoke<MCPServer[]>('get_mcp_servers'), invoke<AppConnection[]>('list_app_connections'), invoke<Builtin[]>('list_aipp_builtin_templates'),
+        ]);
+        const entries = await Promise.all(nextServers.map(async server => [server.id,
+            visibleSearchTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId: server.id }), server.command, mobile)] as const));
+        if (!isCurrent()) return;
+        setServers(nextServers); setConnections(nextConnections); setBuiltins(nextBuiltins); setTools(new Map(entries));
+        setError(''); setLoading(false);
+    }, [mobile]);
+    useDataRefresh({ events: ['mcp_state_changed'], initial: true, refresh,
+        onError: e => { setLoading(false); setError(String(e)); } });
+
+    const loadCatalog = useCallback(async () => {
+        setCatalogBusy(true);
+        try { setCatalog(await invoke<CatalogResponse>('fetch_app_catalog')); }
+        catch (e) { setCatalog(old => ({ catalog: old?.catalog ?? null, fetched_at: old?.fetched_at ?? null, warning: String(e) })); }
+        finally { setCatalogBusy(false); }
+    }, []);
+    useEffect(() => { void loadCatalog(); }, [loadCatalog]);
+
+    const selectedServer = selection?.kind === 'server' ? servers.find(s => s.id === selection.serverId) : undefined;
+    const selectedConnection = selectedServer ? connections.find(c => c.server_id === selectedServer.id) : undefined;
+    const selectedApp = selection?.kind === 'app' ? catalog?.catalog?.apps.find(a => a.id === selection.appId) : selectedConnection?.definition;
+    const matchingConnections = selectedApp ? connections.filter(c => c.app_id === selectedApp.id) : [];
+    const filteredApps = useMemo(() => (catalog?.catalog?.apps ?? []).filter(app =>
+        (category === '全部' || category === app.category) && `${app.name} ${app.description} ${app.publisher}`.toLowerCase().includes(query.toLowerCase())), [catalog, category, query]);
+    const filteredBuiltins = builtins.filter(b => (category === '全部' || category === '内置工具') && `${b.name} ${b.description}`.toLowerCase().includes(query.toLowerCase()));
+    const filteredServers = servers.filter(server => {
+        const connection = connections.find(c => c.server_id === server.id);
+        const type = server.is_builtin ? '内置工具' : connection ? '外部服务' : '自定义 MCP';
+        return (category === '全部' || category === type) && `${server.name} ${server.description} ${connection?.label ?? ''}`.toLowerCase().includes(query.toLowerCase());
+    });
+    const categories = page === 'catalog' ? ['全部', '内置工具', ...new Set((catalog?.catalog?.apps ?? []).map(app => app.category))] : ['全部', '内置工具', '外部服务', '自定义 MCP'];
+
+    const select = (value: Selection) => { setSelection(value); setDetailTab('overview'); setFormGeneration(v => v + 1); };
+    const action = async (id: number, command: string) => {
+        setBusyId(id);
+        try { await invoke(command, { serverId: id }); await refresh(); }
+        catch (e) { toast.error(String(e)); await refresh().catch(() => {}); }
+        finally { setBusyId(undefined); }
+    };
+    const onConnected = (id: number) => { void refresh().then(() => { setSelection({ kind: 'server', serverId: id }); setDetailTab('overview'); }).catch(e => setError(String(e))); };
+    const importConfigs = async (configs: MCPServerRequest[]) => {
+        setImportOpen(false);
+        if (configs.length === 1) { setInitialConfig(configs[0]); setConfigOpen(true); return; }
+        try {
+            for (const request of configs) await invoke('add_mcp_server', { request: { ...request, is_enabled: false } });
+            await refresh(); setPage('installed'); setCategory('全部');
+            toast.success('已导入配置，保持停用；请检查后启用并测试连接。');
+        } catch (e) { toast.error(`导入未全部完成：${String(e)}`); await refresh().catch(() => {}); }
+    };
+    const platformSupported = (app: AppDefinition) => !mobile || app.platforms.includes('android');
+
+    return <div className="h-full overflow-y-auto bg-background">
+        <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-8">
+            <div className="flex items-center justify-between gap-3">
+                <div><h2 className="text-xl font-semibold">应用与工具</h2><p className="mt-1 text-sm text-muted-foreground">连接外部服务，管理助手可以使用的工具。</p></div>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline">添加</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => { setInitialConfig(undefined); setConfigOpen(true); }}>自定义 MCP</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => setImportOpen(true)}>从 JSON 导入</DropdownMenuItem>
+                </DropdownMenuContent></DropdownMenu>
+            </div>
+            <Tabs value={page} onValueChange={value => { setPage(value); setCategory('全部'); }}>
+                <TabsList><TabsTrigger value="catalog">应用目录</TabsTrigger><TabsTrigger value="installed">我的应用 {servers.length || ''}</TabsTrigger></TabsList>
+            </Tabs>
+            <div className="flex gap-2"><div className="relative flex-1"><Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" /><Input className="pl-9" aria-label="搜索应用与工具" placeholder="搜索应用、工具或用途…" value={query} onChange={e => setQuery(e.target.value)} /></div>
+                <Button variant="ghost" size="icon" aria-label="刷新应用目录和连接" disabled={catalogBusy} onClick={() => { void loadCatalog(); void refresh().catch(e => setError(String(e))); }}><RefreshCw className={`h-4 w-4 ${catalogBusy ? 'animate-spin' : ''}`} /></Button>
+            </div>
+            <div className="flex flex-wrap gap-2">{categories.map(item => <Button key={item} size="sm" variant={category === item ? 'secondary' : 'ghost'} className="rounded-full" onClick={() => setCategory(item)}>{item}</Button>)}</div>
+            {error && <p role="alert" className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error}</p>}
+            {page === 'catalog' ? <>
+                {catalog?.warning && <div role="status" className="rounded-lg border p-3 text-sm text-muted-foreground">{catalog.warning}<br />{catalog.catalog ? `正在显示缓存目录（${catalog.fetched_at}），现有连接仍可管理。` : '外部应用目录暂不可用，内置工具和现有连接仍可管理。'}</div>}
+                {filteredBuiltins.length > 0 && <section className="space-y-3"><h3 className="text-sm font-medium">AIPP 内置工具</h3><div className="grid gap-3 md:grid-cols-2">{filteredBuiltins.map(builtin => {
+                    const server = servers.find(s => s.is_builtin && s.command === builtin.command);
+                    return <button key={builtin.id} className="flex items-center gap-4 rounded-xl border p-4 text-left transition-colors hover:bg-muted/40" onClick={() => server ? select({ kind: 'server', serverId: server.id }) : setBuiltinId(builtin.id)}>
+                        <AppIcon builtin /><div className="min-w-0 flex-1"><div className="font-medium">{builtin.name} <span className="text-xs text-muted-foreground">内置</span></div><p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{builtin.description}</p></div><span className="shrink-0 text-sm">{server ? '管理' : '配置'}</span>
+                    </button>;
+                })}</div></section>}
+                <section className="space-y-3">{filteredApps.length > 0 && <h3 className="text-sm font-medium">连接外部服务</h3>}<div className="grid gap-3 md:grid-cols-2">{filteredApps.map(app => {
+                    const count = connections.filter(c => c.app_id === app.id && c.status !== 'disconnected').length;
+                    return <button key={app.id} className="flex items-center gap-4 rounded-xl border p-4 text-left transition-colors hover:bg-muted/40" onClick={() => select({ kind: 'app', appId: app.id })}>
+                        <AppIcon icon={app.icon} /><div className="min-w-0 flex-1"><div className="font-medium">{app.name}</div><p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{app.description}</p><p className="mt-2 text-xs text-muted-foreground">{app.publisher} · {app.category}</p></div><span className="shrink-0 text-sm">{count ? `已添加 ${count}` : '连接'}</span>
+                    </button>;
+                })}</div></section>
+                {!catalogBusy && !filteredBuiltins.length && !filteredApps.length && <p className="py-8 text-center text-sm text-muted-foreground">没有匹配的应用。</p>}
+            </> : <div className="divide-y rounded-xl border">
+                {loading && <p className="p-6 text-sm text-muted-foreground">正在读取应用…</p>}
+                {!loading && !filteredServers.length && <p className="p-6 text-sm text-muted-foreground">没有匹配的连接，可从应用目录或添加菜单开始。</p>}
+                {filteredServers.map(server => {
+                    const connection = connections.find(c => c.server_id === server.id);
+                    const serverTools = tools.get(server.id);
+                    const supported = !mobile || isMobileExecutableMcpServer(server);
+                    return <button key={server.id} className="flex w-full items-center gap-3 p-4 text-left hover:bg-muted/30" onClick={() => select({ kind: 'server', serverId: server.id })}>
+                        <AppIcon builtin={server.is_builtin} icon={connection?.definition.icon} /><div className="min-w-0 flex-1"><div className="truncate font-medium">{connection?.label ?? server.name}</div><p className="truncate text-xs text-muted-foreground">{server.is_builtin ? '内置工具' : connection ? connection.definition.name : `自定义 MCP · ${server.transport_type}`}</p></div>
+                        <div className="text-right"><p className="text-sm">{!supported ? '此设备不可执行' : connection && ['connecting', 'auth_required', 'disconnected'].includes(connection.status) ? connectionStatus(connection.status) : !server.is_enabled ? '已停用' : connection ? connectionStatus(connection.status) : server.is_builtin ? '已启用' : '待验证'}</p><p className="mt-1 text-xs text-muted-foreground">{serverTools ? `${serverTools.filter(t => t.is_enabled).length} / ${serverTools.length} 个工具` : '工具未检测'}</p></div>
+                    </button>;
+                })}
+            </div>}
+        </div>
+        <Sheet open={!!selection} onOpenChange={open => { if (!open) { setSelection(undefined); void refresh().catch(e => setError(String(e))); } }}>
+            <SheetContent className="w-full overflow-y-auto sm:max-w-3xl">
+                <SheetHeader><div className="flex items-center gap-3 pr-8"><AppIcon builtin={selectedServer?.is_builtin} icon={selectedApp?.icon} /><div><SheetTitle>{selectedConnection?.label ?? selectedApp?.name ?? selectedServer?.name ?? '应用详情'}</SheetTitle><SheetDescription>{selectedApp?.description ?? selectedServer?.description ?? '连接配置已移除'}</SheetDescription></div></div></SheetHeader>
+                <div className="space-y-5 px-5 pb-8">
+                    {selectedConnection && <div className="space-y-2 rounded-lg border p-3"><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{['connecting', 'auth_required', 'disconnected'].includes(selectedConnection.status) ? connectionStatus(selectedConnection.status) : !selectedServer?.is_enabled ? '已停用' : connectionStatus(selectedConnection.status)}</Badge>
+                        <Button size="sm" variant="outline" disabled={busyId !== undefined || !selectedServer?.is_enabled} onClick={() => void action(selectedConnection.server_id, 'verify_app_connection')}>测试连接</Button>
+                        <Button size="sm" variant="ghost" onClick={() => { setFormGeneration(v => v + 1); setDetailTab('settings'); }}>重新配置 / 登录</Button>
+                    </div>{selectedConnection.error && <p role="alert" className="break-words text-sm text-destructive">{selectedConnection.error}</p>}</div>}
+                    <Tabs value={detailTab} onValueChange={setDetailTab}>
+                        <TabsList><TabsTrigger value="overview">概览</TabsTrigger>{selectedServer && <TabsTrigger value="tools">工具与管理</TabsTrigger>}{selectedServer && !selectedServer.is_builtin && <TabsTrigger value="access">助手授权</TabsTrigger>}{selectedApp && <TabsTrigger value="settings">{selectedServer ? '连接配置' : '连接'}</TabsTrigger>}</TabsList>
+                        <TabsContent value="overview" className="space-y-5 pt-4">
+                            {selectedApp && <><p className="text-sm">{selectedApp.notice}</p><p className="text-xs text-muted-foreground">{selectedApp.publisher} · 版本 {selectedApp.version} · {selectedApp.category}</p>{selectedApp.homepage?.startsWith('https://') && <Button variant="link" className="px-0" onClick={() => void openUrl(selectedApp.homepage!).catch(e => toast.error(String(e)))}>服务说明 <ArrowUpRight className="ml-1 h-4 w-4" /></Button>}
+                                {!selectedServer && matchingConnections.map(connection => <Button key={connection.server_id} variant="outline" className="w-full justify-between" onClick={() => select({ kind: 'server', serverId: connection.server_id })}>{connection.label}<span>{connectionStatus(connection.status)}</span></Button>)}
+                                {!selectedServer && <Button disabled={!platformSupported(selectedApp)} onClick={() => setDetailTab('settings')}><Plug className="mr-2 h-4 w-4" />{matchingConnections.length ? '添加另一个连接' : '连接应用'}</Button>}
+                                {!platformSupported(selectedApp) && <p className="text-sm text-muted-foreground">此应用尚未支持当前设备的安全凭据存储，暂不能在此设备建立认证连接。</p>}</>}
+                            {selectedServer && <><div className="flex items-center gap-2 text-sm"><Boxes className="h-4 w-4 text-muted-foreground" />{tools.get(selectedServer.id)?.length ?? 0} 个已发现工具</div><Button variant="outline" onClick={() => setDetailTab('tools')}>管理工具和高级配置</Button>{selectedServer.is_builtin && <p className="text-sm text-muted-foreground">内置工具由 AIPP 提供。工具适用场景、平台限制和系统保护继续生效；总管家专用能力不会向普通助手开放。</p>}</>}
+                        </TabsContent>
+                        {selectedServer && <TabsContent value="tools" className="pt-4"><MCPConfig key={selectedServer.id} initialServerId={selectedServer.id} detailOnly onEditManaged={selectedConnection ? () => setDetailTab('settings') : undefined} /></TabsContent>}
+                        {selectedServer && <TabsContent value="access" className="pt-4"><AppAssistantAccess serverId={selectedServer.id} /></TabsContent>}
+                        {selectedApp && <TabsContent value="settings" className="space-y-6 pt-4">
+                            {platformSupported(selectedApp) ? <AppConnectForm key={`${selectedApp.id}-${selectedServer?.id ?? 'new'}-${formGeneration}`} app={selectedApp} connection={selectedConnection} onConnected={onConnected} /> : <p className="text-sm text-muted-foreground">当前平台不支持此应用的认证连接。</p>}
+                            {selectedConnection && <div className="space-y-2 border-t pt-5"><Button variant="outline" disabled={busyId !== undefined} onClick={() => void action(selectedConnection.server_id, 'disconnect_app_connection')}>断开并删除本机凭据</Button><p className="text-xs text-muted-foreground">立即阻止新的凭据使用；已执行的操作不会撤回。本地断开不代表撤销服务商授权，请按需在服务商账户设置中撤销。</p></div>}
+                        </TabsContent>}
+                    </Tabs>
+                </div>
+            </SheetContent>
+        </Sheet>
+        <MCPServerDialog isOpen={configOpen} initialConfig={initialConfig} onClose={() => setConfigOpen(false)} onSubmit={() => { setConfigOpen(false); setPage('installed'); setCategory('全部'); void refresh().catch(e => setError(String(e))); }} />
+        <JSONImportDialog isOpen={importOpen} onClose={() => setImportOpen(false)} onImport={configs => void importConfigs(configs)} />
+        <BuiltinToolDialog isOpen={!!builtinId} initialTemplateId={builtinId} onClose={() => setBuiltinId(undefined)} onSubmit={() => { setBuiltinId(undefined); void refresh().catch(e => setError(String(e))); }} />
+    </div>;
+}

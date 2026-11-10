@@ -85,6 +85,7 @@ docx-rs = "0.4"
 agent-client-protocol = { version = "2.0.0", features = ["unstable_end_turn_token_usage", "unstable_elicitation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 macos-accessibility-client = "0.0.1"
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -113,3 +114,9 @@ wat = "1"
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

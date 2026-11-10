@@ -382,6 +382,7 @@ impl ActionHandler for McpAddHandler {
             .find(|server| server.name == name)
             .ok_or_else(|| format!("MCP server not found for undo: {name}"))?;
 
+        crate::mcp::apps::disconnect_app_connection(app_handle.clone(), server.id).await?;
         db.delete_mcp_server(server.id).map_err(|e| e.to_string())?;
         db.rebuild_dynamic_mcp_catalog().map_err(|e| e.to_string())?;
 

@@ -37,6 +37,7 @@ type BuiltinTemplate = {
 };
 
 interface BuiltinToolDialogProps {
+    initialTemplateId?: string;
     isOpen: boolean;
     onClose: () => void;
     onSubmit: () => void;
@@ -52,6 +53,7 @@ interface BuiltinToolDialogProps {
 }
 
 const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
+    initialTemplateId,
     isOpen,
     onClose,
     onSubmit,
@@ -67,6 +69,7 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
 }) => {
     const [templates, setTemplates] = useState<BuiltinTemplate[]>([]);
     const [selectedId, setSelectedId] = useState<string>("search");
+    useEffect(() => { if (isOpen && initialTemplateId && !editing) setSelectedId(initialTemplateId); }, [isOpen, initialTemplateId, editing]);
     const [envValues, setEnvValues] = useState<Record<string, string>>({});
     const [busy, setBusy] = useState(false);
     const [initialized, setInitialized] = useState(false);

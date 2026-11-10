@@ -24,16 +24,73 @@ pub(crate) fn create_http_transport(
     let (_, headers) = super::util::parse_server_headers(server);
     let mut header_map = HeaderMap::new();
     for (name, value) in headers.unwrap_or_default() {
+        if name.eq_ignore_ascii_case(super::apps::credentials::REFERENCE_HEADER) {
+            return Err("目录应用凭据必须通过受控 HTTP 执行入口解析".into());
+        }
         let name = HeaderName::try_from(name.as_str())
             .map_err(|error| format!("Invalid MCP HTTP header name: {error}"))?;
         let value = HeaderValue::from_str(&value)
             .map_err(|error| format!("Invalid MCP HTTP header value for {name}: {error}"))?;
         header_map.insert(name, value);
     }
-    let client = builder.default_headers(header_map).build()
+    let client = builder.redirect(reqwest::redirect::Policy::none()).default_headers(header_map).build()
         .map_err(|error| format!("Failed to build MCP HTTP client: {error}"))?;
     Ok(StreamableHttpClientTransport::with_client(
         client,
         StreamableHttpClientTransportConfig::with_uri(url),
     ))
+}
+
+pub(crate) async fn create_authenticated_http_transport(
+    server: &MCPServer,
+    builder: reqwest::ClientBuilder,
+) -> Result<(StreamableHttpClientTransport<reqwest::Client>, ResponseRedactor), String> {
+    let mut headers: std::collections::HashMap<String, String> = match server.headers.as_deref().filter(|v| !v.trim().is_empty()) {
+        Some(raw) => serde_json::from_str(raw).map_err(|_| "Invalid MCP HTTP headers: expected string values")?,
+        None => Default::default(),
+    };
+    let keys: Vec<_> = headers.keys().filter(|key| key.eq_ignore_ascii_case(super::apps::credentials::REFERENCE_HEADER)).cloned().collect();
+    if keys.is_empty() { return Ok((create_http_transport(server, builder)?, ResponseRedactor::default())); }
+    if keys.len() != 1 { return Err("连接包含重复凭据引用".into()); }
+    let reference = headers.remove(&keys[0]).unwrap();
+    if !server.is_enabled { return Err(format!("连接 {} 已停用", server.id)); }
+    let secrets = super::apps::credentials::resolve(&reference, server.url.as_deref().ok_or("连接缺少服务地址")?, server.id).await?;
+    let redactor = ResponseRedactor::new(secrets.values().cloned());
+    for (key, value) in secrets {
+        headers.retain(|existing, _| !existing.eq_ignore_ascii_case(&key));
+        headers.insert(key, value);
+    }
+    // Resolved credentials are literal values, never environment-variable templates.
+    let mut header_map = HeaderMap::new();
+    for (name, value) in headers {
+        let name = HeaderName::try_from(name.as_str()).map_err(|_| "应用请求头名称无效")?;
+        let mut value = HeaderValue::from_str(&value).map_err(|_| "应用请求头值无效")?;
+        value.set_sensitive(true);
+        header_map.insert(name, value);
+    }
+    let client = builder.redirect(reqwest::redirect::Policy::none()).default_headers(header_map).build()
+        .map_err(|_| "无法创建应用 HTTP 客户端")?;
+    Ok((StreamableHttpClientTransport::with_client(client,
+        StreamableHttpClientTransportConfig::with_uri(server.url.as_deref().ok_or("连接缺少服务地址")?)), redactor))
+}
+
+#[derive(Default)]
+pub(crate) struct ResponseRedactor(Vec<String>);
+
+impl ResponseRedactor {
+    pub(crate) fn new(values: impl Iterator<Item=String>) -> Self {
+        let mut secrets = Vec::new();
+        for value in values {
+            if let Some(token) = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("Basic ")) { secrets.push(token.to_owned()); }
+            secrets.push(value);
+        }
+        secrets.retain(|s| !s.is_empty());
+        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        Self(secrets)
+    }
+    pub(crate) fn clean(&self, text: &str) -> String {
+        let mut result = text.to_owned();
+        for secret in &self.0 { result = result.replace(secret, "[REDACTED]"); }
+        result
+    }
 }

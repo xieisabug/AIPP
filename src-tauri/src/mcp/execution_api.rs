@@ -3656,7 +3656,7 @@ async fn execute_http_tool(
         None
     };
 
-    let transport = {
+    let (transport, redactor) = {
         let mut client_builder = reqwest::Client::builder();
 
         // 配置代理
@@ -3674,7 +3674,7 @@ async fn execute_http_tool(
             }
         }
 
-        crate::mcp::http_transport::create_http_transport(server, client_builder)
+        crate::mcp::http_transport::create_authenticated_http_transport(server, client_builder).await
             .map_err(anyhow::Error::msg)?
     };
     let client_info = ClientInfo {
@@ -3724,9 +3724,10 @@ async fn execute_http_tool(
     match result {
         Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "http tool executed successfully");
-            Ok(result)
+            Ok(redactor.clean(&result))
         }
         Err(e) => {
+            let e = anyhow!(redactor.clean(&e.to_string()));
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "http tool execution failed");
             Err(e)
         }
