@@ -9,6 +9,7 @@ import {
 } from "react";
 import { cn } from "@/utils/utils";
 import { useTurnRailTracking, type TurnRailItem } from "./ConversationTurnRail";
+import { sampleTickIndices, tickOffset, turnIndexFromOffset } from "./turnRailLayout";
 
 export interface MobileTurnScrubberProps {
     turns: TurnRailItem[];
@@ -22,19 +23,8 @@ const TRACK_HEIGHT_RATIO = 0.6;
 /** 上下额外热区，手指略超出首尾刻度仍能命中。 */
 const TRACK_PADDING_PX = 16;
 const HIDE_DELAY_MS = 1600;
-
-/** 将触点在滑轨内的纵向位置映射为最近的轮次下标。 */
-export function turnIndexFromOffset(offsetY: number, trackHeight: number, count: number): number {
-    if (count <= 1 || trackHeight <= 0) {
-        return 0;
-    }
-    const clamped = Math.min(Math.max(offsetY, 0), trackHeight);
-    return Math.round((clamped / trackHeight) * (count - 1));
-}
-
-function tickOffset(index: number, trackHeight: number, count: number): number {
-    return count <= 1 ? trackHeight / 2 : (index / (count - 1)) * trackHeight;
-}
+/** 刻度间距小于此值时抽样绘制，避免长对话的滑轨糊成一整条。 */
+const MIN_TICK_GAP_PX = 8;
 
 /**
  * 移动端对话轮次滑轨。
@@ -182,19 +172,22 @@ export default function MobileTurnScrubber({
                 data-aipp-slot="chat-mobile-turn-track"
             >
                 <div ref={trackRef} className="relative w-full" style={{ height: trackHeight }}>
-                    {turns.map((turn, index) => (
+                    {sampleTickIndices(count, trackHeight, MIN_TICK_GAP_PX).map((index) => (
                         <span
-                            key={turn.id}
+                            key={turns[index].id}
                             aria-hidden
-                            className={cn(
-                                "absolute right-2 h-[3px] -translate-y-1/2 rounded-full transition-all",
-                                index === highlightIndex
-                                    ? "w-5 bg-foreground shadow-sm ring-2 ring-background"
-                                    : "w-3 bg-foreground/35",
-                            )}
+                            className="absolute right-2 h-[3px] w-3 -translate-y-1/2 rounded-full bg-foreground/35"
                             style={{ top: tickOffset(index, trackHeight, count) }}
                         />
                     ))}
+                    {/* 高亮单独绘制：抽样后当前轮次不一定有自己的刻度 */}
+                    {highlightIndex >= 0 ? (
+                        <span
+                            aria-hidden
+                            className="absolute right-2 h-[3px] w-5 -translate-y-1/2 rounded-full bg-foreground shadow-sm ring-2 ring-background transition-[top]"
+                            style={{ top: tickOffset(highlightIndex, trackHeight, count) }}
+                        />
+                    ) : null}
                 </div>
             </div>
 
