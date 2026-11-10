@@ -7,7 +7,9 @@ import EditAssistantDialog from "@/components/config/EditAssistantDialog";
 import ShareDialog from "@/components/ShareDialog";
 import ConfirmDialog from "@/components/ConfirmDialog";
 
-export function useAssistantItemActions({ onCopied, onReset }: {
+export function useAssistantItemActions({ onEdit, onCopied, onReset }: {
+    /** 提供时「编辑」交给调用方（管家联系人打开含类型、模型与记忆的资料框），不再打开配置页的精简编辑框。 */
+    onEdit?: (assistant: AssistantListItem) => void | Promise<void>;
     onCopied?: (assistant: AssistantDetail) => void | Promise<void>;
     /** 重开该助手在管家中的私聊（旧私聊归档），仅管家联系人列表提供。 */
     onReset?: (assistant: AssistantListItem) => Promise<void>;
@@ -24,7 +26,8 @@ export function useAssistantItemActions({ onCopied, onReset }: {
         const ticket = ++request.current;
         busy.current = true;
         try {
-            if (action === "edit") {
+            if (action === "edit" && onEdit) await onEdit(assistant);
+            else if (action === "edit") {
                 const detail = await invoke<AssistantDetail>("get_assistant", { assistantId: assistant.id });
                 if (ticket === request.current) setEditing(detail);
             } else if (action === "copy") {

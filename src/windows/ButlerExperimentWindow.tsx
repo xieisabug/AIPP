@@ -16,7 +16,7 @@ import type { ButlerMessageSearchHit } from "@/data/Conversation";
 import { useConversationAvatarState } from "@/components/avatar/useConversationAvatarState";
 import type { AvatarState } from "@/components/avatar/avatarDefinition";
 import { useLinger } from "@/hooks/useStablePresence";
-import ButlerProfileDialog, { type ProfileModelField } from "@/components/butler/ButlerProfileDialog";
+import ButlerProfileDialog, { type ProfileModelChoice, type ProfileModelField } from "@/components/butler/ButlerProfileDialog";
 import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import "@/components/butler/butlerDesktop.css";
 import { toast } from "sonner";
@@ -270,29 +270,33 @@ function ButlerExperimentWindow() {
     const [profileTarget, setProfileTarget] = useState<{
         id?: number; name: string; conversationId?: number; description?: string; model?: ProfileModelField;
     } | null>(null);
-    const openProfile = async () => {
-        const conversationId = contact ? contact.conversationId : Number(mainConversationId) || undefined;
-        if (!contact) {
-            setProfileTarget({ name: butlerDisplayName, conversationId });
+    // 顶部头像与联系人右键「编辑」共用：不传 id 时编辑当前联系人，未选联系人时编辑总管家。
+    const openProfile = async (assistantId = contact?.assistantId) => {
+        if (assistantId === undefined) {
+            setProfileTarget({ name: butlerDisplayName, conversationId: Number(mainConversationId) || undefined });
             return;
         }
+        // 记忆页按该助手的当前私聊读取；还没有私聊时不显示记忆页。
+        const conversationId = contact?.assistantId === assistantId
+            ? contact.conversationId
+            : previews.find(preview => preview.assistantId === assistantId)?.conversationId;
         try {
-            const detail = await invoke<AssistantDetail>("get_assistant", { assistantId: contact.assistantId });
+            const detail = await invoke<AssistantDetail>("get_assistant", { assistantId });
             const model = detail.model[0];
             setProfileTarget({
-                id: contact.assistantId, name: detail.assistant.name, conversationId,
+                id: assistantId, name: detail.assistant.name, conversationId,
                 description: detail.assistant.description ?? "",
                 model: {
                     assistantType: detail.assistant.assistant_type,
                     typeName: ASSISTANT_TYPE_NAMES[detail.assistant.assistant_type] ?? `类型 ${detail.assistant.assistant_type}`,
-                    value: model?.model_code && model.provider_id > 0 ? `${model.model_code}%%${model.provider_id}` : "",
+                    current: model && model.provider_id > 0 ? { modelCode: model.model_code, providerId: model.provider_id } : null,
                 },
             });
         } catch (error) {
-            toast.error(`读取助手 ${contact.assistantId} 的资料失败：${error instanceof Error ? error.message : String(error)}`);
+            toast.error(`读取助手 ${assistantId} 的资料失败：${error instanceof Error ? error.message : String(error)}`);
         }
     };
-    const saveProfile = async (name: string, appearance: ButlerAppearance, description?: string, modelValue?: string) => {
+    const saveProfile = async (name: string, appearance: ButlerAppearance, description?: string, modelChoice?: ProfileModelChoice) => {
         if (!profileTarget) return;
         const target = profileTarget;
         let nameSaved = false;
@@ -305,19 +309,20 @@ function ButlerExperimentWindow() {
                 });
             } else {
                 const detail = await invoke<AssistantDetail>("get_assistant", { assistantId: target.id });
-                const [modelCode, providerValue] = (modelValue ?? "").split("%%");
-                const providerId = Number.parseInt(providerValue ?? "", 10);
-                const modelChanged = !!modelValue && modelValue !== target.model?.value && Number.isFinite(providerId) && providerId > 0;
+                const [firstModel, ...otherModels] = detail.model;
+                const changedModel = modelChoice && modelChoice.providerId > 0
+                    && (modelChoice.modelCode !== firstModel?.model_code || modelChoice.providerId !== firstModel?.provider_id)
+                    ? modelChoice : null;
                 const nextDescription = description ?? detail.assistant.description ?? "";
-                if (name !== detail.assistant.name || nextDescription !== (detail.assistant.description ?? "") || modelChanged) {
-                    // 模型的写法与助手配置页一致：替换第一个模型的代码与提供商，保留其 id。
-                    const nextModel = modelChanged ? [{
-                        id: detail.model[0]?.id ?? 0,
-                        assistant_id: detail.model[0]?.assistant_id ?? target.id,
-                        model_code: modelCode,
-                        provider_id: providerId,
-                        alias: "",
-                    }] : detail.model;
+                if (name !== detail.assistant.name || nextDescription !== (detail.assistant.description ?? "") || changedModel) {
+                    // 模型的写法与助手配置页一致：替换第一个模型的代码与提供商，保留其 id 与别名，其余模型不动。
+                    const nextModel = changedModel ? [{
+                        id: firstModel?.id ?? 0,
+                        assistant_id: firstModel?.assistant_id ?? target.id,
+                        model_code: changedModel.modelCode,
+                        provider_id: changedModel.providerId,
+                        alias: firstModel?.alias ?? "",
+                    }, ...otherModels] : detail.model;
                     await invoke("save_assistant", { assistantDetail: {
                         ...detail, assistant: { ...detail.assistant, name, description: nextDescription }, model: nextModel,
                     } });
@@ -669,6 +674,8 @@ function ButlerExperimentWindow() {
     }, [resetContactConversation]);
 
     const assistantItemActions = useAssistantItemActions({
+        // 右键「编辑」与顶部头像打开同一个联系人资料（含类型、模型与记忆页），不用配置页的精简编辑框。
+        onEdit: assistant => openProfile(assistant.id),
         onReset: assistant => resetContactConversation(assistant.id),
     });
 

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import ButlerProfileDialog from "./ButlerProfileDialog";
 
@@ -8,18 +8,20 @@ const memoryApi = vi.hoisted(() => ({
     getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn(),
 }));
 vi.mock("@/services/butlerMemoryService", () => memoryApi);
-vi.mock("@/hooks/useFilteredModels", () => ({ useFilteredModels: () => ({
-    models: [{ name: "Old model", code: "old", llm_provider_id: 1, id: 1 }, { name: "New model", code: "new", llm_provider_id: 2, id: 2 }],
-    loading: false, error: null,
-}) }));
+const chatModels = [{ name: "Old model", code: "old", llm_provider_id: 1, id: 1 }, { name: "New model", code: "new", llm_provider_id: 2, id: 2 }];
+// 智能体提供商没有登记模型时，候选只有一条代表提供商本身的选项（id 0、code acp），与后端 get_filtered_models_for_select 一致。
+const agentProviders = [{ name: "Codex", code: "acp", llm_provider_id: 39, id: 0 }, { name: "Claude Code", code: "acp", llm_provider_id: 40, id: 0 }];
+const modelList = vi.hoisted(() => ({ current: { models: [] as unknown[], loading: false, error: null as string | null } }));
+vi.mock("@/hooks/useFilteredModels", () => ({ useFilteredModels: () => modelList.current }));
 
 describe("Butler profile editor", () => {
+    beforeEach(() => { modelList.current = { models: chatModels, loading: false, error: null }; });
     afterEach(cleanup);
 
     it("should edit description and model like the add form while keeping the type read-only", async () => {
         const user = userEvent.setup();
         const onSave = vi.fn().mockResolvedValue(undefined);
-        render(<ButlerProfileDialog name="小A" description="写作" model={{ assistantType: 0, typeName: "普通对话助手", value: "old%%1" }}
+        render(<ButlerProfileDialog name="小A" description="写作" model={{ assistantType: 0, typeName: "普通对话助手", current: { modelCode: "old", providerId: 1 } }}
             onSave={onSave} onClose={vi.fn()} />);
         expect(screen.getByLabelText("类型")).toHaveValue("普通对话助手");
         expect(screen.getByLabelText("类型")).toBeDisabled();
@@ -27,7 +29,55 @@ describe("Butler profile editor", () => {
         await user.click(screen.getByRole("combobox", { name: "模型" }));
         await user.click(screen.getByRole("option", { name: "New model" }));
         await user.click(screen.getByRole("button", { name: "保存" }));
-        await waitFor(() => expect(onSave).toHaveBeenCalledWith("小A", expect.objectContaining({ motion: true }), "写周报", "new%%2"));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("小A", expect.objectContaining({ motion: true }), "写周报", { modelCode: "new", providerId: 2 }));
+    });
+
+    it("should show the current model when the model list finishes loading after the dialog opens", () => {
+        modelList.current = { models: [], loading: true, error: null };
+        const model = { assistantType: 0, typeName: "普通对话助手", current: { modelCode: "new", providerId: 2 } };
+        const { rerender } = render(<ButlerProfileDialog name="小A" description="" model={model} onSave={vi.fn()} onClose={vi.fn()} />);
+        expect(screen.getByRole("combobox", { name: "模型" })).toHaveTextContent("加载模型中…");
+        modelList.current = { models: chatModels, loading: false, error: null };
+        rerender(<ButlerProfileDialog name="小A" description="" model={model} onSave={vi.fn()} onClose={vi.fn()} />);
+        expect(screen.getByRole("combobox", { name: "模型" })).toHaveTextContent("New model");
+        expect(screen.queryByText(/已不可用/)).toBeNull();
+    });
+
+    it("should show an agent's provider as its model when the provider has no registered models", () => {
+        modelList.current = { models: agentProviders, loading: false, error: null };
+        // Codex 的默认模型由其自身配置决定，不在模型表里；未选模型的智能体存的是空模型代码。
+        for (const modelCode of ["gpt-6.1-sol", ""]) {
+            render(<ButlerProfileDialog name="小B" description="" onSave={vi.fn()} onClose={vi.fn()}
+                model={{ assistantType: 4, typeName: "智能体助手", current: { modelCode, providerId: 39 } }} />);
+            expect(screen.getByRole("combobox", { name: "模型 / 智能体提供商" })).toHaveTextContent("Codex");
+            expect(screen.queryByText(/已不可用/)).toBeNull();
+            cleanup();
+        }
+    });
+
+    it("should save an empty model code when an agent switches to another provider", async () => {
+        const user = userEvent.setup();
+        modelList.current = { models: agentProviders, loading: false, error: null };
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="小B" description="" onSave={onSave} onClose={vi.fn()}
+            model={{ assistantType: 4, typeName: "智能体助手", current: { modelCode: "gpt-6.1-sol", providerId: 39 } }} />);
+        await user.click(screen.getByRole("combobox", { name: "模型 / 智能体提供商" }));
+        await user.click(screen.getByRole("option", { name: "Claude Code" }));
+        await user.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("小B", expect.anything(), "", { modelCode: "", providerId: 40 }));
+    });
+
+    it("should leave the model untouched when the selection is unchanged", async () => {
+        const user = userEvent.setup();
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="小A" description="" onSave={onSave} onClose={vi.fn()}
+            model={{ assistantType: 0, typeName: "普通对话助手", current: { modelCode: "old", providerId: 1 } }} />);
+        await user.click(screen.getByRole("combobox", { name: "模型" }));
+        await user.click(screen.getByRole("option", { name: "New model" }));
+        await user.click(screen.getByRole("combobox", { name: "模型" }));
+        await user.click(screen.getByRole("option", { name: "Old model" }));
+        await user.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("小A", expect.anything(), "", undefined));
     });
 
     it("should list the assistant's memories in a separate tab when a conversation is given", async () => {
