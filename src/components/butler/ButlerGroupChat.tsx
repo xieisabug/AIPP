@@ -20,6 +20,7 @@ import { ConversationStatsDialog } from "@/components/token-statistics";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
+import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker } from "./ButlerGroupMessageRow";
 import { ButlerQuoteChip, ButlerQuoteContext, ButlerQuoteJumpContext, type ButlerQuoteTarget } from "./ButlerQuote";
 import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "./butlerProgress";
@@ -437,6 +438,10 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                                 className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                                 onClick={() => void removeMember(member)}><UserMinus className="size-3.5" /></button>}
                         </div>)}
+                    </section>
+                    <section className="space-y-1.5">
+                        <span className="text-xs text-muted-foreground">群记忆</span>
+                        <ButlerMemoryPanel conversationId={groupId} ownScopeLabel="本群成员" />
                     </section>
                     <Button variant="ghost" className="mt-auto justify-start gap-2 text-destructive hover:text-destructive" onClick={() => setConfirmDelete(true)}>
                         <Trash2 className="size-4" />删除群聊

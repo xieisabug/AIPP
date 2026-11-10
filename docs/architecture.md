@@ -102,6 +102,7 @@ src-tauri/
 -   `skill_api.rs`: Skill scanning/installing and assistant skill configuration
 -   `butler_api.rs`: Butler main conversation, task orchestration, task detail/result flow
 -   `butler_group.rs` / `butler_group_runtime.rs` / `butler_group_router.rs`: group chat commands, the per-member reply dispatcher and automatic responder selection.
+-   `butler_memory.rs`: Butler long-term memory — the `butler_memory` tool, write authorization (direct user turn / group turn answering a user message), per-turn `<long_term_memory>` injection and the memory panel commands; storage, scopes and ranking live in `db/butler_memory.rs`.
 -   `export_api.rs`: Markdown to PDF / DOCX export helpers
 -   `plugin_api.rs`: Plugin registry, lifecycle, config and data storage
 -   `token_statistics_api.rs`: Conversation/group/message token statistics; aggregation rules live in `db/token_stats.rs` (delegation recursion, auxiliary model usage in `model_usage_record`)
@@ -153,7 +154,7 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 
 ### 管家会话的固定工具
 
-`mcp/butler_tools.rs` 统一按 `butler_main` / `butler_contact` / `butler_task` 会话注入 SuperAdmin 和助手协作工具；覆盖助手 MCP 选择，但不持久化配置变更。标准 AI 首轮、工具续答、重新生成、XML 检测及 Codex/Claude Code/ACP 的选中工具桥接共用该策略。执行器对同一白名单免除动态加载门槛，内置分发仍校验管家会话，普通聊天和普通定时任务不获得权限。助手发现/详情与协作查询/停止定义在 `api/butler_assistant_tools.rs`，停止原因存于 `butler_peer_stop`；不把“停止协作”解释为进程取消。
+`mcp/butler_tools.rs` 统一按 `butler_main` / `butler_contact` / `butler_task` 会话注入 SuperAdmin 和助手协作工具（`butler_memory` 另外也注入群成员会话）；覆盖助手 MCP 选择，但不持久化配置变更。标准 AI 首轮、工具续答、重新生成、XML 检测及 Codex/Claude Code/ACP 的选中工具桥接共用该策略。执行器对同一白名单免除动态加载门槛，内置分发仍校验管家会话，普通聊天和普通定时任务不获得权限。助手发现/详情与协作查询/停止定义在 `api/butler_assistant_tools.rs`，停止原因存于 `butler_peer_stop`；不把“停止协作”解释为进程取消。
 
 ## Agent 驱动边界
 
@@ -180,4 +181,10 @@ Routing (`api/butler_group_runtime.rs` → `decide`): explicit `@name` / `@所�
 
 A turn freezes the public upper bound, formats the other speakers' messages since the member's cursor as a plain transcript (`用户：…` / `成员名：…` / `〔系统〕…`, with quote excerpts and size caps) and calls `ask_ai` with origin `butler_group/{turn}` plus a per-turn `<group_chat>` prefix (roster, concurrent peers, discussion round guidance and a short chat-style reminder; not stored in history). `ask_ai` skips @assistant extraction, slash/template parsing and work context for that origin and rejects any other input into member conversations. `write_turn_input` inserts the user message only while the turn is still `running` and advances the cursor only after the write. Completion uses the last finished message after the input (same rule as peer exchanges): a complete reply is posted under the member's name with `source_conversation_id` / `source_message_id` pointing at that message (the UI renders group messages through the private-chat `MessageItem`, so token info, code preview/run and export target the real member message), `[[NO_REPLY]]` is silent, errors / interrupted ends post an `error` line, and an idle execution without a final reply fails after a grace period. `@name` in a member reply relays to that member (depth ≤ 3, ≤ 12 relays per user message); participants of a discussion with rounds remaining are left to the next round instead. Stop/remove cancel queued turns, fence running ones and call `butler_peer::halt_turn`; late results of cancelled turns are dropped. Restart recovery publishes finished answers and reports unknown ones without retrying.
 
-Members keep Butler-mode SuperAdmin tools and `ask_user_question` (cards render inside the group view; approvals use the window-level dialogs), but contact-collaboration tools are hidden (`templates::GROUP_MEMBER_KIND`). The group rules are appended to the system prompt via `build_butler_member_prompt`. Private chats and other groups never enter a member's group context. The first collaboration-group implementation's queue tables are migrated (groups, members, public messages) and dropped by `butler_group::schema`.
+Members keep Butler-mode SuperAdmin tools, `butler_memory` (group scope + global; private assistant memories never enter a group) and `ask_user_question` (cards render inside the group view; approvals use the window-level dialogs), but contact-collaboration tools are hidden (`templates::GROUP_MEMBER_KIND`). The group rules are appended to the system prompt via `build_butler_member_prompt`. Private chats and other groups never enter a member's group context. The first collaboration-group implementation's queue tables are migrated (groups, members, public messages) and dropped by `butler_group::schema`.
+
+### Butler 长期记忆
+
+`db/butler_memory.rs` 一张 `butler_memory` 表（conversation.db）：`scope_type` 为 `assistant`（scope_id=助手）、`group`（scope_id=群聊会话）或 `global`；来源是一条私聊用户消息（`source_message_id`）或一条群发言（`source_group_id` + `source_group_seq`），不复制原文。私聊/总管家/任务看“本助手 + 全局”，群成员与群聊看“本群 + 全局”。单条 ≤300 字，同范围完全相同内容去重，`revision` 可选乐观锁。
+
+`api/butler_memory.rs`：身份只来自当前会话与 `TOOL_MESSAGE`。写入沿 parent 链找到本轮用户消息，拒绝带 `origin`/`relay_origin`/`relayOrigin` 元数据的消息、`butler_work_followup.execution_input_id`（continue_work 转达）和任务首条派工；不要求它是会话最新一条（普通模型允许插队）。群成员写入要求该次 `butler_chat_group_turn` 仍在 running 且 `trigger_seq` 是用户发言。`ai_api` 对所有管家回合调用 `turn_prefix`：按中文二元组/英文词重合度、再按最近更新排序，正文总量 ≤800 字，作为运行时前缀发送（不入库）。删除聊天保留记忆；`cascade_delete` 在删群聊时删群记忆、删助手时删其私有记忆。

@@ -263,7 +263,7 @@ function ButlerExperimentWindow() {
     const activeConversationId = historyView?.conversationId
         ?? (contact ? String(contact.conversationId) : mainConversationId);
     const activeAssistant = assistants.find(assistant => assistant.id === contact?.assistantId);
-    const [profileTarget, setProfileTarget] = useState<{ id?: number; name: string } | null>(null);
+    const [profileTarget, setProfileTarget] = useState<{ id?: number; name: string; conversationId?: number } | null>(null);
     const saveProfile = async (name: string, appearance: ButlerAppearance) => {
         if (!profileTarget) return;
         const target = profileTarget;
@@ -1200,7 +1200,10 @@ function ButlerExperimentWindow() {
                                 <button type="button" className="group flex min-w-0 max-w-[22rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
                                     aria-label="修改助手名字与形象"
                                     data-aipp-slot="butler-main-identity"
-                                    onClick={() => setProfileTarget({ id: contact?.assistantId, name: activeAssistant?.name ?? butlerDisplayName })}
+                                    onClick={() => setProfileTarget({
+                                        id: contact?.assistantId, name: activeAssistant?.name ?? butlerDisplayName,
+                                        conversationId: contact ? contact.conversationId : Number(mainConversationId) || undefined,
+                                    })}
                                     title="修改名字与形象">
                                     <ButlerAvatar id={contact?.assistantId ?? 0} chief={!contact} size={28} figure />
                                     <span className="flex min-w-0 flex-col">
@@ -1388,6 +1391,7 @@ function ButlerExperimentWindow() {
             {profileTarget && <ButlerProfileDialog
                 name={profileTarget.name}
                 appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(profileTarget.id)))}
+                memoryConversationId={profileTarget.conversationId}
                 onClose={() => setProfileTarget(null)} onSave={saveProfile} />}
         </AntiLeakageProvider>
         </ButlerAppearanceContext.Provider>

@@ -10,6 +10,10 @@ const api = vi.hoisted(() => ({
     renameButlerGroup: vi.fn(), deleteButlerGroup: vi.fn(), onButlerGroupChanged: vi.fn(),
 }));
 vi.mock("@/services/butlerGroupService", () => api);
+vi.mock("@/services/butlerMemoryService", () => ({
+    listButlerMemories: vi.fn().mockResolvedValue([]), updateButlerMemory: vi.fn(), deleteButlerMemory: vi.fn(),
+    getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn().mockResolvedValue(() => {}),
+}));
 const askUser = vi.hoisted(() => vi.fn((_: { conversationId: number }) => ({ isDialogOpen: false } as Record<string, unknown>)));
 vi.mock("@/hooks/useInlineInteraction", () => ({ useAskUserQuestion: askUser }));
 vi.mock("@/components/InlineInteractionCards", () => ({

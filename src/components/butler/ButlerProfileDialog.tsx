@@ -6,7 +6,9 @@ import { accessoryPreviewViewBox, BlushArtwork, BowBellArtwork, GlassesArtwork, 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ButlerAvatar from "./ButlerAvatar";
+import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
 import { accessoryActionsOf, showcaseDelay, showcaseStep } from "./avatarShowcase";
 
@@ -36,11 +38,13 @@ interface Props {
     name: string;
     appearance?: ButlerAppearance;
     description?: string;
+    /** 管家私聊或总管家会话：提供时多一个“长期记忆”页，查看和管理该助手的记忆。 */
+    memoryConversationId?: number;
     onClose: () => void;
     onSave: (name: string, appearance: ButlerAppearance, description?: string) => Promise<void>;
 }
 
-export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, onClose, onSave, appearanceOnly = false }: Props) {
+export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, memoryConversationId, onClose, onSave, appearanceOnly = false }: Props) {
     const [name, setName] = useState(initialName);
     const [description, setDescription] = useState(initialDescription ?? "");
     const [appearance, setAppearance] = useState(initialAppearance ?? defaultAppearance);
@@ -89,13 +93,7 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
         </div>
     </fieldset>;
 
-    return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
-        <DialogContent className="sm:max-w-[720px] max-h-[90vh] overflow-y-auto" showCloseButton={!saving}>
-            <DialogHeader>
-                <DialogTitle>{appearanceOnly ? "助手头像" : initialDescription === undefined ? "名字与形象" : "名字、描述与形象"}</DialogTitle>
-                <DialogDescription>{appearanceOnly ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。" : "为助手选一个名字，搭配属于它的颜色。"}</DialogDescription>
-            </DialogHeader>
-            <form onSubmit={event => { event.preventDefault(); void save(); }} className="space-y-6">
+    const profileForm = <form onSubmit={event => { event.preventDefault(); void save(); }} className="space-y-6">
                 <fieldset disabled={saving} className="grid gap-6 sm:grid-cols-[220px_1fr]">
                     <div className="flex flex-col items-center gap-4 rounded-xl bg-muted/40 px-4 py-6">
                         <ButlerAvatar id={0} chief size={200} appearance={{ ...appearance, motion: true }} animated
@@ -148,7 +146,23 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
                     <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
                     <Button type="submit" disabled={saving || !name.trim()}>{saving && <Loader2 className="size-4 animate-spin" />}{saving ? "正在保存…" : "保存"}</Button>
                 </DialogFooter>
-            </form>
+            </form>;
+
+    return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
+        <DialogContent className="sm:max-w-[720px] max-h-[90vh] overflow-y-auto" showCloseButton={!saving}>
+            <DialogHeader>
+                <DialogTitle>{appearanceOnly ? "助手头像" : initialDescription === undefined ? "名字与形象" : "名字、描述与形象"}</DialogTitle>
+                <DialogDescription>{appearanceOnly ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。" : "为助手选一个名字，搭配属于它的颜色。"}</DialogDescription>
+            </DialogHeader>
+            {memoryConversationId === undefined || appearanceOnly ? profileForm : <Tabs defaultValue="profile">
+                <TabsList>
+                    <TabsTrigger value="profile">名字与形象</TabsTrigger>
+                    <TabsTrigger value="memory">长期记忆</TabsTrigger>
+                </TabsList>
+                <TabsContent value="profile" className="pt-2">{profileForm}</TabsContent>
+                {/* 记忆的修改立即生效，不跟随下方“保存”。 */}
+                <TabsContent value="memory" className="pt-2"><ButlerMemoryPanel conversationId={memoryConversationId} ownScopeLabel="该助手" /></TabsContent>
+            </Tabs>}
         </DialogContent>
     </Dialog>;
 }

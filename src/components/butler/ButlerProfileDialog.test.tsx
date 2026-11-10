@@ -2,8 +2,25 @@ import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ButlerProfileDialog from "./ButlerProfileDialog";
 
+const memoryApi = vi.hoisted(() => ({
+    listButlerMemories: vi.fn(), updateButlerMemory: vi.fn(), deleteButlerMemory: vi.fn(),
+    getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn(),
+}));
+vi.mock("@/services/butlerMemoryService", () => memoryApi);
+
 describe("Butler profile editor", () => {
     afterEach(cleanup);
+
+    it("should list the assistant's memories in a separate tab when a conversation is given", async () => {
+        memoryApi.listButlerMemories.mockResolvedValue([{ id: 5, content: "用户希望回答先给结论", scope_type: "assistant", scope_id: 2,
+            author_assistant_id: 2, source_message_id: 9, source_group_id: null, source_group_seq: null, revision: 1, created_at: 0, updated_at: 0 }]);
+        memoryApi.onButlerMemoryChanged.mockResolvedValue(() => {});
+        render(<ButlerProfileDialog name="小A" memoryConversationId={20} onSave={vi.fn()} onClose={vi.fn()} />);
+        expect(memoryApi.listButlerMemories).not.toHaveBeenCalled();
+        fireEvent.mouseDown(screen.getByRole("tab", { name: "长期记忆" }), { button: 0 });
+        expect(await screen.findByText("用户希望回答先给结论")).toBeInTheDocument();
+        expect(memoryApi.listButlerMemories).toHaveBeenCalledWith(20);
+    });
 
     it("should save trimmed name and independent colors when confirming the preview", async () => {
         const onSave = vi.fn().mockResolvedValue(undefined);

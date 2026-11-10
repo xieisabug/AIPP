@@ -1377,6 +1377,20 @@ pub async fn ask_ai(
             _ => prefix.to_string(),
         });
     }
+    // 管家会话（含群成员、协作与派工回合）每轮附带与本轮内容最相关的长期记忆，有字数预算，
+    // 只发给模型、不写进消息正文，所以不会在历史里累积。
+    if let Ok(id) = processed_request.conversation_id.parse::<i64>() {
+        match crate::api::butler_memory::turn_prefix_for(&app_handle, id, &processed_request.prompt) {
+            Ok(Some(prefix)) => {
+                runtime_user_prompt_prefix = Some(match runtime_user_prompt_prefix.take() {
+                    Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{prefix}"),
+                    _ => prefix,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => warn!(conversation_id = id, error = %format!("{error:#}"), "failed to build butler memory context"),
+        }
+    }
     // 管家会话（含内部回调与协作回合）每轮带上当前时间，只发给模型、不写进消息正文。
     let time_prefix = processed_request.conversation_id.parse::<i64>().ok().and_then(|id| {
         let kind = ConversationDatabase::new(&app_handle).ok()?.conversation_repo().ok()?.read(id).ok()??.conversation_kind;

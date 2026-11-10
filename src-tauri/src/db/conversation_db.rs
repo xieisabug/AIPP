@@ -2187,6 +2187,7 @@ impl ConversationDatabase {
         super::butler_group::schema(&conn)?;
         super::token_stats::schema(&conn)?;
         super::butler_work::schema(&conn)?;
+        super::butler_memory::schema(&conn)?;
 
         Ok(())
     }
