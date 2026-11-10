@@ -44,7 +44,7 @@ describe('ConnectedAppsConfig', () => {
     it('should open the same MCP instance when managing an application from the catalog', async () => {
         vi.mocked(invoke).mockImplementation(async command => {
             if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, name: '笔记 · 1234' }];
-            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'available', error: null }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'available', error: null, credential_status: '连接凭据仅在本机加密保存' }];
             if (command === 'fetch_app_catalog') return { catalog: { schema_version: 1, version: '1', apps: [definition] }, warning: null };
             return [];
         });
@@ -54,6 +54,7 @@ describe('ConnectedAppsConfig', () => {
         await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
         await user.click(screen.getByRole('tab', { name: '工具与管理' }));
         expect(await screen.findByText('管理实例 21')).toBeInTheDocument();
+        expect(screen.getByText('连接凭据仅在本机加密保存')).toBeInTheDocument();
         expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'add_mcp_server')).toBe(false);
     });
     it('should distinguish undiscovered tools from zero tools when showing existing connections', async () => {
@@ -88,7 +89,7 @@ describe('ConnectedAppsConfig', () => {
         await user.click(screen.getByRole('menuitem', { name: 'HTTP MCP 模板' }));
         expect(screen.getByText('编辑 MCP http')).toBeInTheDocument();
     });
-    it('should require an explicit local-only choice when remote revocation fails', async () => {
+    it('should require an explicit choice to skip revocation when remote revocation fails', async () => {
         let status = 'available';
         let error: string | null = null;
         vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -107,9 +108,9 @@ describe('ConnectedAppsConfig', () => {
         await user.click(screen.getByRole('tab', { name: /我的应用/ }));
         await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
         await user.click(screen.getByRole('tab', { name: '连接配置' }));
-        expect(screen.queryByRole('button', { name: '仅删除本机凭据' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: '删除凭据，不撤销授权' })).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: '断开连接' }));
-        await user.click(await screen.findByRole('button', { name: '仅删除本机凭据' }));
+        await user.click(await screen.findByRole('button', { name: '删除凭据，不撤销授权' }));
         expect(invoke).toHaveBeenCalledWith('disconnect_app_connection', { serverId: 21, revokeRemote: false });
     });
 });

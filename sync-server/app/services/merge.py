@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import SyncChange, SyncObject
+from app.models import SyncChange, SyncObject, VaultRefreshClaim
 from app.schemas import AcceptedEvent, ConflictEvent, PushEvent, RejectedEvent
 from app.services.conflict import should_accept_stale_event
 
@@ -66,6 +66,13 @@ def process_push_event(
     if settings.max_payload_bytes > 0 and payload_size(payload) > settings.max_payload_bytes:
         return RejectedEvent(event_id=event.event_id, reason="payload_too_large")
 
+    if event.object_type == "mcp.vault_secret" and event.operation == "upsert":
+        value = (payload or {}).get("fields", {}).get("value")
+        if not isinstance(value, dict) or value.get("alg") != "aipp-e2e-aes256gcm-v1" or not all(
+            isinstance(value.get(name), str) and value[name] for name in ("kid", "nonce", "ct")
+        ):
+            return RejectedEvent(event_id=event.event_id, reason="vault_ciphertext_required")
+
     existing_change = db.scalar(
         select(SyncChange).where(
             SyncChange.account_id == account_id,
@@ -77,7 +84,36 @@ def process_push_event(
         # different content means a client bug and must not be acknowledged.
         return replay_existing_change(existing_change, event)
 
+    if event.object_type in {"llm.provider_secret", "mcp.vault_secret"} and event.operation == "upsert":
+        configs = db.scalars(select(SyncObject).where(
+            SyncObject.account_id == account_id, SyncObject.object_type == "system.feature_config",
+            SyncObject.deleted_at.is_(None),
+        ).with_for_update()).all()
+        for config in configs:
+            fields = (config.payload_json or {}).get("fields", {})
+            if fields.get("feature_code") == "data_sync_secret" and fields.get("key") == "key_check":
+                try:
+                    check = json.loads(fields["value"])["check"]
+                    kid = (payload or {})["fields"]["value"]["kid"]
+                except (KeyError, TypeError, ValueError):
+                    return RejectedEvent(event_id=event.event_id, reason="secret_key_epoch_invalid")
+                if kid != check[:12]:
+                    return RejectedEvent(event_id=event.event_id, reason="secret_key_epoch_mismatch")
+
     current = db.get(SyncObject, (account_id, event.object_type, event.object_id), with_for_update=True)
+    fields = (payload or {}).get("fields", {})
+    if event.object_type == "system.feature_config" and fields.get("feature_code") == "data_sync_secret" and fields.get("key") == "key_check":
+        old_value = (current.payload_json or {}).get("fields", {}).get("value") if current else None
+        if fields.get("value") != old_value:
+            active_claim = db.scalar(select(VaultRefreshClaim).join(SyncObject,
+                (SyncObject.account_id == VaultRefreshClaim.account_id)
+                & (SyncObject.object_id == VaultRefreshClaim.object_id)
+                & (SyncObject.version == VaultRefreshClaim.version)
+                & (SyncObject.object_type == "mcp.vault_secret")
+            ).where(VaultRefreshClaim.account_id == account_id, SyncObject.deleted_at.is_(None)).limit(1))
+            if active_claim is not None:
+                return RejectedEvent(event_id=event.event_id, reason="vault_refresh_in_progress: finish refresh or reconnect before rotating keys")
+
     if not should_accept_stale_event(event, current, set(settings.stale_lww_types)):
         assert current is not None
         return ConflictEvent(

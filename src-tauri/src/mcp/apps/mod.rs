@@ -30,7 +30,15 @@ pub fn init(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS app_tool_call_binding (
         call_id INTEGER PRIMARY KEY REFERENCES mcp_tool_call(id) ON DELETE CASCADE,
         request_id TEXT NOT NULL);")
-        .map_err(|e| format!("应用连接数据库初始化失败：{e}"))
+        .map_err(|e| format!("应用连接数据库初始化失败：{e}"))?;
+    let has_id = conn.prepare("PRAGMA table_info(app_connection)").map_err(|e| e.to_string())?
+        .query_map([], |r| r.get::<_,String>(1)).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?.iter().any(|name| name == "id");
+    if !has_id { conn.execute_batch("ALTER TABLE app_connection ADD COLUMN id INTEGER;").map_err(|e| e.to_string())?; }
+    conn.execute_batch("UPDATE app_connection SET id=server_id WHERE id IS NULL;
+        CREATE TRIGGER IF NOT EXISTS app_connection_sync_id AFTER INSERT ON app_connection BEGIN
+        UPDATE app_connection SET id=NEW.server_id WHERE server_id=NEW.server_id; END;").map_err(|e| e.to_string())
+
 }
 
 fn db(app: &tauri::AppHandle) -> Result<MCPDatabase, String> {
@@ -83,10 +91,14 @@ pub struct AppConnection {
     pub config: HashMap<String, String>,
     pub status: String,
     pub error: Option<String>,
+    pub credential_status: Option<String>,
 }
 
 #[tauri::command]
 pub async fn list_app_connections(app_handle: tauri::AppHandle) -> Result<Vec<AppConnection>, String> {
+    let vault_app = app_handle.clone();
+    let credential_status = tokio::task::spawn_blocking(move || crate::sync::credential_status(&vault_app))
+        .await.map_err(|e| format!("读取凭据状态失败: {e}"))?;
     let db = db(&app_handle)?;
     let mut statement = db.conn.prepare("SELECT c.server_id,c.app_id,c.definition,c.label,c.config,c.status,c.error,c.verified_session FROM app_connection c JOIN mcp_server s ON s.id=c.server_id").map_err(|e| e.to_string())?;
     let rows = statement.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, Option<String>>(6)?, r.get::<_, Option<String>>(7)?))).map_err(|e| e.to_string())?;
@@ -98,7 +110,7 @@ pub async fn list_app_connections(app_handle: tauri::AppHandle) -> Result<Vec<Ap
             else if status == "connecting" { status = "auth_required".into(); error = Some("上次连接未完成，请重新连接".into()); }
         }
         result.push(AppConnection { server_id, app_id, definition: serde_json::from_str(&raw).map_err(|_| "连接描述损坏")?, label,
-            config: serde_json::from_str(&config).map_err(|_| "连接配置损坏")?, status, error });
+            config: serde_json::from_str(&config).map_err(|_| "连接配置损坏")?, status, error, credential_status: Some(credential_status.clone()) });
     }
     Ok(result)
 }
@@ -189,7 +201,8 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
     if needs_credentials {
         let key = reference.clone();
         let initial = credentials::Credential { server_id: 0, endpoint: app.connection.url.clone(), headers: headers.clone(), oauth: None };
-        tokio::task::spawn_blocking(move || credentials::save(&key, &initial)).await.map_err(|_| "安全存储任务失败")??;
+        let vault_app = app_handle.clone();
+        tokio::task::spawn_blocking(move || credentials::save(&vault_app, &key, &initial)).await.map_err(|_| "安全存储任务失败")??;
     }
     // Secrets have been safely written before altering a previously usable connection.
     let id_result = (|| {
@@ -216,13 +229,14 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
     })();
     let id = match id_result {
         Ok(id) => id,
-        Err(e) => { if needs_credentials { let key = reference.clone(); let _ = tokio::task::spawn_blocking(move || credentials::clear(&key)).await; } return Err(e); }
+        Err(e) => { if needs_credentials { let key = reference.clone(); let vault_app = app_handle.clone(); let _ = tokio::task::spawn_blocking(move || credentials::clear(&vault_app, &key)).await; } return Err(e); }
     };
     if let Some(job) = LOGIN_JOBS.lock().await.remove(&id) { job.abort.abort(); }
     if let Some(old) = old_reference {
         let _credential_guard = credentials::CREDENTIAL_LOCK.lock().await;
         let key = old.clone();
-        let cleared = tokio::task::spawn_blocking(move || credentials::clear(&key)).await.map_err(|_| "清理旧凭据任务失败".to_string()).and_then(|r| r);
+        let vault_app = app_handle.clone();
+        let cleared = tokio::task::spawn_blocking(move || credentials::clear(&vault_app, &key)).await.map_err(|_| "清理旧凭据任务失败".to_string()).and_then(|r| r);
         if let Err(e) = cleared { set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(e); }
         db(&app_handle)?.conn.execute("DELETE FROM app_credential_cleanup WHERE reference=?1", [old]).map_err(|e| e.to_string())?;
     }
@@ -244,7 +258,8 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
                 let current: Option<String> = db(&handle)?.conn.query_row("SELECT credential_ref FROM app_connection WHERE server_id=?1", [id], |r| r.get(0)).optional().map_err(|e| e.to_string())?.flatten();
                 if current.as_deref() != Some(reference.as_str()) { return Err("连接已取消或替换，丢弃迟到授权结果".into()); }
                 let key = reference.clone();
-                tokio::task::spawn_blocking(move || credentials::save(&key, &credential)).await.map_err(|_| "保存 OAuth 凭据任务失败")??;
+                let vault_app = handle.clone();
+                tokio::task::spawn_blocking(move || credentials::save(&vault_app, &key, &credential)).await.map_err(|_| "保存 OAuth 凭据任务失败")??;
                 set_current_status(&handle, id, &reference, "unchecked", None)?;
                 db(&handle)?.toggle_mcp_server(id, true).map_err(|e| e.to_string())?;
                 Ok::<(),String>(())
@@ -260,7 +275,8 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
     } else {
         if needs_credentials {
             let credential = credentials::Credential { server_id: id, endpoint: app.connection.url, headers, oauth: None };
-            let saved = tokio::task::spawn_blocking(move || credentials::save(&reference, &credential)).await.map_err(|_| "保存连接凭据任务失败".to_string()).and_then(|r| r);
+            let vault_app = app_handle.clone();
+            let saved = tokio::task::spawn_blocking(move || credentials::save(&vault_app, &reference, &credential)).await.map_err(|_| "保存连接凭据任务失败".to_string()).and_then(|r| r);
             if let Err(e) = saved { set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(e); }
         }
         set_status(&app_handle, id, "unchecked", None)?;
@@ -311,12 +327,13 @@ pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: 
     for reference in references {
         if revoke_remote.unwrap_or(true) {
             let key = reference.clone();
-            let credential = tokio::task::spawn_blocking(move || credentials::load_optional(&key)).await.map_err(|_| "读取待撤销凭据任务失败")??;
+            let vault_app = app_handle.clone();
+            let credential = tokio::task::spawn_blocking(move || credentials::load_optional(&vault_app, &key)).await.map_err(|_| "读取待撤销凭据任务失败")??;
             if let Some(credential) = credential {
                 match oauth::revoke(&credential).await {
                     Ok(value) => revoked |= value,
                     Err(error) => {
-                        let error = format!("连接已停用，但服务商撤销未完成：{error}。可重试断开，或明确选择仅删除本机凭据。");
+                        let error = format!("连接已停用，但服务商撤销未完成：{error}。可重试断开，或选择删除凭据但不撤销服务商授权；启用同步时删除会传播。");
                         set_status(&app_handle, server_id, "disconnected", Some(&error))?;
                         return Err(error);
                     }
@@ -324,12 +341,13 @@ pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: 
             }
         }
         let key = reference.clone();
-        let cleared = tokio::task::spawn_blocking(move || credentials::clear(&key)).await.map_err(|_| "删除凭据任务失败".to_string()).and_then(|r| r);
+        let vault_app = app_handle.clone();
+        let cleared = tokio::task::spawn_blocking(move || credentials::clear(&vault_app, &key)).await.map_err(|_| "删除凭据任务失败".to_string()).and_then(|r| r);
         if let Err(e) = cleared { set_status(&app_handle, server_id, "disconnected", Some(&e))?; return Err(e); }
         db(&app_handle)?.conn.execute("DELETE FROM app_credential_cleanup WHERE reference=?1", [reference]).map_err(|e| e.to_string())?;
     }
     db(&app_handle)?.conn.execute("UPDATE app_connection SET credential_ref=NULL WHERE server_id=?1", [server_id]).map_err(|e| e.to_string())?;
-    Ok(if revoked { "已断开连接、撤销服务商令牌并删除本机凭据" } else { "已断开并删除本机凭据；未执行服务商侧撤销，请按需在服务商账户设置中撤销授权" }.into())
+    Ok(if revoked { "已断开连接、撤销服务商令牌并删除凭据；启用同步时会同步删除" } else { "已断开并删除凭据；启用同步时会同步删除，服务商侧授权尚未撤销" }.into())
 }
 
 pub fn guard_update(app: &tauri::AppHandle, id: i64, request: &super::registry_api::MCPServerRequest) -> Result<(), String> {

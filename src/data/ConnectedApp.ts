@@ -48,6 +48,7 @@ export interface AppConnection {
     config: Record<string, string>;
     status: 'connecting' | 'available' | 'unchecked' | 'auth_required' | 'disconnected' | 'error';
     error: string | null;
+    credential_status?: string | null;
 }
 
 export function visibleAppFields(fields: AppField[], values: Record<string, string>): AppField[] {

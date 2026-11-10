@@ -3657,7 +3657,7 @@ async fn execute_http_tool(
 
     let (transport, redactor) = {
         let client_builder = crate::mcp::http_transport::configured_http_builder(app_handle, server).await.map_err(anyhow::Error::msg)?;
-        let resolving = crate::mcp::http_transport::create_authenticated_http_transport(server, client_builder);
+        let resolving = crate::mcp::http_transport::create_authenticated_http_transport(app_handle, server, client_builder);
         let resolved = tokio::select! {
             _ = cancel_token.cancelled() => return Err(anyhow!("Cancelled by user while preparing HTTP credentials")),
             result = tokio::time::timeout(std::time::Duration::from_millis(server.timeout.unwrap_or(30000).max(1) as u64), resolving) => result.map_err(|_| anyhow!("Timeout while preparing HTTP credentials"))?,

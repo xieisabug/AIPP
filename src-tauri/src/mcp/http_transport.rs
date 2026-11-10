@@ -54,6 +54,7 @@ pub(crate) fn create_http_transport(
 }
 
 pub(crate) async fn create_authenticated_http_transport(
+    app: &tauri::AppHandle,
     server: &MCPServer,
     builder: reqwest::ClientBuilder,
 ) -> Result<(StreamableHttpClientTransport<reqwest::Client>, ResponseRedactor), String> {
@@ -66,7 +67,7 @@ pub(crate) async fn create_authenticated_http_transport(
     if keys.len() != 1 { return Err("连接包含重复凭据引用".into()); }
     let reference = headers.remove(&keys[0]).unwrap();
     if !server.is_enabled { return Err(format!("连接 {} 已停用", server.id)); }
-    let secrets = super::apps::credentials::resolve(&reference, server.url.as_deref().ok_or("连接缺少服务地址")?, server.id).await?;
+    let secrets = super::apps::credentials::resolve(app, &reference, server.url.as_deref().ok_or("连接缺少服务地址")?, server.id).await?;
     let redactor = ResponseRedactor::new(secrets.values().cloned());
     for (key, value) in secrets {
         headers.retain(|existing, _| !existing.eq_ignore_ascii_case(&key));

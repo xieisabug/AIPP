@@ -457,7 +457,7 @@ async fn test_http_connection(app: &tauri::AppHandle, server: &MCPServer) -> Res
     };
 
     let builder = crate::mcp::http_transport::configured_http_builder(app, server).await?;
-    let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(server, builder).await?;
+    let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(app, server, builder).await?;
 
     // 创建客户端信息
     let client_info = ClientInfo {
@@ -740,7 +740,7 @@ async fn get_http_capabilities(
         std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
             let builder = crate::mcp::http_transport::configured_http_builder(&app_handle, &server).await.map_err(anyhow::Error::msg)?;
-            let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(&server, builder).await
+            let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(&app_handle, &server, builder).await
                 .map_err(anyhow::Error::msg)?;
 
             let client_info = ClientInfo {
