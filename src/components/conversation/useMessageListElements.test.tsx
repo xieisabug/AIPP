@@ -185,6 +185,37 @@ describe("useMessageListElements merged assistant preview state", () => {
         expect(result.current.renderItems.map(item => item.key)).not.toContain("chat-bottom-spacer");
     });
 
+    it("should keep consecutive replies apart when the host turns merging off", () => {
+        const { result } = renderHook(() => useMessageListElements({
+            ...makeHookProps([
+                makeMessage({ id: 1, message_type: "user", content: "大家看看" }),
+                makeMessage({ id: 2, content: "成员甲" }),
+                makeMessage({ id: 3, content: "成员乙" }),
+            ]),
+            mergeAssistantMessages: false,
+        }));
+        // 显示设置是合并，但宿主（群聊）要求逐条，不能出现合并组
+        expect(result.current.messageElements.map(entry => entry.messageIds ?? [entry.messageId])).toEqual([[1], [2], [3]]);
+    });
+
+    it("should render custom rows as boundaries when merging consecutive replies", () => {
+        const { result } = renderHook(() => useMessageListElements({
+            ...makeHookProps([
+                makeMessage({ id: 1, message_type: "user", content: "问题" }),
+                makeMessage({ id: 2, content: "回复一" }),
+                makeMessage({ id: 3, message_type: "notice", content: "系统提示" }),
+                makeMessage({ id: 4, content: "回复二" }),
+            ]),
+            renderMessageRow: message => message.message_type === "notice"
+                ? <div data-testid="custom-notice">{message.content}</div>
+                : null,
+        }));
+        // 自定义行单独成行，前后的回复不会跨过它并进同一个气泡
+        expect(result.current.messageElements.map(entry => entry.messageIds ?? [entry.messageId])).toEqual([[1], [2], [3], [4]]);
+        render(<>{result.current.messageElements.map(entry => <div key={entry.messageId}>{entry.messageElement}</div>)}</>);
+        expect(screen.getByTestId("custom-notice")).toHaveTextContent("系统提示");
+    });
+
     it("renders a Butler user message followed by an error message", () => {
         render(
             <Harness

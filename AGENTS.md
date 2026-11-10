@@ -13,6 +13,10 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **管家群聊**：群聊与联系人同列，用户直接发言，不选接收人或讨论模式。谁来回复：`@成员`/`@所有人` → 引用的原作者 → 单成员 → 调度模型（小型辅助模型，未配置用总管家模型；失败如实报错不换模型）；多人同时回复（之后通过读取位置补上彼此的回复）；要求讨论时按轮推进（一轮全部结束后进入下一轮，静默轮/轮数上限/用户插话/停止即结束）；成员回复里的 @ 触发接力（有层数/次数上限）。成员说话方式（简短、分段、不逐条列点）每轮随 `<group_chat>` 提醒。每个成员在每个群有独立执行会话，输入是纯文本聊天记录（不含调度字段），私聊与其他群不注入；群成员不提供联系人协作工具。回复只在仍进行时写入成员会话，停止/移出后的迟到结果不公开，重启不重做。实现见 `db/butler_group.rs`、`api/butler_group*.rs`、`src/components/butler/ButlerGroupChat.tsx`，设计与验收见 [群聊 PRD](./docs/butler-group-prd.md)。
 
+**聊天界面只有一套**（Ask 是单轮弹窗，只共用输入框）：
+- 输入框：ChatUI、管家私聊/总管家（经 `ConversationUI`）、Ask、管家群聊都直接用 `src/components/conversation/InputArea.tsx`，输入相关新功能加在这里即全部生效；各场景差异用能力 props 表达（不传 `handleChooseFile` = 不支持附件，如群聊；`mentionCandidates` 替换 @ 候选，群聊传本群成员与“所有人”；`topChip` 引用条），不要再为某个场景手写输入框。发送语义各场景自理，但发送键约定一致：有内容即发送（回复中可插话/排队），空输入且在回复时为停止。
+- 消息列表：私聊与群聊共用 `VirtuosoMessageList` + `useMessageListElements`（虚拟化、打开贴底与晚到布局跟随、发送滑动、跳转高亮、最后一轮布局）与 `useScrollManagement`、`ConversationTurnRail`；气泡统一是 `MessageItem`。群聊（`ButlerGroupTranscript.tsx`）通过 `transcriptKey`（消息分属多个成员执行会话）、`mergeAssistantMessages={false}`（不同成员不并气泡）、`renderMessageRow`（发言人/时间分隔/系统提示）、`inlineInteractionItems`（正在输入/成员提问）接入；列表层改进直接作用于两者，不要再为某个场景手写列表或滚动逻辑。
+
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
 
 ## Essential Build Commands

@@ -15,6 +15,16 @@ export interface TurnRailItem {
     preview: string;
 }
 
+// 从用户消息内容生成悬浮预览片段（私聊与群聊共用）
+const TURN_PREVIEW_MAX = 120;
+export function makeTurnPreview(content: string): string {
+    const collapsed = content.replace(/\s+/g, " ").trim();
+    if (collapsed.length <= TURN_PREVIEW_MAX) {
+        return collapsed;
+    }
+    return collapsed.slice(0, TURN_PREVIEW_MAX) + "…";
+}
+
 export interface ConversationTurnRailProps {
     turns: TurnRailItem[];
     scrollContainerRef: RefObject<HTMLDivElement | null>;
