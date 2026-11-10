@@ -3,14 +3,17 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 // Only conversation kinds owned by the Butler workspace may be searched, even by numeric ID.
+// 归档的联系人私聊与不再是当前主会话的总管家主会话标为 archived，让模型与界面区分新旧会话。
 const ROWS: &str = "SELECT m.id, c.id, c.conversation_kind, c.assistant_id, c.name, m.message_type,
     coalesce(CASE WHEN json_valid(m.metadata_json) THEN json_extract(m.metadata_json,'$.origin') END,
         CASE WHEN c.conversation_kind='butler_task' AND m.message_type='user' AND m.id=(
             SELECT min(t.id) FROM message t WHERE t.conversation_id=c.id AND t.message_type='user') THEN 'butler_task' END),
     CASE WHEN json_valid(m.metadata_json) THEN json_extract(m.metadata_json,'$.sender_bot') END,
-    m.created_time, ";
+    m.created_time,
+    c.conversation_kind='butler_contact_archive' OR (c.conversation_kind='butler_main'
+        AND NOT EXISTS(SELECT 1 FROM butler_main_state s WHERE s.butler_conversation_id=c.id)), ";
 const FROM: &str = " FROM message m JOIN conversation c ON c.id=m.conversation_id
-    WHERE c.conversation_kind IN ('butler_main','butler_contact','butler_task')
+    WHERE c.conversation_kind IN ('butler_main','butler_contact','butler_contact_archive','butler_task')
       AND m.message_type IN ('user','response','assistant','error') AND trim(m.content)!=''
       AND CASE WHEN json_valid(m.metadata_json) THEN coalesce(json_extract(m.metadata_json,'$.origin'),'')!='internal' ELSE 1 END";
 const HUMAN: &str = " AND m.message_type='user' AND CASE WHEN json_valid(m.metadata_json)
@@ -40,9 +43,9 @@ fn entry(row: &Row<'_>, names: &HashMap<i64, String>) -> rusqlite::Result<Value>
         _ => bot.clone(),
     };
     Ok(json!({"message_id":row.get::<_,i64>(0)?, "conversation_id":row.get::<_,i64>(1)?,
-        "conversation_kind":kind,"conversation_name":title,"bot_id":bot_id,"bot_name":bot,
+        "conversation_kind":kind,"conversation_name":title,"archived":row.get::<_,bool>(9)?,"bot_id":bot_id,"bot_name":bot,
         "role":role,"speaker":speaker,"created_time":row.get::<_,String>(8)?,
-        "text":row.get::<_,String>(9)?,"truncated":row.get::<_,bool>(10)?}))
+        "text":row.get::<_,String>(10)?,"truncated":row.get::<_,bool>(11)?}))
 }
 
 pub fn search(
@@ -107,7 +110,7 @@ pub fn context(
     read().map_err(|e| e.to_string())?.ok_or_else(|| format!("管家消息 {id} 不存在或不在可读范围"))
 }
 
-/// 管家窗口左上角搜索：在管家主会话（含已归档）、联系人私聊与派工任务中检索公开消息。
+/// 管家窗口左上角搜索：在管家主会话、联系人私聊（均含已归档）与派工任务中检索公开消息。
 /// 返回完整正文，由调用方按命中位置截取摘要；按消息 id 倒序分页。
 pub fn ui_search(
     conn: &Connection,

@@ -12,6 +12,9 @@ use crate::utils::db_utils::{get_datetime_from_row, get_required_datetime_from_r
 
 use super::{get_db_path, get_db_write_lock};
 
+/// 已归档的管家联系人私聊：保留消息供检索与只读查看，不再是该助手的当前私聊（`butler_contact`）。
+pub const BUTLER_CONTACT_ARCHIVE_KIND: &str = "butler_contact_archive";
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub enum AttachmentType {
     Image = 1,
@@ -338,6 +341,11 @@ impl ConversationRepository {
                  ORDER BY id LIMIT 1", [assistant_id], |row| row.get(0),
             )
         })
+    }
+
+    /// 归档助手当前的管家私聊并新开一条，见 [`archive_butler_contact_conversation`]。
+    pub fn archive_butler_contact(&self, assistant_id: i64, name: &str, archived_name: &str) -> Result<(Vec<i64>, i64)> {
+        self.with_serialized_write(|conn| archive_butler_contact_conversation(conn, assistant_id, name, archived_name))
     }
 
     fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
@@ -755,6 +763,41 @@ pub fn cascade_delete_conversation(conn: &Connection, conversation_id: i64) -> R
     super::cascade_delete::delete(conn, "conversation", conversation_id)
 }
 
+/// 归档助手当前的管家私聊并新开一条。旧会话改为归档类型（消息保留、可检索，不再参与协作与投递），
+/// 尚未发出的排队消息随之丢弃；按助手查找私聊的地方此后都落到新会话。返回（被归档的旧会话，新会话）。
+pub fn archive_butler_contact_conversation(
+    conn: &Connection,
+    assistant_id: i64,
+    name: &str,
+    archived_name: &str,
+) -> Result<(Vec<i64>, i64)> {
+    let tx = conn.unchecked_transaction()?;
+    let now = Utc::now();
+    let archived: Vec<i64> = tx
+        .prepare("SELECT id FROM conversation WHERE assistant_id=?1 AND conversation_kind='butler_contact' ORDER BY id")?
+        .query_map([assistant_id], |row| row.get(0))?
+        .collect::<Result<_>>()?;
+    for id in &archived {
+        tx.execute(
+            "UPDATE conversation SET conversation_kind=?2, name=?3, updated_time=?4 WHERE id=?1",
+            params![id, BUTLER_CONTACT_ARCHIVE_KIND, archived_name, now],
+        )?;
+        tx.execute(
+            "DELETE FROM queued_conversation_message WHERE conversation_id=?1 AND status IN ('queued','paused')",
+            [id],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time, updated_time,
+             conversation_kind, is_hidden_from_normal_chat_list)
+         VALUES (?1, ?2, ?3, ?3, 'butler_contact', 1)",
+        params![name, assistant_id, now],
+    )?;
+    let created = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok((archived, created))
+}
+
 pub struct MessageRepository {
     conn: Connection,
     write_lock: Arc<Mutex<()>>,
@@ -1132,14 +1175,32 @@ impl MessageRepository {
         rows.collect()
     }
 
+    /// 在本会话中检索字面短语。联系人私聊同时检索该助手已归档的私聊，总管家主会话同时检索已归档的主会话；
+    /// 来自归档会话的命中带 `archived: true` 与会话名，让模型知道那是用户重开会话前的旧记录。
     pub fn search_own_history(&self, conversation_id: i64, query: &str) -> Result<Vec<serde_json::Value>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, message_type, substr(content, max(1, instr(content, ?2)-200), 1100)
-             FROM message WHERE conversation_id=?1 AND message_type IN ('user','assistant','response')
-                 AND instr(content, ?2)>0 ORDER BY id DESC LIMIT 6")?;
-        let rows = stmt.query_map(rusqlite::params![conversation_id, query], |row| Ok(serde_json::json!({
-            "message_id": row.get::<_,i64>(0)?, "role": row.get::<_,String>(1)?, "excerpt": row.get::<_,String>(2)?,
-        })))?;
+            "SELECT m.id, m.message_type, substr(m.content, max(1, instr(m.content, ?2)-200), 1100), c.id, c.name
+             FROM conversation cur
+             JOIN conversation c ON c.id=cur.id
+                 OR (cur.conversation_kind='butler_contact' AND c.conversation_kind='butler_contact_archive'
+                     AND c.assistant_id=cur.assistant_id)
+                 OR (cur.conversation_kind='butler_main' AND c.conversation_kind='butler_main' AND c.id<>cur.id
+                     AND NOT EXISTS(SELECT 1 FROM butler_main_state s WHERE s.butler_conversation_id=c.id))
+             JOIN message m ON m.conversation_id=c.id
+             WHERE cur.id=?1 AND m.message_type IN ('user','assistant','response') AND instr(m.content, ?2)>0
+             ORDER BY m.id DESC LIMIT 6")?;
+        let rows = stmt.query_map(rusqlite::params![conversation_id, query], |row| {
+            let mut hit = serde_json::json!({
+                "message_id": row.get::<_,i64>(0)?, "role": row.get::<_,String>(1)?, "excerpt": row.get::<_,String>(2)?,
+            });
+            let source: i64 = row.get(3)?;
+            if source != conversation_id {
+                hit["archived"] = true.into();
+                hit["conversation_id"] = source.into();
+                hit["conversation_name"] = row.get::<_,Option<String>>(4)?.unwrap_or_default().into();
+            }
+            Ok(hit)
+        })?;
         rows.collect()
     }
 

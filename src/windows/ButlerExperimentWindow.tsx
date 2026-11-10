@@ -1,5 +1,5 @@
 import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
-import { clearButlerContactHistory } from "@/services/butlerContactService";
+import { resetButlerContactConversation } from "@/services/butlerContactService";
 import ButlerGroupChat from "@/components/butler/ButlerGroupChat";
 import ButlerGroupMemberPicker from "@/components/butler/ButlerGroupMemberPicker";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
@@ -643,15 +643,33 @@ function ButlerExperimentWindow() {
         }
     }, []);
 
-    const assistantItemActions = useAssistantItemActions({
-        onClear: async assistant => {
-            const selectionRequest = contactRequest.current;
-            const conversationId = await clearButlerContactHistory(assistant.id);
-            if (conversationId === null) return;
-            localStorage.removeItem(`butler-read-${conversationId}`);
-            if (selectionRequest === contactRequest.current && contact?.assistantId === assistant.id) await selectContact(assistant);
+    // 重开联系人私聊（与总管家「重开新会话」一致）：旧私聊归档，仍停留在该助手时切到新私聊。
+    const [resettingContactId, setResettingContactId] = useState<number | null>(null);
+    const resetContactConversation = useCallback(async (assistantId: number) => {
+        setResettingContactId(assistantId);
+        try {
+            const result = await resetButlerContactConversation(assistantId);
+            result.archivedConversationIds.forEach(id => localStorage.removeItem(`butler-read-${id}`));
+            setContact(active => active?.assistantId === assistantId
+                ? { assistantId, conversationId: result.conversationId }
+                : active);
+            if (result.stopNotes.length) toast.info(`已停止旧私聊上进行中的工作：${result.stopNotes.join("；")}`);
             await loadPreviews();
-        },
+        } finally {
+            setResettingContactId(null);
+        }
+    }, [loadPreviews]);
+    const handleResetContactConversation = useCallback(async (assistantId: number) => {
+        try {
+            await resetContactConversation(assistantId);
+            toast.success("旧私聊已归档，已开始新会话");
+        } catch (error) {
+            toast.error(`重开新会话失败（助手 ${assistantId}）：${error instanceof Error ? error.message : String(error)}`);
+        }
+    }, [resetContactConversation]);
+
+    const assistantItemActions = useAssistantItemActions({
+        onReset: assistant => resetContactConversation(assistant.id),
     });
 
     useEffect(() => {
@@ -1079,7 +1097,11 @@ function ButlerExperimentWindow() {
 
     useAppShortcuts("butler", {
         new: () => {
-            if (contact || historyView || groupId !== null || !mainConversationId || resettingMainConversation) {
+            if (historyView || groupId !== null || !mainConversationId || resettingMainConversation || resettingContactId !== null) {
+                return;
+            }
+            if (contact) {
+                void handleResetContactConversation(contact.assistantId);
                 return;
             }
             void handleResetMainConversation();
@@ -1280,16 +1302,18 @@ function ButlerExperimentWindow() {
                                     />
                                     <IconButton
                                         icon={
-                                            resettingMainConversation ? (
+                                            resettingMainConversation || resettingContactId !== null ? (
                                                 <Loader2 className="h-4 w-4 animate-spin text-icon" />
                                             ) : (
                                                 <RefreshCw className="h-4 w-4 text-icon" />
                                             )
                                         }
-                                        onClick={() => void handleResetMainConversation()}
-                                        disabled={!!contact || !mainConversationId || resettingMainConversation}
+                                        onClick={() => void (contact
+                                            ? handleResetContactConversation(contact.assistantId)
+                                            : handleResetMainConversation())}
+                                        disabled={!mainConversationId || resettingMainConversation || resettingContactId !== null}
                                         border
-                                        title="重开新会话"
+                                        title={contact ? "重开新会话（旧私聊归档，可搜索查看）" : "重开新会话"}
                                         dataAippSlot="butler-main-reset-conversation"
                                     />
                                 </div>

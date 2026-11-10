@@ -3898,6 +3898,52 @@ pub async fn open_butler_contact(app_handle: AppHandle, assistant_id: i64) -> Re
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ButlerContactResetResponse {
+    /// 新开的私聊。
+    pub conversation_id: i64,
+    /// 被归档的旧私聊（之前从未打开过私聊时为空）。
+    pub archived_conversation_ids: Vec<i64>,
+    /// 停止旧私聊上进行中工作的说明（没有进行中的工作时为空）。
+    pub stop_notes: Vec<String>,
+}
+
+/// 重开联系人私聊（与总管家「重开新会话」一致）：旧私聊归档为只读存档，仍可在管家搜索和助手历史检索中找到；
+/// 属于旧私聊的进行中工作随之停止；长期记忆不受影响。
+#[tauri::command]
+pub async fn reset_butler_contact_conversation(
+    app_handle: AppHandle,
+    assistant_id: i64,
+) -> Result<ButlerContactResetResponse, String> {
+    ensure_butler_enabled(&app_handle).await?;
+    let assistant = AssistantDatabase::new(&app_handle)
+        .and_then(|db| db.get_assistant(assistant_id))
+        .map_err(|e| format!("读取助手 {assistant_id} 出错：{e}"))?;
+    if is_butler_system_assistant(&assistant) {
+        return Err("总管家的主会话请用总管家的「重开新会话」重开".into());
+    }
+    let archived_name =
+        build_butler_archive_conversation_name(&format!("与{}的私聊", assistant.name), &Utc::now());
+    let (archived, conversation_id) = ConversationDatabase::new(&app_handle)
+        .map_err(|e| e.to_string())
+        .and_then(|db| db.conversation_repo().map_err(|e| e.to_string()))
+        .map_err(|e| format!("打开会话数据库出错（助手 {assistant_id}）：{e}"))?
+        .archive_butler_contact(assistant_id, &assistant.name, &archived_name)
+        .map_err(|e| format!("归档助手 {assistant_id} 的旧私聊出错：{e}"))?;
+    // 先归档再停止：新的协作请求从此落到新私聊，停止只处理旧私聊上已有的工作。
+    let mut stop_notes = Vec::new();
+    for old in &archived {
+        let notes = super::butler_peer::stop_archived_contact_work(&app_handle, *old, assistant.name.clone())
+            .await
+            .map_err(|e| format!(
+                "旧私聊（会话 {old}）已归档、新私聊为会话 {conversation_id}，但停止旧私聊上进行中的工作出错（助手 {assistant_id}）：{e:#}"
+            ))?;
+        stop_notes.extend(notes);
+    }
+    Ok(ButlerContactResetResponse { conversation_id, archived_conversation_ids: archived, stop_notes })
+}
+
 #[tauri::command]
 pub async fn load_butler_main_conversation(
     app_handle: tauri::AppHandle,

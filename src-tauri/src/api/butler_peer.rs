@@ -833,6 +833,41 @@ pub(crate) async fn stop_task_work(app: &AppHandle, task: i64) -> anyhow::Result
     Ok(Some(note))
 }
 
+/// 联系人私聊归档后停止旧会话上的全部工作，避免旧会话继续执行或再收到投递：
+/// 当前回合所属的工作（与用户停止相同）、它正在受理的委托（发起方照常收到停止回执）、
+/// 它发起的协作及其下级（旧会话已归档，不再给它回执），最后打断旧会话自己的执行。
+pub(crate) async fn stop_archived_contact_work(app: &AppHandle, conversation: i64, label: String) -> anyhow::Result<Vec<String>> {
+    let mut notes = Vec::new();
+    if let Some(note) = stop_turn_work(app, conversation).await? {
+        notes.push(note);
+    }
+    let received = peer::active_in_target(&connection(app)?, conversation)?;
+    for exchange in received {
+        notes.push(stop_exchange_work(app, exchange.id, Some(conversation)).await?);
+    }
+    let admission = super::butler_work::execution_gate().await;
+    let conn = connection(app)?;
+    let snapshot = peer::active_in_owner(&conn, conversation)?;
+    let ids = peer::stop_owned(&conn, conversation)?;
+    drop(conn);
+    drop(admission);
+    if !ids.is_empty() {
+        let mut conversations: Vec<i64> = snapshot.iter().map(|e| e.target).collect();
+        for id in &ids {
+            if let Some(ex) = peer::get(&connection(app)?, *id)? {
+                conversations.extend([ex.owner, ex.target]);
+            }
+        }
+        let note = halt_work(app, conversations, HaltScope::Exchanges(ids.clone()), Vec::new(), Some(conversation)).await?;
+        finish_stop(app, &ids, &note)?;
+        notes.push(note);
+    }
+    if busy(app, conversation).await? {
+        notes.push(halt_turn(app, conversation, label).await?.describe());
+    }
+    Ok(notes)
+}
+
 /// 独立任务发起的协作是否仍未闭环（任务据此暂缓收尾）。
 pub(crate) fn has_open_owned_exchanges(app: &AppHandle, conversation: i64) -> anyhow::Result<bool> {
     Ok(peer::has_open_owned(&connection(app)?, conversation)?)
