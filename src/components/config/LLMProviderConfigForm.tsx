@@ -94,6 +94,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const isAcpProvider = apiType === "acp";
     const isCodexAppServerProvider = apiType === "codex_app_server";
     const isClaudeSdkProvider = apiType === "claude_sdk";
+    const isNativeAgentProvider = ["pi", "cursor", "opencode"].includes(apiType);
 
     // API 类型显示标签映射
     const apiTypeLabels: Record<string, string> = {
@@ -108,6 +109,9 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
         'acp': 'ACP(Agent Client Protocol)',
         'codex_app_server': 'Codex',
         'claude_sdk': 'Claude Code',
+        'pi': 'Pi',
+        'cursor': 'Cursor',
+        'opencode': 'OpenCode',
     };
     const apiTypeLabel = apiTypeLabels[apiType] || apiType;
 
@@ -391,6 +395,20 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
 
     // 表单字段定义
     const configFields = useMemo(() => {
+        if (isNativeAgentProvider) {
+            return [
+                { key: "apiType", config: { type: "static" as const, label: "提供商类型", value: apiTypeLabel } },
+                { key: "agent_node_command", config: { type: "input" as const, label: "Node.js 命令", value: "node", tooltip: "需要 Node.js 22.19 或更新版本" } },
+                ...(apiType === "cursor" ? [
+                    { key: "agent_sdk_directory", config: { type: "input" as const, label: "Cursor SDK 安装目录", value: "", tooltip: "填写包含 node_modules/@cursor/sdk 的目录；安装命令：npm install --prefix <目录> @cursor/sdk@1.2.0" } },
+                    { key: "cursor_runtime_notice", config: { type: "static" as const, label: "本机执行策略", value: "使用 Cursor SDK 自动审核；在下方环境变量中配置 CURSOR_API_KEY。" } },
+                ] : [
+                    { key: "agent_cli_command", config: { type: "input" as const, label: `${apiTypeLabel} CLI 命令`, value: apiType, tooltip: "使用本机已安装并登录的 CLI，也可填写可执行文件或 JavaScript 入口的绝对路径" } },
+                ]),
+                { key: "acp_working_directory", config: { type: "input" as const, label: "默认工作目录", value: "", tooltip: "留空使用用户主目录，助手可单独覆盖" } },
+                { key: "acp_env_vars", config: { type: "textarea" as const, label: "环境变量", value: "", placeholder: "KEY=VALUE", tooltip: "支持每行 KEY=VALUE 或 JSON 对象；复用本机登录与配置" } },
+            ];
+        }
         // GitHub Copilot 提供商：特殊表单
         if (isCopilotProvider) {
             return [

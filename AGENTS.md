@@ -48,6 +48,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## Key Development Patterns
 
+**原生 Agent 扩展**：Pi/Cursor/OpenCode 在 `api/ai/agent_driver/native_agents.rs` 注册，协议适配脚本位于同名目录；Pi 使用 RPC + extension、Cursor 使用官方 Node SDK、OpenCode 使用本机 HTTP/SSE。新增驱动复用统一 dispatch、实例归属、scoped MCP 和审批 stores，不作为 ACP 别名。协议测试使用 `node --test src-tauri/src/api/ai/agent_driver/native_agents/native-agents.test.mjs`；Cursor 依赖安装与各通道边界见 `docs/product/11-ACP集成.md`。
+
 ### Frontend-Backend Communication
 
 ```rust

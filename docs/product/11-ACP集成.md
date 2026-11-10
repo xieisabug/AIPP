@@ -4,7 +4,27 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 ## 统一 Agent 调用
 
-Codex app-server、Claude Code CLI 与 ACP 共用 AIPP 的 Agent 驱动入口，继续使用各自原生协议和已有会话。模型、权限、MCP 与可用配置仍由对应 Agent 决定，不会因为统一入口而假设三种通道支持相同能力。
+Codex app-server、Claude Code、Pi、Cursor、OpenCode 与 ACP 共用 AIPP 的 Agent 驱动入口。模型、权限、MCP 与可用配置由对应 Agent 决定，各通道的能力并不完全相同。
+
+### Pi、Cursor 与 OpenCode
+
+在设置中新增对应类型的提供商，再在「智能体助手」中选择它。三者都需要本机 Node.js 22.19 或更新版本，只在桌面执行。
+
+| 类型 | 本机依赖 | 通道和恢复身份 |
+| --- | --- | --- |
+| Pi | 已安装并完成登录的 `pi` | 原生 RPC；保存 `sessionFile` 路径，按原路径恢复 |
+| Cursor | `@cursor/sdk@1.2.0`、`CURSOR_API_KEY` | 官方 SDK 的本机执行模式；保存并恢复 agent ID |
+| OpenCode | 已安装并完成登录的 `opencode` | 本机 HTTP/SSE 服务；保存并恢复 session ID |
+
+Cursor SDK 可用 `npm install --prefix <目录> @cursor/sdk@1.2.0` 安装，然后将该目录填入提供商的「Cursor SDK 安装目录」。在环境变量中设置 `CURSOR_API_KEY`。Cursor 使用 SDK 自动审核；不提供 AIPP 人工审批卡片或额外承诺文件系统沙箱能力。SDK 初始化或权限错误会直接显示，不会切换执行方式。
+
+Pi 和 OpenCode 默认读取本机登录及配置；可单独设置 CLI 入口、工作目录和环境变量。Windows 会解析常见 npm/pnpm PowerShell shim 的 JavaScript 入口，避免交互协议被 shell 管道缓冲；不识别的 shim 会提示填写实际入口。环境变量接受 `KEY=VALUE` 多行文本或 JSON 字符串对象，助手中的同名变量覆盖提供商变量。
+
+模型列表从原生目录发现。「使用智能体本机默认模型」是显式选项；指定模型错误不会改用其他模型。Pi/OpenCode 的完整模型标识为 `provider/model`，Cursor 使用账号模型目录中的 ID。OpenCode 智能体与「OpenCode Go」API 提供商是不同入口。
+
+文本回复、思考和工具活动复用现有会话展示；工具活动随响应保存。Pi 通过扩展注入选中的 AIPP MCP 工具，并在工具调用前请求确认；OpenCode 的原生审批进入 AIPP 权限卡片，执行规则仍由本机 OpenCode 配置决定。Pi/OpenCode 的提问复用 AIPP 交互卡片；超出当前卡片支持范围的原生交互会明确报错。Cursor/OpenCode 通过各自原生 MCP 配置接入 AIPP bridge。
+
+停止会向原生运行发送取消，撤销该 run 的待审批和提问；20 秒内未收到终态则终止所拥有的进程树并显示原因。恢复失败、进程退出或协议错误均不会切换 ACP、模型或新会话。三者当前只支持文本上下文及文本/Skill 附件，不声明图片、音频输入或原生 fork/rollback 支持。
 
 发送时若会话控制通道已经关闭，当前响应会显示失败并保留错误原因，不会自动新建会话后重新发送。
 

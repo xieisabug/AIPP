@@ -221,10 +221,10 @@ impl LLMDatabase {
     ) -> rusqlite::Result<Vec<(i64, String, String, String, bool, bool)>> {
         let where_clause = if assistant_type == 4 {
             // ACP 助手：只要 ACP 提供商
-            "api_type IN ('acp', 'codex_app_server', 'claude_sdk')"
+            "api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode')"
         } else {
             // 普通助手：排除 ACP 提供商
-            "api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk')"
+            "api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode')"
         };
 
         let sql = format!(
@@ -695,7 +695,7 @@ impl LLMDatabase {
                     LEFT JOIN
                         llm_model m ON m.llm_provider_id = p.id
                     WHERE
-                        p.is_enabled = 1 AND p.api_type IN ('acp', 'codex_app_server', 'claude_sdk')
+                        p.is_enabled = 1 AND p.api_type IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode')
                     ORDER BY
                         p.id, m.id
                     ",
@@ -713,7 +713,7 @@ impl LLMDatabase {
             return Ok(result);
         }
 
-        let where_clause = "p.is_enabled = 1 AND p.api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk')";
+        let where_clause = "p.is_enabled = 1 AND p.api_type NOT IN ('acp', 'codex_app_server', 'claude_sdk', 'pi', 'cursor', 'opencode')";
 
         let sql = format!(
             "

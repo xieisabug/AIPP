@@ -177,6 +177,9 @@ export const useAssistantFormConfig = ({
             const isCodexProvider =
                 agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ===
                 "codex_app_server";
+            const isNativeAgentProvider = ["pi", "cursor", "opencode"].includes(
+                agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? ""
+            );
 
             return [
                 {
@@ -202,7 +205,7 @@ export const useAssistantFormConfig = ({
                         },
                     },
                 },
-                ...(isCodexProvider
+                ...(isCodexProvider || isNativeAgentProvider
                     ? [
                           {
                               key: "agent_model",
@@ -218,7 +221,7 @@ export const useAssistantFormConfig = ({
                                       label: option.name,
                                   })),
                                   disabled: agentModelLoading || agentModelOptions.length === 0,
-                                  tooltip: agentModelError ?? "默认读取 Codex 当前生效的配置",
+                                  tooltip: agentModelError ?? "读取智能体当前可用模型；默认项复用本机配置",
                                   onChange: (value: string | boolean) => {
                                       const model = agentModelOptions.find((option) => option.code === value);
                                       const effort = model?.default_effort && model.efforts.includes(model.default_effort)
@@ -228,7 +231,7 @@ export const useAssistantFormConfig = ({
                                   },
                               },
                           },
-                          {
+                          ...(isCodexProvider ? [{
                               key: "reasoning_effort",
                               config: {
                                   type: "select" as const,
@@ -245,7 +248,7 @@ export const useAssistantFormConfig = ({
                                   onChange: (value: string | boolean) =>
                                       handleConfigChange("reasoning_effort", value, "string"),
                               },
-                          },
+                          }] : []),
                       ]
                     : []),
                 {
@@ -266,7 +269,7 @@ export const useAssistantFormConfig = ({
                         type: "textarea" as const,
                         label: "环境变量",
                         value: getAcpConfigValue("acp_env_vars", ""),
-                        tooltip: "每行一个，格式：变量名=值",
+                        tooltip: "每行一个，格式：变量名=值；原生 Pi / Cursor / OpenCode 也支持 JSON 对象",
                         className: "h-32",
                         onChange: (value: string | boolean) =>
                             handleConfigChange("acp_env_vars", value, "string"),
@@ -277,6 +280,7 @@ export const useAssistantFormConfig = ({
                     config: {
                         type: "input" as const,
                         label: "附加启动参数",
+                        disabled: isNativeAgentProvider,
                         value: getAcpConfigValue("acp_additional_args", ""),
                         tooltip: "传递给命令行程序的额外参数，空格分隔",
                         onChange: (value: string | boolean) =>

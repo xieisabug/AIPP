@@ -297,6 +297,9 @@ pub(super) fn register_builtin_drivers(registry: &AgentDriverRegistry) -> Result
     for kind in [AgentSessionKind::Acp, AgentSessionKind::Codex, AgentSessionKind::Claude] {
         registry.register(Arc::new(BuiltinDriver(kind)))?;
     }
+    for id in super::native_agents::DRIVER_IDS {
+        registry.register(Arc::new(super::native_agents::NativeDriver(id)))?;
+    }
     Ok(())
 }
 
