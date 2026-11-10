@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import ButlerProfileDialog from "./ButlerProfileDialog";
 
 const memoryApi = vi.hoisted(() => ({
@@ -7,9 +8,27 @@ const memoryApi = vi.hoisted(() => ({
     getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn(),
 }));
 vi.mock("@/services/butlerMemoryService", () => memoryApi);
+vi.mock("@/hooks/useFilteredModels", () => ({ useFilteredModels: () => ({
+    models: [{ name: "Old model", code: "old", llm_provider_id: 1, id: 1 }, { name: "New model", code: "new", llm_provider_id: 2, id: 2 }],
+    loading: false, error: null,
+}) }));
 
 describe("Butler profile editor", () => {
     afterEach(cleanup);
+
+    it("should edit description and model like the add form while keeping the type read-only", async () => {
+        const user = userEvent.setup();
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="小A" description="写作" model={{ assistantType: 0, typeName: "普通对话助手", value: "old%%1" }}
+            onSave={onSave} onClose={vi.fn()} />);
+        expect(screen.getByLabelText("类型")).toHaveValue("普通对话助手");
+        expect(screen.getByLabelText("类型")).toBeDisabled();
+        fireEvent.change(screen.getByLabelText("描述（选填）"), { target: { value: "写周报" } });
+        await user.click(screen.getByRole("combobox", { name: "模型" }));
+        await user.click(screen.getByRole("option", { name: "New model" }));
+        await user.click(screen.getByRole("button", { name: "保存" }));
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("小A", expect.objectContaining({ motion: true }), "写周报", "new%%2"));
+    });
 
     it("should list the assistant's memories in a separate tab when a conversation is given", async () => {
         memoryApi.listButlerMemories.mockResolvedValue([{ id: 5, content: "用户希望回答先给结论", scope_type: "assistant", scope_id: 2,
@@ -17,7 +36,7 @@ describe("Butler profile editor", () => {
         memoryApi.onButlerMemoryChanged.mockResolvedValue(() => {});
         render(<ButlerProfileDialog name="小A" memoryConversationId={20} onSave={vi.fn()} onClose={vi.fn()} />);
         expect(memoryApi.listButlerMemories).not.toHaveBeenCalled();
-        fireEvent.mouseDown(screen.getByRole("tab", { name: "长期记忆" }), { button: 0 });
+        fireEvent.mouseDown(screen.getByRole("tab", { name: "记忆" }), { button: 0 });
         expect(await screen.findByText("用户希望回答先给结论")).toBeInTheDocument();
         expect(memoryApi.listButlerMemories).toHaveBeenCalledWith(20);
     });
@@ -26,7 +45,7 @@ describe("Butler profile editor", () => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         const onClose = vi.fn();
         render(<ButlerProfileDialog name="总管家" onSave={onSave} onClose={onClose} />);
-        fireEvent.change(screen.getByLabelText("助手名称"), { target: { value: " 小管家 " } });
+        fireEvent.change(screen.getByLabelText("名称"), { target: { value: " 小管家 " } });
         fireEvent.click(screen.getByRole("button", { name: "左侧 · 亮色：薄荷绿" }));
         fireEvent.click(screen.getByRole("button", { name: "右侧 · 深色：海军蓝" }));
         expect(onSave).not.toHaveBeenCalled();
@@ -42,7 +61,7 @@ describe("Butler profile editor", () => {
         const onSave = vi.fn();
         const onClose = vi.fn();
         render(<ButlerProfileDialog name="总管家" onSave={onSave} onClose={onClose} />);
-        fireEvent.change(screen.getByLabelText("助手名称"), { target: { value: "  " } });
+        fireEvent.change(screen.getByLabelText("名称"), { target: { value: "  " } });
         expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
         fireEvent.click(screen.getByRole("button", { name: "取消" }));
         expect(onSave).not.toHaveBeenCalled();
@@ -54,7 +73,7 @@ describe("Butler profile editor", () => {
         render(<ButlerProfileDialog name="总管家" onSave={vi.fn().mockRejectedValue(new Error("配置写入失败：database is locked"))} onClose={onClose} />);
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         expect(await screen.findByRole("alert")).toHaveTextContent("database is locked");
-        expect(screen.getByLabelText("助手名称")).toHaveValue("总管家");
+        expect(screen.getByLabelText("名称")).toHaveValue("总管家");
         expect(onClose).not.toHaveBeenCalled();
     });
 

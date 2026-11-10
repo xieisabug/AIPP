@@ -439,10 +439,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                                 onClick={() => void removeMember(member)}><UserMinus className="size-3.5" /></button>}
                         </div>)}
                     </section>
-                    <section className="space-y-1.5">
-                        <span className="text-xs text-muted-foreground">群记忆</span>
-                        <ButlerMemoryPanel conversationId={groupId} ownScopeLabel="本群成员" />
-                    </section>
+                    <ButlerMemoryPanel conversationId={groupId} scope="group" />
                     <Button variant="ghost" className="mt-auto justify-start gap-2 text-destructive hover:text-destructive" onClick={() => setConfirmDelete(true)}>
                         <Trash2 className="size-4" />删除群聊
                     </Button>
