@@ -230,3 +230,29 @@ fn test_helper_single_plugin_archive_matches_preview() {
         assert!(super::store::read_skill_content(directory.path(), &skill.id).is_ok());
     }
 }
+
+/// Regression: a plugin connection using its own confidential OAuth client used to produce a definition
+/// whose header-less client-secret field was rejected by catalog validation at connect time.
+#[test]
+fn test_agent_plugin_confidential_oauth_definition_passes_validation() {
+    use super::super::catalog::{AppCatalog, OAUTH_CLIENT_SECRET_FIELD};
+    let preview = inspect(source(), "a".repeat(40), &files()).unwrap();
+    for method in ["client_secret_post", "client_secret_basic"] {
+        let definition = super::api::plugin_connection_definition(&preview, "key", "notion", "oauth".into(), Some("own-client".into()), Some(method.into()), None).unwrap();
+        let secret = definition.fields.iter().find(|f| f.key == OAUTH_CLIENT_SECRET_FIELD).expect("secret field");
+        assert!(secret.secret && secret.header.is_none());
+        AppCatalog { schema_version: 1, version: "1".into(), apps: vec![definition.clone()] }.validate().unwrap();
+        // The secret is never persisted as plain config nor sent as an MCP header.
+        let (config, headers) = definition.configuration(&std::collections::HashMap::from([(OAUTH_CLIENT_SECRET_FIELD.to_string(), "own-test-secret".to_string())])).unwrap();
+        assert!(!serde_json::to_string(&config).unwrap().contains("own-test-secret"));
+        assert!(headers.is_empty());
+    }
+    // The exception is narrow: other header-less secrets, or the same key on a public client, still fail.
+    let mut public = super::api::plugin_connection_definition(&preview, "key", "notion", "oauth".into(), None, None, None).unwrap();
+    let mut field = super::api::plugin_connection_definition(&preview, "key", "notion", "oauth".into(), Some("own-client".into()), Some("client_secret_post".into()), None).unwrap().fields.remove(0);
+    public.fields.push(field.clone());
+    assert!(AppCatalog { schema_version: 1, version: "1".into(), apps: vec![public.clone()] }.validate().is_err());
+    field.key = "token".into();
+    public.fields = vec![field];
+    assert!(AppCatalog { schema_version: 1, version: "1".into(), apps: vec![public] }.validate().is_err());
+}

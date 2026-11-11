@@ -3667,17 +3667,15 @@ async fn execute_http_tool(
 ) -> Result<String> {
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
 
-    let (transport, redactor) = {
+    let (transport, redactor, auth) = {
         let client_builder = crate::mcp::http_transport::configured_http_builder(app_handle, server).await.map_err(anyhow::Error::msg)?;
         let resolving = crate::mcp::http_transport::create_authenticated_http_transport(app_handle, server, client_builder);
         let resolved = tokio::select! {
             _ = cancel_token.cancelled() => return Err(anyhow!("Cancelled by user while preparing HTTP credentials")),
             result = tokio::time::timeout(std::time::Duration::from_millis(server.timeout.unwrap_or(30000).max(1) as u64), resolving) => result.map_err(|_| anyhow!("Timeout while preparing HTTP credentials"))?,
         };
-        match resolved {
-            Ok(value) => value,
-            Err(error) => { crate::mcp::apps::record_execution_error(app_handle, server, &error); return Err(anyhow!(error)); }
-        }
+        // Credential-stage auth failures are recorded inside create_authenticated_http_transport.
+        resolved.map_err(|error| anyhow!(error))?
     };
     let client_info = ClientInfo {
         meta: None,
@@ -3730,8 +3728,8 @@ async fn execute_http_tool(
             Ok(redactor.clean(&result))
         }
         Err(e) => {
-            let e = anyhow!(redactor.clean(&e.to_string()));
-            crate::mcp::apps::record_execution_error(app_handle, server, &e.to_string());
+            // Only a transport-level 401 marks the connection; tool output mentioning "401" does not.
+            let e = anyhow!(crate::mcp::http_transport::explain_failure(app_handle, server, &auth, redactor.clean(&format!("{e:#}"))));
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "http tool execution failed");
             Err(e)
         }

@@ -49,36 +49,33 @@ fn db(app: &tauri::AppHandle) -> Result<MCPDatabase, String> {
 }
 
 #[derive(Serialize)]
-pub struct CatalogResponse { pub catalog: Option<AppCatalog>, pub fetched_at: Option<String>, pub warning: Option<String> }
+pub struct CatalogResponse { pub catalog: Option<AppCatalog>, pub fetched_at: Option<String>, pub warning: Option<String>, pub skipped: Vec<String> }
 
 #[tauri::command]
 pub async fn fetch_app_catalog(app_handle: tauri::AppHandle) -> Result<CatalogResponse, String> {
     let result = async {
         let response = oauth::http()?.get(catalog::CATALOG_URL).send().await
             .map_err(|e| format!("获取应用目录失败：{}", e.without_url()))?;
-        let catalog: AppCatalog = serde_json::from_value(oauth::json(response, "应用目录").await?).map_err(|_| "应用目录格式无效或接口尚未发布")?;
-        catalog.validate()?;
-        Ok::<_, String>(catalog)
+        AppCatalog::parse_lenient(oauth::json(response, "应用目录").await?)
     }.await;
     let db = db(&app_handle)?;
     match result {
-        Ok(catalog) => {
+        Ok((catalog, skipped)) => {
             let fetched_at = chrono::Utc::now().to_rfc3339();
             db.conn.execute("INSERT INTO app_catalog_cache VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at",
                 params![serde_json::to_string(&catalog).map_err(|e| e.to_string())?, fetched_at]).map_err(|e| e.to_string())?;
-            Ok(CatalogResponse { catalog: Some(catalog), fetched_at: Some(fetched_at), warning: None })
+            Ok(CatalogResponse { catalog: Some(catalog), fetched_at: Some(fetched_at), warning: None, skipped })
         }
         Err(error) => {
             let cached: Option<(String, String)> = db.conn.query_row("SELECT payload,fetched_at FROM app_catalog_cache WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
-            let (catalog, fetched_at) = match cached {
-                Some((raw, time)) => {
-                    let value: AppCatalog = serde_json::from_str(&raw).map_err(|_| "本地应用目录缓存损坏")?;
-                    value.validate()?;
-                    (Some(value), Some(time))
-                }
-                None => (None, None),
-            };
-            Ok(CatalogResponse { catalog, fetched_at, warning: Some(error) })
+            // A broken cache must not hide why the fetch failed: report both.
+            let cached = cached.map(|(raw, time)| serde_json::from_str::<AppCatalog>(&raw).map_err(|e| e.to_string())
+                .and_then(|value| value.validate().map(|_| (value, time))));
+            match cached {
+                Some(Ok((value, time))) => Ok(CatalogResponse { catalog: Some(value), fetched_at: Some(time), warning: Some(error), skipped: vec![] }),
+                Some(Err(cache)) => Ok(CatalogResponse { catalog: None, fetched_at: None, warning: Some(format!("{error}；本地目录缓存也无法使用：{cache}")), skipped: vec![] }),
+                None => Ok(CatalogResponse { catalog: None, fetched_at: None, warning: Some(error), skipped: vec![] }),
+            }
         }
     }
 }
@@ -110,8 +107,8 @@ pub async fn list_app_connections(app_handle: tauri::AppHandle) -> Result<Vec<Ap
             if status == "available" { status = "unchecked".into(); }
             else if status == "connecting" { status = "auth_required".into(); error = Some("上次连接未完成，请重新连接".into()); }
         }
-        result.push(AppConnection { server_id, app_id, definition: serde_json::from_str(&raw).map_err(|_| "连接描述损坏")?, label,
-            config: serde_json::from_str(&config).map_err(|_| "连接配置损坏")?, status, error, credential_status: Some(credential_status.clone()) });
+        result.push(AppConnection { server_id, app_id, definition: serde_json::from_str(&raw).map_err(|e| format!("连接 {server_id} 的应用描述损坏：{e}"))?, label,
+            config: serde_json::from_str(&config).map_err(|e| format!("连接 {server_id} 的配置损坏：{e}"))?, status, error, credential_status: Some(credential_status.clone()) });
     }
     Ok(result)
 }
@@ -133,8 +130,20 @@ pub async fn get_app_authorization_url(server_id: i64) -> Result<Option<String>,
     Ok(LOGIN_JOBS.lock().await.get(&server_id).map(|job| job.url.clone()))
 }
 
-pub fn record_execution_error(app: &tauri::AppHandle, server: &crate::db::mcp_db::MCPServer, error: &str) {
-    if !["invalid_grant", "invalid_client", "401 Unauthorized", "登录已过期", "凭据不存在"].iter().any(|pattern| error.contains(pattern)) { return; }
+/// Credential-stage errors (vault read, token refresh) are produced by AIPP itself: `oauth::json` maps the
+/// provider's `error` code to fixed text and never echoes `error_description`. Only these may be matched by
+/// text; tool-stage errors carry remote content and are classified through the transport's 401 signal.
+pub fn is_credential_auth_failure(error: &str) -> bool {
+    ["invalid_grant", "invalid_client", "HTTP 401", "登录已过期", "凭据不存在"].iter().any(|pattern| error.contains(pattern))
+}
+
+pub fn record_credential_error(app: &tauri::AppHandle, server: &crate::db::mcp_db::MCPServer, error: &str) {
+    if is_credential_auth_failure(error) { record_auth_failure(app, server, error); }
+}
+
+/// Disable a managed connection that the provider or server no longer accepts. `server` is the snapshot
+/// the failing request used; a connection reconfigured meanwhile is left alone.
+pub fn record_auth_failure(app: &tauri::AppHandle, server: &crate::db::mcp_db::MCPServer, error: &str) {
     let result = (|| {
         let db = db(app)?;
         let transaction = db.conn.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -147,6 +156,13 @@ pub fn record_execution_error(app: &tauri::AppHandle, server: &crate::db::mcp_db
         Ok(())
     })();
     if let Err(error) = result { tracing::warn!(server_id=server.id, error=%error, "Failed to persist app authentication failure"); }
+}
+
+/// Lower-cased names of headers that carry secrets for this connection, from its definition snapshot.
+/// `None` when unknown, in which case callers must treat every credential header as secret.
+pub fn secret_header_names(app: &tauri::AppHandle, server_id: i64) -> Option<std::collections::HashSet<String>> {
+    let raw: String = db(app).ok()?.conn.query_row("SELECT definition FROM app_connection WHERE server_id=?1", [server_id], |r| r.get(0)).ok()?;
+    serde_json::from_str::<AppDefinition>(&raw).ok().map(|definition| definition.secret_headers())
 }
 
 #[derive(Deserialize)]
@@ -197,6 +213,7 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
         } else if ["available", "unchecked"].contains(&status.as_str()) { return Ok(ConnectResult { server_id: id, authorization_url: None }); }
         request.server_id = Some(id);
     }
+    let created_new = request.server_id.is_none();
     let old_reference: Option<String> = if let Some(id) = request.server_id {
         db(&app_handle)?.conn.query_row("SELECT credential_ref FROM app_connection WHERE server_id=?1", [id], |r| r.get(0)).optional().map_err(|e| e.to_string())?.flatten()
     } else { None };
@@ -247,10 +264,32 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
         if let Err(e) = cleared { set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(e); }
         db(&app_handle)?.conn.execute("DELETE FROM app_credential_cleanup WHERE reference=?1", [old]).map_err(|e| e.to_string())?;
     }
+    // A brand-new connection that never became usable is removed instead of lingering as a stray
+    // "需要重新登录" entry; retrying with the same request id then starts clean.
+    let fail_new = {
+        let (app, request_id, reference) = (app_handle.clone(), request.request_id.clone(), reference.clone());
+        move |error: String| {
+        let (app, request_id, reference) = (app.clone(), request_id.clone(), reference.clone());
+        async move {
+            if !created_new { return error; }
+            let discarded = db(&app).and_then(|db| discard_created(&db.conn, id, &request_id));
+            let key = reference.clone(); let vault_app = app.clone();
+            let _ = tokio::task::spawn_blocking(move || credentials::clear(&vault_app, &key)).await;
+            let _ = app.emit("mcp_state_changed", ());
+            match discarded { Ok(()) => error, Err(cleanup) => format!("{error}（清理未完成的连接 {id} 失败：{cleanup}）") }
+        }
+    }};
     if app.connection.auth == "oauth" {
-        let pending = match oauth::begin_options(&oauth::OAuthHttp::new()?,&app.connection.url, app.connection.client_id.as_deref(), &app.connection.scopes, app.connection.oauth_resource.as_deref(),app.connection.oauth_client_auth.as_deref().unwrap_or("none"),request.values.get("oauth_client_secret").map(String::as_str),app.connection.oauth_redirect_uri.as_deref()).await {
+        let http = match credentials::oauth_http_for(&app_handle, id).await {
+            Ok(http) => http,
+            Err(e) => return Err(if created_new { fail_new(e).await } else { e }),
+        };
+        let pending = match oauth::begin_options(&http,&app.connection.url, app.connection.client_id.as_deref(), &app.connection.scopes, app.connection.oauth_resource.as_deref(),app.connection.oauth_client_auth.as_deref().unwrap_or("none"),request.values.get("oauth_client_secret").map(String::as_str),app.connection.oauth_redirect_uri.as_deref()).await {
             Ok(pending) => pending,
-            Err(e) => { set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(format!("连接 {id}：{e}")); }
+            Err(e) => {
+                if created_new { return Err(fail_new(e).await); }
+                set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(format!("连接 {id}：{e}"));
+            }
         };
         let url = pending.url.clone();
         let handle = app_handle.clone();
@@ -258,7 +297,7 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
         let login_reference = reference.clone();
         let job = tokio::spawn(async move {
             let result = async {
-                let mut credential = oauth::finish(pending).await?;
+                let mut credential = oauth::finish_with(&http, pending).await?;
                 credential.server_id = id;
                 credential.headers = headers;
                 let _change = CHANGE_LOCK.lock().await;
@@ -284,7 +323,10 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
             let credential = credentials::Credential { server_id: id, endpoint: app.connection.url, headers, oauth: None };
             let vault_app = app_handle.clone();
             let saved = tokio::task::spawn_blocking(move || credentials::save(&vault_app, &reference, &credential)).await.map_err(|_| "保存连接凭据任务失败".to_string()).and_then(|r| r);
-            if let Err(e) = saved { set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(e); }
+            if let Err(e) = saved {
+                if created_new { return Err(fail_new(e).await); }
+                set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(e);
+            }
         }
         set_status(&app_handle, id, "unchecked", None)?;
         db(&app_handle)?.toggle_mcp_server(id, true).map_err(|e| e.to_string())?;
@@ -297,16 +339,30 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
 #[tauri::command]
 pub async fn verify_app_connection(app_handle: tauri::AppHandle, server_id: i64) -> Result<(), String> {
     let server = db(&app_handle)?.get_mcp_server(server_id).map_err(|e| e.to_string())?;
-    if !server.is_enabled { return Err("连接已停用，请先启用".into()); }
+    let status_of = |app: &tauri::AppHandle| -> Result<Option<String>, String> {
+        db(app)?.conn.query_row("SELECT status FROM app_connection WHERE server_id=?1", [server_id], |r| r.get(0)).optional().map_err(|e| e.to_string())
+    };
+    if !server.is_enabled {
+        return Err(match status_of(&app_handle)?.as_deref() {
+            Some("auth_required") => "连接需要重新登录，请先重新授权".into(),
+            Some("disconnected") => "连接已断开，请重新连接".into(),
+            Some("connecting") => "连接尚未完成授权".into(),
+            _ => "连接已停用，请先启用".into(),
+        });
+    }
     let result = super::registry_api::refresh_mcp_server_capabilities(app_handle.clone(), server_id).await;
     let _change = CHANGE_LOCK.lock().await;
+    // Credential/401 failures were already recorded as auth_required with their cause; keep that state.
+    if let Err(e) = &result {
+        if status_of(&app_handle)?.as_deref() == Some("auth_required") { return Err(format!("连接 {server_id}：{e}")); }
+    }
     let current = db(&app_handle)?.get_mcp_server(server_id).map_err(|e| e.to_string())?;
     if !current.is_enabled || current.headers != server.headers || current.url != server.url || current.command != server.command {
         return Err("连接在验证期间被停用、断开或修改，已丢弃过期验证结果".into());
     }
     match result {
         Ok(_) => { set_status(&app_handle, server_id, "available", None)?; Ok(()) }
-        Err(e) => { set_status(&app_handle, server_id, "error", Some(&e))?; record_execution_error(&app_handle, &server, &e); Err(format!("连接 {server_id}：{e}")) }
+        Err(e) => { set_status(&app_handle, server_id, "error", Some(&e))?; Err(format!("连接 {server_id}：{e}")) }
     }
 }
 
@@ -331,13 +387,14 @@ pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: 
     };
     if let Some(key) = reference { references.push(key); }
     let mut revoked = false;
+    let http = if revoke_remote.unwrap_or(true) { Some(credentials::oauth_http_for(&app_handle, server_id).await?) } else { None };
     for reference in references {
         if revoke_remote.unwrap_or(true) {
             let key = reference.clone();
             let vault_app = app_handle.clone();
             let credential = tokio::task::spawn_blocking(move || credentials::load_optional(&vault_app, &key)).await.map_err(|_| "读取待撤销凭据任务失败")??;
             if let Some(credential) = credential {
-                match oauth::revoke(&credential).await {
+                match oauth::revoke(http.as_ref().expect("built when revoking"), &credential).await {
                     Ok(value) => revoked |= value,
                     Err(error) => {
                         let error = format!("连接已停用，但服务商撤销未完成：{error}。可重试断开，或选择删除凭据但不撤销服务商授权；启用同步时删除会传播。");
@@ -355,6 +412,16 @@ pub async fn disconnect_app_connection(app_handle: tauri::AppHandle, server_id: 
     }
     db(&app_handle)?.conn.execute("UPDATE app_connection SET credential_ref=NULL WHERE server_id=?1", [server_id]).map_err(|e| e.to_string())?;
     Ok(if revoked { "已断开连接、撤销服务商令牌并删除凭据；启用同步时会同步删除" } else { "已断开并删除凭据；启用同步时会同步删除，服务商侧授权尚未撤销" }.into())
+}
+
+/// Delete the rows a failed create inserted, unless another request already took over the instance.
+pub(crate) fn discard_created(conn: &Connection, id: i64, request_id: &str) -> Result<(), String> {
+    let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let owned: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM app_connection WHERE server_id=?1 AND request_id=?2)", params![id, request_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if !owned { return Ok(()); }
+    transaction.execute("DELETE FROM app_connection WHERE server_id=?1", [id]).map_err(|e| e.to_string())?;
+    transaction.execute("DELETE FROM mcp_server WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+    transaction.commit().map_err(|e| e.to_string())
 }
 
 pub fn guard_update(app: &tauri::AppHandle, id: i64, request: &super::registry_api::MCPServerRequest) -> Result<(), String> {

@@ -16,6 +16,7 @@ pub struct Token {
     pub expires_in: Option<u64>,
 }
 
+#[derive(Clone)]
 pub struct OAuthHttp {
     client: reqwest::Client,
     #[cfg(test)]
@@ -25,6 +26,17 @@ pub struct OAuthHttp {
 impl OAuthHttp {
     pub fn new() -> Result<Self, String> {
         Ok(Self { client: http()?, #[cfg(test)] loopback: false })
+    }
+    /// Use the connection's own network settings (e.g. its proxy) so discovery, refresh and revoke take
+    /// the same route as the MCP calls; otherwise tools work until the token expires behind a proxy.
+    pub fn with_builder(builder: reqwest::ClientBuilder) -> Result<Self, String> {
+        let client = builder.redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(30))
+            .build().map_err(|e| format!("无法建立授权 HTTP 客户端：{e}"))?;
+        Ok(Self { client, #[cfg(test)] loopback: false })
+    }
+    #[cfg(test)]
+    pub(super) fn loopback_with(builder: reqwest::ClientBuilder) -> Self {
+        Self { client: builder.redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(3)).build().unwrap(), loopback: true }
     }
     pub(super) fn endpoint(&self, value: &str) -> Result<reqwest::Url, String> {
         #[cfg(test)]
@@ -207,27 +219,45 @@ pub(super) async fn begin_options(http: &OAuthHttp, endpoint: &str, client_id: O
     Ok(PendingLogin { client_secret:secret.map(str::to_string),client_auth_method:method.into(), url: auth_url.to_string(), listener, state, verifier, redirect, client_id, token_endpoint, endpoint: endpoint.to_owned(), resource: expected_resource.into(), revocation_endpoint })
 }
 
-pub async fn finish(pending: PendingLogin) -> Result<Credential, String> {
-    finish_with(&OAuthHttp::new()?, pending).await
+/// Read one request head from the loopback socket. `None` for an empty/oversized/non-UTF-8 request.
+async fn read_request_head(socket: &mut tokio::net::TcpStream) -> Option<String> {
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0u8; 1024];
+        let count = tokio::time::timeout(Duration::from_secs(30), socket.read(&mut chunk)).await.ok()?.ok()?;
+        if count == 0 || bytes.len() + count > 16384 { return None; }
+        bytes.extend_from_slice(&chunk[..count]);
+        if bytes.windows(4).any(|v| v == b"\r\n\r\n") { return String::from_utf8(bytes).ok(); }
+    }
 }
 
 pub(super) async fn finish_with(http: &OAuthHttp, pending: PendingLogin) -> Result<Credential, String> {
+    let redirect_url = reqwest::Url::parse(&pending.redirect).map_err(|_| "OAuth 回调地址损坏")?;
     let code = tokio::time::timeout(Duration::from_secs(300), async {
-        let (mut socket, _) = pending.listener.accept().await.map_err(|e| format!("OAuth 回调接收失败：{e}"))?;
-        let mut bytes = Vec::new();
+        // Browsers preconnect idle sockets and probe /favicon.ico. Each connection is read concurrently so an
+        // idle socket cannot hold up the real callback; only a request to the registered path decides.
+        let mut reads = tokio::task::JoinSet::new();
         loop {
-            let mut chunk = [0u8; 1024];
-            let count = socket.read(&mut chunk).await.map_err(|_| "OAuth 回调读取失败")?;
-            if count == 0 || bytes.len() + count > 16384 { return Err("OAuth 回调不完整或过大".to_string()); }
-            bytes.extend_from_slice(&chunk[..count]);
-            if bytes.windows(4).any(|v| v == b"\r\n\r\n") { break; }
+            tokio::select! {
+                accepted = pending.listener.accept() => {
+                    let (mut socket, _) = accepted.map_err(|e| format!("OAuth 回调接收失败：{e}"))?;
+                    reads.spawn(async move { let head = read_request_head(&mut socket).await; (socket, head) });
+                }
+                Some(done) = reads.join_next() => {
+                    let Ok((mut socket, Some(head))) = done else { continue; };
+                    let path = head.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("");
+                    if reqwest::Url::parse(&format!("http://127.0.0.1{path}")).map(|url| url.path() != redirect_url.path()).unwrap_or(true) {
+                        let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                        continue;
+                    }
+                    let result = callback_path(&head, &pending.state, redirect_url.path());
+                    let body = if result.is_ok() { "Authorization received. Return to AIPP to finish connecting." } else { "Authorization rejected. Return to AIPP for details." };
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return result;
+                }
+            }
         }
-        let redirect_url=reqwest::Url::parse(&pending.redirect).map_err(|_|"OAuth 回调地址损坏")?;
-        let result = callback_path(std::str::from_utf8(&bytes).map_err(|_| "OAuth 回调编码无效")?, &pending.state,redirect_url.path());
-        let body = if result.is_ok() { "Authorization received. Return to AIPP to finish connecting." } else { "Authorization rejected. Return to AIPP for details." };
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        let _ = socket.write_all(response.as_bytes()).await;
-        result
     }).await.map_err(|_| "OAuth 登录等待超时，请重新连接")??;
     let token = exchange_authenticated(http, &pending.token_endpoint, &[
         ("grant_type", "authorization_code"), ("code", &code), ("client_id", &pending.client_id),
@@ -243,8 +273,8 @@ pub(super) async fn finish_with(http: &OAuthHttp, pending: PendingLogin) -> Resu
     }) })
 }
 
-pub async fn revoke(credential: &Credential) -> Result<bool, String> {
-    revoke_with(&OAuthHttp::new()?, credential).await
+pub async fn revoke(http: &OAuthHttp, credential: &Credential) -> Result<bool, String> {
+    revoke_with(http, credential).await
 }
 
 pub(super) async fn revoke_with(http: &OAuthHttp, credential: &Credential) -> Result<bool, String> {

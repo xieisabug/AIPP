@@ -95,3 +95,71 @@ fn test_apps_reference_is_not_sent_by_uncontrolled_transport_and_errors_are_reda
     let redactor = crate::mcp::http_transport::ResponseRedactor::new(["Bearer test-secret".to_string()].into_iter());
     assert_eq!(redactor.clean("echo Bearer test-secret and test-secret"), "echo [REDACTED] and [REDACTED]");
 }
+
+/// Regression: every credential header value was redacted, so a non-secret header such as a read-only
+/// switch sending "true" turned each `true` in tool schemas/results into [REDACTED].
+#[test]
+fn test_apps_redaction_covers_only_secret_headers() {
+    use crate::mcp::http_transport::{secret_header_values, ResponseRedactor};
+    let mut app = catalog().apps[1].clone();
+    app.fields.push(serde_json::from_value(serde_json::json!({"key":"readonly","label":"只读","kind":"boolean","header":"X-MCP-Readonly","default":"true"})).unwrap());
+    app.fields.push(serde_json::from_value(serde_json::json!({"key":"api_key","label":"API Key","kind":"password","secret":true,"header":"X-Api-Key"})).unwrap());
+    AppCatalog { schema_version: 1, version: "1".into(), apps: vec![app.clone()] }.validate().unwrap();
+    let (_, headers) = app.configuration(&HashMap::from([("token".into(), "tok-123456".into()), ("api_key".into(), "key-abcdef".into())])).unwrap();
+    assert_eq!(headers["x-mcp-readonly"], "true");
+    let names = app.secret_headers();
+    assert_eq!(names, std::collections::HashSet::from(["authorization".to_string(), "x-api-key".to_string()]));
+    let result = r#"{"readonly":true,"note":"tok-123456 key-abcdef"}"#;
+    let scoped = ResponseRedactor::new(secret_header_values(&headers, Some(&names)).into_iter());
+    assert_eq!(scoped.clean(result), r#"{"readonly":true,"note":"[REDACTED] [REDACTED]"}"#);
+    // Unknown definition falls back to treating every credential header as secret.
+    let fallback = ResponseRedactor::new(secret_header_values(&headers, None).into_iter());
+    assert!(fallback.clean(result).contains("[REDACTED]"));
+    assert!(!fallback.clean(result).contains("tok-123456"));
+}
+
+/// Regression: one entry using an auth kind this client does not know rejected the whole catalog, so
+/// older clients fell back to a stale cache for every app.
+#[test]
+fn test_apps_catalog_skips_unsupported_entries_but_rejects_identity_conflicts() {
+    let mut value: serde_json::Value = serde_json::from_str(include_str!("../../../../tests/fixtures/apps-catalog.json")).unwrap();
+    let mut future = value["apps"][0].clone();
+    future["id"] = "future".into(); future["name"] = "Future App".into(); future["connection"]["auth"] = "device_code".into();
+    let malformed = serde_json::json!({"id":"broken","name":"Broken","connection":"not-an-object"});
+    value["apps"].as_array_mut().unwrap().extend([future, malformed]);
+    let (parsed, skipped) = AppCatalog::parse_lenient(value.clone()).unwrap();
+    assert_eq!(parsed.apps.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["notion", "github"]);
+    assert_eq!(skipped.len(), 2);
+    assert!(skipped[0].starts_with("Future App") && skipped[1].starts_with("Broken"));
+    let mut reserved = value.clone();
+    reserved["apps"][2]["id"] = "builtin:operation".into();
+    assert!(AppCatalog::parse_lenient(reserved).is_err());
+    let mut duplicate = value;
+    duplicate["apps"][2]["id"] = "notion".into();
+    assert!(AppCatalog::parse_lenient(duplicate).is_err());
+}
+
+/// Regression: a create that failed after inserting rows left a stray "需要重新登录" connection behind.
+#[test]
+fn test_apps_failed_create_discards_only_rows_it_owns() {
+    let db = MCPDatabase { conn: Connection::open_in_memory().unwrap() };
+    db.create_tables().unwrap();
+    init(&db.conn).unwrap();
+    let id = db.upsert_mcp_server_with_builtin("new", None, "http", None, None, Some("{}"), Some("https://example.com/mcp"), None, false, false, false, true, false).unwrap();
+    db.conn.execute("INSERT INTO app_connection(server_id,request_id,app_id,definition,label,config,status) VALUES(?1,'request-1','test','{}','test','{}','auth_required')", [id]).unwrap();
+    discard_created(&db.conn, id, "request-2").unwrap();
+    assert!(db.get_mcp_server(id).is_ok(), "a connection taken over by another request must stay");
+    discard_created(&db.conn, id, "request-1").unwrap();
+    assert!(db.get_mcp_server(id).is_err());
+    assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM app_connection", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn test_apps_credential_stage_classification_matches_aipp_generated_errors() {
+    for error in ["OAuth 令牌交换/刷新失败：HTTP 401 Unauthorized；服务未提供可安全展示的错误代码", "OAuth 令牌交换/刷新失败：HTTP 400 Bad Request；invalid_grant：授权已失效，需要重新登录", "登录已过期，请重新授权", "连接凭据不存在，请重新连接"] {
+        assert!(is_credential_auth_failure(error), "{error}");
+    }
+    for error in ["OAuth 令牌请求失败：error sending request", "读取连接凭据任务失败", "此连接启用了代理，但全局网络代理尚未配置"] {
+        assert!(!is_credential_auth_failure(error), "{error}");
+    }
+}

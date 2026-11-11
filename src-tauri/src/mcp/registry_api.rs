@@ -458,7 +458,7 @@ async fn test_http_connection(app: &tauri::AppHandle, server: &MCPServer) -> Res
     };
 
     let builder = crate::mcp::http_transport::configured_http_builder(app, server).await?;
-    let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(app, server, builder).await?;
+    let (transport, redactor, auth) = crate::mcp::http_transport::create_authenticated_http_transport(app, server, builder).await?;
 
     // 创建客户端信息
     let client_info = ClientInfo {
@@ -485,7 +485,7 @@ async fn test_http_connection(app: &tauri::AppHandle, server: &MCPServer) -> Res
             let _ = client.cancel().await;
             Ok(())
         }
-        Ok(Err(e)) => Err(redactor.clean(&format!("Failed to create MCP client: {}", e))),
+        Ok(Err(e)) => Err(crate::mcp::http_transport::explain_failure(app, server, &auth, redactor.clean(&format!("Failed to create MCP client: {}", e)))),
         Err(_) => Err("Timeout while connecting to HTTP server".to_string()),
     }
 }
@@ -756,7 +756,7 @@ async fn get_http_capabilities(
         std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
             let builder = crate::mcp::http_transport::configured_http_builder(&app_handle, &server).await.map_err(anyhow::Error::msg)?;
-            let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(&app_handle, &server, builder).await
+            let (transport, redactor, auth) = crate::mcp::http_transport::create_authenticated_http_transport(&app_handle, &server, builder).await
                 .map_err(anyhow::Error::msg)?;
 
             let client_info = ClientInfo {
@@ -769,13 +769,14 @@ async fn get_http_capabilities(
                     ..Default::default()
                 },
             };
-            let client = client_info.serve(transport).await.map_err(|e| anyhow::anyhow!(redactor.clean(&e.to_string())))?;
-            Ok::<_, anyhow::Error>((client, redactor))
+            let client = client_info.serve(transport).await
+                .map_err(|e| anyhow::anyhow!(crate::mcp::http_transport::explain_failure(&app_handle, &server, &auth, redactor.clean(&e.to_string()))))?;
+            Ok::<_, anyhow::Error>((client, redactor, auth))
         },
     )
     .await;
 
-    let (client, redactor) = match client_result {
+    let (client, redactor, auth) = match client_result {
         Ok(Ok(client)) => client,
         Ok(Err(e)) => {
             return Err(format!("Failed to create MCP HTTP client: {}", e));
@@ -809,7 +810,8 @@ async fn get_http_capabilities(
         }
     };
 
-    let tools_simple = Some(tools_result.map_err(|e| redactor.clean(&format!("HTTP tools/list failed: {e}")))?).map(|tools| {
+    let explain = |error: String| crate::mcp::http_transport::explain_failure(&app_handle, &server, &auth, error);
+    let tools_simple = Some(tools_result.map_err(|e| explain(redactor.clean(&format!("HTTP tools/list failed: {e}"))))?).map(|tools| {
         tools
             .into_iter()
             .map(|tool| SimpleTool {
@@ -819,7 +821,7 @@ async fn get_http_capabilities(
             })
             .collect::<Vec<_>>()
     });
-    let resources_simple = Some(resources_result.map_err(|e| redactor.clean(&format!("HTTP resources/list failed: {e}")))?).map(|resources| {
+    let resources_simple = Some(resources_result.map_err(|e| explain(redactor.clean(&format!("HTTP resources/list failed: {e}"))))?).map(|resources| {
         resources
             .into_iter()
             .map(|r| SimpleResource {
@@ -830,7 +832,7 @@ async fn get_http_capabilities(
             })
             .collect::<Vec<_>>()
     });
-    let prompts_simple = Some(prompts_result.map_err(|e| redactor.clean(&format!("HTTP prompts/list failed: {e}")))?).map(|prompts| {
+    let prompts_simple = Some(prompts_result.map_err(|e| explain(redactor.clean(&format!("HTTP prompts/list failed: {e}"))))?).map(|prompts| {
         prompts
             .into_iter()
             .map(|p| {

@@ -3,7 +3,9 @@ use crate::mcp::apps::credentials::{self, CredentialStore};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
-struct State { registrations: usize, refreshes: HashMap<String, usize>, revoked: Vec<String>, client_auth: Vec<(HashMap<String,String>,String)> }
+struct State { registrations: usize, refreshes: HashMap<String, usize>, revoked: Vec<String>, client_auth: Vec<(HashMap<String,String>,String)>,
+    /// Requests seen before any delay, so a test can cancel while the provider is still working.
+    refresh_requests: usize, refresh_delay: Duration, strict_rotation: bool }
 
 struct Provider { base: String, state: Arc<Mutex<State>>, task: tokio::task::JoinHandle<()> }
 impl Drop for Provider { fn drop(&mut self) { self.task.abort(); } }
@@ -45,6 +47,10 @@ async fn provider_with_resource(origin_resource: bool) -> Provider {
                 let request = String::from_utf8_lossy(&bytes);
                 let path = request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
                 let form: HashMap<String,String> = reqwest::Url::parse(&format!("http://localhost/?{}", String::from_utf8_lossy(&bytes[header_end..header_end+size]))).unwrap().query_pairs().into_owned().collect();
+                if path == "/token" && form.get("grant_type").map(String::as_str) == Some("refresh_token") {
+                    let delay = { let mut state = shared.lock().unwrap(); state.refresh_requests += 1; state.refresh_delay };
+                    if !delay.is_zero() { tokio::time::sleep(delay).await; }
+                }
                 if path == "/token" || path == "/revoke" {
                     let authorization=request.lines().find_map(|l|l.split_once(':').filter(|(k,_)|k.eq_ignore_ascii_case("authorization")).map(|(_,v)|v.trim().to_string())).unwrap_or_default();
                     shared.lock().unwrap().client_auth.push((form.clone(),authorization));
@@ -77,6 +83,8 @@ async fn provider_with_resource(origin_resource: bool) -> Provider {
                                 status = "400 Bad Request";
                                 serde_json::json!({"error":"invalid_grant","error_description":format!("private token {token}")})
                             } else {
+                                // Strict providers invalidate the used refresh token once it is rotated.
+                                if state.strict_rotation { state.revoked.push(token.clone()); }
                                 let account = token.strip_prefix("refresh-").unwrap();
                                 serde_json::json!({"access_token":format!("fresh-{account}"),"refresh_token":format!("rotated-{account}"),"token_type":"Bearer","expires_in":3600})
                             }
@@ -86,7 +94,8 @@ async fn provider_with_resource(origin_resource: bool) -> Provider {
                     _ => { status = "404 Not Found"; serde_json::json!({}) },
                 }.to_string();
                 let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                socket.write_all(response.as_bytes()).await.unwrap();
+                // The client may have gone away (cancelled caller); the provider-side effects already happened.
+                let _ = socket.write_all(response.as_bytes()).await;
             });
         }
     });
@@ -252,4 +261,67 @@ async fn test_apps_oauth_confidential_client_login_refresh_and_revoke() {
 fn test_apps_oauth_fixed_redirect_rejects_non_loopback_targets() {
     for uri in ["https://example.com/callback","http://127.0.0.1/callback","http://127.0.0.1:0/callback","http://user@localhost:1234/callback"] { assert!(redirect_target(uri).is_err(),"{uri}"); }
     assert!(redirect_target("http://localhost:1234/callback").is_ok());
+}
+
+/// Regression: the token exchange ran inside the caller's future. A tool timeout or cancel after the
+/// provider rotated the refresh token dropped the response, leaving only the now-invalid old token.
+#[tokio::test]
+async fn test_apps_oauth_refresh_survives_caller_cancellation() {
+    let provider = provider().await;
+    { let mut state = provider.state.lock().unwrap(); state.refresh_delay = Duration::from_millis(300); state.strict_rotation = true; }
+    let http = OAuthHttp::loopback();
+    let credential = login(&http, &provider, "account-c", 31).await;
+    let endpoint = credential.endpoint.clone();
+    let store = Arc::new(MemoryStore::default()); store.save("c", &credential).unwrap();
+    let job = { let (store, http, endpoint) = (store.clone(), http.clone(), endpoint.clone());
+        tokio::spawn(async move { credentials::resolve_with(store, &http, "c", &endpoint, 31).await }) };
+    tokio::time::timeout(Duration::from_secs(5), async { while provider.state.lock().unwrap().refresh_requests == 0 { tokio::time::sleep(Duration::from_millis(10)).await; } }).await.unwrap();
+    job.abort();
+    let _ = job.await;
+    tokio::time::timeout(Duration::from_secs(5), async { loop {
+        if store.load("c").unwrap().oauth.unwrap().refresh_token.as_deref() == Some("rotated-account-c") { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    } }).await.expect("the rotated refresh token must be stored even though the caller was cancelled");
+    assert_eq!(credentials::resolve_with(store, &http, "c", &endpoint, 31).await.unwrap()["authorization"], "Bearer fresh-account-c");
+    assert_eq!(provider.state.lock().unwrap().refreshes["refresh-account-c"], 1);
+}
+
+/// Regression: the callback listener accepted exactly one connection, so a browser preconnect or a
+/// favicon probe consumed it and the login failed or hung until the five-minute timeout.
+#[tokio::test]
+async fn test_apps_oauth_callback_ignores_stray_connections_before_the_callback() {
+    let provider = provider().await;
+    let http = OAuthHttp::loopback();
+    let pending = begin_with(&http, &format!("{}/mcp", provider.base), Some("known-client"), &[]).await.unwrap();
+    let redirect = reqwest::Url::parse(&pending.redirect).unwrap();
+    let address = format!("127.0.0.1:{}", redirect.port().unwrap());
+    let mut callback = redirect.clone();
+    callback.query_pairs_mut().append_pair("state", &pending.state).append_pair("code", "account-s");
+    let browser = async {
+        drop(tokio::net::TcpStream::connect(&address).await.unwrap());
+        let idle = tokio::net::TcpStream::connect(&address).await.unwrap();
+        let favicon = http.client.get(format!("http://{address}/favicon.ico")).send().await.unwrap();
+        assert_eq!(favicon.status(), reqwest::StatusCode::NOT_FOUND);
+        let response = http.client.get(callback).send().await.unwrap();
+        drop(idle);
+        response
+    };
+    let (credential, response) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(finish_with(&http, pending), browser) }).await
+        .expect("an idle preconnected socket must not hold up the real callback");
+    assert!(response.status().is_success());
+    assert_eq!(credential.unwrap().oauth.unwrap().access_token, "access-account-s");
+}
+
+/// OAuth traffic built from a connection's client builder honours its proxy (here an unreachable one),
+/// which is what lets refresh and revoke follow the connection's network settings.
+#[tokio::test]
+async fn test_apps_oauth_refresh_uses_the_connection_network_settings() {
+    let provider = provider().await;
+    let http = OAuthHttp::loopback();
+    let credential = login(&http, &provider, "account-p", 41).await;
+    let store = Arc::new(MemoryStore::default()); store.save("p", &credential).unwrap();
+    let proxied = OAuthHttp::loopback_with(reqwest::Client::builder().proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap()));
+    let error = credentials::resolve_with(store, &proxied, "p", &credential.endpoint, 41).await.unwrap_err();
+    assert!(error.contains("OAuth 令牌请求失败"), "{error}");
+    assert!(!provider.state.lock().unwrap().refreshes.contains_key("refresh-account-p"));
 }

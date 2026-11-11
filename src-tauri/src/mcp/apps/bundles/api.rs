@@ -168,11 +168,11 @@ pub async fn uninstall_agent_plugin(app_handle: tauri::AppHandle, key: String, r
     crate::api::skill_api::scan_skills(app_handle).await?; Ok(())
 }
 
-#[tauri::command]
-pub async fn get_agent_plugin_connection(app_handle: tauri::AppHandle, key: String, server_name: String, auth: String, client_id: Option<String>, oauth_client_auth: Option<String>, oauth_redirect_uri: Option<String>) -> Result<AppDefinition, String> {
+/// Derives the HTTP connection definition for one plugin MCP server. Validated exactly like a catalog
+/// entry, so a definition that `connect_catalog_app` would reject is refused before the form is shown.
+pub(crate) fn plugin_connection_definition(preview: &Preview, key: &str, server_name: &str, auth: String, client_id: Option<String>, oauth_client_auth: Option<String>, oauth_redirect_uri: Option<String>) -> Result<AppDefinition, String> {
     if !["none", "oauth", "bearer", "headers"].contains(&auth.as_str()) { return Err("不支持的认证方式".into()); }
-    let installed = installed(&app_handle, &key).await?;
-    let server = installed.preview.servers.iter().find(|s| s.name == server_name).ok_or("插件没有此连接")?;
+    let server = preview.servers.iter().find(|s| s.name == server_name).ok_or("插件没有此连接")?;
     if let Some(reason) = &server.reason {
         if !(reason.contains("OAuth") && (auth == "bearer" || auth == "headers" || client_id.as_ref().is_some_and(|s| !s.trim().is_empty()))) { return Err(reason.clone()); }
     }
@@ -185,17 +185,25 @@ pub async fn get_agent_plugin_connection(app_handle: tauri::AppHandle, key: Stri
         for header in server.config["headers"].as_object().ok_or("此插件没有声明请求头")?.keys() { push_header(header,""); }
     }
     if auth == "oauth" && oauth_client_auth.as_deref().is_some_and(|m|m!="none") {
-        fields.push(super::super::catalog::ConfigField {key:"oauth_client_secret".into(),label:"自己的 OAuth Client Secret".into(),kind:"password".into(),required:true,secret:true,help:"仅用于授权服务器的令牌交换与刷新，保存在加密 Vault".into(),default:String::new(),options:vec![],visible_when:None,header:None,prefix:String::new()});
+        fields.push(super::super::catalog::ConfigField {key:super::super::catalog::OAUTH_CLIENT_SECRET_FIELD.into(),label:"自己的 OAuth Client Secret".into(),kind:"password".into(),required:true,secret:true,help:"仅用于授权服务器的令牌交换与刷新，保存在加密 Vault".into(),default:String::new(),options:vec![],visible_when:None,header:None,prefix:String::new()});
     }
     let auth = if auth == "bearer" || auth == "headers" { "fields".to_string() } else { auth };
-    let definition = AppDefinition { plugin_source: Some(installed.preview.source.clone()), id: format!("agent-plugin:{key}:{server_name}"), version: installed.preview.version,
-        name: format!("{} · {}", installed.preview.name, server_name), description: installed.preview.description,
-        publisher: installed.preview.publisher, category: "Agent 插件".into(), icon: None, homepage: None,
+    let definition = AppDefinition { plugin_source: Some(preview.source.clone()), id: format!("agent-plugin:{key}:{server_name}"), version: preview.version.clone(),
+        name: format!("{} · {}", preview.name, server_name), description: preview.description.clone(),
+        publisher: preview.publisher.clone(), category: "Agent 插件".into(), icon: None, homepage: None,
         notice: "配套技能已安装；连接完成后选择可使用此插件的助手。".into(), platforms: vec!["windows".into(), "macos".into(), "linux".into()],
         connection: ConnectionRecipe { transport: "http".into(), oauth_client_auth, oauth_redirect_uri, url: server.config["url"].as_str().ok_or("MCP 地址缺失")?.into(), auth,
             client_id: client_id.filter(|s| !s.trim().is_empty()).or_else(|| server.config["oauth"]["client_id"].as_str().filter(|s| !s.starts_with('<') && server.config["oauth"].get("client_secret").is_none()).map(str::to_string)),
             oauth_resource: server.config["oauth_resource"].as_str().map(str::to_string),
             scopes: server.config["scopes"].as_array().or_else(|| server.config["oauth"]["scopes"].as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default() }, fields, skill_ids: vec![] };
+    super::super::catalog::AppCatalog { schema_version: 1, version: "1".into(), apps: vec![definition.clone()] }.validate()?;
+    Ok(definition)
+}
+
+#[tauri::command]
+pub async fn get_agent_plugin_connection(app_handle: tauri::AppHandle, key: String, server_name: String, auth: String, client_id: Option<String>, oauth_client_auth: Option<String>, oauth_redirect_uri: Option<String>) -> Result<AppDefinition, String> {
+    let installed = installed(&app_handle, &key).await?;
+    let definition = plugin_connection_definition(&installed.preview, &key, &server_name, auth, client_id, oauth_client_auth, oauth_redirect_uri)?;
     let db = super::super::db(&app_handle)?;
     db.conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_plugin_connection_definition (app_id TEXT PRIMARY KEY, payload TEXT NOT NULL)").map_err(|e| e.to_string())?;
     db.conn.execute("INSERT INTO agent_plugin_connection_definition VALUES(?1,?2) ON CONFLICT(app_id) DO UPDATE SET payload=excluded.payload", rusqlite::params![definition.id, serde_json::to_string(&definition).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;

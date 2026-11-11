@@ -123,14 +123,25 @@ pub fn validate_binding(value: &Credential, endpoint: &str) -> Result<(), String
     Ok(())
 }
 
+/// Runs detached from the caller: a tool timeout or user cancel must not drop an in-flight refresh after the
+/// provider rotated the refresh token, or a sync-mode refresh claim after it was granted.
 pub async fn resolve(app: &tauri::AppHandle, reference: &str, endpoint: &str, server_id: i64) -> Result<HashMap<String, String>, String> {
-    crate::sync::vault_refresh::resolve(app,reference,endpoint,server_id).await
+    let (app, reference, endpoint) = (app.clone(), reference.to_owned(), endpoint.to_owned());
+    tokio::spawn(async move { crate::sync::vault_refresh::resolve(&app, &reference, &endpoint, server_id).await })
+        .await.map_err(|e| format!("连接 {server_id} 的凭据解析任务失败：{e}"))?
 }
 pub(crate) async fn resolve_local(app: &tauri::AppHandle, reference: &str, endpoint: &str, server_id: i64) -> Result<HashMap<String, String>, String> {
-    resolve_with(Arc::new(SystemStore(app.clone())), &super::oauth::OAuthHttp::new()?, reference, endpoint, server_id).await
+    resolve_with(Arc::new(SystemStore(app.clone())), &oauth_http_for(app, server_id).await?, reference, endpoint, server_id).await
 }
 
-pub(super) trait CredentialStore: Send + Sync {
+/// OAuth traffic for a connection uses the same proxy setting as its MCP calls.
+pub(crate) async fn oauth_http_for(app: &tauri::AppHandle, server_id: i64) -> Result<super::oauth::OAuthHttp, String> {
+    let server = crate::db::mcp_db::MCPDatabase::new(app).map_err(|e| e.to_string())?.get_mcp_server(server_id)
+        .map_err(|e| format!("读取连接 {server_id} 的网络设置失败：{e}"))?;
+    super::oauth::OAuthHttp::with_builder(crate::mcp::http_transport::configured_http_builder(app, &server).await?)
+}
+
+pub(super) trait CredentialStore: Send + Sync + 'static {
     fn load(&self, reference: &str) -> Result<Credential, String>;
     fn save(&self, reference: &str, credential: &Credential) -> Result<(), String>;
     fn save_refreshed(&self, reference: &str, _expected: &Credential, credential: &Credential) -> Result<(), String> { self.save(reference,credential) }
@@ -155,22 +166,29 @@ pub(super) async fn resolve_with(store: Arc<dyn CredentialStore>, http: &super::
     http.endpoint(endpoint)?;
     if credential.server_id != server_id { return Err("凭据属于其他连接，不能复制使用".into()); }
     let expected = credential.clone();
-    if let Some(oauth) = credential.oauth.as_mut() {
-        if oauth.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp() + 60) {
-            let refresh = oauth.refresh_token.as_ref().ok_or("登录已过期，请重新授权")?;
-            let token = super::oauth::exchange_authenticated(http, &oauth.token_endpoint, &[
-                ("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", &oauth.client_id),
-                ("resource", oauth.resource.as_deref().unwrap_or(endpoint)),
+    if credential.oauth.as_ref().is_some_and(|oauth| oauth.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp() + 60)) {
+        // Exchange and write run in their own task holding the lock: once the provider rotates the refresh
+        // token, the new one must be stored even if the caller times out or is cancelled meanwhile.
+        let http = http.clone();
+        let endpoint = endpoint.to_owned();
+        credential = tokio::spawn(async move {
+            let mut credential = credential;
+            let oauth = credential.oauth.as_mut().expect("checked above");
+            let refresh = oauth.refresh_token.clone().ok_or("登录已过期，请重新授权")?;
+            let token = super::oauth::exchange_authenticated(&http, &oauth.token_endpoint, &[
+                ("grant_type", "refresh_token"), ("refresh_token", &refresh), ("client_id", &oauth.client_id),
+                ("resource", oauth.resource.as_deref().unwrap_or(&endpoint)),
             ],oauth.client_auth_method.as_deref().unwrap_or("none"),&oauth.client_id,oauth.client_secret.as_deref()).await?;
             oauth.access_token = token.access_token;
             if token.refresh_token.is_some() { oauth.refresh_token = token.refresh_token; }
             oauth.expires_at = token.expires_in.map(|v| chrono::Utc::now().timestamp() + v as i64);
-            let key = reference.clone();
             let copy = credential.clone();
-            // A cancelled caller must not release the lock before the blocking write ends.
-            tokio::task::spawn_blocking(move || { let _guard = guard; store.save_refreshed(&key, &expected, &copy) }).await.map_err(|_| "保存刷新凭据任务失败")??;
-        }
-        let token = &credential.oauth.as_ref().unwrap().access_token;
+            tokio::task::spawn_blocking(move || { let _guard = guard; store.save_refreshed(&reference, &expected, &copy) }).await.map_err(|_| "保存刷新凭据任务失败")??;
+            Ok::<_, String>(credential)
+        }).await.map_err(|e| format!("刷新连接凭据任务失败：{e}"))??;
+    } else { drop(guard); }
+    if let Some(oauth) = credential.oauth.as_ref() {
+        let token = &oauth.access_token;
         if token.is_empty() { return Err("尚未完成登录，请连接应用".into()); }
         credential.headers.insert("authorization".into(), format!("Bearer {token}"));
     }
