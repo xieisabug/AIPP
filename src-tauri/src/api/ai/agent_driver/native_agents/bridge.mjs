@@ -1,8 +1,9 @@
 import { jsonLines } from './common.mjs';
 import { openPi } from './pi.mjs';
-import { openCursor } from './cursor.mjs';
+import { loginCursor, openCursor } from './cursor.mjs';
 import { openOpenCode } from './opencode.mjs';
 import { openAcpNative } from './acp-native.mjs';
+import { detect, npmCli, run, runtime as nodeRuntime } from './tools.mjs';
 
 const drivers = { pi: openPi, cursor: openCursor, opencode: openOpenCode,
   kiro: (config, emit) => openAcpNative('kiro', config, emit),
@@ -17,10 +18,19 @@ jsonLines(process.stdin, request => {
     if (fatal) throw new Error('Native agent bridge has failed');
     let data;
     if (request.type === 'login') {
-      if (request.driver !== 'antigravity') throw new Error('Browser login is only supported by Antigravity');
-      const login = await drivers.antigravity({ ...request.config, login: true }, emit);
-      await login.close();
-      data = { authenticated: true };
+      if (request.driver === 'cursor') data = await loginCursor(request.config, emit);
+      else if (request.driver === 'antigravity') {
+        const login = await drivers.antigravity({ ...request.config, login: true }, emit);
+        await login.close();
+        data = { authenticated: true };
+      } else throw new Error(`Browser login is not supported by ${request.driver}`);
+    } else if (request.type === 'detect') {
+      data = { node: nodeRuntime(), commands: await detect(request.commands || []) };
+    } else if (request.type === 'exec') {
+      const command = request.tool === 'npm' ? npmCli() : request.command;
+      if (!command) throw new Error('exec request omitted its command');
+      data = await run(command, request.args || [], { timeout: request.timeout || 600000,
+        onOutput: text => emit({ type: 'log', id: request.id, text }) });
     } else if (request.type === 'probe') {
       const open = drivers[request.driver];
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);

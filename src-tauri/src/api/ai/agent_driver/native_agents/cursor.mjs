@@ -1,6 +1,51 @@
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
 import { deadline } from './common.mjs';
+
+const loadSdk = config => createRequire(resolve(config.sdk_directory || config.cwd, 'package.json'))('@cursor/sdk');
+
+// Per-provider browser sign-in written by loginCursor() in the SDK's StoredSdkCredentials shape.
+export async function storedCredential(path, now = Date.now(), read = readFile) {
+  if (!path) return undefined;
+  let text;
+  try { text = await read(path, 'utf8'); } catch (error) {
+    if (error.code === 'ENOENT') return undefined;
+    throw new Error(`Cannot read the Cursor sign-in at ${path}: ${error.message}`);
+  }
+  let value;
+  try { value = JSON.parse(text); } catch { throw new Error(`The Cursor sign-in at ${path} is not valid JSON; sign in to Cursor again`); }
+  if (typeof value?.apiKey !== 'string' || !value.apiKey) throw new Error(`The Cursor sign-in at ${path} has no API key; sign in to Cursor again`);
+  if (typeof value.apiKeyExpiresAtMs === 'number' && value.apiKeyExpiresAtMs <= now) {
+    throw new Error('Cursor 登录已过期，请在提供商设置中重新登录 Cursor');
+  }
+  return value.apiKey;
+}
+
+// CURSOR_API_KEY (field or environment) wins over the provider's browser sign-in.
+const apiKeyFor = async config => process.env.CURSOR_API_KEY || await storedCredential(config.auth_store);
+
+// Only Cursor's own login pages may be opened from the settings window.
+export function loginUrl(value) {
+  if (typeof value !== 'string' || value.length > 16384 || /\s/.test(value)) throw new Error('Invalid Cursor sign-in URL');
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.username || url.password
+    || !(url.hostname === 'cursor.com' || url.hostname.endsWith('.cursor.com'))) throw new Error(`Unexpected Cursor sign-in URL host: ${url.host}`);
+  return value;
+}
+
+// Browser sign-in through the official SDK, persisted only after it fully succeeds.
+export async function loginCursor(config, emit, dependencies = {}) {
+  if (!config.auth_store || !isAbsolute(config.auth_store)) throw new Error('Cursor sign-in requires an absolute per-provider credential path');
+  const sdk = dependencies.sdk || loadSdk(config);
+  const pending = new sdk.InMemoryCredentialStore();
+  const result = await sdk.Cursor.auth.login({ openBrowser: false, store: pending, apiKeyName: config.key_name || 'AIPP',
+    onLoginUrl: url => emit({ type: 'auth_url', url: loginUrl(url) }) });
+  const credentials = await pending.load();
+  if (!credentials) throw new Error('Cursor sign-in finished without returning credentials');
+  await new sdk.FileCredentialStore(config.auth_store).save(credentials);
+  return { authenticated: true, email: result.email ?? null, expires_at_ms: result.apiKeyExpiresAtMs ?? null };
+}
 
 function isAbort(error) {
   const seen = new Set();
@@ -22,24 +67,24 @@ function transportDiagnostic(text) {
 }
 
 export async function openCursor(config, emit, dependencies = {}) {
+  const apiKey = await apiKeyFor(config);
   const models = async () => {
-    if (!process.env.CURSOR_API_KEY) throw new Error('Cursor model discovery requires CURSOR_API_KEY');
+    if (!apiKey) throw new Error('Cursor 未登录：在提供商设置中点击「登录 Cursor」，或填写 Cursor API Key');
     const response = await fetch(`${(process.env.CURSOR_BACKEND_URL || 'https://api.cursor.com').replace(/\/$/, '')}/v1/models`,
-      { headers: { Authorization: `Bearer ${process.env.CURSOR_API_KEY}` }, signal: AbortSignal.timeout(30000) });
+      { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(30000) });
     if (!response.ok) throw new Error(`Cursor models HTTP ${response.status}: ${await response.text()}`);
     const data = await response.json();
     return data.items.map(model => ({ id: model.id, name: model.displayName }));
   };
   if (config.probe) return { models, async close() {} };
-  const require = createRequire(resolve(config.sdk_directory || config.cwd, 'package.json'));
-  const { Agent } = dependencies.sdk || require('@cursor/sdk');
+  const { Agent } = dependencies.sdk || loadSdk(config);
   const options = {
     model: { id: config.model || 'default' },
     mode: 'agent',
     local: { cwd: config.cwd, autoReview: true,
       settingSources: ['project', 'user', 'team', 'mdm', 'plugins'], enableAgentRetries: false },
     ...(config.mcp ? { mcpServers: { aipp: config.mcp } } : {}),
-    ...(process.env.CURSOR_API_KEY ? { apiKey: process.env.CURSOR_API_KEY } : {}),
+    ...(apiKey ? { apiKey } : {}),
   };
   const agent = config.session ? await Agent.resume(config.session, options) : await Agent.create(options);
   if (!agent.agentId || (config.session && agent.agentId !== config.session)) {

@@ -6,6 +6,15 @@ ACP (Agent Client Protocol) 集成模块允许 AIPP 与 ACP 代理进行交互�
 
 Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与 ACP 共用 AIPP 的 Agent 驱动入口。模型、权限、MCP 与可用配置由对应 Agent 决定，各通道的能力并不完全相同。
 
+### 原生智能体的环境检测与更新
+
+Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动检测运行环境，不需要手动填写命令：
+
+- **Node.js 运行时**：列出 PATH 以及 nvm / nvm-windows、fnm、Volta、Homebrew、asdf、mise、Scoop、官方安装包中找到的 Node.js 及版本，低于 22.19.0 的会标注。默认「自动」按 PATH 查找；也可以固定为某个检测到的安装或自定义路径（可浏览选择文件）。当前选择不满足要求时会提示可改用的版本。固定为某个安装后，它的目录会在会话 PATH 中优先（已在 PATH 中的目录不改变顺序），让智能体及其子进程使用同一个 Node 和该版本的全局命令。
+- **智能体程序**：在所选 Node 目录、PATH 以及各官方安装器和 npm / pnpm / Bun 全局目录中查找 `pi`、`opencode`、`kiro-cli`、`agy`，显示实际会启动的文件和版本（通过与会话相同的启动解析运行 `--version`，例如 Windows 上会显示解析到的 `.ps1` shim）。可选择自动、某个检测到的安装或自定义路径。未安装时显示官方安装命令（可复制）和文档链接。
+- **更新**：检测到版本后自动对照最新发布（Pi / OpenCode / Cursor SDK 查 npm，Kiro 查官方 manifest，Antigravity 查官方 CHANGELOG，结果缓存 30 分钟），有新版本时显示「更新」。更新使用智能体自带的更新命令（`pi update self`、`opencode upgrade`、`kiro-cli update`、`agy update`），输出实时显示；失败时保留退出码与输出，可使用全局代理重试。有会话正在回复时拒绝更新；空闲会话会先关闭，下次发送消息时按原会话恢复。Antigravity「独立 ACP 程序」由用户自行管理，不提供一键更新。
+- **工作目录**使用文件夹选择器（也可手动输入），目录不存在时直接提示。
+
 ### Kiro 与 Antigravity
 
 在设置中新增「Kiro」或「Antigravity」提供商，再在智能体助手中选择该提供商。两者使用官方原生 ACP 协议，拥有独立驱动身份、会话和权限归属；需要本机 Node.js 22.19 或更新版本，仅桌面支持。支持文本流、思考与工具活动、原生权限确认、选中的 AIPP MCP 工具、模型发现、停止和原会话恢复。恢复、模型或配置失败直接报错，不创建替代会话。
@@ -14,7 +23,7 @@ Codex app-server、Claude Code、Pi、Cursor、OpenCode、Kiro、Antigravity 与
 
 Kiro 提供「本次允许」时，AIPP 不显示其持久化允许选项；只有原生没有本次允许时才提供持久化允许，并标注会保存权限规则。停止以原生 prompt 结束为准；刚发送 prompt 时的取消会等到开始信号或短暂等待后发送，避免 Kiro 忽略过早的取消。
 
-**Antigravity**：默认使用官方 `agy acp`，建议使用 1.5.1 或更新版本。也可显式选择「独立 ACP 程序」，填写其可执行文件路径和相同版本的 `localharness_external` 绝对路径。程序由用户自行安装，本次不包含 Registry 安装管理。
+**Antigravity**：默认使用官方 `agy acp`，建议使用 1.5.1 或更新版本（低于时表单会提示并可一键更新）。也可显式选择「独立 ACP 程序」，选择其可执行文件和相同版本的 `localharness_external`。独立程序由用户自行安装，本次不包含 Registry 安装管理。
 
 认证支持 Google 个人账号和 Gemini API Key。在提供商设置填写当前配置后点击「登录 Antigravity」；个人账号出现「在浏览器中继续登录」按钮，完成 Google 认证后等待 AIPP 显示原生认证成功。可以取消登录，最多等待 5 分钟。API Key 使用专用密码字段；认证错误保留原生原因。普通聊天与模型发现不会自动开启登录，过期时提示返回设置登录。
 
@@ -29,10 +38,16 @@ Antigravity 的账号保存在应用数据目录 `agent-profiles/antigravity/<pr
 | 类型 | 本机依赖 | 通道和恢复身份 |
 | --- | --- | --- |
 | Pi | 已安装并完成登录的 `pi` | 原生 RPC；保存 `sessionFile` 路径，按原路径恢复 |
-| Cursor | `@cursor/sdk@1.2.0`、`CURSOR_API_KEY` | 官方 SDK 的本机执行模式；保存并恢复 agent ID |
+| Cursor | `@cursor/sdk`、Cursor 账号登录或 API Key | 官方 SDK 的本机执行模式；保存并恢复 agent ID |
 | OpenCode | 已安装并完成登录的 `opencode` | 本机 HTTP/SSE 服务；保存并恢复 session ID |
 
-Cursor SDK 可用 `npm install --prefix <目录> @cursor/sdk@1.2.0` 安装，然后将该目录填入提供商的「Cursor SDK 安装目录」。在环境变量中设置 `CURSOR_API_KEY`。Cursor 使用 SDK 自动审核；不提供 AIPP 人工审批卡片或额外承诺文件系统沙箱能力。SDK 初始化或权限错误会直接显示，不会切换执行方式。
+Cursor SDK 可在表单中「一键安装」：用所选 Node.js 自带的 npm 把最新 `@cursor/sdk` 安装到 AIPP 应用数据目录 `agent-runtimes/cursor-sdk`（若已选择 SDK 目录则装到该目录），完成后自动填入目录；之后有新版本时同样可一键更新。也可以选择已有的安装目录；留空时从工作目录向上查找 `node_modules/@cursor/sdk`（与运行时解析一致）。
+
+账号有两种方式，不需要 Cursor 编辑器或 CLI 的登录（SDK 不读取它们）：
+- **登录 Cursor（推荐）**：点击「登录 Cursor」，在浏览器完成 Cursor 登录。AIPP 通过 SDK 官方的 `Cursor.auth.login()` 生成一个名为「AIPP - <提供商名称>」、90 天有效的密钥，只保存在应用数据目录 `agent-profiles/cursor/<provider-id>/auth.json`（每个提供商实例独立、不同步、界面不显示密钥），会话和模型发现自动使用。登录页只允许打开 `cursor.com` 域名；可取消，最多等待 5 分钟。「退出登录」会关闭空闲的 Cursor 会话并删除本地密钥；密钥在到期前仍有效，可在 Cursor 后台的 API Keys 中撤销。过期后表单提示重新登录。账号需要 Cursor 付费计划。
+- **API Key**：填在「Cursor API Key（可选）」字段；环境变量中的 `CURSOR_API_KEY` 会覆盖它。配置了 API Key 时优先使用 API Key，浏览器登录不可用。
+
+两者都没有时表单会提示，会话与模型发现直接报「Cursor 未登录」。Cursor 使用 SDK 自动审核；不提供 AIPP 人工审批卡片或额外承诺文件系统沙箱能力。SDK 初始化或权限错误会直接显示，不会切换执行方式。
 
 Pi 和 OpenCode 默认读取本机登录及配置；可单独设置 CLI 入口、工作目录和环境变量。Windows 会解析常见 npm/pnpm PowerShell shim 的 JavaScript 入口，避免交互协议被 shell 管道缓冲；不识别的 shim 会提示填写实际入口。环境变量接受 `KEY=VALUE` 多行文本或 JSON 字符串对象，助手中的同名变量覆盖提供商变量。
 

@@ -9,12 +9,23 @@ export function splitModel(model) {
   return { providerID: model.slice(0, index), modelID: model.slice(index + 1) };
 }
 
-export function launch(command, args, options = {}) {
-  if (process.platform === 'win32') {
-    const roots = isAbsolute(command) ? [''] : (process.env.PATH || '').split(delimiter);
+// The file a command name resolves to, using the same search order as launch() on Windows
+// (PATH x .exe/.ps1/.cmd/bare) and a plain PATH scan elsewhere. null when nothing matches.
+export function resolveCommand(command, platform = process.platform, path = process.env.PATH || '', exists = existsSync) {
+  const separator = platform === process.platform ? delimiter : platform === 'win32' ? ';' : ':';
+  if (platform === 'win32') {
+    const roots = isAbsolute(command) ? [''] : path.split(separator);
     const extensions = extname(command) ? [''] : ['.exe', '.ps1', '.cmd', ''];
-    const resolved = roots.flatMap(root => extensions.map(ext => root ? join(root, command + ext) : command + ext)).find(existsSync);
-    if (resolved) command = resolved;
+    return roots.flatMap(root => extensions.map(ext => root ? join(root, command + ext) : command + ext)).find(exists) ?? null;
+  }
+  if (command.includes('/')) return exists(command) ? command : null;
+  return path.split(separator).filter(Boolean).map(root => join(root, command)).find(exists) ?? null;
+}
+
+// What launch() will spawn, without spawning: { file, args, resolved }.
+export function launchPlan(command, args, platform = process.platform) {
+  if (platform === 'win32') {
+    command = resolveCommand(command, platform) ?? command;
     if (/\.ps1$/i.test(command)) {
       const shim = readFileSync(command, 'utf8');
       const relative = shim.match(/"\$basedir\/([^"\r\n]+)"\s+\$args/)?.[1]
@@ -22,16 +33,20 @@ export function launch(command, args, options = {}) {
       if (!relative) throw new Error(`Cannot resolve Node entry point from ${command}; configure the CLI executable or JavaScript entry path`);
       const entry = join(dirname(command), relative);
       if (!existsSync(entry)) throw new Error(`CLI entry point does not exist: ${entry}`);
-      return spawn(process.execPath, [entry, ...args], { ...options, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      return { file: process.execPath, args: [entry, ...args], resolved: command };
+    }
+    // Invoke Windows npm shims without concatenating caller-controlled arguments into a shell command.
+    if (/\.(cmd|bat)$/i.test(command)) {
+      throw new Error(`Use the executable or JavaScript CLI entry point instead of a shell shim: ${command}`);
     }
   }
-  // Invoke Windows npm shims without concatenating caller-controlled arguments into a shell command.
-  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
-    throw new Error(`Use the executable or JavaScript CLI entry point instead of a shell shim: ${command}`);
-  }
-  return spawn(/\.[cm]?js$/i.test(command) ? process.execPath : command,
-    /\.[cm]?js$/i.test(command) ? [command, ...args] : args,
-    { ...options, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const script = /\.[cm]?js$/i.test(command);
+  return { file: script ? process.execPath : command, args: script ? [command, ...args] : args, resolved: command };
+}
+
+export function launch(command, args, options = {}) {
+  const plan = launchPlan(command, args);
+  return spawn(plan.file, plan.args, { ...options, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 export function jsonLines(stream, receive, fail) {

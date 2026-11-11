@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { openCursor } from './cursor.mjs';
+import { loginCursor, loginUrl, openCursor, storedCredential } from './cursor.mjs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { tick } from './test-helpers.mjs';
 
 test('should pass the scoped MCP configuration to Cursor without enabling agent retries', async () => {
@@ -137,4 +140,65 @@ test('should use Cursor native default and cancel when send admission is still p
   assert.deepEqual(options.model, { id: 'default' });
   assert.equal(cancelled, true);
   await runtime.close();
+});
+
+test('should prefer CURSOR_API_KEY, then the provider sign-in, and reject expired sign-ins', async () => {
+  const read = async () => JSON.stringify({ version: 1, apiKey: 'login-key', apiKeyExpiresAtMs: 2000, backendUrl: 'https://api2.cursor.sh', createdAtMs: 1 });
+  assert.equal(await storedCredential('/p/auth.json', 1000, read), 'login-key');
+  await assert.rejects(storedCredential('/p/auth.json', 3000, read), /登录已过期/);
+  assert.equal(await storedCredential('/p/auth.json', 1000, async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); }), undefined);
+  await assert.rejects(storedCredential('/p/auth.json', 1000, async () => '{broken'), /not valid JSON/);
+  assert.equal(await storedCredential(undefined), undefined);
+});
+
+test('should open Cursor with the provider sign-in when no API key is configured', async () => {
+  const previous = process.env.CURSOR_API_KEY; delete process.env.CURSOR_API_KEY;
+  const dir = await mkdtemp(join(tmpdir(), 'aipp-cursor-'));
+  try {
+    const authStore = join(dir, 'auth.json');
+    await writeFile(authStore, JSON.stringify({ version: 1, apiKey: 'login-key', backendUrl: 'https://api2.cursor.sh', createdAtMs: 1 }));
+    let options;
+    const sdk = { Agent: { async create(value) { options = value; return { agentId: 'id', async close() {} }; } } };
+    const runtime = await openCursor({ cwd: process.cwd(), auth_store: authStore }, () => {}, { sdk });
+    assert.equal(options.apiKey, 'login-key');
+    await runtime.close();
+    process.env.CURSOR_API_KEY = 'env-key';
+    await (await openCursor({ cwd: process.cwd(), auth_store: authStore }, () => {}, { sdk })).close();
+    assert.equal(options.apiKey, 'env-key');
+  } finally {
+    if (previous === undefined) delete process.env.CURSOR_API_KEY; else process.env.CURSOR_API_KEY = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('should report a missing sign-in instead of calling the model catalog anonymously', async () => {
+  const previous = process.env.CURSOR_API_KEY; delete process.env.CURSOR_API_KEY;
+  try {
+    const probe = await openCursor({ cwd: process.cwd(), probe: true }, () => {});
+    await assert.rejects(probe.models(), /Cursor 未登录/);
+  } finally { if (previous !== undefined) process.env.CURSOR_API_KEY = previous; }
+});
+
+test('should persist the browser sign-in only after the SDK login completes and surface only Cursor URLs', async () => {
+  const events = [], saved = [];
+  class InMemoryCredentialStore { async save(value) { this.value = value; } async load() { return this.value; } }
+  class FileCredentialStore { constructor(path) { this.path = path; } async save(value) { saved.push([this.path, value]); } }
+  const sdk = { InMemoryCredentialStore, FileCredentialStore, Cursor: { auth: { async login(options) {
+    assert.equal(options.openBrowser, false);
+    assert.equal(options.apiKeyName, 'AIPP - Demo');
+    options.onLoginUrl('https://cursor.com/loginDeepControl?challenge=abc');
+    assert.equal(saved.length, 0, 'nothing is written while the browser step is pending');
+    await options.store.save({ version: 1, apiKey: 'minted', backendUrl: 'https://api2.cursor.sh', createdAtMs: 1, apiKeyExpiresAtMs: 9 });
+    return { apiKey: 'minted', email: 'u@example.com', apiKeyExpiresAtMs: 9 };
+  } } } };
+  const store = join(tmpdir(), 'aipp-cursor-login', 'auth.json');
+  const result = await loginCursor({ auth_store: store, key_name: 'AIPP - Demo', cwd: process.cwd() }, event => events.push(event), { sdk });
+  assert.deepEqual(result, { authenticated: true, email: 'u@example.com', expires_at_ms: 9 });
+  assert.deepEqual(events, [{ type: 'auth_url', url: 'https://cursor.com/loginDeepControl?challenge=abc' }]);
+  assert.equal(saved[0][0], store);
+  assert.equal(saved[0][1].apiKey, 'minted');
+  await assert.rejects(loginCursor({ auth_store: 'relative/auth.json' }, () => {}, { sdk }), /absolute/);
+  assert.throws(() => loginUrl('https://evil.example/cursor.com'), /Unexpected Cursor sign-in URL host/);
+  assert.throws(() => loginUrl('http://cursor.com/login'), /Unexpected/);
+  assert.equal(loginUrl('https://www.cursor.com/login?x=1'), 'https://www.cursor.com/login?x=1');
 });

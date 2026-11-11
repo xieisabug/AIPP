@@ -4,3 +4,4 @@ import './pi.test.mjs';
 import './cursor.test.mjs';
 import './opencode.test.mjs';
 import './acp-native.test.mjs';
+import './tools.test.mjs';

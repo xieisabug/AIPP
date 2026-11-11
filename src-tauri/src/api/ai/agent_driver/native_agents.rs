@@ -20,6 +20,8 @@ pub const DRIVER_IDS: [&str; 5] = ["pi", "cursor", "opencode", "kiro", "antigrav
 pub const DEFAULT_MODEL: &str = "__agent_default__";
 #[path = "native_agents_auth.rs"]
 pub(crate) mod auth;
+#[path = "native_agents_env.rs"]
+pub(crate) mod env;
 pub fn is_native_agent(id: &str) -> bool { DRIVER_IDS.contains(&id) }
 fn error(detail: impl std::fmt::Display) -> AppError { AppError::ProviderError(detail.to_string()) }
 
@@ -44,7 +46,7 @@ impl AgentDriver for NativeDriver {
     fn matches_provider(&self, api_type: &str, _: &[LLMProviderConfig]) -> bool { api_type == self.0 }
     fn config_schema(&self) -> Vec<AgentConfigField> {
         ["agent_node_command", "agent_cli_command", "agent_sdk_directory", "acp_working_directory", "acp_env_vars",
-            "antigravity_runtime", "antigravity_harness", "antigravity_auth_method", "antigravity_api_key", "kiro_agent", "kiro_effort"]
+            "antigravity_runtime", "antigravity_harness", "antigravity_auth_method", "antigravity_api_key", "kiro_agent", "kiro_effort", "cursor_api_key"]
             .iter().map(|name| AgentConfigField { name: name.to_string(), required: false, value_type: AgentConfigValueType::String }).collect()
     }
     fn capabilities(&self) -> AgentCapabilities { AgentCapabilities::baseline(self.0, self.declaration()) }
@@ -85,28 +87,62 @@ pub(crate) fn configure_instance(app: &tauri::AppHandle, provider_id: i64, drive
     if driver == "antigravity" {
         config.wire["profile"] = json!(app.path().app_data_dir().map_err(error)?.join("agent-profiles").join("antigravity").join(provider_id.to_string()));
     }
+    if driver == "cursor" {
+        config.wire["auth_store"] = json!(auth::cursor_auth_store(app, provider_id)?);
+    }
     Ok(())
 }
-pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], model: Option<String>) -> Result<NativeConfig, AppError> {
-    let get = |key: &str| models.iter().find(|c| c.name == key).and_then(|c| c.value.clone())
-        .or_else(|| providers.iter().find(|c| c.name == key).map(|c| c.value.clone())).filter(|s| !s.trim().is_empty());
-    let cwd = get("acp_working_directory").map(|path| {
-        if path == "~" { dirs::home_dir().unwrap_or_else(|| PathBuf::from(path)) }
-        else if path.starts_with("~/") || path.starts_with("~\\") { dirs::home_dir().unwrap_or_default().join(&path[2..]) }
-        else { PathBuf::from(path) }
-    }).or_else(dirs::home_dir).ok_or_else(|| error("Cannot resolve native agent working directory"))?;
-    if !cwd.is_dir() { return Err(error(format!("Agent working directory does not exist: {}", cwd.display()))); }
+/// Assistant value first, then provider value; blank counts as unset.
+fn setting(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], key: &str) -> Option<String> {
+    models.iter().find(|c| c.name == key).and_then(|c| c.value.clone())
+        .or_else(|| providers.iter().find(|c| c.name == key).map(|c| c.value.clone())).filter(|s| !s.trim().is_empty())
+}
+pub(crate) fn expand_home(path: &str) -> PathBuf {
+    if path == "~" { dirs::home_dir().unwrap_or_else(|| PathBuf::from(path)) }
+    else if path.starts_with("~/") || path.starts_with("~\\") { dirs::home_dir().unwrap_or_default().join(&path[2..]) }
+    else { PathBuf::from(path) }
+}
+/// Bridge environment overrides: dedicated credential fields, then provider and
+/// assistant variables (later wins), then the chosen Node's directory on PATH.
+pub(crate) fn agent_environment(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], node: &str) -> Result<HashMap<String, String>, AppError> {
     let mut env = HashMap::new();
+    if let Some(key) = setting(models, providers, "cursor_api_key") { env.insert("CURSOR_API_KEY".into(), key.trim().to_string()); }
     for raw in providers.iter().filter(|c|c.name == "acp_env_vars").map(|c|c.value.as_str())
         .chain(models.iter().filter(|c|c.name == "acp_env_vars").filter_map(|c|c.value.as_deref())) {
         env.extend(parse_environment(raw)?);
     }
+    with_node_on_path(node, &mut env, std::env::var_os("PATH"));
+    Ok(env)
+}
+/// An explicitly chosen Node (e.g. an nvm version directory) must also be the `node`
+/// and global-CLI directory the agent's own child processes find. Directories already
+/// on PATH are left in place so selecting a system Node never reorders the user's PATH.
+pub(crate) fn with_node_on_path(node: &str, env: &mut HashMap<String, String>, inherited: Option<std::ffi::OsString>) {
+    let node = std::path::Path::new(node);
+    let Some(directory) = node.is_absolute().then(|| node.parent()).flatten() else { return; };
+    let key = env.keys().find(|key| if cfg!(windows) { key.eq_ignore_ascii_case("PATH") } else { key.as_str() == "PATH" }).cloned();
+    let current = key.as_ref().and_then(|key| env.get(key)).map(std::ffi::OsString::from).or(inherited).unwrap_or_default();
+    let normalize = |path: &std::path::Path| {
+        let text = path.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+        if cfg!(windows) { text.to_lowercase() } else { text }
+    };
+    if std::env::split_paths(&current).any(|entry| normalize(&entry) == normalize(directory)) { return; }
+    let Ok(joined) = std::env::join_paths(std::iter::once(directory.to_path_buf()).chain(std::env::split_paths(&current))) else { return; };
+    env.insert(key.unwrap_or_else(|| "PATH".into()), joined.to_string_lossy().into_owned());
+}
+pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], model: Option<String>) -> Result<NativeConfig, AppError> {
+    let get = |key: &str| setting(models, providers, key);
+    let cwd = get("acp_working_directory").map(|path| expand_home(&path))
+        .or_else(dirs::home_dir).ok_or_else(|| error("Cannot resolve native agent working directory"))?;
+    if !cwd.is_dir() { return Err(error(format!("Agent working directory does not exist: {}", cwd.display()))); }
+    let node = get("agent_node_command").unwrap_or_else(|| "node".into());
+    let mut env = agent_environment(models, providers, &node)?;
     if get("acp_additional_args").is_some() { return Err(error("Dedicated native agent adapters do not accept generic ACP additional arguments; remove acp_additional_args")); }
     if let Some(key) = get("antigravity_api_key") { env.insert("AIPP_ANTIGRAVITY_API_KEY".into(), key); }
     let wire = json!({ "cwd": cwd, "command": get("agent_cli_command"), "sdk_directory": get("agent_sdk_directory"), "model": model,
         "runtime": get("antigravity_runtime"), "harness": get("antigravity_harness"), "auth_method": get("antigravity_auth_method"),
         "auth_key": get("antigravity_api_key"), "kiro_agent": get("kiro_agent"), "kiro_effort": get("kiro_effort") });
-    Ok(NativeConfig { node: get("agent_node_command").unwrap_or_else(|| "node".into()), cwd, env, wire })
+    Ok(NativeConfig { node, cwd, env, wire })
 }
 
 struct Prepared {
@@ -231,6 +267,7 @@ async fn bridge_files() -> Result<BridgeFiles, String> {
         ("opencode.mjs", include_str!("native_agents/opencode.mjs")),
         ("acp-native.mjs", include_str!("native_agents/acp-native.mjs")),
         ("auth-browser.mjs", include_str!("native_agents/auth-browser.mjs")),
+        ("tools.mjs", include_str!("native_agents/tools.mjs")),
     ] { tokio::fs::write(files.0.join(name), content).await.map_err(|e| e.to_string())?; }
     Ok(files)
 }
