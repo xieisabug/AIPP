@@ -9,13 +9,11 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import ButlerContactList, { type ContactPreview } from "@/components/butler/ButlerContactList";
+import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import ButlerAvatar from "@/components/butler/ButlerAvatar";
 import ConversationSearchDialog from "@/components/ConversationSearchDialog";
 import { searchButlerMessages } from "@/services/butlerSearchService";
 import type { ButlerMessageSearchHit } from "@/data/Conversation";
-import { useConversationAvatarState } from "@/components/avatar/useConversationAvatarState";
-import type { AvatarState } from "@/components/avatar/avatarDefinition";
-import { useLinger } from "@/hooks/useStablePresence";
 import ButlerProfileDialog, { type ProfileModelChoice, type ProfileModelField } from "@/components/butler/ButlerProfileDialog";
 import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import "@/components/butler/butlerDesktop.css";
@@ -201,14 +199,6 @@ function getFeishuStatusIcon(
     return <X className="h-3 w-3" />;
 }
 
-const headerStatusLabels: Partial<Record<AvatarState, string>> = {
-    thinking: "思考中…",
-    responding: "回复中…",
-    working: "执行中…",
-    waiting: "等你处理",
-    error: "执行出错",
-};
-
 /** 助手类型名称（与新增助手表单的内置类型一致；插件类型显示编号）。 */
 const ASSISTANT_TYPE_NAMES: Record<number, string> = { 0: "普通对话助手", 4: "智能体助手" };
 
@@ -237,7 +227,6 @@ function ButlerExperimentWindow() {
     const [pluginList, setPluginList] = useState<any[]>([]);
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [mainConversationId, setMainConversationId] = useState<string>("");
-    const [mainModelDisplayName, setMainModelDisplayName] = useState<string>("");
     const [tasks, setTasks] = useState<ButlerTaskListItem[]>([]);
     const [contact, setContact] = useState<{ assistantId: number; conversationId: number } | null>(null);
     const contactRequest = useRef(0);
@@ -634,9 +623,6 @@ function ButlerExperimentWindow() {
     // 执行助手在独立任务里提出的问题，显示在它自己的联系人窗口，答案回到原问题与原执行。
     inlineInteractionItems.push(...taskQuestionItems(taskQuestions, activeAssistant?.name ?? "助手", submitTaskQuestion, cancelTaskQuestion));
     const hasInlineInteraction = inlineInteractionItems.length > 0;
-    const avatarState = useConversationAvatarState(activeConversationId, hasInlineInteraction);
-    // 顶部头像保持静止，运行状态改用副标题文字呈现；工具轮次间的短暂空闲不切回模型名。
-    const headerStatus = useLinger(headerStatusLabels[avatarState], 1200, activeConversationId);
 
     const loadAssistants = useCallback(async () => {
         const request = ++rosterRequest.current;
@@ -699,7 +685,6 @@ function ButlerExperimentWindow() {
     const applyMainConversationResult = useCallback((result: ButlerMainLoadResponse) => {
         setLoadError(null);
         setMainConversationId(String(result.conversation.id));
-        setMainModelDisplayName(result.model_display_name);
         setTasks(sortTasks(result.tasks));
     }, []);
 
@@ -1105,6 +1090,11 @@ function ButlerExperimentWindow() {
     const existingMainWorkspace = butlerWorkspaceConfig.mainWorkspace;
     const existingTrustedWorkspaces = butlerWorkspaceConfig.trustedWorkspaces;
 
+    // 顶部头像和联系人列表共用这一份状态，同一助手播同一套动作。
+    const contactActivity = useContactAvatarActivity(mainConversationId, previews, groupId === null ? contact?.assistantId : -1);
+    const headerAssistantId = contact?.assistantId ?? 0;
+    const headerState = contactActivity.visuals.get(headerAssistantId)?.state ?? "idle";
+
     useAppShortcuts("butler", {
         new: () => {
             if (historyView || groupId !== null || !mainConversationId || resettingMainConversation || resettingContactId !== null) {
@@ -1138,7 +1128,7 @@ function ButlerExperimentWindow() {
                     data-aipp-slot="butler-task-rail"
                 >
                     <ButlerContactList chief={butlerDisplayName} contacts={assistants} selected={contact?.assistantId}
-                        ready={!!mainConversationId} previews={previews} mainConversationId={mainConversationId} plugins={pluginList}
+                        ready={!!mainConversationId} previews={previews} plugins={pluginList} activity={contactActivity}
                         error={rosterError} onRefresh={loadAssistants} onSelect={selectContact}
                         onSearch={() => setSearchOpen(true)} onAssistantAction={(assistant, action) => { void assistantItemActions.run(assistant, action); }}
                         groups={groups} selectedGroup={groupId ?? undefined} onSelectGroup={selectGroup}
@@ -1278,13 +1268,8 @@ function ButlerExperimentWindow() {
                                     data-aipp-slot="butler-main-identity"
                                     onClick={() => void openProfile()}
                                     title="编辑资料与形象">
-                                    <ButlerAvatar id={contact?.assistantId ?? 0} chief={!contact} size={28} figure />
-                                    <span className="flex min-w-0 flex-col">
-                                        <span className="truncate text-sm font-medium leading-4">{activeAssistant?.name ?? butlerDisplayName}</span>
-                                        <span className={`truncate text-[11px] leading-[14px] ${headerStatus ? "text-foreground/70" : "text-muted-foreground"}`}>
-                                            {headerStatus ?? (contact ? "私聊" : mainModelDisplayName || "总管家")}
-                                        </span>
-                                    </span>
+                                    <ButlerAvatar id={headerAssistantId} chief={!contact} size={28} figure animated={headerState !== "idle"} state={headerState} />
+                                    <span className="truncate text-sm font-medium">{activeAssistant?.name ?? butlerDisplayName}</span>
                                     <Pencil aria-hidden="true" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
                                 </button>
                                 <div className="flex min-w-0 items-center justify-end gap-1">

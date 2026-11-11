@@ -51,7 +51,7 @@ describe("hasPublishedReply", () => {
         expect(hasPublishedReply([row(1, "user"), row(2, "response")])).toBe(true);
         expect(hasPublishedReply([row(1, "response"), row(2, "user")])).toBe(false);
         expect(hasPublishedReply([row(1, "user"), row(2, "butler_exchange")])).toBe(false);
-        // 失败也是这一轮的结果，“正在处理…”不再停留
+        // 失败也是这一轮的结果，处理中状态行不再停留
         expect(hasPublishedReply([row(1, "user"), row(2, "error")])).toBe(true);
     });
 });

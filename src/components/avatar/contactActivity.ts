@@ -68,8 +68,8 @@ export function contactVisual(rows: ContactActivity[], feedback: ContactFeedback
         return { state: "streaming", label: "回复中" };
     }
     if (rows.some(r => r.waiting_peer)) return { state: "waiting", label: "等待协作" };
-    if (active.some(r => r.runtime.phase === "user_pending")) return { state: "listening", label: "准备回复" };
-    if (active.length) return { state: "thinking", label: "思考中" };
+    // 还没有推理或回复 token：请求已发出，模型尚未开始输出。不叫思考。
+    if (active.length) return { state: "sending", label: "投递中" };
     if (rows.some(r => r.status === "running")) return { state: "working", label: "任务处理中" };
     if (rows.some(r => r.status === "accepted")) return { state: "receiving", label: "已接收任务" };
     if (feedback && feedback.until > now) return { state: feedback.state, label: feedbackLabels[feedback.state] };

@@ -2,7 +2,7 @@ import AssistantItemContextMenu, { type AssistantItemAction } from "@/components
 import { Search, UsersRound } from "lucide-react";
 import type { AssistantListItem } from "@/data/Assistant";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
-import { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
+import type { useContactAvatarActivity } from "@/components/avatar/useContactAvatarActivity";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
 import AddAssistantDialog from "@/components/config/AddAssistantDialog";
@@ -24,7 +24,6 @@ interface Props {
     selected?: number;
     ready: boolean;
     previews: ContactPreview[];
-    mainConversationId: string;
     plugins: any[];
     error: string;
     onRefresh: () => void;
@@ -38,6 +37,8 @@ interface Props {
     onSelectGroup: (group: ButlerGroupSummary) => void;
     onCreateGroup: () => void;
     onDeleteGroup: (group: ButlerGroupSummary) => void;
+    /** 与顶部头像共用一份活动状态，避免两处各自订阅后动作错开。 */
+    activity: ReturnType<typeof useContactAvatarActivity>;
 }
 
 function groupUnread(group: ButlerGroupSummary, selected: boolean) {
@@ -47,10 +48,9 @@ function groupUnread(group: ButlerGroupSummary, selected: boolean) {
     return last.seq > Number(localStorage.getItem(groupReadKey(group.id)) ?? 0);
 }
 
-export default function ButlerContactList({chief, contacts, selected, ready, previews, mainConversationId, plugins, error, onRefresh, onSelect, onSearch, onAssistantAction,
-    groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup}: Props) {
-    // 正在看群聊时不把总管家的动态当作已读（-1 表示没有选中任何联系人）。
-    const { visuals, approvals, acknowledge } = useContactAvatarActivity(mainConversationId, previews, selectedGroup === undefined ? selected : -1);
+export default function ButlerContactList({chief, contacts, selected, ready, previews, plugins, error, onRefresh, onSelect, onSearch, onAssistantAction,
+    groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup, activity}: Props) {
+    const { visuals, approvals, acknowledge } = activity;
     // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
     const pendingApprovals = usePendingApprovalConversations();
     // 只有真实活动（任务、回复、审批、完成/失败反馈）才驱动动画；空闲时头像保持静止。

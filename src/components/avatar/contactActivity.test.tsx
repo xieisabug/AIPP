@@ -17,10 +17,11 @@ describe("contact activity priority", () => {
         expect(contactVisual([activity({ permission: true, question: true })], undefined, true, 0).label).toBe("待审批");
         expect(contactVisual([activity({ question: true })], undefined, true, 0).label).toBe("等你回答");
     });
-    it("should distinguish pending, reasoning, planning and answering", () => {
-        expect(stateOf([running("user_pending")])).toBe("listening");
+    it("should call the wait before the first token delivering, and distinguish reasoning, planning and answering", () => {
+        expect(contactVisual([running("user_pending")], undefined, false, 0)).toEqual({ state: "sending", label: "投递中" });
+        expect(contactVisual([running("idle")], undefined, false, 0)).toEqual({ state: "sending", label: "投递中" });
         expect(stateOf([running("assistant_streaming")])).toBe("streaming");
-        expect(stateOf([running("assistant_streaming", { stream: "reasoning" })])).toBe("thinking");
+        expect(contactVisual([running("assistant_streaming", { stream: "reasoning" })], undefined, false, 0).label).toBe("思考中");
         expect(stateOf([running("assistant_streaming", { stream: "plan" })])).toBe("writing");
     });
     it("should show auto review above the executing tool", () => {

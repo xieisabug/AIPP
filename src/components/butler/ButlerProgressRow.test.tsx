@@ -12,14 +12,26 @@ const summary = (conversation_id: number, epoch: number, text: string) => ({
 describe("ButlerProgressRow", () => {
     afterEach(() => clearAllMockHandlers());
 
-    it("keeps the plain processing text without a helper summary", async () => {
+    it("uses the same short status as the contact list when there is no helper summary", async () => {
         mockInvokeHandler("get_butler_progress_summary", () => null);
+        mockInvokeHandler("get_conversation_runtime_state", () => ({ conversation_id: 3, is_running: true, phase: "user_pending", epoch: 1, revision: 1 }));
         render(<ButlerProgressRow conversationId={3} />);
-        expect(await screen.findByText("正在处理…")).toBeTruthy();
+        expect(await screen.findByText("投递中")).toBeTruthy();
+        await act(async () => {
+            await emit("conversation_event_3", { type: "message_add", data: { message_type: "reasoning" } });
+            await emit("conversation_event_3", { type: "runtime_state_snapshot", data: { state: { conversation_id: 3, is_running: true, phase: "assistant_streaming", epoch: 1, revision: 2 } } });
+        });
+        await waitFor(() => expect(screen.getByText("思考中")).toBeTruthy());
+        await act(async () => {
+            await emit("conversation_event_3", { type: "runtime_state_snapshot", data: { state: { conversation_id: 3, is_running: true, phase: "mcp_executing", epoch: 1, revision: 3 } } });
+            await emit("conversation_event_3", { type: "mcp_tool_call_update", data: { call_id: 1, status: "executing", tool_name: "read_file", parameters: "{\"file_path\":\"a.md\"}" } });
+        });
+        await waitFor(() => expect(screen.getByText("阅读中")).toBeTruthy());
     });
 
     it("shows the latest summary for its conversation and expands the steps", async () => {
         mockInvokeHandler("get_butler_progress_summary", () => null);
+        mockInvokeHandler("get_conversation_runtime_state", () => null);
         render(<ButlerProgressRow conversationId={3} />);
         await act(async () => {
             await emit(BUTLER_PROGRESS_EVENT, summary(4, 1, "别的会话"));

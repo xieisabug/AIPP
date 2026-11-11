@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, ChevronRight, Loader2, X } from "lucide-react";
 import { useButlerProgress } from "./butlerProgress";
+import { useButlerLiveStatus } from "./useButlerLiveStatus";
 
 function useElapsedSeconds() {
     const [start] = useState(() => Date.now());
@@ -14,15 +15,16 @@ function useElapsedSeconds() {
 
 const formatElapsed = (seconds: number) => seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 
-/** 简洁聊天中的"处理中"行。有辅助模型摘要时显示一句进展，可展开查看步骤；否则保持「正在处理…」。 */
+/** 简洁聊天中的状态行。有辅助模型摘要时显示一句进展，可展开查看步骤；否则与联系人列表用同一句短状态。 */
 export default function ButlerProgressRow({ conversationId }: { conversationId: number }) {
     const summary = useButlerProgress(conversationId);
+    const live = useButlerLiveStatus(conversationId);
     const elapsed = useElapsedSeconds();
     const [expanded, setExpanded] = useState(false);
 
     if (!summary) {
         return <div role="status" data-aipp-slot="butler-processing"
-            className="butler-exchange flex justify-center text-xs text-muted-foreground">正在处理…</div>;
+            className="butler-exchange flex justify-center text-xs text-muted-foreground">{live}</div>;
     }
 
     return <div role="status" data-aipp-slot="butler-processing" className="butler-exchange flex flex-col items-center text-xs text-muted-foreground">

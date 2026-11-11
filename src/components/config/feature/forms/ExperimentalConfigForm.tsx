@@ -1114,7 +1114,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                                     <CircleHelp aria-label="小型辅助模型说明" className="size-3.5 cursor-help text-muted-foreground" />
                                                                 </TooltipTrigger>
                                                                 <TooltipContent className="max-w-xs text-xs">
-                                                                    用于总结之类的辅助任务，例如助手做事时把进展浓缩成一句话，显示在聊天区和左侧联系人中。建议选择便宜、响应快的小模型；不选择时只显示「正在处理…」。
+                                                                    用于总结之类的辅助任务，例如助手做事时把进展浓缩成一句话，显示在聊天区和左侧联系人中。建议选择便宜、响应快的小模型；不选择时两边显示同一句短状态，还没收到回复时是「投递中」。
                                                                 </TooltipContent>
                                                             </Tooltip>
                                                         </span>
