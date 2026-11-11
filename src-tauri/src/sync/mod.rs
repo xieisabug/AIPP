@@ -1245,8 +1245,13 @@ async fn run_sync_once_inner(
     let remote_status =
         fetch_remote_status(&settings.server_url, token, &device_id, cancel).await?;
     let migration_app = app_handle.clone();
-    tokio::task::spawn_blocking(move || crate::mcp::apps::credentials::migrate_all(&migration_app))
-        .await.map_err(|e| format!("迁移旧连接凭据任务失败: {e}"))??;
+    let migration = tokio::task::spawn_blocking(move || crate::mcp::apps::credentials::migrate_all(&migration_app))
+        .await.map_err(|e| format!("迁移旧连接凭据任务失败: {e}")).and_then(|result| result);
+    if let Err(error) = migration {
+        // A locked OS store defers credential migration, not ordinary sync.
+        // The scan repeats migration and skips all encrypted rows on failure.
+        warn!(%error, "Vault credential migration deferred; ordinary sync continues");
+    }
     if remote_status.vault_protocol < 1 {
         let system = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
         vault::init(&system.conn)?;
@@ -1329,7 +1334,11 @@ async fn run_sync_once_inner(
         // Push the moved children/references in the next round.
         schedule_sync_after_local_change(app_handle);
     }
-    if remote_status.vault_protocol >= 1 { vault::finish_rotation(app_handle)?; }
+    if remote_status.vault_protocol >= 1 {
+        if let Err(error) = vault::finish_rotation(app_handle) {
+            warn!(%error, "Vault key retirement deferred; ordinary sync completed");
+        }
+    }
     Ok(())
 }
 
@@ -2096,8 +2105,12 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
     drop(llm_db);
     quick_assistant::prepare(&sync_conn, &assistant_db)?;
     seed::drop_superseded_seeds(&sync_conn, &assistant_db)?;
-    crate::mcp::apps::credentials::migrate_all(app_handle)?;
-    let secret_state = load_secret_state(app_handle)?;
+    // Do not scan partially migrated credentials: that could enqueue deletions
+    // for legacy entries that are still safely held by the OS store.
+    let secret_state = secret_state_for_sync(
+        crate::mcp::apps::credentials::migrate_all(app_handle)
+            .and_then(|()| vault::state(app_handle)),
+    );
     vault_sync::discard_obsolete_outbox(&sync_conn, secret_state.ready_key())?;
     let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
     let device_id = ensure_device_id(&sync_conn)?;
@@ -4344,9 +4357,7 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
     let conn = open_sync_db(app_handle)?;
     let state = load_secret_state(app_handle)?;
     vault_sync::discard_obsolete_outbox(&conn, state.ready_key())?;
-    let mut events = load_pending_outbox_from_db(&conn, limit)?;
-    if state.ready_key().is_none() { events.retain(|(_, event)| !vault_sync::encrypted_type(&event.object_type)); }
-    Ok(events)
+    load_outbox_from_db_with_secret_readiness(&conn, limit, false, state.ready_key().is_some())
 }
 
 fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64, PushEvent)>, String> {
@@ -4354,6 +4365,16 @@ fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64
 }
 
 fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> Result<Vec<(i64, PushEvent)>, String> {
+    // Bootstrap recovery must replay already-attempted ciphertext even while locked.
+    load_outbox_from_db_with_secret_readiness(conn, limit, bootstrap_only, true)
+}
+
+fn load_outbox_from_db_with_secret_readiness(
+    conn: &Connection,
+    limit: i64,
+    bootstrap_only: bool,
+    secrets_ready: bool,
+) -> Result<Vec<(i64, PushEvent)>, String> {
     let rank_sql = specs().iter().enumerate().map(|(rank, spec)|
         format!("WHEN '{}' THEN {rank}", spec.object_type)).collect::<Vec<_>>().join(" ");
     let order_sql = format!("CASE object_type {rank_sql} ELSE 999 END");
@@ -4365,6 +4386,7 @@ fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> R
             &format!("SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
              WHERE ({filter})
+               AND (?3 OR object_type NOT IN (?4, ?5))
                AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM sync_outbox earlier
                    WHERE earlier.object_type = sync_outbox.object_type
                      AND earlier.object_id = sync_outbox.object_id
@@ -4392,7 +4414,7 @@ fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> R
         )
         .map_err(|e| e.to_string())?;
     let raw_rows = stmt
-        .query_map(params![limit, Utc::now().timestamp()], |row| {
+        .query_map(params![limit, Utc::now().timestamp(), secrets_ready, secrets::OBJECT_TYPE, vault::OBJECT_TYPE], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -5648,7 +5670,16 @@ pub(crate) fn credential_status(app: &AppHandle) -> String {
 }
 
 fn load_secret_state(app_handle: &AppHandle) -> Result<secrets::SecretState, String> {
-    vault::state(app_handle)
+    Ok(secret_state_for_sync(vault::state(app_handle)))
+}
+
+/// Credential failures pause only the encrypted domain. Existing ciphertext,
+/// pending remote secrets and outbox events remain available for a later retry.
+fn secret_state_for_sync(result: Result<secrets::SecretState, String>) -> secrets::SecretState {
+    result.unwrap_or_else(|error| {
+        warn!(%error, "Vault unavailable; encrypted sync paused");
+        secrets::SecretState::Unavailable(error)
+    })
 }
 
 /// Apply remote API keys that were parked while this device had no (matching) passphrase.

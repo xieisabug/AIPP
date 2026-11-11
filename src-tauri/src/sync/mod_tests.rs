@@ -726,3 +726,102 @@ fn test_opencode_go_seed_pull_preserves_local_provider_ids() {
     assert_eq!(find_local_id_by_object_id(&sync,"llm.provider",id).unwrap(), Some(local));
     assert_eq!(data.get_llm_provider(local).unwrap().name,"Go");
 }
+
+fn insert_outbox_readiness_event(sync: &Connection, event_id: &str, kind: &str, object_id: &str) {
+    sync.execute(
+        "INSERT INTO sync_outbox(event_id,object_type,object_id,operation,payload_json,local_version,device_id,created_at)
+         VALUES(?1,?2,?3,'upsert',?4,1,'device','now')",
+        params![event_id, kind, object_id, json!({"fields":{"value":{"kid":"original","ct":"ciphertext"}},"refs":{}}).to_string()],
+    ).unwrap();
+}
+
+#[test]
+fn test_outbox_readiness_filters_encrypted_backlog_before_limit_without_dropping_data() {
+    for kind in [secrets::OBJECT_TYPE, vault::OBJECT_TYPE] {
+        let sync = sync_db();
+        for i in 0..400 {
+            insert_outbox_readiness_event(&sync, &format!("secret-event-{i}"), kind, &format!("secret-{i}"));
+        }
+        insert_outbox_readiness_event(&sync, "conversation-event", "conversation", "conversation-id");
+        let before: Vec<(String, String)> = sync.prepare(
+            "SELECT event_id,payload_json FROM sync_outbox WHERE object_type=?1 ORDER BY id"
+        ).unwrap().query_map([kind], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        // Repeated locked/not-ready reads still reach ordinary events and never mutate ciphertext.
+        for _ in 0..2 {
+            let events = load_outbox_from_db_with_secret_readiness(&sync, 400, false, false).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].1.event_id, "conversation-event");
+        }
+        let after: Vec<(String, String)> = sync.prepare(
+            "SELECT event_id,payload_json FROM sync_outbox WHERE object_type=?1 AND status='pending' AND sent_once=0 ORDER BY id"
+        ).unwrap().query_map([kind], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(after, before);
+        let unlocked = load_outbox_from_db_with_secret_readiness(&sync, 400, false, true).unwrap();
+        assert_eq!(unlocked.len(), 400);
+        assert!(unlocked.iter().all(|(_, event)| event.object_type == kind));
+    }
+}
+
+#[test]
+fn test_outbox_readiness_preserves_object_order_and_unknown_outcome_recovery() {
+    for kind in [secrets::OBJECT_TYPE, vault::OBJECT_TYPE] {
+        let sync = sync_db();
+        insert_outbox_readiness_event(&sync, "secret-first", kind, "secret");
+        insert_outbox_readiness_event(&sync, "secret-next", kind, "secret");
+        insert_outbox_readiness_event(&sync, "ordinary-first", "conversation", "conversation");
+        insert_outbox_readiness_event(&sync, "ordinary-next", "conversation", "conversation");
+        let locked = load_outbox_from_db_with_secret_readiness(&sync, 10, false, false).unwrap();
+        assert_eq!(locked.len(), 1);
+        assert_eq!(locked[0].1.event_id, "ordinary-first");
+        let ready = load_outbox_from_db_with_secret_readiness(&sync, 10, false, true).unwrap();
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].1.event_id, "secret-first");
+        sync.execute("UPDATE sync_outbox SET status='failed',sent_once=1,outcome_known=0 WHERE event_id='secret-first'", []).unwrap();
+        sync.execute("INSERT INTO sync_bootstrap_attempt VALUES('secret-first')", []).unwrap();
+        let ready = load_outbox_from_db_with_secret_readiness(&sync, 10, false, true).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].1.event_id, "ordinary-first");
+        // Recovery selects the original unknown attempt, never its unsent successor.
+        let recovery = load_outbox_from_db(&sync, 10, true).unwrap();
+        assert_eq!(recovery.len(), 1);
+        assert_eq!(recovery[0].1.event_id, "secret-first");
+        assert_eq!(recovery[0].1.payload.as_ref().unwrap()["fields"]["value"]["ct"], "ciphertext");
+        sync.execute("DELETE FROM sync_outbox WHERE event_id='secret-first'", []).unwrap();
+        let ready = load_outbox_from_db_with_secret_readiness(&sync, 10, false, true).unwrap();
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].1.event_id, "secret-next");
+    }
+}
+
+#[test]
+fn test_outbox_readiness_keeps_public_connections_eligible_and_secret_deletes_queued() {
+    let sync = sync_db();
+    insert_outbox_readiness_event(&sync, "secret-delete", vault::OBJECT_TYPE, "secret");
+    sync.execute("UPDATE sync_outbox SET operation='delete',payload_json=NULL WHERE event_id='secret-delete'", []).unwrap();
+    insert_outbox_readiness_event(&sync, "connection", vault::CONNECTION_TYPE, "connection");
+    let locked = load_outbox_from_db_with_secret_readiness(&sync, 1, false, false).unwrap();
+    assert_eq!(locked.len(), 1);
+    assert_eq!(locked[0].1.event_id, "connection");
+    let ready = load_outbox_from_db_with_secret_readiness(&sync, 10, false, true).unwrap();
+    assert_eq!(ready.len(), 2);
+    assert!(ready.iter().any(|(_, event)| event.event_id == "secret-delete"));
+}
+
+/// A storage/migration error feeds the same readiness gate used by ordinary sync.
+#[test]
+fn test_outbox_readiness_unavailable_vault_keeps_ordinary_sync_available() {
+    let sync = sync_db();
+    insert_outbox_readiness_event(&sync, "credential", vault::OBJECT_TYPE, "credential");
+    insert_outbox_readiness_event(&sync, "message", "conversation", "conversation");
+    for error in ["OS store locked", "legacy credential migration failed"] {
+        let state = secret_state_for_sync(Err(error.into()));
+        assert_eq!(state.code(), "unavailable");
+        assert!(state.message(0).contains(error));
+        let batch = load_outbox_from_db_with_secret_readiness(&sync, 1, false, state.ready_key().is_some()).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].1.event_id, "message");
+        assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox WHERE event_id='credential' AND sent_once=0", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+}

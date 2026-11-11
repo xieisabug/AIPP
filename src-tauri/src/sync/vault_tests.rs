@@ -197,3 +197,109 @@ fn test_vault_legacy_key_migration_preserves_newer_remote_key_record() {
     assert!(active(&db,&keys).unwrap().unwrap().record == legacy.record);
     assert!(secrets::read_record(&db).unwrap().unwrap() == remote.record);
 }
+
+/// An empty Vault status read must not touch the OS store or legacy master key.
+struct UnavailableKeys;
+impl KeyStore for UnavailableKeys {
+    fn read(&self, _slot: &str) -> Result<Option<String>, String> { Err("OS store locked".into()) }
+    fn write(&self, _slot: &str, _value: &str) -> Result<(), String> { panic!("status must not provision a key") }
+    fn remove(&self, _slot: &str) -> Result<(), String> { panic!("status must not remove a key") }
+}
+
+#[test]
+fn test_vault_state_empty_does_not_provision_key() {
+    let db = db();
+    for _ in 0..2 {
+        let state = state_with(&db, &UnavailableKeys, || panic!("no legacy key to load")).unwrap();
+        assert_eq!(state.code(), "not_configured");
+        assert!(state.ready_key().is_none());
+    }
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM credential_vault_key", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn test_vault_state_remote_record_needs_passphrase_without_creating_key() {
+    let db = db();
+    let key = secrets::prepare_passphrase(&db, "remote-password", false).unwrap();
+    secrets::write_record(&db, &key.record).unwrap();
+    let state = state_with(&db, &UnavailableKeys, || panic!("no legacy key to load")).unwrap();
+    assert_eq!(state.code(), "needs_passphrase");
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM credential_vault_key", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert!(secrets::read_record(&db).unwrap() == Some(key.record));
+}
+
+#[test]
+fn test_vault_state_locked_store_pauses_secret_sync_preserves_ciphertext_and_recovers() {
+    let db = db(); let store = MemoryKeys::default();
+    let key = secrets::prepare_passphrase(&db, "shared-password", false).unwrap();
+    switch(&db, &store, None, &key).unwrap();
+    let reference = Uuid::new_v4().to_string();
+    write_with(&db, &key, &reference, &credential()).unwrap();
+    let before: String = db.query_row("SELECT value FROM credential_vault", [], |r| r.get(0)).unwrap();
+    let state = super::secret_state_for_sync(state_with(&db, &UnavailableKeys, || panic!("active key exists")));
+    assert_eq!(state.code(), "unavailable");
+    assert!(state.ready_key().is_none());
+    assert!(state.message(0).contains("OS store locked"));
+    assert_eq!(db.query_row("SELECT value FROM credential_vault", [], |r| r.get::<_, String>(0)).unwrap(), before);
+    let recovered = state_with(&db, &store, || panic!("active key exists")).unwrap();
+    assert_eq!(recovered.code(), "ready");
+    assert_eq!(read_with(&db, recovered.ready_key().unwrap(), &reference).unwrap().unwrap().headers, credential().headers);
+}
+
+#[test]
+fn test_vault_state_missing_key_metadata_never_replaces_ciphertext() {
+    let db = db();
+    let reference = Uuid::new_v4().to_string();
+    db.execute("INSERT INTO credential_vault(reference,server_id,value) VALUES(?1,17,'preserved-ciphertext')", [&reference]).unwrap();
+    let state = super::secret_state_for_sync(state_with(&db, &UnavailableKeys, || panic!("no legacy key")));
+    assert_eq!(state.code(), "unavailable");
+    assert_eq!(db.query_row("SELECT value FROM credential_vault", [], |r| r.get::<_, String>(0)).unwrap(), "preserved-ciphertext");
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM credential_vault_key", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn test_vault_state_migrates_legacy_key_without_replacing_newer_record() {
+    let db = db(); let store = MemoryKeys::default();
+    let legacy = secrets::prepare_passphrase(&db, "old-password", false).unwrap();
+    let newer = secrets::prepare_passphrase(&db, "new-password", false).unwrap();
+    secrets::write_record(&db, &newer.record).unwrap();
+    db.execute("INSERT INTO secure_config(scope,key) VALUES('data_sync','secret_key')", []).unwrap();
+    let state = state_with(&db, &store, || Ok(Some(legacy.clone()))).unwrap();
+    assert_eq!(state.code(), "mismatch");
+    assert!(active(&db, &store).unwrap().unwrap().record == legacy.record);
+    assert!(secrets::read_record(&db).unwrap() == Some(newer.record));
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM secure_config", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn test_vault_state_failed_legacy_migration_preserves_cache_then_retries() {
+    let db = db(); let failed = MemoryKeys { fail: true, ..Default::default() };
+    let legacy = secrets::prepare_passphrase(&db, "legacy-password", false).unwrap();
+    secrets::write_record(&db, &legacy.record).unwrap();
+    db.execute("INSERT INTO secure_config(scope,key) VALUES('data_sync','secret_key')", []).unwrap();
+    let state = super::secret_state_for_sync(state_with(&db, &failed, || Ok(Some(legacy.clone()))));
+    assert_eq!(state.code(), "unavailable");
+    assert!(state.ready_key().is_none());
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM secure_config", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM credential_vault_key", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert!(secrets::read_record(&db).unwrap() == Some(legacy.record.clone()));
+    let store = MemoryKeys::default();
+    assert_eq!(state_with(&db, &store, || Ok(Some(legacy))).unwrap().code(), "ready");
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM secure_config", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn test_vault_state_missing_retained_key_pauses_without_retiring_it() {
+    let db = db(); let store = MemoryKeys::default();
+    let old = secrets::prepare_passphrase(&db, "old-password", false).unwrap();
+    switch(&db, &store, None, &old).unwrap();
+    let new = secrets::prepare_passphrase(&db, "new-password", true).unwrap();
+    switch(&db, &store, Some(&old), &new).unwrap();
+    let slot: String = db.query_row("SELECT slot FROM credential_vault_retired_key WHERE retain=1", [], |r| r.get(0)).unwrap();
+    store.values.borrow_mut().remove(&slot);
+    let state = super::secret_state_for_sync(state_with(&db, &store, || panic!("active key exists")));
+    assert_eq!(state.code(), "unavailable");
+    assert!(state.ready_key().is_none());
+    assert_eq!(db.query_row("SELECT retain FROM credential_vault_retired_key WHERE slot=?1", [&slot], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert!(active(&db, &store).unwrap().unwrap().record == new.record);
+}

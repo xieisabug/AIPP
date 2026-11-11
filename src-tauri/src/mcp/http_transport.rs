@@ -98,7 +98,16 @@ impl ResponseRedactor {
             secrets.push(value);
         }
         secrets.retain(|s| !s.is_empty());
-        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        // Tool content and registry schemas are serialized before cleanup; errors can
+        // also contain JSON or Debug-quoted strings. Match the escaped string contents
+        // as well as the literal credential, without consuming surrounding JSON quotes.
+        let escaped: Vec<_> = secrets.iter().map(|secret| {
+            let json = serde_json::to_string(secret).expect("serializing a string cannot fail");
+            json[1..json.len() - 1].to_owned()
+        }).collect();
+        secrets.extend(escaped);
+        secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        secrets.dedup();
         Self(secrets)
     }
     pub(crate) fn clean(&self, text: &str) -> String {

@@ -123,18 +123,37 @@ fn switch_key(db: &Connection, store: &impl KeyStore, old: Option<&secrets::Secr
     Ok(())
 }
 
+/// Load or migrate an existing key without provisioning a new Vault on a status read.
+fn existing_key(
+    db: &Connection,
+    store: &impl KeyStore,
+    load_legacy: impl FnOnce() -> Result<Option<secrets::SecretKey>, String>,
+) -> Result<Option<secrets::SecretKey>, String> {
+    if let Some(key) = active(db, store)? { return Ok(Some(key)); }
+    let legacy: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM secure_config WHERE scope='data_sync' AND key='secret_key')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if !legacy {
+        let has_credentials: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM credential_vault)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if has_credentials { return Err("已有凭据缺少原加密密钥，不会生成新密钥覆盖已有凭据".into()); }
+        return Ok(None);
+    }
+    let key = load_legacy()?.ok_or("无法解密旧同步密钥，保留旧数据，请恢复原密钥后重试")?;
+    // Migrating a cached key must not roll back a newer key-check record
+    // received from another device. Keep that mismatch visible until unlocked.
+    switch_key(db, store, None, &key, false)?;
+    Ok(Some(key))
+}
+
+fn legacy_key(app: &AppHandle, db: &Connection) -> Result<Option<secrets::SecretKey>, String> {
+    let master = get_or_create_master_key(app)?;
+    secrets::load_local_key(db, &master)
+}
+
 pub(super) fn key(app: &AppHandle, db: &Connection) -> Result<secrets::SecretKey, String> {
-    if let Some(key) = active(db, &SystemKeys)? {
+    if let Some(key) = existing_key(db, &SystemKeys, || legacy_key(app, db))? {
         if let Err(error) = cleanup_keys(db,&SystemKeys) { warn!(%error,"Vault key cleanup deferred"); }
         return Ok(key);
     }
-    let legacy: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM secure_config WHERE scope='data_sync' AND key='secret_key')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-    let key = if legacy {
-        let master = get_or_create_master_key(app)?;
-        secrets::load_local_key(db, &master)?.ok_or("无法解密旧同步密钥，保留旧数据，请恢复原密钥后重试")?
-    } else { secrets::random_local_key() };
-    // Migrating a cached key must not roll back a newer key-check record
-    // received from another device. Keep that mismatch visible until unlocked.
+    let key = secrets::random_local_key();
     switch_key(db, &SystemKeys, None, &key, false)?;
     Ok(key)
 }
@@ -142,14 +161,25 @@ pub(super) fn key(app: &AppHandle, db: &Connection) -> Result<secrets::SecretKey
 pub(super) fn state(app: &AppHandle) -> Result<secrets::SecretState, String> {
     let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
     let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
-    let mut key = key(app, &db.conn)?;
-    let slots = db.conn.prepare("SELECT slot FROM credential_vault_retired_key WHERE retain=1").map_err(|e|e.to_string())?
+    state_with(&db.conn, &SystemKeys, || legacy_key(app, &db.conn))
+}
+
+fn state_with(
+    db: &Connection,
+    store: &impl KeyStore,
+    load_legacy: impl FnOnce() -> Result<Option<secrets::SecretKey>, String>,
+) -> Result<secrets::SecretState, String> {
+    let key = existing_key(db, store, load_legacy)?;
+    let record = secrets::read_record(db)?;
+    let Some(mut key) = key else {
+        return Ok(if record.is_some() { secrets::SecretState::NeedsPassphrase } else { secrets::SecretState::NotConfigured });
+    };
+    let slots = db.prepare("SELECT slot FROM credential_vault_retired_key WHERE retain=1").map_err(|e|e.to_string())?
         .query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
     for slot in slots {
-        let raw = SystemKeys.read(&slot)?.ok_or("换钥期间的旧密钥缺失，暂不能处理旧版本远端凭据")?;
+        let raw = store.read(&slot)?.ok_or("换钥期间的旧密钥缺失，暂不能处理旧版本远端凭据")?;
         key.previous.push(secrets::decode_key(&raw)?);
     }
-    let record = secrets::read_record(&db.conn)?;
     Ok(match record {
         None if key.record.kdf == "local-random" => secrets::SecretState::NotConfigured,
         Some(_) if key.record.kdf == "local-random" => secrets::SecretState::NeedsPassphrase,
