@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { UseFormReturn, useWatch } from "react-hook-form";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { SyncServerSwitchDialog } from "./SyncServerSwitchDialog";
 import ConfigForm from "@/components/ConfigForm";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -100,7 +101,7 @@ function secretToneDotClass(tone: ReturnType<typeof secretSyncTone>): string {
 const PASSPHRASE_FIELD = "sync_passphrase";
 
 const SECRET_SYNC_HINT =
-    "API Key 等密钥只在本机用同步口令加密后上传，服务器只保存密文。每台设备输入相同口令后才会同步 API Key；口令不会上传，忘记口令可「更换口令」（其他设备需重新输入）。";
+    "API Key 与应用连接凭据共用同步口令加密后上传，服务器只保存密文。未设置口令时，应用凭据使用本机自动生成的密钥加密保存；设置或更换口令时自动重新加密。每台设备输入相同口令才能解密；口令不会上传。原加密密钥丢失时，仅设置新口令无法恢复旧凭据。";
 
 function metricValueClass(metric: SyncStatusMetric): string {
     if (metric.value > 0 && (metric.label === "失败" || metric.label === "无法应用")) {
@@ -115,6 +116,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
     const initialFormPending = useRef(true);
     const [status, setStatus] = useState<SyncStatus | null>(null);
     const [statusReadError, setStatusReadError] = useState<string | null>(null);
+    const [serverSwitch, setServerSwitch] = useState<{ id: string; oldUrl: string; serverUrl: string; initialToken: string; initialChoice?: "new" | "credentials" } | null>(null);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [stopping, setStopping] = useState(false);
@@ -245,16 +247,47 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         return nextStatus;
     }, [form, loadStatus, acceptStatus]);
 
+    const beginServerSwitchIfNeeded = useCallback(async () => {
+        const values = form.getValues();
+        if (values.mode !== "self_hosted") return false;
+        const normalize = (url: string) => url.trim().replace(/\/+$/, "");
+        const first = !status?.token_configured;
+        const changed = normalize(values.server_url || "") !== normalize(status?.server_url || "");
+        if (!first && !changed && !values.token?.trim() && !status?.needs_reset) return false;
+        const started = await invoke<{ id: string; old_url: string; has_sync_state: boolean }>("begin_sync_server_switch");
+        if (started.has_sync_state && !changed && !status?.needs_reset) {
+            try {
+                const checked = await invoke<{ mode: string | null }>("inspect_sync_server_switch", {
+                    request: { id: started.id, server_url: normalize(values.server_url || ""), token: values.token || "", choice: "credentials" },
+                });
+                if (checked.mode) {
+                    const next = await invoke<SyncStatus>("commit_sync_server_switch", { id: started.id, passphrase: null });
+                    acceptStatus(next);
+                    form.reset({ mode: next.mode, server_url: next.server_url, token: "" });
+                    toast.success("访问 Token 已验证并保存，继续同步");
+                    return true;
+                }
+            } catch (error) {
+                await invoke("cancel_sync_server_switch", { id: started.id }).catch(() => {});
+                throw error;
+            }
+        }
+        setServerSwitch({ id: started.id, oldUrl: started.old_url, serverUrl: normalize(values.server_url || ""),
+            initialToken: values.token || "", initialChoice: !started.has_sync_state ? "new" : undefined });
+        return true;
+    }, [form, status, acceptStatus]);
+
     const handleSave = useCallback(async () => {
         setSaving(true);
         try {
+            if (await beginServerSwitchIfNeeded()) return;
             await persistSyncSettings();
         } catch (error) {
             toast.error(friendlySyncError(getErrorMessage(error), "保存同步配置失败"));
         } finally {
             setSaving(false);
         }
-    }, [persistSyncSettings]);
+    }, [persistSyncSettings, beginServerSwitchIfNeeded]);
 
     const handleSyncNow = useCallback(async () => {
         const values = form.getValues();
@@ -273,6 +306,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
 
         setSyncing(true);
         try {
+            if (await beginServerSwitchIfNeeded()) return;
             if (decision.action === "save_then_sync") {
                 setSaving(true);
                 let saved: SyncStatus;
@@ -310,7 +344,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
         } finally {
             setSyncing(false);
         }
-    }, [form, persistSyncSettings, status?.paused, status?.server_url, status?.token_configured, acceptStatus]);
+    }, [form, persistSyncSettings, beginServerSwitchIfNeeded, status?.paused, status?.server_url, status?.token_configured, acceptStatus]);
 
     const handleStopSync = useCallback(async () => {
         setStopping(true);
@@ -786,7 +820,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             key: PASSPHRASE_FIELD,
             config: {
                 type: "custom" as const,
-                label: "API Key 加密同步",
+                label: "凭据加密同步",
                 tooltip: SECRET_SYNC_HINT,
                 hidden: !showsSelfHostedSyncControls(mode),
                 customRender: renderSecretSyncRow,
@@ -797,7 +831,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             config: {
                 type: "static" as const,
                 label: "同步账号范围已变更",
-                value: "服务器地址或访问 token 已变更。请先备份，再使用独立数据目录连接；重置无法安全合并两份已有历史。",
+                value: "请点击保存或立即同步，选择服务器迁移或新同步服务器后继续。",
                 hidden: !showsSelfHostedSyncControls(mode) || !status?.needs_reset,
             },
         },
@@ -816,6 +850,14 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
 
     return (
         <>
+            {serverSwitch && <SyncServerSwitchDialog key={serverSwitch.id} {...serverSwitch}
+                onCancel={() => setServerSwitch(null)}
+                onComplete={(next: SyncStatus) => {
+                    acceptStatus(next);
+                    form.reset({ mode: next.mode, server_url: next.server_url, token: "" });
+                    setServerSwitch(null);
+                    toast.success("新连接配置已保存，正在同步；进度和错误请查看同步状态");
+                }} />}
             <ConfigForm
                 title="数据"
                 description="管理本地数据目录与自建同步。"

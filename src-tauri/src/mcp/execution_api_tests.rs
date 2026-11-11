@@ -123,3 +123,10 @@ fn test_mixed_tool_round_expands_auto_subset_without_other_rounds() {
     expand_tool_call_round(&db, &mut calls).unwrap();
     assert_eq!(calls.len(), 2);
 }
+
+#[test]
+fn test_plugin_structured_content_is_preserved_without_host_private_metadata() {
+    let response: rmcp::model::CallToolResult=serde_json::from_value(serde_json::json!({"content":[],"structuredContent":{"rows":[{"value":42}]},"_meta":{"private":"host-only"}})).unwrap();
+    let output=super::serialize_tool_response(&response).unwrap();
+    assert!(output.contains("42"));assert!(!output.contains("host-only"));
+}

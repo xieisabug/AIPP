@@ -4,8 +4,8 @@
 //! key from a user-entered passphrase (PBKDF2-HMAC-SHA256) and a random salt that
 //! travels in a non-secret synced record (`feature_config` data_sync_secret /
 //! key_check). That record also carries a key-check value so a wrong passphrase
-//! is rejected instead of writing garbage. The derived key is persisted locally
-//! only under the existing local master key (never plaintext, never uploaded).
+//! is rejected instead of writing garbage. The derived key is stored by the OS
+//! credential store through vault.rs; old master-wrapped caches are migrated.
 //!
 //! Values are sealed with AES-256-GCM. The nonce is derived from an HMAC of the
 //! object identity and plaintext (SIV-style), so the same value always produces
@@ -55,6 +55,7 @@ pub(super) struct KeyCheckRecord {
 pub(super) struct SecretKey {
     enc: [u8; 32],
     mac: [u8; 32],
+    pub(super) previous: Vec<SecretKey>,
     pub record: KeyCheckRecord,
 }
 
@@ -66,7 +67,7 @@ impl std::fmt::Debug for SecretKey {
 }
 
 impl SecretKey {
-    fn kid(&self) -> String {
+    pub(super) fn kid(&self) -> String {
         self.record.check.chars().take(12).collect()
     }
 }
@@ -80,6 +81,7 @@ struct StoredKey {
 
 #[derive(Clone, Debug)]
 pub(super) enum SecretState {
+    Unavailable(String),
     /// No local passphrase and no synced record: secrets are not synced.
     NotConfigured,
     /// Another device enabled encrypted sync; this device has no passphrase yet.
@@ -96,6 +98,7 @@ impl SecretState {
     }
     pub fn code(&self) -> &'static str {
         match self {
+            SecretState::Unavailable(_) => "unavailable",
             SecretState::NotConfigured => "not_configured",
             SecretState::NeedsPassphrase => "needs_passphrase",
             SecretState::Mismatch => "mismatch",
@@ -104,11 +107,12 @@ impl SecretState {
     }
     pub fn message(&self, pending: i64) -> String {
         match self {
-            SecretState::NotConfigured => "未设置口令，API Key 不同步".into(),
-            SecretState::NeedsPassphrase => "需要输入同步口令才能同步 API Key".into(),
+            SecretState::Unavailable(error) => format!("凭据库不可用：{error}"),
+            SecretState::NotConfigured => "未设置同步口令，API Key 不同步；连接凭据仅在本机加密保存".into(),
+            SecretState::NeedsPassphrase => "需要输入同步口令才能同步 API Key 与连接凭据".into(),
             SecretState::Mismatch => "同步口令已在其他设备更换，请输入新口令".into(),
-            SecretState::Ready(_) if pending > 0 => format!("API Key 已加密同步（{pending} 条无法解密，已保留本机值）"),
-            SecretState::Ready(_) => "API Key 已加密同步".into(),
+            SecretState::Ready(_) if pending > 0 => format!("API Key 与连接凭据已启用加密同步（{pending} 条无法解密，已保留本机值）"),
+            SecretState::Ready(_) => "API Key 与连接凭据已启用加密同步".into(),
         }
     }
 }
@@ -130,11 +134,12 @@ pub(super) fn derive_key(passphrase: &str, salt: &[u8], iterations: u32) -> Resu
     Ok(SecretKey {
         enc,
         mac,
+        previous: Vec::new(),
         record: KeyCheckRecord { v: 1, kdf: KDF_NAME.into(), iterations, salt: BASE64.encode(salt), check },
     })
 }
 
-fn derive_with_record(passphrase: &str, record: &KeyCheckRecord) -> Result<SecretKey, String> {
+pub(super) fn derive_with_record(passphrase: &str, record: &KeyCheckRecord) -> Result<SecretKey, String> {
     if record.v != 1 || record.kdf != KDF_NAME {
         return Err("同步口令记录版本不受支持，请升级 AIPP".into());
     }
@@ -199,6 +204,7 @@ pub(super) fn open(key: &SecretKey, object_id: &str, name: &str, envelope: &Json
     }
     let kid = obj.get("kid").and_then(JsonValue::as_str).ok_or(OpenError::Malformed)?;
     if kid != key.kid() {
+        if let Some(previous) = key.previous.iter().find(|old| old.kid() == kid) { return open(previous, object_id, name, envelope); }
         return Err(OpenError::OtherKey);
     }
     let nonce = obj.get("nonce").and_then(JsonValue::as_str)
@@ -241,6 +247,7 @@ pub(super) fn write_record(system: &Connection, record: &KeyCheckRecord) -> Resu
 
 // ---------- local key storage (master-key protected) ----------
 
+#[cfg(test)]
 fn store_local_key(system: &Connection, master: &[u8; 32], key: &SecretKey) -> Result<(), String> {
     let stored = StoredKey { enc: BASE64.encode(key.enc), mac: BASE64.encode(key.mac), record: key.record.clone() };
     let plain = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
@@ -253,7 +260,7 @@ fn store_local_key(system: &Connection, master: &[u8; 32], key: &SecretKey) -> R
     Ok(())
 }
 
-fn load_local_key(system: &Connection, master: &[u8; 32]) -> Result<Option<SecretKey>, String> {
+pub(super) fn load_local_key(system: &Connection, master: &[u8; 32]) -> Result<Option<SecretKey>, String> {
     let row: Option<(String, String)> = system.query_row(
         "SELECT ciphertext, nonce FROM secure_config WHERE scope=?1 AND key=?2",
         params![LOCAL_SCOPE, LOCAL_KEY], |r| Ok((r.get(0)?, r.get(1)?)),
@@ -268,10 +275,11 @@ fn load_local_key(system: &Connection, master: &[u8; 32]) -> Result<Option<Secre
     let decode = |v: &str| -> Result<[u8; 32], String> {
         BASE64.decode(v).ok().and_then(|b| b.try_into().ok()).ok_or_else(|| "本地同步口令密钥损坏".to_string())
     };
-    Ok(Some(SecretKey { enc: decode(&stored.enc)?, mac: decode(&stored.mac)?, record: stored.record }))
+    Ok(Some(SecretKey { enc: decode(&stored.enc)?, mac: decode(&stored.mac)?, previous: Vec::new(), record: stored.record }))
 }
 
 /// Resolve the current secret-sync state from system.db (record + local key).
+#[cfg(test)]
 pub(super) fn state_from_db(system: &Connection, master: &[u8; 32]) -> Result<SecretState, String> {
     let record = read_record(system)?;
     let local = load_local_key(system, master)?;
@@ -290,33 +298,43 @@ pub(super) fn state_from_db(system: &Connection, master: &[u8; 32]) -> Result<Se
 
 /// Validate a passphrase against the synced record (or create a new record) and
 /// persist the derived key locally. Never writes anything on a wrong passphrase.
+#[cfg(test)]
 pub(super) fn set_passphrase(
     system: &Connection,
     master: &[u8; 32],
     passphrase: &str,
     replace_existing: bool,
 ) -> Result<SecretKey, String> {
-    if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
-        return Err(format!("同步口令至少需要 {MIN_PASSPHRASE_CHARS} 个字符"));
-    }
-    let record = read_record(system)?;
-    let key = match record {
-        Some(record) if !replace_existing => {
-            let key = derive_with_record(passphrase, &record)?;
-            if key.record != record {
-                return Err(format!("{PASSPHRASE_MISMATCH_CODE}: 输入的口令与已有同步口令不一致"));
-            }
-            key
-        }
-        _ => {
-            let salt: [u8; 16] = rand::random();
-            let key = derive_key(passphrase, &salt, KDF_ITERATIONS)?;
-            write_record(system, &key.record)?;
-            key
-        }
-    };
+    let key = prepare_passphrase(system, passphrase, replace_existing)?;
+    write_record(system, &key.record)?;
     store_local_key(system, master, &key)?;
     Ok(key)
+}
+
+pub(super) fn prepare_passphrase(system: &Connection, passphrase: &str, replace_existing: bool) -> Result<SecretKey, String> {
+    if passphrase.chars().count() < MIN_PASSPHRASE_CHARS { return Err(format!("同步口令至少需要 {} 个字符", MIN_PASSPHRASE_CHARS)); }
+    match read_record(system)? {
+        Some(record) if !replace_existing => {
+            let key = derive_with_record(passphrase, &record)?;
+            if key.record != record { return Err(format!("{PASSPHRASE_MISMATCH_CODE}: 输入的口令与已有同步口令不一致")); }
+            Ok(key)
+        }
+        _ => derive_key(passphrase, &rand::random::<[u8;16]>(), KDF_ITERATIONS),
+    }
+}
+
+pub(super) fn random_local_key() -> SecretKey {
+    SecretKey { enc: rand::random(), mac: rand::random(), previous: Vec::new(), record: KeyCheckRecord {
+        v: 1, kdf: "local-random".into(), iterations: 0, salt: String::new(), check: Uuid::new_v4().to_string(),
+    }}
+}
+pub(super) fn encode_key(key: &SecretKey) -> Result<String, String> {
+    serde_json::to_string(&StoredKey { enc: BASE64.encode(key.enc), mac: BASE64.encode(key.mac), record: key.record.clone() }).map_err(|e| e.to_string())
+}
+pub(super) fn decode_key(raw: &str) -> Result<SecretKey, String> {
+    let stored: StoredKey = serde_json::from_str(raw).map_err(|_| "凭据库密钥格式无效")?;
+    let decode = |v: &str| -> Result<[u8;32],String> { BASE64.decode(v).ok().and_then(|v| v.try_into().ok()).ok_or("凭据库密钥长度无效".into()) };
+    Ok(SecretKey { enc: decode(&stored.enc)?, mac: decode(&stored.mac)?, previous: Vec::new(), record: stored.record })
 }
 
 // ---------- per-round context for apply paths ----------
@@ -333,7 +351,7 @@ pub(super) fn with_state<T>(state: Option<SecretState>, f: impl FnOnce() -> T) -
     result
 }
 
-fn current_key() -> Option<SecretKey> {
+pub(super) fn current_key() -> Option<SecretKey> {
     CURRENT.with(|cell| cell.borrow().as_ref().and_then(|s| s.ready_key().cloned()))
 }
 
@@ -370,7 +388,7 @@ pub(super) fn seal_snapshots(
 
 // ---------- apply side ----------
 
-fn park(sync: &Connection, change: &PullChange, reason: &str) -> Result<(), String> {
+pub(super) fn park(sync: &Connection, change: &PullChange, reason: &str) -> Result<(), String> {
     let change_json = serde_json::to_string(change).map_err(|e| e.to_string())?;
     sync.execute(
         "INSERT INTO sync_secret_pending (object_id, version, change_json, reason, updated_at)
@@ -392,7 +410,7 @@ fn park(sync: &Connection, change: &PullChange, reason: &str) -> Result<(), Stri
 
 const RECONCILE_META: &str = "secret_server_wins_pending";
 
-fn remember_server_copy(sync: &Connection, change: &PullChange) -> Result<(), String> {
+pub(super) fn remember_server_copy(sync: &Connection, change: &PullChange) -> Result<(), String> {
     let change_json = serde_json::to_string(change).map_err(|e| e.to_string())?;
     sync.execute(
         "INSERT INTO sync_secret_server (object_id, version, change_json) VALUES (?1, ?2, ?3)
@@ -453,27 +471,29 @@ pub(super) fn reconcile_server_wins(
         let fields = change.payload.as_ref().and_then(|p| p.get("fields")).and_then(JsonValue::as_object);
         let name = fields.and_then(|f| f.get("name")).and_then(JsonValue::as_str).unwrap_or_default();
         let envelope = fields.and_then(|f| f.get("value")).cloned().unwrap_or(JsonValue::Null);
+        let vault_name = format!("vault:{}", fields.and_then(|f| f.get("reference")).and_then(JsonValue::as_str).unwrap_or_default());
+        let name = if change.object_type == vault::OBJECT_TYPE { vault_name.as_str() } else { name };
         if open(key, &change.object_id, name, &envelope).is_err() {
             continue; // Sealed with an older passphrase: a newer server write will follow.
         }
         let unpushed: bool = sync.query_row(
             "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type=?1 AND object_id=?2)",
-            params![OBJECT_TYPE, change.object_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+            params![change.object_type, change.object_id], |r| r.get(0)).map_err(|e| e.to_string())?;
         if unpushed { continue; } // A real edit made while unlocked is already queued.
         // Re-apply the server version even though it is already "seen": drop the
         // receipt so the apply path does not skip it, restore it if apply fails.
         let shadow: Option<(i64, i64, String, Option<String>, String)> = sync.query_row(
             "SELECT server_version, server_seq, payload_hash, deleted_at, updated_at FROM sync_shadow WHERE object_type=?1 AND object_id=?2",
-            params![OBJECT_TYPE, change.object_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            params![change.object_type, change.object_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         ).optional().map_err(|e| e.to_string())?;
-        sync.execute("DELETE FROM sync_shadow WHERE object_type=?1 AND object_id=?2", params![OBJECT_TYPE, change.object_id])
+        sync.execute("DELETE FROM sync_shadow WHERE object_type=?1 AND object_id=?2", params![change.object_type, change.object_id])
             .map_err(|e| e.to_string())?;
         change.seq = 0; // Not ordered against merged identities: this is the server state.
         if let Err(err) = apply(&change) {
             if let Some((version, seq, hash, deleted_at, updated_at)) = shadow {
                 sync.execute("INSERT OR REPLACE INTO sync_shadow (object_type, object_id, server_version, server_seq, payload_hash, deleted_at, updated_at)
                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![OBJECT_TYPE, change.object_id, version, seq, hash, deleted_at, updated_at]).map_err(|e| e.to_string())?;
+                    params![change.object_type, change.object_id, version, seq, hash, deleted_at, updated_at]).map_err(|e| e.to_string())?;
             }
             warn!(error = %err, "Server-wins reconcile skipped one API key");
             continue;
@@ -556,7 +576,7 @@ pub(super) fn replay_pending(
         // Superseded (newer upsert/tombstone already applied): nothing to recover.
         let superseded: bool = sync.query_row(
             "SELECT EXISTS(SELECT 1 FROM sync_shadow WHERE object_type=?1 AND object_id=?2 AND server_version>=?3)",
-            params![OBJECT_TYPE, object_id, version], |r| r.get(0),
+            params![change.object_type, object_id, version], |r| r.get(0),
         ).map_err(|e| e.to_string())?;
         if superseded {
             sync.execute("DELETE FROM sync_secret_pending WHERE object_id=?1 AND version<=?2",

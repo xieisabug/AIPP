@@ -6,9 +6,7 @@
 //! 3. 统一的参数解析、响应序列化与错误处理抽象
 //! 4. 将执行结果写回数据库并触发前端事件
 //! 5. 在工具成功后继续驱动 AI 对话（包含重试场景）
-use crate::api::ai::config::{
-    get_continue_on_tool_error_from_config, get_network_proxy_from_config,
-};
+use crate::api::ai::config::get_continue_on_tool_error_from_config;
 use crate::api::ai::events::{ConversationEvent, MCPToolCallUpdateEvent};
 use crate::api::ai_api::{
     batch_tool_result_continue_ask_ai_impl, sanitize_tool_name, tool_result_continue_ask_ai_impl,
@@ -25,7 +23,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rmcp::{
     model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation},
     transport::{
-        ConfigureCommandExt, TokioChildProcess,
+        ConfigureCommandExt,
     },
     ServiceExt,
 };
@@ -1199,7 +1197,12 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
     }
 
     // 优先尝试 JSON 序列化（与之前行为保持一致）
-    match serde_json::to_string(&response.content) {
+    let mut content=response.content.clone();
+    if let Some(structured)=&response.structured_content {
+        // MCP structuredContent is model-visible; host-only _meta intentionally stays out.
+        content.push(rmcp::model::Content::text(serde_json::to_string(structured)?));
+    }
+    match serde_json::to_string(&content) {
         Ok(s) => Ok(s),
         Err(json_err) => {
             // 回退：使用 Debug 格式串联各个 content part，确保始终有可显示的结果
@@ -2187,6 +2190,12 @@ async fn execute_mcp_tool_call_on_current_thread(
         ).await,
     };
     let butler_direct = crate::mcp::butler_tools::is_direct_tool(&kind, server.command.as_deref(), &tool_call.tool_name);
+    if let Err(error) = crate::mcp::apps::access::validate_call(&db.conn, server.id, call_id) {
+        return handle_tool_execution_result(
+            &app_handle, &state, &feature_config_state, &window, call_id, tool_call,
+            Err(error), is_retry, trigger_continuation,
+        ).await;
+    }
     if butler_direct { server.is_enabled = true; }
     if let Err(e) = validate_server_status(&server) {
         return handle_tool_execution_result(
@@ -3323,6 +3332,7 @@ pub async fn execute_tool_by_transport(
     conversation_id: Option<i64>,
     cancel_token: Option<CancellationToken>,
 ) -> std::result::Result<String, String> {
+    crate::mcp::apps::access::validate_execution(app_handle, server, tool_name, conversation_id)?;
     // Recheck at the tool boundary, not only when a model turn starts.
     if let Some(id) = conversation_id {
         let db = crate::db::conversation_db::ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
@@ -3361,6 +3371,7 @@ pub async fn execute_tool_by_transport(
                         tool_name,
                         parameters,
                         Some(cancel_token.clone()),
+                        conversation_id,
                     )
                     .await
                     .map_err(|e| e.to_string())
@@ -3372,6 +3383,7 @@ pub async fn execute_tool_by_transport(
                     tool_name,
                     parameters,
                     Some(cancel_token.clone()),
+                    conversation_id,
                 )
                 .await
                 .map_err(|e| e.to_string())
@@ -3393,6 +3405,7 @@ pub async fn execute_tool_by_transport(
             server,
             tool_name,
             parameters,
+            conversation_id,
             Some(cancel_token.clone()),
         )
         .await
@@ -3423,6 +3436,7 @@ async fn execute_stdio_tool(
     tool_name: &str,
     parameters: &str,
     cancel_token: Option<CancellationToken>,
+    conversation_id: Option<i64>,
 ) -> Result<String> {
     // 外部 stdio 在移动端不可执行。aipp:* 已在 execute_tool_by_transport 分流到 builtin，不会进入此函数。
     if cfg!(mobile) {
@@ -3443,9 +3457,7 @@ async fn execute_stdio_tool(
 
     // 定义实际的执行逻辑
     let execution = async {
-        let client = (())
-            .serve(
-                TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+        let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(_app_handle, server, Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
@@ -3456,15 +3468,13 @@ async fn execute_stdio_tool(
                             }
                         }
                     }
-                }))
-                .context("创建子进程失败")?,
-            )
-            .await
-            .context("初始化客户端失败")?;
+                })).await.map_err(anyhow::Error::msg)?;
+        let client = crate::mcp::apps::bundles::client::PluginClient { app:_app_handle.clone(),conversation_id,server_id:server.id }.serve(transport).await.map_err(|e| anyhow!(diagnostics.error("初始化 MCP",e)))?;
 
         let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
         let request_param = build_call_tool_request(tool_name, args);
-        let response = client.call_tool(request_param).await.context("工具调用失败")?;
+        crate::mcp::apps::access::validate_execution(_app_handle,server,tool_name,conversation_id).map_err(anyhow::Error::msg)?;
+        let response = client.call_tool(request_param).await.map_err(|e| anyhow!(diagnostics.error("调用工具", e)))?;
         debug!(is_error=?response.is_error, parts=?response.content.len(), "received stdio tool response");
         client.cancel().await.context("关闭客户端连接失败")?;
         // 不再包裹错误上下文，直接返回底层错误以保留真实原因（例如服务器返回的错误信息）
@@ -3637,45 +3647,29 @@ async fn execute_builtin_tool(
 
 /// 通过 HTTP (streamable) 传输执行工具。
 /// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
-#[instrument(skip(feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
+#[instrument(skip(app_handle,_feature_config_state,server,parameters,cancel_token), fields(server_id=server.id, tool_name=%tool_name))]
 async fn execute_http_tool(
-    _app_handle: &tauri::AppHandle,
-    feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
+    app_handle: &tauri::AppHandle,
+    _feature_config_state: &tauri::State<'_, crate::FeatureConfigState>,
     server: &MCPServer,
     tool_name: &str,
     parameters: &str,
+    conversation_id: Option<i64>,
     cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
 
-    // 获取代理配置
-    let network_proxy = if server.proxy_enabled {
-        let config_map = feature_config_state.config_feature_map.lock().await;
-        get_network_proxy_from_config(&config_map)
-    } else {
-        None
-    };
-
-    let transport = {
-        let mut client_builder = reqwest::Client::builder();
-
-        // 配置代理
-        if let Some(ref proxy_url) = network_proxy {
-            if !proxy_url.trim().is_empty() {
-                match reqwest::Proxy::all(proxy_url) {
-                    Ok(proxy) => {
-                        client_builder = client_builder.proxy(proxy);
-                        info!(proxy_url = %proxy_url, server_id = server.id, "HTTP proxy configured");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, proxy_url = %proxy_url, server_id = server.id, "HTTP proxy configuration failed");
-                    }
-                }
-            }
+    let (transport, redactor) = {
+        let client_builder = crate::mcp::http_transport::configured_http_builder(app_handle, server).await.map_err(anyhow::Error::msg)?;
+        let resolving = crate::mcp::http_transport::create_authenticated_http_transport(app_handle, server, client_builder);
+        let resolved = tokio::select! {
+            _ = cancel_token.cancelled() => return Err(anyhow!("Cancelled by user while preparing HTTP credentials")),
+            result = tokio::time::timeout(std::time::Duration::from_millis(server.timeout.unwrap_or(30000).max(1) as u64), resolving) => result.map_err(|_| anyhow!("Timeout while preparing HTTP credentials"))?,
+        };
+        match resolved {
+            Ok(value) => value,
+            Err(error) => { crate::mcp::apps::record_execution_error(app_handle, server, &error); return Err(anyhow!(error)); }
         }
-
-        crate::mcp::http_transport::create_http_transport(server, client_builder)
-            .map_err(anyhow::Error::msg)?
     };
     let client_info = ClientInfo {
         meta: None,
@@ -3698,6 +3692,7 @@ async fn execute_http_tool(
         let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
         let request_param = build_call_tool_request(tool_name, args);
 
+        crate::mcp::apps::access::validate_execution(app_handle, server, tool_name, conversation_id).map_err(anyhow::Error::msg)?;
         let response = client.call_tool(request_param).await.context("Tool call failed")?;
         debug!(is_error=?response.is_error, parts=?response.content.len(), "received http tool response");
 
@@ -3715,7 +3710,7 @@ async fn execute_http_tool(
         result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), execution) => {
             match result {
                 Ok(Ok(r)) => Ok(r),
-                Ok(Err(e)) => Err(anyhow!("Tool execution failed: {}", e)),
+                Ok(Err(e)) => Err(anyhow!("Tool execution failed: {e:#}")),
                 Err(_) => Err(anyhow!("Timeout while executing tool")),
             }
         }
@@ -3724,9 +3719,11 @@ async fn execute_http_tool(
     match result {
         Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "http tool executed successfully");
-            Ok(result)
+            Ok(redactor.clean(&result))
         }
         Err(e) => {
+            let e = anyhow!(redactor.clean(&e.to_string()));
+            crate::mcp::apps::record_execution_error(app_handle, server, &e.to_string());
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "http tool execution failed");
             Err(e)
         }

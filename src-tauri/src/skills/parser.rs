@@ -9,6 +9,29 @@ use tracing::{debug, warn};
 pub struct SkillParser;
 
 impl SkillParser {
+    /// Parse Agent Skills YAML, including nested metadata and folded descriptions.
+    pub(crate) fn metadata_from_text(content: &str) -> Result<SkillMetadata, String> {
+        let trimmed = content.trim_start_matches('\u{feff}').trim_start();
+        let mut lines = trimmed.lines();
+        if lines.next() != Some("---") { return Err("SKILL.md 缺少 YAML frontmatter".into()); }
+        let mut yaml = String::new(); let mut closed = false;
+        for line in lines { if line.trim() == "---" { closed = true; break; } yaml.push_str(line); yaml.push('\n'); }
+        if !closed { return Err("SKILL.md YAML frontmatter 未闭合".into()); }
+        Self::yaml_metadata(&yaml)
+    }
+
+    fn yaml_metadata(yaml: &str) -> Result<SkillMetadata, String> {
+        use yaml_rust2::{Yaml, YamlLoader};
+        let docs = YamlLoader::load_from_str(yaml).map_err(|e| format!("SKILL.md YAML 无效：{e}"))?;
+        let doc = docs.first().ok_or("SKILL.md YAML 为空")?;
+        if doc.as_hash().is_none() { return Err("SKILL.md YAML 必须是对象".into()); }
+        let text = |v: &Yaml| match v { Yaml::String(s) | Yaml::Real(s) => Some(s.clone()), Yaml::Integer(n) => Some(n.to_string()), _ => None };
+        let array = |v: &Yaml| -> Vec<String> { if let Some(values) = v.as_vec() { values.iter().filter_map(&text).collect() } else { v.as_str().map(Self::parse_yaml_array).unwrap_or_default() } };
+        Ok(SkillMetadata { name: text(&doc["name"]), description: text(&doc["description"]),
+            version: text(&doc["version"]).or_else(|| text(&doc["metadata"]["version"])),
+            author: text(&doc["author"]).or_else(|| text(&doc["metadata"]["author"])),
+            tags: array(&doc["tags"]), requires_files: array(if doc["requires_files"].is_badvalue() { &doc["requires"] } else { &doc["requires_files"] }) })
+    }
     /// Parse only the metadata (frontmatter) from a skill file
     /// This is the fast path - used for listing skills
     pub fn parse_metadata(file_path: &Path) -> Result<SkillMetadata, String> {
@@ -39,7 +62,7 @@ impl SkillParser {
     }
 
     /// Extract metadata from content string
-    fn extract_metadata(content: &str, file_path: &Path) -> Result<SkillMetadata, String> {
+    pub(crate) fn extract_metadata(content: &str, file_path: &Path) -> Result<SkillMetadata, String> {
         let trimmed = content.trim_start();
 
         // Check for YAML frontmatter (starts with ---)
@@ -62,35 +85,7 @@ impl SkillParser {
 
     /// Parse YAML frontmatter into SkillMetadata
     fn parse_yaml_frontmatter(yaml: &str, file_path: &Path) -> Result<SkillMetadata, String> {
-        let mut metadata = SkillMetadata::default();
-
-        for line in yaml.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_lowercase();
-                let value = value.trim().trim_matches('"').trim_matches('\'');
-
-                match key.as_str() {
-                    "name" => metadata.name = Some(value.to_string()),
-                    "description" => metadata.description = Some(value.to_string()),
-                    "version" => metadata.version = Some(value.to_string()),
-                    "author" => metadata.author = Some(value.to_string()),
-                    "tags" => {
-                        metadata.tags = Self::parse_yaml_array(value);
-                    }
-                    "requires_files" | "requires" => {
-                        metadata.requires_files = Self::parse_yaml_array(value);
-                    }
-                    _ => {
-                        debug!("Unknown frontmatter key: {}", key);
-                    }
-                }
-            }
-        }
+        let mut metadata = Self::yaml_metadata(yaml)?;
 
         // Fallback name from filename if not specified
         if metadata.name.is_none() {
@@ -119,7 +114,7 @@ impl SkillParser {
     }
 
     /// Extract body content (after frontmatter)
-    fn extract_body(content: &str) -> String {
+    pub(crate) fn extract_body(content: &str) -> String {
         let trimmed = content.trim_start();
 
         if !trimmed.starts_with("---") {

@@ -251,6 +251,7 @@ impl<'a> Tables<'a> {
 
     fn calls(&self, predicate: &str, id: i64) -> Result<()> {
         if let Some(calls) = self.names.get("mcp_tool_call") {
+            self.remove("app_tool_call_binding", &format!("call_id IN (SELECT id FROM {calls} WHERE {predicate})"), id)?;
             self.remove("tool_review_log", &format!("mcp_tool_call_id IN (SELECT id FROM {calls} WHERE {predicate})"), id)?;
             self.remove("mcp_tool_call", predicate, id)?;
         }
@@ -393,7 +394,7 @@ impl<'a> Tables<'a> {
                 for tool in self.ids("mcp_server_tool", "server_id=?1", id)? { self.tool(tool, false)?; }
                 self.calls("server_id=?1", id)?;
                 self.remove("assistant_mcp_config", "mcp_server_id=?1", id)?;
-                for child in ["mcp_server_resource", "mcp_server_prompt", "mcp_server_capability_epoch_catalog", "mcp_tool_catalog"] {
+                for child in ["mcp_server_resource", "mcp_server_prompt", "mcp_server_capability_epoch_catalog", "mcp_tool_catalog", "app_connection"] {
                     self.remove(child, "server_id=?1", id)?;
                 }
                 self.remove(table, "id=?1", id)

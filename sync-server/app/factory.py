@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import Settings, get_settings
 from app.db import configure_database, init_db
-from app.routes import admin, notify, pull, push, status
+from app.routes import admin, inspect, notify, pull, push, status, vault
 from app.services.notify import NotifyHub
 
 
@@ -44,8 +44,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(status.router)
+    app.include_router(inspect.router)
     app.include_router(push.router)
     app.include_router(pull.router)
     app.include_router(notify.router)
     app.include_router(admin.router)
+    app.include_router(vault.router)
     return app

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, PrimaryKeyConstraint, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -34,9 +34,10 @@ class SyncToken(Base):
 
 class SyncDevice(Base):
     __tablename__ = "sync_device"
-    __table_args__ = (UniqueConstraint("account_id", "id", name="uq_sync_device_account_id"),)
+    __table_args__ = (PrimaryKeyConstraint("account_id", "id", name="pk_sync_device"),)
 
-    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # One installation can join multiple sync spaces without changing its ID.
+    id: Mapped[str] = mapped_column(String(128), nullable=False)
     account_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("sync_account.id", ondelete="CASCADE"), nullable=False
     )
@@ -87,6 +88,16 @@ class SyncChange(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class VaultRefreshClaim(Base):
+    __tablename__ = "vault_refresh_claim"
+    account_id: Mapped[str] = mapped_column(String(64), ForeignKey("sync_account.id", ondelete="CASCADE"), primary_key=True)
+    object_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    claim_id: Mapped[str] = mapped_column(String(128), nullable=False)
     device_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

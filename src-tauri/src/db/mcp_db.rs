@@ -765,10 +765,28 @@ impl MCPDatabase {
         is_builtin: bool,
         proxy_enabled: bool,
     ) -> Result<()> {
+        self.guard_app_connection_config(id, transport_type, command, headers, url, is_builtin)?;
+        if is_enabled { self.guard_app_connection_enable(id)?; }
         self.conn.execute(
             "UPDATE mcp_server SET name = ?, description = ?, transport_type = ?, command = ?, environment_variables = ?, headers = ?, url = ?, timeout = ?, is_long_running = ?, is_enabled = ?, is_builtin = ?, proxy_enabled = ? WHERE id = ?",
             params![name, description, transport_type, command, environment_variables, headers, url, timeout, is_long_running, is_enabled, is_builtin, proxy_enabled, id],
         )?;
+        Ok(())
+    }
+
+    fn app_connection_status(&self, id: i64) -> Result<Option<String>> {
+        let exists: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_connection')", [], |r| r.get(0))?;
+        if !exists { return Ok(None); }
+        self.conn.query_row("SELECT status FROM app_connection WHERE server_id=?1", [id], |r| r.get(0)).optional()
+    }
+
+    fn guard_app_connection_config(&self, id: i64, transport: &str, command: Option<&str>, headers: Option<&str>, url: Option<&str>, builtin: bool) -> Result<()> {
+        if self.app_connection_status(id)?.is_some() {
+            let old = self.get_mcp_server(id)?;
+            if transport != "http" || command.is_some() || builtin || old.url.as_deref() != url || old.headers.as_deref() != headers {
+                return Err(DbError::InvalidParameterName("应用连接的服务地址和认证只能从连接管理修改".into()));
+            }
+        }
         Ok(())
     }
 
@@ -778,10 +796,20 @@ impl MCPDatabase {
     }
 
     pub fn toggle_mcp_server(&self, id: i64, is_enabled: bool) -> Result<()> {
+        if is_enabled { self.guard_app_connection_enable(id)?; }
         self.conn.execute(
             "UPDATE mcp_server SET is_enabled = ? WHERE id = ?",
             params![is_enabled, id],
         )?;
+        Ok(())
+    }
+
+    fn guard_app_connection_enable(&self, id: i64) -> Result<()> {
+        if let Some(status) = self.app_connection_status(id)? {
+            if ["disconnected", "auth_required", "connecting"].contains(&status.as_str()) {
+                return Err(DbError::InvalidParameterName("连接尚未授权或已断开，请从应用详情重新连接".into()));
+            }
+        }
         Ok(())
     }
 
@@ -811,6 +839,8 @@ impl MCPDatabase {
 
         match existing_id {
             Some(id) => {
+                self.guard_app_connection_config(id, transport_type, command, headers, url, is_builtin)?;
+                if is_enabled { self.guard_app_connection_enable(id)?; }
                 // Update existing server (不更新 is_deletable，保持原值)
                 self.conn.execute(
                     "UPDATE mcp_server SET description = ?, transport_type = ?, command = ?, \
@@ -1227,6 +1257,8 @@ impl MCPDatabase {
         llm_call_id: Option<&str>,
         assistant_message_id: Option<i64>,
     ) -> Result<MCPToolCall> {
+        crate::mcp::apps::init(&self.conn).map_err(DbError::InvalidParameterName)?;
+        let transaction = self.conn.unchecked_transaction()?;
         let mut stmt = self.conn.prepare(
             "INSERT INTO mcp_tool_call (conversation_id, message_id, server_id, server_name, tool_name, parameters, llm_call_id, assistant_message_id, subtask_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -1245,7 +1277,8 @@ impl MCPDatabase {
         ])?;
 
         let id = self.conn.last_insert_rowid();
-
+        self.conn.execute("INSERT INTO app_tool_call_binding(call_id,request_id) SELECT ?1,request_id FROM app_connection WHERE server_id=?2", params![id,server_id])?;
+        transaction.commit()?;
         self.get_mcp_tool_call(id)
     }
 

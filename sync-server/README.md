@@ -65,7 +65,9 @@ Device 表示一台 AIPP 客户端安装。
 - Push 请求在 JSON 里带 `device_id`
 - Pull / Notify 请求在请求头带 `X-AIPP-Device-ID`
 
-首次看到「合法 Token + device_id」时，服务端会自动注册设备。已吊销的设备不能再推拉。
+首次看到「合法 Token + device_id」时，服务端会在该 Token 所属空间注册设备，登记主键为 `(account_id, id)`。同一安装可以保留 `device_id`，在同一服务器的多个空间各有一条独立记录；名称、活跃时间和吊销状态互不影响。在 X 空间吊销设备只阻止它访问 X，不影响 Y，也不会因切换回来而解除 X 的吊销。
+
+不同空间的变更、对象、设备列表和通知仍按 Token 隔离。客户端切换到不同历史的空间时应选择「新同步服务器」来重建游标基线；该流程保留并合并本地业务数据，不提供按空间隔离的本地资料库。
 
 > MVP 限制：`device_id` 由客户端自报。后续版本会改为服务端签发的设备凭证。
 
@@ -118,6 +120,7 @@ uv venv --python 3.12
 uv pip install -e ".[dev]"
 
 $env:AIPP_SYNC_BOOTSTRAP_TOKEN = "dev-token"
+alembic upgrade head
 uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
@@ -137,6 +140,7 @@ source .venv/bin/activate
 uv pip install -e ".[dev]"
 
 export AIPP_SYNC_BOOTSTRAP_TOKEN=dev-token
+alembic upgrade head
 uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
@@ -172,6 +176,16 @@ docker run -d --name aipp-sync \
 - SQLite 默认路径相对工作目录 `/app`，即 `/app/data/aipp-sync.db`；**务必挂卷**到 `/app/data`，否则重建容器会丢数据
 - `AIPP_SYNC_BASE_URL` 非 localhost 时，必须设置私有的 `AIPP_SYNC_BOOTSTRAP_TOKEN`
 - 本版本仅支持并测试过 SQLite 后端
+
+### 升级已有服务
+
+升级前停止旧进程写入并备份数据库。Docker 启动时会自动运行迁移；本地部署请在与服务相同的环境变量、工作目录下先运行 `alembic upgrade head`，成功后再启动 uvicorn。只启动 uvicorn 的 `create_all` 不会更改旧表主键。
+
+迁移 `0004_sync_device_account_key` 将旧的设备单列主键改为 `(account_id, id)`，保留已有设备 ID、所属空间、名称、创建/活跃时间及吊销状态，不改动 Token、对象或变更记录。若旧库由直接启动 uvicorn 创建、尚无 Alembic 版本记录，应先核对其实际结构并登记对应的历史基线，再运行升级；不要对未知结构直接 `stamp head` 来跳过迁移。
+
+HTTP 请求/响应及客户端 schema 版本要求不变，旧客户端可继续访问升级后的服务端。**未升级的旧服务端仍不支持同设备跨空间登记**，客户端更新或更换 Token 不能代替数据库迁移。
+
+如果多个空间已登记了相同设备 ID，旧表结构无法无损表示这些记录，`alembic downgrade` 会明确拒绝而不删除数据。此时应继续使用升级后的服务，或停机恢复升级前的完整备份；恢复备份会失去备份之后的变更。
 
 ---
 
@@ -380,7 +394,7 @@ Windows：
 若 pytest 无法写入默认临时目录，请在普通用户 shell 中运行，或设置可写的临时目录。
 
 同步 API 测试使用内存 SQLite，覆盖鉴权、账号隔离、幂等、冲突、删除、分页及
-10,000 条消息先于依赖对象到达的场景。数据库不写入本机或部署中的服务数据。
+10,000 条消息先于依赖对象到达的场景。设备回归在新建库和实际 Alembic 升级库上覆盖同一 ID 的 X→Y→X 推拉、独立登记/名称/吊销、设备列表与通知隔离；迁移测试验证存量记录保留和无损降级限制。数据库不写入本机或部署中的服务数据。
 
 另外，从仓库根目录可运行 Rust 客户端与实际 FastAPI 路由之间的集成测试：
 
@@ -445,3 +459,21 @@ Remove-Item .\data\aipp-sync.db
 - 冲突解决 UI
 - 生产级管理控制台
 - 服务端签发的设备凭证（当前 `device_id` 为客户端自报）
+
+
+## 客户端切换服务器检查（可选扩展）
+
+新增 `POST /v1/sync/inspect`，使用现有 Bearer Token，接收 `{"sequences": [1, 2]}`（最多 10 个历史位置）。响应包含当前账号、最新游标、严格空库判断、指定位置的历史变更及 API Key 同步口令的公开校验配置（不含口令或密钥）。查询严格限定当前账号，不注册设备、不修改同步数据。
+
+此扩展不新增表或执行历史摘要回填，不改变现有 `status/push/pull/notify` 的请求和响应行为，也不提高最低客户端版本。旧客户端可继续正常同步；新版客户端访问旧服务端时，自动检查显示“不支持”，用户仍可自行选择迁移或新服务器。
+
+完整迁移应保留账号、对象、墓碑、变更历史和 Token；切换时避免新旧服务同时接受写入。抽样检查不是全量完整性验证，客户端仅在用户最终确认后保存新地址。此功能不会自动重建服务端数据。
+## 应用凭据同步
+
+新版客户端增加 `mcp.app_connection` 与 `mcp.vault_secret` 对象，秘密值只能以加密 envelope 上传。新密钥校验记录先发布，服务端拒绝不匹配当前密钥版本的凭据写入，防止离线设备覆盖新密文。服务器不持有加密密钥或 OAuth Token 明文。
+
+`POST /v1/sync/vault/claim-refresh` 按账号、凭据对象、服务器版本协调 OAuth 刷新。同一版本只允许一个刷新请求；重试相同 claim ID 幂等。刷新中断后不会靠超时释放来盲目重用旧 refresh token，客户端需等待新凭据同步或重新授权。
+
+升级部署需运行 `alembic upgrade head`（新增 `0004_vault_refresh_claim`）；新安装自动建表。status 新增 vault_protocol=1；应用 Vault 同步要求升级服务端，以保证换钥版本检查和跨设备刷新协调。该改动不涉及 aipp-helper 的应用目录服务。
+
+两个已发布的 `0004` 修订通过 `0005_merge_device_vault` 汇合，不改写历史版本号。已有服务无论先升级了设备作用域还是 Vault 刷新协调，运行 `alembic upgrade head` 都会补齐另一项迁移，最后收敛为单一 head。

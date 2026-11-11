@@ -38,6 +38,7 @@ interface SkillInstallGuideDialogProps {
     isOpen: boolean;
     onClose: () => void;
     onSkillInstalled?: () => void;
+    officialSkillIds?: string[];
 }
 
 interface SkillInstallRecipeSource {
@@ -276,6 +277,7 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
     isOpen,
     onClose,
     onSkillInstalled,
+    officialSkillIds,
 }) => {
     const [activeTab, setActiveTab] = useState<InstallTab>('recommended');
     const [isOpeningFolder, setIsOpeningFolder] = useState(false);
@@ -446,8 +448,8 @@ const SkillInstallGuideDialog: React.FC<SkillInstallGuideDialogProps> = ({
     const selectedSkillCount = selectedSkillList.length;
     const allSelected = inspection ? selectedSkillCount === inspection.skills.length : false;
     const filteredOfficialSkills = useMemo(
-        () => officialSkills.filter((skill) => matchesOfficialSkillSearch(skill, officialSearch)),
-        [officialSkills, officialSearch],
+        () => officialSkills.filter((skill) => (!officialSkillIds || officialSkillIds.includes(skill.id)) && matchesOfficialSkillSearch(skill, officialSearch)),
+        [officialSkills, officialSearch, officialSkillIds],
     );
 
     const handleToggleSkill = useCallback((skill: SkillInstallPlanSkill, checked: boolean) => {

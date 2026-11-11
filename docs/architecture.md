@@ -76,6 +76,7 @@ src-tauri/
 │   │   ├── copilot_api.rs & copilot_lsp.rs # GitHub Copilot 集成
 │   │   └── [other apis]...
 │   ├── mcp/                 # MCP 核心（注册/执行/检测/总结）
+│   │   ├── apps/            # helper 应用目录、连接实例、OAuth 与系统凭据存储
 │   │   ├── builtin_mcp/     # 内置 MCP 工具（agent/ui/search/operation/artifact）
 │   │   ├── registry_api.rs  # MCP server 管理
 │   │   ├── execution_api.rs # MCP tool call 执行与状态
@@ -113,6 +114,8 @@ src-tauri/
 
 ## Built-in MCP Tools
 
+GitHub Agent 插件包由 `mcp/apps/bundles` 管理（格式、文件存储、Tauri API），前端入口为 `AgentPluginsConfig`。包内 Skills 通过 `agent_plugin` 来源接入原技能扫描与 `load_skill`；支持的 HTTP 连接复用应用凭据和执行链。与 JavaScript `PluginRuntime` 相互独立，详见 [GitHub 插件包](./product/21-GitHub插件包.md)。
+
 The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 
 -   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`)
@@ -140,7 +143,7 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 5.  Content Preview & Artifact Workspace
 6.  Script Execution（可配置环境）
 7.  System Tray + Multi-Window UX
-8.  MCP Integration（registry、tool-call 执行状态、内置工具套件）
+8.  MCP Integration（应用目录/我的应用、声明式连接表单、registry、tool-call 执行状态、内置工具套件；协议见 `docs/connected-apps-protocol.md`）
 9.  Scheduled Tasks（once/interval、run logs、notify、stop）
 10. Skills System（文件系统技能、安装、助手绑定）
 11. Plugin Runtime（加载/配置/数据 + 主题注册）
@@ -193,3 +196,10 @@ Members keep Butler-mode SuperAdmin tools, `butler_memory` (group scope + global
 `db/butler_memory.rs` 一张 `butler_memory` 表（conversation.db）：`scope_type` 为 `assistant`（scope_id=助手）、`group`（scope_id=群聊会话）或 `global`；来源是一条私聊用户消息（`source_message_id`）或一条群发言（`source_group_id` + `source_group_seq`），不复制原文。私聊/总管家/任务看“本助手 + 全局”，群成员与群聊看“本群 + 全局”。单条 ≤300 字，同范围完全相同内容去重，`revision` 可选乐观锁。
 
 `api/butler_memory.rs`：身份只来自当前会话与 `TOOL_MESSAGE`。写入沿 parent 链找到本轮用户消息，拒绝带 `origin`/`relay_origin`/`relayOrigin` 元数据的消息、`butler_work_followup.execution_input_id`（continue_work 转达）和任务首条派工；不要求它是会话最新一条（普通模型允许插队）。群成员写入要求该次 `butler_chat_group_turn` 仍在 running 且 `trigger_seq` 是用户发言。`ai_api::build_turn_context` 组装本轮附加上下文（时间、外部渠道/插件前缀、工作记录、工作上下文、记忆），由 `initialize_conversation` 用 `utils/turn_context.rs` 以 `<aipp_turn_context>` 接在用户消息正文末尾（附件之后）入库，发送与存储一致，后续回放逐字相同。“这次要发出的历史”取自 `build_message_list_with_metadata_from_db`（最新分支、压缩后）：工作记录、近期工作与用户消息附加上下文里最近一次相同则不重复；`seen_in_history` 从整段历史读出模型已经看到的记忆——用户消息附加上下文里的记忆块、压缩检查点摘要（`</context_summary>` 之后）附带的记忆块、`Tool: butler_memory` 工具结果里保存/更正/忘记/recall 返回的记忆——按“删除优先、否则取较大版本”合并（编号不复用、版本只增，与先后无关），任一块带 `initial="true"` 即有首次附带基线（不叫 full：首次附带只是预算内最相关的一批，块后说明会告诉模型不一定是全部）。`db::butler_memory::plan` 只附带更新（不占预算）、删除、`as_of` 之后新建/更新、与本轮相关但未看到的记忆；没有首次附带基线时把未看到的按中文二元组/英文词重合度、再按最近更新在 800 字内附带，放不下的计入“另有 N 条”。压缩时摘要输入里的记忆块（用户消息附加上下文里的、旧检查点摘要后面的）由 `butler_memory::without_memory` 去掉，`fit_to_budget_with_compaction` 再经 `CheckpointStore::memory_snapshot`（`butler_memory::checkpoint_block`）把未在保留尾部出现的记忆按首次附带规则接在摘要后面一起存入检查点，压缩轮即可见、之后不在用户消息里整批重带，摘要里也不会留下与之重复或过时的记忆；失败只记日志，下一轮由用户消息首次附带。界面不显示附带的记忆。读正文给人看或检索的地方用 `turn_context::visible`/`visible_sql`（前端 `src/utils/turnContext.ts`）去掉附加上下文：正文须以 `</aipp_turn_context>` 结尾，并从第一处 `wrap` 写出的块开头（开标签紧跟说明行）切开，用户自己打出的成对标签不会把原话藏掉。删除聊天保留记忆；`cascade_delete` 在删群聊时删群记忆、删助手时删其私有记忆。
+
+## 连接凭据 Vault
+
+`sync/vault.rs` 管理 system.db 中的加密凭据及 OS 安全存储中的实际加密密钥。没有同步口令时生成随机密钥；设置后与 provider secret 共用 PBKDF2 派生密钥。换钥使用 SQLite 事务，旧同步密钥保留至远端重加密完成。MCP 认证入口通过该模块读取、迁移和更新凭据，不向 React 或模型提供秘密明文。
+
+`sync/vault_sync.rs` 接入连接元数据、密文、跨设备归属、pending 和 tombstone；`sync/vault_refresh.rs` 与 Sync Server 的版本化刷新申请协调 OAuth refresh token，避免多端重复刷新。服务端仅处理密文、公开密钥版本与同步身份，不持有解密密钥；aipp-helper 提供应用目录与预解析插件详情，并分发固定版本插件归档；不持有连接凭据。
+

@@ -89,6 +89,7 @@ class PullResponse(BaseModel):
 
 
 class StatusResponse(BaseModel):
+    vault_protocol: int = 1
     account_id: str
     object_count: int
     latest_cursor: int
