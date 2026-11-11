@@ -65,7 +65,9 @@ Device 表示一台 AIPP 客户端安装。
 - Push 请求在 JSON 里带 `device_id`
 - Pull / Notify 请求在请求头带 `X-AIPP-Device-ID`
 
-首次看到「合法 Token + device_id」时，服务端会自动注册设备。已吊销的设备不能再推拉。
+首次看到「合法 Token + device_id」时，服务端会在该 Token 所属空间注册设备，登记主键为 `(account_id, id)`。同一安装可以保留 `device_id`，在同一服务器的多个空间各有一条独立记录；名称、活跃时间和吊销状态互不影响。在 X 空间吊销设备只阻止它访问 X，不影响 Y，也不会因切换回来而解除 X 的吊销。
+
+不同空间的变更、对象、设备列表和通知仍按 Token 隔离。客户端切换到不同历史的空间时应选择「新同步服务器」来重建游标基线；该流程保留并合并本地业务数据，不提供按空间隔离的本地资料库。
 
 > MVP 限制：`device_id` 由客户端自报。后续版本会改为服务端签发的设备凭证。
 
@@ -118,6 +120,7 @@ uv venv --python 3.12
 uv pip install -e ".[dev]"
 
 $env:AIPP_SYNC_BOOTSTRAP_TOKEN = "dev-token"
+alembic upgrade head
 uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
@@ -137,6 +140,7 @@ source .venv/bin/activate
 uv pip install -e ".[dev]"
 
 export AIPP_SYNC_BOOTSTRAP_TOKEN=dev-token
+alembic upgrade head
 uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
@@ -172,6 +176,16 @@ docker run -d --name aipp-sync \
 - SQLite 默认路径相对工作目录 `/app`，即 `/app/data/aipp-sync.db`；**务必挂卷**到 `/app/data`，否则重建容器会丢数据
 - `AIPP_SYNC_BASE_URL` 非 localhost 时，必须设置私有的 `AIPP_SYNC_BOOTSTRAP_TOKEN`
 - 本版本仅支持并测试过 SQLite 后端
+
+### 升级已有服务
+
+升级前停止旧进程写入并备份数据库。Docker 启动时会自动运行迁移；本地部署请在与服务相同的环境变量、工作目录下先运行 `alembic upgrade head`，成功后再启动 uvicorn。只启动 uvicorn 的 `create_all` 不会更改旧表主键。
+
+迁移 `0004_sync_device_account_key` 将旧的设备单列主键改为 `(account_id, id)`，保留已有设备 ID、所属空间、名称、创建/活跃时间及吊销状态，不改动 Token、对象或变更记录。若旧库由直接启动 uvicorn 创建、尚无 Alembic 版本记录，应先核对其实际结构并登记对应的历史基线，再运行升级；不要对未知结构直接 `stamp head` 来跳过迁移。
+
+HTTP 请求/响应及客户端 schema 版本要求不变，旧客户端可继续访问升级后的服务端。**未升级的旧服务端仍不支持同设备跨空间登记**，客户端更新或更换 Token 不能代替数据库迁移。
+
+如果多个空间已登记了相同设备 ID，旧表结构无法无损表示这些记录，`alembic downgrade` 会明确拒绝而不删除数据。此时应继续使用升级后的服务，或停机恢复升级前的完整备份；恢复备份会失去备份之后的变更。
 
 ---
 
@@ -380,7 +394,7 @@ Windows：
 若 pytest 无法写入默认临时目录，请在普通用户 shell 中运行，或设置可写的临时目录。
 
 同步 API 测试使用内存 SQLite，覆盖鉴权、账号隔离、幂等、冲突、删除、分页及
-10,000 条消息先于依赖对象到达的场景。数据库不写入本机或部署中的服务数据。
+10,000 条消息先于依赖对象到达的场景。设备回归在新建库和实际 Alembic 升级库上覆盖同一 ID 的 X→Y→X 推拉、独立登记/名称/吊销、设备列表与通知隔离；迁移测试验证存量记录保留和无损降级限制。数据库不写入本机或部署中的服务数据。
 
 另外，从仓库根目录可运行 Rust 客户端与实际 FastAPI 路由之间的集成测试：
 
