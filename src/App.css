@@ -672,7 +672,8 @@ html.aipp-mobile-platform[data-aipp-keyboard-open="true"] [data-aipp-slot="chat-
     -webkit-touch-callout: none;
 }
 .aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="responding"],
-.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="completed_unread"] {
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="completed_unread"],
+.aipp-mobile-platform [data-aipp-slot="chat-conversation-list-item"][data-status="pending_approval"] {
     padding-right: 92px;
 }
 /* 表单控件高度 ≥44px */

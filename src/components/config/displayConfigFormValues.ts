@@ -4,6 +4,7 @@ export interface DisplayFormValues {
     color_mode: string;
     user_message_markdown_render: string;
     notification_on_completion: boolean;
+    notification_on_permission: boolean;
     code_theme_light: string;
     code_theme_dark: string;
     merge_assistant_messages: boolean;
@@ -31,6 +32,9 @@ export function buildDisplayFormValues(
             displayConfig?.get("user_message_markdown_render") || "disabled",
         notification_on_completion:
             displayConfig?.get("notification_on_completion") === "true",
+        // 等待审批的提醒默认开启，只有显式关闭才不发。
+        notification_on_permission:
+            displayConfig?.get("notification_on_permission") !== "false",
         code_theme_light: displayConfig?.get("code_theme_light") || "github",
         code_theme_dark: displayConfig?.get("code_theme_dark") || "github-dark",
         merge_assistant_messages:
@@ -49,6 +53,7 @@ export function serializeDisplayFormValues(values: DisplayFormValues) {
         color_mode: values.color_mode,
         user_message_markdown_render: values.user_message_markdown_render,
         notification_on_completion: values.notification_on_completion.toString(),
+        notification_on_permission: values.notification_on_permission.toString(),
         code_theme_light: values.code_theme_light,
         code_theme_dark: values.code_theme_dark,
         merge_assistant_messages: values.merge_assistant_messages

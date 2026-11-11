@@ -5,8 +5,9 @@ import ConversationList from "./ConversationList";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
 import { clearAllMockHandlers, invoke, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 
+const listStatus = vi.hoisted(() => ({ of: (_id: number): string => "idle" }));
 vi.mock("@/hooks/useConversationListStatus", () => ({
-    useConversationListStatus: () => ({ getItemStatus: () => "idle" }),
+    useConversationListStatus: () => ({ getItemStatus: (id: number) => listStatus.of(id) }),
 }));
 vi.mock("./ConversationTitleEditDialog", () => ({ default: () => null }));
 vi.mock("./ConfirmDialog", () => ({ default: () => null }));
@@ -21,7 +22,24 @@ const show = (conversationId = "1") => {
 };
 const sync = () => act(async () => { await emit("conversation_data_changed"); });
 
-beforeEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); mockInvokeHandler("get_all_feature_config", () => []); });
+beforeEach(() => {
+    clearAllMockHandlers(); vi.clearAllMocks(); mockInvokeHandler("get_all_feature_config", () => []);
+    listStatus.of = () => "idle";
+});
+
+describe("ConversationList status markers", () => {
+    it("should show the approval dot instead of the unread marker when the conversation awaits approval", async () => {
+        listStatus.of = (id) => (id === 2 ? "pending_approval" : "completed_unread");
+        mockInvokeHandler("list_conversations", () => [row(1), row(2)]);
+        show();
+        const waiting = (await screen.findByText("Chat 2")).closest("li")!;
+        const unread = screen.getByText("Chat 1").closest("li")!;
+        expect(waiting.querySelector('[data-aipp-slot="chat-conversation-item-status-pending-approval"]')).not.toBeNull();
+        expect(waiting.querySelector('[data-aipp-slot="chat-conversation-item-status-completed-unread"]')).toBeNull();
+        expect(unread.querySelector('[data-aipp-slot="chat-conversation-item-status-pending-approval"]')).toBeNull();
+        expect(screen.getAllByLabelText("待审批")).toHaveLength(1);
+    });
+});
 
 describe("ConversationList remote invalidation", () => {
     it("should open the shared actions without selecting a conversation when right-clicked", async () => {

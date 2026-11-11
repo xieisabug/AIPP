@@ -5,6 +5,7 @@ import type { ConversationRuntimeState } from "@/data/Conversation";
 import type { AvatarState } from "./avatarDefinition";
 import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "@/components/butler/butlerProgress";
 import type { ContactPreview } from "@/components/butler/ButlerContactList";
+import { APPROVAL_ATTENTION_EVENT } from "@/hooks/useApprovalAttention";
 import { BUSY_STATES, contactVisual, successful, terminal, type ContactActivity, type ContactDetail, type ContactFeedback, type ContactVisual } from "./contactActivity";
 
 // 运行态在工具轮次之间的短暂空闲窗口，见 ConversationActivityManager::recompute_focus。
@@ -34,6 +35,8 @@ const streamKinds: Record<string, ContactDetail["stream"]> = { reasoning: "reaso
 
 export function useContactAvatarActivity(main: string, previews: ContactPreview[], selected?: number) {
     const [visuals, setVisuals] = useState<Map<number, ContactVisual>>(new Map());
+    // 有待审批（权限请求或停下来等确认的工具调用）的助手，列表上显示待审批黄点。
+    const [approvals, setApprovals] = useState<Set<number>>(new Set());
     const [error, setError] = useState("");
     useEffect(() => { if (error) console.warn(`[Contact avatar activity] ${error}`); }, [error]);
     const [controller, setController] = useState<{ unread: (id: number) => void; acknowledge: (id: number) => void }>();
@@ -111,6 +114,8 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
                 return [id, visual];
             }));
             setVisuals(old => old.size === next.size && [...next].every(([id, value]) => old.get(id)?.state === value.state && old.get(id)?.label === value.label) ? old : next);
+            const pending = new Set([...rows.values()].filter(row => row.permission).map(row => row.assistant_id));
+            setApprovals(old => old.size === pending.size && [...pending].every(id => old.has(id)) ? old : pending);
         };
         const pulse = (id: number, state: ContactFeedback["state"]) => {
             // A new unread preview must not replace an unhandled error.
@@ -216,7 +221,7 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
             emit();
         });
         void progressListener.catch(e => { if (!disposed) setError(`进度摘要订阅失败: ${String(e)}`); });
-        const globalListeners = ["butler_task_updated", "butler_peer_changed", "conversation_list_activity"].map(name => listen(name, () => void refresh()));
+        const globalListeners = ["butler_task_updated", "butler_peer_changed", "conversation_list_activity", APPROVAL_ATTENTION_EVENT].map(name => listen(name, () => void refresh()));
         globalListeners.forEach(p => void p.catch(e => { if (!disposed) setError(`联系人活动订阅失败: ${String(e)}`); }));
         const timer = setInterval(() => { emit(); void refresh(); }, 2000);
         const onVisible = () => void refresh();
@@ -238,5 +243,5 @@ export function useContactAvatarActivity(main: string, previews: ContactPreview[
             if (previous !== undefined && message > previous && preview.assistantId !== selected && message > Number(localStorage.getItem(`butler-read-${preview.conversationId}`))) controller.unread(preview.assistantId);
         }
     }, [previews, selected, controller, seen]);
-    return { visuals, error, acknowledge: controller?.acknowledge };
+    return { visuals, approvals, error, acknowledge: controller?.acknowledge };
 }

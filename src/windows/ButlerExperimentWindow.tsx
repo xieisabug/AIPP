@@ -94,6 +94,7 @@ import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "@/hooks/useAppShortcuts";
 import { useTheme } from "@/hooks/useTheme";
 import { useAcpPermission, useOperationPermission } from "@/hooks/useOperationPermission";
+import { useApprovalSurface } from "@/hooks/useApprovalAttention";
 import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
 import { pluginRuntime } from "@/services/PluginRuntime";
@@ -511,6 +512,8 @@ function ButlerExperimentWindow() {
         groups.forEach(group => group.members.forEach(member => ids.add(member.conversation_id)));
         return Array.from(ids);
     }, [chatConversationIds, groups]);
+    // 审批弹窗覆盖全部管家会话；工具调用确认卡片只在打开的私聊/主会话里（群聊不显示工具调用）。
+    useApprovalSurface(groupId === null ? [Number(activeConversationId)] : [], permissionConversationIds);
 
     const {
         pendingRequest,

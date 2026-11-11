@@ -1,6 +1,6 @@
-use crate::api::ai::{acp::{AcpElicitationState, AcpPermissionState}, events::ConversationRuntimeState};
+use crate::api::ai::{acp::AcpElicitationState, events::ConversationRuntimeState};
 use crate::db::conversation_db::ConversationDatabase;
-use crate::mcp::builtin_mcp::{interaction::InteractionState, OperationState};
+use crate::mcp::builtin_mcp::interaction::InteractionState;
 use crate::state::activity_state::ConversationActivityManager;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -42,11 +42,12 @@ pub async fn list_butler_contact_activity(app_handle: AppHandle, main_conversati
         read_activity(&conn, main_conversation_id).map_err(|e| e.to_string())
     }).await.map_err(|e| format!("读取联系人活动任务失败: {e}"))?
         .map_err(|e| format!("读取联系人活动会话失败 (main={main_conversation_id}): {e}"))?;
+    // 待审批包括操作/Agent 权限与停下来等确认的工具调用，与会话列表黄点同源。
+    let approvals = crate::api::approval_attention::pending_approval_conversation_ids(&app_handle).await;
     for row in &mut rows {
         let id = row.conversation_id;
         row.runtime = Some(app_handle.state::<ConversationActivityManager>().get_runtime_state(id).await);
-        row.permission = app_handle.state::<OperationState>().has_pending_permission_for_conversation(id).await
-            || app_handle.state::<AcpPermissionState>().has_pending_permission_for_conversation(id).await;
+        row.permission = approvals.contains(&id);
         row.question = !app_handle.state::<InteractionState>().list_requests_for_conversation(id).await.is_empty()
             || app_handle.state::<AcpElicitationState>().has_pending_request_for_conversation(id).await;
     }

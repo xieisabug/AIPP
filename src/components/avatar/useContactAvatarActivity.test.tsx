@@ -125,4 +125,18 @@ describe("contact activity subscriptions", () => {
         rerender({ messageId: 11 });
         await waitFor(() => expect(result.current.visuals.get(8)?.state).toBe("notifying"));
     });
+    it("should flag assistants awaiting approval and refresh as soon as an approval changes", async () => {
+        let rows = [row()];
+        mockInvokeHandler("list_butler_contact_activity", () => rows);
+        const { result } = renderHook(() => useContactAvatarActivity("1", []));
+        await waitFor(() => expect(result.current.visuals.has(8)).toBe(true));
+        expect(result.current.approvals.has(8)).toBe(false);
+        rows = [{ ...row(), permission: true }];
+        await act(async () => { await emit("approval_attention_changed", { conversation_id: 3 }); });
+        await waitFor(() => expect(result.current.approvals.has(8)).toBe(true));
+        expect(result.current.visuals.get(8)).toEqual({ state: "alerting", label: "待审批" });
+        rows = [row()];
+        await act(async () => { await emit("approval_attention_changed", { conversation_id: 3 }); });
+        await waitFor(() => expect(result.current.approvals.has(8)).toBe(false));
+    });
 });

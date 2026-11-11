@@ -138,11 +138,21 @@ const ConversationItem = memo(function ConversationItem({
                 {displayName}
             </div>
             <div className="flex min-w-0 items-center gap-1.5 pr-8 text-xs text-muted-foreground" data-aipp-slot="chat-conversation-item-subtitle">
-                <ButlerAvatar id={conversation.assistant_id ?? 0} size={18} appearance={appearance ?? defaultAppearance} />
+                <ButlerAvatar id={conversation.assistant_id ?? 0} size={18} appearance={appearance ?? defaultAppearance}
+                    animated={status === "pending_approval"} state={status === "pending_approval" ? "alerting" : undefined} />
                 <span className="truncate">{displayAssistantName}</span>
             </div>
 
             <div className="absolute right-2 top-1/2 size-9 -translate-y-1/2">
+                {status === "pending_approval" && (
+                    <div
+                        className="pointer-events-none absolute inset-0 flex items-center justify-center group-hover:hidden"
+                        data-aipp-slot="chat-conversation-item-status-pending-approval"
+                        title="等待审批"
+                    >
+                        <span aria-label="待审批" className="size-2 rounded-full bg-amber-500" />
+                    </div>
+                )}
                 {status === "responding" && (
                     <div
                         className="pointer-events-none absolute inset-0 flex items-center justify-center group-hover:hidden"

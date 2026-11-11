@@ -25,6 +25,7 @@ describe("displayConfigFormValues", () => {
             color_mode: "dark",
             user_message_markdown_render: "enabled",
             notification_on_completion: true,
+            notification_on_permission: true,
             code_theme_light: "github",
             code_theme_dark: "github-dark",
             merge_assistant_messages: false,
@@ -32,6 +33,13 @@ describe("displayConfigFormValues", () => {
             preview_code_show_toolbar: true,
             mcp_tool_call_component_id: "builtin.default",
         });
+    });
+
+    it("should enable approval notifications by default when the setting was never saved", () => {
+        expect(buildDisplayFormValues(new Map()).notification_on_permission).toBe(true);
+        expect(
+            buildDisplayFormValues(new Map([["notification_on_permission", "false"]])).notification_on_permission,
+        ).toBe(false);
     });
 
     it("reads the default home window from experimental config", () => {
@@ -64,6 +72,7 @@ describe("displayConfigFormValues", () => {
                 color_mode: "system",
                 user_message_markdown_render: "enabled",
                 notification_on_completion: false,
+                notification_on_permission: false,
                 code_theme_light: "github",
                 code_theme_dark: "github-dark",
                 merge_assistant_messages: true,
@@ -76,6 +85,7 @@ describe("displayConfigFormValues", () => {
             color_mode: "system",
             user_message_markdown_render: "enabled",
             notification_on_completion: "false",
+            notification_on_permission: "false",
             code_theme_light: "github",
             code_theme_dark: "github-dark",
             merge_assistant_messages: "enabled",

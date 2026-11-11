@@ -435,6 +435,12 @@ impl OperationState {
         pending.values().any(|request| request.conversation_id == Some(conversation_id))
     }
 
+    /// 有待处理权限请求的会话。
+    pub async fn pending_permission_conversation_ids(&self) -> Vec<i64> {
+        let pending = self.pending_permissions.lock().await;
+        pending.values().filter_map(|request| request.conversation_id).collect()
+    }
+
     /// 添加会话信任路径
     pub async fn add_conversation_trusted_path(&self, conversation_id: i64, path: String) {
         let mut trusted = self.conversation_trusted_paths.lock().await;

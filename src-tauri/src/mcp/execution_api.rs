@@ -1262,6 +1262,9 @@ fn build_mcp_tool_call_update_event(tool_call: &MCPToolCall) -> ConversationEven
 fn broadcast_mcp_tool_call_update(app_handle: &tauri::AppHandle, tool_call: &MCPToolCall) {
     let update_event = build_mcp_tool_call_update_event(tool_call);
     send_conversation_event_to_chat_windows(app_handle, tool_call.conversation_id, update_event);
+    if tool_call.status != "pending" {
+        crate::api::approval_attention::tool_call_settled(app_handle, tool_call.id);
+    }
 }
 
 fn continuation_anchor_message_id(tool_call: &MCPToolCall) -> Option<i64> {

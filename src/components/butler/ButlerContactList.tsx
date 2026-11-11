@@ -7,9 +7,15 @@ import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
 import AddAssistantDialog from "@/components/config/AddAssistantDialog";
 import { useAssistantTypePlugin } from "@/hooks/assistant/useAssistantTypePlugin";
+import { usePendingApprovalConversations } from "@/hooks/useApprovalAttention";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import { groupPreview, groupReadKey } from "./butlerGroupModel";
+
+/** 待审批与未读同样式，颜色区分；待审批需要用户行动，两者同时存在时只显示待审批。 */
+function ApprovalDot() {
+    return <span aria-label="待审批" title="等待审批" className="size-2 shrink-0 rounded-full bg-amber-500"/>;
+}
 
 export interface ContactPreview { assistantId: number; conversationId: number; messageId: number | null; preview: string | null }
 interface Props {
@@ -44,7 +50,9 @@ function groupUnread(group: ButlerGroupSummary, selected: boolean) {
 export default function ButlerContactList({chief, contacts, selected, ready, previews, mainConversationId, plugins, error, onRefresh, onSelect, onSearch, onAssistantAction,
     groups, selectedGroup, onSelectGroup, onCreateGroup, onDeleteGroup}: Props) {
     // 正在看群聊时不把总管家的动态当作已读（-1 表示没有选中任何联系人）。
-    const { visuals, acknowledge } = useContactAvatarActivity(mainConversationId, previews, selectedGroup === undefined ? selected : -1);
+    const { visuals, approvals, acknowledge } = useContactAvatarActivity(mainConversationId, previews, selectedGroup === undefined ? selected : -1);
+    // 群成员在各自的执行会话里请求审批，群聊行按成员会话汇总。
+    const pendingApprovals = usePendingApprovalConversations();
     // 只有真实活动（任务、回复、审批、完成/失败反馈）才驱动动画；空闲时头像保持静止。
     const state = (id: number) => visuals.get(id)?.state ?? "idle";
     const {assistantTypes} = useAssistantTypePlugin(plugins);
@@ -60,7 +68,8 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
         <div className="mb-4 flex shrink-0 justify-center">
             <button onClick={() => { acknowledge?.(0); onSelect(); }} aria-pressed={selected === undefined && selectedGroup === undefined}
                 className="flex max-w-full flex-col items-center gap-1.5 rounded-xl px-5 py-2 text-xs font-medium hover:bg-muted aria-pressed:bg-muted">
-                <ButlerAvatar id={0} chief size={44} figure animated={state(0) !== "idle"} state={state(0)}/>{chief}
+                <ButlerAvatar id={0} chief size={44} figure animated={state(0) !== "idle"} state={state(0)}/>
+                <span className="inline-flex max-w-full items-center gap-1.5">{chief}{approvals.has(0) ? <ApprovalDot/> : null}</span>
                 {visuals.get(0)?.label && <span className="max-w-40 truncate text-xs text-muted-foreground">{visuals.get(0)?.label}</span>}
             </button>
         </div>
@@ -79,7 +88,8 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                                     {typing.length ? `${typing.join("、")} 正在输入…` : groupPreview(group.last_message) || "尚无消息"}
                                 </span>
                             </span>
-                            {groupUnread(group, active) ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
+                            {group.members.some(member => pendingApprovals.has(member.conversation_id)) ? <ApprovalDot/>
+                                : groupUnread(group, active) ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
                         </button>
                     </div></ContextMenuTrigger>
                     <ContextMenuContent>
@@ -98,7 +108,8 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                         <span className="block truncate text-sm font-medium">{assistant.name}</span>
                         <span className="block truncate text-xs text-muted-foreground">{visuals.get(assistant.id)?.label || preview?.preview || "尚未对话"}</span>
                     </span>
-                    {unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
+                    {approvals.has(assistant.id) ? <ApprovalDot/>
+                        : unread ? <span aria-label="未读" className="size-2 shrink-0 rounded-full bg-primary"/> : null}
                 </button></AssistantItemContextMenu>;
             })}
         </nav>

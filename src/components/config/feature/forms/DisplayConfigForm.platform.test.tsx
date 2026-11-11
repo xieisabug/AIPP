@@ -30,6 +30,7 @@ function Harness() {
             code_theme_dark: "",
             user_message_markdown_render: "enabled",
             notification_on_completion: false,
+            notification_on_permission: true,
             merge_assistant_messages: true,
             show_thinking: true,
             preview_code_show_toolbar: false,

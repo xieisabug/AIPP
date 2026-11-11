@@ -184,4 +184,25 @@ describe("useConversationListStatus", () => {
 
         expect(result.current.getItemStatus(5)).toBe("idle");
     });
+
+    it("should prioritize pending_approval over responding when the conversation awaits approval", async () => {
+        mockInvokeHandler("list_running_conversation_ids", () => [5, 6]);
+        let pending = [5];
+        mockInvokeHandler("list_pending_approval_conversations", () => pending);
+
+        const { result } = renderHook(() => useConversationListStatus("1"));
+        await flushEffects();
+
+        expect(result.current.getItemStatus(5)).toBe("pending_approval");
+        expect(result.current.getItemStatus(6)).toBe("responding");
+
+        pending = [];
+        await act(async () => {
+            await emit("approval_attention_changed", { conversation_id: 5 });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(result.current.getItemStatus(5)).toBe("responding");
+    });
 });

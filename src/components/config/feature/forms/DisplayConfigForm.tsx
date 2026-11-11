@@ -44,6 +44,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     showButlerHomeWindow,
 }) => {
     const previousNotificationValue = useRef<boolean | undefined>(undefined);
+    const previousPermissionNotificationValue = useRef<boolean | undefined>(undefined);
     const { themes, themeInfo } = useSyntectThemes();
     const mcpToolComponents = useMcpToolComponentRegistrySnapshot();
     const isMobilePlatform = useIsMobilePlatform();
@@ -204,14 +205,21 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
     const handleSaveDisplayConfig = useCallback(async () => {
         const values = form.getValues();
         const currentNotificationValue = values.notification_on_completion;
+        const currentPermissionNotificationValue = values.notification_on_permission;
 
-        // 检查通知设置是否从 false 变为 true
-        const notificationJustEnabled = 
-            previousNotificationValue.current === false && 
-            currentNotificationValue === true;
+        // 检查通知设置是否从 false 变为 true（完成通知与审批通知共用系统通知权限）
+        const justEnabled = [
+            previousNotificationValue.current === false && currentNotificationValue === true
+                ? { key: "notification_on_completion" as const, body: "AI 消息或 Agent 任务完成时将发送系统通知" }
+                : null,
+            previousPermissionNotificationValue.current === false && currentPermissionNotificationValue === true
+                ? { key: "notification_on_permission" as const, body: "有权限或工具调用等待你审批时将发送系统通知" }
+                : null,
+        ].filter((item) => item !== null);
+        const resetJustEnabled = () => justEnabled.forEach((item) => form.setValue(item.key, false));
 
         // 如果用户刚刚开启了通知，需要检查和申请权限
-        if (notificationJustEnabled) {
+        if (justEnabled.length > 0) {
             try {
                 let permissionGranted = await isPermissionGranted();
 
@@ -223,19 +231,19 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
                 if (!permissionGranted) {
                     toast.error("通知权限未获取，无法开启系统通知功能");
                     // 重置开关状态
-                    form.setValue("notification_on_completion", false);
+                    resetJustEnabled();
                     return;
                 }
 
                 // 权限获取成功，发送测试通知
                 sendNotification({
                     title: "AIPP - 系统通知已开启",
-                    body: "AI 消息或 Agent 任务完成时将发送系统通知",
+                    body: justEnabled.map((item) => item.body).join("；"),
                 });
                 toast.success("通知权限获取成功，已发送测试通知");
             } catch (e) {
                 toast.error("获取通知权限时发生错误: " + e);
-                form.setValue("notification_on_completion", false);
+                resetJustEnabled();
                 return;
             }
         }
@@ -245,6 +253,7 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
 
             // 更新上次的通知设置值
             previousNotificationValue.current = currentNotificationValue;
+            previousPermissionNotificationValue.current = currentPermissionNotificationValue;
 
             // 发出主题变化事件，通知其他窗口和组件
             await emit("theme-changed", {
@@ -328,6 +337,14 @@ export const DisplayConfigForm: React.FC<DisplayConfigFormProps> = ({
                 type: "switch" as const,
                 label: "消息完成时发送系统通知",
                 tooltip: "AI 消息或 Agent 任务（Codex、Claude Code、ACP）完成时发送系统通知提醒，窗口聚焦时不弹出",
+            },
+        },
+        {
+            key: "notification_on_permission",
+            config: {
+                type: "switch" as const,
+                label: "等待审批时发送系统通知",
+                tooltip: "有权限请求或工具调用需要你审批（未开启自动审核或自动审核未通过）时发送系统通知；弹出审批的窗口正聚焦时不弹出",
             },
         },
         {

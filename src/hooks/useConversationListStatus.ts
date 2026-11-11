@@ -5,6 +5,7 @@ import type {
     ConversationListActivityEvent,
     ConversationListItemStatus,
 } from "@/data/Conversation";
+import { usePendingApprovalConversations } from "@/hooks/useApprovalAttention";
 
 function setsEqual(a: Set<number>, b: Set<number>): boolean {
     if (a.size !== b.size) {
@@ -49,6 +50,7 @@ function updateUnreadIds(
 export function useConversationListStatus(activeConversationId: string) {
     const [runningIds, setRunningIds] = useState<Set<number>>(() => new Set());
     const [unreadIds, setUnreadIds] = useState<Set<number>>(() => new Set());
+    const pendingApprovalIds = usePendingApprovalConversations();
     const activeConversationIdRef = useRef(activeConversationId);
 
     useEffect(() => {
@@ -144,6 +146,10 @@ export function useConversationListStatus(activeConversationId: string) {
 
     const getItemStatus = useCallback(
         (conversationId: number): ConversationListItemStatus => {
+            // 等待审批时会话虽在运行，但卡在用户这里，提示优先于“回复中”。
+            if (pendingApprovalIds.has(conversationId)) {
+                return "pending_approval";
+            }
             if (runningIds.has(conversationId)) {
                 return "responding";
             }
@@ -152,7 +158,7 @@ export function useConversationListStatus(activeConversationId: string) {
             }
             return "idle";
         },
-        [runningIds, unreadIds],
+        [pendingApprovalIds, runningIds, unreadIds],
     );
 
     return { getItemStatus };

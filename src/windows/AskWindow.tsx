@@ -19,6 +19,7 @@ import { ShineBorder } from "../components/magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
 import { useOperationPermission } from "../hooks/useOperationPermission";
+import { useApprovalSurface } from "../hooks/useApprovalAttention";
 import { OperationPermissionDialog } from "../components/OperationPermissionDialog";
 import { pluginRuntime } from "../services/PluginRuntime";
 import { describeAskAiError } from "../lib/askAiError";
@@ -50,6 +51,7 @@ function AskWindow() {
     const { pendingRequest, isDialogOpen, decisionError, isSubmitting, handleDecision } = useOperationPermission({
         conversationId: conversationId ? parseInt(conversationId, 10) : undefined,
     });
+    useApprovalSurface(conversationId ? [parseInt(conversationId, 10)] : []);
 
     // 清除错误信息
     const clearError = useCallback(() => {

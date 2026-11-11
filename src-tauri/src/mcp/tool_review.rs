@@ -819,8 +819,20 @@ fn existing_safe_pending(db: &MCPDatabase, call_id: i64) -> Option<bool> {
     }
 }
 
+/// 自动执行判断的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewDecision {
+    /// 立即执行。
+    Run,
+    /// 停在 pending 等用户确认（未开启审核、审核判定有风险或审核失败）。
+    Hold,
+    /// 不再处理：调用已不是 pending，或用户已手动介入。
+    Skip,
+}
+
 /// 返回是否应立即执行。非免审核操作启用模型审核时会写入 `tool_review_log`。
 /// 用户手动确认/拒绝时会 `cancel_tool_review`，本函数随之返回 false 且不再自动执行。
+/// 需要用户确认时登记为待审批（列表黄点、头像、系统通知），见 `approval_attention`。
 pub async fn should_auto_execute_after_review(
     app_handle: &tauri::AppHandle,
     assistant_id: i64,
@@ -831,6 +843,22 @@ pub async fn should_auto_execute_after_review(
     _parameters: &str,
     _legacy_auto_run: bool,
 ) -> bool {
+    match review_decision(app_handle, assistant_id, conversation_id, call_id).await {
+        ReviewDecision::Run => true,
+        ReviewDecision::Skip => false,
+        ReviewDecision::Hold => {
+            crate::api::approval_attention::tool_call_held(app_handle, call_id).await;
+            false
+        }
+    }
+}
+
+async fn review_decision(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+    conversation_id: i64,
+    call_id: i64,
+) -> ReviewDecision {
     let mode = read_review_mode(app_handle, assistant_id);
     // 使用持久化调用的 server_id 核实来源，禁止外部同名工具冒充免审核工具。
     let resolved = (|| -> Result<_, String> {
@@ -844,11 +872,11 @@ pub async fn should_auto_execute_after_review(
         Err(error) => {
             emit_tool_review_status(app_handle, conversation_id, call_id, "done", Some("error"),
                 &format!("{error} (conversation_id={conversation_id}, call_id={call_id})"));
-            return false;
+            return ReviewDecision::Hold;
         }
     };
     if call.status != "pending" || call.conversation_id != conversation_id {
-        return false;
+        return ReviewDecision::Skip;
     }
     // 分类、模型输入及审核日志始终使用同一个持久化快照（包括插件改写后的目标）。
     let server_name = call.server_name.as_str();
@@ -856,12 +884,12 @@ pub async fn should_auto_execute_after_review(
     let parameters = call.parameters.as_str();
     let review_exempt = is_review_exempt_tool(server.is_builtin, server.command.as_deref(), tool_name, parameters);
     if review_exempt || mode != "auto_model" {
-        return resolve_auto_execute(&mode, review_exempt, None);
+        return run_or_hold(resolve_auto_execute(&mode, review_exempt, None));
     }
 
     if let Ok(db) = MCPDatabase::new(app_handle) {
         if let Some(should_run) = existing_safe_pending(&db, call_id) {
-            return should_run;
+            return run_or_hold(should_run);
         }
     }
 
@@ -884,12 +912,12 @@ pub async fn should_auto_execute_after_review(
             Some("cancelled"),
             "用户已手动介入，已停止自动审核",
         );
-        return false;
+        return ReviewDecision::Skip;
     };
 
     // 审核结束时若用户已手动执行/拒绝，不再自动跑、也不再覆盖 UI 状态。
     if !call_still_pending(app_handle, call_id) {
-        return false;
+        return ReviewDecision::Skip;
     }
 
     if let Some(detail) = draft.error_detail.as_ref() {
@@ -923,7 +951,7 @@ pub async fn should_auto_execute_after_review(
                 );
                 emit_tool_review_status(app_handle, conversation_id, call_id, "done", Some("error"),
                     &format!("保存审核结果失败 (conversation_id={conversation_id}, call_id={call_id}): {error}"));
-                return false;
+                return ReviewDecision::Hold;
             }
         }
         Err(error) => {
@@ -936,16 +964,20 @@ pub async fn should_auto_execute_after_review(
             );
             emit_tool_review_status(app_handle, conversation_id, call_id, "done", Some("error"),
                 &format!("打开审核数据库失败 (conversation_id={conversation_id}, call_id={call_id}): {error}"));
-            return false;
+            return ReviewDecision::Hold;
         }
     }
     if !call_still_pending(app_handle, call_id) {
-        return false;
+        return ReviewDecision::Skip;
     }
     // Publish completion after persistence, so confirmation can immediately record a decision.
     emit_tool_review_status(app_handle, conversation_id, call_id, "done",
         Some(draft.verdict.as_str()), &draft.reason);
-    should_run
+    run_or_hold(should_run)
+}
+
+fn run_or_hold(should_run: bool) -> ReviewDecision {
+    if should_run { ReviewDecision::Run } else { ReviewDecision::Hold }
 }
 
 pub fn record_user_allow_if_review_held(app_handle: &tauri::AppHandle, call_id: i64) {

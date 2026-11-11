@@ -24,6 +24,13 @@ pub fn is_chat_or_ask_window_focused(app_handle: &tauri::AppHandle) -> bool {
     false
 }
 
+/// 指定窗口是否可见且聚焦。
+pub fn is_window_focused(app_handle: &tauri::AppHandle, label: &str) -> bool {
+    app_handle.get_webview_window(label).is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+    })
+}
+
 /// 智能发送错误到合适的窗口
 /// Butler 请求的错误直接返回 Butler 窗口，避免被预创建的隐藏 ChatUI 截走
 /// 如果 ChatUI 窗口存在（不管是否可见），只发送给 ChatUI（不发送给 Ask 窗口）

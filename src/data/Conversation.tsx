@@ -218,7 +218,8 @@ export interface ConversationRuntimeState {
     revision: number;
 }
 
-export type ConversationListItemStatus = "idle" | "responding" | "completed_unread";
+/** pending_approval：有等待用户审批的权限请求或工具调用，优先于其他状态。 */
+export type ConversationListItemStatus = "idle" | "responding" | "completed_unread" | "pending_approval";
 
 export interface ConversationListActivityEvent {
     conversation_id: number;

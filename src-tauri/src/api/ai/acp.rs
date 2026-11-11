@@ -602,6 +602,12 @@ impl AcpPermissionState {
         pending.values().any(|request| request.conversation_id == Some(conversation_id))
     }
 
+    /// 有待处理权限请求的会话。
+    pub async fn pending_permission_conversation_ids(&self) -> Vec<i64> {
+        let pending = self.pending_requests.lock().await;
+        pending.values().filter_map(|request| request.conversation_id).collect()
+    }
+
     pub async fn cancel_requests_for_scope(
         &self,
         scope: &crate::api::ai::agent_driver::approval::AgentRequestScope,

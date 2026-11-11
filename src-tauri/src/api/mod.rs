@@ -6,6 +6,7 @@ pub mod ai;
 pub mod ai_api;
 pub mod assistant_api;
 pub mod assistant_summary_api;
+pub(crate) mod approval_attention;
 pub mod attachment_api;
 pub mod butler_api;
 pub(crate) mod butler_reporting;

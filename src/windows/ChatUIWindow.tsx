@@ -25,6 +25,7 @@ import {
     useAcpPermission,
     useOperationPermission,
 } from "../hooks/useOperationPermission";
+import { useApprovalSurface } from "../hooks/useApprovalAttention";
 import { useAcpElicitation } from "../hooks/useAcpElicitation";
 import { useAskUserQuestion, usePreviewFile } from "../hooks/useInlineInteraction";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
@@ -219,6 +220,9 @@ function ChatUIWindow() {
         }>(),
     );
     const { listConversations } = useConversationManager();
+
+    // 只为当前会话弹审批（权限弹窗与工具调用确认卡片），聚焦时这个会话的审批不再发系统通知。
+    useApprovalSurface(selectedConversation ? [parseInt(selectedConversation, 10)] : []);
 
     // 操作权限对话框
     const {

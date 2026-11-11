@@ -85,6 +85,21 @@ pub(crate) fn emit_permission_request_event<T: Serialize>(
     conversation_id: Option<i64>,
     payload: &T,
 ) -> Result<(), String> {
+    emit_permission_request_to_windows(app_handle, event_name, conversation_id, payload)?;
+    // 所有权限请求都经过这里：登记待审批（列表黄点/头像）并在用户没看到时发系统通知。
+    if crate::api::approval_attention::is_permission_request_event(event_name) {
+        let payload = serde_json::to_value(payload).unwrap_or_default();
+        crate::api::approval_attention::permission_requested(app_handle, event_name, conversation_id, &payload);
+    }
+    Ok(())
+}
+
+fn emit_permission_request_to_windows<T: Serialize>(
+    app_handle: &AppHandle,
+    event_name: &str,
+    conversation_id: Option<i64>,
+    payload: &T,
+) -> Result<(), String> {
     if can_route_to_visible_butler_window(app_handle, conversation_id) {
         if let Err(error) = app_handle.emit_to(BUTLER_WINDOW_LABEL, event_name, payload) {
             warn!(
@@ -106,6 +121,9 @@ pub(crate) fn emit_permission_resolved_event(
     event_name: &str,
     payload: &PermissionResolvedEvent,
 ) -> Result<(), String> {
+    if crate::api::approval_attention::is_permission_resolved_event(event_name) {
+        crate::api::approval_attention::permission_resolved(app_handle, payload.conversation_id);
+    }
     app_handle.emit(event_name, payload).map_err(|error| error.to_string())
 }
 
