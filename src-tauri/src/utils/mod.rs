@@ -2,6 +2,7 @@ pub mod async_thread;
 pub mod bun_utils;
 pub mod db_utils;
 pub mod path_utils;
+pub mod prompt_image;
 pub mod python_utils;
 pub mod reply_quote;
 pub mod shell_utils;
@@ -12,6 +13,8 @@ pub mod window_utils;
 
 #[cfg(test)]
 mod async_thread_tests;
+#[cfg(test)]
+mod prompt_image_tests;
 #[cfg(test)]
 mod reply_quote_tests;
 #[cfg(test)]

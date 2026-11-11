@@ -128,6 +128,15 @@ mod tests {
     }
 }
 
+/// 发送兜底：新附件入库时已规整；这里只处理历史里超限或 MIME 标错的旧图片，
+/// 否则一张大图会让该会话之后的每一轮都被模型服务拒绝。
+fn image_part(mime: String, b64: String) -> ContentPart {
+    match crate::utils::prompt_image::fit_base64_for_send(&mime, &b64) {
+        Some((mime, b64)) => ContentPart::from_binary_base64(mime, b64, None),
+        None => ContentPart::from_binary_base64(mime, b64, None),
+    }
+}
+
 fn build_user_message_with_attachments(
     content: &str,
     attachment_list: &[MessageAttachment],
@@ -159,7 +168,7 @@ fn build_user_message_with_attachments(
             if let Some(content) = &attachment.attachment_content {
                 if content.starts_with("data:") {
                     if let Some((mime, b64)) = parse_data_url(content) {
-                        parts.push(genai::chat::ContentPart::from_binary_base64(mime, b64, None));
+                        parts.push(image_part(mime, b64));
                         continue;
                     }
                 }
@@ -177,7 +186,7 @@ fn build_user_message_with_attachments(
                 // 3) 若 attachment_url 是 data:URL，则解析为 base64
                 if url_lower.starts_with("data:") {
                     if let Some((mime, b64)) = parse_data_url(url) {
-                        parts.push(genai::chat::ContentPart::from_binary_base64(mime, b64, None));
+                        parts.push(image_part(mime, b64));
                         continue;
                     }
                 }
@@ -193,7 +202,7 @@ fn build_user_message_with_attachments(
                 if let Ok(bytes) = std::fs::read(&path) {
                     let mime = infer_media_type_from_url(url);
                     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-                    parts.push(genai::chat::ContentPart::from_binary_base64(mime, b64, None));
+                    parts.push(image_part(mime, b64));
                     continue;
                 } else {
                     // 无法读取则跳过为安全
