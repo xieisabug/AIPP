@@ -14,6 +14,16 @@
 
 ## 客户端状态与身份
 
+### GitHub Agent 插件包
+
+`mcp/apps/bundles` 独立处理公开 GitHub marketplace 与 Agent 插件包，不执行清单中的 JavaScript。安装以仓库、目录的稳定摘要为身份，以固定 commit 和包文件摘要验证预览结果；应用数据目录下 `agent-plugins/<key>/current` 保存完整包及安装记录，`previous` 保存回退版本。Skills 使用 `agent_plugin:<key>/<skill-directory>` 稳定标识。
+
+公开 HTTPS MCP 可派生 `agent-plugin:<key>:<server-name>` 应用定义，保存在 `agent_plugin_connection_definition`；实际连接仍以 `mcp_server.id` 为身份。复用旧连接不改变其应用归属。插件卸载只断开自身创建的连接。助手授权同时设置连接与安装包技能，但不取代逐工具权限。新增技能不会自动取得现有助手授权。
+
+`connection.oauth_resource` 可声明与 MCP endpoint 同源但不同路径的 OAuth resource。发现元数据、授权及刷新按该 resource 执行，凭据绑定仍校验实际 MCP endpoint。Notion 公开清单声明根地址 resource，与 `/mcp` 传输地址不同；不能混用两者的 protected-resource 元数据。
+
+完整包保存不等于全部宿主扩展均可执行。平台私有连接器 ID 会明确报告缺少公开接入。stdio 使用结构化连接绑定、插件 cwd 与加密环境变量，在发现/调用两端检查版本和凭据归属；执行期间阻止安装替换。命令进入技能索引，助手定义可按指定模板创建。自有 OAuth 支持 Secret POST/Basic 和固定 loopback 回调，Secret 仅存在于加密凭据中；清单中的私密客户端配置不会自动复用。产品入口、兼容矩阵和真实账号验收见 [GitHub 插件包](./product/21-GitHub插件包.md)。
+
 `mcp_server.id` 仍是连接实例身份。`app_connection` 只记录应用关联、描述快照、配置名称、非秘密字段、凭据引用和状态，不复制工具。相同服务可创建多个独立连接；创建请求 UUID 幂等，不按地址或名称合并。高级自定义 MCP 保留原数据。
 
 状态区分 connecting/available/unchecked/auth_required/disconnected/error；重启后旧 available 不视为当前验证成功。开关启用与服务可用是两个维度。OAuth 只在明确连接操作中启动，正常工具调用不自动弹出授权或换账号。

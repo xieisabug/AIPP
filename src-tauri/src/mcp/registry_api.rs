@@ -377,10 +377,10 @@ pub async fn test_mcp_connection(
                     // 内置 aipp:* 不需要实际连接
                     Ok(())
                 } else {
-                    test_stdio_connection(&server).await
+                    test_stdio_connection(&app_handle, &server).await
                 }
             } else {
-                test_stdio_connection(&server).await
+                test_stdio_connection(&app_handle, &server).await
             }
         }
         "sse" => test_sse_connection(&server).await,
@@ -398,14 +398,14 @@ pub async fn test_mcp_connection(
 }
 
 // 测试stdio连接
-async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
+async fn test_stdio_connection(app_handle: &tauri::AppHandle, server: &MCPServer) -> Result<(), String> {
     // 外部 stdio 在移动端不可执行（aipp:* 内置已在 test_mcp_connection 分流）
     if cfg!(mobile) {
         let _ = server;
         return Err(crate::api::system_api::mobile_unsupported_error("外部 stdio MCP"));
     }
     use rmcp::{
-        transport::{ConfigureCommandExt, TokioChildProcess},
+        transport::ConfigureCommandExt,
         ServiceExt,
     };
     use tokio::process::Command;
@@ -418,8 +418,7 @@ async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
 
     // 简短的连接测试，超时时间更短
     let client_result = tokio::time::timeout(STDIO_TEST_TIMEOUT, async {
-        let client = ()
-            .serve(TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+        let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(app_handle, server, Command::new(&parts[0]).configure(|cmd| {
                 if parts.len() > 1 {
                     cmd.args(&parts[1..]);
                 }
@@ -428,8 +427,10 @@ async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
                         cmd.env(k, v);
                     }
                 }
-            }))?)
-            .await?;
+            })).await.map_err(anyhow::Error::msg)?;
+            let client = ().serve(transport).await.map_err(|e| anyhow::anyhow!(diagnostics.error("初始化 MCP", e)))?;
+        // Keep stderr capture alive through cancellation.
+        let _diagnostics = diagnostics;
 
         // 测试成功，取消连接
         client.cancel().await?;
@@ -586,7 +587,7 @@ async fn get_stdio_capabilities(
     }
 
     use rmcp::{
-        transport::{ConfigureCommandExt, TokioChildProcess},
+        transport::ConfigureCommandExt,
         ServiceExt,
     };
     use tokio::process::Command;
@@ -594,7 +595,7 @@ async fn get_stdio_capabilities(
     let db = open_db(&app_handle)?;
 
     // 获取命令，如果没有则返回错误
-    let command = server.command.ok_or("No command specified for stdio transport")?;
+    let command = server.command.clone().ok_or("No command specified for stdio transport")?;
 
     // 解析命令和参数
     let parts = split_command_line(&command);
@@ -608,8 +609,7 @@ async fn get_stdio_capabilities(
             server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64,
         ),
         async {
-            let client = ()
-                .serve(TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+            let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(&app_handle, &server, Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
@@ -618,15 +618,17 @@ async fn get_stdio_capabilities(
                             cmd.env(k, v);
                         }
                     }
-                }))?)
-                .await?;
+                })).await.map_err(anyhow::Error::msg)?;
+            let client = ().serve(transport).await.map_err(|e| anyhow::anyhow!(diagnostics.error("初始化 MCP", e)))?;
+            // Return diagnostics alongside the live client.
+            let client = (client, diagnostics);
 
             Ok::<_, anyhow::Error>(client)
         },
     )
     .await;
 
-    let client = match client_result {
+    let (client, _diagnostics) = match client_result {
         Ok(Ok(client)) => client,
         Ok(Err(e)) => {
             return Err(format!("Failed to create MCP client: {}", e));
@@ -657,7 +659,21 @@ async fn get_stdio_capabilities(
         }
     };
 
-    // 转换结果为简化结构，失败则保持为 None（不做删除）
+    // Advertised capabilities must be discovered successfully, otherwise the
+    // connection must not be presented as usable with a silently partial catalog.
+    if let Some(info) = client.peer_info() {
+        if info.capabilities.tools.is_some() {
+            if let Err(error) = &tools_result { return Err(_diagnostics.error("发现工具", error)); }
+        }
+        if info.capabilities.resources.is_some() {
+            if let Err(error) = &resources_result { return Err(_diagnostics.error("发现资源", error)); }
+        }
+        if info.capabilities.prompts.is_some() {
+            if let Err(error) = &prompts_result { return Err(_diagnostics.error("发现提示", error)); }
+        }
+    }
+
+    // 未声明的能力保持为 None（不做删除）
     let tools_simple = tools_result.ok().map(|tools| {
         tools
             .into_iter()

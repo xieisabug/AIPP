@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod credentials;
 pub mod oauth;
 pub mod access;
+pub mod bundles;
 
 use crate::db::connection::{params, Connection, OptionalExtension};
 use crate::db::mcp_db::MCPDatabase;
@@ -166,6 +167,12 @@ fn definition(conn: &Connection, request: &ConnectRequest) -> Result<AppDefiniti
         let raw: String = conn.query_row("SELECT definition FROM app_connection WHERE server_id=?1 AND app_id=?2", params![id, request.app_id], |r| r.get(0)).map_err(|_| "找不到对应的应用连接")?;
         return serde_json::from_str(&raw).map_err(|_| "已保存的应用描述损坏".into());
     }
+    if request.app_id.starts_with("agent-plugin:") {
+        let raw: String = conn.query_row("SELECT payload FROM agent_plugin_connection_definition WHERE app_id=?1", [&request.app_id], |r| r.get(0)).map_err(|e| format!("读取插件连接定义失败：{e}"))?;
+        let definition: AppDefinition = serde_json::from_str(&raw).map_err(|e| format!("插件连接定义无效：{e}"))?;
+        AppCatalog { schema_version: 1, version: "1".into(), apps: vec![definition.clone()] }.validate()?;
+        return Ok(definition);
+    }
     let raw: String = conn.query_row("SELECT payload FROM app_catalog_cache WHERE id=1", [], |r| r.get(0)).map_err(|_| "请先加载应用目录")?;
     let catalog: AppCatalog = serde_json::from_str(&raw).map_err(|_| "应用目录缓存无效")?;
     catalog.validate()?;
@@ -241,7 +248,7 @@ pub async fn connect_catalog_app(app_handle: tauri::AppHandle, mut request: Conn
         db(&app_handle)?.conn.execute("DELETE FROM app_credential_cleanup WHERE reference=?1", [old]).map_err(|e| e.to_string())?;
     }
     if app.connection.auth == "oauth" {
-        let pending = match oauth::begin(&app.connection.url, app.connection.client_id.as_deref(), &app.connection.scopes).await {
+        let pending = match oauth::begin_options(&oauth::OAuthHttp::new()?,&app.connection.url, app.connection.client_id.as_deref(), &app.connection.scopes, app.connection.oauth_resource.as_deref(),app.connection.oauth_client_auth.as_deref().unwrap_or("none"),request.values.get("oauth_client_secret").map(String::as_str),app.connection.oauth_redirect_uri.as_deref()).await {
             Ok(pending) => pending,
             Err(e) => { set_status(&app_handle, id, "auth_required", Some(&e))?; return Err(format!("连接 {id}：{e}")); }
         };
@@ -294,7 +301,7 @@ pub async fn verify_app_connection(app_handle: tauri::AppHandle, server_id: i64)
     let result = super::registry_api::refresh_mcp_server_capabilities(app_handle.clone(), server_id).await;
     let _change = CHANGE_LOCK.lock().await;
     let current = db(&app_handle)?.get_mcp_server(server_id).map_err(|e| e.to_string())?;
-    if !current.is_enabled || current.headers != server.headers || current.url != server.url {
+    if !current.is_enabled || current.headers != server.headers || current.url != server.url || current.command != server.command {
         return Err("连接在验证期间被停用、断开或修改，已丢弃过期验证结果".into());
     }
     match result {
@@ -355,7 +362,7 @@ pub fn guard_update(app: &tauri::AppHandle, id: i64, request: &super::registry_a
     let managed: bool = db.conn.query_row("SELECT EXISTS(SELECT 1 FROM app_connection WHERE server_id=?1)", [id], |r| r.get(0)).map_err(|e| e.to_string())?;
     if managed {
         let old = db.get_mcp_server(id).map_err(|e| e.to_string())?;
-        if old.url != request.url || old.headers != request.headers || request.transport_type != "http" || request.command.is_some() || request.is_builtin == Some(true) {
+        if old.url != request.url || old.headers != request.headers || request.transport_type != old.transport_type || request.command != old.command || request.environment_variables != old.environment_variables || request.is_builtin == Some(true) {
             return Err("目录应用的认证和服务地址由连接管理维护，请从应用详情重新配置".into());
         }
         if request.is_enabled { guard_enable(app, id)?; }

@@ -113,6 +113,8 @@ src-tauri/
 
 ## Built-in MCP Tools
 
+GitHub Agent 插件包由 `mcp/apps/bundles` 管理（格式、文件存储、Tauri API），前端入口为 `AgentPluginsConfig`。包内 Skills 通过 `agent_plugin` 来源接入原技能扫描与 `load_skill`；支持的 HTTP 连接复用应用凭据和执行链。与 JavaScript `PluginRuntime` 相互独立，详见 [GitHub 插件包](./product/21-GitHub插件包.md)。
+
 The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 
 -   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`)

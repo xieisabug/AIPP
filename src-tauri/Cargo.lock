@@ -78,6 +78,7 @@ dependencies = [
  "wasmtime",
  "wat",
  "which 6.0.3",
+ "yaml-rust2",
  "zip 2.4.2",
  "zip-extract",
 ]

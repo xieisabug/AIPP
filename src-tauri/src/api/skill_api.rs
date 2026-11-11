@@ -346,6 +346,13 @@ pub async fn get_skill_content_internal(
     app_handle: &tauri::AppHandle,
     identifier: &str,
 ) -> Result<SkillContent, crate::errors::AppError> {
+    if identifier.starts_with("agent_plugin:") {
+        let data = app_handle.path().app_data_dir().map_err(|e| crate::errors::AppError::UnknownError(e.to_string()))?;
+        let identifier = identifier.to_string();
+        return tokio::task::spawn_blocking(move || crate::mcp::apps::bundles::read_skill_content(&data, &identifier))
+            .await.map_err(|e| crate::errors::AppError::UnknownError(e.to_string()))?
+            .map_err(crate::errors::AppError::UnknownError);
+    }
     let scanner = create_scanner(app_handle);
 
     // Find the skill

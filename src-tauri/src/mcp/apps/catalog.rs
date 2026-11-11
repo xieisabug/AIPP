@@ -40,7 +40,13 @@ pub struct ConnectionRecipe {
     #[serde(default)]
     pub client_id: Option<String>,
     #[serde(default)]
+    pub oauth_resource: Option<String>,
+    #[serde(default)]
     pub scopes: Vec<String>,
+    #[serde(default)]
+    pub oauth_client_auth: Option<String>,
+    #[serde(default)]
+    pub oauth_redirect_uri: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,6 +103,14 @@ impl AppCatalog {
                 return Err(format!("{} 的连接方式不受当前客户端支持", app.name));
             }
             public_https(&app.connection.url)?;
+            if let Some(method)=&app.connection.oauth_client_auth {
+                if !["none","client_secret_post","client_secret_basic"].contains(&method.as_str()) {return Err("不支持的 OAuth 客户端认证方式".into());}
+            }
+            if let Some(uri)=&app.connection.oauth_redirect_uri { super::oauth::redirect_target(uri)?; }
+            if let Some(resource) = &app.connection.oauth_resource {
+                let resource = public_https(resource)?;
+                if resource.origin() != public_https(&app.connection.url)?.origin() { return Err("OAuth resource 必须与 MCP 服务同源".into()); }
+            }
             let mut keys = HashSet::new();
             for f in &app.fields {
                 if !keys.insert(&f.key) || f.key.is_empty() || !["text", "password", "select", "boolean", "number"].contains(&f.kind.as_str()) {

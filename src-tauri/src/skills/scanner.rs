@@ -65,6 +65,8 @@ impl SkillScanner {
             all_skills.extend(skills);
         }
 
+        #[cfg(desktop)]
+        all_skills.extend(crate::mcp::apps::bundles::scan_installed_skills(&self.app_data_dir));
         info!("Scanned {} skills from {} sources", all_skills.len(), self.sources.len());
         all_skills
     }
@@ -465,6 +467,7 @@ impl SkillScanner {
 
     /// Check if a specific skill exists by identifier
     pub fn skill_exists(&self, identifier: &str) -> bool {
+        if identifier.starts_with("agent_plugin:") { return self.get_skill(identifier).is_some(); }
         #[cfg(mobile)]
         return self.get_skill(identifier).is_some();
         if let Some((source_type, relative_path)) = ScannedSkill::parse_identifier(identifier) {
@@ -542,6 +545,10 @@ impl SkillScanner {
 
     /// Get a single skill by identifier
     pub fn get_skill(&self, identifier: &str) -> Option<ScannedSkill> {
+        #[cfg(desktop)]
+        if identifier.starts_with("agent_plugin:") {
+            return crate::mcp::apps::bundles::scan_installed_skills(&self.app_data_dir).into_iter().find(|s| s.identifier == identifier);
+        }
         #[cfg(mobile)]
         return self.scan_all().into_iter().find(|skill| skill.identifier == identifier);
         if let Some((source_type, relative_path)) = ScannedSkill::parse_identifier(identifier) {

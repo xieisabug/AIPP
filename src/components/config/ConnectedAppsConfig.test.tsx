@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -113,4 +113,23 @@ describe('ConnectedAppsConfig', () => {
         await user.click(await screen.findByRole('button', { name: '删除凭据，不撤销授权' }));
         expect(invoke).toHaveBeenCalledWith('disconnect_app_connection', { serverId: 21, revokeRemote: false });
     });
+    it('should remove an existing connection only after confirmation from its overview', async () => {
+        let removed = false;
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'get_mcp_servers') return removed ? [] : [{ ...legacy, is_deletable: true }];
+            if (command === 'delete_mcp_server') { removed = true; return; }
+            return [];
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        await user.click(await screen.findByRole('button', { name: /公司知识库/ }));
+        await user.click(screen.getByRole('button', { name: '删除连接' }));
+        expect(invoke).not.toHaveBeenCalledWith('delete_mcp_server', expect.anything());
+        await user.click(screen.getByRole('button', { name: '确认' }));
+        expect(invoke).toHaveBeenCalledWith('delete_mcp_server', { id: 8 });
+        await waitFor(() => expect(screen.queryByRole('button', { name: /公司知识库/ })).not.toBeInTheDocument());
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+
 });

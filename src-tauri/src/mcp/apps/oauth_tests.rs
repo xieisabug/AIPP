@@ -3,12 +3,16 @@ use crate::mcp::apps::credentials::{self, CredentialStore};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
-struct State { registrations: usize, refreshes: HashMap<String, usize>, revoked: Vec<String> }
+struct State { registrations: usize, refreshes: HashMap<String, usize>, revoked: Vec<String>, client_auth: Vec<(HashMap<String,String>,String)> }
 
 struct Provider { base: String, state: Arc<Mutex<State>>, task: tokio::task::JoinHandle<()> }
 impl Drop for Provider { fn drop(&mut self) { self.task.abort(); } }
 
 async fn provider() -> Provider {
+    provider_with_resource(false).await
+}
+
+async fn provider_with_resource(origin_resource: bool) -> Provider {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let state = Arc::new(Mutex::new(State::default()));
@@ -41,12 +45,16 @@ async fn provider() -> Provider {
                 let request = String::from_utf8_lossy(&bytes);
                 let path = request.lines().next().unwrap().split_whitespace().nth(1).unwrap();
                 let form: HashMap<String,String> = reqwest::Url::parse(&format!("http://localhost/?{}", String::from_utf8_lossy(&bytes[header_end..header_end+size]))).unwrap().query_pairs().into_owned().collect();
+                if path == "/token" || path == "/revoke" {
+                    let authorization=request.lines().find_map(|l|l.split_once(':').filter(|(k,_)|k.eq_ignore_ascii_case("authorization")).map(|(_,v)|v.trim().to_string())).unwrap_or_default();
+                    shared.lock().unwrap().client_auth.push((form.clone(),authorization));
+                }
                 let mut status = "200 OK";
                 let mut extra = String::new();
                 let body = match path {
                     "/mcp" => { status = "401 Unauthorized"; extra = format!("WWW-Authenticate: Bearer resource_metadata=\"{base}/metadata\"\r\n"); serde_json::json!({}) },
-                    "/metadata" => serde_json::json!({"resource":format!("{base}/mcp"),"authorization_servers":[base]}),
-                    "/.well-known/oauth-authorization-server" => serde_json::json!({"issuer":base,"authorization_endpoint":format!("{base}/authorize"),"token_endpoint":format!("{base}/token"),"registration_endpoint":format!("{base}/register"),"revocation_endpoint":format!("{base}/revoke"),"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"]}),
+                    "/metadata" | "/.well-known/oauth-protected-resource" => serde_json::json!({"resource":if origin_resource { base.clone() } else { format!("{base}/mcp") },"authorization_servers":[base]}),
+                    "/.well-known/oauth-authorization-server" => serde_json::json!({"issuer":base,"authorization_endpoint":format!("{base}/authorize"),"token_endpoint":format!("{base}/token"),"registration_endpoint":format!("{base}/register"),"revocation_endpoint":format!("{base}/revoke"),"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none","client_secret_post","client_secret_basic"]}),
                     "/register" => {
                         let body: serde_json::Value = serde_json::from_slice(&bytes[header_end..header_end+size]).unwrap();
                         assert_eq!(body["token_endpoint_auth_method"], "none");
@@ -57,10 +65,11 @@ async fn provider() -> Provider {
                     "/token" => {
                         if form["grant_type"] == "authorization_code" {
                             assert!(!form["code_verifier"].is_empty());
-                            assert_eq!(form["resource"], format!("{base}/mcp"));
+                            assert_eq!(form["resource"], if origin_resource { base.clone() } else { format!("{base}/mcp") });
                             let account = &form["code"];
                             serde_json::json!({"access_token":format!("access-{account}"),"refresh_token":format!("refresh-{account}"),"token_type":"Bearer","expires_in":0})
                         } else {
+                            assert_eq!(form["resource"], if origin_resource { base.clone() } else { format!("{base}/mcp") });
                             let token = &form["refresh_token"];
                             let mut state = shared.lock().unwrap();
                             *state.refreshes.entry(token.clone()).or_default() += 1;
@@ -82,6 +91,33 @@ async fn provider() -> Provider {
         }
     });
     Provider { base, state, task }
+}
+
+#[tokio::test]
+async fn test_apps_oauth_declared_resource_survives_login_and_refresh() {
+    let provider = provider_with_resource(true).await;
+    let http = OAuthHttp::loopback();
+    let endpoint = format!("{}/mcp", provider.base);
+    assert!(begin_with(&http, &endpoint, None, &[]).await.is_err());
+    let pending = begin_with_resource(&http, &endpoint, None, &[], Some(&provider.base)).await.unwrap();
+    let query: HashMap<_,_> = reqwest::Url::parse(&pending.url).unwrap().query_pairs().into_owned().collect();
+    assert_eq!(query["resource"], provider.base);
+    let mut callback = reqwest::Url::parse(&pending.redirect).unwrap();
+    callback.query_pairs_mut().append_pair("state", &pending.state).append_pair("code", "resource-test");
+    let (credential, response) = tokio::join!(finish_with(&http, pending), http.client.get(callback).send());
+    assert!(response.unwrap().status().is_success());
+    let mut credential = credential.unwrap(); credential.server_id = 77;
+    assert_eq!(credential.endpoint, endpoint);
+    assert_eq!(credential.oauth.as_ref().unwrap().resource.as_deref(), Some(provider.base.as_str()));
+    let store = Arc::new(MemoryStore::default()); store.save("resource", &credential).unwrap();
+    assert_eq!(credentials::resolve_with(store, &http, "resource", &endpoint, 77).await.unwrap()["authorization"], "Bearer fresh-resource-test");
+}
+
+#[tokio::test]
+async fn test_apps_oauth_declared_resource_rejects_other_origin() {
+    let http = OAuthHttp::loopback();
+    let result = begin_with_resource(&http, "http://127.0.0.1:1/mcp", None, &[], Some("http://127.0.0.1:2")).await;
+    assert!(result.err().unwrap().contains("同源"));
 }
 
 async fn login(http: &OAuthHttp, provider: &Provider, account: &str, id: i64) -> Credential {
@@ -188,4 +224,32 @@ async fn test_apps_cancelled_refresh_keeps_write_serialized_with_disconnect() {
     assert!(credentials::CREDENTIAL_LOCK.try_lock().is_err(), "disconnect must wait until the in-flight credential write finishes");
     release.send(()).unwrap();
     let _guard = tokio::time::timeout(Duration::from_secs(5), credentials::CREDENTIAL_LOCK.lock()).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_apps_oauth_confidential_client_login_refresh_and_revoke() {
+    for method in ["client_secret_post","client_secret_basic"] {
+        let provider=provider().await;let http=OAuthHttp::loopback();let endpoint=format!("{}/mcp",provider.base);
+        let port=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect=format!("http://127.0.0.1:{}/custom-callback",port.local_addr().unwrap().port());drop(port);
+        let pending=begin_options(&http,&endpoint,Some("own-client"),&[],None,method,Some("own-test-secret"),Some(&redirect)).await.unwrap();
+        assert!(!pending.url.contains("own-test-secret"));assert_eq!(pending.redirect,redirect);
+        let mut callback=reqwest::Url::parse(&pending.redirect).unwrap();callback.query_pairs_mut().append_pair("state",&pending.state).append_pair("code","own-account");
+        let (credential,response)=tokio::join!(finish_with(&http,pending),http.client.get(callback).send());
+        assert!(response.unwrap().status().is_success());let mut credential=credential.unwrap();credential.server_id=71;
+        let store=Arc::new(MemoryStore::default());store.save("own",&credential).unwrap();
+        assert_eq!(credentials::resolve_with(store.clone(),&http,"own",&endpoint,71).await.unwrap()["authorization"],"Bearer fresh-own-account");
+        revoke_with(&http,&store.load("own").unwrap()).await.unwrap();
+        let captured=provider.state.lock().unwrap();assert_eq!(captured.registrations,0);assert_eq!(captured.client_auth.len(),4);
+        for (form,authorization) in &captured.client_auth {
+            if method=="client_secret_post" {assert_eq!(form["client_secret"],"own-test-secret");assert!(authorization.is_empty());}
+            else {assert!(!form.contains_key("client_secret"));assert_eq!(authorization, &format!("Basic {}",base64::engine::general_purpose::STANDARD.encode("own-client:own-test-secret")));}
+        }
+    }
+}
+
+#[test]
+fn test_apps_oauth_fixed_redirect_rejects_non_loopback_targets() {
+    for uri in ["https://example.com/callback","http://127.0.0.1/callback","http://127.0.0.1:0/callback","http://user@localhost:1234/callback"] { assert!(redirect_target(uri).is_err(),"{uri}"); }
+    assert!(redirect_target("http://localhost:1234/callback").is_ok());
 }

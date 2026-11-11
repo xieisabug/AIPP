@@ -15,12 +15,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import MCPConfig from './MCPConfig';
+import ConfirmDialog from '../ConfirmDialog';
 import MCPServerDialog from './MCPServerDialog';
 import JSONImportDialog from './JSONImportDialog';
 import BuiltinToolDialog from './BuiltinToolDialog';
 import AppConnectForm from './apps/AppConnectForm';
 import AppAssistantAccess from './apps/AppAssistantAccess';
 import AppRelatedSkills from './apps/AppRelatedSkills';
+import AgentPluginsConfig, { PluginSource } from './apps/AgentPluginsConfig';
 import AppTransportSettings from './apps/AppTransportSettings';
 import { getQuickStartTemplates } from '@/data/MCPTemplates';
 
@@ -53,6 +55,9 @@ export default function ConnectedAppsConfig() {
     const [builtinId, setBuiltinId] = useState<string>();
     const [busyId, setBusyId] = useState<number>();
     const [formGeneration, setFormGeneration] = useState(0);
+    const [pluginsOpen, setPluginsOpen] = useState(false);
+    const [pluginSource, setPluginSource] = useState<PluginSource>();
+    const [removingServer, setRemovingServer] = useState<MCPServer>();
 
     const refresh = useCallback(async (isCurrent: () => boolean = () => true) => {
         const [nextServers, nextConnections, nextBuiltins] = await Promise.all([
@@ -126,6 +131,7 @@ export default function ConnectedAppsConfig() {
             <Tabs value={page} onValueChange={value => { setPage(value); setCategory('全部'); }}>
                 <TabsList><TabsTrigger value="catalog">应用目录</TabsTrigger><TabsTrigger value="installed">我的应用 {servers.length || ''}</TabsTrigger></TabsList>
             </Tabs>
+            {!mobile && <Button variant="outline" onClick={() => { setPluginSource(undefined); setPluginsOpen(true); }}>GitHub 插件 · 工具与 Skills</Button>}
             <div className="flex gap-2"><div className="relative flex-1"><Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" /><Input className="pl-9" aria-label="搜索应用与工具" placeholder="搜索应用、工具或用途…" value={query} onChange={e => setQuery(e.target.value)} /></div>
                 <Button variant="ghost" size="icon" aria-label="刷新应用目录和连接" disabled={catalogBusy} onClick={() => { void loadCatalog(); void refresh().catch(e => setError(String(e))); }}><RefreshCw className={`h-4 w-4 ${catalogBusy ? 'animate-spin' : ''}`} /></Button>
             </div>
@@ -170,9 +176,11 @@ export default function ConnectedAppsConfig() {
                         {selectedConnection.status === 'connecting' && <Button size="sm" variant="outline" onClick={() => void invoke<string | null>('get_app_authorization_url', { serverId: selectedConnection.server_id }).then(url => { if (!url) throw new Error('授权已结束，请重新连接'); return openUrl(url); }).catch(e => toast.error(String(e)))}>继续授权</Button>}
                         <Button size="sm" variant="ghost" onClick={() => { setFormGeneration(v => v + 1); setDetailTab('settings'); }}>重新配置 / 登录</Button>
                     </div>{selectedConnection.error && <p role="alert" className="break-words text-sm text-destructive">{selectedConnection.error}</p>}</div>}
+                    {selectedServer?.is_deletable && <Button variant="destructive" disabled={busyId !== undefined} onClick={() => setRemovingServer(selectedServer)}>删除连接</Button>}
                     <Tabs value={detailTab} onValueChange={setDetailTab}>
                         <TabsList><TabsTrigger value="overview">概览</TabsTrigger>{selectedServer && <TabsTrigger value="tools">工具与管理</TabsTrigger>}{selectedServer && !selectedServer.is_builtin && <TabsTrigger value="access">助手授权</TabsTrigger>}{selectedApp && <TabsTrigger value="settings">{selectedServer ? '连接配置' : '连接'}</TabsTrigger>}</TabsList>
                         <TabsContent value="overview" className="space-y-5 pt-4">
+                            {!mobile && selectedApp?.id === 'notion' && <Button variant="outline" onClick={() => { setPluginSource({ repo: 'openai/plugins', git_ref: 'main', path: 'plugins/notion' }); setPluginsOpen(true); }}>查看 Notion 官方插件与配套 Skills</Button>}
                             {selectedApp && <><p className="text-sm">{selectedApp.notice}</p><p className="text-sm text-muted-foreground">{selectedApp.connection.auth === 'oauth' ? `请求的授权范围：${selectedApp.connection.scopes?.join('、') || '由服务商决定'}。实际权限以授权页面为准。` : selectedApp.connection.auth === 'fields' ? '实际访问权限由你提供的密钥或令牌决定。' : '此应用不要求登录。'}</p><AppRelatedSkills key={selectedApp.id} ids={selectedApp.skill_ids ?? []} /><p className="text-xs text-muted-foreground">{selectedApp.publisher} · 版本 {selectedApp.version} · {selectedApp.category}</p>{selectedApp.homepage?.startsWith('https://') && <Button variant="link" className="px-0" onClick={() => void openUrl(selectedApp.homepage!).catch(e => toast.error(String(e)))}>服务说明 <ArrowUpRight className="ml-1 h-4 w-4" /></Button>}
                                 {!selectedServer && matchingConnections.map(connection => <Button key={connection.server_id} variant="outline" className="w-full justify-between" onClick={() => select({ kind: 'server', serverId: connection.server_id })}>{connection.label}<span>{connectionStatus(connection.status)}</span></Button>)}
                                 {!selectedServer && <Button disabled={!platformSupported(selectedApp)} onClick={() => setDetailTab('settings')}><Plug className="mr-2 h-4 w-4" />{matchingConnections.length ? '添加另一个连接' : '连接应用'}</Button>}
@@ -182,7 +190,7 @@ export default function ConnectedAppsConfig() {
                         {selectedServer && <TabsContent value="tools" className="pt-4"><MCPConfig key={selectedServer.id} initialServerId={selectedServer.id} detailOnly onEditManaged={selectedConnection ? () => setDetailTab('settings') : undefined} /></TabsContent>}
                         {selectedServer && <TabsContent value="access" className="pt-4"><AppAssistantAccess serverId={selectedServer.id} /></TabsContent>}
                         {selectedApp && <TabsContent value="settings" className="space-y-6 pt-4">
-                            {platformSupported(selectedApp) ? <AppConnectForm key={`${selectedApp.id}-${selectedServer?.id ?? 'new'}-${formGeneration}`} app={selectedApp} connection={selectedConnection} onConnected={onConnected} /> : <p className="text-sm text-muted-foreground">当前平台不支持此应用的认证连接。</p>}
+                            {selectedApp.connection.transport === 'stdio' ? <Button variant="outline" onClick={() => { void invoke<{preview: {key: string; source: PluginSource}}[]>('list_agent_plugins').then(items => { const found = items.find(i => selectedApp.id.startsWith(`agent-plugin:${i.preview.key}:`)); if (!found) throw new Error('插件已卸载，请从 GitHub 插件重新安装'); setPluginSource(found.preview.source); setPluginsOpen(true); }).catch(e => setError(String(e))); }}>管理插件本地连接</Button> : platformSupported(selectedApp) ? <AppConnectForm key={`${selectedApp.id}-${selectedServer?.id ?? 'new'}-${formGeneration}`} app={selectedApp} connection={selectedConnection} onConnected={onConnected} /> : <p className="text-sm text-muted-foreground">当前平台不支持此应用的认证连接。</p>}
                             {selectedConnection && selectedServer && <AppTransportSettings key={`${selectedServer.id}-${selectedServer.timeout}-${selectedServer.proxy_enabled}`} server={selectedServer} onSaved={() => { toast.success('网络设置已保存'); void refresh().catch(e => setError(String(e))); }} />}
                             {selectedConnection && <div className="space-y-2 border-t pt-5"><Button variant="outline" disabled={busyId !== undefined} onClick={() => void action(selectedConnection.server_id, 'disconnect_app_connection')}>断开连接</Button>{selectedConnection.status === 'disconnected' && selectedConnection.error && <Button variant="ghost" disabled={busyId !== undefined} onClick={() => void action(selectedConnection.server_id, 'disconnect_app_connection', false)}>删除凭据，不撤销授权</Button>}<p className="text-xs text-muted-foreground">断开会停用连接、删除凭据，并尝试撤销服务商支持的 OAuth 授权。启用同步时，连接断开和凭据删除会同步到其他设备；跳过撤销只表示保留服务商侧授权，不代表仅影响本机。</p></div>}
                         </TabsContent>}
@@ -190,8 +198,14 @@ export default function ConnectedAppsConfig() {
                 </div>
             </SheetContent>
         </Sheet>
+        <ConfirmDialog isOpen={!!removingServer} title="删除连接" confirmText={`删除 ${removingServer?.name ?? ''} 的连接、工具配置和凭据。GitHub 插件包和复用此服务的其他连接不会被卸载。`} onCancel={() => { if (busyId === undefined) setRemovingServer(undefined); }} onConfirm={() => {
+            if (!removingServer || busyId !== undefined) return;
+            const id = removingServer.id; setBusyId(id);
+            void invoke('delete_mcp_server', { id }).then(async () => { setRemovingServer(undefined); setSelection(undefined); await refresh(); toast.success('连接已删除'); }).catch(e => { setRemovingServer(undefined); setError(String(e)); toast.error(String(e)); }).finally(() => setBusyId(undefined));
+        }} />
         <MCPServerDialog isOpen={configOpen} initialConfig={initialConfig} onClose={() => setConfigOpen(false)} onSubmit={() => { setConfigOpen(false); setPage('installed'); setCategory('全部'); void refresh().catch(e => setError(String(e))); }} />
         <JSONImportDialog isOpen={importOpen} onClose={() => setImportOpen(false)} onImport={configs => void importConfigs(configs)} />
+        <Sheet open={pluginsOpen} onOpenChange={setPluginsOpen}><SheetContent className="w-full overflow-y-auto sm:max-w-3xl"><SheetHeader><SheetTitle>GitHub 插件</SheetTitle><SheetDescription>浏览配套技能与连接器，安装和更新插件包。</SheetDescription></SheetHeader>{pluginsOpen && <div className="px-5 pb-8"><AgentPluginsConfig initialSource={pluginSource} onChanged={() => void refresh().catch(e => setError(String(e)))} /></div>}</SheetContent></Sheet>
         <BuiltinToolDialog isOpen={!!builtinId} initialTemplateId={builtinId} onClose={() => setBuiltinId(undefined)} onSubmit={() => { setBuiltinId(undefined); void refresh().catch(e => setError(String(e))); }} />
     </div>;
 }

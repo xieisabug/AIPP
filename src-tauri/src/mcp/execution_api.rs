@@ -23,7 +23,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rmcp::{
     model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation},
     transport::{
-        ConfigureCommandExt, TokioChildProcess,
+        ConfigureCommandExt,
     },
     ServiceExt,
 };
@@ -1197,7 +1197,12 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
     }
 
     // 优先尝试 JSON 序列化（与之前行为保持一致）
-    match serde_json::to_string(&response.content) {
+    let mut content=response.content.clone();
+    if let Some(structured)=&response.structured_content {
+        // MCP structuredContent is model-visible; host-only _meta intentionally stays out.
+        content.push(rmcp::model::Content::text(serde_json::to_string(structured)?));
+    }
+    match serde_json::to_string(&content) {
         Ok(s) => Ok(s),
         Err(json_err) => {
             // 回退：使用 Debug 格式串联各个 content part，确保始终有可显示的结果
@@ -3366,6 +3371,7 @@ pub async fn execute_tool_by_transport(
                         tool_name,
                         parameters,
                         Some(cancel_token.clone()),
+                        conversation_id,
                     )
                     .await
                     .map_err(|e| e.to_string())
@@ -3377,6 +3383,7 @@ pub async fn execute_tool_by_transport(
                     tool_name,
                     parameters,
                     Some(cancel_token.clone()),
+                    conversation_id,
                 )
                 .await
                 .map_err(|e| e.to_string())
@@ -3429,6 +3436,7 @@ async fn execute_stdio_tool(
     tool_name: &str,
     parameters: &str,
     cancel_token: Option<CancellationToken>,
+    conversation_id: Option<i64>,
 ) -> Result<String> {
     // 外部 stdio 在移动端不可执行。aipp:* 已在 execute_tool_by_transport 分流到 builtin，不会进入此函数。
     if cfg!(mobile) {
@@ -3449,9 +3457,7 @@ async fn execute_stdio_tool(
 
     // 定义实际的执行逻辑
     let execution = async {
-        let client = (())
-            .serve(
-                TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+        let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(_app_handle, server, Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
@@ -3462,15 +3468,13 @@ async fn execute_stdio_tool(
                             }
                         }
                     }
-                }))
-                .context("创建子进程失败")?,
-            )
-            .await
-            .context("初始化客户端失败")?;
+                })).await.map_err(anyhow::Error::msg)?;
+        let client = crate::mcp::apps::bundles::client::PluginClient { app:_app_handle.clone(),conversation_id,server_id:server.id }.serve(transport).await.map_err(|e| anyhow!(diagnostics.error("初始化 MCP",e)))?;
 
         let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
         let request_param = build_call_tool_request(tool_name, args);
-        let response = client.call_tool(request_param).await.context("工具调用失败")?;
+        crate::mcp::apps::access::validate_execution(_app_handle,server,tool_name,conversation_id).map_err(anyhow::Error::msg)?;
+        let response = client.call_tool(request_param).await.map_err(|e| anyhow!(diagnostics.error("调用工具", e)))?;
         debug!(is_error=?response.is_error, parts=?response.content.len(), "received stdio tool response");
         client.cancel().await.context("关闭客户端连接失败")?;
         // 不再包裹错误上下文，直接返回底层错误以保留真实原因（例如服务器返回的错误信息）

@@ -16,7 +16,7 @@ pub fn validate(
     if !server.is_enabled || ["connecting", "auth_required", "disconnected"].contains(&status.as_str()) {
         return Err(format!("应用连接 {} 已停用、断开或需要重新授权", server.id));
     }
-    if server.url != snapshot.url || server.headers != snapshot.headers || server.transport_type != snapshot.transport_type {
+    if server.url != snapshot.url || server.headers != snapshot.headers || server.transport_type != snapshot.transport_type || server.command != snapshot.command || server.environment_variables != snapshot.environment_variables {
         return Err(format!("应用连接 {} 已重新配置，旧请求不可继续使用", server.id));
     }
     let allowed: bool = assistants.query_row("SELECT is_enabled FROM assistant_mcp_config WHERE assistant_id=?1 AND mcp_server_id=?2", params![assistant_id,server.id], |r| r.get(0))

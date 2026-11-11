@@ -25,6 +25,12 @@ fn serialize_headers<S: serde::Serializer>(headers: &HashMap<String, String>, se
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthCredential {
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub client_auth_method: Option<String>,
+    #[serde(default)]
+    pub resource: Option<String>,
     pub client_id: String,
     pub token_endpoint: String,
     pub access_token: String,
@@ -152,10 +158,10 @@ pub(super) async fn resolve_with(store: Arc<dyn CredentialStore>, http: &super::
     if let Some(oauth) = credential.oauth.as_mut() {
         if oauth.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp() + 60) {
             let refresh = oauth.refresh_token.as_ref().ok_or("登录已过期，请重新授权")?;
-            let token = super::oauth::exchange_with(http, &oauth.token_endpoint, &[
+            let token = super::oauth::exchange_authenticated(http, &oauth.token_endpoint, &[
                 ("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", &oauth.client_id),
-                ("resource", endpoint),
-            ]).await?;
+                ("resource", oauth.resource.as_deref().unwrap_or(endpoint)),
+            ],oauth.client_auth_method.as_deref().unwrap_or("none"),&oauth.client_id,oauth.client_secret.as_deref()).await?;
             oauth.access_token = token.access_token;
             if token.refresh_token.is_some() { oauth.refresh_token = token.refresh_token; }
             oauth.expires_at = token.expires_in.map(|v| chrono::Utc::now().timestamp() + v as i64);
