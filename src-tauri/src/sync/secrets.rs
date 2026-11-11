@@ -139,7 +139,7 @@ pub(super) fn derive_key(passphrase: &str, salt: &[u8], iterations: u32) -> Resu
     })
 }
 
-fn derive_with_record(passphrase: &str, record: &KeyCheckRecord) -> Result<SecretKey, String> {
+pub(super) fn derive_with_record(passphrase: &str, record: &KeyCheckRecord) -> Result<SecretKey, String> {
     if record.v != 1 || record.kdf != KDF_NAME {
         return Err("同步口令记录版本不受支持，请升级 AIPP".into());
     }

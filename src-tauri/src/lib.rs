@@ -117,6 +117,7 @@ use crate::api::system_api::{
 use crate::sync::{
     cleanup_dangling_foreign_keys, get_sync_status,
     reset_sync_state, retry_failed_sync_outbox,
+    begin_sync_server_switch, inspect_sync_server_switch, cancel_sync_server_switch, commit_sync_server_switch,
     retry_sync_dead_letters, save_sync_settings, set_auto_sync, set_sync_passphrase, stop_sync,
     trigger_sync_now,
 };
@@ -1023,6 +1024,10 @@ pub fn run() {
             open_data_folder,
             get_sync_status,
             retry_failed_sync_outbox,
+            begin_sync_server_switch,
+            inspect_sync_server_switch,
+            cancel_sync_server_switch,
+            commit_sync_server_switch,
             save_sync_settings,
             set_sync_passphrase,
             trigger_sync_now,

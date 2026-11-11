@@ -22,6 +22,19 @@ pub(crate) async fn resolve(app: &AppHandle, reference: &str, endpoint: &str, se
     }
     let state = app.try_state::<SyncState>().ok_or("凭据刷新缺少同步状态")?;
     let _sync_guard = state.sync_lock.lock().await;
+    if state.switching.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("同步服务器正在切换，请完成或取消切换后重试凭据刷新".into());
+    }
+    // A switch may have finished while we waited for the sync lock.
+    let settings = load_settings(app)?;
+    if settings.mode != SyncMode::SelfHosted {
+        return credentials::resolve_local(app,reference,endpoint,server_id).await;
+    }
+    match load_secret_state(app)? {
+        secrets::SecretState::NotConfigured => return credentials::resolve_local(app,reference,endpoint,server_id).await,
+        secrets::SecretState::Ready(_) => {},
+        _ => return Err("共享连接凭据需要正确的同步口令才能刷新，请先解锁凭据同步".into()),
+    }
     let cancel = CancellationToken::new();
     run_sync_once_inner(app,&cancel).await.map_err(|e|format!("刷新凭据前同步失败: {e}"))?;
     if !expired(&load(app,reference).await?) {

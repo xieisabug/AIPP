@@ -216,3 +216,43 @@ describe.each(viewports)("DataFolderConfigForm encrypted API Key sync ($name)", 
         expect(row.closest(".hidden")).not.toBeNull();
     });
 });
+
+describe("DataFolderConfigForm server changes", () => {
+    beforeEach(() => {
+        setViewport(1400, "windows");
+        mockInvokeHandler("begin_sync_server_switch", () => ({ id:"switch", old_url:"https://sync.example.com", has_sync_state:true }));
+        mockInvokeHandler("cancel_sync_server_switch", () => undefined);
+    });
+    afterEach(() => { clearAllMockHandlers(); vi.clearAllMocks(); });
+    it("should open the choice dialog only on save when the address changes", async () => {
+        await renderWith({});
+        fireEvent.change(screen.getByDisplayValue("https://sync.example.com"), { target:{value:"https://new.example.com"} });
+        expect(screen.queryByRole("dialog")).toBeNull();
+        fireEvent.click(screen.getAllByRole("button", { name:"保存配置" })[0]);
+        await screen.findByRole("dialog");
+        expect(screen.getByRole("button", { name:"下一步" })).toBeDisabled();
+        expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_sync_settings")).toBe(false);
+        fireEvent.click(screen.getByRole("button", { name:"取消" }));
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+    it("should save a verified token without asking for a migration choice when the account is unchanged", async () => {
+        mockInvokeHandler("inspect_sync_server_switch", () => ({ mode:"migration" }));
+        mockInvokeHandler("commit_sync_server_switch", () => status());
+        await renderWith({});
+        fireEvent.change(screen.getByPlaceholderText("留空则沿用已保存 token"), { target:{value:"rotated-token"} });
+        fireEvent.click(screen.getAllByRole("button", { name:"保存配置" })[0]);
+        await waitFor(() => expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "commit_sync_server_switch")).toBe(true));
+        expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    it("should ask for a connection choice when the new token belongs to another account", async () => {
+        mockInvokeHandler("inspect_sync_server_switch", () => ({ mode:null, needs_choice:true }));
+        await renderWith({});
+        fireEvent.change(screen.getByPlaceholderText("留空则沿用已保存 token"), { target:{value:"other-token"} });
+        fireEvent.click(screen.getAllByRole("button", { name:"保存配置" })[0]);
+        await screen.findByRole("dialog");
+        expect(screen.getByRole("button", { name:"下一步" })).toBeDisabled();
+        expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "commit_sync_server_switch")).toBe(false);
+        fireEvent.click(screen.getByRole("button", { name:"取消" }));
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+});

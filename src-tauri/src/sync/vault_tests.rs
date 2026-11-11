@@ -303,3 +303,73 @@ fn test_vault_state_missing_retained_key_pauses_without_retiring_it() {
     assert_eq!(db.query_row("SELECT retain FROM credential_vault_retired_key WHERE slot=?1", [&slot], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert!(active(&db, &store).unwrap().unwrap().record == new.record);
 }
+
+
+#[test]
+fn test_vault_server_switch_commits_key_credentials_and_target_together() {
+    let db = db(); let store = MemoryKeys::default();
+    let sync = Connection::open_in_memory().unwrap(); sync.execute_batch(SYNC_SCHEMA_SQL).unwrap();
+    let old = secrets::random_local_key(); switch(&db, &store, None, &old).unwrap();
+    let reference = Uuid::new_v4().to_string(); write_with(&db, &old, &reference, &credential()).unwrap();
+    let new = secrets::derive_key("target-password", &[8;16], 1000).unwrap();
+    switch_key_with(&db, &store, Some(&old), &new, true, |write_key| {
+        persistence::coordinated(&sync, &db, || {
+            write_key()?;
+            set_sync_meta(&sync, "remote_account_scope", "target")
+        })
+    }).unwrap();
+    assert_eq!(get_sync_meta(&sync, "remote_account_scope").unwrap().as_deref(), Some("target"));
+    assert!(active(&db, &store).unwrap().unwrap().record == new.record);
+    assert!(secrets::read_record(&db).unwrap() == Some(new.record.clone()));
+    assert_eq!(read_with(&db, &new, &reference).unwrap().unwrap().headers, credential().headers);
+    assert!(read_with(&db, &old, &reference).is_err());
+}
+
+#[test]
+fn test_vault_server_switch_rollback_preserves_old_key_and_credentials() {
+    let db = db(); let store = MemoryKeys::default();
+    let sync = Connection::open_in_memory().unwrap(); sync.execute_batch(SYNC_SCHEMA_SQL).unwrap();
+    let old = secrets::random_local_key(); switch(&db, &store, None, &old).unwrap();
+    let reference = Uuid::new_v4().to_string(); write_with(&db, &old, &reference, &credential()).unwrap();
+    let new = secrets::derive_key("target-password", &[8;16], 1000).unwrap();
+    let result = switch_key_with(&db, &store, Some(&old), &new, true, |write_key| {
+        persistence::coordinated(&sync, &db, || {
+            write_key()?;
+            set_sync_meta(&sync, "remote_account_scope", "target")?;
+            Err("injected settings write failure".into())
+        })
+    });
+    assert!(result.is_err());
+    assert!(get_sync_meta(&sync, "remote_account_scope").unwrap().is_none());
+    assert!(active(&db, &store).unwrap().unwrap().record == old.record);
+    assert_eq!(read_with(&db, &old, &reference).unwrap().unwrap().headers, credential().headers);
+    assert_eq!(store.values.borrow().len(), 1);
+    assert!(secrets::read_record(&db).unwrap().is_none());
+}
+
+#[test]
+fn test_vault_server_switch_recovery_keeps_committed_os_key() {
+    let db = db(); let store = MemoryKeys::default();
+    let sync = Connection::open_in_memory().unwrap(); sync.execute_batch(SYNC_SCHEMA_SQL).unwrap();
+    let old = secrets::random_local_key(); switch(&db, &store, None, &old).unwrap();
+    let reference = Uuid::new_v4().to_string(); write_with(&db, &old, &reference, &credential()).unwrap();
+    let new = secrets::derive_key("target-password", &[8;16], 1000).unwrap();
+    sync.execute_batch("PRAGMA foreign_keys=ON;
+        CREATE TABLE required(id INTEGER PRIMARY KEY);
+        CREATE TABLE deferred_failure(id INTEGER REFERENCES required(id) DEFERRABLE INITIALLY DEFERRED);
+        CREATE TRIGGER fail_commit AFTER INSERT ON sync_apply_receipt BEGIN INSERT INTO deferred_failure VALUES (1); END;").unwrap();
+    let result = switch_key_with(&db, &store, Some(&old), &new, true, |write_key| {
+        persistence::coordinated(&sync, &db, || {
+            write_key()?;
+            set_sync_meta(&sync, "remote_account_scope", "target")
+        })
+    });
+    assert!(result.is_err());
+    assert!(active(&db, &store).unwrap().unwrap().record == new.record);
+    assert_eq!(read_with(&db, &new, &reference).unwrap().unwrap().headers, credential().headers);
+    assert!(get_sync_meta(&sync, "remote_account_scope").unwrap().is_none());
+    sync.execute_batch("DROP TRIGGER fail_commit").unwrap();
+    persistence::recover(&sync, &db).unwrap();
+    assert_eq!(get_sync_meta(&sync, "remote_account_scope").unwrap().as_deref(), Some("target"));
+    assert!(active(&db, &store).unwrap().unwrap().record == new.record);
+}

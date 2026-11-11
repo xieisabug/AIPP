@@ -87,40 +87,65 @@ pub(super) fn switch(db: &Connection, store: &impl KeyStore, old: Option<&secret
 }
 
 fn switch_key(db: &Connection, store: &impl KeyStore, old: Option<&secrets::SecretKey>, new: &secrets::SecretKey, publish_record: bool) -> Result<(), String> {
+    switch_key_with(db, store, old, new, publish_record, |apply| {
+        let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+        apply()?;
+        tx.commit().map_err(|e|e.to_string())
+    })
+}
+
+// The caller owns the transaction boundary, including a recoverable sync commit.
+fn switch_key_with(
+    db: &Connection, store: &impl KeyStore, old: Option<&secrets::SecretKey>,
+    new: &secrets::SecretKey, publish_record: bool,
+    transact: impl FnOnce(&dyn Fn() -> Result<(), String>) -> Result<(), String>,
+) -> Result<(), String> {
     init(db)?;
-    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
-    let current = active(db,store)?;
-    if current.as_ref().map(|key|&key.record) != old.map(|key|&key.record) {
-        return Err("另一进程已更换凭据库密钥，请重试".into());
-    }
-    let rows = db.prepare("SELECT reference,server_id,value FROM credential_vault ORDER BY id").map_err(|e| e.to_string())?
-        .query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)?, r.get::<_,String>(2)?)))
-        .map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
-    let mut converted = Vec::new();
-    for (reference, server_id, value) in rows {
-        let old = old.ok_or("已有凭据缺少原加密密钥，无法迁移")?;
-        let plain = decrypt(old, &reference, server_id, &value)?;
-        converted.push((reference.clone(), encrypt(new, &reference, server_id, &plain)?));
-    }
     let slot = Uuid::new_v4().to_string();
-    let mut prepared = PreparedKey { store,slot:slot.clone(),committed:false };
+    let mut prepared = PreparedKey { store, slot: slot.clone(), committed: false };
     store.write(&slot, &secrets::encode_key(new)?)?;
-    let retain = old.is_some_and(|key| key.record.kdf != "local-random" && key.record != new.record);
-    tx.execute("INSERT OR IGNORE INTO credential_vault_retired_key(slot,retain) SELECT slot,?1 FROM credential_vault_key",[retain]).map_err(|e| e.to_string())?;
-    for (reference, value) in converted {
-        tx.execute("UPDATE credential_vault SET value=?2 WHERE reference=?1", params![reference, value]).map_err(|e| e.to_string())?;
+    let result = transact(&|| {
+        let current = active(db, store)?;
+        if current.as_ref().map(|key| &key.record) != old.map(|key| &key.record) {
+            return Err("另一进程已更换凭据库密钥，请重试".into());
+        }
+        let rows = db.prepare("SELECT reference,server_id,value FROM credential_vault ORDER BY id").map_err(|e| e.to_string())?
+            .query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)?, r.get::<_,String>(2)?)))
+            .map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        for (reference, server_id, value) in rows {
+            let old = old.ok_or("已有凭据缺少原加密密钥，无法迁移")?;
+            let plain = decrypt(old, &reference, server_id, &value)?;
+            let value = encrypt(new, &reference, server_id, &plain)?;
+            db.execute("UPDATE credential_vault SET value=?2 WHERE reference=?1", params![reference, value]).map_err(|e| e.to_string())?;
+        }
+        let retain = old.is_some_and(|key| key.record.kdf != "local-random" && key.record != new.record);
+        db.execute("INSERT OR IGNORE INTO credential_vault_retired_key(slot,retain) SELECT slot,?1 FROM credential_vault_key",[retain]).map_err(|e| e.to_string())?;
+        db.execute("INSERT INTO credential_vault_key(id,slot,record) VALUES(1,?1,?2)
+            ON CONFLICT(id) DO UPDATE SET slot=excluded.slot,record=excluded.record",
+            params![slot, serde_json::to_string(&new.record).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
+        db.execute("DELETE FROM credential_vault_retired_key WHERE slot=?1",[&slot]).map_err(|e|e.to_string())?;
+        if publish_record && new.record.kdf != "local-random" { secrets::write_record(db, &new.record)?; }
+        db.execute("DELETE FROM secure_config WHERE scope='data_sync' AND key='secret_key'", []).map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    // A coordinated commit can report an error after the business DB committed.
+    // Never delete its active OS key, even if metadata recovery is still pending.
+    prepared.committed = db.query_row("SELECT EXISTS(SELECT 1 FROM credential_vault_key WHERE slot=?1)", [&slot], |r| r.get(0)).unwrap_or(true);
+    if result.is_ok() {
+        if let Err(error) = cleanup_keys(db,store) { warn!(%error,"Vault key cleanup deferred"); }
     }
-    tx.execute("INSERT INTO credential_vault_key(id,slot,record) VALUES(1,?1,?2)
-        ON CONFLICT(id) DO UPDATE SET slot=excluded.slot,record=excluded.record",
-        params![slot, serde_json::to_string(&new.record).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM credential_vault_retired_key WHERE slot=?1",[&slot]).map_err(|e|e.to_string())?;
-    if publish_record && new.record.kdf != "local-random" { secrets::write_record(&tx, &new.record)?; }
-    tx.execute("DELETE FROM secure_config WHERE scope='data_sync' AND key='secret_key'", []).map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
-    prepared.committed = true;
-    // The switch has committed. Cleanup failure must not misreport a failed switch.
-    if let Err(error) = cleanup_keys(db,store) { warn!(%error,"Vault key cleanup deferred"); }
-    Ok(())
+    result
+}
+
+pub(super) fn switch_server(
+    app: &AppHandle, sync: &Connection, db: &Connection, new: &secrets::SecretKey,
+    apply: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
+    let old = key(app, db)?;
+    switch_key_with(db, &SystemKeys, Some(&old), new, true, |write_key| {
+        persistence::coordinated(sync, db, || { write_key()?; apply() })
+    })
 }
 
 /// Load or migrate an existing key without provisioning a new Vault on a status read.

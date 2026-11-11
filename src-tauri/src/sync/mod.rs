@@ -28,6 +28,8 @@ mod persistence;
 mod quick_assistant;
 mod seed;
 mod secrets;
+mod server_switch;
+pub use server_switch::{begin_sync_server_switch, inspect_sync_server_switch, cancel_sync_server_switch, commit_sync_server_switch};
 pub(crate) mod vault;
 mod vault_sync;
 pub(crate) mod vault_refresh;
@@ -146,6 +148,8 @@ pub struct SaveSyncSettingsRequest {
 }
 
 pub struct SyncState {
+    switching: std::sync::atomic::AtomicBool,
+    switch_session: Mutex<Option<server_switch::SwitchSession>>,
     worker_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     notify_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     debounce_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -160,6 +164,8 @@ pub struct SyncState {
 impl Default for SyncState {
     fn default() -> Self {
         Self {
+            switching: std::sync::atomic::AtomicBool::new(false),
+            switch_session: Mutex::new(None),
             worker_task: Mutex::new(None),
             notify_task: Mutex::new(None),
             debounce_task: Mutex::new(None),
@@ -733,6 +739,9 @@ pub async fn save_sync_settings(
     request: SaveSyncSettingsRequest,
 ) -> Result<SyncStatusDto, String> {
     let SaveSyncSettingsRequest { mode, server_url, token } = request;
+    if app_handle.state::<SyncState>().switching.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("请先完成或取消正在进行的同步服务器切换".into());
+    }
     let server_url = server_url.unwrap_or_default().trim().trim_end_matches('/').to_string();
 
     match mode {
@@ -939,6 +948,9 @@ pub async fn retry_sync_dead_letters(app_handle: AppHandle) -> Result<SyncStatus
 
 #[tauri::command]
 pub async fn reset_sync_state(app_handle: AppHandle) -> Result<SyncStatusDto, String> {
+    if app_handle.state::<SyncState>().switching.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("请先完成或取消正在进行的同步服务器切换".into());
+    }
     let settings = load_settings(&app_handle)?;
     if settings.mode != SyncMode::SelfHosted {
         return Err("当前是本地模式，未启用自建同步".to_string());
@@ -1172,6 +1184,7 @@ async fn run_sync_once_with_options(app_handle: &AppHandle, allow_when_paused: b
     }
     let _guard = state.sync_lock.lock().await;
     // Re-check after acquiring the lock: auto-off / stop may have happened while waiting.
+    if state.switching.load(std::sync::atomic::Ordering::SeqCst) { return; }
     if state.status.lock().await.paused && !allow_when_paused {
         return;
     }
@@ -1266,7 +1279,8 @@ async fn run_sync_once_inner(
         let conn = open_sync_db(app_handle)?;
         bind_remote_account(&conn, &settings.server_url, &remote_status.account_id, remote_status.remote_empty)?;
     }
-    if ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty).is_err() {
+    if get_sync_meta(&open_sync_db(app_handle)?, "allow_initial_merge")?.as_deref() != Some("1")
+        && ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty).is_err() {
         // Recover only durable first-upload attempts, before scanning new edits.
         let conn = open_sync_db(app_handle)?;
         ensure_bootstrap_origin(&conn, &settings.server_url, &remote_status.account_id)?;
@@ -1283,6 +1297,14 @@ async fn run_sync_once_inner(
             }
         }
         ensure_initial_sync_is_safe(&open_sync_db(app_handle)?, remote_status.remote_empty, local_empty)?;
+    }
+    if get_sync_meta(&open_sync_db(app_handle)?, "new_target_pull_pending")?.as_deref() == Some("1") {
+        // Capture local edits first, then learn target identities/keys before pushing.
+        // The flag survives interruption; old-target receipts are never reused.
+        scan_local_changes(app_handle)?;
+        pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
+        replay_secret_pending(app_handle).await?;
+        set_sync_meta(&open_sync_db(app_handle)?, "new_target_pull_pending", "0")?;
     }
     if remote_status.remote_empty && !local_empty {
         let (queued, dangling) = scan_local_changes(app_handle)?;
@@ -5748,6 +5770,9 @@ pub async fn set_sync_passphrase(
     app_handle: AppHandle,
     request: SetSyncPassphraseRequest,
 ) -> Result<SyncStatusDto, String> {
+    if app_handle.state::<SyncState>().switching.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("请在服务器切换确认框中设置目标口令，或先取消切换".into());
+    }
     let SetSyncPassphraseRequest { passphrase, replace_existing } = request;
     if passphrase.chars().count() < secrets::MIN_PASSPHRASE_CHARS {
         return Err(format!("同步口令至少需要 {} 个字符", secrets::MIN_PASSPHRASE_CHARS));
