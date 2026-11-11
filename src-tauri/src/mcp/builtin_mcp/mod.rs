@@ -1725,6 +1725,7 @@ pub async fn execute_aipp_builtin_tool(
                     let request = LoadSkillRequest {
                         command: command.to_string(),
                         source_type: source_type.to_string(),
+                        file: args.get("file").and_then(|v| v.as_str()).map(str::to_string),
                     };
 
                     match handler.load_skill(request).await {

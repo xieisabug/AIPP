@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 const LLMProviderConfig = React.lazy(() => import("../components/config/LLMProviderConfig"));
 const AssistantConfig = React.lazy(() => import("../components/config/AssistantConfig"));
 const FeatureAssistantConfig = React.lazy(() => import("../components/config/FeatureAssistantConfig"));
-const MCPConfig = React.lazy(() => import("../components/config/MCPConfig"));
+const MCPConfig = React.lazy(() => import("../components/config/ConnectedAppsConfig"));
 const SkillsConfig = React.lazy(() => import("../components/config/SkillsConfig"));
 const PluginCenterConfig = React.lazy(() => import("../components/config/PluginCenterConfig"));
 const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTasksConfig"));
@@ -74,7 +74,7 @@ function ConfigWindow() {
             },
             {
                 id: "mcp-config",
-                name: "MCP",
+                name: "应用与工具",
                 icon: <MCP className="w-full h-full text-muted-foreground" />,
                 iconSelected: <MCP className="w-full h-full text-foreground" />,
             },

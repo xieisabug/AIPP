@@ -445,3 +445,11 @@ Remove-Item .\data\aipp-sync.db
 - 冲突解决 UI
 - 生产级管理控制台
 - 服务端签发的设备凭证（当前 `device_id` 为客户端自报）
+
+## 应用凭据同步
+
+新版客户端增加 `mcp.app_connection` 与 `mcp.vault_secret` 对象，秘密值只能以加密 envelope 上传。新密钥校验记录先发布，服务端拒绝不匹配当前密钥版本的凭据写入，防止离线设备覆盖新密文。服务器不持有加密密钥或 OAuth Token 明文。
+
+`POST /v1/sync/vault/claim-refresh` 按账号、凭据对象、服务器版本协调 OAuth 刷新。同一版本只允许一个刷新请求；重试相同 claim ID 幂等。刷新中断后不会靠超时释放来盲目重用旧 refresh token，客户端需等待新凭据同步或重新授权。
+
+升级部署需运行 `alembic upgrade head`（新增 `0004_vault_refresh_claim`）；新安装自动建表。status 新增 vault_protocol=1；应用 Vault 同步要求升级服务端，以保证换钥版本检查和跨设备刷新协调。该改动不涉及 aipp-helper 的应用目录服务。

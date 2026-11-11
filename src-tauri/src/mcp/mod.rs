@@ -1,6 +1,7 @@
 // Central MCP module: prompt building, detection, execution API, and builtin wrappers
 
 pub mod builtin_mcp;
+pub mod apps;
 pub mod butler_tools;
 pub mod detection;
 pub mod execution_api;

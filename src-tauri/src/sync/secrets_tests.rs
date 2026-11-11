@@ -136,8 +136,11 @@ struct MiniServer {
 
 impl MiniServer {
     fn push(&mut self, d: &KDev) {
-        {
+        // Production drains successive batches: the key-check ACK unlocks the
+        // following encrypted-secret batch, as do parent/dependency ACKs.
+        loop {
             let events = load_pending_outbox_from_db(&d.sync, 1000).unwrap();
+            if events.is_empty() { break; }
             mark_events_pushing_in_db(&d.sync, &events).unwrap();
             for (row_id, e) in events {
                 self.received.push(serde_json::to_string(&e).unwrap());

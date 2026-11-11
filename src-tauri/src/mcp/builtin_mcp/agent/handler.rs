@@ -3,7 +3,7 @@
 use super::types::*;
 use crate::api::skill_api::get_skill_content_internal;
 use crate::slash::find_skill_by_source_and_command;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tracing::{debug, error, info, instrument};
 
 /// Handler for Agent tools
@@ -32,6 +32,14 @@ impl AgentHandler {
         match matching_skill {
             Some(skill) => {
                 debug!("Found skill: {}", skill.identifier);
+
+                if let Some(file) = request.file {
+                    let data = self.app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+                    let identifier = skill.identifier.clone();
+                    let content = tokio::task::spawn_blocking(move || crate::mcp::apps::bundles::read_skill_file(&data, &identifier, &file))
+                        .await.map_err(|e| format!("读取插件技能文件：{e}"))??;
+                    return Ok(LoadSkillResponse { identifier: skill.identifier, content, additional_files: vec![], found: true, error: None });
+                }
 
                 // Load the full content
                 match get_skill_content_internal(&self.app_handle, &skill.identifier).await {
