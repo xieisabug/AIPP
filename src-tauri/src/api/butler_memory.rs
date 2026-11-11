@@ -501,15 +501,7 @@ pub(crate) fn turn_block(conn: &Connection, conversation: i64, text: &str, seen:
     if ident.assistant.is_none() || !table_exists(conn, "butler_memory")? {
         return Ok(None);
     }
-    let viewer = ident.viewer;
-    let delta = memory::plan(
-        memory::recent_for_prompt(conn, viewer)?,
-        &memory::visible_ids(conn, viewer)?,
-        memory::count(conn, viewer)?,
-        text,
-        seen,
-        memory::PROMPT_BUDGET_CHARS,
-    );
+    let delta = memory::plan(memory::all_by_recency(conn, ident.viewer)?, text, seen, memory::PROMPT_BUDGET_CHARS)?;
     if delta.is_empty() {
         return Ok(None);
     }

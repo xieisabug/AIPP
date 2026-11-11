@@ -15,8 +15,6 @@ pub const MAX_QUERY_CHARS: usize = 200;
 pub const RECALL_LIMIT: usize = 10;
 /// 每轮自动附带的记忆正文总字数上限。
 pub const PROMPT_BUDGET_CHARS: usize = 800;
-/// 排序时最多参与打分的记忆条数（按最近更新），避免记忆很多时每轮全表打分。
-const SCAN_LIMIT: i64 = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -207,8 +205,11 @@ pub fn count(conn: &Connection, viewer: Viewer) -> Result<usize> {
     Ok(total as usize)
 }
 
-fn recent(conn: &Connection, viewer: Viewer, limit: i64) -> Result<Vec<Memory>> {
+/// viewer 可见的记忆，按最近更新排列；`limit` 为 None 时不限条数。
+fn recent(conn: &Connection, viewer: Viewer, limit: Option<usize>) -> Result<Vec<Memory>> {
     let (kind, id) = viewer_params(viewer);
+    // SQLite 的 LIMIT -1 表示不限条数。
+    let limit = limit.map_or(-1, |n| n as i64);
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM butler_memory WHERE {VISIBLE} ORDER BY updated_at DESC, id DESC LIMIT ?3"
     ))?;
@@ -268,17 +269,37 @@ pub fn terms(text: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
-/// 记忆正文包含了多少个不同的检索词。
-pub fn score(content: &str, terms: &[String]) -> usize {
-    let content = content.to_lowercase();
-    terms.iter().filter(|term| content.contains(term.as_str())).count()
+/// 相关度打分：记忆正文包含了多少个不同的检索词。
+/// 所有检索词编进一个自动机，每条记忆只扫一遍正文，耗时只和记忆总字数有关、与检索词个数无关——
+/// 每轮附带用整条用户消息切词，贴一大段文字时可能有上千个词，逐词查找会随记忆条数成倍变慢。
+struct Matcher {
+    automaton: aho_corasick::AhoCorasick,
+}
+
+impl Matcher {
+    fn new(text: &str) -> Result<Matcher> {
+        let terms = terms(text);
+        let automaton = aho_corasick::AhoCorasick::new(&terms)
+            .with_context(|| format!("记忆检索词（{} 个）无法建立匹配器", terms.len()))?;
+        Ok(Matcher { automaton })
+    }
+
+    fn score(&self, content: &str) -> usize {
+        if self.automaton.patterns_len() == 0 {
+            return 0;
+        }
+        // 重叠匹配：相邻二元组（“回复”“复偏”）共用一个字，都要计入。
+        let mut hits: Vec<_> = self.automaton.find_overlapping_iter(&content.to_lowercase()).map(|m| m.pattern()).collect();
+        hits.sort_unstable();
+        hits.dedup();
+        hits.len()
+    }
 }
 
 /// 按相关度（相同时按最近更新）排序；`require_match` 时去掉完全不相关的记录。
-fn rank(memories: Vec<Memory>, text: &str, require_match: bool) -> Vec<Memory> {
-    let terms = terms(text);
+fn rank(memories: Vec<Memory>, matcher: &Matcher, require_match: bool) -> Vec<Memory> {
     // memories 已按最近更新排列，稳定排序保留这个次序。
-    let mut scored: Vec<(usize, Memory)> = memories.into_iter().map(|m| (score(&m.content, &terms), m)).collect();
+    let mut scored: Vec<(usize, Memory)> = memories.into_iter().map(|m| (matcher.score(&m.content), m)).collect();
     if require_match {
         scored.retain(|(s, _)| *s > 0);
     }
@@ -286,14 +307,15 @@ fn rank(memories: Vec<Memory>, text: &str, require_match: bool) -> Vec<Memory> {
     scored.into_iter().map(|(_, m)| m).collect()
 }
 
-/// 模型按关键词查找：无关键词时列出最近的记忆。最多 RECALL_LIMIT 条。
+/// 模型按关键词查找：在全部可见记忆里按相关度排序（再旧、再久没改过的也能查到）；无关键词时列出最近的记忆。
+/// 最多 RECALL_LIMIT 条。
 pub fn recall(conn: &Connection, viewer: Viewer, query: &str) -> Result<Vec<Memory>> {
     let query = query.trim();
     ensure!(query.chars().count() <= MAX_QUERY_CHARS, "记忆查询最多 {MAX_QUERY_CHARS} 字");
     if query.is_empty() {
-        return recent(conn, viewer, RECALL_LIMIT as i64);
+        return recent(conn, viewer, Some(RECALL_LIMIT));
     }
-    let mut ranked = rank(recent(conn, viewer, SCAN_LIMIT)?, query, true);
+    let mut ranked = rank(recent(conn, viewer, None)?, &Matcher::new(query)?, true);
     ranked.truncate(RECALL_LIMIT);
     Ok(ranked)
 }
@@ -312,17 +334,10 @@ fn fill(ranked: Vec<Memory>, budget: usize, mut used: usize) -> Vec<Memory> {
     picked
 }
 
-/// 参与每轮附带打分的记忆（按最近更新排列，最多 SCAN_LIMIT 条）。
-pub fn recent_for_prompt(conn: &Connection, viewer: Viewer) -> Result<Vec<Memory>> {
-    recent(conn, viewer, SCAN_LIMIT)
-}
-
-/// 会话能看到的全部记忆编号（判断历史里附带过的记忆是否已删除或不再可见）。
-pub fn visible_ids(conn: &Connection, viewer: Viewer) -> Result<HashSet<i64>> {
-    let (kind, id) = viewer_params(viewer);
-    let mut stmt = conn.prepare(&format!("SELECT id FROM butler_memory WHERE {VISIBLE}"))?;
-    let ids = stmt.query_map(params![kind, id], |r| r.get(0))?.collect::<rusqlite::Result<HashSet<i64>>>()?;
-    Ok(ids)
+/// 参与每轮附带规划的记忆：viewer 可见的全部记忆，按最近更新排列。
+/// 不按条数截断：早期、很久没改过的记忆与本轮相关时同样要能被附带。
+pub fn all_by_recency(conn: &Connection, viewer: Viewer) -> Result<Vec<Memory>> {
+    recent(conn, viewer, None)
 }
 
 /// 模型在这次要发出的历史里已经看到的记忆：附带过的记忆块（含压缩检查点里的），以及记忆工具返回给它的结果。
@@ -376,35 +391,37 @@ impl Delta {
 /// - 历史里没有首次附带：还没看到过的记忆按相关度、再按最近更新放入预算（首次附带，放不下的不附带）。
 /// - 否则只放入上次附带之后新建或更新的，以及与本轮相关但还没看到过的。
 ///
-/// `memories` 按最近更新排列（[`recent_for_prompt`]），`visible` 为全部可见编号，`total` 为可见总数。
-pub fn plan(memories: Vec<Memory>, visible: &HashSet<i64>, total: usize, text: &str, injected: &Injected, budget: usize) -> Delta {
+/// `memories` 为可见的全部记忆、按最近更新排列（[`all_by_recency`]），据此判断历史里看到过的记忆是否已删除或不再可见。
+pub fn plan(memories: Vec<Memory>, text: &str, injected: &Injected, budget: usize) -> Result<Delta> {
+    let total = memories.len();
+    let visible: HashSet<i64> = memories.iter().map(|m| m.id).collect();
     let mut removed: Vec<i64> = injected.revisions.iter()
         .filter(|(id, revision)| revision.is_some() && !visible.contains(id))
         .map(|(id, _)| *id)
         .collect();
     removed.sort_unstable();
-    let terms = terms(text);
-    let (mut updated, mut fresh, mut relevant, mut unchanged) = (Vec::new(), Vec::new(), Vec::new(), 0usize);
+    let (mut updated, mut fresh, mut unseen, mut unchanged) = (Vec::new(), Vec::new(), Vec::new(), 0usize);
     for memory in memories {
         match injected.revisions.get(&memory.id) {
             Some(Some(revision)) if memory.revision > *revision => updated.push(memory),
             Some(Some(_)) => unchanged += 1,
             _ if !injected.initial || memory.updated_at > injected.as_of => fresh.push(memory),
-            _ if score(&memory.content, &terms) > 0 => relevant.push(memory),
-            _ => {}
+            _ => unseen.push(memory),
         }
     }
     let used = updated.iter().map(|m| m.content.chars().count()).sum();
-    let mut candidates = rank(fresh, text, false);
-    candidates.extend(rank(relevant, text, true));
+    let matcher = Matcher::new(text)?;
+    let mut candidates = rank(fresh, &matcher, false);
+    // 还没看到过的旧记忆只补带与本轮相关的。
+    candidates.extend(rank(unseen, &matcher, true));
     let listed = fill(candidates, budget, used);
-    Delta {
+    Ok(Delta {
         initial: !injected.initial,
         omitted: total.saturating_sub(unchanged + updated.len() + listed.len()),
         listed,
         updated,
         removed,
-    }
+    })
 }
 
 fn ensure_revision(memory: &Memory, revision: Option<i64>) -> Result<()> {

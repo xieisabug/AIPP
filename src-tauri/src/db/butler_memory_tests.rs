@@ -109,8 +109,46 @@ fn test_memory_recall_ranks_by_overlap_then_recency_and_limits() {
 }
 
 fn plan_for(conn: &Connection, text: &str, injected: &Injected, budget: usize) -> Delta {
-    let viewer = Viewer::Assistant(1);
-    plan(recent_for_prompt(conn, viewer).unwrap(), &visible_ids(conn, viewer).unwrap(), count(conn, viewer).unwrap(), text, injected, budget)
+    plan(all_by_recency(conn, Viewer::Assistant(1)).unwrap(), text, injected, budget).unwrap()
+}
+
+#[test]
+fn test_memory_matcher_counts_distinct_overlapping_terms_like_contains() {
+    let matcher = Matcher::new("回复偏好，用 PNPM").unwrap();
+    // 回复、复偏、偏好 互相重叠都计入；“回复”出现两次只算一次；英文不区分大小写。
+    assert_eq!(matcher.score("用户的回复偏好：回复简短，用 pnpm"), 5);
+    assert_eq!(matcher.score("今天天气"), 0);
+    assert_eq!(Matcher::new("，。！").unwrap().score("任何内容"), 0, "没有检索词时不相关");
+    // 与逐词 contains 的结果一致（单字、英文子串、重叠二元组）。
+    let naive = |text: &str, content: &str| {
+        let content = content.to_lowercase();
+        terms(text).iter().filter(|term| content.contains(term.as_str())).count()
+    };
+    for (text, content) in [
+        ("回复风格要简短", "用户希望回复简短，先给结论"),
+        ("AIPP 的 ai 功能", "用户在做 AIPP 项目，主要维护 AI 对话"),
+        ("周报 结论 风险 表格", "周报格式：先写结论再写风险，用表格"),
+        ("字", "一个字"),
+    ] {
+        assert_eq!(Matcher::new(text).unwrap().score(content), naive(text, content), "{text} / {content}");
+    }
+}
+
+#[test]
+fn test_memory_recall_and_plan_reach_old_memories_behind_many_newer_ones() {
+    // 早期、很久没改过的记忆不能因为后来记得多了就查不到、附带不上。
+    let conn = db();
+    let old = add(&conn, Scope::Assistant(1), "部署流程：先跑测试再发版");
+    for i in 0..600 { add(&conn, Scope::Assistant(1), &format!("备注{i}")); }
+    conn.execute("UPDATE butler_memory SET updated_at=0 WHERE id=?1", [old.id]).unwrap();
+    let ids = |memories: &[Memory]| memories.iter().map(|m| m.id).collect::<Vec<_>>();
+    assert_eq!(ids(&recall(&conn, Viewer::Assistant(1), "部署流程").unwrap()), vec![old.id]);
+    let initial = plan_for(&conn, "部署流程怎么走", &Injected::default(), PROMPT_BUDGET_CHARS);
+    assert_eq!(initial.listed[0].id, old.id, "首次附带按相关度挑，不受新旧限制");
+    let injected = Injected { initial: true, as_of: now() + 1_000, revisions: HashMap::new() };
+    let topped_up = plan_for(&conn, "部署流程怎么走", &injected, PROMPT_BUDGET_CHARS);
+    assert_eq!(ids(&topped_up.listed), vec![old.id], "相关的旧记忆照样补带");
+    assert_eq!(topped_up.omitted, 600);
 }
 
 #[test]
