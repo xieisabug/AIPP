@@ -194,4 +194,4 @@ Members keep Butler-mode SuperAdmin tools and `ask_user_question` (cards render 
 
 `sync/vault.rs` 管理 system.db 中的加密凭据及 OS 安全存储中的实际加密密钥。没有同步口令时生成随机密钥；设置后与 provider secret 共用 PBKDF2 派生密钥。换钥使用 SQLite 事务，旧同步密钥保留至远端重加密完成。MCP 认证入口通过该模块读取、迁移和更新凭据，不向 React 或模型提供秘密明文。
 
-`sync/vault_sync.rs` 接入连接元数据、密文、跨设备归属、pending 和 tombstone；`sync/vault_refresh.rs` 与 Sync Server 的版本化刷新申请协调 OAuth refresh token，避免多端重复刷新。服务端仅处理密文、公开密钥版本与同步身份，不持有解密密钥；aipp-helper 仍只提供应用目录。
+`sync/vault_sync.rs` 接入连接元数据、密文、跨设备归属、pending 和 tombstone；`sync/vault_refresh.rs` 与 Sync Server 的版本化刷新申请协调 OAuth refresh token，避免多端重复刷新。服务端仅处理密文、公开密钥版本与同步身份，不持有解密密钥；aipp-helper 提供应用目录与预解析插件详情，并分发固定版本插件归档；不持有连接凭据。

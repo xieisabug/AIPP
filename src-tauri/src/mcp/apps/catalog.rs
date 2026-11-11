@@ -30,6 +30,8 @@ pub struct AppDefinition {
     pub fields: Vec<ConfigField>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    #[serde(default)]
+    pub plugin_source: Option<super::bundles::PluginSource>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

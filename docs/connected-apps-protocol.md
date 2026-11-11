@@ -6,7 +6,7 @@
 
 - `GET /api/apps` 返回 `{schema_version:1, version, apps:[...]}`；`GET /api/apps/:id` 返回 `{schema_version:1, app:{...}}` 单项详情。
 - 保留 `/api/skills` 与 `/api/plugins`。普通插件、独立 Skills、模型供应商入口不变。
-- `apps` 的每项包含 `id/version/name/description/publisher/category/platforms/connection/fields`；可选 `icon/homepage/notice/skill_ids`。
+- `apps` 的每项包含 `id/version/name/description/publisher/category/platforms/connection/fields`；可选 `icon/homepage/notice/skill_ids/plugin_source`。
 - `connection` 声明固定 HTTPS MCP 地址及 `auth: none | fields | oauth`。OAuth 为授权码 + S256 PKCE 公共客户端；可声明 `client_id/scopes`，未提供 client_id 时要求服务支持动态注册。
 - `fields` 支持 text/password/select/boolean/number，默认值、必填、帮助、选项及 `visible_when:{field,equals}`。`header/prefix` 表示受控请求头绑定；`secret:true` 的值不保存到普通配置。v1 不接收远端可执行 JS，也不执行目录下发的命令。
 - 新的协议或认证机制需要客户端适配；不能把未知方式标成已支持。
@@ -69,3 +69,12 @@ Windows Credential Manager / macOS Keychain / Linux Secret Service 使用 keyrin
 - 未解锁/密钥不匹配的密文进入 pending，不覆盖本地值。删除使用现有版本化 outbox/tombstone；换钥后清理可确定未生效的旧版本 outbox，有未知上传结果或未解密远端凭据时拒绝换钥。
 - 同步模式下 OAuth 刷新先同步最新凭据，再通过 `/v1/sync/vault/claim-refresh` 申请当前版本刷新权；完成后上传新密文。服务端只存身份、版本与请求标识；不能确认的刷新不自动重试。Sync Server 在 status 返回 vault_protocol=1，拒绝旧密钥版本覆盖新版本，并协调刷新；旧服务端缺少协议时明确要求升级。
 - 目前 provider 本地配置表的存储格式不变；本次统一的是实际同步密钥与应用 Vault，不宣称已将所有历史自定义 MCP 或 provider 本地字段迁入 Vault。
+
+## Helper 插件目录与分发
+
+- `/api/apps` 的 `plugin_source:{repo,git_ref,path}` 关联已发布插件；旧连接快照可使用当前目录的同应用关联。
+- `GET /api/agent-plugins/catalog?repo=...&ref=...` 返回 `{revision,entries:[{name,description,category,source}]}`；客户端将其与应用目录合并、按来源去重。
+- `GET /api/agent-plugins/preview?repo=...&ref=...&path=...` 返回预解析 `Preview`（技能、说明、图标、连接器、版本、摘要、文件清单）。helper 从随发布的静态资源读取，不在详情请求时访问 GitHub。
+- `GET /api/agent-plugins/archive?...&revision=<sha>` 仅允许已发布来源和固定版本，服务端从已发布静态资源分块流式返回归档。客户端禁止跟随重定向，仍本地解包、检查路径与摘要，不信任声明替代安装校验。
+- 此次发布集合为固定提交的 62 个包。helper 未发布的来源返回 404，旧预览版本返回 409；不自动回退直连 GitHub。已安装记录仍可离线管理。
+- 新客户端依赖 helper 同步发布这些路由与静态资源；线上未更新时显示明确加载错误，不能宣称上线完成。

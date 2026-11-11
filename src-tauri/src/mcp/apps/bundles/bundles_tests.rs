@@ -185,3 +185,48 @@ fn test_agent_plugin_full_upstream_archive() {
         }
     }
 }
+
+// Maintainer-only exporter: publish parsed metadata with the helper release.
+#[test]
+#[ignore = "Exports pinned metadata for AIPP-helper; requires archive and output paths"]
+fn test_export_helper_plugin_catalog() {
+    fn redact(value: &mut Value) {
+        match value {
+            Value::Object(map) => { map.remove("client_secret"); for child in map.values_mut() { redact(child); } }
+            Value::Array(items) => for child in items { redact(child); },
+            _ => {},
+        }
+    }
+    let archive = std::fs::read(std::env::var("AIPP_PLUGIN_TEST_ARCHIVE").unwrap()).unwrap();
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!("../../../../tests/fixtures/agent-plugins/upstream.json")).unwrap();
+    let mut previews = Vec::new();
+    for fixture in fixtures {
+        let source: Source = serde_json::from_value(fixture["source"].clone()).unwrap();
+        let files = unpack(&archive, &source).unwrap();
+        let mut preview = inspect(source.clone(), "d420d13051bffe4543ed39e30fa46b87148e47dd".into(), &files).unwrap();
+        preview.set_permissions(permissions(&archive, &source).unwrap());
+        super::dependencies::resolve(&mut preview, &archive).unwrap();
+        let mut value = serde_json::to_value(preview).unwrap(); redact(&mut value); previews.push(value);
+    }
+    std::fs::write(std::env::var("AIPP_PLUGIN_EXPORT").unwrap(), serde_json::to_vec(&previews).unwrap()).unwrap();
+}
+
+#[test]
+#[ignore = "Verifies a helper single-plugin artifact against its published preview"]
+fn test_helper_single_plugin_archive_matches_preview() {
+    let archive = std::fs::read(std::env::var("AIPP_PLUGIN_TEST_ARCHIVE").unwrap()).unwrap();
+    let expected: super::format::Preview = serde_json::from_slice(&std::fs::read(std::env::var("AIPP_PLUGIN_PREVIEW").unwrap()).unwrap()).unwrap();
+    let files = unpack(&archive, &expected.source).unwrap();
+    let mut actual = inspect(expected.source.clone(), expected.revision.clone(), &files).unwrap();
+    actual.set_permissions(permissions(&archive, &expected.source).unwrap());
+    super::dependencies::resolve(&mut actual, &archive).unwrap();
+    assert_eq!(actual.digest, expected.digest);
+    assert_eq!(actual.files, expected.files);
+    assert_eq!(actual.skills.len(), expected.skills.len());
+    assert_eq!(serde_json::to_value(&actual.dependencies).unwrap(), serde_json::to_value(&expected.dependencies).unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    super::store::install(directory.path(), &actual, &files).unwrap();
+    for skill in &actual.skills {
+        assert!(super::store::read_skill_content(directory.path(), &skill.id).is_ok());
+    }
+}

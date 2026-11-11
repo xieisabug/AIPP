@@ -26,6 +26,7 @@ export interface AppDefinition {
     connection: { transport: 'http' | 'stdio'; url: string; auth: 'none' | 'fields' | 'oauth'; client_id?: string | null; scopes?: string[] };
     fields: AppField[];
     skill_ids?: string[];
+    plugin_source?: { repo: string; git_ref: string; path: string } | null;
 }
 
 export interface AppCatalog {

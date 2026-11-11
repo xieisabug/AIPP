@@ -17,7 +17,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 ## Essential Build Commands
 
-**GitHub Agent 插件包**：`mcp/apps/bundles` 管理 marketplace、完整包文件、固定提交更新与回退，`AgentPluginsConfig` 提供入口。插件 Skills/commands 使用 `agent_plugin` 来源；HTTP/stdio 连接复用应用凭据链。stdio 必须经 bundles/runtime 的结构化 argv/cwd/环境变量及摘要校验，不能把其 command 标记当 shell 命令运行；MCP 表单请求复用对话审批 UI。与原 JavaScript 插件分离；不能把平台私有连接器 ID 或未适配的宿主扩展标成可用。见 [GitHub 插件包](./docs/product/21-GitHub插件包.md)。
+**GitHub Agent 插件包**：`mcp/apps/bundles` 管理 marketplace、完整包文件、固定提交更新与回退，`AgentPluginsConfig` 在应用详情内展示介绍、应用与 Skills；高级来源管理从添加菜单进入。目录/详情/下载统一请求 aipp-helper `/api/agent-plugins`，客户端不直连 GitHub；helper 随版本发布预解析详情，归档随 helper 发布并流式下发。插件 Skills/commands 使用 `agent_plugin` 来源；HTTP/stdio 连接复用应用凭据链。stdio 必须经 bundles/runtime 的结构化 argv/cwd/环境变量及摘要校验，不能把其 command 标记当 shell 命令运行；MCP 表单请求复用对话审批 UI。与原 JavaScript 插件分离；不能把平台私有连接器 ID 或未适配的宿主扩展标成可用。见 [GitHub 插件包](./docs/product/21-GitHub插件包.md)。
 
 **genai 依赖**：AIPP 不内嵌 genai 源码，通过 `src-tauri/Cargo.toml` 的 GitHub Git 依赖和固定 `rev` 使用独立 `xieisabug/rust-genai` 仓库。Provider/协议实现与缓存协议补丁在该独立项目维护；AIPP 保留应用配置、持久化与使用策略。更新依赖前先推送库提交，再更新 `rev` 与 `Cargo.lock`，不得提交依赖本机目录的路径配置。
 

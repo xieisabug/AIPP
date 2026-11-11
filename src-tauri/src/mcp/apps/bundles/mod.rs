@@ -15,3 +15,5 @@ pub(crate) use store::read_skill_content;
 mod tests;
 #[cfg(test)]
 mod runtime_tests;
+
+pub use format::Source as PluginSource;

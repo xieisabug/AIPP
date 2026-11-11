@@ -1,9 +1,8 @@
 use super::{format::{self, Preview, Source}, store::{self, Receipt}};
 use super::super::catalog::{AppDefinition, ConnectionRecipe};
 use serde::Serialize;
-use serde_json::Value;
 use std::{path::PathBuf, sync::LazyLock, time::Duration};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 pub(super) static INSTALL_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -18,40 +17,53 @@ async fn client(app: &tauri::AppHandle) -> Result<reqwest::Client, String> {
     let map = config.config_feature_map.lock().await;
     let mut builder = reqwest::Client::builder().user_agent("AIPP-Agent-Plugins").timeout(Duration::from_secs(120));
     if let Some(proxy) = crate::api::ai::config::get_network_proxy_from_config(&map) { builder = builder.proxy(reqwest::Proxy::all(&proxy).map_err(|e| format!("插件网络代理无效：{e}"))?); }
-    builder.build().map_err(|e| e.to_string())
+    builder.redirect(reqwest::redirect::Policy::none()).build().map_err(|e| e.to_string())
 }
 async fn installed(app: &tauri::AppHandle, key: &str) -> Result<Receipt, String> {
     let directory = data(app)?; let key = key.to_string();
     tokio::task::spawn_blocking(move || store::receipt(&directory, &key)?.ok_or("插件未安装".to_string()))
         .await.map_err(|e| format!("读取插件安装记录：{e}"))?
 }
-async fn bytes(client: &reqwest::Client, url: &str, limit: usize) -> Result<Vec<u8>, String> {
-    let mut response = client.get(url).send().await.map_err(|e| format!("获取插件来源 {url}：{e}"))?;
+fn progress(app: &tauri::AppHandle, key: &str, message: impl Into<String>) {
+    let _ = app.emit("agent-plugin-install-progress", serde_json::json!({"key": key, "message": message.into()}));
+}
+async fn bytes(client: &reqwest::Client, url: &str, limit: usize, progress_target: Option<(&tauri::AppHandle, &str)>) -> Result<Vec<u8>, String> {
+    // Archive transfers can exceed the metadata timeout on slow connections.
+    let timeout = if limit > 16 * 1024 * 1024 { Duration::from_secs(600) } else { Duration::from_secs(120) };
+    let mut response = client.get(url).timeout(timeout).send().await.map_err(|e| format!("获取插件来源 {url}：{e}"))?;
     if !response.status().is_success() { return Err(format!("获取插件来源 {url}：HTTP {}", response.status())); }
+    let total = response.content_length();
     let mut result = Vec::new();
+    let mut last_progress = std::time::Instant::now();
     while let Some(chunk) = response.chunk().await.map_err(|e| format!("下载插件：{e}"))? {
         if result.len() + chunk.len() > limit { return Err(format!("插件来源响应超过 {} MiB", limit / 1024 / 1024)); }
         result.extend_from_slice(&chunk);
+        if last_progress.elapsed() >= Duration::from_millis(250) {
+            if let Some((app, key)) = progress_target {
+                progress(app, key, format!("正在下载插件：{:.1} MiB{}", result.len() as f64 / 1048576.0, total.map(|n| format!(" / {:.1} MiB", n as f64 / 1048576.0)).unwrap_or_default()));
+            }
+            last_progress = std::time::Instant::now();
+        }
     }
     Ok(result)
 }
-async fn revision(client: &reqwest::Client, source: &Source) -> Result<String, String> {
+const HELPER_PLUGINS: &str = "https://aipp-helper.xiejingyang.com/api/agent-plugins";
+fn helper_url(route: &str, source: &Source) -> Result<reqwest::Url, String> {
     source.validate()?;
-    let mut url = reqwest::Url::parse(&format!("https://api.github.com/repos/{}/commits/", source.repo)).map_err(|e| e.to_string())?;
-    url.path_segments_mut().map_err(|_| "GitHub 地址无效")?.pop_if_empty().push(&source.git_ref);
-    let response: Value = serde_json::from_slice(&bytes(client, url.as_str(), 4 * 1024 * 1024).await?).map_err(|e| e.to_string())?;
-    let sha = response["sha"].as_str().ok_or("GitHub 没有返回提交标识")?;
-    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("GitHub 提交标识无效".into()); }
-    Ok(sha.into())
+    let mut url = reqwest::Url::parse(&format!("{HELPER_PLUGINS}/{route}")).map_err(|e|e.to_string())?;
+    url.query_pairs_mut().append_pair("repo", &source.repo).append_pair("ref", &source.git_ref).append_pair("path", &source.path);
+    Ok(url)
 }
 async fn package(app: &tauri::AppHandle, source: &Source, sha: &str) -> Result<Vec<u8>, String> {
     source.validate()?;
     if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("插件提交标识无效".into()); }
     let root = data(app)?.join("agent-plugin-cache");
     tokio::fs::create_dir_all(&root).await.map_err(|e| e.to_string())?;
-    let path = root.join(format!("{}-{sha}.zip", source.repo.replace('/', "--")));
+    let path = root.join(format!("{}-{sha}.zip", source.key()));
     if path.exists() { return tokio::fs::read(path).await.map_err(|e| e.to_string()); }
-    let archive = bytes(&client(app).await?, &format!("https://codeload.github.com/{}/zip/{sha}", source.repo), 128 * 1024 * 1024).await?;
+    let mut url = helper_url("archive", source)?;
+    url.query_pairs_mut().append_pair("revision", sha);
+    let archive = bytes(&client(app).await?, url.as_str(), 128 * 1024 * 1024, Some((app, &source.key()))).await?;
     let staging = root.join(format!("{}.download", uuid::Uuid::new_v4()));
     tokio::fs::write(&staging, &archive).await.map_err(|e| e.to_string())?;
     if let Err(e) = tokio::fs::rename(&staging, &path).await {
@@ -60,43 +72,40 @@ async fn package(app: &tauri::AppHandle, source: &Source, sha: &str) -> Result<V
     }
     Ok(archive)
 }
-#[derive(Serialize)]
-pub struct CatalogEntry { pub name: String, pub description: String, pub category: String, pub source: Source }
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
+pub struct CatalogEntry {
+    pub name: String, pub description: String, pub category: String, pub source: Source,
+    #[serde(default)] pub icon: Option<String>,
+    #[serde(default)] pub icon_dark: Option<String>,
+    #[serde(default)] pub icon_small: Option<String>,
+}
+#[derive(Serialize, serde::Deserialize)]
 pub struct PluginCatalog { pub revision: String, pub entries: Vec<CatalogEntry> }
 
 #[tauri::command]
 pub async fn fetch_agent_plugin_catalog(app_handle: tauri::AppHandle, repo: String, git_ref: String) -> Result<PluginCatalog, String> {
     let _ = data(&app_handle)?;
     let source = Source { repo, git_ref, path: "plugins".into() };
-    let client = client(&app_handle).await?; let sha = revision(&client, &source).await?;
-    let url = format!("https://raw.githubusercontent.com/{}/{sha}/.agents/plugins/marketplace.json", source.repo);
-    let marketplace: Value = serde_json::from_slice(&bytes(&client, &url, 4 * 1024 * 1024).await?).map_err(|e| format!("Marketplace JSON 无效：{e}"))?;
-    let mut entries = Vec::new();
-    for plugin in marketplace["plugins"].as_array().ok_or("Marketplace 缺少 plugins 列表")? {
-        let path = plugin["source"]["path"].as_str().or(plugin["source"].as_str()).ok_or("Marketplace 条目缺少 source.path")?;
-        let path = format::safe_path(path)?;
-        entries.push(CatalogEntry { name: plugin["interface"]["displayName"].as_str().or(plugin["name"].as_str()).unwrap_or(&path).into(),
-            description: plugin["description"].as_str().unwrap_or("").into(), category: plugin["category"].as_str().unwrap_or("其他").into(),
-            source: Source { repo: source.repo.clone(), git_ref: source.git_ref.clone(), path } });
-    }
-    Ok(PluginCatalog { revision: sha, entries })
+    let url = helper_url("catalog", &source)?;
+    let response = bytes(&client(&app_handle).await?, url.as_str(), 4 * 1024 * 1024, None).await?;
+    serde_json::from_slice(&response).map_err(|e| format!("helper 插件目录无效：{e}"))
 }
 
 #[tauri::command]
 pub async fn inspect_agent_plugin(app_handle: tauri::AppHandle, source: Source) -> Result<Preview, String> {
-    let sha = revision(&client(&app_handle).await?, &source).await?;
-    let archive = package(&app_handle, &source, &sha).await?;
+    let url = helper_url("preview", &source)?;
+    let response = bytes(&client(&app_handle).await?, url.as_str(), 16 * 1024 * 1024, None).await?;
+    let mut preview: Preview = serde_json::from_slice(&response).map_err(|e| format!("helper 插件详情无效：{e}"))?;
+    if preview.source != source || preview.key != source.key() || preview.revision.len() != 40
+        || !preview.revision.bytes().all(|b| b.is_ascii_hexdigit()) || preview.digest.len() != 64
+        || !preview.digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("helper 插件详情身份或版本摘要无效".into());
+    }
     let data = data(&app_handle)?;
     tokio::task::spawn_blocking(move || {
-        let files = format::unpack(&archive, &source)?;
-        let permissions = format::permissions(&archive, &source)?;
-        let mut preview = format::inspect(source, sha, &files)?;
-        preview.set_permissions(permissions);
-        super::dependencies::resolve(&mut preview,&archive)?;
         if let Some(r) = store::receipt(&data, &preview.key)? { preview.installed_revision = Some(r.preview.revision.clone()); preview.locally_modified = store::modified(&data, &r)?; }
         Ok(preview)
-    }).await.map_err(|e| format!("解析插件工作进程：{e}"))?
+    }).await.map_err(|e| format!("读取插件安装记录：{e}"))?
 }
 
 #[tauri::command]
@@ -107,9 +116,13 @@ pub async fn list_agent_plugins(app_handle: tauri::AppHandle) -> Result<Vec<Rece
 
 #[tauri::command]
 pub async fn install_agent_plugin(app_handle: tauri::AppHandle, source: Source, revision: String, digest: String) -> Result<Receipt, String> {
+    progress(&app_handle, &source.key(), "等待安装任务…");
     let _guard = INSTALL_LOCK.lock().await;
     super::runtime::ensure_idle(&source.key())?;
+    progress(&app_handle, &source.key(), "正在下载插件包…");
     let archive = package(&app_handle, &source, &revision).await?;
+    progress(&app_handle, &source.key(), "正在校验并安装插件文件…");
+    let key = source.key();
     let data = data(&app_handle)?;
     let installed = tokio::task::spawn_blocking(move || {
         let files = format::unpack(&archive, &source)?;
@@ -120,6 +133,7 @@ pub async fn install_agent_plugin(app_handle: tauri::AppHandle, source: Source, 
         if preview.digest != digest { return Err("插件内容已改变，请重新预览后安装".into()); }
         store::install(&data, &preview, &files)
     }).await.map_err(|e| format!("安装插件工作进程：{e}"))??;
+    progress(&app_handle, &key, "正在刷新技能索引…");
     crate::api::skill_api::scan_skills(app_handle).await.map_err(|e| format!("插件已保存，但刷新技能索引失败：{e}"))?;
     Ok(installed)
 }
@@ -174,7 +188,7 @@ pub async fn get_agent_plugin_connection(app_handle: tauri::AppHandle, key: Stri
         fields.push(super::super::catalog::ConfigField {key:"oauth_client_secret".into(),label:"自己的 OAuth Client Secret".into(),kind:"password".into(),required:true,secret:true,help:"仅用于授权服务器的令牌交换与刷新，保存在加密 Vault".into(),default:String::new(),options:vec![],visible_when:None,header:None,prefix:String::new()});
     }
     let auth = if auth == "bearer" || auth == "headers" { "fields".to_string() } else { auth };
-    let definition = AppDefinition { id: format!("agent-plugin:{key}:{server_name}"), version: installed.preview.version,
+    let definition = AppDefinition { plugin_source: Some(installed.preview.source.clone()), id: format!("agent-plugin:{key}:{server_name}"), version: installed.preview.version,
         name: format!("{} · {}", installed.preview.name, server_name), description: installed.preview.description,
         publisher: installed.preview.publisher, category: "Agent 插件".into(), icon: None, homepage: None,
         notice: "配套技能已安装；连接完成后选择可使用此插件的助手。".into(), platforms: vec!["windows".into(), "macos".into(), "linux".into()],
@@ -260,7 +274,7 @@ pub async fn connect_agent_plugin_stdio(app_handle: tauri::AppHandle, key: Strin
     let endpoint = runtime::endpoint(&binding);
     let command = format!("{}{}",runtime::PREFIX,serde_json::to_string(&binding).map_err(|e|e.to_string())?);
     let label = format!("{} · {} · {}",r.preview.name,server_name,&reference[..8]);
-    let definition = AppDefinition { id: app_id.clone(), version:r.preview.version, name:r.preview.name, description:r.preview.description,
+    let definition = AppDefinition { plugin_source: Some(r.preview.source.clone()), id: app_id.clone(), version:r.preview.version, name:r.preview.name, description:r.preview.description,
         publisher:r.preview.publisher, category:"Agent 插件".into(), icon:None, homepage:None, notice:"本地 stdio 服务；环境变量保存在加密凭据库。".into(),
         platforms:vec!["windows".into(),"macos".into(),"linux".into()], fields:vec![],skill_ids:vec![],
         connection:ConnectionRecipe { transport:"stdio".into(),oauth_client_auth:None,oauth_redirect_uri:None,url:endpoint.clone(),auth:"none".into(),client_id:None,oauth_resource:None,scopes:vec![] } };
