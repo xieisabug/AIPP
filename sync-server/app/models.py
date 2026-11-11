@@ -91,3 +91,13 @@ class SyncChange(Base):
     device_id: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+
+class VaultRefreshClaim(Base):
+    __tablename__ = "vault_refresh_claim"
+    account_id: Mapped[str] = mapped_column(String(64), ForeignKey("sync_account.id", ondelete="CASCADE"), primary_key=True)
+    object_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    claim_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+

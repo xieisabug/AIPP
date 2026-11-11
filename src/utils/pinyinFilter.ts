@@ -61,10 +61,11 @@ export interface AssistantItem {
     description?: string;
 }
 
-export interface FilteredAssistant extends AssistantItem {
+/** 过滤结果保留候选项自带的其他字段（如群成员头像），只追加匹配信息。 */
+export type FilteredAssistant<T extends AssistantItem = AssistantItem> = T & {
     matchType: "exact" | "pinyin" | "initial";
     highlightIndices: number[];
-}
+};
 
 interface PinyinSearchIndex {
     pinyinArray: string[];
@@ -239,10 +240,10 @@ export class PinyinFilter {
      * @param query 搜索查询（可以是中文字符、拼音或首字母）
      * @returns 过滤并排序的助手列表
      */
-    static filterAssistants(
-        assistants: AssistantItem[],
+    static filterAssistants<T extends AssistantItem>(
+        assistants: T[],
         query: string,
-    ): FilteredAssistant[] {
+    ): FilteredAssistant<T>[] {
         if (!query.trim()) {
             return assistants.map((assistant) => ({
                 ...assistant,
@@ -252,7 +253,7 @@ export class PinyinFilter {
         }
 
         const queryLower = query.toLowerCase();
-        const results: FilteredAssistant[] = [];
+        const results: FilteredAssistant<T>[] = [];
 
         for (const assistant of assistants) {
             const nameLower = assistant.name.toLowerCase();

@@ -170,7 +170,8 @@ pub async fn generate_conversation_summary(
                 || m.message_type == "tool_result"
         })
         .map(|m| {
-            let content = strip_base64_images(&m.content);
+            // 用户消息只总结原话，本轮附加上下文（时间、记忆、工作记录等）不算对话内容。
+            let content = strip_base64_images(crate::utils::turn_context::visible(&m.content));
 
             match m.message_type.as_str() {
                 "user" => ("user".to_string(), content.trim().to_string(), Vec::new()),

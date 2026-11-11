@@ -1,5 +1,5 @@
 import { useAssistantItemActions } from "@/hooks/assistant/useAssistantItemActions";
-import { clearButlerContactHistory } from "@/services/butlerContactService";
+import { resetButlerContactConversation } from "@/services/butlerContactService";
 import ButlerGroupChat from "@/components/butler/ButlerGroupChat";
 import ButlerGroupMemberPicker from "@/components/butler/ButlerGroupMemberPicker";
 import type { ButlerGroupSummary } from "@/data/ButlerGroup";
@@ -16,7 +16,7 @@ import type { ButlerMessageSearchHit } from "@/data/Conversation";
 import { useConversationAvatarState } from "@/components/avatar/useConversationAvatarState";
 import type { AvatarState } from "@/components/avatar/avatarDefinition";
 import { useLinger } from "@/hooks/useStablePresence";
-import ButlerProfileDialog from "@/components/butler/ButlerProfileDialog";
+import ButlerProfileDialog, { type ProfileModelChoice, type ProfileModelField } from "@/components/butler/ButlerProfileDialog";
 import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerAppearance } from "@/components/butler/butlerAppearance";
 import "@/components/butler/butlerDesktop.css";
 import { toast } from "sonner";
@@ -208,6 +208,9 @@ const headerStatusLabels: Partial<Record<AvatarState, string>> = {
     error: "执行出错",
 };
 
+/** 助手类型名称（与新增助手表单的内置类型一致；插件类型显示编号）。 */
+const ASSISTANT_TYPE_NAMES: Record<number, string> = { 0: "普通对话助手", 4: "智能体助手" };
+
 function ButlerExperimentWindow() {
     useTheme("butler_experiment");
     const {
@@ -263,8 +266,37 @@ function ButlerExperimentWindow() {
     const activeConversationId = historyView?.conversationId
         ?? (contact ? String(contact.conversationId) : mainConversationId);
     const activeAssistant = assistants.find(assistant => assistant.id === contact?.assistantId);
-    const [profileTarget, setProfileTarget] = useState<{ id?: number; name: string } | null>(null);
-    const saveProfile = async (name: string, appearance: ButlerAppearance) => {
+    // 联系人带上描述、类型与模型，和新增助手的字段一致；总管家只改名字与形象（模型在管家设置里）。
+    const [profileTarget, setProfileTarget] = useState<{
+        id?: number; name: string; conversationId?: number; description?: string; model?: ProfileModelField;
+    } | null>(null);
+    // 顶部头像与联系人右键「编辑」共用：不传 id 时编辑当前联系人，未选联系人时编辑总管家。
+    const openProfile = async (assistantId = contact?.assistantId) => {
+        if (assistantId === undefined) {
+            setProfileTarget({ name: butlerDisplayName, conversationId: Number(mainConversationId) || undefined });
+            return;
+        }
+        // 记忆页按该助手的当前私聊读取；还没有私聊时不显示记忆页。
+        const conversationId = contact?.assistantId === assistantId
+            ? contact.conversationId
+            : previews.find(preview => preview.assistantId === assistantId)?.conversationId;
+        try {
+            const detail = await invoke<AssistantDetail>("get_assistant", { assistantId });
+            const model = detail.model[0];
+            setProfileTarget({
+                id: assistantId, name: detail.assistant.name, conversationId,
+                description: detail.assistant.description ?? "",
+                model: {
+                    assistantType: detail.assistant.assistant_type,
+                    typeName: ASSISTANT_TYPE_NAMES[detail.assistant.assistant_type] ?? `类型 ${detail.assistant.assistant_type}`,
+                    current: model && model.provider_id > 0 ? { modelCode: model.model_code, providerId: model.provider_id } : null,
+                },
+            });
+        } catch (error) {
+            toast.error(`读取助手 ${assistantId} 的资料失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+    };
+    const saveProfile = async (name: string, appearance: ButlerAppearance, description?: string, modelChoice?: ProfileModelChoice) => {
         if (!profileTarget) return;
         const target = profileTarget;
         let nameSaved = false;
@@ -275,19 +307,36 @@ function ButlerExperimentWindow() {
                     ...Object.fromEntries(latest.get("experimental") ?? []),
                     butler_display_name: name,
                 });
-            } else if (name !== target.name) {
+            } else {
                 const detail = await invoke<AssistantDetail>("get_assistant", { assistantId: target.id });
-                await invoke("save_assistant", { assistantDetail: { ...detail, assistant: { ...detail.assistant, name } } });
-                setAssistants(previous => previous.map(assistant => assistant.id === target.id ? { ...assistant, name } : assistant));
+                const [firstModel, ...otherModels] = detail.model;
+                const changedModel = modelChoice && modelChoice.providerId > 0
+                    && (modelChoice.modelCode !== firstModel?.model_code || modelChoice.providerId !== firstModel?.provider_id)
+                    ? modelChoice : null;
+                const nextDescription = description ?? detail.assistant.description ?? "";
+                if (name !== detail.assistant.name || nextDescription !== (detail.assistant.description ?? "") || changedModel) {
+                    // 模型的写法与助手配置页一致：替换第一个模型的代码与提供商，保留其 id 与别名，其余模型不动。
+                    const nextModel = changedModel ? [{
+                        id: firstModel?.id ?? 0,
+                        assistant_id: firstModel?.assistant_id ?? target.id,
+                        model_code: changedModel.modelCode,
+                        provider_id: changedModel.providerId,
+                        alias: firstModel?.alias ?? "",
+                    }, ...otherModels] : detail.model;
+                    await invoke("save_assistant", { assistantDetail: {
+                        ...detail, assistant: { ...detail.assistant, name, description: nextDescription }, model: nextModel,
+                    } });
+                    setAssistants(previous => previous.map(assistant => assistant.id === target.id ? { ...assistant, name } : assistant));
+                }
             }
             nameSaved = true;
             await saveFeatureConfig("butler_appearance", {
                 ...Object.fromEntries(latest.get("butler_appearance") ?? []),
                 [appearanceKey(target.id)]: JSON.stringify(appearance),
             });
-            toast.success("名字与形象已保存");
+            toast.success(target.id === undefined ? "名字与形象已保存" : "助手资料与形象已保存");
         } catch (error) {
-            throw new Error(`${nameSaved ? "名称已保存，但形象保存失败" : "保存助手名称失败"}（${target.id === undefined ? "总管家" : `助手 ${target.id}`}）：${error instanceof Error ? error.message : String(error)}`);
+            throw new Error(`${nameSaved ? "资料已保存，但形象保存失败" : "保存助手资料失败"}（${target.id === undefined ? "总管家" : `助手 ${target.id}`}）：${error instanceof Error ? error.message : String(error)}`);
         }
     };
     const [rosterError, setRosterError] = useState("");
@@ -599,15 +648,35 @@ function ButlerExperimentWindow() {
         }
     }, []);
 
-    const assistantItemActions = useAssistantItemActions({
-        onClear: async assistant => {
-            const selectionRequest = contactRequest.current;
-            const conversationId = await clearButlerContactHistory(assistant.id);
-            if (conversationId === null) return;
-            localStorage.removeItem(`butler-read-${conversationId}`);
-            if (selectionRequest === contactRequest.current && contact?.assistantId === assistant.id) await selectContact(assistant);
+    // 重开联系人私聊（与总管家「重开新会话」一致）：旧私聊归档，仍停留在该助手时切到新私聊。
+    const [resettingContactId, setResettingContactId] = useState<number | null>(null);
+    const resetContactConversation = useCallback(async (assistantId: number) => {
+        setResettingContactId(assistantId);
+        try {
+            const result = await resetButlerContactConversation(assistantId);
+            result.archivedConversationIds.forEach(id => localStorage.removeItem(`butler-read-${id}`));
+            setContact(active => active?.assistantId === assistantId
+                ? { assistantId, conversationId: result.conversationId }
+                : active);
+            if (result.stopNotes.length) toast.info(`已停止旧私聊上进行中的工作：${result.stopNotes.join("；")}`);
             await loadPreviews();
-        },
+        } finally {
+            setResettingContactId(null);
+        }
+    }, [loadPreviews]);
+    const handleResetContactConversation = useCallback(async (assistantId: number) => {
+        try {
+            await resetContactConversation(assistantId);
+            toast.success("旧私聊已归档，已开始新会话");
+        } catch (error) {
+            toast.error(`重开新会话失败（助手 ${assistantId}）：${error instanceof Error ? error.message : String(error)}`);
+        }
+    }, [resetContactConversation]);
+
+    const assistantItemActions = useAssistantItemActions({
+        // 右键「编辑」与顶部头像打开同一个联系人资料（含类型、模型与记忆页），不用配置页的精简编辑框。
+        onEdit: assistant => openProfile(assistant.id),
+        onReset: assistant => resetContactConversation(assistant.id),
     });
 
     useEffect(() => {
@@ -1035,7 +1104,11 @@ function ButlerExperimentWindow() {
 
     useAppShortcuts("butler", {
         new: () => {
-            if (contact || historyView || groupId !== null || !mainConversationId || resettingMainConversation) {
+            if (historyView || groupId !== null || !mainConversationId || resettingMainConversation || resettingContactId !== null) {
+                return;
+            }
+            if (contact) {
+                void handleResetContactConversation(contact.assistantId);
                 return;
             }
             void handleResetMainConversation();
@@ -1198,10 +1271,10 @@ function ButlerExperimentWindow() {
                                     </Badge>}
                                 </div>
                                 <button type="button" className="group flex min-w-0 max-w-[22rem] items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
-                                    aria-label="修改助手名字与形象"
+                                    aria-label="编辑助手资料与形象"
                                     data-aipp-slot="butler-main-identity"
-                                    onClick={() => setProfileTarget({ id: contact?.assistantId, name: activeAssistant?.name ?? butlerDisplayName })}
-                                    title="修改名字与形象">
+                                    onClick={() => void openProfile()}
+                                    title="编辑资料与形象">
                                     <ButlerAvatar id={contact?.assistantId ?? 0} chief={!contact} size={28} figure />
                                     <span className="flex min-w-0 flex-col">
                                         <span className="truncate text-sm font-medium leading-4">{activeAssistant?.name ?? butlerDisplayName}</span>
@@ -1236,16 +1309,18 @@ function ButlerExperimentWindow() {
                                     />
                                     <IconButton
                                         icon={
-                                            resettingMainConversation ? (
+                                            resettingMainConversation || resettingContactId !== null ? (
                                                 <Loader2 className="h-4 w-4 animate-spin text-icon" />
                                             ) : (
                                                 <RefreshCw className="h-4 w-4 text-icon" />
                                             )
                                         }
-                                        onClick={() => void handleResetMainConversation()}
-                                        disabled={!!contact || !mainConversationId || resettingMainConversation}
+                                        onClick={() => void (contact
+                                            ? handleResetContactConversation(contact.assistantId)
+                                            : handleResetMainConversation())}
+                                        disabled={!mainConversationId || resettingMainConversation || resettingContactId !== null}
                                         border
-                                        title="重开新会话"
+                                        title={contact ? "重开新会话（旧私聊归档，可搜索查看）" : "重开新会话"}
                                         dataAippSlot="butler-main-reset-conversation"
                                     />
                                 </div>
@@ -1388,6 +1463,9 @@ function ButlerExperimentWindow() {
             {profileTarget && <ButlerProfileDialog
                 name={profileTarget.name}
                 appearance={parseAppearance(featureConfig.get("butler_appearance")?.get(appearanceKey(profileTarget.id)))}
+                description={profileTarget.description}
+                model={profileTarget.model}
+                memoryConversationId={profileTarget.conversationId}
                 onClose={() => setProfileTarget(null)} onSave={saveProfile} />}
         </AntiLeakageProvider>
         </ButlerAppearanceContext.Provider>

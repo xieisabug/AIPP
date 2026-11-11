@@ -145,3 +145,22 @@ def test_device_accounts_notify_and_inspect_do_not_leak_other_space(client):
             body = "".join(notification.iter_text())
         assert f'"cursor":{own["server_seq"]}' in body
         assert f'"cursor":{other["server_seq"]}' not in body
+
+
+def test_device_accounts_vault_refresh_claims_and_revocation_remain_scoped(client):
+    endpoint = "/v1/sync/vault/claim-refresh"
+    claim = {"device_id": DEVICE_ID, "object_id": "credential", "version": 1, "claim_id": "refresh"}
+    for token in (TOKEN_X, TOKEN_Y):
+        event = sample_event("vault-event", "credential")
+        event["object_type"] = "mcp.vault_secret"
+        event["payload"] = {"fields": {"value": {
+            "alg": "aipp-e2e-aes256gcm-v1", "kid": "key", "nonce": "nonce", "ct": "ciphertext",
+        }}, "refs": {}}
+        response = client.post("/v1/sync/push", headers=auth_headers(token), json={
+            "device_id": DEVICE_ID, "events": [event],
+        })
+        assert response.status_code == 200 and len(response.json()["accepted"]) == 1
+        assert client.post(endpoint, headers=auth_headers(token), json=claim).status_code == 200
+    assert client.post(f"/v1/admin/devices/{DEVICE_ID}/revoke", headers=auth_headers(TOKEN_X)).status_code == 200
+    assert client.post(endpoint, headers=auth_headers(TOKEN_X), json=claim).status_code == 403
+    assert client.post(endpoint, headers=auth_headers(TOKEN_Y), json=claim).status_code == 200

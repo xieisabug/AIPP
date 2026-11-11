@@ -251,6 +251,7 @@ impl<'a> Tables<'a> {
 
     fn calls(&self, predicate: &str, id: i64) -> Result<()> {
         if let Some(calls) = self.names.get("mcp_tool_call") {
+            self.remove("app_tool_call_binding", &format!("call_id IN (SELECT id FROM {calls} WHERE {predicate})"), id)?;
             self.remove("tool_review_log", &format!("mcp_tool_call_id IN (SELECT id FROM {calls} WHERE {predicate})"), id)?;
             self.remove("mcp_tool_call", predicate, id)?;
         }
@@ -293,6 +294,8 @@ impl<'a> Tables<'a> {
         self.remove("butler_task_result", "task_conversation_id=?1", id)?;
         self.remove("butler_task_definition", "task_conversation_id=?1 OR butler_conversation_id=?1", id)?;
         self.remove("butler_main_state", "butler_conversation_id=?1", id)?;
+        // 删除普通聊天保留已保存的记忆（来源显示为已删除）；删除群聊则群记忆失去归属，一并删除。
+        self.remove("butler_memory", "scope_type='group' AND scope_id=?1", id)?;
         // Main conversations have no user-facing delete. A remote tombstone
         // detaches surviving children instead of recursively erasing history.
         self.update("conversation", "parent_butler_conversation_id", "NULL", "parent_butler_conversation_id=?1", id)?;
@@ -319,6 +322,8 @@ impl<'a> Tables<'a> {
         }
         // Some legacy profiles do not have quick assistant 1 yet.
         let quick_exists = self.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {} WHERE id=1 AND id!=?1)", self.names["assistant"]), [id], |r| r.get::<_, bool>(0))?;
+        // 私有记忆随助手删除，不转给接手会话的默认助手；全局与群记忆保留。
+        self.remove("butler_memory", "scope_type='assistant' AND scope_id=?1", id)?;
         self.update("conversation", "assistant_id", if quick_exists { "1" } else { "NULL" }, "assistant_id=?1", id)?;
         self.update("artifacts_collection", "assistant_id", "NULL", "assistant_id=?1", id)?;
         self.remove("PluginAssistantConfigurations", "assistant_id=?1", id)?;
@@ -389,7 +394,7 @@ impl<'a> Tables<'a> {
                 for tool in self.ids("mcp_server_tool", "server_id=?1", id)? { self.tool(tool, false)?; }
                 self.calls("server_id=?1", id)?;
                 self.remove("assistant_mcp_config", "mcp_server_id=?1", id)?;
-                for child in ["mcp_server_resource", "mcp_server_prompt", "mcp_server_capability_epoch_catalog", "mcp_tool_catalog"] {
+                for child in ["mcp_server_resource", "mcp_server_prompt", "mcp_server_capability_epoch_catalog", "mcp_tool_catalog", "app_connection"] {
                     self.remove(child, "server_id=?1", id)?;
                 }
                 self.remove(table, "id=?1", id)

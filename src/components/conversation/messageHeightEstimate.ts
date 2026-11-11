@@ -1,4 +1,5 @@
 import type { Message } from "../../data/Conversation";
+import { visibleText } from "../../utils/turnContext";
 import { PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX } from "../../utils/previewCode";
 
 // Pixel constants are calibrated against the rendered ChatUI (merged assistant
@@ -197,7 +198,8 @@ export function estimateMessageHeight(
         listWidthPx,
         isMobilePlatform = false,
     } = options;
-    const rawContent = message.content ?? "";
+    // 用户消息末尾的本轮附加上下文不显示，不占高度。
+    const rawContent = visibleText(message.content ?? "");
     const contentWidthPx = getBubbleContentWidthPx(listWidthPx, isMobilePlatform);
     const hasToolMarkup = rawContent.includes("MCP_TOOL_CALL") || /<mcp_tool_call/i.test(rawContent);
 

@@ -122,7 +122,8 @@ pub fn render_message_for_external_channel(
 ) -> Vec<String> {
     match message.message_type.as_str() {
         "system" | "reasoning" => Vec::new(),
-        "user" => render_user_message(&message.content, context).into_iter().collect(),
+        // 外部渠道只转发用户原话，不带本轮附加上下文。
+        "user" => render_user_message(crate::utils::turn_context::visible(&message.content), context).into_iter().collect(),
         "response" | "assistant" => render_assistant_message(&message.content, context),
         "tool_result" => render_tool_result_message(&message.content),
         _ => sanitize_plain_text(&message.content).into_iter().collect(),

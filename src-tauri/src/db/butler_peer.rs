@@ -731,6 +731,13 @@ pub fn active_in_owner(conn: &Connection, owner: i64) -> rusqlite::Result<Vec<Ex
         .collect()
 }
 
+/// 某会话正在受理（作为接收方）、仍在进行的协作。
+pub fn active_in_target(conn: &Connection, target: i64) -> rusqlite::Result<Vec<Exchange>> {
+    conn.prepare(&format!("{SELECT} WHERE target=?1 AND state IN {ACTIVE} ORDER BY id"))?
+        .query_map([target], row)?
+        .collect()
+}
+
 /// 进行中的协作（停止前快照），用于停止后判断哪些执行需要实际打断。
 pub fn active_in_chain(conn: &Connection, chain: i64) -> rusqlite::Result<Vec<Exchange>> {
     conn.prepare(&format!("{SELECT} WHERE coalesce(chain,root)=?1 AND state IN {ACTIVE} ORDER BY id"))?

@@ -128,11 +128,56 @@ def test_device_migration_downgrade_refuses_to_discard_duplicate_ids(legacy_data
     ))
     connection.commit()
     original_rows = device_rows(connection)
+    connection.execute(sa.text(
+        "INSERT INTO vault_refresh_claim "
+        "(account_id, object_id, version, claim_id, device_id, created_at) "
+        "VALUES ('x', 'credential', 1, 'refresh', 'active', '2026-11-11 01:02:03')"
+    ))
+    connection.commit()
+    claims = connection.exec_driver_sql("SELECT * FROM vault_refresh_claim").all()
     with pytest.raises(RuntimeError, match="registered in multiple accounts"):
         command.downgrade(config, "0003_sync_token_expires_at")
     assert device_rows(connection) == original_rows
     assert sa.inspect(connection).get_pk_constraint("sync_device")["constrained_columns"] == ["account_id", "id"]
-    assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0004_sync_device_account_key"
+    assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0005_merge_device_vault"
+    assert connection.exec_driver_sql("SELECT * FROM vault_refresh_claim").all() == claims
+
+
+@pytest.mark.parametrize("source", [
+    "0003_sync_token_expires_at",
+    "0004_sync_device_account_key",
+    "0004_vault_refresh_claim",
+    "heads",
+])
+def test_device_migration_merges_both_deployed_branches(legacy_database, source):
+    connection, config = legacy_database
+    # Upgrade from the common base, either already-published branch, or both
+    # branch revisions. Never renumber migrations an installation may have run.
+    if source == "heads":
+        command.upgrade(config, "0004_sync_device_account_key")
+        command.upgrade(config, "0004_vault_refresh_claim")
+    else:
+        command.upgrade(config, source)
+    if source in ("0004_sync_device_account_key", "heads"):
+        connection.execute(sa.text(
+            "INSERT INTO sync_device SELECT id, 'y', name, created_at, last_seen_at, revoked_at "
+            "FROM sync_device WHERE account_id = 'x'"
+        ))
+    claims = []
+    if sa.inspect(connection).has_table("vault_refresh_claim"):
+        connection.execute(sa.text(
+            "INSERT INTO vault_refresh_claim "
+            "(account_id, object_id, version, claim_id, device_id, created_at) "
+            "VALUES ('x', 'credential', 1, 'refresh', 'active', '2026-11-11 01:02:03')"
+        ))
+        claims = connection.exec_driver_sql("SELECT * FROM vault_refresh_claim").all()
+    connection.commit()
+    original_devices = device_rows(connection)
+    command.upgrade(config, "head")
+    assert device_rows(connection) == original_devices
+    assert connection.exec_driver_sql("SELECT * FROM vault_refresh_claim").all() == claims
+    assert connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "0005_merge_device_vault"
+    assert sa.inspect(connection).get_pk_constraint("sync_device")["constrained_columns"] == ["account_id", "id"]
 
 
 def test_device_migration_matches_fresh_metadata():

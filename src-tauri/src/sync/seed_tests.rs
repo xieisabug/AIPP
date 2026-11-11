@@ -18,6 +18,8 @@ fn fresh_install() -> Connection {
     system.init_feature_config().unwrap(); // default summary settings
     let mcp = MCPDatabase { conn: system.conn };
     mcp.create_tables().unwrap();
+    crate::mcp::apps::init(&mcp.conn).unwrap();
+    vault::init(&mcp.conn).unwrap();
     // Built-in tool sets, as init_builtin_mcp_servers writes them.
     let server = mcp.upsert_mcp_server_with_builtin("搜索", Some("builtin"), "stdio", Some("aipp:search"),
         None, None, None, Some(20000), false, true, true, false, false).unwrap();

@@ -57,6 +57,17 @@ export interface UseMessageListElementsProps {
     onApproveAgentPlan?: () => void;
     /** Width of the message list, used to estimate text wrapping. */
     listWidthPx?: number;
+    /**
+     * 覆盖“合并助手消息”显示设置。群聊里连续的非用户消息来自不同成员，
+     * 合并成一个气泡会丢掉发言人，所以群聊固定关闭。
+     */
+    mergeAssistantMessages?: boolean;
+    /**
+     * 自定义整行：返回元素即替代默认的 MessageItem 行（如群聊的发言人、时间分隔、系统提示），
+     * 返回 null 走默认渲染。虚拟化、贴底、跳转高亮、最后一轮布局等列表能力照常生效；
+     * 需要参与跳转高亮的行应包含带 data-message-id 的 MessageItem。
+     */
+    renderMessageRow?: (message: Message) => React.ReactElement | null;
 }
 
 export interface MessageElementSegment {
@@ -291,8 +302,12 @@ export function useMessageListElements({
     onContinueAgentPlan,
     onApproveAgentPlan,
     listWidthPx,
+    mergeAssistantMessages,
+    renderMessageRow,
 }: UseMessageListElementsProps) {
-    const { isMergeAssistantMessages, isShowThinking } = useDisplayConfig();
+    const displayConfig = useDisplayConfig();
+    const isMergeAssistantMessages = mergeAssistantMessages ?? displayConfig.isMergeAssistantMessages;
+    const { isShowThinking } = displayConfig;
     const isMobilePlatform = useIsMobilePlatform();
     const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
 
@@ -477,10 +492,23 @@ export function useMessageListElements({
     const resultsOnly = useContext(ButlerResultsOnlyContext);
 
     const messageElements = useMemo(() => {
+        const customEntry = (message: Message): MessageElementEntry | null => {
+            const element = renderMessageRow?.(message);
+            return element ? {
+                messageId: message.id,
+                messageIds: [message.id],
+                estimatedHeight: estimatedHeightByMessageId.get(message.id) ?? 0,
+                messageElement: element,
+                groupControl: null,
+            } : null;
+        };
+
         if (!isMergeAssistantMessages) {
             // 非合并模式：每条消息单独渲染
             const entries = allDisplayMessages.map((message) => {
                 if (message.butler_posts || message.message_type === "butler_processing") return exchangeEntry(message);
+                const custom = customEntry(message);
+                if (custom) return custom;
                 const streamEvent = streamingMessages.get(message.id);
                 const groupControl = getGenerationGroupControl(message);
                 const shouldShowShineBorder = shiningMessageIds.has(message.id);
@@ -627,6 +655,13 @@ export function useMessageListElements({
                 result.push(exchangeEntry(message));
                 continue;
             }
+            const custom = customEntry(message);
+            if (custom) {
+                // 自定义行不并入相邻气泡，按边界处理
+                flushGroup({ keepExpanded: false });
+                result.push(custom);
+                continue;
+            }
             if (message.message_type === "user" || message.message_type === "agent_plan") {
                 flushGroup({ keepExpanded: false });
                 const streamEvent = streamingMessages.get(message.id);
@@ -704,6 +739,7 @@ export function useMessageListElements({
         agentPlanModeSwitching,
         onContinueAgentPlan,
         onApproveAgentPlan,
+        renderMessageRow,
     ]);
 
     const versionControlElements = useMemo(() => {

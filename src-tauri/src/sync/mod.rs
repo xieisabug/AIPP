@@ -30,6 +30,9 @@ mod seed;
 mod secrets;
 mod server_switch;
 pub use server_switch::{begin_sync_server_switch, inspect_sync_server_switch, cancel_sync_server_switch, commit_sync_server_switch};
+pub(crate) mod vault;
+mod vault_sync;
+pub(crate) mod vault_refresh;
 mod provider_merge;
 #[cfg(test)]
 mod persistence_tests;
@@ -322,6 +325,8 @@ struct PullChange {
 
 #[derive(Debug, Clone, Deserialize)]
 struct RemoteStatus {
+    #[serde(default)]
+    vault_protocol: u32,
     account_id: String,
     #[allow(dead_code)]
     latest_cursor: i64,
@@ -478,6 +483,20 @@ fn specs() -> Vec<SyncTableSpec> {
             foreign_keys: &[],
             where_clause: None,
             order_by: "id",
+        },
+        SyncTableSpec {
+            db_name: "mcp.db", table: "app_connection", object_type: vault::CONNECTION_TYPE,
+            columns: &["id", "server_id", "request_id", "app_id", "definition", "label", "config", "credential_ref", "status"],
+            natural_key_columns: &[], unique_key_columns: &["server_id"], seed_official_ids: &[], official_column: None,
+            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
+            where_clause: None, order_by: "id",
+        },
+        SyncTableSpec {
+            db_name: "system.db", table: "credential_vault", object_type: vault::OBJECT_TYPE,
+            columns: &["id", "reference", "server_id", "value"],
+            natural_key_columns: &[], unique_key_columns: &["reference"], seed_official_ids: &[], official_column: None,
+            foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
+            where_clause: Some("server_id > 0"), order_by: "id",
         },
         SyncTableSpec {
             db_name: "mcp.db",
@@ -1238,6 +1257,20 @@ async fn run_sync_once_inner(
     reset_pushing_events(app_handle)?;
     let remote_status =
         fetch_remote_status(&settings.server_url, token, &device_id, cancel).await?;
+    let migration_app = app_handle.clone();
+    let migration = tokio::task::spawn_blocking(move || crate::mcp::apps::credentials::migrate_all(&migration_app))
+        .await.map_err(|e| format!("迁移旧连接凭据任务失败: {e}")).and_then(|result| result);
+    if let Err(error) = migration {
+        // A locked OS store defers credential migration, not ordinary sync.
+        // The scan repeats migration and skips all encrypted rows on failure.
+        warn!(%error, "Vault credential migration deferred; ordinary sync continues");
+    }
+    if remote_status.vault_protocol < 1 {
+        let system = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        vault::init(&system.conn)?;
+        let has_vault: bool = system.conn.query_row("SELECT EXISTS(SELECT 1 FROM credential_vault)", [], |r|r.get(0)).map_err(|e|e.to_string())?;
+        if has_vault { return Err("同步服务器尚不支持凭据 Vault 协议，请升级 Sync Server 后重试".into()); }
+    }
     ensure_not_cancelled(cancel)?;
     ensure_remote_history_is_compatible(&open_sync_db(app_handle)?, remote_status.latest_cursor)?;
 
@@ -1309,13 +1342,24 @@ async fn run_sync_once_inner(
         emit_status_changed(app_handle).await;
     }
     ensure_not_cancelled(cancel)?;
-    push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await?;
+    if let Err(error) = push_pending(app_handle, &settings, token, &device_id, &device_name, cancel).await {
+        if error.contains("secret_key_epoch_mismatch") {
+            pull_remote(app_handle, &settings, token, &device_id, cancel).await
+                .map_err(|pull_error| format!("{error}; 获取新密钥版本失败: {pull_error}"))?;
+        }
+        return Err(error);
+    }
     ensure_not_cancelled(cancel)?;
     pull_remote(app_handle, &settings, token, &device_id, cancel).await?;
     replay_secret_pending(app_handle).await?;
     if auto_merge_duplicate_providers(app_handle).await? > 0 {
         // Push the moved children/references in the next round.
         schedule_sync_after_local_change(app_handle);
+    }
+    if remote_status.vault_protocol >= 1 {
+        if let Err(error) = vault::finish_rotation(app_handle) {
+            warn!(%error, "Vault key retirement deferred; ordinary sync completed");
+        }
     }
     Ok(())
 }
@@ -2083,13 +2127,19 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
     drop(llm_db);
     quick_assistant::prepare(&sync_conn, &assistant_db)?;
     seed::drop_superseded_seeds(&sync_conn, &assistant_db)?;
-    let secret_state = load_secret_state(app_handle)?;
+    // Do not scan partially migrated credentials: that could enqueue deletions
+    // for legacy entries that are still safely held by the OS store.
+    let secret_state = secret_state_for_sync(
+        crate::mcp::apps::credentials::migrate_all(app_handle)
+            .and_then(|()| vault::state(app_handle)),
+    );
+    vault_sync::discard_obsolete_outbox(&sync_conn, secret_state.ready_key())?;
     let sync_conn = sync_conn.transaction().map_err(|e| e.to_string())?;
     let device_id = ensure_device_id(&sync_conn)?;
     let mut enqueued = 0;
     let mut dangling = DanglingFkScanReport::default();
     for spec in specs() {
-        let secret_key = if spec.object_type == secrets::OBJECT_TYPE {
+        let secret_key = if vault_sync::encrypted_type(spec.object_type) {
             // Without a matching passphrase secrets are neither pushed nor tombstoned.
             let Some(key) = secret_state.ready_key() else { continue };
             // Just unlocked: server values must land first (replay_secret_pending).
@@ -2099,6 +2149,7 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
         let (snapshots, present_ids) =
             read_local_snapshots(app_handle, &spec, &sync_conn, &mut dangling)?;
         let snapshots = match secret_key {
+            Some(key) if spec.object_type == vault::OBJECT_TYPE => vault_sync::seal_snapshots(&sync_conn, key, snapshots)?,
             Some(key) => secrets::seal_snapshots(&sync_conn, key, snapshots)?,
             None => snapshots,
         };
@@ -2377,6 +2428,12 @@ fn read_local_snapshots_from_db(
         }
 
         let local_id = local_id.ok_or_else(|| format!("{} row missing id", spec.table))?;
+        if spec.object_type == vault::OBJECT_TYPE {
+            fields.insert("vault_local_id".into(), raw_values.get("server_id").cloned().unwrap_or(JsonValue::Null));
+        }
+        if spec.object_type == vault::CONNECTION_TYPE {
+            fields.insert("status".into(), json!(if raw_values.get("status").and_then(JsonValue::as_str) == Some("disconnected") { "disconnected" } else { "unchecked" }));
+        }
         let is_official_row = spec.seed_official_ids.contains(&local_id)
             || spec
                 .official_column
@@ -2836,6 +2893,8 @@ fn required_sync_owner(object_type: &str, column: &str) -> bool {
         || matches!((object_type, column),
             ("assistant.model", "provider_id")
             | ("mcp.server_tool", "server_id")
+            | ("mcp.app_connection", "server_id")
+            | ("mcp.vault_secret", "server_id")
             | ("mcp.server_resource", "server_id")
             | ("mcp.server_prompt", "server_id")
             | ("assistant.mcp_config", "mcp_server_id")
@@ -3079,8 +3138,10 @@ fn apply_change(
     };
     let db_path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&db_path)?;
+    if spec.object_type == vault::OBJECT_TYPE { vault::init(&conn)?; }
+    if spec.object_type == vault::CONNECTION_TYPE { crate::mcp::apps::init(&conn)?; }
     // Only secret rows need the passphrase state; avoid touching system.db per message.
-    let secret_state = if spec.object_type == secrets::OBJECT_TYPE { Some(load_secret_state(app_handle)?) } else { None };
+    let secret_state = if vault_sync::encrypted_type(spec.object_type) { Some(load_secret_state(app_handle)?) } else { None };
     secrets::with_state(secret_state, || {
         apply_change_to_db(sync_conn, &conn, &spec, change, local_device_id, |fields| {
             maybe_fork_before_message_insert(app_handle, sync_conn, &conn, fields)
@@ -3159,7 +3220,7 @@ fn apply_change_to_db_inner(
 
     if change.operation == "delete" {
         if quick_assistant::apply_delete(sync_conn, conn, change)? { return Ok(()); }
-        if spec.object_type == secrets::OBJECT_TYPE { secrets::forget_server_copy(sync_conn, &change.object_id)?; }
+        if vault_sync::encrypted_type(spec.object_type) { secrets::forget_server_copy(sync_conn, &change.object_id)?; }
         apply_delete(sync_conn, &conn, &spec, change)?;
         upsert_shadow_from_remote(sync_conn, change)?;
         return Ok(());
@@ -3192,6 +3253,10 @@ fn apply_change_to_db_inner(
         find_local_id_by_object_id(sync_conn, object_type, ref_object_id)
     })?;
 
+    if spec.object_type == vault::OBJECT_TYPE { return vault_sync::apply(sync_conn, conn, spec, change, &field_values); }
+    if spec.object_type == vault::CONNECTION_TYPE {
+        field_values.insert("status".into(), json!(if field_values.get("status").and_then(JsonValue::as_str) == Some("disconnected") { "disconnected" } else { "unchecked" }));
+    }
     if spec.object_type == secrets::OBJECT_TYPE {
         return secrets::apply_upsert(sync_conn, conn, spec, change, &field_values);
     }
@@ -3295,6 +3360,7 @@ fn apply_change_to_db_inner(
         }
     }
 
+    if spec.object_type == vault::CONNECTION_TYPE { vault_sync::connection_headers(conn)?; }
     provider_merge::record_origin(sync_conn, change)?;
     upsert_shadow_from_remote_with_fields(sync_conn, &spec, change, &field_values)?;
     Ok(())
@@ -4311,7 +4377,9 @@ fn upsert_natural_row(
 
 fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, PushEvent)>, String> {
     let conn = open_sync_db(app_handle)?;
-    load_pending_outbox_from_db(&conn, limit)
+    let state = load_secret_state(app_handle)?;
+    vault_sync::discard_obsolete_outbox(&conn, state.ready_key())?;
+    load_outbox_from_db_with_secret_readiness(&conn, limit, false, state.ready_key().is_some())
 }
 
 fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64, PushEvent)>, String> {
@@ -4319,6 +4387,16 @@ fn load_pending_outbox_from_db(conn: &Connection, limit: i64) -> Result<Vec<(i64
 }
 
 fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> Result<Vec<(i64, PushEvent)>, String> {
+    // Bootstrap recovery must replay already-attempted ciphertext even while locked.
+    load_outbox_from_db_with_secret_readiness(conn, limit, bootstrap_only, true)
+}
+
+fn load_outbox_from_db_with_secret_readiness(
+    conn: &Connection,
+    limit: i64,
+    bootstrap_only: bool,
+    secrets_ready: bool,
+) -> Result<Vec<(i64, PushEvent)>, String> {
     let rank_sql = specs().iter().enumerate().map(|(rank, spec)|
         format!("WHEN '{}' THEN {rank}", spec.object_type)).collect::<Vec<_>>().join(" ");
     let order_sql = format!("CASE object_type {rank_sql} ELSE 999 END");
@@ -4330,6 +4408,7 @@ fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> R
             &format!("SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
              WHERE ({filter})
+               AND (?3 OR object_type NOT IN (?4, ?5))
                AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM sync_outbox earlier
                    WHERE earlier.object_type = sync_outbox.object_type
                      AND earlier.object_id = sync_outbox.object_id
@@ -4341,17 +4420,23 @@ fn load_outbox_from_db(conn: &Connection, limit: i64, bootstrap_only: bool) -> R
                         JOIN sync_object_map canonical ON canonical.object_type=alias.object_type AND canonical.local_id=alias.local_id
                         WHERE canonical.sync_id='{quick_model_id}' AND legacy.sent_once=1 AND legacy.outcome_known=0
                         AND legacy.status IN ('pending','pushing','failed')))
+               AND (operation='delete' OR object_type NOT IN ('llm.provider_secret','mcp.vault_secret') OR NOT EXISTS (
+                   SELECT 1 FROM sync_outbox key_event WHERE key_event.object_type='system.feature_config'
+                   AND json_valid(key_event.payload_json) AND json_extract(key_event.payload_json,'$.fields.feature_code')='data_sync_secret'
+                   AND key_event.status IN ('pending','pushing','failed')))
                AND ({bootstrap_only} OR next_retry_at IS NULL OR next_retry_at <= ?2)
                AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.refs') ELSE NULL END) ref
                    JOIN sync_outbox parent ON parent.object_id = ref.value
                    WHERE parent.operation = 'upsert' AND parent.status IN ('pending', 'pushing', 'failed')
                      AND parent.object_id != sync_outbox.object_id))
-             ORDER BY CASE WHEN operation = 'delete' THEN 1000 - ({order_sql}) ELSE {order_sql} END, id
+             ORDER BY CASE WHEN object_type='system.feature_config' AND json_valid(payload_json)
+                 AND json_extract(payload_json,'$.fields.feature_code')='data_sync_secret' THEN -1
+                 WHEN operation = 'delete' THEN 1000 - ({order_sql}) ELSE {order_sql} END, id
              LIMIT ?1", quick_model_id = quick_assistant::MODEL_ID),
         )
         .map_err(|e| e.to_string())?;
     let raw_rows = stmt
-        .query_map(params![limit, Utc::now().timestamp()], |row| {
+        .query_map(params![limit, Utc::now().timestamp(), secrets_ready, secrets::OBJECT_TYPE, vault::OBJECT_TYPE], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -4591,7 +4676,7 @@ fn consume_accepted_event(conn: &Connection, id: i64, event: &PushEvent, ack: &A
         let hash = sync_payload_hash(conn, event.payload.as_ref())?;
         apply_ack_to_shadow(conn, &ack.object_type, &ack.object_id, ack.server_version,
             ack.server_seq, &event.operation, &hash)?;
-        if event.object_type == secrets::OBJECT_TYPE {
+        if vault_sync::encrypted_type(&event.object_type) {
             secrets::remember_accepted_push(conn, event, ack)?;
         }
         conn.execute("DELETE FROM sync_outbox WHERE id=?1 AND event_id=?2", params![id, ack.event_id]).map_err(|e| e.to_string())?;
@@ -5496,7 +5581,7 @@ async fn sync_status(app_handle: &AppHandle) -> Result<SyncStatusDto, String> {
     let secret_pending_count = secrets::pending_count(&conn);
     let secret_state = load_secret_state(app_handle).unwrap_or_else(|err| {
         warn!(error = %err, "Failed to read sync passphrase state");
-        secrets::SecretState::NotConfigured
+        secrets::SecretState::Unavailable(err)
     });
     let duplicate_provider_conflicts = get_db_path(app_handle, "llm.db")
         .and_then(|path| open_data_db(&path))
@@ -5599,10 +5684,24 @@ async fn apply_persisted_auto_sync_to_runtime(app_handle: &AppHandle) {
 }
 
 
+pub(crate) fn credential_status(app: &AppHandle) -> String {
+    match vault::state(app) {
+        Ok(state) => state.message(0),
+        Err(error) => format!("凭据库不可用：{error}"),
+    }
+}
+
 fn load_secret_state(app_handle: &AppHandle) -> Result<secrets::SecretState, String> {
-    let system = open_data_db(&get_db_path(app_handle, "system.db")?)?;
-    let master = get_or_create_master_key(app_handle)?;
-    secrets::state_from_db(&system, &master)
+    Ok(secret_state_for_sync(vault::state(app_handle)))
+}
+
+/// Credential failures pause only the encrypted domain. Existing ciphertext,
+/// pending remote secrets and outbox events remain available for a later retry.
+fn secret_state_for_sync(result: Result<secrets::SecretState, String>) -> secrets::SecretState {
+    result.unwrap_or_else(|error| {
+        warn!(%error, "Vault unavailable; encrypted sync paused");
+        secrets::SecretState::Unavailable(error)
+    })
 }
 
 /// Apply remote API keys that were parked while this device had no (matching) passphrase.
@@ -5621,7 +5720,7 @@ async fn replay_secret_pending(app_handle: &AppHandle) -> Result<usize, String> 
         applied
     };
     if applied > 0 {
-        let types = HashSet::from([secrets::OBJECT_TYPE.to_string()]);
+        let types = HashSet::from([secrets::OBJECT_TYPE.to_string(), vault::OBJECT_TYPE.to_string(), vault::CONNECTION_TYPE.to_string()]);
         emit_sync_domain_events(app_handle, &types).await?;
     }
     Ok(applied)
@@ -5684,24 +5783,37 @@ pub async fn set_sync_passphrase(
     let settings = load_settings(&app_handle)?;
     if settings.mode == SyncMode::SelfHosted && settings.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
         run_sync_once_manual(&app_handle).await;
+        if let Some(error) = app_handle.state::<SyncState>().status.lock().await.last_error.clone() {
+            return Err(format!("设置口令前同步失败，尚未更换密钥: {error}"));
+        }
     }
+    let sync_state = app_handle.state::<SyncState>();
+    let _sync_guard = sync_state.sync_lock.lock().await;
+    let _credential_guard = crate::mcp::apps::credentials::CREDENTIAL_LOCK.lock().await;
     let has_record = {
         let system = open_data_db(&get_db_path(&app_handle, "system.db")?)?;
         secrets::read_record(&system)?.is_some()
     };
-    let master = get_or_create_master_key(&app_handle)?;
-    let system_path = get_db_path(&app_handle, "system.db")?;
+    let migration_app = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::mcp::apps::credentials::migrate_all(&migration_app))
+        .await.map_err(|e| format!("迁移连接凭据任务失败: {e}"))??;
+    let key_app = app_handle.clone();
     // Unlocking an existing passphrase: server keys win over local ones once.
     // Creating or replacing the passphrase is the deliberate write instead.
     // Flag first so no concurrent scan can upload local keys in between.
     let server_wins = has_record && !replace_existing;
     let sync = open_sync_db(&app_handle)?;
+    if replace_existing {
+        let uncertain: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('llm.provider_secret','mcp.vault_secret') AND sent_once=1 AND outcome_known=0)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if uncertain || secrets::pending_count(&sync) > 0 {
+            return Err("仍有结果未确认或无法解密的同步凭据，请先完成同步并解锁旧凭据，再更换口令".into());
+        }
+    }
     let flag_was_set = secrets::server_wins_pending(&sync);
     if server_wins { secrets::begin_server_wins(&sync)?; }
     // PBKDF2 is intentionally slow; keep it off the async runtime.
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let system = open_data_db(&system_path)?;
-        secrets::set_passphrase(&system, &master, &passphrase, replace_existing).map(|_| ())
+        vault::set_passphrase(&key_app, &passphrase, replace_existing)
     })
     .await
     .map_err(|e| format!("设置同步口令失败: {e}"))

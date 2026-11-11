@@ -424,3 +424,31 @@ fn test_cascade_delete_assistant_keeps_pending_request_and_rejects_silent_reassi
     assert_eq!(count(&db.conn,"aipp_delete_conversation.conversation",&format!("id=10 AND assistant_id={id}")),1);
     assert_eq!(db.conn.query_row("SELECT request_json FROM aipp_delete_conversation.queued_conversation_message WHERE id=42",[],|r|r.get::<_,String>(0)).unwrap(),payload);
 }
+
+#[test]
+fn test_cascade_delete_assistant_removes_private_memory_and_keeps_shared() {
+    let db=assistant_db(); let id=db.add_assistant("memory owner","",Some(0),false).unwrap();
+    let conversation=create_test_db();
+    crate::db::butler_memory::schema(&conversation).unwrap();
+    peer(&db.conn,"aipp_delete_conversation",&conversation);
+    db.conn.execute_batch(&format!("INSERT INTO aipp_delete_conversation.butler_memory(content,scope_type,scope_id,created_at,updated_at) VALUES
+        ('private','assistant',{id},0,0),('other private','assistant',{other},0,0),('global','global',NULL,0,0),('group','group',50,0,0)", other=id+1)).unwrap();
+    db.delete_assistant(id).unwrap();
+    assert_eq!(count(&db.conn,"aipp_delete_conversation.butler_memory",&format!("scope_type='assistant' AND scope_id={id}")),0);
+    assert_eq!(count(&db.conn,"aipp_delete_conversation.butler_memory","1=1"),3);
+}
+
+#[test]
+fn test_cascade_delete_conversation_keeps_memory_but_group_delete_removes_group_memory() {
+    let conn=create_test_db(); seed_messages(&conn);
+    crate::db::butler_memory::schema(&conn).unwrap();
+    conn.execute_batch("INSERT INTO conversation(id,name,created_time,conversation_kind) VALUES(50,'group','now','butler_group');
+        INSERT INTO butler_memory(content,scope_type,scope_id,source_message_id,created_at,updated_at) VALUES('from chat','assistant',1,11,0,0);
+        INSERT INTO butler_memory(content,scope_type,scope_id,source_group_id,source_group_seq,created_at,updated_at) VALUES('group rule','group',50,50,1,0,0);
+        INSERT INTO butler_memory(content,scope_type,scope_id,source_group_id,source_group_seq,created_at,updated_at) VALUES('global from group','global',NULL,50,2,0,0);").unwrap();
+    crate::db::conversation_db::cascade_delete_conversation(&conn,10).unwrap();
+    assert_eq!(count(&conn,"butler_memory","content='from chat' AND source_message_id=11"),1);
+    crate::db::conversation_db::cascade_delete_conversation(&conn,50).unwrap();
+    assert_eq!(count(&conn,"butler_memory","scope_type='group'"),0);
+    assert_eq!(count(&conn,"butler_memory","scope_type='global'"),1);
+}

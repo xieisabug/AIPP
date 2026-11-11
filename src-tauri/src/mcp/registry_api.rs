@@ -225,6 +225,10 @@ pub async fn add_mcp_server(
 ) -> Result<i64, String> {
     let db = open_db(&app_handle)?;
 
+    if let Some(existing) = db.get_mcp_servers().map_err(|e| e.to_string())?.into_iter().find(|s| s.name == request.name) {
+        crate::mcp::apps::guard_update(&app_handle, existing.id, &request)?;
+    }
+
     let server_id = db
         .upsert_mcp_server_with_builtin(
             &request.name,
@@ -244,6 +248,7 @@ pub async fn add_mcp_server(
     .map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
 
     Ok(server_id)
 }
@@ -255,6 +260,7 @@ pub async fn update_mcp_server(
     id: i64,
     request: MCPServerRequest,
 ) -> Result<(), String> {
+    crate::mcp::apps::guard_update(&app_handle, id, &request)?;
     let db = open_db(&app_handle)?;
 
     db.update_mcp_server_with_builtin(
@@ -275,6 +281,7 @@ pub async fn update_mcp_server(
     .map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
 
     Ok(())
 }
@@ -290,9 +297,12 @@ pub async fn delete_mcp_server(app_handle: tauri::AppHandle, id: i64) -> Result<
         return Err("系统内置工具集不可删除".to_string());
     }
 
+    crate::mcp::apps::disconnect_app_connection(app_handle.clone(), id, None).await?;
+
     db.delete_mcp_server(id).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
     Ok(())
 }
 
@@ -303,10 +313,12 @@ pub async fn toggle_mcp_server(
     id: i64,
     is_enabled: bool,
 ) -> Result<(), String> {
+    if is_enabled { crate::mcp::apps::guard_enable(&app_handle, id)?; }
     let db = open_db(&app_handle)?;
     db.toggle_mcp_server(id, is_enabled).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
     Ok(())
 }
 
@@ -333,6 +345,7 @@ pub async fn update_mcp_server_tool(
     db.update_mcp_server_tool(tool_id, is_enabled, is_auto_run).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
     Ok(())
 }
 
@@ -364,14 +377,14 @@ pub async fn test_mcp_connection(
                     // 内置 aipp:* 不需要实际连接
                     Ok(())
                 } else {
-                    test_stdio_connection(&server).await
+                    test_stdio_connection(&app_handle, &server).await
                 }
             } else {
-                test_stdio_connection(&server).await
+                test_stdio_connection(&app_handle, &server).await
             }
         }
         "sse" => test_sse_connection(&server).await,
-        "http" => test_http_connection(&server).await,
+        "http" => test_http_connection(&app_handle, &server).await,
         _ => Err(format!("Unsupported transport type: {}", server.transport_type)),
     };
 
@@ -385,14 +398,14 @@ pub async fn test_mcp_connection(
 }
 
 // 测试stdio连接
-async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
+async fn test_stdio_connection(app_handle: &tauri::AppHandle, server: &MCPServer) -> Result<(), String> {
     // 外部 stdio 在移动端不可执行（aipp:* 内置已在 test_mcp_connection 分流）
     if cfg!(mobile) {
         let _ = server;
         return Err(crate::api::system_api::mobile_unsupported_error("外部 stdio MCP"));
     }
     use rmcp::{
-        transport::{ConfigureCommandExt, TokioChildProcess},
+        transport::ConfigureCommandExt,
         ServiceExt,
     };
     use tokio::process::Command;
@@ -405,8 +418,7 @@ async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
 
     // 简短的连接测试，超时时间更短
     let client_result = tokio::time::timeout(STDIO_TEST_TIMEOUT, async {
-        let client = ()
-            .serve(TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+        let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(app_handle, server, Command::new(&parts[0]).configure(|cmd| {
                 if parts.len() > 1 {
                     cmd.args(&parts[1..]);
                 }
@@ -415,8 +427,10 @@ async fn test_stdio_connection(server: &MCPServer) -> Result<(), String> {
                         cmd.env(k, v);
                     }
                 }
-            }))?)
-            .await?;
+            })).await.map_err(anyhow::Error::msg)?;
+            let client = ().serve(transport).await.map_err(|e| anyhow::anyhow!(diagnostics.error("初始化 MCP", e)))?;
+        // Keep stderr capture alive through cancellation.
+        let _diagnostics = diagnostics;
 
         // 测试成功，取消连接
         client.cancel().await?;
@@ -437,13 +451,14 @@ async fn test_sse_connection(_server: &MCPServer) -> Result<(), String> {
 }
 
 // 测试HTTP连接
-async fn test_http_connection(server: &MCPServer) -> Result<(), String> {
+async fn test_http_connection(app: &tauri::AppHandle, server: &MCPServer) -> Result<(), String> {
     use rmcp::{
         model::{ClientCapabilities, ClientInfo, Implementation},
         ServiceExt,
     };
 
-    let transport = crate::mcp::http_transport::create_http_transport(server, reqwest::Client::builder())?;
+    let builder = crate::mcp::http_transport::configured_http_builder(app, server).await?;
+    let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(app, server, builder).await?;
 
     // 创建客户端信息
     let client_info = ClientInfo {
@@ -470,7 +485,7 @@ async fn test_http_connection(server: &MCPServer) -> Result<(), String> {
             let _ = client.cancel().await;
             Ok(())
         }
-        Ok(Err(e)) => Err(format!("Failed to create MCP client: {}", e)),
+        Ok(Err(e)) => Err(redactor.clean(&format!("Failed to create MCP client: {}", e))),
         Err(_) => Err("Timeout while connecting to HTTP server".to_string()),
     }
 }
@@ -494,6 +509,7 @@ pub async fn update_mcp_server_prompt(
     let db = open_db(&app_handle)?;
     db.update_mcp_server_prompt(prompt_id, is_enabled).map_err(|e| e.to_string())?;
     crate::sync::schedule_sync_after_local_change(&app_handle);
+    let _ = app_handle.emit("mcp_state_changed", ());
     Ok(())
 }
 
@@ -544,6 +560,7 @@ pub async fn refresh_mcp_server_capabilities(
                 server_id,
             );
             crate::sync::schedule_sync_after_local_change(&app_handle);
+            let _ = app_handle.emit("mcp_state_changed", ());
             let tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
             let resources = db.get_mcp_server_resources(server_id).map_err(|e| e.to_string())?;
             let prompts = db.get_mcp_server_prompts(server_id).map_err(|e| e.to_string())?;
@@ -570,7 +587,7 @@ async fn get_stdio_capabilities(
     }
 
     use rmcp::{
-        transport::{ConfigureCommandExt, TokioChildProcess},
+        transport::ConfigureCommandExt,
         ServiceExt,
     };
     use tokio::process::Command;
@@ -578,7 +595,7 @@ async fn get_stdio_capabilities(
     let db = open_db(&app_handle)?;
 
     // 获取命令，如果没有则返回错误
-    let command = server.command.ok_or("No command specified for stdio transport")?;
+    let command = server.command.clone().ok_or("No command specified for stdio transport")?;
 
     // 解析命令和参数
     let parts = split_command_line(&command);
@@ -592,8 +609,7 @@ async fn get_stdio_capabilities(
             server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64,
         ),
         async {
-            let client = ()
-                .serve(TokioChildProcess::new(Command::new(&parts[0]).configure(|cmd| {
+            let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(&app_handle, &server, Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
@@ -602,15 +618,17 @@ async fn get_stdio_capabilities(
                             cmd.env(k, v);
                         }
                     }
-                }))?)
-                .await?;
+                })).await.map_err(anyhow::Error::msg)?;
+            let client = ().serve(transport).await.map_err(|e| anyhow::anyhow!(diagnostics.error("初始化 MCP", e)))?;
+            // Return diagnostics alongside the live client.
+            let client = (client, diagnostics);
 
             Ok::<_, anyhow::Error>(client)
         },
     )
     .await;
 
-    let client = match client_result {
+    let (client, _diagnostics) = match client_result {
         Ok(Ok(client)) => client,
         Ok(Err(e)) => {
             return Err(format!("Failed to create MCP client: {}", e));
@@ -641,7 +659,21 @@ async fn get_stdio_capabilities(
         }
     };
 
-    // 转换结果为简化结构，失败则保持为 None（不做删除）
+    // Advertised capabilities must be discovered successfully, otherwise the
+    // connection must not be presented as usable with a silently partial catalog.
+    if let Some(info) = client.peer_info() {
+        if info.capabilities.tools.is_some() {
+            if let Err(error) = &tools_result { return Err(_diagnostics.error("发现工具", error)); }
+        }
+        if info.capabilities.resources.is_some() {
+            if let Err(error) = &resources_result { return Err(_diagnostics.error("发现资源", error)); }
+        }
+        if info.capabilities.prompts.is_some() {
+            if let Err(error) = &prompts_result { return Err(_diagnostics.error("发现提示", error)); }
+        }
+    }
+
+    // 未声明的能力保持为 None（不做删除）
     let tools_simple = tools_result.ok().map(|tools| {
         tools
             .into_iter()
@@ -723,7 +755,8 @@ async fn get_http_capabilities(
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(server.timeout.unwrap_or(CONNECT_TIMEOUT_DEFAULT_MS as i32) as u64),
         async {
-            let transport = crate::mcp::http_transport::create_http_transport(&server, reqwest::Client::builder())
+            let builder = crate::mcp::http_transport::configured_http_builder(&app_handle, &server).await.map_err(anyhow::Error::msg)?;
+            let (transport, redactor) = crate::mcp::http_transport::create_authenticated_http_transport(&app_handle, &server, builder).await
                 .map_err(anyhow::Error::msg)?;
 
             let client_info = ClientInfo {
@@ -736,13 +769,13 @@ async fn get_http_capabilities(
                     ..Default::default()
                 },
             };
-            let client = client_info.serve(transport).await?;
-            Ok::<_, anyhow::Error>(client)
+            let client = client_info.serve(transport).await.map_err(|e| anyhow::anyhow!(redactor.clean(&e.to_string())))?;
+            Ok::<_, anyhow::Error>((client, redactor))
         },
     )
     .await;
 
-    let client = match client_result {
+    let (client, redactor) = match client_result {
         Ok(Ok(client)) => client,
         Ok(Err(e)) => {
             return Err(format!("Failed to create MCP HTTP client: {}", e));
@@ -753,14 +786,17 @@ async fn get_http_capabilities(
     };
 
     // 获取服务器信息
-    let _server_info = client.peer_info();
+    let server_info = client.peer_info();
+    let supports_tools = server_info.is_some_and(|info| info.capabilities.tools.is_some());
+    let supports_resources = server_info.is_some_and(|info| info.capabilities.resources.is_some());
+    let supports_prompts = server_info.is_some_and(|info| info.capabilities.prompts.is_some());
 
     // 获取能力
     let capabilities_result = tokio::time::timeout(CAPABILITY_TIMEOUT, async {
         let (tools_result, resources_result, prompts_result) = tokio::join!(
-            client.list_all_tools(),
-            client.list_all_resources(),
-            client.list_all_prompts()
+            async { if supports_tools { client.list_all_tools().await } else { Ok(Vec::new()) } },
+            async { if supports_resources { client.list_all_resources().await } else { Ok(Vec::new()) } },
+            async { if supports_prompts { client.list_all_prompts().await } else { Ok(Vec::new()) } }
         );
         (tools_result, resources_result, prompts_result)
     })
@@ -773,29 +809,28 @@ async fn get_http_capabilities(
         }
     };
 
-    let tools_simple = tools_result.ok().map(|tools| {
+    let tools_simple = Some(tools_result.map_err(|e| redactor.clean(&format!("HTTP tools/list failed: {e}")))?).map(|tools| {
         tools
             .into_iter()
             .map(|tool| SimpleTool {
-                name: tool.name.to_string(),
-                description: tool.description.as_ref().map(|d| d.to_string()),
-                params_json: serde_json::to_string(&tool.input_schema)
-                    .unwrap_or_else(|_| "{}".to_string()),
+                name: redactor.clean(tool.name.as_ref()),
+                description: tool.description.as_ref().map(|d| redactor.clean(d)),
+                params_json: redactor.clean(&serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string())),
             })
             .collect::<Vec<_>>()
     });
-    let resources_simple = resources_result.ok().map(|resources| {
+    let resources_simple = Some(resources_result.map_err(|e| redactor.clean(&format!("HTTP resources/list failed: {e}")))?).map(|resources| {
         resources
             .into_iter()
             .map(|r| SimpleResource {
-                uri: r.uri.to_string(),
-                name: r.name.to_string(),
-                mime_type: r.mime_type.as_deref().unwrap_or("unknown").to_string(),
-                description: r.description.as_ref().map(|d| d.to_string()),
+                uri: redactor.clean(&r.uri),
+                name: redactor.clean(&r.name),
+                mime_type: redactor.clean(r.mime_type.as_deref().unwrap_or("unknown")),
+                description: r.description.as_ref().map(|d| redactor.clean(d)),
             })
             .collect::<Vec<_>>()
     });
-    let prompts_simple = prompts_result.ok().map(|prompts| {
+    let prompts_simple = Some(prompts_result.map_err(|e| redactor.clean(&format!("HTTP prompts/list failed: {e}")))?).map(|prompts| {
         prompts
             .into_iter()
             .map(|p| {
@@ -805,9 +840,9 @@ async fn get_http_capabilities(
                     "{}".to_string()
                 };
                 SimplePrompt {
-                    name: p.name.to_string(),
-                    description: p.description.as_ref().map(|d| d.to_string()),
-                    args_json,
+                    name: redactor.clean(&p.name),
+                    description: p.description.as_ref().map(|d| redactor.clean(d)),
+                    args_json: redactor.clean(&args_json),
                 }
             })
             .collect::<Vec<_>>()

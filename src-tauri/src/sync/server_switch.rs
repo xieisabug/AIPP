@@ -218,6 +218,7 @@ pub async fn commit_sync_server_switch(app_handle: AppHandle, feature_state: Sta
     let session = slot.as_mut().filter(|s| s.id == id).ok_or("切换会话已失效")?;
     let candidate = session.candidate.as_ref().ok_or("请先检查并确认连接方式")?;
     let _guard = state.sync_lock.lock().await;
+    let _credential_guard = crate::mcp::apps::credentials::CREDENTIAL_LOCK.lock().await;
     // Reauthenticate immediately before commit. No remote writes have happened yet.
     let status = fetch_remote_status(&candidate.url, &candidate.token, "", &CancellationToken::new()).await?;
     if status.account_id != candidate.account { return Err("目标账号在检查后发生变化，请返回重新检查".into()); }
@@ -264,7 +265,7 @@ pub async fn commit_sync_server_switch(app_handle: AppHandle, feature_state: Sta
         let sync = open_sync_db(&app_handle)?;
         let system = open_data_db(&get_db_path(&app_handle, "system.db")?)?;
         session.commit_started = true;
-        let committed = persistence::coordinated(&sync, &system, || {
+        let apply = || {
             bind_target(&sync, &scope, is_new, &id)?;
             for (name, value) in [("mode", "self_hosted"), ("server_url", url.as_str())] {
                 system.execute("INSERT INTO feature_config (feature_code,key,value,data_type,description) VALUES ('data_sync',?1,?2,'string','')
@@ -272,12 +273,13 @@ pub async fn commit_sync_server_switch(app_handle: AppHandle, feature_state: Sta
             }
             system.execute("INSERT INTO secure_config (scope,key,ciphertext,nonce,updated_time) VALUES ('data_sync','token',?1,?2,CURRENT_TIMESTAMP)
                 ON CONFLICT(scope,key) DO UPDATE SET ciphertext=excluded.ciphertext,nonce=excluded.nonce,updated_time=CURRENT_TIMESTAMP", params![ciphertext, nonce]).map_err(|e| e.to_string())?;
-            if let Some(key) = &key {
-                secrets::write_record(&system, &key.record)?;
-                secrets::store_local_key(&system, &master, key)?;
-            }
             Ok(())
-        });
+        };
+        let committed = if let Some(key) = &key {
+            vault::switch_server(&app_handle, &sync, &system, key, apply)
+        } else {
+            persistence::coordinated(&sync, &system, apply)
+        };
         if let Err(error) = committed {
             // The business commit may already be durable. Recover before deciding
             // whether cancellation/retry may still return to the old connection.

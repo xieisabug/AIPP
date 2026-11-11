@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emit } from "@tauri-apps/api/event";
 import InputArea from "./InputArea";
 import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
@@ -364,5 +364,51 @@ describe("InputArea mobile attachment tray", () => {
 
         const removes = container.querySelectorAll('[data-aipp-slot="chat-input-attachment-remove"]');
         expect(removes.length).toBe(2);
+    });
+});
+
+describe("InputArea desktop capsule height", () => {
+    const LINE_HEIGHT = 55;
+    let originalScrollHeight: PropertyDescriptor | undefined;
+
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_bang_list", () => []);
+        mockInvokeHandler("get_assistants", () => []);
+        mockInvokeHandler("get_artifacts_for_completion", () => []);
+        mockInvokeHandler("get_skills_for_slash_completion", () => []);
+        // happy-dom 不做布局，scrollHeight 恒为 0，initialHeight 永远量不到
+        originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
+        Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+            configurable: true,
+            get: () => LINE_HEIGHT,
+        });
+    });
+
+    afterEach(() => {
+        if (originalScrollHeight) {
+            Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", originalScrollHeight);
+        } else {
+            delete (HTMLTextAreaElement.prototype as { scrollHeight?: number }).scrollHeight;
+        }
+    });
+
+    it("shrinks back to one line when attachments are cleared while unfocused", () => {
+        const files = [
+            { id: 1, name: "shot.png", path: "/a.png", type: 1, thumbnail: "data:image/png;base64,aa" },
+        ] as import("../../data/Conversation").FileInfo[];
+        const { container, rerender } = render(<InputAreaHarness fileInfoList={files} />);
+        const capsule = container.querySelector(
+            '[data-aipp-slot="chat-input-area-container"]',
+        ) as HTMLElement;
+        const textarea = screen.getByRole("textbox");
+
+        // 点发送钮：先失焦（按有附件的高度收起），随后发送清空附件
+        fireEvent.focus(textarea);
+        fireEvent.blur(textarea);
+        expect(capsule.style.height).toBe(`${LINE_HEIGHT + 80}px`);
+
+        rerender(<InputAreaHarness fileInfoList={null} />);
+        expect(capsule.style.height).toBe(`${LINE_HEIGHT}px`);
     });
 });

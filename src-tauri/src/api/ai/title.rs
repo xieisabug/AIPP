@@ -95,10 +95,12 @@ pub async fn maybe_generate_title_from_conversation_if_needed(
     }
 
     let messages = message_repo.list_by_conversation_id(conversation_id).map_err(AppError::from)?;
+    // 标题只按用户原话生成，不含本轮附加上下文。
     let Some(user_prompt) = messages
         .iter()
-        .find(|(message, _)| message.message_type == "user" && !message.content.trim().is_empty())
-        .map(|(message, _)| message.content.clone())
+        .map(|(message, _)| (message, crate::utils::turn_context::visible(&message.content)))
+        .find(|(message, text)| message.message_type == "user" && !text.trim().is_empty())
+        .map(|(_, text)| text.to_string())
     else {
         warn!(
             conversation_id,

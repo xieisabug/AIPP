@@ -230,7 +230,8 @@ pub(super) fn exchange_tool(conn: &Connection, current: i64, name: &str, args: &
     }
     let stop_reason=root.map(|root|conn.query_row("SELECT reason FROM butler_peer_stop WHERE root=?1",[root],|r|r.get::<_,String>(0)).optional()).transpose()?.flatten();
     let user_message=if context {
-        root.map(|root|conn.query_row("SELECT content FROM message WHERE id=?1 AND message_type='user'",[root],|r|r.get::<_,String>(0)).optional()).transpose()?.flatten().map(|s|clip(&s,6000))
+        root.map(|root|conn.query_row("SELECT content FROM message WHERE id=?1 AND message_type='user'",[root],|r|r.get::<_,String>(0)).optional()).transpose()?.flatten()
+            .map(|s|clip(crate::utils::turn_context::visible(&s),6000))
     } else {None};
     Ok(json!({"exchanges":items,"next_before_id":next,"stop_reason":stop_reason,"user_message":user_message}))
 }

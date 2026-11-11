@@ -101,7 +101,7 @@ function secretToneDotClass(tone: ReturnType<typeof secretSyncTone>): string {
 const PASSPHRASE_FIELD = "sync_passphrase";
 
 const SECRET_SYNC_HINT =
-    "API Key 等密钥只在本机用同步口令加密后上传，服务器只保存密文。每台设备输入相同口令后才会同步 API Key；口令不会上传，忘记口令可「更换口令」（其他设备需重新输入）。";
+    "API Key 与应用连接凭据共用同步口令加密后上传，服务器只保存密文。未设置口令时，应用凭据使用本机自动生成的密钥加密保存；设置或更换口令时自动重新加密。每台设备输入相同口令才能解密；口令不会上传。原加密密钥丢失时，仅设置新口令无法恢复旧凭据。";
 
 function metricValueClass(metric: SyncStatusMetric): string {
     if (metric.value > 0 && (metric.label === "失败" || metric.label === "无法应用")) {
@@ -820,7 +820,7 @@ export const DataFolderConfigForm: React.FC<DataFolderConfigFormProps> = ({ form
             key: PASSPHRASE_FIELD,
             config: {
                 type: "custom" as const,
-                label: "API Key 加密同步",
+                label: "凭据加密同步",
                 tooltip: SECRET_SYNC_HINT,
                 hidden: !showsSelfHostedSyncControls(mode),
                 customRender: renderSecretSyncRow,

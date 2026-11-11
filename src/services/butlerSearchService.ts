@@ -14,9 +14,10 @@ interface RawButlerSearchHit {
     snippet: string;
 }
 
-/** 搜索结果分组标题：私聊和派工会话本身的名字不足以说明来源，补上类型。 */
+/** 搜索结果分组标题：私聊和派工会话本身的名字不足以说明来源，补上类型；归档会话的名字已带“存档”时间。 */
 export function butlerGroupName(kind: RawButlerSearchHit["conversation_kind"], name: string, mainConversationId?: number, conversationId?: number) {
     if (kind === "butler_contact") return "私聊";
+    if (kind === "butler_contact_archive") return name;
     if (kind === "butler_task") return `派工任务「${name}」`;
     return conversationId === mainConversationId ? "当前主会话" : name;
 }

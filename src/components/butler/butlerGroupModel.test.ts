@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ButlerGroupMember, ButlerGroupMessage } from "@/data/ButlerGroup";
 import {
-    applyMention, findMentionQuery, groupPreview, mentionOptions, mergeMessages, showTimeDivider,
+    groupPreview, mentionTargets, mergeMessages, showTimeDivider,
 } from "./butlerGroupModel";
 
 const member = (id: number, name: string): ButlerGroupMember => ({ id, assistant_id: id + 10, name, conversation_id: id + 100, is_chief: false });
@@ -11,24 +11,13 @@ const message = (seq: number, patch: Partial<ButlerGroupMessage> = {}): ButlerGr
 });
 
 describe("butlerGroupModel", () => {
-    it("should detect the mention being typed when the caret follows an @", () => {
-        expect(findMentionQuery("你好 @写", 5)).toEqual({ start: 3, query: "写" });
-        expect(findMentionQuery("@", 1)).toEqual({ start: 0, query: "" });
-        expect(findMentionQuery("@写作 助手", 6)).toBeNull();
-        expect(findMentionQuery("mail me@host", 12)).toBeNull();
-    });
-
-    it("should offer matching members and everyone when filtering mentions", () => {
+    it("should offer every member and everyone when building mention targets", () => {
         const members = [member(1, "写作助手"), member(2, "Coder")];
-        expect(mentionOptions(members, "co").map(option => option.label)).toEqual(["Coder"]);
-        expect(mentionOptions(members, "").map(option => option.label)).toEqual(["写作助手", "Coder", "所有人"]);
-        expect(mentionOptions([members[0]], "").map(option => option.label)).toEqual(["写作助手"]);
-    });
-
-    it("should replace the typed query with the chosen name when applying a mention", () => {
-        const text = "请 @写 看看";
-        const query = findMentionQuery(text, 4)!;
-        expect(applyMention(text, query, 4, "写作助手")).toEqual({ text: "请 @写作助手  看看", caret: 8 });
+        expect(mentionTargets(members).map(target => target.name)).toEqual(["写作助手", "Coder", "所有人"]);
+        expect(mentionTargets([members[0]]).map(target => target.name)).toEqual(["写作助手"]);
+        // “所有人”的 id 不能和成员撞上，列表用它做 key
+        const ids = mentionTargets(members).map(target => target.id);
+        expect(new Set(ids).size).toBe(ids.length);
     });
 
     it("should merge older pages without duplicates when loading history", () => {

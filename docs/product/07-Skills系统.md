@@ -22,6 +22,7 @@ Skills 系统用于给助手追加“可复用的任务说明书”。它不是�
 - 列表页只扫描元数据，减少加载开销
 - 打开某个 Skill 详情时，才会通过 `get_skill_content` 读取完整正文
 - `requires_files` 中声明的附加文件会一起读取并返回，便于 Skill 携带模板、示例或附属说明
+- 支持 YAML 多行说明和嵌套 `metadata.version/author`。GitHub 插件技能使用独立 `agent_plugin` 来源，安装时保留整个包；`load_skill` 的 `file` 参数可读取该技能的配套文本，路径相对于技能目录，并受包目录边界和大小限制。详见 [GitHub 插件包](./21-GitHub插件包.md)。
 
 ---
 

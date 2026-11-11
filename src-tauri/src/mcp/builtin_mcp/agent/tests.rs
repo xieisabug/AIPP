@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn test_load_skill_request_creation() {
         let request =
-            LoadSkillRequest { command: "test-skill".to_string(), source_type: "aipp".to_string() };
+            LoadSkillRequest { command: "test-skill".to_string(), source_type: "aipp".to_string(), file: None };
 
         assert_eq!(request.command, "test-skill");
         assert_eq!(request.source_type, "aipp");
@@ -63,6 +63,7 @@ mod tests {
         let request = LoadSkillRequest {
             command: "pdf".to_string(),
             source_type: "claude_code_agents".to_string(),
+            file: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();

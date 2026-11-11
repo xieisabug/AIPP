@@ -35,7 +35,7 @@ import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { visibleSearchTools, MOBILE_UNEXECUTABLE_LABEL, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
 
-const MCPConfig: React.FC = () => {
+const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEditManaged?: () => void }> = ({ initialServerId, detailOnly = false, onEditManaged }) => {
     const isMobilePlatform = useIsMobilePlatform();
     // 移动端（移动平台或窄屏）使用列表 → 详情布局与紧凑详情页
     const isNarrow = useIsMobile();
@@ -118,11 +118,11 @@ const MCPConfig: React.FC = () => {
                 setMcpServers(servers);
                 // 如果没有选中的服务器，选择第一个
                 if (!selectedServer && servers.length > 0) {
-                    setSelectedServer(servers[0]);
+                    setSelectedServer(servers.find(server => server.id === initialServerId) ?? (detailOnly ? null : servers[0]));
                 }
                 // 如果当前选中的服务器已被删除，选择第一个
                 if (selectedServer && !servers.find(s => s.id === selectedServer.id)) {
-                    setSelectedServer(servers.length > 0 ? servers[0] : null);
+                    setSelectedServer(!detailOnly && servers.length > 0 ? servers[0] : null);
                 }
                 // 加载所有服务器的工具用于搜索
                 loadAllServerTools(servers);
@@ -130,7 +130,7 @@ const MCPConfig: React.FC = () => {
             .catch((e) => {
                 toast.error('获取MCP服务器失败: ' + e);
             });
-    }, [selectedServer]);
+    }, [selectedServer, initialServerId, detailOnly]);
 
     // 加载所有服务器的工具（用于搜索穿透）
     const loadAllServerTools = useCallback(async (servers: MCPServer[]) => {
@@ -163,7 +163,7 @@ const MCPConfig: React.FC = () => {
 
     async function refreshMcpState(isCurrent: () => boolean) {
         const servers = await invoke<MCPServer[]>("get_mcp_servers");
-        const selected = servers.find((server) => server.id === selectedServer?.id) ?? servers[0] ?? null;
+        const selected = servers.find((server) => server.id === (selectedServer?.id ?? initialServerId)) ?? (detailOnly ? null : servers[0]) ?? null;
         const [tools, resources, prompts, allTools] = await Promise.all([
             selected ? invoke<MCPServerTool[]>("get_mcp_server_tools", { serverId: selected.id }) : Promise.resolve([]),
             selected ? invoke<MCPServerResource[]>("get_mcp_server_resources", { serverId: selected.id }) : Promise.resolve([]),
@@ -270,6 +270,7 @@ const MCPConfig: React.FC = () => {
 
     // 打开编辑服务器对话框
     const openEditServerDialog = useCallback((server: MCPServer) => {
+        if (onEditManaged) { onEditManaged(); return; }
         // Built-in servers (identified by is_builtin or aipp:* command) use env-only dialog
         const isBuiltin = server.is_builtin || (!!server.command && server.command.startsWith('aipp:'));
         if (isBuiltin) {
@@ -282,7 +283,7 @@ const MCPConfig: React.FC = () => {
         }
         setEditingServer(server);
         setServerDialogOpen(true);
-    }, []);
+    }, [onEditManaged]);
 
     // 关闭服务器对话框
     const closeServerDialog = useCallback(() => {
@@ -840,7 +841,7 @@ const MCPConfig: React.FC = () => {
 
     return (
         <>
-            <ConfigPageLayout
+            {detailOnly ? content : <ConfigPageLayout
                 sidebar={sidebar}
                 content={content}
                 selectOptions={selectOptions}
@@ -848,7 +849,7 @@ const MCPConfig: React.FC = () => {
                 onSelectOption={handleSelectFromDropdown}
                 selectPlaceholder="选择MCP服务器"
                 addButton={addButton}
-            />
+            />}
 
             {/* MCP服务器对话框 */}
             <MCPServerDialog

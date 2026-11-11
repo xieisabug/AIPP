@@ -9,6 +9,9 @@ pub struct LoadSkillRequest {
     pub command: String,
     /// Source type of the skill (e.g., "aipp", "claude_code_agents", etc.)
     pub source_type: String,
+    /// Optional text file relative to the installed plugin skill directory.
+    #[serde(default)]
+    pub file: Option<String>,
 }
 
 /// Response from loading a skill

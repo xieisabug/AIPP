@@ -36,7 +36,7 @@ const EditAssistantDialog: React.FC<EditAssistantDialogProps> = ({
     }, [isOpen, id, loadFeatureConfig]);
     if (!isOpen || !currentAssistant) return null;
     if (!loaded || loaded.id !== id) return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-        <DialogContent><DialogHeader><DialogTitle>名字、描述与形象</DialogTitle></DialogHeader>
+        <DialogContent><DialogHeader><DialogTitle>编辑助手</DialogTitle></DialogHeader>
             <p role={error ? "alert" : "status"}>{error || "正在读取助手形象…"}</p>
         </DialogContent>
     </Dialog>;

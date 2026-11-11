@@ -37,6 +37,12 @@ import {
 
 interface VirtuosoMessageListProps extends UseMessageListElementsProps {
     conversationId: string;
+    /**
+     * 列表数据的身份。默认按每条消息的 conversation_id 判断数据是否已属于当前会话
+     * （切会话时旧数据还没换掉，不能拿它做打开贴底）。群聊等聚合视图的消息分属多个执行会话，
+     * 由宿主直接给出：与 conversationId 相同即视为数据已就绪。
+     */
+    transcriptKey?: string;
     scrollContainerRef: React.RefObject<HTMLDivElement | null>;
     pendingScrollMessageId: number | null;
     /** 跳转对齐方式，默认居中；轮次导航使用 start。 */
@@ -252,6 +258,7 @@ function scheduleHighlightAttempt({
 
 const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
     conversationId,
+    transcriptKey,
     scrollContainerRef,
     pendingScrollMessageId,
     pendingScrollAlign = "center",
@@ -360,13 +367,16 @@ const VirtuosoMessageList: React.FC<VirtuosoMessageListProps> = ({
         if (!conversationId || messageListProps.allDisplayMessages.length === 0) {
             return false;
         }
+        if (transcriptKey !== undefined) {
+            return transcriptKey === conversationId;
+        }
 
         return messageListProps.allDisplayMessages.every(
             (message) => String(message.conversation_id) === conversationId,
         );
-    }, [conversationId, messageListProps.allDisplayMessages]);
+    }, [conversationId, messageListProps.allDisplayMessages, transcriptKey]);
     // 按数据实际所属会话重建 Virtuoso，保证新会话从空 sizeTree 开始并采纳本会话的 heightEstimates。
-    const dataConversationKey = String(
+    const dataConversationKey = transcriptKey ?? String(
         messageListProps.allDisplayMessages[0]?.conversation_id ?? conversationId,
     );
 
