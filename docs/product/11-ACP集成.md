@@ -15,11 +15,25 @@ Pi、Cursor、OpenCode、Kiro、Antigravity 的提供商表单打开时会自动
 - **更新**：检测到版本后自动对照最新发布（Pi / OpenCode / Cursor SDK 查 npm，Kiro 查官方 manifest，Antigravity 查官方 CHANGELOG，结果缓存 30 分钟），有新版本时显示「更新」。更新使用智能体自带的更新命令（`pi update self`、`opencode upgrade`、`kiro-cli update`、`agy update`），输出实时显示；失败时保留退出码与输出，可使用全局代理重试。有会话正在回复时拒绝更新；空闲会话会先关闭，下次发送消息时按原会话恢复。Antigravity「独立 ACP 程序」由用户自行管理，不提供一键更新。
 - **工作目录**使用文件夹选择器（也可手动输入），目录不存在时直接提示。
 
+### 原生智能体的审批
+
+审批设置在「智能体助手」中（与 Codex 的审批策略同一位置），每个助手可以不同：
+
+| 智能体 | 原生审批控制 | 选项 |
+| --- | --- | --- |
+| Pi | Pi 自身没有权限系统，由 AIPP 扩展在工具调用前请求确认 | 「需要审批的操作」：所有工具调用（默认）/ 只读工具（read、grep、find、ls）直接执行 / 全部直接执行 |
+| Kiro | Autopilot | 关闭：逐项审批（默认）/ 开启：Kiro 自动执行 |
+| Antigravity | 原生权限模式 | 默认逐项审批（默认）/ 自动接受编辑 / 全部自动执行（yolo）；当前 agy 不提供所选模式时直接报错并列出可用模式 |
+| OpenCode | 本机配置的 `permissions` 规则 | AIPP 不改写（新旧版本的规则格式不同），默认几乎全部放行 |
+| Cursor | SDK 自带的自动审核（Auto-review） | SDK 不支持逐项人工审批，不会弹出确认 |
+
+Pi、OpenCode、Kiro、Antigravity 没有自带的审核模型，「审批请求的处理」可选人工审批（缺省）或 **AIPP 模型自动审核**：智能体发出的每个权限请求先交给「设置 → 辅助AI」中的审核模型，使用与 MCP 工具审核相同的规则，并告诉审核模型智能体的工作目录。判定安全时自动选择智能体提供的「本次允许」（从不替用户选择「始终允许」这类持久化选项），不弹窗也不发提醒；有风险、审核失败、超时、未配置审核模型或智能体没有提供「本次允许」时才弹出权限确认，并在弹窗中说明原因。审核期间（最长 20 秒）停止会话会撤销这次请求。修改这些设置后，下一次发送消息时会以新设置重启该会话（原会话继续恢复）。
+
 ### Kiro 与 Antigravity
 
 在设置中新增「Kiro」或「Antigravity」提供商，再在智能体助手中选择该提供商。两者使用官方原生 ACP 协议，拥有独立驱动身份、会话和权限归属；需要本机 Node.js 22.19 或更新版本，仅桌面支持。支持文本流、思考与工具活动、原生权限确认、选中的 AIPP MCP 工具、模型发现、停止和原会话恢复。恢复、模型或配置失败直接报错，不创建替代会话。
 
-**Kiro**：安装支持 V3 的官方 `kiro-cli`，先在终端运行 `kiro-cli login`。AIPP 固定启动 `kiro-cli acp --agent-engine=v3 --auth-method=cli`，每次新建或恢复会话均将 Autopilot 设为 `off`。提供商可以填写 Kiro Agent（原生 `mode` ID）和思考强度（`effortLevel`）；留空使用原生当前值，指定的值不受支持时直接报错。选择 Agent 后再应用模型和思考强度。Kiro 在新会话后才公布模型选项时，发现过程会短暂等待。
+**Kiro**：安装支持 V3 的官方 `kiro-cli`，先在终端运行 `kiro-cli login`。AIPP 固定启动 `kiro-cli acp --agent-engine=v3 --auth-method=cli`，每次新建或恢复会话都按助手设置写入 Autopilot（默认 `off`，见下方「原生智能体的审批」）。提供商可以填写 Kiro Agent（原生 `mode` ID）和思考强度（`effortLevel`）；留空使用原生当前值，指定的值不受支持时直接报错。选择 Agent 后再应用模型和思考强度。Kiro 在新会话后才公布模型选项时，发现过程会短暂等待。
 
 Kiro 提供「本次允许」时，AIPP 不显示其持久化允许选项；只有原生没有本次允许时才提供持久化允许，并标注会保存权限规则。停止以原生 prompt 结束为准；刚发送 prompt 时的取消会等到开始信号或短暂等待后发送，避免 Kiro 忽略过早的取消。
 
@@ -27,7 +41,7 @@ Kiro 提供「本次允许」时，AIPP 不显示其持久化允许选项；只�
 
 认证支持 Google 个人账号和 Gemini API Key。在提供商设置填写当前配置后点击「登录 Antigravity」；个人账号出现「在浏览器中继续登录」按钮，完成 Google 认证后等待 AIPP 显示原生认证成功。可以取消登录，最多等待 5 分钟。API Key 使用专用密码字段；认证错误保留原生原因。普通聊天与模型发现不会自动开启登录，过期时提示返回设置登录。
 
-Antigravity 的账号保存在应用数据目录 `agent-profiles/antigravity/<provider-id>`，与 IDE 和其他提供商实例分离，不继承主机的 Google 凭据变量。运行时临时文件归属当前桥接进程并在关闭或取消后清理。使用真实 AIPP 客户端身份，只展示该账号和运行程序实际公布的模型。会话启动会设为原生 `default` 权限模式，不继承 `yolo` 或 `auto_edit`。原生 `interaction_` 选择题显示为 AIPP 问题卡片，答案必须匹配选项（当前卡片支持 2–4 项，超出时明确报错）；其他请求显示为权限卡片。
+Antigravity 的账号保存在应用数据目录 `agent-profiles/antigravity/<provider-id>`，与 IDE 和其他提供商实例分离，不继承主机的 Google 凭据变量。运行时临时文件归属当前桥接进程并在关闭或取消后清理。使用真实 AIPP 客户端身份，只展示该账号和运行程序实际公布的模型。会话启动会设为助手选择的原生权限模式（默认 `default`），不继承之前保存的 `yolo` 或 `auto_edit`。原生 `interaction_` 选择题显示为 AIPP 问题卡片，答案必须匹配选项（当前卡片支持 2–4 项，超出时明确报错）；其他请求显示为权限卡片。
 
 当前未接入：Kiro steer/fork/compact、Antigravity 企业认证和 Agent Platform、多媒体输入、完整原生子代理执行树。真实登录、真实模型、工作区工具和 MCP 执行仍需在已安装运行程序的机器验收；协议回放测试不代表真实账号验证通过。
 

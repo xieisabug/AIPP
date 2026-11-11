@@ -46,7 +46,8 @@ impl AgentDriver for NativeDriver {
     fn matches_provider(&self, api_type: &str, _: &[LLMProviderConfig]) -> bool { api_type == self.0 }
     fn config_schema(&self) -> Vec<AgentConfigField> {
         ["agent_node_command", "agent_cli_command", "agent_sdk_directory", "acp_working_directory", "acp_env_vars",
-            "antigravity_runtime", "antigravity_harness", "antigravity_auth_method", "antigravity_api_key", "kiro_agent", "kiro_effort", "cursor_api_key"]
+            "antigravity_runtime", "antigravity_harness", "antigravity_auth_method", "antigravity_api_key", "kiro_agent", "kiro_effort", "cursor_api_key",
+            "pi_approval", "kiro_autopilot", "antigravity_mode", "tool_review_mode"]
             .iter().map(|name| AgentConfigField { name: name.to_string(), required: false, value_type: AgentConfigValueType::String }).collect()
     }
     fn capabilities(&self) -> AgentCapabilities { AgentCapabilities::baseline(self.0, self.declaration()) }
@@ -82,6 +83,8 @@ impl AgentDriver for NativeDriver {
 #[derive(Clone)]
 pub(crate) struct NativeConfig {
     node: String, pub cwd: PathBuf, env: HashMap<String, String>, wire: Value,
+    /// Assistant `tool_review_mode=auto_model`: native permission requests go to AIPP's review model first.
+    review: bool,
 }
 pub(crate) fn configure_instance(app: &tauri::AppHandle, provider_id: i64, driver: &str, config: &mut NativeConfig) -> Result<(), AppError> {
     if driver == "antigravity" {
@@ -139,10 +142,14 @@ pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMPro
     let mut env = agent_environment(models, providers, &node)?;
     if get("acp_additional_args").is_some() { return Err(error("Dedicated native agent adapters do not accept generic ACP additional arguments; remove acp_additional_args")); }
     if let Some(key) = get("antigravity_api_key") { env.insert("AIPP_ANTIGRAVITY_API_KEY".into(), key); }
+    let review = get("tool_review_mode").as_deref() == Some("auto_model");
     let wire = json!({ "cwd": cwd, "command": get("agent_cli_command"), "sdk_directory": get("agent_sdk_directory"), "model": model,
         "runtime": get("antigravity_runtime"), "harness": get("antigravity_harness"), "auth_method": get("antigravity_auth_method"),
-        "auth_key": get("antigravity_api_key"), "kiro_agent": get("kiro_agent"), "kiro_effort": get("kiro_effort") });
-    Ok(NativeConfig { node, cwd, env, wire })
+        "auth_key": get("antigravity_api_key"), "kiro_agent": get("kiro_agent"), "kiro_effort": get("kiro_effort"),
+        "pi_approval": get("pi_approval"), "kiro_autopilot": get("kiro_autopilot"), "antigravity_mode": get("antigravity_mode"),
+        // Part of the session signature, so changing the review mode restarts the native session.
+        "aipp_review": review });
+    Ok(NativeConfig { node, cwd, env, wire, review })
 }
 
 struct Prepared {
@@ -422,7 +429,8 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                                 write_frame(&mut stdin, &json!({"type":"reply","request_id":frame["id"],"value":reject["id"]})).await?;
                                 continue;
                             }
-                            queue_permission(&app, &identity, turn.id, &frame, tx.clone()).await?;
+                            let review = prepared.config.review.then(|| (driver.metadata().display_name, prepared.config.cwd.display().to_string()));
+                            queue_permission(&app, &identity, turn.id, &frame, tx.clone(), review).await?;
                         }
                         Some("question") => {
                             if cancel_deadline.is_some() {
@@ -596,7 +604,64 @@ fn persist_success(app: &tauri::AppHandle, turn: &ActiveTurn) -> Result<(), Stri
     Ok(())
 }
 
-async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity, turn: i64, frame: &Value, tx: mpsc::UnboundedSender<Command>) -> Result<(), String> {
+/// Pi passes its tool input as a JSON string; show and review the object itself, not escaped text.
+pub(crate) fn permission_parameters(input: &Value) -> String {
+    match input {
+        Value::String(text) => serde_json::from_str::<Value>(text).map(|value| value.to_string()).unwrap_or_else(|_| text.clone()),
+        other => other.to_string(),
+    }
+}
+
+/// After AIPP's review: answer with the advertised one-time allow, or ask the user with the reason.
+/// Never picks a persistent `allow_always` option on the user's behalf.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ReviewOutcome { Allow(String), Ask(String) }
+pub(crate) fn review_outcome(options: &[crate::api::ai::acp::AcpPermissionOptionPayload], verdict: &str, reason: &str) -> ReviewOutcome {
+    match verdict {
+        "safe" => match options.iter().find(|option| option.kind == "allow_once") {
+            Some(option) => ReviewOutcome::Allow(option.option_id.clone()),
+            None => ReviewOutcome::Ask(format!("自动审核判定安全（{reason}），但智能体没有提供「本次允许」选项，需要人工确认")),
+        },
+        "risky" => ReviewOutcome::Ask(format!("自动审核认为需要人工确认：{reason}")),
+        _ => ReviewOutcome::Ask(format!("自动审核未完成，需要人工确认：{reason}")),
+    }
+}
+
+/// Review first; the card (and its notification) only appears when the review does not clear the request.
+async fn review_permission(app: tauri::AppHandle, event: crate::api::ai::acp::AcpPermissionRequestEvent,
+    scope: super::approval::AgentRequestScope, agent: &'static str, working_directory: String) {
+    use crate::api::ai::acp::AcpPermissionState;
+    use super::approval::{AgentInteractionReply, AgentPermissionReply, AgentReplyTarget};
+    let conversation_id = event.conversation_id.unwrap_or_default();
+    let draft = crate::mcp::tool_review::review_agent_permission(&app, conversation_id, agent,
+        event.title.as_deref().unwrap_or("未命名操作"), event.parameters.as_deref().unwrap_or_default(), &working_directory).await;
+    let state = app.state::<AcpPermissionState>();
+    // Answered, cancelled or the turn ended while the model was reviewing.
+    if state.get_request(&event.request_id).await.is_none() { return; }
+    let reason = match review_outcome(&event.options, &draft.verdict, &draft.reason) {
+        ReviewOutcome::Allow(option_id) => {
+            let target = AgentReplyTarget { request_id: event.request_id.clone(), scope };
+            match crate::api::operation_api::resolve_agent_interaction_response(&app, target,
+                AgentInteractionReply::Permission(AgentPermissionReply::Select { option_id })).await {
+                Ok(_) => {
+                    tracing::info!(conversation_id, request_id = %event.request_id, agent, reason = %draft.reason, "Native agent permission approved by AIPP auto-review");
+                    return;
+                }
+                Err(error) => format!("自动审核判定安全，但自动放行失败，需要人工确认：{error}"),
+            }
+        }
+        ReviewOutcome::Ask(reason) => reason,
+    };
+    if state.get_request(&event.request_id).await.is_none() { return; }
+    let mut payload = serde_json::to_value(&event).unwrap_or_else(|_| json!({}));
+    payload["review"] = json!({ "verdict": draft.verdict, "reason": reason });
+    if let Err(error) = crate::api::operation_api::emit_permission_request_event(&app, crate::api::operation_api::ACP_PERMISSION_REQUEST_EVENT, Some(conversation_id), &payload) {
+        tracing::warn!(conversation_id, request_id = %event.request_id, error = %error, "Failed to show reviewed native agent permission");
+    }
+}
+
+async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity, turn: i64, frame: &Value, tx: mpsc::UnboundedSender<Command>,
+    review: Option<(&'static str, String)>) -> Result<(), String> {
     use crate::api::ai::acp::{AcpPermissionState, AcpPermissionRequestEvent, AcpPermissionOptionPayload, AcpPermissionDecision};
     let native_id = frame["id"].as_str().ok_or("Native permission request omitted ID")?.to_string();
     let request_id = format!("{}:{}:{}:{turn}:{native_id}", identity.driver_id, identity.conversation_id, identity.run_id.as_deref().unwrap_or_default());
@@ -610,12 +675,15 @@ async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity,
     let rejected = options.iter().find(|o|o.kind == "reject_once").ok_or("Permission request omitted rejection choice")?.option_id.clone();
     let event = AcpPermissionRequestEvent { request_id, conversation_id: Some(identity.conversation_id), agent_kind: Some(identity.driver_id.clone()),
         tool_call_id: native_id.clone(), title: frame["title"].as_str().map(str::to_string), kind: Some("native_agent_permission".into()),
-        parameters: Some(frame["input"].to_string()), options };
+        parameters: Some(permission_parameters(&frame["input"])), options };
     let guard = crate::mcp::builtin_mcp::superadmin::approval::NativeApprovalGuard::capture(app, identity.conversation_id, Some(turn), "native_agent.permission", json!(event))?;
     let scope = super::approval::AgentRequestScope::native(&identity.driver_id, identity.instance_id.as_deref().and_then(|id|id.parse().ok()), identity.conversation_id, identity.run_id.as_deref().unwrap_or_default());
     let (sender, receiver) = oneshot::channel();
-    app.state::<AcpPermissionState>().store_request_guarded(event.clone(), sender, scope, guard.clone()).await?;
-    crate::api::operation_api::emit_permission_request_event(app, crate::api::operation_api::ACP_PERMISSION_REQUEST_EVENT, Some(identity.conversation_id), &event)?;
+    app.state::<AcpPermissionState>().store_request_guarded(event.clone(), sender, scope.clone(), guard.clone()).await?;
+    match review {
+        Some((agent, working_directory)) => { tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, agent, working_directory)); }
+        None => crate::api::operation_api::emit_permission_request_event(app, crate::api::operation_api::ACP_PERMISSION_REQUEST_EVENT, Some(identity.conversation_id), &event)?,
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut value = match receiver.await { Ok(AcpPermissionDecision::Selected(option)) => option, _ => rejected.clone() };

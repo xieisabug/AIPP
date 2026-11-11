@@ -84,3 +84,14 @@ test('should forward Pi text and approval while accepting abort before the user 
   } finally { await runtime.close(); }
   assert.equal(events.some(e => e.type === 'fatal'), false);
 });
+
+test('should pass the assistant approval scope to the Pi extension and reject unknown scopes', async () => {
+  for (const [configured, expected] of [[undefined, 'all'], ['read_only', 'read_only'], ['none', 'none']]) {
+    const fixture = piFixture();
+    const runtime = await openPi({ cwd: process.cwd(), pi_approval: configured }, () => {}, fixture);
+    try { assert.equal(fixture.launches[0][2].env.AIPP_PI_APPROVAL, expected); } finally { await runtime.close(); }
+  }
+  const fixture = piFixture();
+  await assert.rejects(openPi({ cwd: process.cwd(), pi_approval: 'yolo' }, () => {}, fixture), /Unsupported Pi approval scope 'yolo'/);
+  assert.equal(fixture.launches.length, 0, 'an invalid scope never starts Pi');
+});

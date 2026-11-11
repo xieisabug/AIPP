@@ -1,9 +1,14 @@
 import { deadline, jsonLines, launch, splitModel, stopChild } from './common.mjs';
 import { fileURLToPath } from 'node:url';
 
+// all: every tool call; read_only: read/grep/find/ls run without asking; none: Pi's native behaviour.
+export const PI_APPROVAL_SCOPES = ['all', 'read_only', 'none'];
+
 export async function openPi(config, emit, dependencies = {}) {
+  const approval = config.pi_approval || 'all';
+  if (!PI_APPROVAL_SCOPES.includes(approval)) throw new Error(`Unsupported Pi approval scope '${approval}'; expected ${PI_APPROVAL_SCOPES.join(', ')}`);
   const child = (dependencies.launch || launch)(config.command || 'pi', ['--mode', 'rpc', '--extension', fileURLToPath(new URL('./pi-extension.mjs', import.meta.url))],
-    { cwd: config.cwd, env: { ...process.env, ...(config.mcp ? { AIPP_PI_MCP: JSON.stringify(config.mcp) } : {}) } });
+    { cwd: config.cwd, env: { ...process.env, AIPP_PI_APPROVAL: approval, ...(config.mcp ? { AIPP_PI_MCP: JSON.stringify(config.mcp) } : {}) } });
   let sequence = 0, turn = null, failure, session, closing = false;
   const pending = new Map();
   const questions = new Map();

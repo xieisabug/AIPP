@@ -42,6 +42,8 @@ export interface AcpPermissionRequest {
     kind?: string;
     parameters?: string;
     options: AcpPermissionOption[];
+    /** Present when AIPP's model review ran first and handed the decision to the user. */
+    review?: { verdict: string; reason: string };
 }
 
 interface OperationPermissionDialogProps {
@@ -260,6 +262,11 @@ export function AcpPermissionDialog({
                     <AlertDialogDescription asChild>
                         <div className={permissionDialogBodyClassName}>
                             <p>AI 助手请求执行以下工具调用：</p>
+                            {request.review ? (
+                                <p role="status" className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-foreground">
+                                    {request.review.reason}
+                                </p>
+                            ) : null}
                             <div className={permissionDetailPanelClassName}>
                                 <div className="flex items-start gap-2 text-sm">
                                     <span className="shrink-0 font-medium text-foreground">标题:</span>

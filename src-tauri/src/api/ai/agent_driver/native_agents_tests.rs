@@ -85,3 +85,46 @@ async fn test_native_agents_control_preserves_protocol_errors_without_retry() {
     actor.await.unwrap();
     assert!(control.cancel_current_prompt().await.is_err());
 }
+
+fn permission_option(id: &str, kind: &str) -> crate::api::ai::acp::AcpPermissionOptionPayload {
+    crate::api::ai::acp::AcpPermissionOptionPayload { option_id: id.into(), name: id.into(), kind: kind.into() }
+}
+
+/// AIPP auto-review only ever answers with the one-time allow; everything else goes to the user with the reason.
+#[test]
+fn test_native_agents_review_outcome_allows_once_and_explains_holds() {
+    let options = [permission_option("always", "allow_always"), permission_option("once", "allow_once"), permission_option("deny", "reject_once")];
+    assert_eq!(review_outcome(&options, "safe", "只读查询"), ReviewOutcome::Allow("once".into()));
+    match review_outcome(&options, "risky", "会删除工作区外的文件") {
+        ReviewOutcome::Ask(reason) => assert!(reason.contains("会删除工作区外的文件")),
+        other => panic!("risky requests must ask the user: {other:?}"),
+    }
+    match review_outcome(&options, "error", "自动审核模型未配置") {
+        ReviewOutcome::Ask(reason) => assert!(reason.contains("未完成") && reason.contains("自动审核模型未配置")),
+        other => panic!("failed reviews must ask the user: {other:?}"),
+    }
+    let only_always = [permission_option("always", "allow_always"), permission_option("deny", "reject_once")];
+    match review_outcome(&only_always, "safe", "安全") {
+        ReviewOutcome::Ask(reason) => assert!(reason.contains("没有提供「本次允许」")),
+        other => panic!("a persistent allow is never chosen automatically: {other:?}"),
+    }
+}
+
+#[test]
+fn test_native_agents_review_and_permission_settings_follow_the_assistant() {
+    use crate::db::assistant_db::AssistantModelConfig;
+    let assistant = |name: &str, value: &str| AssistantModelConfig { id: 0, assistant_id: 1, assistant_model_id: 0, name: name.into(), value: Some(value.into()), value_type: "string".into() };
+    let config = configuration(&[assistant("tool_review_mode", "auto_model"), assistant("pi_approval", "read_only")], &[], None).unwrap();
+    assert!(config.review);
+    assert_eq!(config.wire["pi_approval"], "read_only");
+    assert_eq!(config.wire["aipp_review"], true, "the review mode is part of the session signature");
+    let manual = configuration(&[assistant("tool_review_mode", "off")], &[], None).unwrap();
+    assert!(!manual.review);
+}
+
+#[test]
+fn test_native_agents_permission_parameters_unwrap_json_text() {
+    assert_eq!(permission_parameters(&json!("{\"command\":\"ls -la\"}")), "{\"command\":\"ls -la\"}");
+    assert_eq!(permission_parameters(&json!({"path":"a.txt"})), "{\"path\":\"a.txt\"}");
+    assert_eq!(permission_parameters(&json!("plain text")), "plain text");
+}

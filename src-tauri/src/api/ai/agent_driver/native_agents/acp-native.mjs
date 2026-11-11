@@ -56,6 +56,13 @@ export async function antigravityLaunch(config, environment = process.env, fs = 
 }
 
 const choices = option => (option?.options ?? []).flatMap(entry => 'value' in entry ? [entry] : entry.options ?? []);
+
+// Antigravity permission modes the assistant may choose, with the native IDs each may be advertised as.
+export const ANTIGRAVITY_MODES = {
+  default: ['default'],
+  auto_edit: ['auto_edit', 'autoEdit', 'accept-edits', 'accept_edits', 'acceptEdits'],
+  yolo: ['yolo'],
+};
 const snapshotOptions = options => options.filter(option => option.type === 'select').map(option => ({
   id: option.id, name: option.name || option.id, category: option.category || option.id,
   current_value: option.currentValue, options: choices(option).map(choice => ({
@@ -243,17 +250,25 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
     }
     updateOptions(result.configOptions);
     if (driver === 'kiro') {
-      // V3 starts with Autopilot enabled. Write off even before it advertises
-      // options, and fail if the native runtime rejects supervised operation.
-      const response = await request('session/set_config_option', { sessionId: session, configId: 'autopilot', value: 'off' });
+      // V3 starts with Autopilot enabled. Write the chosen state (off unless the assistant
+      // opted in) even before it advertises options, and fail if Kiro rejects it.
+      const autopilot = config.kiro_autopilot || 'off';
+      if (!['off', 'on'].includes(autopilot)) throw new Error(`Unsupported Kiro Autopilot setting '${autopilot}'; expected off or on`);
+      const response = await request('session/set_config_option', { sessionId: session, configId: 'autopilot', value: autopilot });
       updateOptions(response.configOptions);
       if (config.kiro_agent) await configure('mode', config.kiro_agent);
     } else {
-      // Never inherit a persisted yolo/auto_edit permission mode.
+      // Never inherit a persisted yolo/auto_edit mode; apply the assistant's choice (default: supervised).
+      const wanted = config.antigravity_mode || 'default';
+      const aliases = ANTIGRAVITY_MODES[wanted];
+      if (!aliases) throw new Error(`Unsupported Antigravity permission mode '${wanted}'; expected ${Object.keys(ANTIGRAVITY_MODES).join(', ')}`);
+      const advertised = result.modes?.availableModes?.map(mode => mode.id) ?? [];
       const mode = options.find(option => option.category === 'mode' || option.id === 'mode');
-      if (result.modes?.availableModes?.some(mode => mode.id === 'default')) await request('session/set_mode', { sessionId: session, modeId: 'default' });
-      else if (mode) await configure(mode.id, 'default');
-      else throw new Error('Antigravity did not advertise supervised default mode');
+      const modeId = aliases.find(id => advertised.includes(id));
+      const optionValue = mode && aliases.find(id => choices(mode).some(choice => choice.value === id));
+      if (modeId) await request('session/set_mode', { sessionId: session, modeId });
+      else if (optionValue) await configure(mode.id, optionValue);
+      else throw new Error(`Antigravity did not advertise the ${wanted} permission mode (advertised: ${[...advertised, ...(mode ? choices(mode).map(choice => choice.value) : [])].join(', ') || 'none'})`);
     }
     if (config.model) await configure('model', config.model);
     if (config.kiro_effort) {

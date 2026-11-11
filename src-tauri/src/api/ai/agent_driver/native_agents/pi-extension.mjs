@@ -2,11 +2,17 @@ import { spawn } from 'node:child_process';
 import { jsonLines } from './common.mjs';
 import { Type } from 'typebox';
 
+// Pi's built-in tools that only read. Everything else (bash, edit, write, MCP tools) still asks.
+export const READ_ONLY_TOOLS = new Set(['read', 'grep', 'find', 'ls']);
+
 // Runs inside Pi, using its extension/tool API. A failed MCP handshake must stop
 // admission in the parent bridge instead of producing a session missing tools.
 export default async function aippExtension(pi) {
   try {
-    pi.on('tool_call', async (event, context) => {
+    const approval = process.env.AIPP_PI_APPROVAL || 'all';
+    if (!['all', 'read_only', 'none'].includes(approval)) throw new Error(`Unsupported Pi approval scope '${approval}'`);
+    if (approval !== 'none') pi.on('tool_call', async (event, context) => {
+      if (approval === 'read_only' && READ_ONLY_TOOLS.has(event.toolName)) return;
       if (!(await context.ui.confirm(`允许 Pi 使用 ${event.toolName}`, JSON.stringify(event.input)))) {
         return { block: true, reason: 'User denied this tool call' };
       }

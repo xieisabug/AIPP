@@ -16,6 +16,7 @@ import { useFilteredProviders } from "@/hooks/useFilteredProviders";
 import { useIsMobilePlatform, usePlatform } from "@/hooks/use-platform";
 import type { PluginAssistantFormFieldContribution } from "@/services/PluginRuntime";
 import type { AgentModelOption } from "@/utils/agentDefaults";
+import { buildNativeAgentApprovalFields } from "./nativeAgentApprovalFields";
 
 function AutoReviewModelMissingHint() {
     return React.createElement(
@@ -179,6 +180,17 @@ export const useAssistantFormConfig = ({
                 "codex_app_server";
             const isNativeAgentProvider = ["pi", "cursor", "opencode", "kiro", "antigravity"].includes(
                 agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? ""
+            );
+            const agentApiType = agentProviders.find((provider) => provider.id.toString() === currentProviderId)?.api_type ?? "";
+            const nativeAgentApprovalFields = buildNativeAgentApprovalFields(
+                agentApiType,
+                getAcpConfigValue,
+                handleConfigChange,
+                Boolean(
+                    getConfigValue("conversation_summary", "auto_review_model").trim()
+                    && getConfigValue("conversation_summary", "auto_review_provider_id").trim()
+                ),
+                () => React.createElement(AutoReviewModelMissingHint),
             );
 
             return [
@@ -353,6 +365,7 @@ export const useAssistantFormConfig = ({
                           },
                       ]
                     : []),
+                ...nativeAgentApprovalFields,
                 {
                     key: "mcp_config",
                     config: {

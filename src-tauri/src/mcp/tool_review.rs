@@ -640,6 +640,38 @@ async fn review_with_configured_model(
     tool_name: &str,
     parameters: &str,
 ) -> ReviewRecordDraft {
+    let definition = load_tool_review_definition(app_handle, call_id, server_name, tool_name);
+    review_with_definition(app_handle, conversation_id, call_id, server_name, tool_name, parameters, definition).await
+}
+
+/// 原生智能体（Pi / OpenCode / Kiro / Antigravity）的权限请求使用同一审核模型与规则。
+/// 这些请求不对应 MCP 调用记录，不写 `tool_review_log`；结果由调用方决定放行或交给用户。
+pub async fn review_agent_permission(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    agent: &str,
+    title: &str,
+    parameters: &str,
+    working_directory: &str,
+) -> ReviewRecordDraft {
+    let definition = ToolReviewDefinition {
+        description: format!(
+            "{agent} 编码智能体在本机执行操作前请求授权（文件读写、命令、联网等由智能体自身完成）。智能体的工作目录（工作区）是：{working_directory}"
+        ),
+        input_schema: String::new(),
+    };
+    review_with_definition(app_handle, conversation_id, 0, &format!("{agent} 智能体"), title, parameters, Some(definition)).await
+}
+
+async fn review_with_definition(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    call_id: i64,
+    server_name: &str,
+    tool_name: &str,
+    parameters: &str,
+    definition: Option<ToolReviewDefinition>,
+) -> ReviewRecordDraft {
     let started = Instant::now();
     let config_feature_map = load_feature_config_map(app_handle).await;
     let (model_code, provider_id) = match configured_review_model(&config_feature_map) {
@@ -750,7 +782,6 @@ async fn review_with_configured_model(
         }
     };
 
-    let definition = load_tool_review_definition(app_handle, call_id, server_name, tool_name);
     let user_prompt =
         build_review_user_prompt(server_name, tool_name, parameters, definition.as_ref());
     let chat_request = build_chat_request_from_messages(

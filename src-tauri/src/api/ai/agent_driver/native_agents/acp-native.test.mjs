@@ -228,3 +228,26 @@ test('should isolate Antigravity credentials and clean only the owned temporary 
   await assert.rejects(antigravityLaunch({ profile, runtime: 'standalone' }, {}, fs), /matching localharness/);
   await assert.rejects(antigravityLaunch({ profile, auth_method: 'gemini-api-key' }, {}, fs), /key is missing/);
 });
+
+test('should keep Kiro Autopilot off by default and enable it only when the assistant opts in', async () => {
+  const f = fixture(); const runtime = await f.open('kiro', { kiro_autopilot: 'on' });
+  try {
+    assert.deepEqual(f.commands.find(c => c.method === 'session/set_config_option').params, { sessionId: 's1', configId: 'autopilot', value: 'on' });
+  } finally { await runtime.close(); }
+  await assert.rejects(fixture().open('kiro', { kiro_autopilot: 'always' }), /Unsupported Kiro Autopilot setting 'always'/);
+});
+
+test('should apply the chosen Antigravity permission mode through its advertised alias', async () => {
+  const modes = { availableModes: [{ id: 'default' }, { id: 'autoEdit' }, { id: 'yolo' }] };
+  const f = fixture({ respond: c => c.method === 'session/new' ? { result: { sessionId: 's1', configOptions: [], modes } } : undefined });
+  const runtime = await f.open('antigravity', { antigravity_mode: 'auto_edit' });
+  try {
+    assert.deepEqual(f.commands.find(c => c.method === 'session/set_mode').params, { sessionId: 's1', modeId: 'autoEdit' });
+  } finally { await runtime.close(); }
+});
+
+test('should name the advertised Antigravity modes when the chosen one is missing', async () => {
+  const f = fixture({ respond: c => c.method === 'session/new' ? { result: { sessionId: 's1', configOptions: [], modes: { availableModes: [{ id: 'default' }, { id: 'plan' }] } } } : undefined });
+  await assert.rejects(f.open('antigravity', { antigravity_mode: 'yolo' }), /did not advertise the yolo permission mode \(advertised: default, plan\)/);
+  await assert.rejects(fixture().open('antigravity', { antigravity_mode: 'turbo' }), /Unsupported Antigravity permission mode 'turbo'/);
+});

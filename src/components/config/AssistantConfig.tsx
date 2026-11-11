@@ -20,6 +20,7 @@ import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState, ConfigPageLo
 import { useAssistantTypePlugin } from "@/hooks/assistant/useAssistantTypePlugin";
 import { useAssistantOperations } from "@/hooks/assistant/useAssistantOperations";
 import { useAssistantFormConfig } from "@/hooks/assistant/useAssistantFormConfig";
+import { isAgentAssistantField } from "@/hooks/assistant/nativeAgentApprovalFields";
 import { useDialogStates } from "@/hooks/assistant/useDialogStates";
 import { AssistantFormRenderer } from "./assistant/AssistantFormRenderer";
 import { AssistantDialogs } from "./assistant/AssistantDialogs";
@@ -693,7 +694,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                     // ACP/Codex 助手专用字段（assistant_type === 4）
                     const isAcpField =
-                        (key.startsWith("acp_") || key.startsWith("codex_")) &&
+                        isAgentAssistantField(key) &&
                         currentAssistant.assistant.assistant_type === 4;
                     if (isAcpField) {
                         return true;
@@ -731,7 +732,7 @@ const AssistantConfig: React.FC<AssistantConfigProps> = ({ pluginList, navigateT
 
                     // ACP/Codex 助手专用字段
                     const isAcpField =
-                        (key.startsWith("acp_") || key.startsWith("codex_")) &&
+                        isAgentAssistantField(key) &&
                         currentAssistant.assistant.assistant_type === 4;
                     if (isAcpField) {
                         valueType = "string";
