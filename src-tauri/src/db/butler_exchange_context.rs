@@ -43,7 +43,8 @@ pub fn context(conn: &Connection, names: &HashMap<i64, String>, conversation: i6
                 "SELECT content FROM message WHERE conversation_id=?1 AND message_type='user'
                  AND julianday(created_time)<=julianday(?2) AND CASE WHEN json_valid(metadata_json)
                     THEN coalesce(json_extract(metadata_json,'$.origin'),'') NOT IN ('internal','butler_peer') ELSE 1 END
-                 ORDER BY id DESC LIMIT 1", params![owner,created], |r| r.get(0)).optional()?;
+                 ORDER BY id DESC LIMIT 1", params![owner,created], |r| r.get(0)).optional()?
+                .map(|text: String| crate::utils::turn_context::visible(&text).to_owned());
             let task_posts: Vec<_> = posts.iter().filter(|p| p.task_id == Some(id)).collect();
             let mut messages = vec![ContextMessage {sender:sender.clone(),recipient:recipient.clone(),text:goal}];
             if let Some(reply) = task_posts.iter().find(|p| p.task_reply && !p.text.is_empty()) {
@@ -52,7 +53,8 @@ pub fn context(conn: &Connection, names: &HashMap<i64, String>, conversation: i6
             let status = task_posts.last().map(|p| p.status.clone()).unwrap_or_else(|| "waiting".into());
             episodes.push(Episode {prompt,messages,status});
         } else {
-            let prompt = conn.query_row("SELECT content FROM message WHERE id=?1 AND message_type='user'", [id], |r| r.get(0)).optional()?;
+            let prompt = conn.query_row("SELECT content FROM message WHERE id=?1 AND message_type='user'", [id], |r| r.get(0)).optional()?
+                .map(|text: String| crate::utils::turn_context::visible(&text).to_owned());
             let mut stmt = conn.prepare("SELECT sender,recipient,body,reply,state FROM butler_peer_exchange WHERE root=?1 ORDER BY round_no,id")?;
             let rows = stmt.query_map([id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?)))?;
             let mut messages = Vec::new();

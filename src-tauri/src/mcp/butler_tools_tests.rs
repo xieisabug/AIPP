@@ -19,7 +19,7 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
                 .map(|t|t.name.as_str()).collect();
             // 受托助手可在自己的会话里向用户提问；其余界面交互工具仍按助手自身配置。
             assert!(!names.contains(&"preview_code"),"{kind} should not force preview tools");
-            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","read_work_context","continue_work","resume_work","superadmin_execute","superadmin_undo","ask_user_question"] {
+            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","read_work_context","continue_work","resume_work","butler_memory","superadmin_execute","superadmin_undo","ask_user_question"] {
                 assert!(names.contains(&expected),"{kind} dynamic={dynamic} missing {expected}");
             }
             assert!(configured.iter().all(|s|s.is_enabled&&s.tools.iter().all(|t|t.is_enabled)));
@@ -36,7 +36,7 @@ fn test_butler_tools_group_member_keeps_admin_and_questions_without_contact_coll
     for tool in &mut configured[0].tools { tool.is_enabled=true; }
     merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin"),server(3,"aipp:ui_interaction")],"butler_group_member");
     let names:Vec<_>=configured.iter().flat_map(|s|s.tools.iter()).map(|t|t.name.as_str()).collect();
-    for expected in ["superadmin_execute","superadmin_undo","ask_user_question"] {
+    for expected in ["butler_memory","superadmin_execute","superadmin_undo","ask_user_question"] {
         assert!(names.contains(&expected),"group member missing {expected}");
     }
     for hidden in ["message_bot","list_assistants","search_bot_history","spawn_task_conversation"] {
@@ -44,6 +44,8 @@ fn test_butler_tools_group_member_keeps_admin_and_questions_without_contact_coll
     }
     assert!(!is_direct_tool("butler_group_member",Some("aipp:agent"),"message_bot"));
     assert!(is_direct_tool("butler_group_member",Some("aipp:superadmin"),"superadmin_execute"));
+    // 群成员读写的是本群记忆，所以记忆工具在群里保留。
+    assert!(is_direct_tool("butler_group_member",Some("aipp:agent"),"butler_memory"));
 }
 
 #[test]
@@ -64,10 +66,11 @@ fn test_butler_tools_do_not_grant_administration_to_normal_chats() {
         assert!(configured.is_empty());
         assert!(!is_direct_tool(kind,Some("aipp:superadmin"),"superadmin_execute"));
         assert!(!is_direct_tool(kind,Some("aipp:agent"),"list_assistants"));
+        assert!(!is_direct_tool(kind,Some("aipp:agent"),"butler_memory"));
         let mut configured=vec![server(1,"aipp:agent"),server(2,"aipp:superadmin")];
         merge_tools(&mut configured,Vec::new(),kind);
         assert_eq!(configured.len(),1);
-        assert!(!configured[0].tools.iter().any(|t|crate::api::butler_peer::is_peer_tool(&t.name)));
+        assert!(!configured[0].tools.iter().any(|t|crate::api::butler_peer::is_peer_tool(&t.name)||t.name=="butler_memory"));
     }
     assert!(!is_direct_tool("butler_contact",Some("aipp:superadmin"),"not_a_tool"));
     assert!(!is_direct_tool("butler_contact",Some("aipp:operation"),"execute_command"));
@@ -81,10 +84,10 @@ async fn test_butler_tools_have_direct_schemas_in_native_bridge_and_dynamic_prom
     let native:serde_json::Value=serde_json::from_str(&payload).unwrap();
     let names:Vec<_>=native.as_array().unwrap().iter().flat_map(|s|s["tools"].as_array().unwrap())
         .map(|t|t["tool_name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"resume_work"));assert!(names.contains(&"superadmin_execute"));assert!(names.contains(&"get_assistant_details"));
+    assert!(names.contains(&"butler_memory"));assert!(names.contains(&"resume_work"));assert!(names.contains(&"superadmin_execute"));assert!(names.contains(&"get_assistant_details"));
     let info=MCPInfoForAssistant {enabled_servers:servers,use_native_toolcall:false,dynamic_loading_enabled:true};
     let prompt=super::super::prompt::format_mcp_prompt(String::new(),&info).await;
-    assert!(prompt.contains("superadmin_execute"));assert!(prompt.contains("get_assistant_details"));
+    assert!(prompt.contains("butler_memory"));assert!(prompt.contains("superadmin_execute"));assert!(prompt.contains("get_assistant_details"));
     assert!(prompt.contains("server_name: aipp:superadmin"));
     let (tools,mapping)=crate::api::ai_api::build_tools_with_mapping(&info.enabled_servers);
     assert_eq!(tools.len(),names.len());

@@ -2,7 +2,26 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ButlerGroupDetail } from "@/data/ButlerGroup";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
+import { clearAllMockHandlers, mockInvokeHandler } from "@/__tests__/mocks/tauri";
 import ButlerGroupChat from "./ButlerGroupChat";
+
+// 群聊用的是通用输入框 InputArea：光标坐标依赖真实排版，测试环境里固定掉。
+vi.mock("@/utils/caretCoordinates", () => ({ getCaretCoordinates: () => ({ cursorLeft: 0, cursorTop: 0 }) }));
+// 群聊记录走与私聊相同的消息列表。显示设置打开“合并助手消息”，用来确认群里不同成员的发言不会被并成一个气泡。
+vi.mock("@/hooks/useDisplayConfig", () => ({
+    useDisplayConfig: () => ({
+        config: {}, isLoading: false, error: null, isUserMessageMarkdownEnabled: false,
+        isMergeAssistantMessages: true, isShowThinking: false, isPreviewCodeShowToolbar: false, refreshConfig: () => {},
+    }),
+}));
+// 列表的跳转高亮用 ShineBorder 呈现，换成可查询的标记。
+vi.mock("@/components/magicui/shine-border", () => ({ ShineBorder: () => <span data-testid="shine" /> }));
+
+class ResizeObserverMock {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+}
 
 const api = vi.hoisted(() => ({
     getButlerGroup: vi.fn(), listOlderButlerGroupMessages: vi.fn(), postButlerGroupMessage: vi.fn(),
@@ -10,6 +29,10 @@ const api = vi.hoisted(() => ({
     renameButlerGroup: vi.fn(), deleteButlerGroup: vi.fn(), onButlerGroupChanged: vi.fn(),
 }));
 vi.mock("@/services/butlerGroupService", () => api);
+vi.mock("@/services/butlerMemoryService", () => ({
+    listButlerMemories: vi.fn().mockResolvedValue([]), updateButlerMemory: vi.fn(), deleteButlerMemory: vi.fn(),
+    getButlerMemorySource: vi.fn(), onButlerMemoryChanged: vi.fn().mockResolvedValue(() => {}),
+}));
 const askUser = vi.hoisted(() => vi.fn((_: { conversationId: number }) => ({ isDialogOpen: false } as Record<string, unknown>)));
 vi.mock("@/hooks/useInlineInteraction", () => ({ useAskUserQuestion: askUser }));
 vi.mock("@/components/InlineInteractionCards", () => ({
@@ -60,8 +83,15 @@ afterEach(() => {
 
 beforeEach(() => {
     vi.clearAllMocks();
+    clearAllMockHandlers();
+    // 通用输入框加载的 ! / # / 斜杠 / 全部助手 补全源；群聊的 @ 只用本群成员，不能出现全部助手里的人。
+    mockInvokeHandler("get_bang_list", () => []);
+    mockInvokeHandler("get_assistants", () => [{ id: 99, name: "写作外包" }]);
+    mockInvokeHandler("get_artifacts_for_completion", () => []);
+    mockInvokeHandler("get_skills_for_slash_completion", () => []);
     askUser.mockImplementation(() => ({ isDialogOpen: false }));
     vi.stubGlobal("localStorage", memoryStorage());
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     const posted: ButlerGroupDetail["messages"] = [];
     api.getButlerGroup.mockImplementation(async () => {
         const current = detail();
@@ -108,7 +138,7 @@ describe("ButlerGroupChat", () => {
         expect(api.postButlerGroupMessage).not.toHaveBeenCalled();
     });
 
-    it("should jump to the user message a member reply quotes", async () => {
+    it("should jump to and highlight the user message a member reply quotes", async () => {
         const base = detail();
         api.getButlerGroup.mockResolvedValue({ ...base, messages: [...base.messages, {
             group_id: 7, seq: 4, sender_member: 1, sender_assistant: 11, sender_name: "总管家", kind: "message", body: "周报我来汇总",
@@ -116,7 +146,7 @@ describe("ButlerGroupChat", () => {
         }] });
         const scrolled = vi.fn();
         const original = HTMLElement.prototype.scrollIntoView;
-        HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { scrolled(this.dataset.aippGroupSeq); };
+        HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { scrolled(this.dataset.messageId); };
         try {
             renderChat();
             const reply = await screen.findByText("周报我来汇总");
@@ -124,10 +154,40 @@ describe("ButlerGroupChat", () => {
                 .getByTitle("查看被引用的消息");
             expect(label).toHaveTextContent("我：帮我写周报");
             fireEvent.click(label);
-            expect(scrolled).toHaveBeenCalledWith("2");
+            // 走与私聊相同的跳转链路：滚到被引用的那条（用户发言在列表里的 id 是 -序号）并闪烁高亮
+            await waitFor(() => expect(scrolled).toHaveBeenCalledWith("-2"));
+            const quotedRow = screen.getByText("帮我写周报").closest("[data-aipp-slot='butler-group-user-message']") as HTMLElement;
+            await waitFor(() => expect(within(quotedRow).getByTestId("shine")).toBeInTheDocument());
         } finally {
             HTMLElement.prototype.scrollIntoView = original;
         }
+    });
+
+    it("should keep each member reply in its own bubble when merge display is on", async () => {
+        const base = detail();
+        api.getButlerGroup.mockResolvedValue({ ...base, messages: [...base.messages, {
+            group_id: 7, seq: 4, sender_member: 1, sender_assistant: 11, sender_name: "总管家", kind: "message", body: "我补充数据",
+            reply_to: null, created_at: "2026-11-09 08:02:30", source_conversation_id: 101, source_message_id: 9003,
+        }] });
+        renderChat();
+        await screen.findByText("我补充数据");
+        const rows = document.querySelectorAll("[data-aipp-slot='butler-group-member-message']");
+        expect(rows).toHaveLength(2);
+        expect(within(rows[0] as HTMLElement).getByText("写作助手")).toBeInTheDocument();
+        expect(within(rows[1] as HTMLElement).getByText("总管家")).toBeInTheDocument();
+    });
+
+    it("should load the whole history at once when the group has older messages", async () => {
+        const base = detail({ has_more: true });
+        api.getButlerGroup.mockResolvedValue(base);
+        api.listOlderButlerGroupMessages.mockResolvedValue([
+            { group_id: 7, seq: 0, sender_member: null, sender_assistant: null, sender_name: "我", kind: "message", body: "很早以前的话",
+                reply_to: null, created_at: "2026-11-08 08:00:00", source_conversation_id: null, source_message_id: null },
+        ]);
+        renderChat();
+        expect(await screen.findByText("很早以前的话")).toBeInTheDocument();
+        expect(api.listOlderButlerGroupMessages).toHaveBeenCalledWith(7, 1, expect.any(Number));
+        expect(screen.queryByText("查看更早的消息")).toBeNull();
     });
 
     it("should quote a member reply with the private chat quote button and chip", async () => {
@@ -148,8 +208,26 @@ describe("ButlerGroupChat", () => {
         const input = await screen.findByLabelText("群聊消息") as HTMLTextAreaElement;
         fireEvent.change(input, { target: { value: "@写", selectionStart: 2 } });
         const option = await screen.findByRole("option", { name: /写作助手/ });
-        fireEvent.mouseDown(option);
+        // 候选只来自本群成员，不是全部助手
+        expect(screen.queryByRole("option", { name: /写作外包/ })).toBeNull();
+        fireEvent.click(option);
         expect(input.value).toBe("@写作助手 ");
+    });
+
+    it("should offer everyone in @ suggestions when the group has several members", async () => {
+        renderChat();
+        const input = await screen.findByLabelText("群聊消息");
+        fireEvent.change(input, { target: { value: "@", selectionStart: 1 } });
+        const list = await screen.findByRole("listbox");
+        const names = within(list).getAllByRole("option")
+            .map(option => option.querySelector(".assistant-completion-name")?.textContent);
+        expect(names).toEqual(["总管家", "写作助手", "所有人"]);
+    });
+
+    it("should not offer attachments when chatting in a group", async () => {
+        renderChat();
+        await screen.findByLabelText("群聊消息");
+        expect(screen.queryByLabelText("添加附件")).toBeNull();
     });
 
     it("should show who is typing and offer stop when members are replying", async () => {
@@ -159,10 +237,22 @@ describe("ButlerGroupChat", () => {
         renderChat();
         // 两位成员同时回复
         expect(await screen.findByRole("status", { name: "写作助手 正在输入" })).toBeInTheDocument();
-        expect(screen.getByRole("status", { name: "总管家 正在输入" })).toBeInTheDocument();
+        expect(await screen.findByRole("status", { name: "总管家 正在输入" })).toBeInTheDocument();
         expect(screen.getByText("总管家、写作助手 正在输入…")).toBeInTheDocument();
-        fireEvent.click(screen.getByLabelText("停止回复"));
+        // 与私聊同一个发送键：输入为空时是停止
+        fireEvent.click(screen.getByLabelText("停止"));
         await waitFor(() => expect(api.stopButlerGroupReplies).toHaveBeenCalledWith(7));
+    });
+
+    it("should send instead of stopping when typing while members are replying", async () => {
+        api.getButlerGroup.mockResolvedValue(detail({ turns: [{ member_id: 2, state: "running", round: 1, rounds: 1 }] }));
+        renderChat();
+        const input = await screen.findByLabelText("群聊消息");
+        await screen.findByRole("status", { name: "写作助手 正在输入" });
+        fireEvent.change(input, { target: { value: "先停一下，改成三段" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+        await waitFor(() => expect(api.postButlerGroupMessage).toHaveBeenCalledWith(7, expect.any(String), "先停一下，改成三段", null));
+        expect(api.stopButlerGroupReplies).not.toHaveBeenCalled();
     });
 
     it("should show discussion progress when members are discussing in rounds", async () => {
@@ -181,7 +271,7 @@ describe("ButlerGroupChat", () => {
         renderChat();
         expect(await screen.findByText("写作助手 想问你")).toBeInTheDocument();
         expect(screen.getByText("周报发给谁？")).toBeInTheDocument();
-        expect(screen.getByRole("status", { name: "总管家 正在输入" })).toBeInTheDocument();
+        expect(await screen.findByRole("status", { name: "总管家 正在输入" })).toBeInTheDocument();
         expect(screen.queryByText("总管家 想问你")).toBeNull();
     });
 

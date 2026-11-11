@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { ArrowUp, Loader2, Square, Trash2, UserMinus, UserPlus, Users } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Trash2, UserMinus, UserPlus, Users } from "lucide-react";
 import { toast } from "sonner";
 import IconButton from "@/components/IconButton";
-import { AskUserQuestionCard } from "@/components/InlineInteractionCards";
+import InputArea from "@/components/conversation/InputArea";
+import type { MentionCandidate } from "@/components/conversation/AssistantCompletionList";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -11,8 +11,6 @@ import {
     AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
     AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { useAskUserQuestion } from "@/hooks/useInlineInteraction";
-import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import type { AssistantListItem } from "@/data/Assistant";
 import { type ButlerGroupDetail, type ButlerGroupMember, type ButlerGroupMessage } from "@/data/ButlerGroup";
 import * as groups from "@/services/butlerGroupService";
@@ -20,13 +18,10 @@ import { ConversationStatsDialog } from "@/components/token-statistics";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupAvatar from "./ButlerGroupAvatar";
 import ButlerGroupMemberPicker from "./ButlerGroupMemberPicker";
-import ButlerGroupMessageRow, { ButlerGroupSpeaker } from "./ButlerGroupMessageRow";
-import { ButlerQuoteChip, ButlerQuoteContext, ButlerQuoteJumpContext, type ButlerQuoteTarget } from "./ButlerQuote";
-import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "./butlerProgress";
-import {
-    applyMention, findMentionQuery, formatDivider, groupReadKey, mentionOptions, mergeMessages,
-    showTimeDivider, type MentionQuery,
-} from "./butlerGroupModel";
+import ButlerGroupTranscript from "./ButlerGroupTranscript";
+import ButlerMemoryPanel from "./ButlerMemoryPanel";
+import { ButlerQuoteChip, ButlerQuoteContext, type ButlerQuoteTarget } from "./ButlerQuote";
+import { groupReadKey, mentionTargets, mergeMessages } from "./butlerGroupModel";
 
 interface Props {
     groupId: number;
@@ -35,58 +30,12 @@ interface Props {
     onDeleted: () => void;
 }
 
-/** 只显示这次回复开始之后的进展摘要，避免把上一轮的旧摘要当成当前进展。 */
-function useLiveProgress(conversationId: number) {
-    const [text, setText] = useState("");
-    useEffect(() => {
-        let disposed = false;
-        const unlisten = listen<ButlerProgressSummary>(BUTLER_PROGRESS_EVENT, ({ payload }) => {
-            if (!disposed && payload.conversation_id === conversationId) setText(payload.text);
-        });
-        return () => {
-            disposed = true;
-            void unlisten.then(stop => stop()).catch(() => {});
-        };
-    }, [conversationId]);
-    return text;
-}
-
-function TypingRow({ member }: { member: ButlerGroupMember }) {
-    const progress = useLiveProgress(member.conversation_id);
-    return <div role="status" aria-label={`${member.name} 正在输入`} data-aipp-slot="butler-group-typing">
-        <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name}>
-            <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={20} figure animated state="thinking" />
-        </ButlerGroupSpeaker>
-        <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
-            <span className="butler-typing-dots" aria-hidden="true"><i /><i /><i /></span>
-            {progress && <span className="truncate text-xs">{progress}</span>}
-        </div>
-    </div>;
-}
-
-/** 成员在执行中向用户提的问题，显示在群聊里，答案回到这位成员的原执行。 */
-function MemberQuestion({ member }: { member: ButlerGroupMember }) {
-    const question = useAskUserQuestion({ conversationId: member.conversation_id });
-    const elicitation = useAcpElicitation({ conversationId: member.conversation_id });
-    if (!question.isDialogOpen && !elicitation.questionRequest && !elicitation.decisionError) return null;
-    return <div data-aipp-slot="butler-group-question">
-        <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={`${member.name} 想问你`} />
-        <div className="min-w-0 max-w-[min(65%,48rem)]">
-            {question.isDialogOpen && <AskUserQuestionCard request={question.pendingRequest} isOpen={question.isDialogOpen}
-                viewMode={question.viewMode} completedAnswers={question.completedAnswers} readOnly={question.readOnly}
-                onSubmit={question.handleSubmit} onCancel={question.handleCancel} />}
-            {elicitation.questionRequest && <AskUserQuestionCard request={elicitation.questionRequest} isOpen viewMode="questionnaire"
-                errorMessage={elicitation.decisionError} onSubmit={elicitation.handleSubmit} onCancel={elicitation.handleCancel} />}
-            {!elicitation.questionRequest && elicitation.decisionError &&
-                <p role="alert" className="text-sm text-destructive">{elicitation.decisionError}</p>}
-        </div>
-    </div>;
-}
+/** 打开群聊时一次取回全部历史（与私聊一样交给虚拟列表），不再分页“查看更早的消息”。 */
+const FULL_HISTORY_LIMIT = 100_000;
 
 export default function ButlerGroupChat({ groupId, chiefName, assistants, onDeleted }: Props) {
     const [detail, setDetail] = useState<ButlerGroupDetail | null>(null);
     const [older, setOlder] = useState<ButlerGroupMessage[]>([]);
-    const [hasMoreOlder, setHasMoreOlder] = useState<boolean | null>(null);
     const [loadError, setLoadError] = useState("");
     const [draft, setDraft] = useState("");
     // 引用与私聊共用同一套组件：悬浮条/右键菜单的“引用回复”写入这里，输入框上方显示引用标签。id 是群消息序号。
@@ -94,37 +43,30 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     const quoteState = useMemo(() => ({ quote, setQuote }), [quote]);
     const [sending, setSending] = useState(false);
     const [stopping, setStopping] = useState(false);
-    const [inputError, setInputError] = useState("");
     const [panelOpen, setPanelOpen] = useState(false);
     const [inviteOpen, setInviteOpen] = useState(false);
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [nameDraft, setNameDraft] = useState("");
-    const [mention, setMention] = useState<MentionQuery | null>(null);
-    const [mentionIndex, setMentionIndex] = useState(0);
     const pendingPost = useRef<{ signature: string; key: string } | null>(null);
-    const listRef = useRef<HTMLDivElement>(null);
-    const inputRef = useRef<HTMLTextAreaElement>(null);
-    const stickToBottom = useRef(true);
-    // 点击引用标签跳到被引用的群消息（按序号定位）并短暂高亮，和私聊的引用定位一致。
-    const [highlightSeq, setHighlightSeq] = useState<number | null>(null);
-    const jumpToQuoted = useCallback((seq: number) => {
-        const target = listRef.current?.querySelector<HTMLElement>(`[data-aipp-group-seq="${seq}"]`);
-        if (!target) return;
-        target.scrollIntoView({ behavior: "smooth", block: "center" });
-        setHighlightSeq(seq);
-    }, []);
-    useEffect(() => {
-        if (highlightSeq === null) return;
-        const timer = window.setTimeout(() => setHighlightSeq(null), 2000);
-        return () => window.clearTimeout(timer);
-    }, [highlightSeq]);
+    const historyLoaded = useRef(false);
     const revision = useRef(0);
 
     const refresh = useCallback(async () => {
         const version = ++revision.current;
         try {
             const next = await groups.getButlerGroup(groupId);
+            // 首次打开时把最新一页之前的历史一并取回，再交给列表一次性展示并贴底，避免先显示再往上插入导致跳动。
+            let earlier: ButlerGroupMessage[] | null = null;
+            if (!historyLoaded.current) {
+                earlier = next.has_more && next.messages.length
+                    ? await groups.listOlderButlerGroupMessages(groupId, next.messages[0].seq, FULL_HISTORY_LIMIT)
+                    : [];
+            }
             if (version !== revision.current) return;
+            if (earlier) {
+                historyLoaded.current = true;
+                setOlder(earlier);
+            }
             setDetail(next);
             setLoadError("");
         } catch (error) {
@@ -160,52 +102,15 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
     }, [detail?.turns, members]);
     const replying = !!detail && (detail.routing || detail.turns.length > 0);
 
-    // 停在底部时，新消息和“正在输入”出现后继续跟随到底部；用户上翻查看历史时不打扰。
-    useLayoutEffect(() => {
-        const list = listRef.current;
-        if (list && stickToBottom.current) list.scrollTop = list.scrollHeight;
-    }, [messages.length, running.length, detail?.id]);
-    const onScroll = () => {
-        const list = listRef.current;
-        if (!list) return;
-        stickToBottom.current = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
-    };
-
-    const loadOlder = async () => {
-        const first = messages[0];
-        if (!first) return;
-        try {
-            const page = await groups.listOlderButlerGroupMessages(groupId, first.seq);
-            const list = listRef.current;
-            const previousHeight = list?.scrollHeight ?? 0;
-            setOlder(previous => mergeMessages(page, previous));
-            setHasMoreOlder(page.length >= 80);
-            requestAnimationFrame(() => {
-                if (list) list.scrollTop += list.scrollHeight - previousHeight;
-            });
-        } catch (error) {
-            toast.error(`读取更早的群消息失败：${error}`);
-        }
-    };
-
-    const options = useMemo(() => mention ? mentionOptions(members, mention.query) : [], [mention, members]);
-    const updateMention = (text: string, caret: number) => {
-        const next = findMentionQuery(text, caret);
-        setMention(next);
-        setMentionIndex(0);
-    };
-    const chooseMention = (label: string) => {
-        const input = inputRef.current;
-        if (!mention || !input) return;
-        const caret = input.selectionStart ?? draft.length;
-        const next = applyMention(draft, mention, caret, label);
-        setDraft(next.text);
-        setMention(null);
-        requestAnimationFrame(() => {
-            input.focus();
-            input.setSelectionRange(next.caret, next.caret);
-        });
-    };
+    // @ 候选交给通用输入框过滤（支持拼音/首字母），这里只提供本群成员与头像。
+    const mentionCandidates = useMemo<MentionCandidate[]>(() => mentionTargets(members).map(target => ({
+        id: target.id,
+        name: target.name,
+        description: target.description,
+        icon: target.member
+            ? <ButlerAvatar id={target.member.assistant_id} chief={target.member.is_chief} size={20} figure />
+            : <Users className="size-4 text-muted-foreground" />,
+    })), [members]);
 
     const send = async () => {
         const body = draft.trim();
@@ -216,18 +121,17 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
             pendingPost.current = { signature, key: crypto.randomUUID() };
         }
         setSending(true);
-        setInputError("");
         try {
             const message = await groups.postButlerGroupMessage(groupId, pendingPost.current.key, body, replyTo);
             pendingPost.current = null;
             setDraft("");
             setQuote(null);
-            setMention(null);
-            stickToBottom.current = true;
+            // 本地先并入自己的发言：列表看到新的“末尾用户消息”，播放与私聊相同的发送滑动并贴底。
             setDetail(previous => previous ? { ...previous, routing: true, messages: mergeMessages(previous.messages, [message]) } : previous);
             void refresh();
         } catch (error) {
-            setInputError(String(error));
+            // 草稿保留，重试时沿用同一个 request key，后端不会重复入群
+            toast.error(`发送群消息失败：${error}`);
         } finally {
             setSending(false);
         }
@@ -246,37 +150,11 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         }
     };
 
-    const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-        if (event.nativeEvent.isComposing) return;
-        if (mention && options.length) {
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                event.preventDefault();
-                setMentionIndex(index => (index + (event.key === "ArrowDown" ? 1 : options.length - 1)) % options.length);
-                return;
-            }
-            if (event.key === "Enter" || event.key === "Tab") {
-                event.preventDefault();
-                chooseMention(options[Math.min(mentionIndex, options.length - 1)].label);
-                return;
-            }
-            if (event.key === "Escape") {
-                event.preventDefault();
-                setMention(null);
-                return;
-            }
-        }
-        if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            void send();
-        }
+    // 与私聊同一套发送键语义：有内容就发送（成员回复中也可以插话）；输入为空且有人在回复时，按钮/回车是停止。
+    const handleSend = () => {
+        if (draft.trim()) void send();
+        else if (replying && !stopping) void stop();
     };
-
-    useEffect(() => {
-        const input = inputRef.current;
-        if (!input) return;
-        input.style.height = "auto";
-        input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
-    }, [draft]);
 
     const saveName = async () => {
         const name = nameDraft.trim();
@@ -315,9 +193,6 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         </div>;
     }
 
-    const byId = new Map(members.map(member => [member.id, member]));
-    const quotedBySeq = new Map(messages.map(message => [message.seq, message]));
-    const canLoadOlder = hasMoreOlder ?? detail.has_more;
     const discussion = detail.turns.filter(turn => turn.rounds > 1).sort((a, b) => b.round - a.round)[0];
     const typing = running.length ? `${running.map(member => member.name).join("、")} 正在输入…` : "";
     const subtitle = discussion
@@ -344,71 +219,22 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
         </div>
 
         <ButlerQuoteContext.Provider value={quoteState}>
-        <ButlerQuoteJumpContext.Provider value={jumpToQuoted}>
-        {/* 与私聊（ConversationUI）同样的 p-6 与整行宽度，不再收窄成居中一栏。 */}
-        <div ref={listRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto p-6" aria-label="群聊记录" data-aipp-slot="butler-group-messages">
-            <div className="flex flex-col gap-4">
-                {canLoadOlder && <button type="button" className="self-center rounded-full px-3 py-1 text-xs text-muted-foreground hover:bg-muted"
-                    onClick={() => void loadOlder()}>查看更早的消息</button>}
-                {messages.map((message, index) => {
-                    const divider = showTimeDivider(message, messages[index - 1]);
-                    const key = `${message.seq}`;
-                    const time = divider && <div className="py-1 text-center text-[11px] text-muted-foreground">{formatDivider(message.created_at)}</div>;
-                    if (message.kind !== "message") {
-                        return <div key={key}>
-                            {time}
-                            <div className="flex justify-center" data-aipp-slot={`butler-group-${message.kind}`}>
-                                <span className={`max-w-[80%] whitespace-pre-wrap break-words rounded-lg px-3 py-1 text-center text-xs ${message.kind === "error" ? "bg-destructive/5 text-destructive" : "text-muted-foreground"}`}>
-                                    {message.body}
-                                </span>
-                            </div>
-                        </div>;
-                    }
-                    return <div key={key} data-aipp-group-seq={message.seq}>
-                        {time}
-                        <ButlerGroupMessageRow groupId={groupId} message={message}
-                            quoted={message.reply_to ? quotedBySeq.get(message.reply_to) : undefined}
-                            sender={message.sender_member ? byId.get(message.sender_member) : undefined}
-                            highlighted={highlightSeq === message.seq} />
-                    </div>;
-                })}
-                {running.map(member => <TypingRow key={`typing-${member.id}`} member={member} />)}
-                {members.map(member => <MemberQuestion key={`question-${member.id}`} member={member} />)}
-            </div>
-        </div>
-        </ButlerQuoteJumpContext.Provider>
+        {/* 消息列表与私聊同一套（见 ButlerGroupTranscript）：输入框悬浮在列表底部之上，尾部空间由列表留出。 */}
+        <ButlerGroupTranscript groupId={groupId} messages={messages} members={members} running={running} />
 
-        <div className="flex-none px-6 pb-4 pt-2" data-aipp-slot="butler-group-input">
-            {quote && <div className="mb-2 flex"><ButlerQuoteChip quote={quote} onClear={() => setQuote(null)} /></div>}
-            <div className="relative flex items-end gap-2 rounded-2xl border border-border bg-background px-3 py-2 focus-within:border-ring">
-                {mention && options.length > 0 && <div role="listbox" aria-label="点名成员"
-                    className="absolute bottom-full left-2 mb-2 w-56 overflow-hidden rounded-lg border bg-popover p-1 shadow-md">
-                    {options.map((option, index) => <button key={option.key} type="button" role="option" aria-selected={index === mentionIndex}
-                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${index === mentionIndex ? "bg-muted" : "hover:bg-muted"}`}
-                        onMouseDown={event => { event.preventDefault(); chooseMention(option.label); }}>
-                        {option.member ? <ButlerAvatar id={option.member.assistant_id} chief={option.member.is_chief} size={20} figure />
-                            : <Users className="size-4 text-muted-foreground" />}
-                        <span className="truncate">{option.label}</span>
-                    </button>)}
-                </div>}
-                <textarea ref={inputRef} rows={1} value={draft} aria-label="群聊消息"
-                    placeholder="发消息，输入 @ 可以点名"
-                    className="max-h-[200px] min-h-[24px] flex-1 resize-none bg-transparent py-1 text-sm outline-none placeholder:text-muted-foreground"
-                    onChange={event => { setDraft(event.target.value); updateMention(event.target.value, event.target.selectionStart ?? event.target.value.length); }}
-                    onSelect={event => updateMention(event.currentTarget.value, event.currentTarget.selectionStart ?? 0)}
-                    onBlur={() => setMention(null)}
-                    onKeyDown={onKeyDown} />
-                {replying && <Button type="button" size="icon" variant="ghost" className="size-8 rounded-full" title="停止回复" aria-label="停止回复"
-                    disabled={stopping} onClick={() => void stop()}>
-                    {stopping ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-3.5 fill-current" />}
-                </Button>}
-                <Button type="button" size="icon" className="size-8 rounded-full" title="发送" aria-label="发送"
-                    disabled={!draft.trim() || sending} onClick={() => void send()}>
-                    {sending ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
-                </Button>
-            </div>
-            {inputError && <p role="alert" className="mt-1.5 whitespace-pre-wrap text-xs text-destructive">{inputError}</p>}
-        </div>
+        {/* 群聊消息只有正文和引用，暂不支持附件，所以不传附件能力。 */}
+        <InputArea
+            inputText={draft}
+            setInputText={setDraft}
+            handleSend={handleSend}
+            aiIsResponsing={replying}
+            placement="bottom"
+            sendButtonIcon={sending || stopping ? <Loader2 size={20} className="animate-spin text-action-foreground" /> : undefined}
+            mentionCandidates={mentionCandidates}
+            placeholder="发消息，输入 @ 可以点名"
+            ariaLabel="群聊消息"
+            topChip={quote ? <ButlerQuoteChip quote={quote} onClear={() => setQuote(null)} /> : undefined}
+        />
         </ButlerQuoteContext.Provider>
 
         <Sheet open={panelOpen} onOpenChange={setPanelOpen}>
@@ -438,6 +264,7 @@ export default function ButlerGroupChat({ groupId, chiefName, assistants, onDele
                                 onClick={() => void removeMember(member)}><UserMinus className="size-3.5" /></button>}
                         </div>)}
                     </section>
+                    <ButlerMemoryPanel conversationId={groupId} scope="group" />
                     <Button variant="ghost" className="mt-auto justify-start gap-2 text-destructive hover:text-destructive" onClick={() => setConfirmDelete(true)}>
                         <Trash2 className="size-4" />删除群聊
                     </Button>

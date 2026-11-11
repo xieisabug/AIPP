@@ -5,11 +5,12 @@ import { useAssistantItemActions } from "./useAssistantItemActions";
 
 vi.mock("@/components/config/EditAssistantDialog", () => ({ default: () => null }));
 const assistant = { id: 8, name: "目标助手", assistant_type: 0 };
-function Harness({ onClear = vi.fn() }: { onClear?: () => Promise<void> }) {
-    const actions = useAssistantItemActions({ onClear });
+function Harness({ onReset = vi.fn(), onEdit }: { onReset?: () => Promise<void>; onEdit?: () => void }) {
+    const actions = useAssistantItemActions({ onReset, onEdit });
     return <>{actions.dialogs}
+        <button onClick={() => void actions.run(assistant, "edit")}>edit target</button>
         <button onClick={() => void actions.run(assistant, "delete")}>delete target</button>
-        <button onClick={() => void actions.run(assistant, "clear")}>clear target</button>
+        <button onClick={() => void actions.run(assistant, "reset")}>reset target</button>
         <button onClick={() => void actions.run(assistant, "copy")}>copy target</button>
     </>;
 }
@@ -27,16 +28,25 @@ describe("useAssistantItemActions", () => {
         fireEvent.click(screen.getByRole("button", { name: "确认" }));
         await waitFor(() => expect(remove).toHaveBeenCalledWith({ assistantId: 8 }));
     });
-    it("should confirm history clearing separately from deleting the assistant", async () => {
-        const clear = vi.fn().mockResolvedValue(undefined);
+    it("should confirm conversation reset separately from deleting the assistant", async () => {
+        const reset = vi.fn().mockResolvedValue(undefined);
         const remove = vi.fn();
         mockInvokeHandler("delete_assistant", remove);
-        render(<Harness onClear={clear} />);
-        fireEvent.click(screen.getByText("clear target"));
-        expect(clear).not.toHaveBeenCalled();
+        render(<Harness onReset={reset} />);
+        fireEvent.click(screen.getByText("reset target"));
+        expect(reset).not.toHaveBeenCalled();
         fireEvent.click(screen.getByRole("button", { name: "确认" }));
-        await waitFor(() => expect(clear).toHaveBeenCalledWith(assistant));
+        await waitFor(() => expect(reset).toHaveBeenCalledWith(assistant));
         expect(remove).not.toHaveBeenCalled();
+    });
+    it("should hand editing to the caller when it provides its own editor", async () => {
+        const onEdit = vi.fn();
+        const load = vi.fn();
+        mockInvokeHandler("get_assistant", load);
+        render(<Harness onEdit={onEdit} />);
+        fireEvent.click(screen.getByText("edit target"));
+        await waitFor(() => expect(onEdit).toHaveBeenCalledWith(assistant));
+        expect(load).not.toHaveBeenCalled();
     });
     it("should copy using the requested assistant ID", async () => {
         const copy = vi.fn().mockReturnValue({ assistant: { id: 9 } });

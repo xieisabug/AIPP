@@ -294,6 +294,8 @@ impl<'a> Tables<'a> {
         self.remove("butler_task_result", "task_conversation_id=?1", id)?;
         self.remove("butler_task_definition", "task_conversation_id=?1 OR butler_conversation_id=?1", id)?;
         self.remove("butler_main_state", "butler_conversation_id=?1", id)?;
+        // 删除普通聊天保留已保存的记忆（来源显示为已删除）；删除群聊则群记忆失去归属，一并删除。
+        self.remove("butler_memory", "scope_type='group' AND scope_id=?1", id)?;
         // Main conversations have no user-facing delete. A remote tombstone
         // detaches surviving children instead of recursively erasing history.
         self.update("conversation", "parent_butler_conversation_id", "NULL", "parent_butler_conversation_id=?1", id)?;
@@ -320,6 +322,8 @@ impl<'a> Tables<'a> {
         }
         // Some legacy profiles do not have quick assistant 1 yet.
         let quick_exists = self.conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {} WHERE id=1 AND id!=?1)", self.names["assistant"]), [id], |r| r.get::<_, bool>(0))?;
+        // 私有记忆随助手删除，不转给接手会话的默认助手；全局与群记忆保留。
+        self.remove("butler_memory", "scope_type='assistant' AND scope_id=?1", id)?;
         self.update("conversation", "assistant_id", if quick_exists { "1" } else { "NULL" }, "assistant_id=?1", id)?;
         self.update("artifacts_collection", "assistant_id", "NULL", "assistant_id=?1", id)?;
         self.remove("PluginAssistantConfigurations", "assistant_id=?1", id)?;

@@ -2,45 +2,24 @@ import { parseGroupTime, type ButlerGroupMember, type ButlerGroupMessage } from 
 
 /** 与后端 `EVERYONE_MENTIONS` 保持一致。 */
 export const EVERYONE_MENTION = "所有人";
+const EVERYONE_MENTION_ID = -1;
 
-export interface MentionQuery {
-    /** `@` 在文本中的位置。 */
-    start: number;
-    query: string;
-}
-
-/** 光标前最近的 `@xxx`（中间没有空白）就是正在输入的点名。 */
-export function findMentionQuery(text: string, caret: number): MentionQuery | null {
-    const before = text.slice(0, caret);
-    const at = Math.max(before.lastIndexOf("@"), before.lastIndexOf("＠"));
-    if (at < 0) return null;
-    const previous = at > 0 ? before[at - 1] : "";
-    if (/[A-Za-z0-9]/.test(previous)) return null;
-    const query = before.slice(at + 1);
-    if (/\s/.test(query) || query.length > 20) return null;
-    return { start: at, query };
-}
-
-export interface MentionOption {
-    key: string;
-    label: string;
+export interface MentionTarget {
+    /** 成员 id；“所有人”用 -1，不会与成员冲突。 */
+    id: number;
+    name: string;
+    description?: string;
     member?: ButlerGroupMember;
 }
 
-export function mentionOptions(members: ButlerGroupMember[], query: string): MentionOption[] {
-    const needle = query.trim().toLowerCase();
-    const matched = members.filter(member => member.name.toLowerCase().includes(needle))
-        .map(member => ({ key: `member-${member.id}`, label: member.name, member }));
-    const everyone = members.length > 1 && EVERYONE_MENTION.includes(needle)
-        ? [{ key: "everyone", label: EVERYONE_MENTION }] : [];
-    return [...matched, ...everyone];
-}
-
-/** 用选中的名字替换正在输入的 `@xxx`，并在后面补一个空格。 */
-export function applyMention(text: string, mention: MentionQuery, caret: number, label: string) {
-    const inserted = `@${label} `;
-    const next = text.slice(0, mention.start) + inserted + text.slice(caret);
-    return { text: next, caret: mention.start + inserted.length };
+/**
+ * 群聊输入框的 @ 候选：本群成员，多于一人时再加“所有人”。
+ * 过滤、插入与键盘选择由通用输入框 InputArea 负责，和私聊的 @ 是同一套。
+ */
+export function mentionTargets(members: ButlerGroupMember[]): MentionTarget[] {
+    const targets: MentionTarget[] = members.map(member => ({ id: member.id, name: member.name, member }));
+    if (members.length > 1) targets.push({ id: EVERYONE_MENTION_ID, name: EVERYONE_MENTION, description: "群里每位成员都会回复" });
+    return targets;
 }
 
 /** 合并向上翻页加载的旧消息与最新一页，按序号去重。 */

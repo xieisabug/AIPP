@@ -12,6 +12,9 @@ use crate::utils::db_utils::{get_datetime_from_row, get_required_datetime_from_r
 
 use super::{get_db_path, get_db_write_lock};
 
+/// 已归档的管家联系人私聊：保留消息供检索与只读查看，不再是该助手的当前私聊（`butler_contact`）。
+pub const BUTLER_CONTACT_ARCHIVE_KIND: &str = "butler_contact_archive";
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub enum AttachmentType {
     Image = 1,
@@ -297,13 +300,14 @@ impl ConversationRepository {
     }
 
     pub fn butler_contact_previews(&self) -> Result<Vec<serde_json::Value>> {
-        let mut stmt = self.conn.prepare(
+        // 用户消息只取原话，不带本轮附加上下文。
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT c.assistant_id, c.id, nullif(max(coalesce(p.anchor,0),coalesce(m.id,0)),0),
                     CASE WHEN p.anchor IS NOT NULL AND p.anchor >= coalesce(m.id,0) THEN substr(
                         CASE WHEN p.outgoing THEN '发给 ' ELSE '来自 ' END ||
                         CASE WHEN c.id=e.owner THEN e.recipient ELSE e.sender END || '：' ||
                         CASE WHEN p.leg='request' THEN e.body ELSE e.reply END,1,140)
-                    ELSE substr(m.content,1,140) END
+                    ELSE substr({visible},1,140) END
              FROM conversation c LEFT JOIN message m ON m.id=(
                  SELECT id FROM message WHERE conversation_id=c.id
                    AND message_type IN ('user','assistant','response') AND trim(content) NOT IN ('','[[NO_REPLY]]')
@@ -313,7 +317,9 @@ impl ConversationRepository {
                  ORDER BY id DESC LIMIT 1)
              LEFT JOIN butler_peer_post p ON p.id=(SELECT id FROM butler_peer_post WHERE conversation_id=c.id ORDER BY anchor DESC,id DESC LIMIT 1)
              LEFT JOIN butler_peer_exchange e ON e.id=p.exchange_id
-             WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id")?;
+             WHERE c.conversation_kind='butler_contact' AND c.assistant_id IS NOT NULL ORDER BY c.id",
+            visible = crate::utils::turn_context::visible_sql("m.content"),
+        ))?;
         let rows = stmt.query_map([], |row| Ok(serde_json::json!({
             "assistantId":row.get::<_,i64>(0)?, "conversationId":row.get::<_,i64>(1)?,
             "messageId":row.get::<_,Option<i64>>(2)?,
@@ -338,6 +344,11 @@ impl ConversationRepository {
                  ORDER BY id LIMIT 1", [assistant_id], |row| row.get(0),
             )
         })
+    }
+
+    /// 归档助手当前的管家私聊并新开一条，见 [`archive_butler_contact_conversation`]。
+    pub fn archive_butler_contact(&self, assistant_id: i64, name: &str, archived_name: &str) -> Result<(Vec<i64>, i64)> {
+        self.with_serialized_write(|conn| archive_butler_contact_conversation(conn, assistant_id, name, archived_name))
     }
 
     fn with_serialized_write<T, F>(&self, f: F) -> Result<T>
@@ -400,16 +411,17 @@ impl ConversationRepository {
             search.filter(|s| !s.trim().is_empty()).map(|s| format!("%{}%", s.trim()));
 
         let sql = if search_pattern.is_some() {
-            "SELECT DISTINCT c.id, c.name, c.assistant_id, c.created_time, c.updated_time,
+            // 用户消息只按原话匹配，本轮附加上下文（记忆、工作记录等）不参与搜索。
+            format!("SELECT DISTINCT c.id, c.name, c.assistant_id, c.created_time, c.updated_time,
                     c.conversation_kind, c.parent_butler_conversation_id, c.source_task_title,
                     c.is_hidden_from_normal_chat_list, c.channel_source, c.butler_task_status,
                     c.butler_task_summary, c.butler_task_finalized_at
                FROM conversation c
                LEFT JOIN message m ON m.conversation_id = c.id
               WHERE c.conversation_kind = ?1
-                AND (c.name LIKE ?2 COLLATE NOCASE OR m.content LIKE ?2 COLLATE NOCASE)
+                AND (c.name LIKE ?2 COLLATE NOCASE OR {} LIKE ?2 COLLATE NOCASE)
               ORDER BY c.updated_time DESC
-              LIMIT ?3 OFFSET ?4"
+              LIMIT ?3 OFFSET ?4", crate::utils::turn_context::visible_sql("m.content"))
         } else {
             "SELECT id, name, assistant_id, created_time, updated_time, conversation_kind,
                     parent_butler_conversation_id, source_task_title,
@@ -418,10 +430,10 @@ impl ConversationRepository {
                FROM conversation
               WHERE conversation_kind = ?1
               ORDER BY updated_time DESC
-              LIMIT ?3 OFFSET ?4"
+              LIMIT ?3 OFFSET ?4".to_string()
         };
 
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let like_val = search_pattern.unwrap_or_default();
         let rows = stmt.query_map(rusqlite::params![kind, like_val, per_page, offset], |row| {
             Ok(Conversation {
@@ -753,6 +765,41 @@ impl Repository<Conversation> for ConversationRepository {
 /// Delete owned data through the same transaction used by remote tombstones.
 pub fn cascade_delete_conversation(conn: &Connection, conversation_id: i64) -> Result<()> {
     super::cascade_delete::delete(conn, "conversation", conversation_id)
+}
+
+/// 归档助手当前的管家私聊并新开一条。旧会话改为归档类型（消息保留、可检索，不再参与协作与投递），
+/// 尚未发出的排队消息随之丢弃；按助手查找私聊的地方此后都落到新会话。返回（被归档的旧会话，新会话）。
+pub fn archive_butler_contact_conversation(
+    conn: &Connection,
+    assistant_id: i64,
+    name: &str,
+    archived_name: &str,
+) -> Result<(Vec<i64>, i64)> {
+    let tx = conn.unchecked_transaction()?;
+    let now = Utc::now();
+    let archived: Vec<i64> = tx
+        .prepare("SELECT id FROM conversation WHERE assistant_id=?1 AND conversation_kind='butler_contact' ORDER BY id")?
+        .query_map([assistant_id], |row| row.get(0))?
+        .collect::<Result<_>>()?;
+    for id in &archived {
+        tx.execute(
+            "UPDATE conversation SET conversation_kind=?2, name=?3, updated_time=?4 WHERE id=?1",
+            params![id, BUTLER_CONTACT_ARCHIVE_KIND, archived_name, now],
+        )?;
+        tx.execute(
+            "DELETE FROM queued_conversation_message WHERE conversation_id=?1 AND status IN ('queued','paused')",
+            [id],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO conversation (name, assistant_id, created_time, updated_time,
+             conversation_kind, is_hidden_from_normal_chat_list)
+         VALUES (?1, ?2, ?3, ?3, 'butler_contact', 1)",
+        params![name, assistant_id, now],
+    )?;
+    let created = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok((archived, created))
 }
 
 pub struct MessageRepository {
@@ -1132,14 +1179,37 @@ impl MessageRepository {
         rows.collect()
     }
 
+    /// 在本会话中检索字面短语。联系人私聊同时检索该助手已归档的私聊，总管家主会话同时检索已归档的主会话；
+    /// 来自归档会话的命中带 `archived: true` 与会话名，让模型知道那是用户重开会话前的旧记录。
+    /// 用户消息只在原话里查找，本轮附加上下文（记忆、工作记录等）不参与。
     pub fn search_own_history(&self, conversation_id: i64, query: &str) -> Result<Vec<serde_json::Value>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, message_type, substr(content, max(1, instr(content, ?2)-200), 1100)
-             FROM message WHERE conversation_id=?1 AND message_type IN ('user','assistant','response')
-                 AND instr(content, ?2)>0 ORDER BY id DESC LIMIT 6")?;
-        let rows = stmt.query_map(rusqlite::params![conversation_id, query], |row| Ok(serde_json::json!({
-            "message_id": row.get::<_,i64>(0)?, "role": row.get::<_,String>(1)?, "excerpt": row.get::<_,String>(2)?,
-        })))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, message_type, substr(text, max(1, instr(text, ?2)-200), 1100), source, source_name FROM (
+                SELECT m.id, m.message_type, {visible} AS text, c.id AS source, c.name AS source_name
+                FROM conversation cur
+                JOIN conversation c ON c.id=cur.id
+                    OR (cur.conversation_kind='butler_contact' AND c.conversation_kind='butler_contact_archive'
+                        AND c.assistant_id=cur.assistant_id)
+                    OR (cur.conversation_kind='butler_main' AND c.conversation_kind='butler_main' AND c.id<>cur.id
+                        AND NOT EXISTS(SELECT 1 FROM butler_main_state s WHERE s.butler_conversation_id=c.id))
+                JOIN message m ON m.conversation_id=c.id
+                WHERE cur.id=?1 AND m.message_type IN ('user','assistant','response'))
+             WHERE instr(text, ?2)>0
+             ORDER BY id DESC LIMIT 6",
+            visible = crate::utils::turn_context::visible_sql("m.content"),
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![conversation_id, query], |row| {
+            let mut hit = serde_json::json!({
+                "message_id": row.get::<_,i64>(0)?, "role": row.get::<_,String>(1)?, "excerpt": row.get::<_,String>(2)?,
+            });
+            let source: i64 = row.get(3)?;
+            if source != conversation_id {
+                hit["archived"] = true.into();
+                hit["conversation_id"] = source.into();
+                hit["conversation_name"] = row.get::<_,Option<String>>(4)?.unwrap_or_default().into();
+            }
+            Ok(hit)
+        })?;
         rows.collect()
     }
 
@@ -2187,6 +2257,7 @@ impl ConversationDatabase {
         super::butler_group::schema(&conn)?;
         super::token_stats::schema(&conn)?;
         super::butler_work::schema(&conn)?;
+        super::butler_memory::schema(&conn)?;
 
         Ok(())
     }

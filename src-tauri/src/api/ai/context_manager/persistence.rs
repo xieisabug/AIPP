@@ -33,6 +33,8 @@ pub trait CheckpointStore: Sync {
         self.save(conversation_id,header,content)
     }
     fn save(&self, conversation_id: i64, header: &str, content: &str) -> Result<String, AppError>;
+    /// 压缩检查点里接在摘要后面的长期记忆（管家会话）；`tail` 为压缩后原样保留的近期消息。
+    fn memory_snapshot(&self, _conversation_id: i64, _tail: &[super::MessageTuple]) -> Result<Option<String>, AppError> { Ok(None) }
     /// 摘要调用的用量不落在 message 表里，单独记录供对话信息统计。
     fn record_summary_usage(&self, _conversation_id: i64, _model_id: Option<i64>, _model_name: &str, _usage: &genai::chat::Usage) {}
 }
@@ -73,6 +75,11 @@ impl CheckpointStore for ConversationDatabase {
     }
     fn save(&self, conversation_id: i64, header: &str, content: &str) -> Result<String, AppError> {
         Ok(self.message_repo()?.get_or_create_checkpoint(conversation_id, header, content)?)
+    }
+    fn memory_snapshot(&self, conversation_id: i64, tail: &[super::MessageTuple]) -> Result<Option<String>, AppError> {
+        let tail: Vec<(&str, &str)> = tail.iter().map(|(kind, content, _)| (kind.as_str(), content.as_str())).collect();
+        crate::api::butler_memory::checkpoint_block(&self.get_connection()?, conversation_id, &tail, chrono::Utc::now().timestamp_millis())
+            .map_err(|e| AppError::UnknownError(format!("{e:#}")))
     }
 }
 

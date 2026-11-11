@@ -352,6 +352,75 @@ fn build_prompt_with_attachment_context(prompt: &str, context: &str) -> String {
     }
 }
 
+/// 这次要发出的历史（消息类型，正文），按时间排列。
+/// 与发给模型的历史同一来源（最新分支、压缩后的结果），据此判断哪些上下文模型已经看到、不必重复。
+fn replay_history(db: &ConversationDatabase, conversation_id: i64) -> Result<Vec<(String, String)>, AppError> {
+    let all_messages = db.message_repo()?.list_by_conversation_id(conversation_id)?;
+    let (messages, _) = build_message_list_with_metadata_from_db(&all_messages, BranchSelection::LatestBranch);
+    Ok(messages.into_iter().map(|(kind, content, _)| (kind, content)).collect())
+}
+
+/// 历史里各条用户消息的附加上下文（按时间排列）。
+fn replay_turn_contexts(history: &[(String, String)]) -> Vec<String> {
+    history
+        .iter()
+        .filter(|(kind, _)| kind == "user")
+        .filter_map(|(_, content)| crate::utils::turn_context::context(content).map(str::to_owned))
+        .collect()
+}
+
+/// 这一段（工作记录、近期工作）是否与历史里最近一次附带的完全相同；相同就不重复附带。
+fn repeats_last_section(history: &[String], section: &str, tags: &[&str]) -> bool {
+    let current = tags.iter().find_map(|tag| crate::utils::turn_context::elements(section, tag).into_iter().next());
+    current.is_some() && current == crate::utils::turn_context::last_element(history, tags)
+}
+
+/// 组装本轮附加上下文：当前时间、外部渠道/插件前缀、工作记录、工作上下文、长期记忆。
+/// 每轮都会变或只属于这一轮的（时间、渠道来源、引用的工作）照常附带；
+/// 工作记录、近期工作与历史里最近一次相同时不再重复；长期记忆只附带变化（见 butler_memory::turn_block）。
+fn build_turn_context(
+    app_handle: &tauri::AppHandle,
+    conversation_id: Option<i64>,
+    caller_prefix: Option<&str>,
+    goal_conversation: bool,
+    work_prefix: Option<&str>,
+    memory_text: &str,
+) -> Result<Option<String>, AppError> {
+    let mut sections: Vec<String> = Vec::new();
+    let Some(id) = conversation_id else {
+        return Ok(crate::utils::turn_context::wrap(caller_prefix));
+    };
+    let db = ConversationDatabase::new(app_handle)?;
+    let kind = db.conversation_repo()?.read(id)?.map(|c| c.conversation_kind).unwrap_or_default();
+    let butler = crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind);
+    if let Some(time) = crate::api::butler_work::current_time_prefix(&kind, chrono::Local::now()) {
+        sections.push(time);
+    }
+    sections.extend(caller_prefix.map(str::to_owned));
+    if !butler && !goal_conversation && work_prefix.is_none() {
+        return Ok(crate::utils::turn_context::wrap(sections));
+    }
+    let replayed = replay_history(&db, id)?;
+    let history = replay_turn_contexts(&replayed);
+    let conn = db.get_connection()?;
+    if goal_conversation {
+        let goal = crate::db::butler_goal::prompt(&conn, id)
+            .map_err(|e| AppError::UnknownError(format!("读取会话 {id} 的工作记录失败：{e}")))?;
+        if let Some(goal) = goal.filter(|goal| !repeats_last_section(&history, goal, &["current_butler_goal"])) {
+            sections.push(goal);
+        }
+    }
+    if let Some(work) = work_prefix.filter(|work| !repeats_last_section(&history, work, &["recent_work", "available_work"])) {
+        sections.push(work.to_owned());
+    }
+    let seen = crate::api::butler_memory::seen_in_history(replayed.iter().map(|(kind, content)| (kind.as_str(), content.as_str())));
+    match crate::api::butler_memory::turn_block(&conn, id, memory_text, &seen, chrono::Utc::now().timestamp_millis()) {
+        Ok(block) => sections.extend(block),
+        Err(error) => warn!(conversation_id = id, error = %format!("{error:#}"), "failed to build butler memory context"),
+    }
+    Ok(crate::utils::turn_context::wrap(sections))
+}
+
 fn normalize_queue_kind(queue_kind: &str) -> Result<&'static str, AppError> {
     match queue_kind {
         QUEUE_KIND_NORMAL => Ok(QUEUE_KIND_NORMAL),
@@ -1261,12 +1330,15 @@ pub async fn ask_ai(
     );
     let mut runtime_user_prompt_prefix = runtime_user_prompt_prefix;
     let mut request = request;
+    // 管家工作记录会话：本轮附加上下文里需要带上当前工作记录（与历史里最近一次相同时不重复）。
+    let mut butler_goal_conversation = false;
     // Claim intent before any asynchronous model/plugin preparation. Queued requests
     // carry their original version and cannot resurrect an obsolete requirement.
     if let Ok(id) = request.conversation_id.parse::<i64>() {
         let db = ConversationDatabase::new(&app_handle)?;
         let conn = db.get_connection()?;
         if crate::db::butler_goal::is_butler(&conn,id).map_err(|e|AppError::UnknownError(e.to_string()))? {
+            butler_goal_conversation = true;
             if let Some(revision)=request.butler_goal_revision {
                 crate::db::butler_goal::assert_current(&conn,id,revision).map_err(|e|AppError::UnknownError(e.to_string()))?;
             } else if relay_origin.is_none() {
@@ -1280,9 +1352,6 @@ pub async fn ask_ai(
                 if request.butler_goal_revision.is_none() {
                     request.butler_goal_revision=crate::db::butler_goal::apply(&conn,id,"replace",&request.prompt).map_err(|e|AppError::UnknownError(e.to_string()))?.map(|g|g.revision);
                 }
-            }
-            if let Some(context)=crate::db::butler_goal::prompt(&conn,id).map_err(|e|AppError::UnknownError(e.to_string()))? {
-                runtime_user_prompt_prefix=Some(format!("{}\n{}",runtime_user_prompt_prefix.unwrap_or_default(),context));
             }
         }
     }
@@ -1362,7 +1431,6 @@ pub async fn ask_ai(
     ).await.map_err(AppError::UnknownError)?;
 
     // 管家会话的用户消息：引用了某份结果时带入对应工作的必要上下文；未引用时提供近期工作清单以便判断指代。
-    // 只作为本轮运行时前缀发给模型，不写进用户可见的消息正文。
     let work_context = match (peer_turn || group_turn.is_some() || relay_origin.as_deref() == Some("internal"), processed_request.conversation_id.parse::<i64>()) {
         (false, Ok(id)) => crate::api::butler_work::turn_context(&app_handle, id, processed_request.quote.as_ref())
             .unwrap_or_else(|error| {
@@ -1371,23 +1439,16 @@ pub async fn ask_ai(
             }),
         _ => Default::default(),
     };
-    if let Some(prefix) = work_context.prefix.as_deref() {
-        runtime_user_prompt_prefix = Some(match runtime_user_prompt_prefix.take() {
-            Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{prefix}"),
-            _ => prefix.to_string(),
-        });
-    }
-    // 管家会话（含内部回调与协作回合）每轮带上当前时间，只发给模型、不写进消息正文。
-    let time_prefix = processed_request.conversation_id.parse::<i64>().ok().and_then(|id| {
-        let kind = ConversationDatabase::new(&app_handle).ok()?.conversation_repo().ok()?.read(id).ok()??.conversation_kind;
-        crate::api::butler_work::current_time_prefix(&kind, chrono::Local::now())
-    });
-    if let Some(time_prefix) = time_prefix {
-        runtime_user_prompt_prefix = Some(match runtime_user_prompt_prefix.take() {
-            Some(existing) if !existing.trim().is_empty() => format!("{time_prefix}\n{existing}"),
-            _ => time_prefix,
-        });
-    }
+    // 本轮附加上下文（当前时间、外部渠道/插件前缀、工作记录、工作上下文、长期记忆）和用户原话一起存进正文末尾，
+    // 之后逐字回放给模型，界面只显示原话。见 utils/turn_context.rs。
+    let turn_context_block = build_turn_context(
+        &app_handle,
+        processed_request.conversation_id.parse::<i64>().ok(),
+        runtime_user_prompt_prefix.as_deref(),
+        butler_goal_conversation,
+        work_context.prefix.as_deref(),
+        &processed_request.prompt,
+    )?;
 
     let template_engine = build_template_engine(&app_handle)
         .map_err(|e| AppError::UnknownError(format!("Failed to build template engine: {}", e)))?;
@@ -1533,12 +1594,8 @@ pub async fn ask_ai(
             &slash_parse_result.active_skills,
         )
     };
-    let runtime_prompt_result = runtime_user_prompt_prefix
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|prefix| format!("{}\n\n{}", prefix, request_prompt_result))
-        .unwrap_or_else(|| request_prompt_result.clone());
+    // 附加上下文不再作为前缀临时拼接：它由 initialize_conversation 接在正文末尾并一起存储。
+    let runtime_prompt_result = request_prompt_result.clone();
     let display_prompt_result = if group_turn.is_some() {
         processed_request.prompt.clone()
     } else {
@@ -1619,6 +1676,7 @@ pub async fn ask_ai(
         assistant_prompt_result,
         display_prompt_result,
         runtime_prompt_result.clone(),
+        turn_context_block.as_deref(),
         override_prompt.clone(),
         active_skill_attachments,
         relay_origin.as_deref(),
@@ -1685,7 +1743,8 @@ pub async fn ask_ai(
             crate::api::ai::agent_driver::AgentTurnRequest { source_message_id: Some(user_message_id),
                 assistant: &assistant_detail,
                 conversation_id,
-                prompt: runtime_prompt_result,
+                // 与存进会话的用户消息一致：原话后接本轮附加上下文（附件由驱动另行处理）。
+                prompt: crate::utils::turn_context::append(&runtime_prompt_result, turn_context_block.as_deref()),
                 display_prompt: processed_request.prompt,
                 override_model_id: processed_request.override_model_id,
                 overrides: &override_model_config,
@@ -3665,6 +3724,7 @@ async fn initialize_conversation(
     assistant_prompt_result: String,
     display_user_prompt: String,
     runtime_user_prompt: String,
+    turn_context: Option<&str>,
     override_prompt: Option<String>,
     extra_user_attachments: Vec<MessageAttachment>,
     origin: Option<&str>,
@@ -3713,10 +3773,11 @@ async fn initialize_conversation(
             })
             .collect();
         let context = text_attachments.join("\n");
-        let display_user_prompt_with_context =
-            build_prompt_with_attachment_context(&display_user_prompt, &context);
-        let runtime_user_prompt_with_context =
-            build_prompt_with_attachment_context(&runtime_user_prompt, &context);
+        // 本轮附加上下文接在附件之后、存进正文；发送内容与存储内容一致。
+        let display_user_prompt_with_context = crate::utils::turn_context::append(
+            &build_prompt_with_attachment_context(&display_user_prompt, &context), turn_context);
+        let runtime_user_prompt_with_context = crate::utils::turn_context::append(
+            &build_prompt_with_attachment_context(&runtime_user_prompt, &context), turn_context);
         let db_init_message_list = vec![
             (String::from("system"), system_prompt.clone(), vec![]),
             (
@@ -3827,10 +3888,11 @@ async fn initialize_conversation(
             .collect();
         let context = text_attachments.join("\n");
 
-        let display_user_prompt_with_context =
-            build_prompt_with_attachment_context(&display_user_prompt, &context);
-        let runtime_user_prompt_with_context =
-            build_prompt_with_attachment_context(&runtime_user_prompt, &context);
+        // 本轮附加上下文接在附件之后、存进正文；之后的回放（下一轮、工具续写、重新生成）与本次发送逐字一致。
+        let display_user_prompt_with_context = crate::utils::turn_context::append(
+            &build_prompt_with_attachment_context(&display_user_prompt, &context), turn_context);
+        let runtime_user_prompt_with_context = crate::utils::turn_context::append(
+            &build_prompt_with_attachment_context(&runtime_user_prompt, &context), turn_context);
         // 添加用户消息
         let user_message = if let Some(turn) = origin.and_then(|s| s.strip_prefix("butler_group/")) {
             let turn = turn.parse::<i64>().map_err(|e| AppError::UnknownError(format!("群聊回复来源无效：{turn}；{e}")))?;
@@ -4017,7 +4079,7 @@ pub async fn regenerate_conversation_title(
     generate_title(
         &app_handle,
         conversation_id,
-        user_message.content.clone(),
+        crate::utils::turn_context::visible(&user_message.content).to_string(),
         response_content,
         config_feature_map.clone(),
         window,

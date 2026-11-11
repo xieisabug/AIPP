@@ -1,5 +1,10 @@
-import React, { useEffect, useRef } from "react";
-import type { FilteredAssistant } from "../../utils/pinyinFilter";
+import React, { useEffect, useRef, type ReactNode } from "react";
+import type { AssistantItem, FilteredAssistant } from "../../utils/pinyinFilter";
+
+/** @ 补全候选：普通聊天是全部助手，群聊是本群成员（带头像）和“所有人”。 */
+export interface MentionCandidate extends AssistantItem {
+    icon?: ReactNode;
+}
 
 interface AssistantCompletionListProps {
     assistantListVisible: boolean;
@@ -9,7 +14,7 @@ interface AssistantCompletionListProps {
         left: number;
         top: number;
     };
-    assistants: FilteredAssistant[];
+    assistants: FilteredAssistant<MentionCandidate>[];
     selectedAssistantIndex: number;
     textareaRef: React.RefObject<HTMLTextAreaElement | null>;
     setInputText: React.Dispatch<React.SetStateAction<string>>;
@@ -52,7 +57,7 @@ const AssistantCompletionList: React.FC<AssistantCompletionListProps> = ({
         scrollToSelectedAssistant();
     }, [selectedAssistantIndex]);
 
-    const handleAssistantSelect = (assistant: FilteredAssistant) => {
+    const handleAssistantSelect = (assistant: FilteredAssistant<MentionCandidate>) => {
         if (!textareaRef.current) return;
 
         const textarea = textareaRef.current;
@@ -120,7 +125,10 @@ const AssistantCompletionList: React.FC<AssistantCompletionListProps> = ({
     return (
         <div
             ref={listRef}
+            role="listbox"
+            aria-label="选择要 @ 的对象"
             className="assistant-completion-list"
+            data-aipp-slot="chat-input-mention-list"
             style={{
                 ...(placement === "top"
                     ? { top: cursorPosition.top }
@@ -131,15 +139,21 @@ const AssistantCompletionList: React.FC<AssistantCompletionListProps> = ({
             {assistants.map((assistant, index) => (
                 <div
                     key={assistant.id}
+                    role="option"
+                    aria-selected={index === selectedAssistantIndex}
+                    // 名字按字拆成高亮 span，显式给出无障碍名称，避免逐字朗读或混入“拼音”等匹配标签
+                    aria-label={assistant.name}
                     className={`assistant-completion-item ${
                         index === selectedAssistantIndex ? "selected" : ""
                     }`}
+                    // 按下时不让输入框失焦，选中后光标留在原处继续输入
+                    onMouseDown={(event) => event.preventDefault()}
                     onClick={() => handleAssistantSelect(assistant)}
-                    onMouseEnter={() => {
-                        // We could update selected index on hover if needed
-                    }}
                 >
                     <div className="assistant-completion-content">
+                        {assistant.icon ? (
+                            <span className="mr-2 flex shrink-0 items-center">{assistant.icon}</span>
+                        ) : null}
                         <div className="assistant-completion-info">
                             <div className="assistant-completion-name">
                                 {renderHighlightedText(assistant.name, assistant.highlightIndices)}

@@ -62,7 +62,7 @@ import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { previewMobile } from "@/mobile/navigation";
 import { getCaretCoordinates } from "../../utils/caretCoordinates";
 import BangCompletionList, { type BangCompletionItem } from "./BangCompletionList";
-import AssistantCompletionList from "./AssistantCompletionList";
+import AssistantCompletionList, { type MentionCandidate } from "./AssistantCompletionList";
 import ArtifactCompletionList from "./ArtifactCompletionList";
 import SlashCompletionList from "./SlashCompletionList";
 import { useFileList } from "../../hooks/useFileList";
@@ -90,10 +90,14 @@ export interface InputAreaRef {
 interface InputAreaProps {
     inputText: string;
     setInputText: React.Dispatch<React.SetStateAction<string>>;
-    fileInfoList: FileInfo[] | null;
-    handleChooseFile: () => void;
-    handlePaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
-    handleDeleteFile: (fileId: number) => void;
+    /**
+     * 附件能力：不传 handleChooseFile 表示这个聊天不支持附件（如管家群聊），
+     * 不显示“添加附件”按钮，粘贴也按纯文本处理。
+     */
+    fileInfoList?: FileInfo[] | null;
+    handleChooseFile?: () => void;
+    handlePaste?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+    handleDeleteFile?: (fileId: number) => void;
     handleSend: () => void;
     aiIsResponsing: boolean;
     placement?: "top" | "bottom";
@@ -108,12 +112,21 @@ interface InputAreaProps {
     onPlanModeToggle?: () => void;
     /** 输入框顶部的附加条（如管家引用回复的引用对象），仅桌面端展示 */
     topChip?: ReactNode;
+    /**
+     * @ 补全的候选。不传时列出全部助手（普通聊天里 @助手 指定回答者）；
+     * 群聊传入本群成员与“所有人”。需由调用方 memo，避免每次渲染重建监听。
+     */
+    mentionCandidates?: MentionCandidate[];
+    placeholder?: string;
+    /** 输入框的无障碍名称 */
+    ariaLabel?: string;
 }
 const IMAGE_AREA_HEIGHT = 80;
 const TOP_CHIP_HEIGHT = 30;
 export const COMPOSER_GROW_VAR = "--aipp-composer-grow";
 // 稳定的空数组引用，避免 prop 缺省时 useCallback/useEffect 依赖每轮渲染都变化
 const EMPTY_ACP_COMMANDS: AcpAvailableCommand[] = [];
+const NO_FILE_DELETE = () => {};
 
 const InputArea = React.memo(
     forwardRef<InputAreaRef, InputAreaProps>(
@@ -121,10 +134,10 @@ const InputArea = React.memo(
             {
                 inputText,
                 setInputText,
-                fileInfoList,
+                fileInfoList = null,
                 handleChooseFile,
                 handlePaste,
-                handleDeleteFile,
+                handleDeleteFile = NO_FILE_DELETE,
                 handleSend,
                 aiIsResponsing,
                 placement = "bottom",
@@ -138,6 +151,9 @@ const InputArea = React.memo(
                 planModeSwitching = false,
                 onPlanModeToggle,
                 topChip,
+                mentionCandidates,
+                placeholder,
+                ariaLabel,
             },
             ref
         ) => {
@@ -174,8 +190,10 @@ const InputArea = React.memo(
             // Assistant selection states
             const [assistantListVisible, setAssistantListVisible] = useState<boolean>(false);
             const [assistants, setAssistants] = useState<AssistantItem[]>([]);
-            const [filteredAssistants, setFilteredAssistants] = useState<FilteredAssistant[]>([]);
+            const [filteredAssistants, setFilteredAssistants] = useState<FilteredAssistant<MentionCandidate>[]>([]);
             const [selectedAssistantIndex, setSelectedAssistantIndex] = useState<number>(0);
+            // 调用方给了候选（如群成员）就只补全这些，否则补全全部助手
+            const mentionSource: MentionCandidate[] = mentionCandidates ?? assistants;
 
             // Artifact selection states
             const [artifactListVisible, setArtifactListVisible] = useState<boolean>(false);
@@ -463,25 +481,22 @@ const InputArea = React.memo(
                 [hideSlashCompletion, setInputText, slashContext],
             );
 
+            // 胶囊高度由 JS 内联写入，任何影响高度的输入（正文/附件/引用条/聚焦）变化都要重算：
+            // 聚焦时按内容撑高，未聚焦时回到初始高度。未聚焦也必须同步——点发送钮会先失焦
+            // （按“有附件”的高度收起），随后附件被清空，若不重算胶囊会停在旧高度变成圆角矩形。
+            // 移动端失焦（点发送钮）后内容被清空也需要回缩，因此始终按内容调整
+            const hasTopChip = !!topChip;
             useEffect(() => {
                 if (textareaRef.current && !initialHeight) {
                     setInitialHeight(textareaRef.current.scrollHeight);
                 }
-                // Only adjust height when focused or when content changes
-                // 移动端失焦（点发送钮）后内容被清空也需要回缩，因此始终按内容调整
                 if (isFocused || isMobile) {
                     adjustTextareaHeight();
+                } else {
+                    restoreInitialHeight();
                 }
-            }, [inputText, initialHeight, fileInfoList, isFocused, isMobile]);
-
-            // 引用条出现或消失时同步输入框高度（未聚焦时按初始高度计算）
-            const hasTopChip = !!topChip;
-            useEffect(() => {
-                if (isMobile) return;
-                if (isFocused) adjustTextareaHeight();
-                else restoreInitialHeight();
                 // eslint-disable-next-line react-hooks/exhaustive-deps
-            }, [hasTopChip]);
+            }, [inputText, initialHeight, fileInfoList, hasTopChip, isFocused, isMobile]);
 
             useEffect(() => {
                 if (!isMobile || !window.visualViewport) return;
@@ -525,17 +540,8 @@ const InputArea = React.memo(
                 void loadBangList();
                 void loadSlashSkills();
 
-                // Load assistants for @ selection
-                invoke<AssistantItem[]>("get_assistants").then((assistantList) => {
-                    setAssistants(assistantList);
-                    // Initialize with default match info for all assistants
-                    const initialFiltered: FilteredAssistant[] = assistantList.map((assistant) => ({
-                        ...assistant,
-                        matchType: "exact" as const,
-                        highlightIndices: [],
-                    }));
-                    setFilteredAssistants(initialFiltered);
-                });
+                // Load assistants for @ selection（过滤结果在输入 @ 时才计算，这里只更新候选源）
+                invoke<AssistantItem[]>("get_assistants").then(setAssistants);
 
                 // Load artifacts for # selection
                 const loadArtifacts = () => {
@@ -609,13 +615,6 @@ const InputArea = React.memo(
             useAssistantListListener({
                 onAssistantListChanged: useCallback((assistantList: AssistantItem[]) => {
                     setAssistants(assistantList);
-                    // 重新初始化过滤后的助手列表
-                    const initialFiltered: FilteredAssistant[] = assistantList.map((assistant) => ({
-                        ...assistant,
-                        matchType: "exact" as const,
-                        highlightIndices: [],
-                    }));
-                    setFilteredAssistants(initialFiltered);
                 }, []),
             });
 
@@ -708,7 +707,7 @@ const InputArea = React.memo(
                             const atInput = value.substring(atIndex + 1, cursorPosition).toLowerCase();
 
                             // Filter assistants using pinyin
-                            const filtered = PinyinFilter.filterAssistants(assistants, atInput);
+                            const filtered = PinyinFilter.filterAssistants(mentionSource, atInput);
 
                             if (filtered.length > 0) {
                                 setFilteredAssistants(filtered);
@@ -811,7 +810,7 @@ const InputArea = React.memo(
                 };
             }, [
                 originalBangList,
-                assistants,
+                mentionSource,
                 artifacts,
                 placement,
                 hideSlashCompletion,
@@ -957,7 +956,7 @@ const InputArea = React.memo(
                     const atInput = newValue.substring(atIndex + 1, cursorPosition).toLowerCase();
 
                     // Filter assistants using pinyin
-                    const filtered = PinyinFilter.filterAssistants(assistants, atInput);
+                    const filtered = PinyinFilter.filterAssistants(mentionSource, atInput);
 
                     if (filtered.length > 0) {
                         setFilteredAssistants(filtered);
@@ -1400,6 +1399,8 @@ const InputArea = React.memo(
                             rows={1}
                             autoCapitalize="none"
                             enterKeyHint={isMobile ? "enter" : undefined}
+                            placeholder={placeholder}
+                            aria-label={ariaLabel}
                             value={inputText}
                             onChange={handleTextareaChange}
                             onKeyDown={handleKeyDownWithBang}
@@ -1452,19 +1453,21 @@ const InputArea = React.memo(
                         </Button>
                     ) : null}
 
-                    <CircleButton
-                        onClick={handleChooseFile}
-                        icon={<Plus size={16} className="text-icon" />}
-                        className={`input-area-add-button ${placement}`}
-                        dataThemeSlot="input-area-add-button"
-                        dataAippSlot="chat-input-add-button"
-                        aria-label="添加附件"
-                        style={
-                            placement === "bottom" && !isMobile
-                                ? { right: addButtonRight }
-                                : undefined
-                        }
-                    />
+                    {handleChooseFile ? (
+                        <CircleButton
+                            onClick={handleChooseFile}
+                            icon={<Plus size={16} className="text-icon" />}
+                            className={`input-area-add-button ${placement}`}
+                            dataThemeSlot="input-area-add-button"
+                            dataAippSlot="chat-input-add-button"
+                            aria-label="添加附件"
+                            style={
+                                placement === "bottom" && !isMobile
+                                    ? { right: addButtonRight }
+                                    : undefined
+                            }
+                        />
+                    ) : null}
                     <CircleButton
                         size={isMobile ? "medium" : placement === "bottom" ? "large" : "medium"}
                         onClick={handleSend}

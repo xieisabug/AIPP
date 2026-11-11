@@ -1,34 +1,27 @@
-import { useEffect, useState } from "react";
-import { Check, Loader2, X } from "lucide-react";
-import { useReducedMotion } from "motion/react";
-import { accessoriesOf, accessoryDefinitions, avatarDefinitions, type AccessoryId, type AvatarAction } from "@/components/avatar/avatarDefinition";
-import { accessoryPreviewViewBox, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "@/components/avatar/AvatarAccessories";
+import { useState } from "react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import ButlerAvatar from "./ButlerAvatar";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useFilteredModels, type ModelForSelect } from "@/hooks/useFilteredModels";
+import AssistantProfileEditor, { PROFILE_DIALOG_CLASS, PROFILE_FOOTER_CLASS } from "./AssistantProfileEditor";
+import ButlerMemoryPanel from "./ButlerMemoryPanel";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
-import { accessoryActionsOf, showcaseDelay, showcaseStep } from "./avatarShowcase";
 
-const lightColors = [
-    ["纯白", "#FFFFFF"], ["奶油黄", "#FFF0B5"], ["蜜桃", "#FFD6C2"],
-    ["樱花粉", "#FAD4E4"], ["浅紫", "#E4DAFF"], ["浅蓝", "#CDE9FF"],
-    ["薄荷绿", "#CEF3DF"], ["青柠", "#E5F4B8"],
-];
-const darkColors = [
-    ["纯黑", "#000000"], ["石墨", "#343B48"], ["海军蓝", "#193B68"],
-    ["靛蓝", "#39316D"], ["深紫", "#613C72"], ["酒红", "#793D50"],
-    ["墨绿", "#205448"], ["深棕", "#624735"],
-];
+/** 助手第一个模型（assistant_model）：智能体助手只选了提供商时 `modelCode` 为空。 */
+export interface ProfileModelChoice {
+    modelCode: string;
+    providerId: number;
+}
 
-const accessorySlots = [["eyes", "脸部"], ["head", "头部"]] as const;
-
-function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: ButlerAppearance }) {
-    const artwork = {
-        "round-glasses": <GlassesArtwork />, sunglasses: <SunglassesArtwork />, blush: <BlushArtwork />, beret: <HatArtwork />,
-        "bow-bell": <BowBellArtwork color={appearance.colors.primary} outline={appearance.colors.secondary} />, flower: <FlowerArtwork />,
-    }[id];
-    return <svg aria-hidden="true" viewBox={accessoryPreviewViewBox[id]} className="size-8">{artwork}</svg>;
+/** 管家窗口编辑联系人时提供：类型只读展示，模型可改（与新增助手的字段一致）。 */
+export interface ProfileModelField {
+    assistantType: number;
+    typeName: string;
+    /** 当前模型；助手还没有模型时为 null。 */
+    current: ProfileModelChoice | null;
 }
 
 interface Props {
@@ -36,39 +29,76 @@ interface Props {
     name: string;
     appearance?: ButlerAppearance;
     description?: string;
+    model?: ProfileModelField;
+    /** 管家私聊或总管家会话：提供时多一个“记忆”页，查看和管理该助手的记忆。 */
+    memoryConversationId?: number;
     onClose: () => void;
-    onSave: (name: string, appearance: ButlerAppearance, description?: string) => Promise<void>;
+    /** `model` 只在用户换了模型时传入，未改动为 undefined。 */
+    onSave: (name: string, appearance: ButlerAppearance, description?: string, model?: ProfileModelChoice) => Promise<void>;
 }
 
-export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, onClose, onSave, appearanceOnly = false }: Props) {
+const optionValue = (model: ModelForSelect) => `${model.code}%%${model.llm_provider_id}`;
+
+/**
+ * 智能体助手的提供商没有登记模型时，候选里只有一条代表提供商本身的选项（id 为 0、code 为 `acp`），
+ * 新增助手选它会存成空模型代码（见后端 resolve_new_assistant_model），这里按同样规则反向对应。
+ */
+const isProviderOnly = (field: ProfileModelField, model: ModelForSelect) => field.assistantType === 4 && model.id === 0;
+
+/** 助手当前模型对应的候选项：先按模型代码精确匹配；智能体助手再匹配同一提供商的“仅提供商”选项（如 Codex 的默认模型由其自身配置决定）。 */
+export function findCurrentModelOption(models: ModelForSelect[], field: ProfileModelField): ModelForSelect | undefined {
+    const current = field.current;
+    if (!current || current.providerId <= 0) return undefined;
+    const sameProvider = models.filter(model => model.llm_provider_id === current.providerId);
+    return sameProvider.find(model => !isProviderOnly(field, model) && model.code === current.modelCode)
+        ?? sameProvider.find(model => isProviderOnly(field, model));
+}
+
+export const toModelChoice = (field: ProfileModelField, model: ModelForSelect): ProfileModelChoice =>
+    ({ modelCode: isProviderOnly(field, model) ? "" : model.code, providerId: model.llm_provider_id });
+
+function ModelSelect({ field, picked, onPick }: { field: ProfileModelField; picked: ModelForSelect | null; onPick: (model: ModelForSelect | null) => void }) {
+    const { models, loading, error } = useFilteredModels(field.assistantType);
+    const current = findCurrentModelOption(models, field);
+    const shown = picked ?? current;
+    return <div className="space-y-2">
+        <label htmlFor="assistant-profile-model" className="text-sm font-medium">{field.assistantType === 4 ? "模型 / 智能体提供商" : "模型"}</label>
+        <Select value={shown ? optionValue(shown) : ""} disabled={loading || !!error} onValueChange={value => {
+            const model = models.find(option => optionValue(option) === value);
+            // 选回原来的模型等于没改，保存时不写模型。
+            onPick(!model || (current && optionValue(current) === value) ? null : model);
+        }}>
+            <SelectTrigger id="assistant-profile-model" className="w-full">
+                <SelectValue placeholder={loading ? "加载模型中…" : "选择模型"} />
+            </SelectTrigger>
+            <SelectContent>{models.map(model => <SelectItem key={optionValue(model)} value={optionValue(model)}>{model.name}</SelectItem>)}</SelectContent>
+        </Select>
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {!loading && !error && field.current && !current && !picked && <p className="text-sm text-muted-foreground">
+            当前模型（{field.current.modelCode || `提供商 ${field.current.providerId}`}）已不可用，请重新选择。
+        </p>}
+    </div>;
+}
+
+export default function ButlerProfileDialog({ name: initialName, appearance: initialAppearance, description: initialDescription, model: modelField,
+    memoryConversationId, onClose, onSave, appearanceOnly = false }: Props) {
     const [name, setName] = useState(initialName);
     const [description, setDescription] = useState(initialDescription ?? "");
+    const [pickedModel, setPickedModel] = useState<ModelForSelect | null>(null);
     const [appearance, setAppearance] = useState(initialAppearance ?? defaultAppearance);
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState("");
-    // 预览自动轮播：`override` 用于刚选中装饰时立刻插播它的动作。
-    const [showcase, setShowcase] = useState<{ step: number; id: number; override?: AvatarAction }>({ step: 0, id: 0 });
-    const reducedMotion = useReducedMotion();
-    const definition = avatarDefinitions[appearance.shape];
-    const current = showcase.override ? { kind: "action" as const, action: showcase.override }
-        : showcaseStep(showcase.step, accessoryActionsOf([appearance.accessories.eyes, appearance.accessories.head]));
-    const delay = showcaseDelay(current, showcase.id);
-    useEffect(() => {
-        if (reducedMotion) return;
-        const timer = setTimeout(() => setShowcase(previous => ({ step: previous.step + 1, id: previous.id + 1 })), delay);
-        return () => clearTimeout(timer);
-    }, [showcase.id, delay, reducedMotion]);
+    const withDescription = !appearanceOnly && (initialDescription !== undefined || modelField !== undefined);
     const save = async () => {
         if (!name.trim() || saving) return;
         setSaving(true);
         setError("");
         try {
             // 编辑器不再提供动画开关，保存时统一开启（兼容旧配置里关掉的情况）。
-            if (initialDescription === undefined) {
-                await onSave(name.trim(), { ...appearance, motion: true });
-            } else {
-                await onSave(name.trim(), { ...appearance, motion: true }, description);
-            }
+            const next = { ...appearance, motion: true };
+            if (modelField) await onSave(name.trim(), next, description, pickedModel ? toModelChoice(modelField, pickedModel) : undefined);
+            else if (initialDescription === undefined) await onSave(name.trim(), next);
+            else await onSave(name.trim(), next, description);
             onClose();
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause));
@@ -76,79 +106,56 @@ export default function ButlerProfileDialog({ name: initialName, appearance: ini
             setSaving(false);
         }
     };
-    const palette = (side: "primary" | "secondary", title: string, colors: string[][]) => <fieldset className="space-y-3">
-        <legend className="text-sm font-medium">{title}</legend>
-        <div className="flex flex-wrap gap-2">
-            {colors.map(([label, color]) => <button key={color} type="button" title={label}
-                aria-label={`${title}：${label}`} aria-pressed={appearance.colors[side] === color}
-                onClick={() => setAppearance(previous => ({ ...previous, colors: { ...previous.colors, [side]: color } }))}
-                className="flex size-11 items-center justify-center rounded-full border border-black/15 outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring aria-pressed:ring-2 aria-pressed:ring-foreground aria-pressed:ring-offset-2 aria-pressed:ring-offset-background"
-                style={{ backgroundColor: color, color: side === "primary" ? "#111A2D" : "#FFFFFF" }}>
-                {appearance.colors[side] === color && <Check className="size-4" />}
-            </button>)}
-        </div>
-    </fieldset>;
 
+    const profileForm = <form onSubmit={event => { event.preventDefault(); void save(); }} className="flex min-h-0 flex-1 flex-col gap-4">
+        <AssistantProfileEditor name={name} appearance={appearance} onAppearanceChange={setAppearance} disabled={saving}>
+            {!appearanceOnly && <>
+                <div className="space-y-2">
+                    <label htmlFor="butler-profile-name" className="text-sm font-medium">名称</label>
+                    <Input id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
+                </div>
+                {withDescription && <div className="space-y-2">
+                    <label htmlFor="assistant-profile-description" className="text-sm font-medium">描述（选填）</label>
+                    <Input id="assistant-profile-description" value={description} placeholder="简单介绍助手的用途"
+                        onChange={event => setDescription(event.target.value)} />
+                </div>}
+                {modelField && <>
+                    <div className="space-y-2">
+                        <label htmlFor="assistant-profile-type" className="text-sm font-medium">类型</label>
+                        <Input id="assistant-profile-type" value={modelField.typeName} disabled readOnly />
+                        <p className="text-xs text-muted-foreground">类型创建后不能修改。</p>
+                    </div>
+                    <ModelSelect field={modelField} picked={pickedModel} onPick={setPickedModel} />
+                </>}
+            </>}
+        </AssistantProfileEditor>
+        {error && <p role="alert" className="shrink-0 break-words text-sm text-destructive">{error}</p>}
+        <DialogFooter className={PROFILE_FOOTER_CLASS}>
+            <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
+            <Button type="submit" disabled={saving || !name.trim()}>{saving && <Loader2 className="size-4 animate-spin" />}{saving ? "正在保存…" : "保存"}</Button>
+        </DialogFooter>
+    </form>;
+
+    const tabbed = memoryConversationId !== undefined && !appearanceOnly;
+    const title = appearanceOnly ? "助手头像" : withDescription ? "编辑助手" : "名字与形象";
     return <Dialog open onOpenChange={open => { if (!open && !saving) onClose(); }}>
-        <DialogContent className="sm:max-w-[720px] max-h-[90vh] overflow-y-auto" showCloseButton={!saving}>
-            <DialogHeader>
-                <DialogTitle>{appearanceOnly ? "助手头像" : initialDescription === undefined ? "名字与形象" : "名字、描述与形象"}</DialogTitle>
-                <DialogDescription>{appearanceOnly ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。" : "为助手选一个名字，搭配属于它的颜色。"}</DialogDescription>
+        <DialogContent className={PROFILE_DIALOG_CLASS} showCloseButton={!saving}>
+            <DialogHeader className="shrink-0">
+                <DialogTitle>{title}</DialogTitle>
+                <DialogDescription>{appearanceOnly ? "设置助手的形状、配色和配饰，保存后同步用于会话列表和管家联系人。" : "修改助手的基本信息，并搭配属于它的形象。"}</DialogDescription>
             </DialogHeader>
-            <form onSubmit={event => { event.preventDefault(); void save(); }} className="space-y-6">
-                <fieldset disabled={saving} className="grid gap-6 sm:grid-cols-[220px_1fr]">
-                    <div className="flex flex-col items-center gap-4 rounded-xl bg-muted/40 px-4 py-6">
-                        <ButlerAvatar id={0} chief size={200} appearance={{ ...appearance, motion: true }} animated
-                            state={current.kind === "state" ? current.state : "idle"}
-                            actionRequest={current.kind === "action" ? { action: current.action, sequence: showcase.id } : undefined} />
-                        <span className="max-w-full break-words text-center font-medium">{name.trim() || "助手"}</span>
-                    </div>
-                    <div className="min-w-0 space-y-5">
-                        {!appearanceOnly && <div className="space-y-2">
-                            <label htmlFor="butler-profile-name" className="text-sm font-medium">助手名称</label>
-                            <Input id="butler-profile-name" value={name} onChange={event => setName(event.target.value)} maxLength={80} autoFocus />
-                        </div>}
-                        {!appearanceOnly && initialDescription !== undefined && <div className="space-y-2">
-                            <label htmlFor="assistant-profile-description" className="text-sm font-medium">描述（选填）</label>
-                            <Input id="assistant-profile-description" value={description} onChange={event => setDescription(event.target.value)} />
-                        </div>}
-                        <fieldset className="space-y-2">
-                            <legend className="text-sm font-medium">形状</legend>
-                            <div className="flex flex-wrap gap-2">
-                                {Object.values(avatarDefinitions).map(shape => <button key={shape.id} type="button" aria-label={shape.label} title={shape.label}
-                                    aria-pressed={appearance.shape === shape.id}
-                                    onClick={() => setAppearance(previous => ({ ...previous, shape: shape.id }))}
-                                    className="flex items-center justify-center rounded-lg border p-2 aria-pressed:border-primary aria-pressed:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
-                                    <ButlerAvatar id={0} chief size={40} appearance={{ ...appearance, shape: shape.id, accessories: { eyes: null, head: null } }} />
-                                </button>)}
-                            </div>
-                        </fieldset>
-                        {palette("primary", `${definition.colorLabels.primary} · 亮色`, lightColors)}
-                        {palette("secondary", `${definition.colorLabels.secondary} · 深色`, darkColors)}
-                        {accessorySlots.map(([slot, label]) => <fieldset key={slot} className="space-y-2">
-                            <legend className="text-sm font-medium">{label}</legend>
-                            <div className="flex flex-wrap gap-2">
-                                {[null, ...accessoriesOf(slot)].map(value => <button key={value ?? "none"} type="button"
-                                    aria-label={`${label}：${value ? accessoryDefinitions[value].label : "无"}`} title={value ? accessoryDefinitions[value].label : "无"}
-                                    aria-pressed={appearance.accessories[slot] === value}
-                                    onClick={() => {
-                                        setAppearance(previous => ({ ...previous, accessories: { ...previous.accessories, [slot]: value } }));
-                                        if (value) setShowcase(previous => ({ ...previous, id: previous.id + 1, override: accessoryDefinitions[value].action }));
-                                    }}
-                                    className="flex size-11 items-center justify-center rounded-lg border aria-pressed:border-primary aria-pressed:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
-                                    {value ? <AccessoryIcon id={value} appearance={appearance} /> : <X className="size-4 text-muted-foreground" />}
-                                </button>)}
-                            </div>
-                        </fieldset>)}
-                    </div>
-                </fieldset>
-                {error && <p role="alert" className="text-sm text-destructive break-words">{error}</p>}
-                <DialogFooter>
-                    <Button type="button" variant="ghost" className="sm:mr-auto" disabled={saving} onClick={() => setAppearance(previous => ({ ...previous, colors: defaultAppearance.colors }))}>恢复黑白配色</Button>
-                    <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
-                    <Button type="submit" disabled={saving || !name.trim()}>{saving && <Loader2 className="size-4 animate-spin" />}{saving ? "正在保存…" : "保存"}</Button>
-                </DialogFooter>
-            </form>
+            {!tabbed ? profileForm : <Tabs defaultValue="profile" className="min-h-0 flex-1 gap-4">
+                <TabsList className="shrink-0">
+                    <TabsTrigger value="profile" className="px-4">{withDescription ? "资料与形象" : "名字与形象"}</TabsTrigger>
+                    <TabsTrigger value="memory" className="px-4">记忆</TabsTrigger>
+                </TabsList>
+                {/* 资料页自己管理滚动（右侧表单滚动、底部操作栏固定）。 */}
+                <TabsContent value="profile" className="flex min-h-0 flex-col">{profileForm}</TabsContent>
+                {/* 记忆的修改立即生效，不跟随资料页的保存按钮。 */}
+                <TabsContent value="memory" className="min-h-0 overflow-y-auto pr-1">
+                    <ButlerMemoryPanel conversationId={memoryConversationId} scope="assistant" />
+                </TabsContent>
+            </Tabs>}
         </DialogContent>
     </Dialog>;
 }

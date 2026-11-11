@@ -1694,6 +1694,12 @@ pub async fn execute_aipp_builtin_tool(
                         .await.map_err(|e| format!("{tool_name} conversation={id}: {e:#}"))?;
                     serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
                 }
+                "butler_memory" => {
+                    let id = conversation_id.ok_or("butler_memory 需要当前管家会话")?;
+                    let result = crate::api::butler_memory::tool(&app_handle, id, &args)
+                        .await.map_err(|e| format!("butler_memory conversation={id}: {e:#}"))?;
+                    serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
+                }
                 "search_own_history" => {
                     let id = conversation_id.ok_or("search_own_history requires a current conversation")?;
                     if !matches!(get_conversation_kind(&app_handle, id).as_deref(), Some("butler_main" | "butler_contact" | "butler_task")) {

@@ -91,7 +91,7 @@ export default function ButlerContactList({chief, contacts, selected, ready, pre
                 const preview = previews.find(p => p.assistantId === assistant.id);
                 const unread = preview?.messageId && selected !== assistant.id &&
                     preview.messageId > Number(localStorage.getItem(`butler-read-${preview.conversationId}`));
-                return <AssistantItemContextMenu key={assistant.id} assistant={assistant} onAction={onAssistantAction} canClear><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
+                return <AssistantItemContextMenu key={assistant.id} assistant={assistant} onAction={onAssistantAction} canReset><button onClick={() => { acknowledge?.(assistant.id); onSelect(assistant); }} disabled={!ready}
                     aria-pressed={selected === assistant.id} className="butler-contact">
                     <ButlerAvatar id={assistant.id} figure animated={state(assistant.id) !== "idle"} state={state(assistant.id)} />
                     <span className="min-w-0 flex-1">

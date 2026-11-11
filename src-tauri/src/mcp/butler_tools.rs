@@ -15,7 +15,9 @@ pub fn conversation_kind(app: &tauri::AppHandle, id: Option<i64>) -> Result<Stri
 pub fn is_direct_tool(kind: &str, command: Option<&str>, tool: &str) -> bool {
     cfg!(desktop) && is_butler_conversation_kind(kind) && match command {
         Some("aipp:superadmin") => matches!(tool,"superadmin_catalog"|"superadmin_inspect"|"superadmin_execute"|"superadmin_batch"|"superadmin_undo"|"superadmin_audit_query"),
-        Some("aipp:agent") => kind != GROUP_MEMBER_KIND && crate::api::butler_peer::is_peer_tool(tool),
+        // 长期记忆在群成员会话里也可用：群里读写的是本群记忆，看不到成员的私有记忆。
+        Some("aipp:agent") => crate::api::butler_memory::is_tool(tool)
+            || (kind != GROUP_MEMBER_KIND && crate::api::butler_peer::is_peer_tool(tool)),
         // 受托助手在自己的会话里向用户提问，问题绑定当前回合（即当前这项委托或任务）。
         Some("aipp:ui_interaction") => tool == "ask_user_question",
         _ => false,
