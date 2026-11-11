@@ -26,6 +26,7 @@ export interface ConversationContentProps {
     onMessageEdit: (message: Message) => void;
     onMessageFork: (messageId: number) => void;
     onQueuedMessagePromote?: (queueId: number) => void;
+    onQueuedMessageSendNow?: (queueId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
@@ -73,6 +74,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
     onMessageEdit,
     onMessageFork,
     onQueuedMessagePromote,
+    onQueuedMessageSendNow,
     onToggleReasoningExpand,
     inlineInteractionItems,
     allowFeishuDebugResend = false,
@@ -117,6 +119,7 @@ const ConversationContent: React.FC<ConversationContentProps> = memo(({
         onMessageEdit,
         onMessageFork,
         onQueuedMessagePromote,
+        onQueuedMessageSendNow,
         onToggleReasoningExpand,
         inlineInteractionItems,
         allowFeishuDebugResend,

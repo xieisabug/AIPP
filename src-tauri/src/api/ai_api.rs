@@ -834,6 +834,42 @@ pub async fn promote_queued_conversation_message(
     Ok(queued)
 }
 
+/// 用户手动“立即发送”一条排队消息。自动派发只在一轮回复结束时发生；会话空闲时
+/// （如重启后、上一轮报错、停止工具后）排队消息不会自己发出，这里给出手动入口。
+/// 只看本进程的运行状态：数据库里遗留的“执行中”记录不再挡住用户。
+#[tauri::command]
+#[instrument(skip(app_handle, window), fields(queue_id))]
+pub async fn send_queued_conversation_message_now(
+    app_handle: tauri::AppHandle,
+    window: tauri::Window,
+    queue_id: i64,
+) -> Result<(), AppError> {
+    let db = ConversationDatabase::new(&app_handle).map_err(AppError::from)?;
+    let repo = db.queued_message_repo()?;
+    let pending = repo.get_pending(queue_id)?.ok_or_else(|| {
+        AppError::UnknownError(format!("排队消息 {queue_id} 不存在或已经发出，请刷新会话"))
+    })?;
+    let conversation_id = pending.conversation_id;
+    if app_handle.state::<ConversationActivityManager>().get_runtime_state(conversation_id).await.is_running {
+        return Err(AppError::UnknownError(format!(
+            "会话 {conversation_id} 正在回复，排队消息 {queue_id} 会在这一轮结束后自动发送；想马上插进去请用「提升为打断消息」"
+        )));
+    }
+    let token = app_handle.state::<MessageTokenManager>().get_cancel_token(conversation_id).await;
+    crate::api::ai::context_manager::summarizer::ensure_summary_execution(&|| Ok(()), token.as_ref())?;
+    crate::db::butler_control::ensure_turn(&db.get_connection()?, conversation_id)
+        .map_err(|e| AppError::UnknownError(format!("排队消息 {queue_id} 未发送：{e}")))?;
+    let queued = repo.take_for_dispatch_by_id(queue_id)?.ok_or_else(|| {
+        AppError::UnknownError(format!("排队消息 {queue_id} 刚刚已被发出或删除，未重复发送"))
+    })?;
+    if !dispatch_queued_message(app_handle, window, queued)? {
+        return Err(AppError::UnknownError(format!(
+            "排队消息 {queue_id} 属于已变更或已停止的工作目标，已作废，没有发送"
+        )));
+    }
+    Ok(())
+}
+
 fn dispatch_queued_message(
     app_handle: tauri::AppHandle,
     window: tauri::Window,

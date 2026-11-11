@@ -35,6 +35,7 @@ export interface MergedAssistantGroupProps {
     onMessageEdit: (message: Message) => void;
     onMessageFork: (messageId: number) => void;
     onQueuedMessagePromote?: (queueId: number) => void;
+    onQueuedMessageSendNow?: (queueId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     renderMessageActions?: (message: Message) => React.ReactNode;
     resendMessageToFeishuDebug: (messageId: number) => Promise<void> | void;
@@ -95,6 +96,7 @@ function sharedPropsEqual(
     if (previous.onMessageEdit !== next.onMessageEdit) return false;
     if (previous.onMessageFork !== next.onMessageFork) return false;
     if (previous.onQueuedMessagePromote !== next.onQueuedMessagePromote) return false;
+    if (previous.onQueuedMessageSendNow !== next.onQueuedMessageSendNow) return false;
     if (previous.onToggleReasoningExpand !== next.onToggleReasoningExpand) return false;
     if (previous.renderMessageActions !== next.renderMessageActions) return false;
     if (previous.resendMessageToFeishuDebug !== next.resendMessageToFeishuDebug) return false;
@@ -155,6 +157,7 @@ function MergedGroupParts({
         onMessageEdit,
         onMessageFork,
         onQueuedMessagePromote,
+        onQueuedMessageSendNow,
         onToggleReasoningExpand,
         renderMessageActions,
         onContinueAgentPlan,
@@ -176,6 +179,7 @@ function MergedGroupParts({
                         onMessageEdit={() => onMessageEdit(message)}
                         onMessageFork={() => onMessageFork(message.id)}
                         onQueuedMessagePromote={onQueuedMessagePromote}
+                        onQueuedMessageSendNow={onQueuedMessageSendNow}
                         isReasoningExpanded={reasoningExpandStates.get(message.id) || false}
                         onToggleReasoningExpand={() => onToggleReasoningExpand(message.id)}
                         shouldShowShineBorder={false}

@@ -16,9 +16,13 @@ describe("Butler transcript", () => {
         expect(step.content).toContain("MCP_TOOL_CALL");
     });
 
-    it("should hide tool actions and technical errors without deleting history", () => {
+    it("should show the failure of this turn as an error row and hide errors a later reply superseded", () => {
         const error = message(6, "error", "读取报告失败：文件不存在");
-        expect(butlerTranscript([...history, error], new Set([3]))).toEqual([history[0], history[4]]);
+        expect(butlerTranscript([...history, error], new Set([3]))).toEqual([history[0], history[4], error]);
+        const retried = message(6, "error", "读取报告失败：文件不存在", { isSupersededError: true });
+        expect(butlerTranscript([history[0], retried, history[4]])).toEqual([history[0], history[4]]);
+        // 仍在进行的这一轮不提前显示
+        expect(butlerTranscript([history[0], error], new Set([6]))).toEqual([history[0]]);
     });
 
     it("should hide streaming markers and internal callbacks without hiding a user quoting the same text", () => {

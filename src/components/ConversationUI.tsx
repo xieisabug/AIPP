@@ -1163,6 +1163,16 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             });
         }, []);
 
+        // 会话空闲时排队消息不会自己发出（如重启后、上一轮报错），给用户一个手动发送入口。
+        const handleQueuedMessageSendNow = useCallback((queueId: number) => {
+            void invoke("send_queued_conversation_message_now", { queueId }).catch((error) => {
+                toast.error("排队消息没有发出", {
+                    description: String(error),
+                    position: "bottom-right",
+                });
+            });
+        }, []);
+
         // 对话操作
         const {
             handleDeleteConversationSuccess,
@@ -2212,6 +2222,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                 onMessageEdit={readOnly ? rejectReadOnlyAction : handleMessageEdit}
                                 onMessageFork={handleMessageFork}
                                 onQueuedMessagePromote={readOnly ? undefined : handleQueuedMessagePromote}
+                                onQueuedMessageSendNow={readOnly ? undefined : handleQueuedMessageSendNow}
                                 onToggleReasoningExpand={toggleReasoningExpand}
                                 inlineInteractionItems={conversationId ? inlineInteractionItems : undefined}
                                 allowFeishuDebugResend={allowFeishuDebugResend}

@@ -28,7 +28,7 @@ import { resolveMessageDisplayContent } from "../utils/streamingOverlayHandoff";
 import { splitTurnContext } from "../utils/turnContext";
 import { collapseUserMessage } from "../utils/userMessageCollapse";
 import type { InlineInteractionItem } from "./ConversationUI";
-import { ChevronDown, ChevronUp, ListEnd, Loader2, Zap } from "lucide-react";
+import { ChevronDown, ChevronUp, ListEnd, Loader2, Send, Zap } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -44,6 +44,7 @@ interface MessageItemProps {
     onMessageEdit?: () => void;
     onMessageFork?: () => void;
     onQueuedMessagePromote?: (queueId: number) => void;
+    onQueuedMessageSendNow?: (queueId: number) => void;
     isReasoningExpanded?: boolean;
     onToggleReasoningExpand?: () => void;
     shouldShowShineBorder?: boolean;
@@ -230,41 +231,41 @@ const RichMessageContent = React.memo(function RichMessageContent(props: RichMes
 function QueuedMessageIndicator({
     meta,
     onPromote,
+    onSendNow,
 }: {
     meta: QueueMessageMeta;
     onPromote?: (queueId: number) => void;
+    onSendNow?: (queueId: number) => void;
 }) {
     // 移动端触控目标 ≥44px，桌面保持 28px
     const sizeClass = useIsMobilePlatform() ? "h-11 w-11" : "h-7 w-7";
-    if (meta.queueKind === "interrupt") {
-        return (
-            <div
-                className={`mt-3 flex ${sizeClass} shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground`}
-                title="打断消息"
-                aria-label="打断消息"
-            >
-                <Zap className="h-3.5 w-3.5" />
-            </div>
-        );
-    }
-
+    const isInterrupt = meta.queueKind === "interrupt";
+    const label = isInterrupt ? "打断消息" : "排队消息";
     return (
         <DropdownMenu>
             <DropdownMenuTrigger asChild>
                 <button
                     type="button"
                     className={`mt-3 flex ${sizeClass} shrink-0 items-center justify-center rounded-md border border-border bg-background text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground`}
-                    title="排队消息"
-                    aria-label="排队消息"
+                    title={label}
+                    aria-label={label}
                 >
-                    <ListEnd className="h-3.5 w-3.5" />
+                    {isInterrupt ? <Zap className="h-3.5 w-3.5" /> : <ListEnd className="h-3.5 w-3.5" />}
                 </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => onPromote?.(meta.queueId)}>
-                    <Zap className="h-4 w-4" />
-                    提升为打断消息
-                </DropdownMenuItem>
+                {onSendNow && (
+                    <DropdownMenuItem onClick={() => onSendNow(meta.queueId)}>
+                        <Send className="h-4 w-4" />
+                        立即发送
+                    </DropdownMenuItem>
+                )}
+                {!isInterrupt && (
+                    <DropdownMenuItem onClick={() => onPromote?.(meta.queueId)}>
+                        <Zap className="h-4 w-4" />
+                        提升为打断消息
+                    </DropdownMenuItem>
+                )}
             </DropdownMenuContent>
         </DropdownMenu>
     );
@@ -304,6 +305,7 @@ const MessageItem = React.memo<MessageItemProps>(
         onMessageEdit,
         onMessageFork,
         onQueuedMessagePromote,
+        onQueuedMessageSendNow,
         isReasoningExpanded = false,
         onToggleReasoningExpand,
         shouldShowShineBorder = false,
@@ -648,6 +650,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     <QueuedMessageIndicator
                         meta={queuedMessageMeta}
                         onPromote={onQueuedMessagePromote}
+                        onSendNow={onQueuedMessageSendNow}
                     />
                 ) : null}
                 {bubbleElement}
@@ -700,6 +703,7 @@ const areEqual = (prevProps: MessageItemProps, nextProps: MessageItemProps) => {
 
     if (prevProps.inlineInteractionItems !== nextProps.inlineInteractionItems) return false;
     if (prevProps.onQueuedMessagePromote !== nextProps.onQueuedMessagePromote) return false;
+    if (prevProps.onQueuedMessageSendNow !== nextProps.onQueuedMessageSendNow) return false;
 
     // 防泄露模式：isLastMessage 变化时需要重新渲染
     if (prevProps.isLastMessage !== nextProps.isLastMessage) return false;

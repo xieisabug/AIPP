@@ -1673,6 +1673,43 @@ impl QueuedConversationMessageRepository {
         })
     }
 
+    /// 读取一条还在等待派发（queued/paused）的排队消息。
+    pub fn get_pending(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.conn
+            .query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1 AND status IN ('queued', 'paused')",
+                params![id],
+                Self::queued_message_from_row,
+            )
+            .optional()
+    }
+
+    /// 用户手动“立即发送”指定的一条：只认领仍在等待的记录，自动派发已经认领的不会被重复发出。
+    #[instrument(level = "debug", skip(self), fields(id))]
+    pub fn take_for_dispatch_by_id(&self, id: i64) -> Result<Option<QueuedConversationMessage>> {
+        self.with_serialized_write(|conn| {
+            let changed = conn.execute(
+                "UPDATE queued_conversation_message
+                 SET status = 'dispatching', updated_time = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status IN ('queued', 'paused')",
+                params![id],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            conn.query_row(
+                "SELECT id, conversation_id, queue_kind, status, request_json, prompt, assistant_id, created_time, updated_time
+                 FROM queued_conversation_message
+                 WHERE id = ?1",
+                params![id],
+                Self::queued_message_from_row,
+            )
+            .optional()
+        })
+    }
+
     #[instrument(level = "debug", skip(self), fields(id))]
     pub fn finish_dispatch(&self, id: i64) -> Result<()> {
         self.with_serialized_write(|conn| {

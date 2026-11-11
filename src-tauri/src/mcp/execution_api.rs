@@ -2624,39 +2624,44 @@ pub async fn stop_mcp_tool_call(
     // 1. 取消执行令牌（如果正在执行）
     let _cancelled = cancel_tool_call_execution(call_id).await;
 
-    // 2. 更新状态为 failed，标记为用户主动停止
-    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    // 2. 标记为用户主动停止
+    fail_unfinished_tool_call(&app_handle, call_id, "Stopped by user").await?;
+    Ok(())
+}
 
-    // 获取当前工具调用状态
+/// 以 failed 结束仍停在 pending/executing 的工具调用：写入原因、补齐 tool_result、广播状态并移除 MCP 焦点。
+/// 只处理状态，不取消执行令牌，也不触发续写。返回是否真的结束了一条调用。
+pub(crate) async fn fail_unfinished_tool_call(
+    app_handle: &tauri::AppHandle,
+    call_id: i64,
+    reason: &str,
+) -> std::result::Result<bool, String> {
+    let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let current_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
+    if current_call.status != "pending" && current_call.status != "executing" {
+        return Ok(false);
+    }
+    db.update_mcp_tool_call_status(call_id, "failed", None, Some(reason))
+        .map_err(|e| e.to_string())?;
 
-    // 只对 pending 或 executing 状态的工具进行停止操作
-    if current_call.status == "pending" || current_call.status == "executing" {
-        db.update_mcp_tool_call_status(call_id, "failed", None, Some("Stopped by user"))
-            .map_err(|e| e.to_string())?;
+    let updated_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
+    broadcast_mcp_tool_call_update(app_handle, &updated_call);
 
-        // 3. 广播状态更新事件
-        let updated_call = db.get_mcp_tool_call(call_id).map_err(|e| e.to_string())?;
-        broadcast_mcp_tool_call_update(&app_handle, &updated_call);
-
-        if let Err(error) = persist_terminal_tool_result_message(&app_handle, &updated_call).await {
-            warn!(
-                call_id,
-                conversation_id = updated_call.conversation_id,
-                error = %error,
-                "failed to persist tool_result after stopping MCP tool call"
-            );
-        }
-
-        // 4. 立即移除已停止的 MCP 焦点
-        if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
-            activity_manager
-                .finish_mcp_call(&app_handle, current_call.conversation_id, call_id)
-                .await;
-        }
+    if let Err(error) = persist_terminal_tool_result_message(app_handle, &updated_call).await {
+        warn!(
+            call_id,
+            conversation_id = updated_call.conversation_id,
+            error = %error,
+            "failed to persist tool_result after failing unfinished MCP tool call"
+        );
     }
 
-    Ok(())
+    if let Some(activity_manager) = app_handle.try_state::<ConversationActivityManager>() {
+        activity_manager
+            .finish_mcp_call(app_handle, current_call.conversation_id, call_id)
+            .await;
+    }
+    Ok(true)
 }
 
 /// 批量发送工具调用结果：将指定消息下的所有工具调用结果发送给 AI 继续对话

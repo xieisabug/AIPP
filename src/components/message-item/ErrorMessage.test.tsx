@@ -1,11 +1,14 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import ErrorMessage, { extractRootCause } from "./ErrorMessage";
+import ErrorMessage, { extractRootCause, summarizeError } from "./ErrorMessage";
 
 const platformState = vi.hoisted(() => ({ mobile: false }));
 vi.mock("@/hooks/use-platform", () => ({
     useIsMobilePlatform: () => platformState.mobile,
 }));
+
+const toggle = () => fireEvent.click(screen.getByRole("button", { name: /查看详情$|查看错误$|收起$/ }));
+const details = (container: HTMLElement) => container.querySelector('[data-aipp-slot="error-details"]') as HTMLElement | null;
 
 const networkError = JSON.stringify({
     message: "AI请求失败: 网络连接异常，请检查网络设置",
@@ -23,65 +26,74 @@ describe("ErrorMessage", () => {
         expect(extractRootCause("only line")).toBe("only line");
     });
 
-    it("shows the real cause when there is no response body", () => {
-        render(<ErrorMessage content={networkError} messageId={1} />);
-        expect(screen.getByText(/error sending request for url/)).toBeTruthy();
-        expect(screen.getByText("查看详情（响应体/原始错误）")).toBeTruthy();
+    it("should name the server-side reason when the friendly message is generic", () => {
+        const body = JSON.stringify({ error: { message: "upstream error: do request failed", code: "do_request_failed" } });
+        expect(summarizeError("AI请求失败: 请求失败，请稍后重试", body, null))
+            .toEqual({ summary: "请求失败，请稍后重试", reason: "upstream error: do request failed" });
+        expect(summarizeError("助手尚未配置模型", null, null)).toEqual({ summary: "助手尚未配置模型", reason: null });
+    });
+
+    it("should fold into one line with the specific cause and expand details under the same line", () => {
+        const { container } = render(<ErrorMessage content={networkError} messageId={1} />);
+        expect(container.querySelector('[data-aipp-slot="error-summary"]')?.textContent).toBe("网络连接异常，请检查网络设置");
+        expect(container.querySelector('[data-aipp-slot="error-reason"]')?.textContent).toContain("error sending request for url");
+        expect(details(container)).toBeNull();
+
+        toggle();
+        const header = screen.getByRole("button", { name: /收起$/ });
+        expect(header).toHaveAttribute("aria-expanded", "true");
+        // 展开后标题行还是同一行文字，只是操作提示变成“收起”
+        expect(header.querySelector('[data-aipp-slot="error-summary"]')?.textContent).toBe("网络连接异常，请检查网络设置");
+        expect(details(container)?.textContent).toContain("mock-rich");
+        expect(details(container)?.textContent).toContain("流式请求");
+        fireEvent.click(screen.getByText("查看详情（响应体/原始错误）"));
+        expect(screen.getByText(/Stream processing failed/)).toBeInTheDocument();
+
+        toggle();
+        expect(details(container)).toBeNull();
     });
 
     it("uses full width on mobile and the desktop width otherwise", () => {
         platformState.mobile = true;
         const { container, unmount } = render(<ErrorMessage content={networkError} messageId={1} />);
-        expect((container.firstChild as HTMLElement).className).toContain("w-full max-w-full");
+        toggle();
+        expect(details(container)!.className).toContain("w-full max-w-full");
         unmount();
         platformState.mobile = false;
         const desktop = render(<ErrorMessage content={networkError} messageId={1} />);
-        expect((desktop.container.firstChild as HTMLElement).className).toContain("w-fit max-w-[min(65%,56rem)]");
+        toggle();
+        expect(details(desktop.container)!.className).toContain("max-w-[min(65%,56rem)]");
     });
 
     it.each([
         ["desktop", false],
         ["mobile", true],
-    ])("keeps light colors and adds readable dark-theme colors on %s", (_label, mobile) => {
+    ])("should keep the expanded view in the folded line's neutral style on %s", (_label, mobile) => {
         platformState.mobile = mobile;
-        document.documentElement.classList.toggle("aipp-mobile-platform", mobile);
-        document.documentElement.classList.add("dark");
         try {
             const { container } = render(<ErrorMessage content={networkError} messageId={1} />);
-            const card = container.firstChild as HTMLElement;
-            // 浅色主题保持原样
-            expect(card.className).toContain("bg-red-50");
-            expect(card.className).toContain("border-red-200");
-            // 深色主题：深红底 + 浅红字，不再是白字压粉底
-            expect(card.className).toContain("dark:bg-red-950/40");
-            expect(card.className).toContain("dark:text-red-200");
-            const title = container.querySelector('[data-aipp-slot="error-title"]') as HTMLElement;
-            expect(title.textContent).toBe("AI Request Failed");
-            expect(title.className).toContain("text-red-800");
-            expect(title.className).toContain("dark:text-red-200");
-            const rootCause = container.querySelector('[data-aipp-slot="error-root-cause"]') as HTMLElement;
-            expect(rootCause.className).toContain("dark:text-red-300");
-            // 主文案走 .prose（text-foreground），配合深色卡片底可读
-            const main = container.querySelector('[data-aipp-slot="error-main-message"]') as HTMLElement;
-            expect(main.className).toContain("prose");
-            // 操作条在深色下不再是粉色底
-            const actionBarClass = mobile ? ".aipp-mobile-action-bar" : ".group-hover\\:flex";
-            const actionBar = container.querySelector(actionBarClass) as HTMLElement;
-            expect(actionBar.className).toContain("dark:bg-red-950");
+            toggle();
+            fireEvent.click(screen.getByText("查看详情（响应体/原始错误）"));
+            // 不再切换成红底红框的大卡片：只有图标带红色，正文走主题色，深浅色自动适配
+            const tinted = Array.from(container.querySelectorAll<HTMLElement>("[class]"))
+                .filter((element) => /\b(bg|border)-red-/.test(element.getAttribute("class") ?? ""));
+            expect(tinted).toEqual([]);
+            expect(details(container)!.className).toContain("text-muted-foreground");
+            expect(details(container)!.className).toContain("border-border");
+            expect(screen.getByRole("button", { name: "复制错误" })).toBeInTheDocument();
         } finally {
-            document.documentElement.classList.remove("dark", "aipp-mobile-platform");
             platformState.mobile = false;
         }
     });
 });
 
- it("should fold the previous error when a new reply supersedes it and allow inspection", () => {
+it("should fold the previous error when a new reply supersedes it and allow inspection", () => {
     const { rerender } = render(<ErrorMessage content="助手尚未配置模型" messageId={9} />);
-    expect(screen.getByText("助手尚未配置模型")).toBeVisible();
+    expect(screen.getByRole("button", { name: "回复失败：助手尚未配置模型 · 查看详情" })).toBeVisible();
     rerender(<ErrorMessage content="助手尚未配置模型" messageId={9} superseded />);
     expect(screen.queryByText("助手尚未配置模型")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "此前请求失败 · 查看错误" }));
     expect(screen.getByText("助手尚未配置模型")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "收起此前错误" }));
+    fireEvent.click(screen.getByRole("button", { name: "此前请求失败 · 收起" }));
     expect(screen.queryByText("助手尚未配置模型")).not.toBeInTheDocument();
- });
+});

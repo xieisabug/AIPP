@@ -1,8 +1,7 @@
 import React, { useState } from "react";
-import IconButton from "../IconButton";
 import { Copy, Check } from "lucide-react";
 import { useCopyHandler } from "@/hooks/useCopyHandler";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, AlertCircle } from "lucide-react";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 
 interface ErrorMessageProps {
@@ -34,15 +33,6 @@ const getStatusDescription = (status: number): string => {
     return statusMap[status] || `HTTP ${status}`;
 };
 
-// 状态码对应的样式
-const getStatusBadgeStyle = (status: number): string => {
-    if (status >= 500) {
-        return "bg-red-200 text-red-800 border-red-300";
-    } else if (status >= 400) {
-        return "bg-orange-200 text-orange-800 border-orange-300";
-    }
-    return "bg-gray-200 text-gray-800 border-gray-300";
-};
 
 /** 从 genai 的多行错误里取根因："Cause: xxx" 优先，否则取最后一行。 */
 export function extractRootCause(originalError: string): string {
@@ -52,8 +42,33 @@ export function extractRootCause(originalError: string): string {
     return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
 }
 
+/** 响应体里服务端自己给出的错误说明（OpenAI 兼容格式 `error.message` 或顶层 `message`）。 */
+function extractDetailsMessage(details: string): string | null {
+    try {
+        const parsed = JSON.parse(details);
+        const message = typeof parsed?.error === "string" ? parsed.error : parsed?.error?.message ?? parsed?.message;
+        return typeof message === "string" && message.trim() ? message.trim() : null;
+    } catch {
+        return null;
+    }
+}
+
+/** 折叠行用的一句话：概括文案 + 具体原因（根因或服务端错误说明），两者重复时只留一个。 */
+export function summarizeError(mainMessage: string, details: string | null, rootCause: string | null): {
+    summary: string;
+    reason: string | null;
+} {
+    const summary = mainMessage.replace(/^AI\s*请求失败\s*[:：]\s*/, "").trim() || mainMessage;
+    const rawReason = rootCause || (details ? extractDetailsMessage(details) : null);
+    const reason = rawReason && !summary.includes(rawReason)
+        ? (rawReason.length > 200 ? `${rawReason.slice(0, 200)}…` : rawReason)
+        : null;
+    return { summary, reason };
+}
+
 const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId, superseded = false }) => {
-    const [showPreviousError, setShowPreviousError] = useState(false);
+    // 默认折叠成一行，点开才显示完整错误卡片（ChatUI 与管家共用）。
+    const [isOpen, setIsOpen] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
     const { copyIconState, handleCopy } = useCopyHandler(content);
 
@@ -158,184 +173,92 @@ const ErrorMessage: React.FC<ErrorMessageProps> = ({ content, messageId, superse
         }
     };
 
-    if (superseded && !showPreviousError) {
-        return (
-            <button type="button" className="flex min-h-11 items-center gap-2 text-sm text-muted-foreground"
-                aria-expanded={false} onClick={() => setShowPreviousError(true)}
-                data-message-id={messageId} data-message-type="error">
-                <ChevronRight className="h-4 w-4" />此前请求失败 · 查看错误
-            </button>
-        );
-    }
+    const { summary, reason } = summarizeError(mainMessage, details, rootCause);
+    const headline = superseded ? "此前请求失败" : `回复失败：${summary}${reason ? `（${reason}）` : ""}`;
+    const action = isOpen ? "收起" : superseded ? "查看错误" : "查看详情";
+    const label = `${headline} · ${action}`;
+    const phaseLabel = meta?.phase === "stream" ? "流式请求" : meta?.phase === "non_stream" ? "非流式请求" : meta?.phase;
+    const facts: Array<[string, React.ReactNode]> = [];
+    if (meta?.status) facts.push(["状态", `${meta.status} · ${getStatusDescription(meta.status)}`]);
+    if (meta?.model) facts.push(["模型", meta.model]);
+    if (phaseLabel) facts.push(["阶段", phaseLabel]);
+    if (meta?.attempts !== undefined && meta?.attempts !== null) facts.push(["重试次数", meta.attempts]);
+    if (meta?.request_id) facts.push(["请求ID", <span className="font-mono">{String(meta.request_id)}</span>]);
+    if (meta?.endpoint) facts.push(["端点", <span className="font-mono">{String(meta.endpoint)}</span>]);
+    const suggestions: string[] = Array.isArray(meta?.suggestions) ? meta.suggestions : [];
 
+    // 折叠和展开共用同一行标题：展开只是在下方补充详情，不换成另一套卡片样式。
     return (
-        <div
-            data-message-item
-            data-message-id={messageId}
-            data-message-type="error"
-            className={`group relative ${isMobilePlatform ? "w-full max-w-full" : "w-fit max-w-[min(65%,56rem)]"} overflow-hidden rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-red-800 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-200 transition-all duration-200 self-start`}
-        >
-            {superseded && (
-                <button type="button" className="mb-2 flex min-h-11 items-center gap-2 text-sm"
-                    aria-expanded={true} onClick={() => setShowPreviousError(false)}>
-                    <ChevronDown className="h-4 w-4" />收起此前错误
-                </button>
-            )}
-            <div className="flex items-start gap-3">
-                <div className="flex-shrink-0 w-5 h-5 mt-0.5">
-                    <svg
-                        className="w-5 h-5 text-red-500 dark:text-red-400"
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                    >
-                        <path
-                            fillRule="evenodd"
-                            d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
-                            clipRule="evenodd"
-                        />
-                    </svg>
-                </div>
-                <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-red-800 dark:text-red-200 mb-1" data-aipp-slot="error-title">
-                        AI Request Failed
-                    </div>
-                    <div className="prose prose-sm max-w-none break-words text-red-700" data-aipp-slot="error-main-message">
-                        {mainMessage}
-                    </div>
-                    {rootCause && (
-                        <div className="mt-1 text-xs text-red-700 dark:text-red-300 break-words" data-aipp-slot="error-root-cause">
-                            <span className="text-red-600/80 dark:text-red-300/80">原因：</span>
-                            {rootCause}
-                        </div>
+        <div data-message-item data-message-id={messageId} data-message-type="error" className="flex w-full min-w-0 flex-col items-start">
+            <button type="button" aria-expanded={isOpen} aria-label={label} title={label} onClick={() => setIsOpen(!isOpen)}
+                className={`flex min-h-11 min-w-0 max-w-full items-center gap-2 text-left text-sm transition-colors ${superseded ? "text-muted-foreground hover:text-foreground" : "text-foreground hover:text-foreground/80"}`}>
+                <AlertCircle className={`h-4 w-4 shrink-0 ${superseded ? "" : "text-red-500 dark:text-red-400"}`} />
+                {superseded ? <span>{headline}</span> : (
+                    <span className={`min-w-0 ${isOpen ? "break-words" : "truncate"}`}>
+                        回复失败：<span data-aipp-slot="error-summary">{summary}</span>
+                        {reason && <span className="text-muted-foreground" data-aipp-slot="error-reason">（{reason}）</span>}
+                    </span>
+                )}
+                <span className="shrink-0 text-muted-foreground">· {action}</span>
+            </button>
+            {isOpen && (
+                <div data-aipp-slot="error-details"
+                    className={`${isMobilePlatform ? "w-full max-w-full" : "max-w-[min(65%,56rem)]"} ml-2 min-w-0 space-y-2 border-l border-border pb-1 pl-4 text-xs text-muted-foreground`}>
+                    {/* 标题行已写明概括与原因；此前的错误标题只有“此前请求失败”，在这里补上 */}
+                    {superseded && (
+                        <p className="break-words text-sm text-foreground" data-aipp-slot="error-main-message">
+                            {summary}{reason && <span className="text-muted-foreground">（{reason}）</span>}
+                        </p>
                     )}
-                    {meta && (
-                        <div className="mt-2 text-xs text-red-700 dark:text-red-300 space-y-2">
-                            {/* HTTP 状态码 - 突出显示 */}
-                            {meta.status && (
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold border ${getStatusBadgeStyle(meta.status)}`}>
-                                        {meta.status}
-                                    </span>
-                                    <span className="break-words text-red-600/80 dark:text-red-300/80">
-                                        {getStatusDescription(meta.status)}
-                                    </span>
-                                </div>
-                            )}
-
-                            {/* 基本信息网格 */}
-                            <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
-                                {meta.model && (
-                                    <div className="min-w-0">
-                                        <span className="text-red-600/80 dark:text-red-300/80">模型：</span>
-                                        <span className="font-medium break-all">{meta.model}</span>
-                                    </div>
-                                )}
-                                {meta.phase && (
-                                    <div className="min-w-0">
-                                        <span className="text-red-600/80 dark:text-red-300/80">阶段：</span>
-                                        <span className="font-medium break-words">{meta.phase === 'stream' ? '流式请求' : meta.phase === 'non_stream' ? '非流式请求' : meta.phase}</span>
-                                    </div>
-                                )}
-                                {typeof meta.attempts !== "undefined" && meta.attempts !== null && (
-                                    <div className="min-w-0">
-                                        <span className="text-red-600/80 dark:text-red-300/80">重试次数：</span>
-                                        <span className="font-medium">{meta.attempts}</span>
-                                    </div>
-                                )}
-                                {meta.request_id && (
-                                    <div className="min-w-0 break-all sm:col-span-2">
-                                        <span className="text-red-600/80 dark:text-red-300/80">请求ID：</span>
-                                        <span className="font-medium font-mono text-[11px]">{String(meta.request_id)}</span>
-                                    </div>
-                                )}
-                                {meta.endpoint && (
-                                    <div className="min-w-0 break-all sm:col-span-2">
-                                        <span className="text-red-600/80 dark:text-red-300/80">端点：</span>
-                                        <span className="font-medium font-mono text-[11px]">{String(meta.endpoint)}</span>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* 建议标签 */}
-                            {Array.isArray(meta.suggestions) && meta.suggestions.length > 0 && (
-                                <div className="flex flex-wrap gap-1 pt-1">
-                                    <span className="text-red-600/80 dark:text-red-300/80 text-[11px]">建议：</span>
-                                    {meta.suggestions.map((s: string, idx: number) => (
-                                        <span
-                                            key={idx}
-                                            className="inline-flex items-center px-2 py-0.5 rounded bg-red-100 text-red-700 border border-red-200 dark:bg-red-900/40 dark:text-red-200 dark:border-red-800 text-[11px]"
-                                        >
-                                            {s}
-                                        </span>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
+                    {facts.length > 0 && (
+                        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
+                            {facts.map(([name, value]) => (
+                                <React.Fragment key={name}>
+                                    <dt>{name}</dt>
+                                    <dd className="break-all text-foreground">{value}</dd>
+                                </React.Fragment>
+                            ))}
+                        </dl>
+                    )}
+                    {suggestions.length > 0 && (
+                        <p className="break-words">建议：<span className="text-foreground">{suggestions.join("；")}</span></p>
                     )}
                     {hasDetails && (
-                        <div className="mt-3">
-                            <button
-                                onClick={() => setIsExpanded(!isExpanded)}
-                                className="flex items-center gap-1 text-xs text-red-600 transition-colors hover:text-red-800 dark:text-red-300 dark:hover:text-red-100"
-                            >
-                                {isExpanded ? (
-                                    <ChevronDown className="w-3 h-3 text-icon" />
-                                ) : (
-                                    <ChevronRight className="w-3 h-3 text-icon" />
-                                )}
-                                <span>
-                                    {isExpanded ? "隐藏详情" : "查看详情（响应体/原始错误）"}
-                                </span>
+                        <div>
+                            <button type="button" onClick={() => setIsExpanded(!isExpanded)} aria-expanded={isExpanded}
+                                className="flex min-h-8 items-center gap-1 transition-colors hover:text-foreground">
+                                {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                                <span>{isExpanded ? "隐藏详情" : "查看详情（响应体/原始错误）"}</span>
                             </button>
                             {isExpanded && (
-                                <div className="mt-2 w-full max-w-full space-y-3 rounded-lg border border-red-200 bg-red-100 p-3 dark:border-red-900/70 dark:bg-red-950/60">
-                                    {/* 响应体 / 错误详情 - 重点展示 */}
+                                <div className="mt-1 space-y-2">
                                     {details && (
                                         <div>
-                                            <div className="flex items-center justify-between mb-1">
-                                                <div className="text-[11px] text-red-600/80 dark:text-red-300/80 font-medium">
-                                                    {meta?.status ? `HTTP ${meta.status} 响应体` : '错误详情'}
-                                                </div>
-                                            </div>
-                                            <div className="max-w-full overflow-hidden rounded border border-red-200 bg-white/50 p-2 dark:border-red-900/70 dark:bg-black/30">
-                                                <pre className="max-w-full overflow-auto whitespace-pre-wrap break-words text-xs font-mono text-red-800 dark:text-red-200">
-                                                    {formatDetails(details)}
-                                                </pre>
-                                            </div>
+                                            <div className="mb-1">{meta?.status ? `HTTP ${meta.status} 响应体` : "错误详情"}</div>
+                                            <pre className="max-h-64 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/50 p-2 font-mono text-[11px] text-foreground">
+                                                {formatDetails(details)}
+                                            </pre>
                                         </div>
                                     )}
-
-                                    {/* 原始错误信息 */}
-                                    {meta && meta.original_error && (
+                                    {meta?.original_error && (
                                         <div>
-                                            <div className="text-[11px] text-red-600/80 dark:text-red-300/80 mb-1 font-medium">原始错误信息</div>
-                                            <div className="max-w-full overflow-hidden rounded border border-red-200 bg-white/30 p-2 dark:border-red-900/70 dark:bg-black/20">
-                                                <pre className="max-h-32 max-w-full overflow-auto whitespace-pre-wrap break-words text-[11px] font-mono text-red-700 dark:text-red-300">
-                                                    {String(meta.original_error)}
-                                                </pre>
-                                            </div>
+                                            <div className="mb-1">原始错误信息</div>
+                                            <pre className="max-h-32 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/50 p-2 font-mono text-[11px] text-foreground">
+                                                {String(meta.original_error)}
+                                            </pre>
                                         </div>
                                     )}
                                 </div>
                             )}
                         </div>
                     )}
+                    <button type="button" onClick={handleCopy}
+                        className={`flex ${isMobilePlatform ? "min-h-11" : "min-h-8"} items-center gap-1 transition-colors hover:text-foreground`}>
+                        {copyIconState === "copy" ? <Copy className="h-3 w-3" /> : <Check className="h-3 w-3" />}
+                        <span>{copyIconState === "copy" ? "复制错误" : "已复制"}</span>
+                    </button>
                 </div>
-            </div>
-            <div className={isMobilePlatform
-                ? "aipp-mobile-action-bar mt-3 flex w-fit items-center px-1 box-border rounded-[26px] border border-red-200 bg-red-50 dark:border-red-900/70 dark:bg-red-950"
-                : "hidden group-hover:flex items-center absolute -bottom-9 py-3 px-4 box-border h-10 rounded-[21px] border border-red-200 bg-red-50 dark:border-red-900/70 dark:bg-red-950 left-0"}>
-                <IconButton
-                    icon={
-                        copyIconState === "copy" ? (
-                            <Copy size={16} className="text-icon" />
-                        ) : (
-                            <Check size={16} className="text-icon" />
-                        )
-                    }
-                    onClick={handleCopy}
-                />
-            </div>
+            )}
         </div>
     );
 };

@@ -425,3 +425,34 @@ it('updates the old-goal label even when stream text has not changed', () => {
     rerender(<MessageItem message={message} streamEvent={{...streamEvent, end_reason: 'goal_superseded'}} />);
     expect(screen.getByRole('note')).toBeInTheDocument();
 });
+
+describe('MessageItem queued message actions', () => {
+    const queued = (queue_kind: string) => createMessage({
+        id: -5, message_type: 'user', content: '[用户回答已恢复的问题]', finish_time: null,
+        metadata_json: JSON.stringify({ queue_status: 'queued', queue_kind, queue_id: 5 }),
+    });
+
+    it('should let a stuck interrupt message be sent now', async () => {
+        const user = userEvent.setup();
+        const sendNow = vi.fn();
+        render(<MessageItem message={queued('interrupt')} onQueuedMessageSendNow={sendNow} onQueuedMessagePromote={vi.fn()} />);
+
+        await user.click(screen.getByRole('button', { name: '打断消息' }));
+        expect(screen.queryByRole('menuitem', { name: '提升为打断消息' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('menuitem', { name: '立即发送' }));
+
+        expect(sendNow).toHaveBeenCalledWith(5);
+    });
+
+    it('should offer both send now and promote for a normal queued message', async () => {
+        const user = userEvent.setup();
+        const promote = vi.fn();
+        render(<MessageItem message={queued('normal')} onQueuedMessageSendNow={vi.fn()} onQueuedMessagePromote={promote} />);
+
+        await user.click(screen.getByRole('button', { name: '排队消息' }));
+        expect(screen.getByRole('menuitem', { name: '立即发送' })).toBeInTheDocument();
+        await user.click(screen.getByRole('menuitem', { name: '提升为打断消息' }));
+
+        expect(promote).toHaveBeenCalledWith(5);
+    });
+});

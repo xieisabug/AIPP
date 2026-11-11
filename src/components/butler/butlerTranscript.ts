@@ -31,7 +31,12 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
                 } catch { /* Historical metadata can be absent or invalid. */ }
             }
         }
-        if (internalTurn || ["system", "reasoning", "tool_result", "error"].includes(message.message_type)) continue;
+        if (internalTurn || ["system", "reasoning", "tool_result"].includes(message.message_type)) continue;
+        // 失败和 ChatUI 一样显示成可展开的一行；之后已有回复的旧错误属于重试过程，简洁聊天不再显示。
+        if (message.message_type === "error") {
+            if (!unpublished.has(message.id) && !message.isSupersededError) result.push(message);
+            continue;
+        }
         if (message.message_type !== "response" && message.message_type !== "assistant") {
             result.push(message);
             continue;

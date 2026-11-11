@@ -47,6 +47,7 @@ export interface UseMessageListElementsProps {
     onMessageEdit: (message: Message) => void;
     onMessageFork: (messageId: number) => void;
     onQueuedMessagePromote?: (queueId: number) => void;
+    onQueuedMessageSendNow?: (queueId: number) => void;
     onToggleReasoningExpand: (messageId: number) => void;
     inlineInteractionItems?: InlineInteractionItem[];
     allowFeishuDebugResend?: boolean;
@@ -293,6 +294,7 @@ export function useMessageListElements({
     onMessageEdit,
     onMessageFork,
     onQueuedMessagePromote,
+    onQueuedMessageSendNow,
     onToggleReasoningExpand,
     inlineInteractionItems,
     allowFeishuDebugResend = false,
@@ -528,6 +530,7 @@ export function useMessageListElements({
                             onMessageEdit={() => onMessageEdit(message)}
                             onMessageFork={() => onMessageFork(message.id)}
                             onQueuedMessagePromote={onQueuedMessagePromote}
+                            onQueuedMessageSendNow={onQueuedMessageSendNow}
                             isReasoningExpanded={
                                 reasoningExpandStates.get(message.id) || false
                             }
@@ -594,6 +597,7 @@ export function useMessageListElements({
                 onMessageEdit,
                 onMessageFork,
                 onQueuedMessagePromote,
+                onQueuedMessageSendNow,
                 onToggleReasoningExpand,
                 renderMessageActions,
                 resendMessageToFeishuDebug,
@@ -681,6 +685,7 @@ export function useMessageListElements({
                             onMessageEdit={() => onMessageEdit(message)}
                             onMessageFork={() => onMessageFork(message.id)}
                             onQueuedMessagePromote={onQueuedMessagePromote}
+                            onQueuedMessageSendNow={onQueuedMessageSendNow}
                             isReasoningExpanded={
                                 reasoningExpandStates.get(message.id) || false
                             }
@@ -721,6 +726,7 @@ export function useMessageListElements({
         onMessageEdit,
         onMessageFork,
         onQueuedMessagePromote,
+        onQueuedMessageSendNow,
         reasoningExpandStates,
         onToggleReasoningExpand,
         mcpSliceByMessageId,

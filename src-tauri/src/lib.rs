@@ -38,7 +38,7 @@ use crate::api::ai_api::{
     get_conversation_runtime_state, get_shine_state, list_queued_conversation_messages,
     list_running_conversation_ids,
     promote_queued_conversation_message, regenerate_ai, regenerate_conversation_title,
-    tool_result_continue_ask_ai,
+    send_queued_conversation_message_now, tool_result_continue_ask_ai,
 };
 use crate::api::assistant_api::{
     add_assistant, add_assistant_workspace, bulk_update_assistant_mcp_tools, copy_assistant,
@@ -989,6 +989,7 @@ pub fn run() {
             enqueue_conversation_message,
             list_queued_conversation_messages,
             promote_queued_conversation_message,
+            send_queued_conversation_message_now,
             tool_result_continue_ask_ai,
             regenerate_ai,
             get_activity_focus,

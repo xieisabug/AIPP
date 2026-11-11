@@ -1257,6 +1257,15 @@ pub(crate) async fn resolve_preview_code_response(
     }
 }
 
+/// 仍停在 pending/executing 的提问调用。调用方须先确认本进程没有等待回答的请求，它们才算已中断；
+/// 其他工具的调用结果不明，不能顺手结束。
+fn unfinished_ask_user_call_ids(calls: &[crate::db::mcp_db::MCPToolCall]) -> Vec<i64> {
+    calls.iter()
+        .filter(|call| call.tool_name == "ask_user_question" && matches!(call.status.as_str(), "pending" | "executing"))
+        .map(|call| call.id)
+        .collect()
+}
+
 #[tauri::command]
 pub async fn submit_ask_user_question_response(
     app_handle: AppHandle,
@@ -1274,6 +1283,15 @@ pub async fn submit_ask_user_question_response(
         let calls=crate::db::mcp_db::MCPDatabase::new(&app_handle).and_then(|db|db.get_mcp_tool_calls_by_conversation(id)).map_err(|e|e.to_string())?;
         if !cancelled.unwrap_or(false) && calls.iter().any(|call|call.tool_name != "ask_user_question" && matches!(call.status.as_str(),"pending"|"executing")) {
             return Err("原执行还有结果不明的工具操作，请先核对操作结果，再重新提出要求；未自动续接".into());
+        }
+        // 等待回答的进程已经不在（如应用重启），原提问调用永远不会自己结束：它会挡住下面的续接派发
+        // （has_active_mcp_calls 看数据库状态），界面也会把它当成仍在等待的问卷再弹一次。先以具体原因结束它。
+        if app_handle.state::<InteractionState>().list_requests_for_conversation(id).await.is_empty() {
+            let reason=format!("原提问的执行已中断（应用重启或进程退出），这次调用没有收到回答；用户在恢复的问题里作答后，答案会作为新消息送回（问题编号 {request_id}）");
+            for call_id in unfinished_ask_user_call_ids(&calls) {
+                crate::mcp::execution_api::fail_unfinished_tool_call(&app_handle,call_id,&reason).await
+                    .map_err(|e|format!("结束已中断的提问调用失败（会话 {id}，调用 {call_id}）：{e}"))?;
+            }
         }
         crate::db::butler_goal::recover_answer(&mut conn,&request_id,&answers.clone().unwrap_or_default(),cancelled.unwrap_or(false),chrono::Utc::now().timestamp()).map_err(|e|e.to_string())?;
         drop(conn);
@@ -1307,10 +1325,32 @@ pub async fn submit_preview_code_response(
 mod tests {
     use super::{
         inline_local_text_preview_files, inline_text_file_content, is_allowed_preview_relay_origin,
-        resolve_local_file_path, PreviewCodeRequest, PreviewFileItem,
+        resolve_local_file_path, unfinished_ask_user_call_ids, PreviewCodeRequest, PreviewFileItem,
     };
     use std::fs;
     use std::path::PathBuf;
+
+    fn tool_call(id: i64, tool_name: &str, status: &str) -> crate::db::mcp_db::MCPToolCall {
+        crate::db::mcp_db::MCPToolCall {
+            id, conversation_id: 1, message_id: Some(10), subtask_id: None, server_id: 1,
+            server_name: "UI交互工具".into(), tool_name: tool_name.into(), parameters: "{}".into(),
+            status: status.into(), result: None, error: None, created_time: String::new(),
+            started_time: None, finished_time: None, llm_call_id: None, assistant_message_id: None,
+        }
+    }
+
+    #[test]
+    fn test_unfinished_ask_user_call_ids_only_selects_waiting_questions() {
+        let calls = vec![
+            tool_call(1, "ask_user_question", "executing"),
+            tool_call(2, "ask_user_question", "pending"),
+            tool_call(3, "ask_user_question", "success"),
+            tool_call(4, "ask_user_question", "failed"),
+            // 其他工具结果不明，不能被当成已中断的提问结束掉
+            tool_call(5, "run_command", "executing"),
+        ];
+        assert_eq!(unfinished_ask_user_call_ids(&calls), vec![1, 2]);
+    }
 
     #[test]
     fn preview_code_request_accepts_html_submit_once() {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { AskUserQuestionRequest, PreviewFileRequest } from "@/components/InlineInteractionCards";
 import { MCPToolCall } from "@/data/MCPToolCall";
 import { getErrorMessage } from "@/utils/error";
@@ -700,6 +701,13 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
         async (requestId: string, answers: Record<string, string>) => {
             const currentPending = pendingRequest;
             if (!currentPending || currentPending.request_id !== requestId) {
+                // 问卷来自持久化记录，但已没有等待这份回答的请求（原执行因应用重启等中断）：不能静默吞掉。
+                if (parsePersistedAskCallId(requestId) !== null) {
+                    console.error("AskUserQuestion submit without a live request:", { requestId });
+                    toast.error("回答没有送达", {
+                        description: "这份问卷已没有等待中的请求（原执行可能因应用重启而中断）。请点“取消”结束这次提问，再直接在输入框回复。",
+                    });
+                }
                 return;
             }
             try {
@@ -709,26 +717,30 @@ export function useAskUserQuestion(options: UseAskUserQuestionOptions = {}) {
                     cancelled: false,
                 });
             } catch (error) {
-                console.error("Failed to submit AskUserQuestion response:", getErrorMessage(error));
-            } finally {
-                // Only keep the local summary when this was the last queued request.
-                // If another ask is already waiting, showing the previous answers would
-                // mask the next questionnaire (bug: 2nd call shows 1st answers).
-                setRequestQueue((prev) => {
-                    const [, ...rest] = prev;
-                    if (rest.length > 0) {
-                        setSubmittedSummary(null);
-                        setPendingRequest(rest[0] ?? null);
-                        setIsDialogOpen(true);
-                    } else {
-                        setSubmittedSummary({ request: currentPending, answers });
-                        setPendingRequest(null);
-                        setIsDialogOpen(false);
-                    }
-                    return rest;
-                });
+                // 失败时保留问卷，便于重试或取消；不要显示成“已回答”。
+                const message = getErrorMessage(error);
+                console.error("Failed to submit AskUserQuestion response:", message);
+                toast.error("回答没有送达", { description: message });
                 schedulePersistedRefresh();
+                return;
             }
+            // Only keep the local summary when this was the last queued request.
+            // If another ask is already waiting, showing the previous answers would
+            // mask the next questionnaire (bug: 2nd call shows 1st answers).
+            setRequestQueue((prev) => {
+                const [, ...rest] = prev;
+                if (rest.length > 0) {
+                    setSubmittedSummary(null);
+                    setPendingRequest(rest[0] ?? null);
+                    setIsDialogOpen(true);
+                } else {
+                    setSubmittedSummary({ request: currentPending, answers });
+                    setPendingRequest(null);
+                    setIsDialogOpen(false);
+                }
+                return rest;
+            });
+            schedulePersistedRefresh();
         },
         [pendingRequest, schedulePersistedRefresh]
     );

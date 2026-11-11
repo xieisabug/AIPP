@@ -34,6 +34,25 @@ fn test_has_pending_user_turn_prioritizes_user_messages() {
     assert!(!repo.has_pending_user_turn(conversation_id).unwrap(), "暂停的消息不阻塞续跑");
 }
 
+/// 手动“立即发送”可以越过队首直接认领某一条，也能取回暂停的消息；已被认领的不会再发一次
+#[test]
+fn test_take_for_dispatch_by_id_claims_only_waiting_message() {
+    let (repo, conversation_id) = create_queue_test_repo();
+    let first = repo.enqueue(conversation_id, "normal", "{}", "先排的", 1).unwrap();
+    let stuck = repo.enqueue(conversation_id, "interrupt", "{}", "卡住的续接", 1).unwrap();
+    assert_eq!(repo.get_pending(stuck.id).unwrap().unwrap().conversation_id, conversation_id);
+
+    let claimed = repo.take_for_dispatch_by_id(stuck.id).unwrap().unwrap();
+    assert_eq!((claimed.id, claimed.status.as_str()), (stuck.id, "dispatching"));
+    assert!(repo.take_for_dispatch_by_id(stuck.id).unwrap().is_none(), "已认领的不能重复发送");
+    assert!(repo.get_pending(stuck.id).unwrap().is_none());
+    assert_eq!(repo.list_queued_by_conversation(conversation_id).unwrap()[0].id, first.id, "其余排队消息保持原样");
+
+    repo.take_next_for_dispatch(conversation_id, false).unwrap().unwrap();
+    repo.pause_dispatch(first.id).unwrap().unwrap();
+    assert_eq!(repo.take_for_dispatch_by_id(first.id).unwrap().unwrap().status, "dispatching", "暂停的消息可手动发送");
+}
+
 fn create_queue_test_repo() -> (QueuedConversationMessageRepository, i64) {
     let conn = create_test_db();
     let conversation = build_test_conversation("queue test", Some(1));

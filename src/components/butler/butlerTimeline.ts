@@ -77,12 +77,12 @@ export function withButlerProcessing(messages: Message[], conversationId: number
     }];
 }
 
-/** 最后一条用户消息之后是否已经发布了助手回复（简洁视图中可见的 response/assistant）。 */
+/** 最后一条用户消息之后是否已经发布了结果（简洁视图中可见的回复，或这一轮的失败提示）。 */
 export function hasPublishedReply(messages: Message[]): boolean {
     for (let index = messages.length - 1; index >= 0; index--) {
         const type = messages[index].message_type;
         if (type === "user") return false;
-        if (type === "response" || type === "assistant") return true;
+        if (type === "response" || type === "assistant" || type === "error") return true;
     }
     return false;
 }
