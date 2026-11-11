@@ -39,7 +39,7 @@ describe('ConnectedAppsConfig', () => {
         await user.click(screen.getByRole('tab', { name: /我的应用/ }));
         expect(await screen.findByText('公司知识库')).toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: /公司知识库/ }));
-        await user.click(screen.getByRole('tab', { name: '工具与管理' }));
+        await user.click(screen.getByRole('tab', { name: /^工具/ }));
         expect(await screen.findByText('管理实例 8')).toBeInTheDocument();
     });
     it('should open the same MCP instance when managing an application from the catalog', async () => {
@@ -53,10 +53,10 @@ describe('ConnectedAppsConfig', () => {
         render(<ConnectedAppsConfig />);
         await user.click(await screen.findByRole('button', { name: /笔记服务/ }));
         expect(screen.getByRole('heading', {name:'工作笔记'})).toBeInTheDocument();
-        await user.click(screen.getByRole('tab', { name: '工具与管理' }));
+        await user.click(screen.getByRole('tab', { name: /^工具/ }));
         expect(await screen.findByText('管理实例 21')).toBeInTheDocument();
         expect(screen.queryByText('连接凭据仅在本机加密保存')).not.toBeInTheDocument();
-        await user.click(screen.getByRole('tab', {name:'连接配置'}));
+        await user.click(screen.getByRole('tab', {name:'连接设置'}));
         expect(screen.getByText('连接凭据仅在本机加密保存')).toBeInTheDocument();
         expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'add_mcp_server')).toBe(false);
     });
@@ -79,11 +79,10 @@ describe('ConnectedAppsConfig', () => {
         render(<ConnectedAppsConfig />);
         await user.click(screen.getByRole('tab', { name: /我的应用/ }));
         await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
-        expect(screen.queryByRole('button', {name:'继续授权'})).not.toBeInTheDocument();
-        await user.click(screen.getByRole('tab', {name:'连接配置'}));
+        expect(screen.getByRole('note')).toHaveTextContent('等待浏览器授权');
         expect(screen.queryByRole('button', {name:'登录并连接'})).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: '继续授权' }));
-        expect(openUrl).toHaveBeenCalledWith('https://example.com/authorize?state=test');
+        await waitFor(() => expect(openUrl).toHaveBeenCalledWith('https://example.com/authorize?state=test'));
         expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'connect_catalog_app')).toBe(false);
     });
     it('should retain quick templates and JSON import when adding a connection', async () => {
@@ -113,10 +112,12 @@ describe('ConnectedAppsConfig', () => {
         render(<ConnectedAppsConfig />);
         await user.click(screen.getByRole('tab', { name: /我的应用/ }));
         await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
-        await user.click(screen.getByRole('tab', { name: '连接配置' }));
+        await user.click(screen.getByRole('tab', { name: '连接设置' }));
         expect(screen.queryByRole('button', { name: '删除凭据，不撤销授权' })).not.toBeInTheDocument();
         await user.click(screen.getByRole('button', { name: '断开连接' }));
-        await user.click(await screen.findByRole('button', { name: '删除凭据，不撤销授权' }));
+        expect(await screen.findByRole('alert')).toHaveTextContent('服务商撤销未完成');
+        expect(screen.queryByRole('button', { name: '断开连接' })).not.toBeInTheDocument();
+        await user.click(screen.getByRole('button', { name: '删除凭据，不撤销授权' }));
         expect(invoke).toHaveBeenCalledWith('disconnect_app_connection', { serverId: 21, revokeRemote: false });
     });
     it('should remove an existing connection only after confirmation from its overview', async () => {
@@ -152,7 +153,8 @@ describe('ConnectedAppsConfig', () => {
         const user = userEvent.setup();render(<ConnectedAppsConfig />);
         await user.click(await screen.findByRole('button',{name:/Notion/}));
         expect(await screen.findByText('Knowledge capture')).toBeInTheDocument();
-        expect(screen.getByRole('button',{name:'安装插件'})).toBeInTheDocument();
+        expect(screen.getByRole('button',{name:'安装配套技能'})).toBeInTheDocument();
+        expect(screen.getByRole('button',{name:'连接'})).toBeInTheDocument();
         expect(screen.queryByText('此应用未声明配套技能。')).not.toBeInTheDocument();
         expect(screen.queryByRole('textbox',{name:'GitHub 仓库'})).not.toBeInTheDocument();
         expect(screen.queryByRole('button',{name:'查看 Notion 官方插件与配套 Skills'})).not.toBeInTheDocument();
@@ -178,8 +180,71 @@ describe('ConnectedAppsConfig', () => {
         expect(screen.getByRole('heading',{name:'Notion 工作区'})).toBeInTheDocument();
         expect(screen.getByRole('tab',{name:'助手授权'})).toBeInTheDocument();
         expect(screen.queryByText('连接外部服务')).not.toBeInTheDocument();
-        await user.click(screen.getByRole('tab',{name:'工具与管理'}));
+        await user.click(screen.getByRole('tab',{name:/^工具/}));
         expect(await screen.findByText('管理实例 21')).toBeInTheDocument();
     });
 
+    it('should re-authorize an OAuth connection in one click when no secret is needed', async () => {
+        const oauth = { ...definition, connection: { ...definition.connection, auth: 'oauth' } };
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition: oauth, label: '工作笔记', config: { region: 'eu' }, status: 'auth_required', error: 'invalid_grant: refresh token expired' }];
+            if (command === 'connect_catalog_app') return { server_id: 21, authorization_url: 'https://example.com/authorize?state=again' };
+            return [];
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
+        expect(screen.getByRole('alert')).toHaveTextContent('invalid_grant: refresh token expired');
+        await user.click(screen.getByRole('button', { name: '重新登录' }));
+        await waitFor(() => expect(openUrl).toHaveBeenCalledWith('https://example.com/authorize?state=again'));
+        const call = vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === 'connect_catalog_app')!;
+        expect(call[1]).toMatchObject({ request: { app_id: 'notes', server_id: 21, label: '工作笔记', values: { region: 'eu' } } });
+    });
+
+    it('should ask for the secret again instead of reconnecting silently when the token expired', async () => {
+        const pat = { ...definition, connection: { ...definition.connection, auth: 'fields' }, fields: [{ key: 'token', label: 'Token', kind: 'password', required: true, secret: true, header: 'Authorization' }] };
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition: pat, label: '工作笔记', config: {}, status: 'auth_required', error: '401 Unauthorized' }];
+            return [];
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        await user.click(await screen.findByRole('button', { name: /工作笔记/ }));
+        await user.click(screen.getByRole('button', { name: '重新登录' }));
+        expect(screen.getByLabelText('Token *')).toHaveValue('');
+        expect(screen.getByRole('button', { name: '保存并验证' })).toBeInTheDocument();
+        expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'connect_catalog_app')).toBe(false);
+    });
+
+    it('should list connections that need attention first', async () => {
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'get_mcp_servers') return [builtin, legacy, { ...legacy, id: 21, is_enabled: false }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'auth_required', error: null }];
+            return [];
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        await screen.findByRole('button', { name: /工作笔记/ });
+        const names = screen.getAllByRole('button').map(button => button.textContent?.match(/工作笔记|搜索工具|公司知识库/)?.[0]).filter(Boolean);
+        expect(names).toEqual(['工作笔记', '搜索工具', '公司知识库']);
+        expect(screen.getByRole('button', { name: /工作笔记/ })).toHaveTextContent('需要重新登录');
+    });
+
+    it('should not report a disabled connection as available on its catalog card', async () => {
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition, label: '工作笔记', config: {}, status: 'available', error: null }];
+            if (command === 'fetch_app_catalog') return { catalog: { schema_version: 1, version: '1', apps: [definition] }, warning: null };
+            return [];
+        });
+        render(<ConnectedAppsConfig />);
+        const card = await screen.findByRole('button', { name: /笔记服务/ });
+        await waitFor(() => expect(card).toHaveTextContent('已停用'));
+        expect(card).not.toHaveTextContent('可用');
+    });
 });

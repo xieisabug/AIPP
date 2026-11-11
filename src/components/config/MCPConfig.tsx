@@ -35,7 +35,12 @@ import { PinyinFilter, usePinyinReady } from "../../utils/pinyinFilter";
 import { useIsMobilePlatform } from "@/hooks/use-platform";
 import { visibleSearchTools, MOBILE_UNEXECUTABLE_LABEL, isMobileExecutableMcpServer, isMobileUnexecutableBuiltinTool } from "@/lib/mobileUnsupported";
 
-const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEditManaged?: () => void }> = ({ initialServerId, detailOnly = false, onEditManaged }) => {
+/**
+ * `compact` (with detailOnly) is the app-detail embedding: the surrounding sheet owns name/status/delete,
+ * so only the enable switch, refresh, edit and the capability lists render here.
+ * `onRefreshManaged` routes refresh through app-connection verification so its status updates too.
+ */
+const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; compact?: boolean; onEditManaged?: () => void; onRefreshManaged?: () => Promise<void> }> = ({ initialServerId, detailOnly = false, compact = false, onEditManaged, onRefreshManaged }) => {
     const isMobilePlatform = useIsMobilePlatform();
     // 移动端（移动平台或窄屏）使用列表 → 详情布局与紧凑详情页
     const isNarrow = useIsMobile();
@@ -328,6 +333,11 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
     // 刷新服务器能力
     const handleRefreshServerCapabilities = useCallback(async (serverId: number) => {
         setIsRefreshing(true);
+        if (onRefreshManaged) {
+            // Verification refreshes capabilities and emits mcp_state_changed, which reloads this view.
+            try { await onRefreshManaged(); } finally { setIsRefreshing(false); }
+            return;
+        }
         try {
             const [tools, resources, prompts] = await invoke<[MCPServerTool[], MCPServerResource[], MCPServerPrompt[]]>(
                 'refresh_mcp_server_capabilities',
@@ -342,7 +352,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
         } finally {
             setIsRefreshing(false);
         }
-    }, []);
+    }, [onRefreshManaged]);
 
     // 更新工具配置
     const handleUpdateTool = useCallback(async (toolId: number, isEnabled: boolean, isAutoRun: boolean) => {
@@ -571,8 +581,28 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
             truncateText={truncateText}
         />
     ) : (
-        <div className="space-y-6">
-            {/* 服务器基本信息 */}
+        <div className={compact ? "space-y-4" : "space-y-6"}>
+            {compact ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3">
+                    <label className="flex items-center gap-3 text-sm">
+                        <Switch
+                            aria-label="启用此连接"
+                            checked={selectedServer.is_enabled}
+                            onCheckedChange={(checked) => handleToggleServer(selectedServer.id, checked)}
+                        />
+                        {selectedServer.is_enabled ? '已启用' : '已停用'}
+                        <span className="text-xs text-muted-foreground">{selectedServer.transport_type} · 超时 {selectedServer.timeout ?? 30000}ms</span>
+                    </label>
+                    <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="sm" onClick={() => handleRefreshServerCapabilities(selectedServer.id)} disabled={isRefreshing} aria-label="测试连接并刷新能力">
+                            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />刷新工具
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => openEditServerDialog(selectedServer)} aria-label="编辑MCP">
+                            <Edit className="h-4 w-4" />{onEditManaged ? '重新配置' : '编辑配置'}
+                        </Button>
+                    </div>
+                </div>
+            ) : (
             <div className="bg-background rounded-lg border border-border p-6">
                 <div className="flex items-center justify-between mb-4">
                     <div className='mr-8 mb-5'>
@@ -660,9 +690,11 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
                 </div>
             </div>
 
+            )}
+
             {/* 能力列表 - 使用 Tabs */}
-            <div className="bg-background rounded-lg border border-border p-6">
-                <h4 className="text-md font-semibold text-foreground mb-4">MCP能力</h4>
+            <div className={compact ? "" : "bg-background rounded-lg border border-border p-6"}>
+                {!compact && <h4 className="text-md font-semibold text-foreground mb-4">MCP能力</h4>}
 
                 {/* 动态计算需要显示的tabs */}
                 {(() => {
@@ -677,7 +709,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
 
                     return availableTabs.length > 0 ? (
                         <Tabs defaultValue={defaultValue} className="w-full">
-                            <TabsList className={`grid w-full ${gridCols}`}>
+                            <TabsList className={`grid w-full ${gridCols} ${compact && availableTabs.length === 1 ? 'hidden' : ''}`}>
                                 {serverTools.length > 0 && (
                                     <TabsTrigger value="tools">
                                         工具 ({serverTools.length})
@@ -697,7 +729,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
 
                             {/* 工具列表 */}
                             {serverTools.length > 0 && (
-                                <TabsContent value="tools" className="mt-4">
+                                <TabsContent value="tools" className={compact && availableTabs.length === 1 ? "mt-0" : "mt-4"}>
                                     <div className="space-y-3">
                                         {serverTools.map((tool) => (
                                             <MCPToolItem
@@ -767,7 +799,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
                         <div className="text-center py-8">
                             <MCP className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
                             <p className="text-sm text-muted-foreground">暂无能力数据</p>
-                            <p className="text-xs text-muted-foreground mt-1">点击上方"刷新能力"按钮获取服务器能力</p>
+                            <p className="text-xs text-muted-foreground mt-1">点击上方"{compact ? '刷新工具' : '刷新能力'}"按钮获取服务器能力</p>
                         </div>
                     );
                 })()}
@@ -779,7 +811,7 @@ const MCPConfig: React.FC<{ initialServerId?: number; detailOnly?: boolean; onEd
             title="选择一个MCP服务器"
             description="从左侧列表中选择一个服务器开始配置"
         />
-    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText, isMobilePlatform, isMobileLayout]);
+    ), [selectedServer, serverTools, serverPrompts, serverResources, expandedTools, isRefreshing, handleToggleServer, handleRefreshServerCapabilities, openEditServerDialog, handleDeleteServer, toggleToolExpansion, handleUpdateTool, handleUpdatePrompt, truncateText, isMobilePlatform, isMobileLayout, compact, onEditManaged]);
 
     if (!serversLoaded) {
         return <ConfigPageLoading />;

@@ -39,6 +39,8 @@ export interface CatalogResponse {
     catalog: AppCatalog | null;
     fetched_at: string | null;
     warning: string | null;
+    /** Entries this client cannot use yet (new auth kind/field type); skipped instead of rejecting the catalog. */
+    skipped?: string[];
 }
 
 export interface AppConnection {
