@@ -134,7 +134,7 @@ pub(super) fn derive_key(passphrase: &str, salt: &[u8], iterations: u32) -> Resu
     })
 }
 
-fn derive_with_record(passphrase: &str, record: &KeyCheckRecord) -> Result<SecretKey, String> {
+pub(super) fn derive_with_record(passphrase: &str, record: &KeyCheckRecord) -> Result<SecretKey, String> {
     if record.v != 1 || record.kdf != KDF_NAME {
         return Err("同步口令记录版本不受支持，请升级 AIPP".into());
     }
@@ -241,7 +241,7 @@ pub(super) fn write_record(system: &Connection, record: &KeyCheckRecord) -> Resu
 
 // ---------- local key storage (master-key protected) ----------
 
-fn store_local_key(system: &Connection, master: &[u8; 32], key: &SecretKey) -> Result<(), String> {
+pub(super) fn store_local_key(system: &Connection, master: &[u8; 32], key: &SecretKey) -> Result<(), String> {
     let stored = StoredKey { enc: BASE64.encode(key.enc), mac: BASE64.encode(key.mac), record: key.record.clone() };
     let plain = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
     let (ciphertext, nonce) = encrypt_secret_with_key(master, &plain)?;
