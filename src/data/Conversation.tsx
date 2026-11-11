@@ -554,6 +554,7 @@ export interface ConversationSearchHit {
 
 /** 管家窗口搜索命中：在通用命中基础上携带跳转所需的会话类型与助手 */
 export interface ButlerMessageSearchHit extends ConversationSearchHit {
-    conversation_kind: "butler_main" | "butler_contact" | "butler_task";
+    /** butler_contact_archive：用户重开私聊时归档的旧私聊（只读查看） */
+    conversation_kind: "butler_main" | "butler_contact" | "butler_contact_archive" | "butler_task";
     assistant_id: number | null;
 }

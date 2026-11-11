@@ -2,17 +2,7 @@ import React from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-import ConversationTurnRail, { findActiveTurnId } from "./ConversationTurnRail";
-
-// Tooltip 用直通渲染，避免 Radix Portal 在 happy-dom 中的时序问题
-vi.mock("@/components/ui/tooltip", () => ({
-    Tooltip: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-    TooltipTrigger: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-    TooltipContent: ({ children }: { children: React.ReactNode }) => (
-        <div data-testid="tooltip-content">{children}</div>
-    ),
-    TooltipProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-}));
+import ConversationTurnRail, { findActiveTurnId, railTrackHeight } from "./ConversationTurnRail";
 
 class ResizeObserverMock {
     observe = vi.fn();
@@ -32,6 +22,17 @@ function makeRef(height: number) {
     return {
         current: makeScrollContainer(height),
     } as React.RefObject<HTMLDivElement | null>;
+}
+
+const TURNS = [
+    { id: 101, preview: "first question" },
+    { id: 202, preview: "second question" },
+    { id: 303, preview: "third question" },
+];
+
+function mockTrackTop(slider: HTMLElement, top: number) {
+    const track = slider.firstElementChild as HTMLElement;
+    vi.spyOn(track, "getBoundingClientRect").mockReturnValue({ top } as DOMRect);
 }
 
 describe("ConversationTurnRail", () => {
@@ -54,47 +55,53 @@ describe("ConversationTurnRail", () => {
         expect(container.firstChild).toBeNull();
     });
 
-    it("renders one button per turn and invokes onSelect on click", () => {
+    it("should jump to the nearest turn when the track is clicked", () => {
         const onSelect = vi.fn();
         render(
-            <ConversationTurnRail
-                turns={[
-                    { id: 101, preview: "first question" },
-                    { id: 202, preview: "second question" },
-                ]}
-                scrollContainerRef={makeRef(800)}
-                onSelect={onSelect}
-            />,
+            <ConversationTurnRail turns={TURNS} scrollContainerRef={makeRef(800)} onSelect={onSelect} />,
         );
+        const slider = screen.getByRole("slider");
+        // 3 轮 × 16px 间距 = 32px 轨道，轨道顶部位于 y=100
+        mockTrackTop(slider, 100);
 
-        const buttons = screen.getAllByRole("button");
-        expect(buttons).toHaveLength(2);
-        expect(buttons[0]).toHaveAttribute("aria-label", "跳转到第 1 轮对话");
-        expect(buttons[1]).toHaveAttribute("aria-label", "跳转到第 2 轮对话");
-
-        fireEvent.click(buttons[0]);
-        expect(onSelect).toHaveBeenCalledWith(101);
-        fireEvent.click(buttons[1]);
-        expect(onSelect).toHaveBeenCalledWith(202);
+        fireEvent.click(slider, { clientY: 100 });
+        expect(onSelect).toHaveBeenLastCalledWith(101);
+        fireEvent.click(slider, { clientY: 133 });
+        expect(onSelect).toHaveBeenLastCalledWith(303);
+        expect(slider).toHaveAttribute("aria-valuenow", "3");
     });
 
-    it("marks clicked turn as current", () => {
+    it("should preview the hovered turn and hide the preview on leave", () => {
         render(
-            <ConversationTurnRail
-                turns={[
-                    { id: 101, preview: "first question" },
-                    { id: 202, preview: "second question" },
-                ]}
-                scrollContainerRef={makeRef(800)}
-                onSelect={vi.fn()}
-            />,
+            <ConversationTurnRail turns={TURNS} scrollContainerRef={makeRef(800)} onSelect={vi.fn()} />,
         );
+        const slider = screen.getByRole("slider");
+        mockTrackTop(slider, 100);
 
-        const buttons = screen.getAllByRole("button");
-        fireEvent.click(buttons[1]);
+        fireEvent.pointerMove(slider, { clientY: 117 });
+        expect(screen.getByText("第 2 / 3 轮")).toBeTruthy();
+        expect(screen.getByText("second question")).toBeTruthy();
 
-        expect(buttons[0]).not.toHaveAttribute("aria-current");
-        expect(buttons[1]).toHaveAttribute("aria-current", "true");
+        fireEvent.pointerLeave(slider);
+        expect(screen.queryByText("second question")).toBeNull();
+    });
+
+    it("should step through turns with the keyboard and jump on Enter", () => {
+        const onSelect = vi.fn();
+        render(
+            <ConversationTurnRail turns={TURNS} scrollContainerRef={makeRef(800)} onSelect={onSelect} />,
+        );
+        const slider = screen.getByRole("slider");
+
+        fireEvent.keyDown(slider, { key: "ArrowDown" });
+        expect(screen.getByText("second question")).toBeTruthy();
+        fireEvent.keyDown(slider, { key: "End" });
+        expect(screen.getByText("third question")).toBeTruthy();
+        expect(onSelect).not.toHaveBeenCalled();
+
+        fireEvent.keyDown(slider, { key: "Enter" });
+        expect(onSelect).toHaveBeenCalledWith(303);
+        expect(screen.queryByText("third question")).toBeNull();
     });
 
     it("keeps a user turn active until the next user turn boundary", () => {
@@ -111,39 +118,28 @@ describe("ConversationTurnRail", () => {
         expect(findActiveTurnId(turns, positions, 860)).toBe(303);
     });
 
-    it("uses the max gap when there is plenty of vertical space", () => {
-        render(
-            <ConversationTurnRail
-                turns={Array.from({ length: 5 }, (_, i) => ({
-                    id: i + 1,
-                    preview: `q${i}`,
-                }))}
-                scrollContainerRef={makeRef(2000)}
-                onSelect={vi.fn()}
-            />,
-        );
-
-        const button = screen.getAllByRole("button")[0];
-        const wrapper = button.parentElement as HTMLElement;
-        // BAR_H=10, GAP_MAX=6: 5*10 + 4*6 = 74, available = 2000*0.7 = 1400 → plenty
-        expect(wrapper.style.gap).toBe("6px");
+    it("should size the track per turn while there is room", () => {
+        expect(railTrackHeight(1, 800)).toBe(0);
+        expect(railTrackHeight(5, 2000)).toBe(64);
     });
 
-    it("shrinks the gap below the max when the container is short", () => {
-        render(
+    it("should cap the track height and sample ticks for very long conversations", () => {
+        expect(railTrackHeight(300, 800)).toBe(400);
+
+        const { container } = render(
             <ConversationTurnRail
-                turns={Array.from({ length: 20 }, (_, i) => ({
-                    id: i + 1,
-                    preview: `q${i}`,
-                }))}
-                scrollContainerRef={makeRef(50)}
+                turns={Array.from({ length: 300 }, (_, i) => ({ id: i + 1, preview: `q${i}` }))}
+                scrollContainerRef={makeRef(800)}
                 onSelect={vi.fn()}
             />,
         );
 
-        const button = screen.getAllByRole("button")[0];
-        const wrapper = button.parentElement as HTMLElement;
-        // needed = 20*10 + 19*6 = 314 >> available = 50*0.7 = 35 → clamped to GAP_MIN=2
-        expect(wrapper.style.gap).toBe("2px");
+        const slider = screen.getByRole("slider");
+        const track = slider.firstElementChild as HTMLElement;
+        expect(track.style.height).toBe("400px");
+        const ticks = container.querySelectorAll("[data-turn-tick]");
+        expect(ticks.length).toBeGreaterThan(2);
+        expect(ticks.length).toBeLessThanOrEqual(400 / 8 + 1);
+        expect(slider).toHaveAttribute("aria-valuemax", "300");
     });
 });

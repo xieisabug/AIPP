@@ -101,7 +101,7 @@ impl ActionHandler for ConversationGetHandler {
                     json!({
                         "id": m.id,
                         "message_type": m.message_type,
-                        "content": m.content,
+                        "content": crate::utils::turn_context::visible(&m.content),
                         "llm_model_name": m.llm_model_name,
                         "created_time": m.created_time.to_rfc3339(),
                     })
@@ -245,7 +245,7 @@ impl ActionHandler for ConversationArchiveHandler {
                     .map(|(m, _)| {
                         json!({
                             "message_type": m.message_type,
-                            "content": m.content,
+                            "content": crate::utils::turn_context::visible(&m.content),
                             "llm_model_name": m.llm_model_name,
                             "created_time": m.created_time.to_rfc3339(),
                         })

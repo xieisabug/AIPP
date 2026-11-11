@@ -72,7 +72,8 @@ import { useAntiLeakage } from "@/contexts/AntiLeakageContext";
 import ConversationHeader from "./conversation/ConversationHeader";
 import ConversationExportDialog from "./conversation/ConversationExportDialog";
 import ConversationContent from "./conversation/ConversationContent";
-import ConversationTurnRail from "./conversation/ConversationTurnRail";
+import ConversationTurnRail, { makeTurnPreview } from "./conversation/ConversationTurnRail";
+import { visibleText } from "../utils/turnContext";
 import MobileTurnScrubber from "./conversation/MobileTurnScrubber";
 import type { MessageScrollAlign } from "./conversation/scrollHighlight";
 import { ToolErrorContinueProvider } from "./McpToolCall";
@@ -262,16 +263,6 @@ interface ConversationUIProps {
     /** 只读查看（如管家搜索打开的归档会话）：隐藏输入框，禁止重新生成/编辑等会改写会话的操作 */
     readOnly?: boolean;
     onPreviewFileContextClick?: (selection: PreviewFileContextSelection) => void;
-}
-
-// 左侧对话轮次导航条：从用户消息内容生成悬浮预览片段
-const TURN_PREVIEW_MAX = 120;
-function makeTurnPreview(content: string): string {
-    const collapsed = content.replace(/\s+/g, " ").trim();
-    if (collapsed.length <= TURN_PREVIEW_MAX) {
-        return collapsed;
-    }
-    return collapsed.slice(0, TURN_PREVIEW_MAX) + "…";
 }
 
 const EMPTY_GENERATION_GROUPS = new Map<string, any>();
@@ -2375,7 +2366,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
                     <MessageEditDialog
                         isOpen={editDialogIsOpen}
-                        initialContent={editingMessage?.content || ""}
+                        initialContent={visibleText(editingMessage?.content || "")}
                         messageType={editingMessage?.message_type || ""}
                         onClose={closeEditDialog}
                         onSave={handleEditSave}

@@ -13,14 +13,23 @@ describe("AddAssistantDialog model selection", () => {
         const user = userEvent.setup();
         const add = vi.fn().mockReturnValue({ assistant: { id: 9 } });
         mockInvokeHandler("add_assistant", add);
+        mockInvokeHandler("get_all_feature_config", () => [{ id: 1, feature_code: "butler_appearance", key: "butler_appearance_3", value: "{}" }]);
+        const saveConfig = vi.fn();
+        mockInvokeHandler("save_feature_config", saveConfig);
         render(<AddAssistantDialog assistantTypes={[{ code: 0, name: "普通" }, { code: 4, name: "Agent" }]} onAssistantAdded={vi.fn()} triggerButtonProps={{ "aria-label": "add" }} />);
         await user.click(screen.getByRole("button", { name: "add" }));
         fireEvent.change(screen.getByLabelText("名称"), { target: { value: "New" } });
-        await user.click(screen.getByRole("button", { name: "确认" }));
+        await user.click(screen.getByRole("button", { name: "创建" }));
         expect(add).not.toHaveBeenCalled();
         await user.click(screen.getAllByRole("combobox")[1]);
         await user.click(screen.getByRole("option", { name: "Test model" }));
-        await user.click(screen.getByRole("button", { name: "确认" }));
+        await user.click(screen.getByRole("button", { name: "头部：贝雷帽" }));
+        await user.click(screen.getByRole("button", { name: "创建" }));
         await waitFor(() => expect(add).toHaveBeenCalledWith({ name: "New", description: "", assistantType: 0, modelSelection: "test%%10" }));
+        // 形象与编辑助手共用 butler_appearance 配置，保留其他助手已有的形象。
+        await waitFor(() => expect(saveConfig).toHaveBeenCalledOnce());
+        const config = saveConfig.mock.calls[0][0].config;
+        expect(config.butler_appearance_3).toBe("{}");
+        expect(JSON.parse(config.butler_appearance_9)).toMatchObject({ accessories: { head: "beret" }, motion: true });
     });
 });

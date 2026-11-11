@@ -8,6 +8,8 @@ pub(super) fn database() -> Connection {
         CREATE TABLE message(id INTEGER PRIMARY KEY,conversation_id INTEGER,message_type TEXT,content TEXT,metadata_json TEXT,created_time TEXT DEFAULT CURRENT_TIMESTAMP,
             llm_model_id INTEGER,llm_model_name TEXT,token_count INTEGER,input_token_count INTEGER,output_token_count INTEGER,finish_time TEXT,tool_calls_json TEXT);
         CREATE TABLE conversation_summary(conversation_id INTEGER);
+        CREATE TABLE butler_main_state(butler_conversation_id INTEGER);
+        INSERT INTO butler_main_state VALUES (10);
         INSERT INTO conversation VALUES (10,1,'总管家','butler_main',NULL),(20,2,'写作','butler_contact',NULL),
             (30,3,'审稿','butler_contact',NULL),(40,3,'审核任务','butler_task',NULL),(50,3,'普通聊天','normal',NULL);").unwrap();
     schema(&db).unwrap();
@@ -588,6 +590,19 @@ fn test_butler_peer_expiry_fails_waiting_work_once_with_receipt() {
     assert_eq!((failed.state.as_str(), failed.receipt_state.as_deref()), ("failed", Some("pending")));
     assert!(failed.error.unwrap().contains("有效期"));
     assert!(!expire(&db, &reread(&db, ex.id), later).unwrap(), "只失败一次");
+}
+
+/// 归档联系人私聊前按受理方查找仍在进行的协作：只返回以该会话为接收方、尚未结束的协作。
+#[test]
+fn test_butler_peer_active_in_target_lists_only_open_requests_to_conversation() {
+    let mut db = database();
+    message(&db, 20, "user", "请审稿");
+    let done = enqueue(&mut db, request("done", "初稿")).unwrap();
+    fail(&db, done.id, "测试：已结束").unwrap();
+    let open = enqueue(&mut db, request("open", "二稿")).unwrap();
+    let ids: Vec<i64> = active_in_target(&db, 30).unwrap().iter().map(|e| e.id).collect();
+    assert_eq!(ids, vec![open.id]);
+    assert!(active_in_target(&db, 20).unwrap().is_empty(), "发起方不是受理方");
 }
 
 /// 独立任务发起协作：未闭环时任务不收尾；整项停止只停本任务的协作，不给被取消的任务自己回执。

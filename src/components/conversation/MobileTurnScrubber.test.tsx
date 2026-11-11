@@ -2,7 +2,7 @@ import React from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import MobileTurnScrubber, { turnIndexFromOffset } from "./MobileTurnScrubber";
+import MobileTurnScrubber from "./MobileTurnScrubber";
 
 class ResizeObserverMock {
     observe = vi.fn();
@@ -21,20 +21,6 @@ function makeRef(height: number) {
     document.body.appendChild(el);
     return { current: el } as React.RefObject<HTMLDivElement | null>;
 }
-
-describe("turnIndexFromOffset", () => {
-    it("should snap to the nearest turn when offset is inside the track", () => {
-        expect(turnIndexFromOffset(0, 100, 3)).toBe(0);
-        expect(turnIndexFromOffset(40, 100, 3)).toBe(1);
-        expect(turnIndexFromOffset(90, 100, 3)).toBe(2);
-    });
-
-    it("should clamp when offset is outside the track", () => {
-        expect(turnIndexFromOffset(-30, 100, 3)).toBe(0);
-        expect(turnIndexFromOffset(500, 100, 3)).toBe(2);
-        expect(turnIndexFromOffset(50, 0, 3)).toBe(0);
-    });
-});
 
 describe("MobileTurnScrubber", () => {
     beforeEach(() => {

@@ -52,7 +52,9 @@ const BUTLER_ONLY_AGENT_TOOLS: &[&str] =
 
 /// Returns true if the given tool from `aipp:agent` is butler-only.
 pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
-    BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name) || crate::api::butler_peer::is_peer_tool(tool_name)
+    BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
+        || crate::api::butler_peer::is_peer_tool(tool_name)
+        || crate::api::butler_memory::is_tool(tool_name)
 }
 
 /// 只在总管家主会话可用的工具（派发/操作独立任务、定时任务）。成员会话调用必然失败，因此不向其暴露。
@@ -414,6 +416,7 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
         Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
+            crate::api::butler_memory::definition(),
             BuiltinToolInfo {
                 name: "message_bot".into(),
                 description: "Send a self-contained request (goal, materials, expected result) to a Butler contact. Use this whenever the user asks a named assistant to reply or do work, including a simple greeting, or when you need another member's help for your current work. The receipt is not its answer. End this turn; its answer wakes you later. Never send acknowledgements. deliver_to decides who receives the answer: \"user\" means the receiver delivers results or asks questions to the user in its own conversation under its own name and you must not restate it; \"sender\" means the answer comes back only to you as material for your own work or for a summary the user asked for. Default: \"user\" when you act on a user message; \"sender\" while handling another assistant's request or executing an independent task. Chains are limited in depth, rounds and lifetime, and assistants already in the chain cannot be messaged again (loop).".into(),
@@ -451,7 +454,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "search_bot_history".into(),
-                description: "Search the messages of ALL Butler contacts, the chief and their task conversations by literal phrase. Each match identifies the owning Bot, the speaker, conversation and message ID. Use read_bot_message_context for the surrounding conversation.".into(),
+                description: "Search the messages of ALL Butler contacts, the chief and their task conversations by literal phrase, including archived conversations. Each match identifies the owning Bot, the speaker, conversation and message ID. archived=true means the match is from an old conversation the user archived when starting a new one: treat it as past history, not the current conversation. Use read_bot_message_context for the surrounding conversation.".into(),
                 input_schema: serde_json::json!({"type":"object","required":["query"],"properties":{
                     "query":{"type":"string"},"bot_id":{"type":"integer"},"before_message_id":{"type":"integer"}
                 }}),
@@ -463,7 +466,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "search_own_history".into(),
-                description: "Find a literal phrase in this conversation, including history covered by a checkpoint. Set scope=all_bots to find matches across the Butler workspace with Bot names and message IDs.".into(),
+                description: "Find a literal phrase in this conversation, including history covered by a checkpoint and your earlier conversations the user archived when starting a new one (those matches carry archived=true and the archived conversation name; treat them as past history). Set scope=all_bots to find matches across the Butler workspace with Bot names and message IDs.".into(),
                 input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"scope":{"enum":["current","all_bots"]}},"required":["query"]}),
             },
             BuiltinToolInfo {

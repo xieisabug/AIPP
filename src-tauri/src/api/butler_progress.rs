@@ -214,7 +214,9 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64) -> Result<bool, S
         .map(|(i, step)| format!("{}. [{}] {}", i + 1, step.status, step.label))
         .collect::<Vec<_>>()
         .join("\n");
-    let prompt = format!("用户请求：{}\n\n最近步骤：\n{}", clip(&request.content, 400), step_lines);
+    // 用户消息正文末尾存着本轮附加上下文（时间、工作记录、长期记忆等），只把用户原话交给辅助模型。
+    let request_text = crate::utils::turn_context::visible(&request.content);
+    let prompt = format!("用户请求：{}\n\n最近步骤：\n{}", clip(request_text, 400), step_lines);
 
     let config_map = app.state::<crate::FeatureConfigState>().config_feature_map.lock().await.clone();
     let detail = LLMDatabase::new(app)

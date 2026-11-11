@@ -1,34 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockInvokeHandler, clearAllMockHandlers } from "@/__tests__/mocks/tauri";
-import { clearButlerContactHistory } from "./butlerContactService";
+import { resetButlerContactConversation } from "./butlerContactService";
 
-describe("clearButlerContactHistory", () => {
+describe("resetButlerContactConversation", () => {
     afterEach(clearAllMockHandlers);
-    it("should stop and delete only the selected assistant private conversation", async () => {
-        mockInvokeHandler("list_butler_contact_previews", () => [{ assistantId: 1, conversationId: 10 }, { assistantId: 2, conversationId: 20 }]);
-        const order: string[] = [];
-        const cancel = vi.fn(() => { order.push("cancel"); });
-        const remove = vi.fn(() => { order.push("delete"); });
-        mockInvokeHandler("cancel_ai", cancel);
-        mockInvokeHandler("delete_conversation", remove);
-        expect(await clearButlerContactHistory(2)).toBe(20);
-        expect(order).toEqual(["cancel", "delete"]);
-        expect(cancel).toHaveBeenCalledExactlyOnceWith({ conversationId: 20 });
-        expect(remove).toHaveBeenCalledExactlyOnceWith({ conversationId: 20 });
-    });
-    it("should keep history when stopping fails and report the original cause", async () => {
-        mockInvokeHandler("list_butler_contact_previews", () => [{ assistantId: 2, conversationId: 20 }]);
-        mockInvokeHandler("cancel_ai", () => { throw new Error("session unavailable"); });
+    it("should archive through the backend without deleting the conversation", async () => {
+        const reset = vi.fn(() => ({ conversationId: 21, archivedConversationIds: [20], stopNotes: [] }));
         const remove = vi.fn();
+        mockInvokeHandler("reset_butler_contact_conversation", reset);
         mockInvokeHandler("delete_conversation", remove);
-        await expect(clearButlerContactHistory(2)).rejects.toThrow("停止私聊执行失败（助手 2，会话 20）：Error: session unavailable");
+        expect(await resetButlerContactConversation(2)).toEqual({ conversationId: 21, archivedConversationIds: [20], stopNotes: [] });
+        expect(reset).toHaveBeenCalledExactlyOnceWith({ assistantId: 2 });
         expect(remove).not.toHaveBeenCalled();
     });
-    it("should do nothing when the assistant has no private conversation", async () => {
-        mockInvokeHandler("list_butler_contact_previews", () => []);
-        const remove = vi.fn();
-        mockInvokeHandler("delete_conversation", remove);
-        expect(await clearButlerContactHistory(2)).toBeNull();
-        expect(remove).not.toHaveBeenCalled();
+    it("should pass through the backend stage and cause when archiving fails", async () => {
+        mockInvokeHandler("reset_butler_contact_conversation", () => { throw new Error("归档助手 2 的旧私聊出错：database is locked"); });
+        await expect(resetButlerContactConversation(2)).rejects.toThrow("归档助手 2 的旧私聊出错：database is locked");
     });
 });

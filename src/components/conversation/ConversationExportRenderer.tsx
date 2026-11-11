@@ -6,6 +6,7 @@ import remarkCodeBlockMeta from "@/react-markdown/remarkCodeBlockMeta";
 import type { ExportData, ConversationExportOptions } from "@/utils/exportFormatters";
 import { parseToolCalls, mapToolCallsToMessages, stripMcpToolCallMarkers, extractMcpToolCallHints, formatJsonContent } from "@/utils/exportFormatters";
 import { resolveCodeBlockMeta } from "@/react-markdown/remarkCodeBlockMeta";
+import { visibleText } from "@/utils/turnContext";
 
 // 导出专用的颜色方案 - 使用纯 RGB 值避免 oklch 兼容性问题
 const exportColors = {
@@ -441,7 +442,7 @@ const ConversationExportRenderer: React.FC<ConversationExportRendererProps> = ({
                         <div style={getBubbleStyle(message.message_type)}>
                             {/* 消息内容 */}
                             <div style={styles.prose}>
-                                <ExportMarkdown colors={colors}>{stripMcpToolCallMarkers(message.content || "")}</ExportMarkdown>
+                                <ExportMarkdown colors={colors}>{stripMcpToolCallMarkers(visibleText(message.content || ""))}</ExportMarkdown>
                             </div>
 
                             {/* 图片附件 */}
@@ -873,7 +874,7 @@ export function renderPdfExportContent(
             return `
                 <div style="margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5; page-break-inside: avoid; break-inside: avoid;">
                     <div style="font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px;">${escapeHtml(label)}</div>
-                    <div style="color: #111; font-size: 12px; line-height: 1.6;">${markdownToHtml(stripMcpToolCallMarkers(message.content || ""))}</div>
+                    <div style="color: #111; font-size: 12px; line-height: 1.6;">${markdownToHtml(stripMcpToolCallMarkers(visibleText(message.content || "")))}</div>
                     ${imageAttachmentsHtml}
                     ${toolCallsHtml}
                 </div>

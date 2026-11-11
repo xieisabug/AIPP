@@ -1,19 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/** Clear only the assistant's Butler private conversation, never ordinary chat or tasks. */
-export async function clearButlerContactHistory(assistantId: number): Promise<number | null> {
-    let stage = "读取联系人私聊";
-    let conversationId: number | null = null;
-    try {
-        const contacts = await invoke<Array<{ assistantId: number; conversationId: number }>>("list_butler_contact_previews");
-        conversationId = contacts.find(contact => contact.assistantId === assistantId)?.conversationId ?? null;
-        if (conversationId === null) return null;
-        stage = "停止私聊执行";
-        await invoke("cancel_ai", { conversationId });
-        stage = "删除私聊历史";
-        await invoke("delete_conversation", { conversationId });
-        return conversationId;
-    } catch (error) {
-        throw new Error(`${stage}失败（助手 ${assistantId}，会话 ${conversationId ?? "尚未取得"}）：${String(error)}`);
-    }
+export interface ButlerContactResetResult {
+    /** 新开的私聊。 */
+    conversationId: number;
+    /** 被归档的旧私聊；之前从未打开过私聊时为空。 */
+    archivedConversationIds: number[];
+    /** 停止旧私聊上进行中工作的说明；没有进行中的工作时为空。 */
+    stopNotes: string[];
+}
+
+/**
+ * 重开助手在管家中的私聊（与总管家「重开新会话」一致）：旧私聊归档为只读存档，
+ * 仍可在管家搜索和助手历史检索中找到；属于旧私聊的进行中工作由后台停止。不影响普通聊天、任务与长期记忆。
+ * 失败时原样抛出后台给出的环节与原因（含助手、会话 ID），由调用方加上操作名展示。
+ */
+export function resetButlerContactConversation(assistantId: number): Promise<ButlerContactResetResult> {
+    return invoke<ButlerContactResetResult>("reset_butler_contact_conversation", { assistantId });
 }
