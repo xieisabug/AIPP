@@ -373,3 +373,17 @@ fn test_vault_server_switch_recovery_keeps_committed_os_key() {
     assert_eq!(get_sync_meta(&sync, "remote_account_scope").unwrap().as_deref(), Some("target"));
     assert!(active(&db, &store).unwrap().unwrap().record == new.record);
 }
+
+/// Presence is answered without the key: a device that cannot decrypt (or never received) a credential
+/// must still be able to tell "no copy here" from an authentication failure.
+#[test]
+fn test_vault_stored_references_reports_presence_without_decrypting() {
+    let db = db(); let store = MemoryKeys::default();
+    let key = secrets::random_local_key();
+    switch(&db,&store,None,&key).unwrap();
+    let here = Uuid::new_v4().to_string();
+    write_with(&db,&key,&here,&credential()).unwrap();
+    let stored = stored_references_with(&db).unwrap();
+    assert!(stored.contains(&here));
+    assert!(!stored.contains(&Uuid::new_v4().to_string()), "a reference that synced without its secret is absent");
+}

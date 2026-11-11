@@ -66,7 +66,7 @@ Windows Credential Manager / macOS Keychain / Linux Secret Service 使用 keyrin
 - `system.db/credential_vault` 保存密文，`credential_vault_key` 只记录系统安全存储槽位和公开派生参数。未配置同步口令时采用随机密钥；设置后与 provider secret 共用派生密钥。密钥只在 OS store，不在 Vault 数据库或同步服务器保存明文。
 - 空 Vault 的状态查询不创建随机密钥。系统安全存储不可用时暂停凭据同步，保留已有密文与待同步事件，普通数据仍可同步；旧凭据迁移失败时暂停秘密扫描，待解锁后重试，不回退到明文。未就绪的凭据事件在批次大小限制前排除，避免堵塞普通数据。
 - 换钥先准备并验证新 OS 槽位，再用事务重加密全部本地 Vault 行并切换密钥指针；未参与同步的旧随机密钥在提交后清理；旧同步密钥保留到已观察的远端凭据全部完成重加密后清理，失败保留清理任务。旧 provider 缓存与旧逐条 keyring 凭据可迁移。保护同步服务登录 Token 的旧 master key 不在本次删除范围。
-- `mcp.app_connection` 同步非秘密配置与连接引用；`mcp.vault_secret` 同步加密凭据。服务归属使用 `mcp.server` 同步身份，接收端重绑定本地编号；本地密文与传输密文分别绑定各自身份。
+- `mcp.app_connection` 同步非秘密配置与连接引用；`mcp.vault_secret` 同步加密凭据。未设置同步口令时只有前者同步，其他设备会收到连接但没有凭据：`list_app_connections` 按本机 Vault 是否有该引用返回 `credential_on_device`（每台设备各自计算，不同步）与 `credential_sync`（not_configured/needs_passphrase/mismatch/ready/unavailable）。“此设备没有凭据”不算认证失败，不停用连接、不写会同步的状态；验证在该设备直接报错而不写“连接失败”，执行报具体原因。界面在该设备显示原因与口令设置入口（需要输入或更新口令时提醒，未设置口令时只做灰色提示），不提供重新登录；从菜单重新配置会提示新凭据将替换其他设备正在使用的凭据，断开会提示无法撤销服务商授权。服务归属使用 `mcp.server` 同步身份，接收端重绑定本地编号；本地密文与传输密文分别绑定各自身份。
 - 未解锁/密钥不匹配的密文进入 pending，不覆盖本地值。删除使用现有版本化 outbox/tombstone；换钥后清理可确定未生效的旧版本 outbox，有未知上传结果或未解密远端凭据时拒绝换钥。
 - 同步模式下 OAuth 刷新先同步最新凭据，再通过 `/v1/sync/vault/claim-refresh` 申请当前版本刷新权；完成后上传新密文。服务端只存身份、版本与请求标识；不能确认的刷新不自动重试。Sync Server 在 status 返回 vault_protocol=1，拒绝旧密钥版本覆盖新版本，并协调刷新；旧服务端缺少协议时明确要求升级。
 - 目前 provider 本地配置表的存储格式不变；本次统一的是实际同步密钥与应用 Vault，不宣称已将所有历史自定义 MCP 或 provider 本地字段迁入 Vault。

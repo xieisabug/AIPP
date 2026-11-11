@@ -1,4 +1,4 @@
-import type { AppConnection } from '@/data/ConnectedApp';
+import { AppConnection, missingCredentialHint } from '@/data/ConnectedApp';
 import type { MCPServer, MCPServerTool } from '@/data/MCP';
 
 export type StatusTone = 'ok' | 'idle' | 'pending' | 'warn' | 'error';
@@ -13,11 +13,19 @@ export function displayStatus(server: Pick<MCPServer, 'is_enabled' | 'is_builtin
     if (!supported) return { label: '此设备不可执行', tone: 'idle', attention: false };
     switch (connection?.status) {
         case 'connecting': return { label: '等待授权', tone: 'pending', attention: true };
-        case 'auth_required': return { label: '需要重新登录', tone: 'warn', attention: true };
         case 'disconnected': return connection.error
             ? { label: '断开未完成', tone: 'warn', attention: true }
             : { label: '已断开', tone: 'idle', attention: false };
     }
+    // The connection synced here but its credential did not. This device cannot re-login usefully, so
+    // this wins over a synced auth_required. Only nag when it can fix it (enter the passphrase);
+    // without a passphrase, credentials are per-device by design.
+    if (connection?.credential_on_device === false) {
+        return missingCredentialHint(connection.credential_sync).actionable
+            ? { label: '凭据待解锁', tone: 'warn', attention: true }
+            : { label: '此设备无凭据', tone: 'idle', attention: false };
+    }
+    if (connection?.status === 'auth_required') return { label: '需要重新登录', tone: 'warn', attention: true };
     if (server && !server.is_enabled) return { label: '已停用', tone: 'idle', attention: false };
     switch (connection?.status) {
         case 'error': return { label: '连接失败', tone: 'error', attention: true };

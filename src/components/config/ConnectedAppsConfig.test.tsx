@@ -247,4 +247,23 @@ describe('ConnectedAppsConfig', () => {
         await waitFor(() => expect(card).toHaveTextContent('已停用'));
         expect(card).not.toHaveTextContent('可用');
     });
+
+    it('should explain a credential that did not sync to this device without offering a re-login', async () => {
+        const oauth = { ...definition, connection: { ...definition.connection, auth: 'oauth' } };
+        vi.mocked(invoke).mockImplementation(async command => {
+            if (command === 'get_mcp_servers') return [{ ...legacy, id: 21, is_enabled: false }];
+            if (command === 'list_app_connections') return [{ server_id: 21, app_id: 'notes', definition: oauth, label: '工作笔记', config: {}, status: 'auth_required', error: '连接凭据不存在', credential_on_device: false, credential_sync: 'not_configured' }];
+            return [];
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        await user.click(screen.getByRole('tab', { name: /我的应用/ }));
+        const row = await screen.findByRole('button', { name: /工作笔记/ });
+        expect(row).toHaveTextContent('此设备无凭据');
+        await user.click(row);
+        expect(screen.getByRole('note')).toHaveTextContent('这台设备没有此连接的凭据');
+        expect(screen.queryByRole('button', { name: '重新登录' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: '测试连接' })).not.toBeInTheDocument();
+        expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'connect_catalog_app' || cmd === 'verify_app_connection')).toBe(false);
+    });
 });

@@ -5684,10 +5684,21 @@ async fn apply_persisted_auto_sync_to_runtime(app_handle: &AppHandle) {
 }
 
 
-pub(crate) fn credential_status(app: &AppHandle) -> String {
+/// Status text plus a stable code (not_configured / needs_passphrase / mismatch / ready / unavailable) so
+/// the UI can say why a credential is absent on this device without parsing the text.
+pub(crate) fn credential_sync_state(app: &AppHandle) -> (String, &'static str) {
     match vault::state(app) {
-        Ok(state) => state.message(0),
-        Err(error) => format!("凭据库不可用：{error}"),
+        Ok(state) => {
+            let code = match &state {
+                secrets::SecretState::NotConfigured => "not_configured",
+                secrets::SecretState::NeedsPassphrase => "needs_passphrase",
+                secrets::SecretState::Mismatch => "mismatch",
+                secrets::SecretState::Ready(_) => "ready",
+                secrets::SecretState::Unavailable(_) => "unavailable",
+            };
+            (state.message(0), code)
+        }
+        Err(error) => (format!("凭据库不可用：{error}"), "unavailable"),
     }
 }
 

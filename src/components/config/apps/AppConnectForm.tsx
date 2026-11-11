@@ -11,7 +11,8 @@ import { Switch } from '@/components/ui/switch';
 
 const selectClass = 'border-input dark:bg-input/30 h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50';
 
-function Intro({ app, reconfiguring }: { app: AppDefinition; reconfiguring: boolean }) {
+function Intro({ app, connection }: { app: AppDefinition; connection?: AppConnection }) {
+    const reconfiguring = !!connection;
     const { auth, scopes } = app.connection;
     const Icon = auth === 'oauth' ? LogIn : auth === 'fields' ? KeyRound : ShieldCheck;
     const text = auth === 'oauth'
@@ -25,6 +26,7 @@ function Intro({ app, reconfiguring }: { app: AppDefinition; reconfiguring: bool
             <p>{text}</p>
             {auth === 'oauth' && <p>请求的授权范围：{scopes?.length ? scopes.join('、') : '由服务商决定'}，实际权限以授权页面为准。</p>}
             {reconfiguring && <p>重新配置会先停用此连接；新凭据保存成功后才删除旧凭据。出于安全原因，已保存的密钥不会回显，需要重新填写。</p>}
+            {connection?.credential_on_device === false && <p className="text-foreground">这台设备没有原凭据。重新配置后新凭据替换原凭据；未设置同步口令时，其他设备上的这个连接将无法使用。</p>}
         </div>
     </div>;
 }
@@ -63,7 +65,7 @@ export default function AppConnectForm({ app, connection, onConnected, onCancel 
 
     const submitLabel = busy ? '正在准备连接…' : app.connection.auth === 'oauth' ? '登录并连接' : '保存并验证';
     return <form className="space-y-5" onSubmit={e => { e.preventDefault(); void connect(); }}>
-        <Intro app={app} reconfiguring={!!connection} />
+        <Intro app={app} connection={connection} />
         <div className="space-y-2">
             <Label htmlFor="app-connection-label">连接名称</Label>
             <Input id="app-connection-label" value={label} onChange={e => setLabel(e.target.value)} required maxLength={80} disabled={locked} />

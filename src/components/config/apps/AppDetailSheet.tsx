@@ -2,8 +2,8 @@ import { ReactNode, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { toast } from 'sonner';
-import { AlertTriangle, ArrowLeft, ArrowUpRight, CircleSlash, Info, Loader2, LogIn, MoreHorizontal, Plug, Power, RefreshCw, Unplug, Users } from 'lucide-react';
-import { AppConnection, AppDefinition, visibleAppFields } from '@/data/ConnectedApp';
+import { AlertTriangle, ArrowLeft, ArrowUpRight, CircleSlash, Info, KeyRound, Loader2, LogIn, MoreHorizontal, Plug, Power, RefreshCw, Unplug, Users } from 'lucide-react';
+import { AppConnection, AppDefinition, missingCredentialHint, visibleAppFields } from '@/data/ConnectedApp';
 import { MCPServer, MCPServerTool } from '@/data/MCP';
 import { isMobileExecutableMcpServer } from '@/lib/mobileUnsupported';
 import { cn } from '@/utils/utils';
@@ -164,6 +164,14 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
         if (!deviceSupported) return <Notice icon={<CircleSlash />} title="此设备不能执行">此连接依赖本机进程。可以查看配置和授权，但只能在桌面端运行。</Notice>;
         if (connection) {
             const error = connection.error && <p className="font-mono text-xs leading-5">{connection.error}</p>;
+            // No re-login here on purpose: a new credential would replace the one the other device uses.
+            if (connection.credential_on_device === false && connection.status !== 'disconnected') {
+                const hint = missingCredentialHint(connection.credential_sync);
+                return <Notice tone={hint.actionable ? 'warn' : 'neutral'} icon={<KeyRound />} title={hint.title}>
+                    <p>{hint.body}</p>
+                    <p className="mt-1 text-xs">不建议在这台设备重新配置：新凭据会替换其他设备正在使用的凭据。</p>
+                </Notice>;
+            }
             switch (connection.status) {
                 case 'connecting': return <Notice icon={<Loader2 className="animate-spin" />} title="等待浏览器授权"
                     actions={<Button size="sm" variant="outline" disabled={!!busy} onClick={() => continueAuthorization(connection)}>{busyIcon('正在打开授权页面…')}继续授权</Button>}>
@@ -207,7 +215,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
             ? app.connection.transport === 'stdio'
                 ? <Button size="sm" variant="outline" onClick={() => void openPluginConnection(app)}>管理插件本地连接</Button>
                 : <Button size="sm" disabled={!appSupported(app)} onClick={() => startConnect()}><Plug className="h-4 w-4" />{matching.length ? '添加连接' : '连接'}</Button>
-            : connection && server?.is_enabled && !status?.attention && connection.status !== 'disconnected'
+            : connection && server?.is_enabled && !status?.attention && connection.status !== 'disconnected' && connection.credential_on_device !== false
                 ? <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void verify(server.id)}>{busyIcon('正在测试连接…') ?? <RefreshCw className="h-4 w-4" />}测试连接</Button>
                 : null;
         return <div className="flex shrink-0 items-center gap-1">
@@ -311,7 +319,9 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
                             {server.transport_type === 'http' && <Panel title="网络" description="调整超时和代理不需要重新授权。">
                                 <AppTransportSettings key={`${server.id}-${server.timeout}-${server.proxy_enabled}`} server={server} onSaved={() => { toast.success('网络设置已保存'); void refresh().catch(() => {}); }} />
                             </Panel>}
-                            <Panel danger title="断开连接" description="断开会停用连接、删除本机凭据，并尝试撤销服务商支持的 OAuth 授权；已执行的操作不会回滚。启用同步时，断开和凭据删除会同步到其他设备。">
+                            <Panel danger title="断开连接" description={connection.credential_on_device === false
+                                ? '这台设备没有此连接的凭据，无法撤销服务商授权；断开会停用连接并同步到其他设备。建议在保存凭据的设备上断开。'
+                                : '断开会停用连接、删除本机凭据，并尝试撤销服务商支持的 OAuth 授权；已执行的操作不会回滚。启用同步时，断开和凭据删除会同步到其他设备。'}>
                                 {connection.status === 'disconnected'
                                     ? <p className="text-sm text-muted-foreground">{connection.error ? '上次断开未完成，请在页面顶部重试或选择不撤销授权。' : '此连接已断开。'}</p>
                                     : <div className="flex justify-end"><Button size="sm" variant="outline" className="border-destructive/40 text-destructive hover:bg-destructive/5 hover:text-destructive" disabled={!!busy} onClick={() => void disconnect(connection.server_id)}>{busyIcon('正在断开连接…') ?? <Unplug className="h-4 w-4" />}断开连接</Button></div>}

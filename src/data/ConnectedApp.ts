@@ -52,6 +52,21 @@ export interface AppConnection {
     status: 'connecting' | 'available' | 'unchecked' | 'auth_required' | 'disconnected' | 'error';
     error: string | null;
     credential_status?: string | null;
+    /** Per device, never synced. `false`: the connection syncs here but its credential does not. */
+    credential_on_device?: boolean | null;
+    credential_sync?: CredentialSync;
+}
+
+export type CredentialSync = 'not_configured' | 'needs_passphrase' | 'mismatch' | 'ready' | 'unavailable';
+
+/** Why this device has no copy of a synced connection's credential, and what the user can do about it. */
+export function missingCredentialHint(sync?: CredentialSync): { title: string; body: string; actionable: boolean } {
+    switch (sync) {
+        case 'needs_passphrase': return { title: '凭据需要同步口令解锁', body: '其他设备已开启凭据加密同步。在「程序功能 → 数据」中输入同步口令后即可使用此连接。', actionable: true };
+        case 'mismatch': return { title: '同步口令已在其他设备更换', body: '在「程序功能 → 数据」中输入新的同步口令后即可使用此连接。', actionable: true };
+        case 'not_configured': return { title: '这台设备没有此连接的凭据', body: '未设置同步口令时，连接凭据只保存在创建连接的设备上。要在多台设备使用，请在每台设备的「程序功能 → 数据」中设置相同的同步口令。', actionable: false };
+        default: return { title: '凭据尚未同步到这台设备', body: '完成一次同步后即可使用。如果原设备没有设置同步口令，凭据不会上传，请先在原设备设置。', actionable: false };
+    }
 }
 
 export function visibleAppFields(fields: AppField[], values: Record<string, string>): AppField[] {

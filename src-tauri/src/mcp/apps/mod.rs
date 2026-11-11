@@ -90,25 +90,31 @@ pub struct AppConnection {
     pub status: String,
     pub error: Option<String>,
     pub credential_status: Option<String>,
+    /// Computed per device, never synced: `None` when the connection holds no credential reference.
+    pub credential_on_device: Option<bool>,
+    /// Stable code for the credential sync state of this device (see sync::credential_sync_state).
+    pub credential_sync: String,
 }
 
 #[tauri::command]
 pub async fn list_app_connections(app_handle: tauri::AppHandle) -> Result<Vec<AppConnection>, String> {
     let vault_app = app_handle.clone();
-    let credential_status = tokio::task::spawn_blocking(move || crate::sync::credential_status(&vault_app))
-        .await.map_err(|e| format!("读取凭据状态失败: {e}"))?;
+    let ((credential_status, credential_sync), stored) = tokio::task::spawn_blocking(move || {
+        Ok::<_, String>((crate::sync::credential_sync_state(&vault_app), crate::sync::vault::stored_references(&vault_app)?))
+    }).await.map_err(|e| format!("读取凭据状态失败: {e}"))??;
     let db = db(&app_handle)?;
-    let mut statement = db.conn.prepare("SELECT c.server_id,c.app_id,c.definition,c.label,c.config,c.status,c.error,c.verified_session FROM app_connection c JOIN mcp_server s ON s.id=c.server_id").map_err(|e| e.to_string())?;
-    let rows = statement.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, Option<String>>(6)?, r.get::<_, Option<String>>(7)?))).map_err(|e| e.to_string())?;
+    let mut statement = db.conn.prepare("SELECT c.server_id,c.app_id,c.definition,c.label,c.config,c.status,c.error,c.verified_session,c.credential_ref FROM app_connection c JOIN mcp_server s ON s.id=c.server_id").map_err(|e| e.to_string())?;
+    let rows = statement.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, Option<String>>(6)?, r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?))).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for row in rows {
-        let (server_id, app_id, raw, label, config, mut status, mut error, session) = row.map_err(|e| e.to_string())?;
+        let (server_id, app_id, raw, label, config, mut status, mut error, session, reference) = row.map_err(|e| e.to_string())?;
         if session.as_deref() != Some(SESSION.as_str()) {
             if status == "available" { status = "unchecked".into(); }
             else if status == "connecting" { status = "auth_required".into(); error = Some("上次连接未完成，请重新连接".into()); }
         }
         result.push(AppConnection { server_id, app_id, definition: serde_json::from_str(&raw).map_err(|e| format!("连接 {server_id} 的应用描述损坏：{e}"))?, label,
-            config: serde_json::from_str(&config).map_err(|e| format!("连接 {server_id} 的配置损坏：{e}"))?, status, error, credential_status: Some(credential_status.clone()) });
+            config: serde_json::from_str(&config).map_err(|e| format!("连接 {server_id} 的配置损坏：{e}"))?, status, error, credential_status: Some(credential_status.clone()),
+            credential_on_device: reference.map(|r| stored.contains(&r)), credential_sync: credential_sync.to_string() });
     }
     Ok(result)
 }
@@ -134,7 +140,8 @@ pub async fn get_app_authorization_url(server_id: i64) -> Result<Option<String>,
 /// provider's `error` code to fixed text and never echoes `error_description`. Only these may be matched by
 /// text; tool-stage errors carry remote content and are classified through the transport's 401 signal.
 pub fn is_credential_auth_failure(error: &str) -> bool {
-    ["invalid_grant", "invalid_client", "HTTP 401", "登录已过期", "凭据不存在"].iter().any(|pattern| error.contains(pattern))
+    // A credential missing on this device is deliberately absent: see credentials::MISSING_ON_DEVICE.
+    ["invalid_grant", "invalid_client", "HTTP 401", "登录已过期"].iter().any(|pattern| error.contains(pattern))
 }
 
 pub fn record_credential_error(app: &tauri::AppHandle, server: &crate::db::mcp_db::MCPServer, error: &str) {
@@ -349,6 +356,13 @@ pub async fn verify_app_connection(app_handle: tauri::AppHandle, server_id: i64)
             Some("connecting") => "连接尚未完成授权".into(),
             _ => "连接已停用，请先启用".into(),
         });
+    }
+    // Writing "error" here would sync to the device that does hold the credential and mislabel it.
+    let reference: Option<String> = db(&app_handle)?.conn.query_row("SELECT credential_ref FROM app_connection WHERE server_id=?1", [server_id], |r| r.get(0)).optional().map_err(|e| e.to_string())?.flatten();
+    if let Some(reference) = reference {
+        let vault_app = app_handle.clone();
+        let stored = tokio::task::spawn_blocking(move || crate::sync::vault::stored_references(&vault_app)).await.map_err(|e| format!("读取凭据状态失败: {e}"))??;
+        if !stored.contains(&reference) { return Err(format!("连接 {server_id}：{}", credentials::MISSING_ON_DEVICE)); }
     }
     let result = super::registry_api::refresh_mcp_server_capabilities(app_handle.clone(), server_id).await;
     let _change = CHANGE_LOCK.lock().await;

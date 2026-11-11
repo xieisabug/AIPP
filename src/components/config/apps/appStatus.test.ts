@@ -28,6 +28,23 @@ describe('displayStatus', () => {
     });
 });
 
+describe('displayStatus on a device without the credential', () => {
+    const synced = (status: AppConnection['status'], credential_sync: AppConnection['credential_sync']) =>
+        ({ status, error: null, credential_on_device: false, credential_sync } as AppConnection);
+    it('should not ask this device to re-login when it never had the credential', () => {
+        // auth_required synced from another device must not offer a re-login that would replace its credential.
+        expect(displayStatus(enabled, synced('auth_required', 'not_configured'))).toMatchObject({ label: '此设备无凭据', attention: false });
+        expect(displayStatus(enabled, synced('available', 'ready'))).toMatchObject({ label: '此设备无凭据', attention: false });
+    });
+    it('should ask for attention when entering the sync passphrase would fix it', () => {
+        expect(displayStatus(enabled, synced('unchecked', 'needs_passphrase'))).toMatchObject({ label: '凭据待解锁', tone: 'warn', attention: true });
+        expect(displayStatus(enabled, synced('unchecked', 'mismatch'))).toMatchObject({ attention: true });
+    });
+    it('should keep a deliberate disconnect visible', () => {
+        expect(displayStatus(disabled, synced('disconnected', 'not_configured'))).toMatchObject({ label: '已断开' });
+    });
+});
+
 describe('toolSummary', () => {
     it('should show unknown instead of zero when tools were never discovered', () => {
         expect(toolSummary([], enabled, connection('unchecked')).label).toBe('工具未检测');

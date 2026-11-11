@@ -156,10 +156,12 @@ fn test_apps_failed_create_discards_only_rows_it_owns() {
 
 #[test]
 fn test_apps_credential_stage_classification_matches_aipp_generated_errors() {
-    for error in ["OAuth 令牌交换/刷新失败：HTTP 401 Unauthorized；服务未提供可安全展示的错误代码", "OAuth 令牌交换/刷新失败：HTTP 400 Bad Request；invalid_grant：授权已失效，需要重新登录", "登录已过期，请重新授权", "连接凭据不存在，请重新连接"] {
+    for error in ["OAuth 令牌交换/刷新失败：HTTP 401 Unauthorized；服务未提供可安全展示的错误代码", "OAuth 令牌交换/刷新失败：HTTP 400 Bad Request；invalid_grant：授权已失效，需要重新登录", "登录已过期，请重新授权"] {
         assert!(is_credential_auth_failure(error), "{error}");
     }
-    for error in ["OAuth 令牌请求失败：error sending request", "读取连接凭据任务失败", "此连接启用了代理，但全局网络代理尚未配置"] {
+    // A credential missing on this device must not disable the connection: that state syncs and used to
+    // ping-pong between a device with the credential and one without (no sync passphrase).
+    for error in [credentials::MISSING_ON_DEVICE, "OAuth 令牌请求失败：error sending request", "读取连接凭据任务失败", "此连接启用了代理，但全局网络代理尚未配置"] {
         assert!(!is_credential_auth_failure(error), "{error}");
     }
 }

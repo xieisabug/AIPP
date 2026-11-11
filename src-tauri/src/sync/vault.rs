@@ -231,6 +231,20 @@ pub(super) fn decrypt(key: &secrets::SecretKey, reference: &str, server_id: i64,
         .map_err(|_| format!("凭据 {reference} 解密或归属校验失败，已保留原密文"))
 }
 
+/// References stored in this device's vault. Presence only, no key or decryption needed: lets the UI tell
+/// "this device has no copy of the credential" apart from an authentication failure.
+pub(crate) fn stored_references(app: &AppHandle) -> Result<std::collections::HashSet<String>, String> {
+    let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
+    let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
+    init(&db.conn)?;
+    stored_references_with(&db.conn)
+}
+pub(super) fn stored_references_with(db: &Connection) -> Result<std::collections::HashSet<String>, String> {
+    let mut statement = db.prepare("SELECT reference FROM credential_vault").map_err(|e| e.to_string())?;
+    let rows = statement.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<_>>().map_err(|e| e.to_string())
+}
+
 pub(crate) fn read(app: &AppHandle, reference: &str) -> Result<Option<crate::mcp::apps::credentials::Credential>, String> {
     let _lock = LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
     let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
