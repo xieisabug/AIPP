@@ -100,8 +100,6 @@ pub async fn tool(
     ensure_butler_enabled(app).await.map_err(anyhow::Error::msg)?;
     let db = ConversationDatabase::new(app)?;
     let owner = db.conversation_repo()?.read(current)?.context("找不到当前管家会话")?;
-    ensure!(owner.conversation_kind != crate::mcp::builtin_mcp::templates::GROUP_MEMBER_KIND,
-        "群聊里请直接在回复中 @ 成员协作；联系人协作工具只在私聊和独立任务中可用");
     ensure!(
         cfg!(desktop)
             && crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&owner.conversation_kind),

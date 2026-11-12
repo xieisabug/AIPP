@@ -38,6 +38,15 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([user,peer,answer,user,answer])).toEqual([user,user,answer]);
     });
 
+    it("should show a scheduled task delivery even right after an internal turn", () => {
+        const peer = message(2, "user", "[助手协作请求 · 内部协作]", {metadata_json:'{"origin":"butler_peer","leg":"request","audience":"peer"}'});
+        const internalAnswer = message(3, "response", "给对方的素材");
+        const trigger = message(4, "user", "[定时任务] 《周四休息提醒》", {metadata_json:'{"origin":"scheduled_task","role":"trigger","scheduled_task_id":6}'});
+        const delivered = message(5, "response", "今天是休息日，记得拉伸。", {metadata_json:'{"origin":"scheduled_task","role":"result","scheduled_task_id":6,"scheduled_task_name":"周四休息提醒"}'});
+        expect(butlerTranscript([peer, internalAnswer, trigger, delivered])).toEqual([delivered]);
+        expect(butlerTranscript([peer, internalAnswer, delivered])).toEqual([delivered]);
+    });
+
     it("should show the delegate's own answer and question when the work was handed over to it", () => {
         const handed = message(2, "user", "[助手协作请求 · 来自 总管家]", {metadata_json:'{"origin":"butler_peer","leg":"request","audience":"user"}'});
         const answer = message(3, "response", "这是我写好的稿子");

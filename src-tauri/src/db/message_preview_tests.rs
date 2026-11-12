@@ -11,7 +11,7 @@ fn database() -> Connection {
         CREATE TABLE butler_peer_post(id INTEGER PRIMARY KEY,exchange_id INTEGER,conversation_id INTEGER,
             leg TEXT,outgoing INTEGER,anchor INTEGER);
         CREATE TABLE butler_task_result(task_conversation_id INTEGER,final_message_id INTEGER);
-        CREATE TABLE scheduled_task(id INTEGER PRIMARY KEY,name TEXT,butler_conversation_id INTEGER);
+        CREATE TABLE scheduled_task(id INTEGER PRIMARY KEY,name TEXT,butler_mode INTEGER);
         CREATE TABLE scheduled_task_run(id INTEGER PRIMARY KEY,task_id INTEGER,run_id TEXT,
             started_time TEXT,conversation_id INTEGER,final_message_id INTEGER);
         INSERT INTO conversation VALUES (10,1,'总管家','butler_main'),(11,1,'总管家（归档）','butler_main'),
@@ -19,7 +19,7 @@ fn database() -> Connection {
             (50,2,'普通聊天','normal'),(60,4,'计划任务: 日报','scheduled_run'),(61,4,'计划任务: 日报','normal'),
             (62,4,'计划任务: 个人','normal');
         INSERT INTO butler_main_state VALUES (10);
-        INSERT INTO scheduled_task VALUES (1,'日报',10),(2,'个人',NULL);",
+        INSERT INTO scheduled_task VALUES (1,'日报',1),(2,'个人',0);",
     )
     .unwrap();
     conn

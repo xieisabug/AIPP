@@ -47,8 +47,8 @@ pub fn is_butler_only_builtin_command(command: &str) -> bool {
 }
 
 /// Butler-only tool names within the `aipp:agent` command.
-const BUTLER_ONLY_AGENT_TOOLS: &[&str] =
-    &["spawn_task_conversation", "task_conversation_operation", "schedule_task"];
+/// 定时任务不在其中：普通聊天的助手启用 Agent 工具后也能用，管家会话则总是直接提供。
+const BUTLER_ONLY_AGENT_TOOLS: &[&str] = &["spawn_task_conversation", "task_conversation_operation"];
 
 /// Returns true if the given tool from `aipp:agent` is butler-only.
 pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
@@ -57,20 +57,17 @@ pub fn is_butler_only_agent_tool(tool_name: &str) -> bool {
         || crate::api::butler_memory::is_tool(tool_name)
 }
 
-/// 只在总管家主会话可用的工具（派发/操作独立任务、定时任务）。成员会话调用必然失败，因此不向其暴露。
+/// 只在总管家主会话可用的工具：派发/操作独立任务。独立任务的结果回流、卡住提醒与代批都以总管家主会话为中心，
+/// 其他助手委托工作用协作工具（结果回到自己）。
 pub fn is_butler_main_only_agent_tool(tool_name: &str) -> bool {
     BUTLER_ONLY_AGENT_TOOLS.contains(&tool_name)
 }
 
-/// 群聊成员会话：成员之间在群里用 @ 协作，不提供联系人协作工具（否则结果会绕开群聊回到私聊）。
 pub const GROUP_MEMBER_KIND: &str = "butler_group_member";
 
-/// 管家会话中某个 `aipp:agent` 工具是否可见：主会话全部可见，成员会话（联系人/任务）去掉总管家专用工具，
-/// 群聊成员会话再去掉联系人协作工具。
+/// 管家会话中某个 `aipp:agent` 工具是否可见：管家模式下所有助手与总管家权限一致，
+/// 只有以总管家主会话为中心的独立任务工具留在主会话。
 pub fn is_agent_tool_visible_in_butler(kind: &str, tool_name: &str) -> bool {
-    if kind == GROUP_MEMBER_KIND && crate::api::butler_peer::is_peer_tool(tool_name) {
-        return false;
-    }
     kind == "butler_main" || !is_butler_main_only_agent_tool(tool_name)
 }
 
@@ -764,97 +761,47 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             },
             BuiltinToolInfo {
                 name: "schedule_task".into(),
-                description: "Manage scheduled tasks (定时任务) that run periodically or at a specific time. Use this to create, list, update, delete, enable, or disable scheduled tasks. Tasks created through this tool are treated as Butler-managed tasks, and each execution result backflows to the latest Butler main conversation at runtime instead of being pinned to an old conversation id. For create/update with schedule_type='interval', always provide interval_unit + interval_value explicitly. Common combinations: every day at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'; weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'; monthly => interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'. Do not pass week_days by itself.".into(),
+                description: "Manage scheduled tasks (定时任务). Every run starts a FRESH unattended session for the executing assistant: it does not see this conversation and the user is not there to answer, so `prompt` must be self-contained — write down all context, user preferences, sources, the exact expected output, how to judge whether anything is worth telling the user, and when the task is done. The final reply of each run is posted to the user as a message from the executing assistant (Butler mode: that assistant's private chat with the user; normal chat: this conversation). `schedule` is ONE string in local time: one-shot ISO datetime (2026-11-13T16:00+08:00 or 2026-11-13 16:00) or relative (in 30m); fixed interval (every 30m, every 2h, every 1d at 09:00, every 1w at 16:00); or 5-field cron (minute hour day month weekday: 0 16 * * 4 = Thursdays 16:00, 0 9 * * 1-5 = weekdays 09:00, 0 9 1 * * = 1st of month 09:00). The result echoes schedule_text and next_runs: check them and tell the user. Tasks take effect immediately; there is no confirmation step. Actions: create, list, get, runs, update, pause, resume, run_now, delete; decide is only for answering a <scheduled_task_approval> request.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
-                    "description": "Parameter matrix for create/update: once => run_at is required. interval => interval_unit + interval_value are required. week_days is only valid with interval_unit='week'. month_days is only valid with interval_unit='month'.",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["create", "list", "get", "update", "delete", "enable", "disable"],
-                            "description": "Action to perform. create: create new task; list: list all Butler-managed tasks; get: get task details + recent runs; update: modify task; delete: remove task; enable/disable: toggle task."
+                            "enum": ["create", "list", "get", "runs", "update", "pause", "resume", "run_now", "delete", "decide"],
+                            "description": "create: new task; list: tasks (scope mine/all); get: settings + recent runs; runs: run history; update: change fields (time changes recompute the next run); pause/resume: stop or restart (resume never replays missed runs); run_now: start one run now without changing the plan; delete: remove the task; decide: allow/deny an operation a scheduled run is waiting on."
                         },
-                        "task_id": {
-                            "type": "integer",
-                            "description": "Required for get/update/delete/enable/disable. The scheduled task ID."
-                        },
-                        "name": {
+                        "task_id": { "type": "integer", "description": "Required for get/runs/update/pause/resume/run_now/delete." },
+                        "name": { "type": "string", "description": "Short task name shown to the user. Required for create." },
+                        "schedule": { "type": "string", "description": "Required for create. One string, see tool description. Examples: '2026-11-13T16:00+08:00', 'in 2h', 'every 1d at 08:30', '0 21 * * 2,6'." },
+                        "prompt": { "type": "string", "description": "Required for create. Self-contained instructions for each unattended run (the run cannot see this conversation)." },
+                        "assistant": { "type": ["string", "integer"], "description": "Executing assistant name or id. Omit to run it yourself." },
+                        "deliver": {
                             "type": "string",
-                            "description": "Task name. Required for create."
+                            "enum": ["always", "if_needed", "never"],
+                            "description": "always (default): send every run, e.g. reminders. if_needed: the run replies only [NO_REPLY] when nothing is worth reporting and the user is not disturbed, e.g. monitoring. never: only record."
                         },
-                        "schedule_type": {
+                        "deliver_to": {
                             "type": "string",
-                            "enum": ["once", "interval"],
-                            "description": "Required for create. 'once' runs at a specific time and requires run_at. 'interval' runs repeatedly and requires interval_unit + interval_value."
+                            "enum": ["owner_chat", "this_conversation"],
+                            "description": "Where results go. Default: Butler mode → owner_chat (the executing assistant's private chat with the user); normal chat → this_conversation."
                         },
-                        "interval_value": {
-                            "type": "integer",
-                            "description": "Required when schedule_type='interval'. The numeric interval value used together with interval_unit (e.g. 1=every day, 2=every 2 hours)."
-                        },
-                        "interval_unit": {
-                            "type": "string",
-                            "enum": ["minute", "hour", "day", "week", "month"],
-                            "description": "Required when schedule_type='interval'. The time unit for the interval. Use 'week' together with week_days; use 'month' together with month_days."
-                        },
-                        "start_time": {
-                            "type": "string",
-                            "description": "For day/week/month intervals. The time of day to run in HH:mm format (e.g. '14:30'). Example daily at 22:00 => interval_unit='day', interval_value=1, start_time='22:00'."
-                        },
-                        "week_days": {
-                            "type": "array",
-                            "items": { "type": "integer" },
-                            "description": "Only valid when interval_unit='week'. Days of the week (0=Sun, 1=Mon, ..., 6=Sat). Cannot be used alone. Example weekdays at 09:00 => interval_unit='week', interval_value=1, week_days=[1,2,3,4,5], start_time='09:00'."
-                        },
-                        "month_days": {
-                            "type": "array",
-                            "items": { "type": "integer" },
-                            "description": "Only valid when interval_unit='month'. Days of the month (1-31). Example: interval_unit='month', interval_value=1, month_days=[1,15], start_time='09:00'."
-                        },
-                        "run_at": {
-                            "type": "string",
-                            "description": "Required when schedule_type='once'. The datetime to run at in 'YYYY-MM-DD HH:mm' format (local time)."
-                        },
-                        "assistant_id": {
-                            "type": "integer",
-                            "description": "The assistant to execute the task. Either assistant_id or assistant_name is required for create."
-                        },
-                        "assistant_name": {
-                            "type": "string",
-                            "description": "Assistant name to look up. Used when assistant_id is not known."
-                        },
-                        "task_prompt": {
-                            "type": "string",
-                            "description": "The prompt/instruction for the scheduled task. Required for create."
-                        },
-                        "notify_prompt": {
-                            "type": "string",
-                            "description": "Optional prompt to decide whether to notify the user after execution. If omitted, a sensible default is used."
-                        },
-                        "butler_conversation_id": {
-                            "type": "integer",
-                            "description": "Optional. Butler main conversation id. If omitted, the current conversation context is used."
-                        }
+                        "ends_at": { "type": "string", "description": "Optional end time (ISO datetime); no runs after it. Empty string clears it on update." },
+                        "max_runs": { "type": "integer", "description": "Optional maximum number of runs; 0 clears it on update." },
+                        "missed": { "type": "string", "enum": ["run_once", "skip"], "description": "When the app was not running at the planned time: run_once (default) runs the latest missed time once with a lateness note; skip only records it." },
+                        "scope": { "type": "string", "enum": ["mine", "all"], "description": "list only. mine (default): tasks you execute or created here." },
+                        "limit": { "type": "integer", "description": "runs only. Default 10." },
+                        "request_id": { "type": "string", "description": "decide only. From <scheduled_task_approval request_id=...>." },
+                        "decision": { "type": "string", "enum": ["allow", "deny"], "description": "decide only." },
+                        "reason": { "type": "string", "description": "decide only. One sentence why." }
                     },
                     "allOf": [
                         {
-                            "if": {
-                                "properties": {
-                                    "schedule_type": { "const": "once" }
-                                }
-                            },
-                            "then": {
-                                "required": ["run_at"]
-                            }
+                            "if": { "properties": { "action": { "const": "create" } } },
+                            "then": { "required": ["name", "schedule", "prompt"] }
                         },
                         {
-                            "if": {
-                                "properties": {
-                                    "schedule_type": { "const": "interval" }
-                                }
-                            },
-                            "then": {
-                                "required": ["interval_value", "interval_unit"]
-                            }
+                            "if": { "properties": { "action": { "const": "decide" } } },
+                            "then": { "required": ["request_id", "decision"] }
                         }
                     ],
                     "required": ["action"]
@@ -1837,15 +1784,32 @@ mod tests {
 
     #[test]
     fn test_butler_main_only_tools_hidden_from_member_conversations() {
-        for tool in ["spawn_task_conversation", "task_conversation_operation", "schedule_task"] {
+        for tool in ["spawn_task_conversation", "task_conversation_operation"] {
             assert!(is_agent_tool_visible_in_butler("butler_main", tool));
             assert!(!is_agent_tool_visible_in_butler("butler_contact", tool), "{tool} 只能在主会话使用");
             assert!(!is_agent_tool_visible_in_butler("butler_task", tool), "{tool} 只能在主会话使用");
         }
-        for tool in ["message_bot", "read_work_context", "continue_work", "list_assistants", "load_skill"] {
-            assert!(is_agent_tool_visible_in_butler("butler_contact", tool));
-            assert!(is_agent_tool_visible_in_butler("butler_task", tool));
+        // 管家模式下其他能力所有助手一致，群成员也一样
+        for kind in ["butler_contact", "butler_task", GROUP_MEMBER_KIND] {
+            for tool in ["schedule_task", "message_bot", "read_work_context", "continue_work", "list_assistants", "load_skill"] {
+                assert!(is_agent_tool_visible_in_butler(kind, tool), "{kind} 应能使用 {tool}");
+            }
         }
+        assert!(!is_butler_only_agent_tool("schedule_task"), "普通聊天启用 Agent 工具后也能用定时任务");
+    }
+
+    #[test]
+    fn test_schedule_task_schema_uses_single_schedule_string() {
+        let tools = get_builtin_tools_for_command("aipp:agent");
+        let tool = tools.iter().find(|t| t.name == "schedule_task").unwrap();
+        let props = &tool.input_schema["properties"];
+        for field in ["schedule", "prompt", "assistant", "deliver", "deliver_to", "request_id", "decision"] {
+            assert!(props[field].is_object(), "missing {field}");
+        }
+        for legacy in ["schedule_type", "interval_value", "interval_unit", "week_days", "notify_prompt", "butler_conversation_id"] {
+            assert!(props[legacy].is_null(), "legacy field {legacy} should be gone");
+        }
+        assert!(tool.description.contains("FRESH unattended session"));
     }
 
     #[test]

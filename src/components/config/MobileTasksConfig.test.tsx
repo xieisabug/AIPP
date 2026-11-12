@@ -12,11 +12,11 @@ describe("mobile task controls", () => {
         vi.clearAllMocks();
         vi.mocked(invoke).mockImplementation(async command => {
             if (command === "get_mobile_butler_overview") return { main_conversation_id: 1, tasks: [{ task_conversation_id: 2, title: "同步任务", status: "running", is_running: false }], local_permissions: [] };
-            if (command === "list_scheduled_tasks") return [{ id: 3, name: "计划任务", isEnabled: true, taskPrompt: "检查状态" }];
+            if (command === "list_scheduled_tasks") return [{ id: 3, name: "计划任务", enabled: true, prompt: "检查状态", scheduleText: "每天 09:00", upcomingText: [] }];
             if (command === "get_butler_feishu_runtime_status") return { configured: false, running: false, connected: false, status_text: "未配置" };
             if (command === "get_assistants") return [{ id: 4, name: "API 助手", assistant_type: 0 }];
             if (command === "get_assistant_execution_capability") return { available: true, issues: [] };
-            if (command === "list_scheduled_task_runs") return { runs: [{ runId: "remote-1", status: "running", localRunning: false }, { runId: "missed-1", status: "missed", localRunning: false }] };
+            if (command === "list_scheduled_task_runs") return [{ runId: "remote-1", status: "running", localRunning: false }, { runId: "missed-1", status: "missed", localRunning: false }];
             throw new Error(`unexpected command: ${command}`);
         });
     });
@@ -79,12 +79,12 @@ describe("mobile task controls", () => {
         let resolveOld: (value: unknown) => void = () => {};
         vi.mocked(invoke).mockImplementation((command, args: any) => {
             if (command === "list_scheduled_tasks") return Promise.resolve([
-                { id: 3, name: "任务A", isEnabled: true, taskPrompt: "A" },
-                { id: 5, name: "任务B", isEnabled: true, taskPrompt: "B" },
+                { id: 3, name: "任务A", enabled: true, prompt: "A", scheduleText: "每天 09:00", upcomingText: [] },
+                { id: 5, name: "任务B", enabled: true, prompt: "B", scheduleText: "每天 09:00", upcomingText: [] },
             ]);
             if (command === "list_scheduled_task_runs") {
                 if (args.taskId === 3 && ++readsA > 1) return new Promise(resolve => { resolveOld = resolve; });
-                return Promise.resolve({ runs: [{ runId: args.taskId === 3 ? "run-A" : "run-B", status: "running", localRunning: true }] });
+                return Promise.resolve([{ runId: args.taskId === 3 ? "run-A" : "run-B", status: "running", localRunning: true }]);
             }
             return original(command, args);
         });
@@ -97,24 +97,22 @@ describe("mobile task controls", () => {
         await waitFor(() => expect(readsA).toBeGreaterThan(1));
         fireEvent.click(screen.getAllByText("查看运行记录")[1]);
         await screen.findByText("run-B");
-        await act(async () => { resolveOld({ runs: [{ runId: "stale-A", status: "running", localRunning: true }] }); });
+        await act(async () => { resolveOld([{ runId: "stale-A", status: "running", localRunning: true }]); });
         expect(screen.queryByText("stale-A")).toBeNull();
         expect(screen.getByText("run-B")).toBeTruthy();
     });
-    it("should expose stop while a manual run is pending without opening records first", async () => {
+    it("should expose stop for a manual run without opening records first", async () => {
         const original = vi.mocked(invoke).getMockImplementation()!;
         let running = false;
-        let finish: (value: unknown) => void = () => {};
         vi.mocked(invoke).mockImplementation((command, args) => {
             if (command === "run_scheduled_task_now") {
                 running = true;
-                return new Promise(resolve => { finish = resolve; });
+                return Promise.resolve("local-run");
             }
-            if (command === "list_scheduled_task_runs") return Promise.resolve({ runs: [{ runId: "local-run", status: running ? "running" : "cancelled", localRunning: running }] });
+            if (command === "list_scheduled_task_runs") return Promise.resolve([{ runId: "local-run", status: running ? "running" : "cancelled", localRunning: running }]);
             if (command === "stop_scheduled_task_run") {
                 running = false;
-                finish({ success: false, error: "cancelled by fixture" });
-                return Promise.resolve();
+                return Promise.resolve(true);
             }
             return original(command, args);
         });

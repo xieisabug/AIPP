@@ -28,7 +28,8 @@ import { resolveMessageDisplayContent } from "../utils/streamingOverlayHandoff";
 import { splitTurnContext } from "../utils/turnContext";
 import { collapseUserMessage } from "../utils/userMessageCollapse";
 import type { InlineInteractionItem } from "./ConversationUI";
-import { ChevronDown, ChevronUp, ListEnd, Loader2, Send, Zap } from "lucide-react";
+import { CalendarClock, ChevronDown, ChevronUp, ListEnd, Loader2, Send, Zap } from "lucide-react";
+import { openScheduleTask } from "../lib/scheduleTaskFocus";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -377,6 +378,20 @@ const MessageItem = React.memo<MessageItemProps>(
             }
         }, [message.metadata_json]);
 
+        // 定时任务投递的结果：标出来源，点击可打开该任务
+        const scheduledTaskOrigin = useMemo(() => {
+            if (!message.metadata_json) return null;
+            try {
+                const parsed = JSON.parse(message.metadata_json) as Record<string, unknown>;
+                if (parsed.origin !== "scheduled_task") return null;
+                const taskId = Number(parsed.scheduled_task_id);
+                const taskName = typeof parsed.scheduled_task_name === "string" ? parsed.scheduled_task_name : "";
+                return Number.isInteger(taskId) && taskId > 0 ? { taskId, taskName } : null;
+            } catch {
+                return null;
+            }
+        }, [message.metadata_json]);
+
         const obsoleteGoal = useMemo(() => {
             if (streamEvent?.end_reason === "goal_superseded") return true;
             try {
@@ -488,6 +503,23 @@ const MessageItem = React.memo<MessageItemProps>(
             {rawMessageBodyContent}
         </>;
 
+        // 定时任务结果前的触发消息：显示成一行分隔提示，不当成用户发言
+        if (message.message_type === "user" && scheduledTaskOrigin) {
+            return (
+                <div className="flex justify-center py-1" data-aipp-slot="message-scheduled-task-trigger">
+                    <button
+                        type="button"
+                        className="inline-flex max-w-full items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                        title="在定时任务里查看"
+                        onClick={() => void openScheduleTask(scheduledTaskOrigin.taskId).catch(console.error)}
+                    >
+                        <CalendarClock className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">{message.content.replace(/^\[定时任务\]\s*/, "定时任务 ")}</span>
+                    </button>
+                </div>
+            );
+        }
+
         // 早期返回：reasoning 类型消息
         if (message.message_type === "reasoning") {
             // 不展示思考过程：思考中时显示加载指示器，思考完成后不渲染
@@ -595,6 +627,18 @@ const MessageItem = React.memo<MessageItemProps>(
                 )}
 
                 <ButlerMessageQuoteLabel message={message} />
+                {scheduledTaskOrigin && (
+                    <button
+                        type="button"
+                        className="mb-2 inline-flex max-w-full items-center gap-1 rounded text-xs text-muted-foreground hover:text-foreground"
+                        title="在定时任务里查看"
+                        data-aipp-slot="message-scheduled-task-origin"
+                        onClick={() => void openScheduleTask(scheduledTaskOrigin.taskId).catch(console.error)}
+                    >
+                        <CalendarClock className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">来自定时任务《{scheduledTaskOrigin.taskName || `#${scheduledTaskOrigin.taskId}`}》</span>
+                    </button>
+                )}
                 {speakerLabel && (
                     <div className="mb-2 text-xs font-medium text-muted-foreground">
                         {speakerLabel}

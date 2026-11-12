@@ -28,8 +28,16 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
                         continue;
                     }
                     if (metadata?.origin === "internal") continue;
+                    // 定时任务结果前的触发消息不是用户发言；结果本身带「来自定时任务」标签
+                    if (metadata?.origin === "scheduled_task") continue;
                 } catch { /* Historical metadata can be absent or invalid. */ }
             }
+        }
+        if (message.message_type === "response" && message.metadata_json?.includes("scheduled_task")) {
+            // 定时任务投递的结果是独立的一条消息，不属于之前的内部回合
+            try {
+                if (JSON.parse(message.metadata_json)?.origin === "scheduled_task") internalTurn = false;
+            } catch { /* Historical metadata can be absent or invalid. */ }
         }
         if (internalTurn || ["system", "reasoning", "tool_result"].includes(message.message_type)) continue;
         // 失败和 ChatUI 一样显示成可展开的一行；之后已有回复的旧错误属于重试过程，简洁聊天不再显示。

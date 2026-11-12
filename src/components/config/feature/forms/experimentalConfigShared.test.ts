@@ -9,15 +9,13 @@ describe("butler capability rollout settings", () => {
         expect(values.butler_peer_collaboration_enabled).toBe("false");
         expect(values.butler_task_dispatch_enabled).toBe("true");
         expect(values.butler_work_continuation_enabled).toBe("true");
-        expect(values.butler_background_checks_enabled).toBe("true");
     });
     it("should persist disabled capabilities without changing unrelated configuration", async () => {
         const save = vi.fn(async () => undefined);
         const values = buildExperimentalConfigFormValues(new Map());
-        await saveExperimentalConfigValues(save, { ...values, butler_background_checks_enabled: false });
+        await saveExperimentalConfigValues(save, { ...values, butler_task_dispatch_enabled: false });
         expect(save).toHaveBeenCalledWith("experimental", expect.objectContaining({
-            butler_background_checks_enabled: "false",
-            butler_task_dispatch_enabled: "true",
+            butler_task_dispatch_enabled: "false",
             butler_peer_collaboration_enabled: "true",
             butler_work_continuation_enabled: "true",
         }));

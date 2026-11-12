@@ -126,6 +126,13 @@ impl PermissionManager {
         butler_trust_applies(kind.as_deref())
     }
 
+    fn is_scheduled_run_conversation(&self, conversation_id: i64) -> bool {
+        ConversationDatabase::new(&self.app_handle)
+            .ok()
+            .and_then(|db| db.conversation_repo().ok()?.read(conversation_id).ok()?)
+            .is_some_and(|conversation| conversation.conversation_kind == crate::db::message_preview::SCHEDULED_RUN_KIND)
+    }
+
     fn get_assistant_id_from_conversation(&self, conversation_id: i64) -> Option<i64> {
         let conversation_db = ConversationDatabase::new(&self.app_handle).ok()?;
         conversation_db.conversation_repo().ok()?.read(conversation_id).ok()??.assistant_id
@@ -649,7 +656,15 @@ impl PermissionManager {
             return Ok(true);
         }
 
-        // 7. 请求用户权限
+        // 7. 定时任务运行：这次调用已通过无人值守准入（审核或总管家裁决），不再弹窗等人
+        if let Some(conv_id) = conversation_id {
+            if self.is_scheduled_run_conversation(conv_id) {
+                debug!(path = %path, conversation_id = conv_id, "Path allowed for admitted scheduled run call");
+                return Ok(true);
+            }
+        }
+
+        // 8. 请求用户权限
         let decision =
             self.request_permission(operation_state, operation, path, conversation_id).await?;
 

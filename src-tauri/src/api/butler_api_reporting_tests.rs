@@ -16,7 +16,7 @@ fn reporting_system_prompt_holds_the_full_policy_once() {
         "原请求如果还没有任何人交付",
         "不能把部分完成说成全部完成",
         "未经用户明确允许，不换成员",
-        "`notify_decision=false`",
+        "`<scheduled_task_approval>`",
         "manual_review_required",
         "`<current_time>`",
         "`continue_work`",

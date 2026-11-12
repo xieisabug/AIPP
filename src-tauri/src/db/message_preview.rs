@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub const PREVIEWABLE_BUTLER_KINDS: [&str; 4] =
     ["butler_main", "butler_contact", "butler_contact_archive", "butler_task"];
 
-/// 管家定时任务不通知用户的运行会话：保留下来只为引用展示，不出现在聊天列表里。
+/// 定时任务的运行会话：隐藏保存每次运行的过程（按任务保留最近若干个），可从投递消息或任务详情打开。
 pub const SCHEDULED_RUN_KIND: &str = "scheduled_run";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +124,7 @@ pub fn load(conn: &Connection, message_id: i64) -> rusqlite::Result<Option<Previ
                 c.conversation_kind='butler_contact_archive' OR (c.conversation_kind='butler_main'
                     AND NOT EXISTS(SELECT 1 FROM butler_main_state s WHERE s.butler_conversation_id=c.id)),
                 (SELECT t.name FROM scheduled_task_run r JOIN scheduled_task t ON t.id=r.task_id
-                  WHERE r.conversation_id=c.id AND t.butler_conversation_id IS NOT NULL LIMIT 1)
+                  WHERE r.conversation_id=c.id AND COALESCE(t.butler_mode, 0)=1 LIMIT 1)
            FROM message m JOIN conversation c ON c.id=m.conversation_id
           WHERE m.id=?1",
         [message_id],

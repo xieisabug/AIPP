@@ -1,99 +1,34 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { format } from "date-fns";
 import { useTheme } from "@/hooks/useTheme";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Calendar as DateCalendar } from "@/components/ui/calendar";
 import { ConfigPageLayout, SidebarList, ListItemButton, EmptyState } from "@/components/common";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { AssistantListItem } from "@/data/Assistant";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
-import {
-    SCHEDULE_FOCUS_TASK_EVENT,
-    consumePendingScheduleFocus,
-    type ScheduleFocusTaskPayload,
-} from "@/lib/scheduleTaskFocus";
-import ScheduleTaskDetail from "@/components/schedule/ScheduleTaskDetail";
-import { formatShortDateTime, parseToolLogPayload } from "@/components/schedule/scheduleFormat";
+import { SCHEDULE_FOCUS_TASK_EVENT, consumePendingScheduleFocus, type ScheduleFocusTaskPayload } from "@/lib/scheduleTaskFocus";
+import ScheduleTaskDetail, { RunStatusDot } from "@/components/schedule/ScheduleTaskDetail";
+import ScheduleTaskEditor from "@/components/schedule/ScheduleTaskEditor";
+import { formatShortDateTime, parseToolLogPayload, taskGroup, taskGroupLabels, type TaskGroup } from "@/components/schedule/scheduleFormat";
 import type {
+    ScheduledRun,
     ScheduledTask,
+    ScheduledTaskInput,
     ScheduledTaskLog,
-    ScheduledTaskRun,
-    ScheduledTaskRunUpdateEvent,
+    ScheduledTaskRunEvent,
 } from "@/components/schedule/scheduleTypes";
-import { Calendar, Clock, Plus, RefreshCw, HelpCircle } from "lucide-react";
+import { Calendar, Clock, HelpCircle, Plus, RefreshCw } from "lucide-react";
 
-interface ScheduledTaskFormValues {
-    name: string;
-    is_enabled: boolean;
-    schedule_type: "once" | "interval";
-    run_at: string;
-    interval_value: string;
-    interval_unit: string;
-    start_time: string;
-    week_days: number[];
-    month_days: number[];
-    assistant_id: string;
-    task_prompt: string;
-    notify_prompt: string;
-}
+const GROUP_ORDER: TaskGroup[] = ["attention", "active", "paused", "finished"];
+const LOG_LIMIT = 500;
 
-interface ScheduledTaskSavePayload {
-    name: string;
-    isEnabled: boolean;
-    scheduleType: "once" | "interval";
-    intervalValue: number | null;
-    intervalUnit: string | null;
-    startTime: string | null;
-    weekDays: number[] | null;
-    monthDays: number[] | null;
-    runAt: string | null;
-    assistantId: number;
-    taskPrompt: string;
-    notifyPrompt: string;
-}
-
-const intervalUnitLabels: Record<string, string> = {
-    minute: "分钟",
-    hour: "小时",
-    day: "天",
-    week: "周",
-    month: "月",
-};
-
-const weekDayLabels: Record<number, string> = {
-    0: "周日",
-    1: "周一",
-    2: "周二",
-    3: "周三",
-    4: "周四",
-    5: "周五",
-    6: "周六",
-};
-
-const toLocalDatetimeInput = (value?: string | null) => {
-    if (!value) return "";
-    const date = new Date(value);
-    return format(date, "yyyy-MM-dd'T'HH:mm");
-};
-
-const DEFAULT_ONCE_TIME = "09:00";
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 const formatToolLogValue = (value: unknown): string => {
-    if (typeof value === "string") {
-        return value;
-    }
+    if (typeof value === "string") return value;
     try {
         return JSON.stringify(value, null, 2);
     } catch {
@@ -101,168 +36,29 @@ const formatToolLogValue = (value: unknown): string => {
     }
 };
 
-const pad2 = (value: number) => String(value).padStart(2, "0");
-
-const parseRunAtParts = (value: string): { date: string; time: string } | null => {
-    const raw = value.trim();
-    if (!raw) return null;
-    const normalized = raw
-        .replace(/[年月]/g, "-")
-        .replace(/日/g, "")
-        .replace(/\//g, "-")
-        .replace(/T/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})/);
-    if (!match) {
-        return null;
-    }
-    const [, y, m, d, hh, mm] = match;
-    const year = Number(y);
-    const month = Number(m);
-    const day = Number(d);
-    const hour = Number(hh);
-    const minute = Number(mm);
-    if (
-        month < 1 || month > 12 ||
-        day < 1 || day > 31 ||
-        hour < 0 || hour > 23 ||
-        minute < 0 || minute > 59
-    ) {
-        return null;
-    }
-    return {
-        date: `${year}-${pad2(month)}-${pad2(day)}`,
-        time: `${pad2(hour)}:${pad2(minute)}`,
-    };
-};
-
-const parseDatePartToLocalDate = (datePart: string): Date | undefined => {
-    const match = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!match) {
-        return undefined;
-    }
-    const [, y, m, d] = match;
-    const year = Number(y);
-    const month = Number(m);
-    const day = Number(d);
-    const date = new Date(year, month - 1, day, 0, 0, 0);
-    if (
-        Number.isNaN(date.getTime()) ||
-        date.getFullYear() !== year ||
-        date.getMonth() !== month - 1 ||
-        date.getDate() !== day
-    ) {
-        return undefined;
-    }
-    return date;
-};
-
-const composeRunAtValue = (datePart: string, timePart: string): string => {
-    const date = datePart.trim();
-    const time = timePart.trim();
-    if (!date || !time) {
-        return "";
-    }
-    return `${date}T${time}`;
-};
-
-const toServerDatetime = (value: string): string | null => {
-    const raw = value.trim();
-    if (!raw) return null;
-
-    const normalized = raw
-        .replace(/[年月]/g, "-")
-        .replace(/日/g, "")
-        .replace(/\//g, "-")
-        .replace(/T/g, " ")
-        .replace(/\s+/g, " ");
-    const match = normalized.match(
-        /^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.\d+)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?$/i
+function TaskListRow({ task, selected, onSelect }: { task: ScheduledTask; selected: boolean; onSelect: () => void }) {
+    const sub = selected ? "text-primary-foreground/80" : "text-muted-foreground";
+    const next = task.enabled && task.upcoming[0] ? `下次 ${formatShortDateTime(task.upcoming[0])}` : task.pausedReason;
+    return (
+        <ListItemButton isSelected={selected} onClick={onSelect} className="h-auto items-start py-2">
+            <div className="w-full min-w-0">
+                <div className="flex items-center gap-2">
+                    {task.lastRun && <RunStatusDot status={task.lastRun.status} />}
+                    <span className={`truncate text-sm font-medium ${selected ? "text-primary-foreground" : "text-foreground"}`}>{task.name}</span>
+                </div>
+                <div className={`mt-0.5 truncate text-xs ${sub}`}>
+                    {task.scheduleText} · {task.assistantName}
+                </div>
+                {next && (
+                    <div className={`mt-0.5 flex items-center gap-1 truncate text-xs ${sub}`}>
+                        <Clock className="h-3 w-3 shrink-0" />
+                        <span className="truncate">{next}</span>
+                    </div>
+                )}
+            </div>
+        </ListItemButton>
     );
-    if (!match) {
-        const fallbackDate = new Date(raw);
-        if (!Number.isNaN(fallbackDate.getTime())) {
-            return format(fallbackDate, "yyyy-MM-dd HH:mm:ss");
-        }
-        const normalizedFallbackDate = new Date(normalized);
-        if (!Number.isNaN(normalizedFallbackDate.getTime())) {
-            return format(normalizedFallbackDate, "yyyy-MM-dd HH:mm:ss");
-        }
-        return null;
-    }
-
-    const [, y, m, d, hh, mm, ss = "0"] = match;
-    const year = Number(y);
-    const month = Number(m);
-    const day = Number(d);
-    const hour = Number(hh);
-    const minute = Number(mm);
-    const second = Number(ss);
-    if (
-        month < 1 || month > 12 ||
-        day < 1 || day > 31 ||
-        hour < 0 || hour > 23 ||
-        minute < 0 || minute > 59 ||
-        second < 0 || second > 59
-    ) {
-        return null;
-    }
-
-    const date = new Date(year, month - 1, day, hour, minute, second);
-    if (
-        Number.isNaN(date.getTime()) ||
-        date.getFullYear() !== year ||
-        date.getMonth() !== month - 1 ||
-        date.getDate() !== day ||
-        date.getHours() !== hour ||
-        date.getMinutes() !== minute ||
-        date.getSeconds() !== second
-    ) {
-        return null;
-    }
-
-    return format(date, "yyyy-MM-dd HH:mm:ss");
-};
-
-const getErrorMessage = (error: unknown): string => {
-    if (typeof error === "string") {
-        return error;
-    }
-    if (error instanceof Error) {
-        return error.message || String(error);
-    }
-    if (error && typeof error === "object") {
-        const candidate = error as Record<string, unknown>;
-        const messageCandidates = [candidate.message, candidate.error, candidate.reason, candidate.details];
-        const text = messageCandidates.find((item) => typeof item === "string" && item.trim()) as string | undefined;
-        if (text) {
-            return text;
-        }
-        try {
-            return JSON.stringify(candidate);
-        } catch {
-            return String(error);
-        }
-    }
-    return String(error);
-};
-
-const humanizeSaveError = (message: string): string => {
-    if (!message.trim()) {
-        return "保存失败：未知错误，请查看控制台日志。";
-    }
-    if (message.includes("无法解析时间") || message.includes("一次性任务需要设置执行时间")) {
-        return "保存失败：执行时间格式无效，请重新选择“指定时间执行一次”的时间。";
-    }
-    if (message.includes("只能选择普通对话助手")) {
-        return "保存失败：当前助手类型不支持定时任务，请选择普通对话助手。";
-    }
-    if (message.includes("任务不存在")) {
-        return "保存失败：任务不存在，可能已被删除，请刷新后重试。";
-    }
-    return message;
-};
+}
 
 export default function ScheduleWindow() {
     useTheme("schedule");
@@ -271,1091 +67,409 @@ export default function ScheduleWindow() {
     const [tasks, setTasks] = useState<ScheduledTask[]>([]);
     const [assistants, setAssistants] = useState<AssistantListItem[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [search, setSearch] = useState("");
     const [activeTaskId, setActiveTaskId] = useState<number | null>(null);
     // 其他窗口（如管家窗口）请求定位的任务；任务列表加载到它之后再选中
     const [pendingFocusTaskId, setPendingFocusTaskId] = useState<number | null>(() => consumePendingScheduleFocus());
-    const [focusReloadToken, setFocusReloadToken] = useState(0);
-    const [editingTaskId, setEditingTaskId] = useState<number | null>(null);
-    const [isDialogOpen, setIsDialogOpen] = useState(false);
-    const [isHelpDialogOpen, setIsHelpDialogOpen] = useState(false);
+    const [editor, setEditor] = useState<{ open: boolean; task: ScheduledTask | null }>({ open: false, task: null });
     const [isSaving, setIsSaving] = useState(false);
-    const [isRunning, setIsRunning] = useState(false);
+    const [isStarting, setIsStarting] = useState(false);
     const [isStopping, setIsStopping] = useState(false);
-    const [isRefreshing, setIsRefreshing] = useState(false);
-    const [runEntries, setRunEntries] = useState<ScheduledTaskRun[]>([]);
+    const [isHelpOpen, setIsHelpOpen] = useState(false);
+    const [runs, setRuns] = useState<ScheduledRun[]>([]);
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-    const [logEntries, setLogEntries] = useState<ScheduledTaskLog[]>([]);
+    const [logs, setLogs] = useState<ScheduledTaskLog[]>([]);
     const [isRunsLoading, setIsRunsLoading] = useState(false);
-    const [isLogLoading, setIsLogLoading] = useState(false);
+    const [isLogsLoading, setIsLogsLoading] = useState(false);
     const [selectedToolLog, setSelectedToolLog] = useState<ScheduledTaskLog | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<ScheduledTask | null>(null);
-    const [formValues, setFormValues] = useState<ScheduledTaskFormValues>({
-        name: "",
-        is_enabled: true,
-        schedule_type: "once",
-        run_at: "",
-        interval_value: "1",
-        interval_unit: "hour",
-        start_time: "09:00",
-        week_days: [1],
-        month_days: [1],
-        assistant_id: "",
-        task_prompt: "",
-        notify_prompt: "",
-    });
+    const activeTaskIdRef = useRef<number | null>(null);
+    activeTaskIdRef.current = activeTaskId;
+    const selectedRunIdRef = useRef<string | null>(null);
+    selectedRunIdRef.current = selectedRunId;
 
-    const selectedTask = useMemo(
-        () => tasks.find((task) => task.id === activeTaskId) ?? null,
-        [tasks, activeTaskId]
-    );
-
+    const selectedTask = useMemo(() => tasks.find((task) => task.id === activeTaskId) ?? null, [tasks, activeTaskId]);
     const assistantOptions = useMemo(
-        () => assistants.filter((assistant) => assistant.assistant_type === 0),
-        [assistants]
+        () => assistants.filter((assistant) => assistant.assistant_type === 0).map((a) => ({ id: a.id, name: a.name })),
+        [assistants],
     );
-
-    const onceRunAtParts = useMemo(() => parseRunAtParts(formValues.run_at), [formValues.run_at]);
-    const onceDatePart = onceRunAtParts?.date ?? "";
-    const onceTimePart = onceRunAtParts?.time ?? "";
-    const onceSelectedDate = useMemo(() => parseDatePartToLocalDate(onceDatePart), [onceDatePart]);
-
-    const handleOnceDateChange = useCallback((date?: Date) => {
-        setFormValues((prev) => {
-            if (!date) {
-                return { ...prev, run_at: "" };
-            }
-            const currentParts = parseRunAtParts(prev.run_at);
-            const nextDate = format(date, "yyyy-MM-dd");
-            return { ...prev, run_at: composeRunAtValue(nextDate, currentParts?.time ?? DEFAULT_ONCE_TIME) };
-        });
-    }, []);
-
-    const handleOnceTimeChange = useCallback((timeValue: string) => {
-        setFormValues((prev) => {
-            const currentParts = parseRunAtParts(prev.run_at);
-            if (!currentParts?.date) {
-                return { ...prev, run_at: "" };
-            }
-            return { ...prev, run_at: composeRunAtValue(currentParts.date, timeValue) };
-        });
-    }, []);
 
     const loadTasks = useCallback(async () => {
         try {
-            setIsLoading(true);
-            // 管家创建的任务也在这里展示：查看运行记录、编辑、删除都只能由用户在此完成
+            // 管家与各助手创建的任务都在这里统一查看与管理
             const result = await invoke<ScheduledTask[]>("list_scheduled_tasks");
             setTasks(result);
-            if (result.length > 0 && !activeTaskId) {
-                setActiveTaskId(result[0].id);
-            } else if (result.length === 0) {
-                setActiveTaskId(null);
-            }
-        } catch (error) {
-            toast({
-                title: "加载失败",
-                description: error as string,
-                variant: "destructive",
+            setActiveTaskId((current) => {
+                if (current !== null && result.some((task) => task.id === current)) return current;
+                const first = GROUP_ORDER.flatMap((group) => result.filter((task) => taskGroup(task) === group))[0];
+                return first?.id ?? null;
             });
+        } catch (error) {
+            toast({ title: "加载定时任务失败", description: errorText(error), variant: "destructive" });
         } finally {
             setIsLoading(false);
         }
-    }, [activeTaskId, toast]);
+    }, [toast]);
 
     const loadAssistants = useCallback(async () => {
         try {
-            const result = await invoke<AssistantListItem[]>("get_assistants");
-            setAssistants(result);
-            if (!formValues.assistant_id && result.length > 0) {
-                const first = result.find((assistant) => assistant.assistant_type === 0);
-                if (first) {
-                    setFormValues((prev) => ({ ...prev, assistant_id: first.id.toString() }));
-                }
-            }
+            setAssistants(await invoke<AssistantListItem[]>("get_assistants"));
         } catch (error) {
             console.error("加载助手失败:", error);
         }
-    }, [formValues.assistant_id]);
+    }, []);
 
-    useAssistantListListener({
-        onAssistantListChanged: setAssistants,
-    });
+    useAssistantListListener({ onAssistantListChanged: setAssistants });
 
     useEffect(() => {
-        loadTasks();
-        loadAssistants();
-    }, [loadTasks, loadAssistants, focusReloadToken]);
+        void loadTasks();
+        void loadAssistants();
+    }, [loadTasks, loadAssistants]);
 
     useEffect(() => {
         const unlisten = listen<ScheduleFocusTaskPayload>(SCHEDULE_FOCUS_TASK_EVENT, (event) => {
             // 事件已带上任务 id，清掉同一请求留在 localStorage 里的副本
             consumePendingScheduleFocus();
             setPendingFocusTaskId(event.payload.taskId);
-            // 任务可能是窗口上次加载之后才创建的：先标记加载中，避免用旧列表判定"找不到"
-            setIsLoading(true);
-            setFocusReloadToken((token) => token + 1);
+            void loadTasks();
         });
         return () => {
-            unlisten.then((fn) => fn());
+            void unlisten.then((fn) => fn());
         };
-    }, []);
+    }, [loadTasks]);
 
     useEffect(() => {
         if (pendingFocusTaskId === null || isLoading) return;
         if (tasks.some((task) => task.id === pendingFocusTaskId)) {
             setActiveTaskId(pendingFocusTaskId);
+            setPendingFocusTaskId(null);
         }
-        setPendingFocusTaskId(null);
     }, [pendingFocusTaskId, tasks, isLoading]);
 
-    const loadRuns = useCallback(
-        async (taskId?: number | null, options?: { silent?: boolean }) => {
-            if (!taskId) {
-                setRunEntries([]);
-                setSelectedRunId(null);
-                return;
-            }
-            const silent = options?.silent ?? false;
-            if (!silent) {
-                setIsRunsLoading(true);
-            }
-            try {
-                const result = await invoke<{ runs: ScheduledTaskRun[] }>("list_scheduled_task_runs", {
-                    taskId,
-                    limit: 50,
-                });
-                setRunEntries(result.runs);
-                setSelectedRunId((prev) => {
-                    if (prev && result.runs.some((run) => run.runId === prev)) {
-                        return prev;
-                    }
-                    return result.runs[0]?.runId ?? null;
-                });
-            } catch (error) {
-                console.error("加载定时任务运行记录失败:", error);
-                setRunEntries([]);
-                setSelectedRunId(null);
-            } finally {
-                if (!silent) {
-                    setIsRunsLoading(false);
-                }
-            }
-        },
-        []
-    );
+    const loadRuns = useCallback(async (taskId: number | null, silent = false) => {
+        if (!taskId) {
+            setRuns([]);
+            setSelectedRunId(null);
+            return;
+        }
+        if (!silent) setIsRunsLoading(true);
+        try {
+            const result = await invoke<ScheduledRun[]>("list_scheduled_task_runs", { taskId, limit: 50 });
+            if (activeTaskIdRef.current !== taskId) return;
+            setRuns(result);
+            setSelectedRunId((prev) => (prev && result.some((run) => run.runId === prev) ? prev : result[0]?.runId ?? null));
+        } catch (error) {
+            console.error("加载运行记录失败:", error);
+            setRuns([]);
+        } finally {
+            if (!silent) setIsRunsLoading(false);
+        }
+    }, []);
 
-    const loadLogs = useCallback(
-        async (taskId?: number | null, runId?: string | null, options?: { silent?: boolean }) => {
-            if (!taskId || !runId) {
-                setLogEntries([]);
-                return;
-            }
-            const silent = options?.silent ?? false;
-            if (!silent) {
-                setIsLogLoading(true);
-            }
-            try {
-                const result = await invoke<{ logs: ScheduledTaskLog[] }>("list_scheduled_task_logs", {
-                    taskId,
-                    runId,
-                    limit: 200,
-                });
-                setLogEntries(result.logs);
-            } catch (error) {
-                console.error("加载定时任务日志失败:", error);
-                setLogEntries([]);
-            } finally {
-                if (!silent) {
-                    setIsLogLoading(false);
-                }
-            }
-        },
-        []
-    );
+    const loadLogs = useCallback(async (taskId: number | null, runId: string | null) => {
+        if (!taskId || !runId) {
+            setLogs([]);
+            return;
+        }
+        setIsLogsLoading(true);
+        try {
+            setLogs(await invoke<ScheduledTaskLog[]>("list_scheduled_task_logs", { taskId, runId, limit: LOG_LIMIT }));
+        } catch (error) {
+            console.error("加载运行过程失败:", error);
+            setLogs([]);
+        } finally {
+            setIsLogsLoading(false);
+        }
+    }, []);
 
     useEffect(() => {
-        loadRuns(selectedTask?.id ?? null);
+        void loadRuns(selectedTask?.id ?? null);
     }, [loadRuns, selectedTask?.id]);
 
     useEffect(() => {
-        loadLogs(selectedTask?.id ?? null, selectedRunId);
+        void loadLogs(selectedTask?.id ?? null, selectedRunId);
     }, [loadLogs, selectedTask?.id, selectedRunId]);
 
+    // 任务与运行的变化：列表整体刷新（状态、下次时间、上次结果都可能变），当前任务的运行记录静默刷新
     useEffect(() => {
-        const runCreatedUnlisten = listen<ScheduledTaskRun>("scheduled_task_run_created", (event) => {
-            const run = event.payload;
-            if (selectedTask?.id !== run.taskId) {
-                return;
-            }
-            setRunEntries((prev) => {
-                const idx = prev.findIndex((item) => item.runId === run.runId);
-                if (idx >= 0) {
-                    const next = [...prev];
-                    next[idx] = run;
-                    return next;
-                }
-                return [run, ...prev];
-            });
-            setSelectedRunId((prev) => prev ?? run.runId);
-        });
-
-        const runUpdatedUnlisten = listen<ScheduledTaskRunUpdateEvent>(
-            "scheduled_task_run_updated",
-            (event) => {
-                const update = event.payload;
-                setRunEntries((prev) => {
-                    const idx = prev.findIndex((run) => run.runId === update.runId);
-                    if (idx < 0) {
-                        return prev;
-                    }
-                    const next = [...prev];
-                    next[idx] = {
-                        ...next[idx],
-                        status: update.status,
-                        notify: update.notify,
-                        summary: update.summary ?? null,
-                        errorMessage: update.errorMessage ?? null,
-                        finishedTime: update.finishedTime ?? null,
-                    };
-                    return next;
-                });
-            }
-        );
-
-        const logAddedUnlisten = listen<ScheduledTaskLog>("scheduled_task_log_added", (event) => {
-            const log = event.payload;
-            if (selectedTask?.id !== log.taskId) {
-                return;
-            }
-            if (selectedRunId && log.runId !== selectedRunId) {
-                return;
-            }
-            setLogEntries((prev) => {
-                if (prev.some((item) => item.id === log.id)) {
-                    return prev;
-                }
-                const next = [...prev, log];
-                return next.length > 200 ? next.slice(next.length - 200) : next;
-            });
-        });
-
-        return () => {
-            runCreatedUnlisten.then((unlisten) => unlisten());
-            runUpdatedUnlisten.then((unlisten) => unlisten());
-            logAddedUnlisten.then((unlisten) => unlisten());
+        const onRunEvent = (event: { payload: ScheduledTaskRunEvent }) => {
+            void loadTasks();
+            if (event.payload.taskId === activeTaskIdRef.current) void loadRuns(event.payload.taskId, true);
         };
-    }, [selectedRunId, selectedTask?.id]);
+        const subscriptions = [
+            listen("scheduled_task_changed", () => void loadTasks()),
+            listen<ScheduledTaskRunEvent>("scheduled_task_run_created", (event) => {
+                onRunEvent(event);
+                if (event.payload.taskId === activeTaskIdRef.current) setSelectedRunId(event.payload.runId);
+            }),
+            listen<ScheduledTaskRunEvent>("scheduled_task_run_updated", onRunEvent),
+            listen<ScheduledTaskLog>("scheduled_task_log_added", (event) => {
+                const log = event.payload;
+                if (log.taskId !== activeTaskIdRef.current || log.runId !== selectedRunIdRef.current) return;
+                setLogs((prev) => (prev.some((item) => item.id === log.id) ? prev : [...prev, log].slice(-LOG_LIMIT)));
+            }),
+        ];
+        return () => {
+            subscriptions.forEach((subscription) => void subscription.then((unlisten) => unlisten()));
+        };
+    }, [loadRuns, loadTasks]);
 
-    const handleRefresh = useCallback(async () => {
-        setIsRefreshing(true);
-        await loadTasks();
-        setIsRefreshing(false);
-    }, [loadTasks]);
-
-    const openCreateDialog = useCallback(() => {
-        setFormValues({
-            name: "",
-            is_enabled: true,
-            schedule_type: "once",
-            run_at: "",
-            interval_value: "1",
-            interval_unit: "hour",
-            start_time: "09:00",
-            week_days: [1],
-            month_days: [1],
-            assistant_id: assistantOptions[0]?.id.toString() ?? "",
-            task_prompt: "",
-            notify_prompt: "",
-        });
-        setEditingTaskId(null);
-        setIsDialogOpen(true);
-    }, [assistantOptions]);
-
-    const openEditDialog = useCallback(
-        (task: ScheduledTask) => {
-            setFormValues({
-                name: task.name,
-                is_enabled: task.isEnabled,
-                schedule_type: task.scheduleType,
-                run_at: toLocalDatetimeInput(task.runAt),
-                interval_value: task.intervalValue ? task.intervalValue.toString() : "1",
-                interval_unit: task.intervalUnit ?? "hour",
-                start_time: task.startTime ?? "09:00",
-                week_days: task.weekDays ?? [1],
-                month_days: task.monthDays ?? [1],
-                assistant_id: task.assistantId.toString(),
-                task_prompt: task.taskPrompt,
-                notify_prompt: task.notifyPrompt || "",
-            });
-            setEditingTaskId(task.id);
-            setActiveTaskId(task.id);
-            setIsDialogOpen(true);
+    const handleSave = useCallback(
+        async (input: ScheduledTaskInput) => {
+            setIsSaving(true);
+            try {
+                const saved = editor.task
+                    ? await invoke<ScheduledTask>("update_scheduled_task", { taskId: editor.task.id, patch: input })
+                    : await invoke<ScheduledTask>("create_scheduled_task", { input });
+                setActiveTaskId(saved.id);
+                setEditor({ open: false, task: null });
+                toast({ title: editor.task ? "已保存" : "已创建", description: `${saved.scheduleText}；${saved.upcomingText[0] ? `下次 ${saved.upcomingText[0]}` : "未安排运行"}` });
+                await loadTasks();
+            } catch (error) {
+                toast({ title: "保存失败", description: errorText(error), variant: "destructive" });
+            } finally {
+                setIsSaving(false);
+            }
         },
-        []
+        [editor.task, loadTasks, toast],
     );
 
-    const handleSave = useCallback(async () => {
-        let payload: ScheduledTaskSavePayload | null = null;
-        setIsSaving(true);
-        try {
-            const needsStartTime = ["day", "week", "month"].includes(formValues.interval_unit);
-            const onceRunAtRaw = formValues.schedule_type === "once" ? formValues.run_at.trim() : "";
-            payload = {
-                name: formValues.name.trim(),
-                isEnabled: formValues.is_enabled,
-                scheduleType: formValues.schedule_type,
-                intervalValue: formValues.schedule_type === "interval" ? Number(formValues.interval_value) : null,
-                intervalUnit: formValues.schedule_type === "interval" ? formValues.interval_unit : null,
-                startTime: formValues.schedule_type === "interval" && needsStartTime ? formValues.start_time : null,
-                weekDays: formValues.schedule_type === "interval" && formValues.interval_unit === "week" ? formValues.week_days : null,
-                monthDays: formValues.schedule_type === "interval" && formValues.interval_unit === "month" ? formValues.month_days : null,
-                runAt: formValues.schedule_type === "once" ? toServerDatetime(onceRunAtRaw) : null,
-                assistantId: Number(formValues.assistant_id),
-                taskPrompt: formValues.task_prompt.trim(),
-                notifyPrompt: formValues.notify_prompt.trim(),
-            };
-            if (!payload.name) {
-                throw new Error("请输入任务名称");
-            }
-            if (!payload.assistantId) {
-                throw new Error("请选择助手");
-            }
-            if (!payload.taskPrompt) {
-                throw new Error("请输入任务指令");
-            }
-            if (payload.scheduleType === "once" && !onceRunAtRaw) {
-                throw new Error("请先选择执行日期和时间");
-            }
-            if (payload.scheduleType === "once" && !payload.runAt) {
-                console.error("[ScheduleWindow] Invalid once runAt when saving task", {
-                    rawRunAt: onceRunAtRaw,
-                    stateRunAt: formValues.run_at,
-                    runAtParts: parseRunAtParts(formValues.run_at),
-                    parsedRunAt: payload.runAt,
-                });
-                throw new Error(`执行时间格式无效：${onceRunAtRaw || "空值"}，请重新选择时间`);
-            }
-            if (payload.scheduleType === "interval" && (!payload.intervalValue || payload.intervalValue <= 0)) {
-                throw new Error("请设置有效的执行周期");
-            }
-            if (payload.intervalUnit === "week" && (!payload.weekDays || payload.weekDays.length === 0)) {
-                throw new Error("请至少选择一个星期几");
-            }
-            if (payload.intervalUnit === "month" && (!payload.monthDays || payload.monthDays.length === 0)) {
-                throw new Error("请至少选择一天");
-            }
-
-            if (editingTaskId !== null) {
-                const updated = await invoke<ScheduledTask>("update_scheduled_task", {
-                    request: { id: editingTaskId, ...payload },
-                });
-                setActiveTaskId(updated.id);
-            } else {
-                const created = await invoke<ScheduledTask>("create_scheduled_task", { request: payload });
-                setActiveTaskId(created.id);
-            }
-
-            toast({
-                title: "保存成功",
-                description: "定时任务已更新",
-            });
-            setEditingTaskId(null);
-            setIsDialogOpen(false);
-            loadTasks();
-        } catch (error) {
-            const rawMessage = getErrorMessage(error);
-            const userMessage = humanizeSaveError(rawMessage);
-            console.error("[ScheduleWindow] Failed to save scheduled task", {
-                error,
-                rawMessage,
-                userMessage,
-                editingTaskId,
-                formValues,
-                payload,
-            });
-            toast({
-                title: "保存失败",
-                description: userMessage,
-                variant: "destructive",
-            });
-        } finally {
-            setIsSaving(false);
-        }
-    }, [editingTaskId, formValues, loadTasks, toast]);
-
     const handleToggleEnabled = useCallback(
-        async (task: ScheduledTask, value: boolean) => {
+        async (task: ScheduledTask, enabled: boolean) => {
             try {
-                const updated = await invoke<ScheduledTask>("update_scheduled_task", {
-                    request: {
-                        id: task.id,
-                        name: task.name,
-                        isEnabled: value,
-                        scheduleType: task.scheduleType,
-                        intervalValue: task.intervalValue ?? null,
-                        intervalUnit: task.intervalUnit ?? null,
-                        startTime: task.startTime ?? null,
-                        weekDays: task.weekDays ?? null,
-                        monthDays: task.monthDays ?? null,
-                        runAt: task.runAt ? toServerDatetime(toLocalDatetimeInput(task.runAt)) : null,
-                        assistantId: task.assistantId,
-                        taskPrompt: task.taskPrompt,
-                        notifyPrompt: task.notifyPrompt,
-                    },
-                });
-                setTasks((prev) =>
-                    prev.map((item) => (item.id === task.id ? { ...item, ...updated, isEnabled: value } : item))
-                );
+                const updated = await invoke<ScheduledTask>("set_scheduled_task_enabled", { taskId: task.id, enabled });
+                setTasks((prev) => prev.map((item) => (item.id === task.id ? updated : item)));
             } catch (error) {
-                toast({
-                    title: "更新失败",
-                    description: error as string,
-                    variant: "destructive",
-                });
+                toast({ title: enabled ? "启用失败" : "暂停失败", description: errorText(error), variant: "destructive" });
             }
         },
-        [toast]
+        [toast],
     );
 
     const handleRunNow = useCallback(
         async (task: ScheduledTask) => {
-            setIsRunning(true);
+            setIsStarting(true);
             try {
-                void loadRuns(task.id, { silent: true });
-                const result = await invoke<{ success: boolean; notify: boolean; summary?: string; error?: string }>(
-                    "run_scheduled_task_now",
-                    { taskId: task.id }
-                );
-                if (!result.success) {
-                    throw new Error(result.error || "执行失败");
-                }
-                toast({
-                    title: result.notify ? "任务执行完成" : "任务执行完成（未通知）",
-                    description: result.summary ?? "已完成执行",
-                });
-                await loadTasks();
-                await loadRuns(task.id, { silent: true });
+                const runId = await invoke<string>("run_scheduled_task_now", { taskId: task.id });
+                setSelectedRunId(runId);
+                toast({ title: "已开始运行", description: `结果会按设置发到${task.deliverTargetText}` });
+                await loadRuns(task.id, true);
             } catch (error) {
-                toast({
-                    title: "执行失败",
-                    description: error as string,
-                    variant: "destructive",
-                });
+                toast({ title: "无法运行", description: errorText(error), variant: "destructive" });
             } finally {
-                setIsRunning(false);
+                setIsStarting(false);
             }
         },
-        [loadRuns, loadTasks, toast]
+        [loadRuns, toast],
     );
 
-    const runningRun = useMemo(
-        () => runEntries.find((run) => run.status === "running") ?? null,
-        [runEntries]
-    );
-
-    const handleStopRun = useCallback(async () => {
-        if (!selectedTask || !runningRun) {
-            return;
-        }
-        setIsStopping(true);
-        try {
-            await invoke<boolean>("stop_scheduled_task_run", {
-                taskId: selectedTask.id,
-                runId: runningRun.runId,
-            });
-            toast({
-                title: "已发送停止请求",
-                description: `正在停止运行 ${runningRun.runId.slice(0, 8)}...`,
-            });
-            await loadRuns(selectedTask.id, { silent: true });
-            await loadLogs(selectedTask.id, runningRun.runId, { silent: true });
-        } catch (error) {
-            toast({
-                title: "停止失败",
-                description: getErrorMessage(error),
-                variant: "destructive",
-            });
-        } finally {
-            setIsStopping(false);
-        }
-    }, [loadLogs, loadRuns, runningRun, selectedTask, toast]);
-
-    const selectedToolPayload = useMemo(() => {
-        if (!selectedToolLog) {
-            return null;
-        }
-        return parseToolLogPayload(selectedToolLog);
-    }, [selectedToolLog]);
-
-    const scheduleDescription = useMemo(() => {
-        if (!selectedTask) return "";
-        if (selectedTask.scheduleType === "once") {
-            return selectedTask.runAt ? `单次 · ${formatShortDateTime(selectedTask.runAt)} 执行` : "未设置时间";
-        }
-        const value = selectedTask.intervalValue ?? 1;
-        const unit = intervalUnitLabels[selectedTask.intervalUnit ?? "hour"] ?? selectedTask.intervalUnit ?? "";
-        let desc = `每 ${value} ${unit}`;
-
-        if (selectedTask.intervalUnit === "week" && selectedTask.weekDays?.length) {
-            const days = selectedTask.weekDays.map(d => weekDayLabels[d] ?? d).join("、");
-            desc += ` (${days})`;
-        } else if (selectedTask.intervalUnit === "month" && selectedTask.monthDays?.length) {
-            const days = selectedTask.monthDays.join("、");
-            desc += ` (${days}日)`;
-        }
-
-        if (["day", "week", "month"].includes(selectedTask.intervalUnit ?? "") && selectedTask.startTime) {
-            desc += ` ${selectedTask.startTime}`;
-        }
-
-        return desc + " 执行";
-    }, [selectedTask]);
-
-    const assistantName = useMemo(() => {
-        if (!selectedTask) return "";
-        return assistants.find((assistant) => assistant.id === selectedTask.assistantId)?.name ?? "";
-    }, [assistants, selectedTask]);
-
-    const selectOptions = useMemo(
-        () =>
-            tasks.map((task) => ({
-                id: task.id.toString(),
-                label: task.name,
-                icon: <Clock className="h-4 w-4" />,
-            })),
-        [tasks]
-    );
-
-    const handleSelectFromDropdown = useCallback(
-        (taskId: string) => {
-            const task = tasks.find((item) => item.id.toString() === taskId);
-            if (task) {
-                setActiveTaskId(task.id);
+    const handleStop = useCallback(
+        async (run: ScheduledRun) => {
+            if (!selectedTask) return;
+            setIsStopping(true);
+            try {
+                await invoke<boolean>("stop_scheduled_task_run", { taskId: selectedTask.id, runId: run.runId });
+                toast({ title: "已请求停止", description: "已经产生的外部操作不会撤销" });
+            } catch (error) {
+                toast({ title: "停止失败", description: errorText(error), variant: "destructive" });
+            } finally {
+                setIsStopping(false);
             }
         },
-        [tasks]
+        [selectedTask, toast],
     );
 
-    const addButton = useMemo(
-        () => (
-            <div className="flex items-center gap-2">
-                <Button variant="ghost" size="icon" onClick={() => setIsHelpDialogOpen(true)} title="使用说明">
-                    <HelpCircle className="h-4 w-4" />
-                </Button>
-                <Button variant="outline" size="icon" onClick={handleRefresh} disabled={isRefreshing} title="刷新">
-                    <RefreshCw className={isRefreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
-                </Button>
-                <Button size="icon" onClick={openCreateDialog} title="新建任务">
-                    <Plus className="h-4 w-4" />
-                </Button>
-            </div>
-        ),
-        [handleRefresh, isRefreshing, openCreateDialog]
+    const filteredTasks = useMemo(() => {
+        const keyword = search.trim().toLowerCase();
+        if (!keyword) return tasks;
+        return tasks.filter((task) =>
+            [task.name, task.assistantName, task.prompt, task.scheduleText].some((text) => text.toLowerCase().includes(keyword)),
+        );
+    }, [search, tasks]);
+
+    const grouped = useMemo(
+        () => GROUP_ORDER.map((group) => ({ group, items: filteredTasks.filter((task) => taskGroup(task) === group) })).filter((entry) => entry.items.length > 0),
+        [filteredTasks],
     );
 
-    const sidebar = useMemo(
-        () => (
-            <SidebarList
-                title="定时任务"
-                description="管理自动执行的任务调度"
-                icon={<Clock className="h-5 w-5" />}
-                addButton={addButton}
-            >
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>共 {tasks.length} 个</span>
-                    {isLoading && (
-                        <span className="flex items-center gap-1">
-                            <RefreshCw className="h-3 w-3 animate-spin" />
-                            加载中
-                        </span>
-                    )}
+    const openCreate = useCallback(() => setEditor({ open: true, task: null }), []);
+
+    const addButton = (
+        <div className="flex items-center gap-2">
+            <Button variant="ghost" size="icon" onClick={() => setIsHelpOpen(true)} title="使用说明">
+                <HelpCircle className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" size="icon" onClick={() => void loadTasks()} title="刷新">
+                <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button size="icon" onClick={openCreate} title="新建任务">
+                <Plus className="h-4 w-4" />
+            </Button>
+        </div>
+    );
+
+    const sidebar = (
+        <SidebarList
+            title="定时任务"
+            description="让助手按时提醒、检查和汇报"
+            icon={<Clock className="h-5 w-5" />}
+            addButton={addButton}
+            searchValue={search}
+            onSearchChange={setSearch}
+            searchPlaceholder="搜索名称、助手或指令"
+        >
+            {isLoading ? (
+                <div className="flex items-center justify-center py-6 text-sm text-muted-foreground">
+                    <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" />
+                    加载中...
                 </div>
-                {isLoading ? (
-                    <div className="flex items-center justify-center py-6 text-muted-foreground text-sm">
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin mr-2" />
-                        加载中...
-                    </div>
-                ) : tasks.length === 0 ? (
-                    <div className="text-sm text-muted-foreground py-6 text-center">暂无定时任务</div>
-                ) : (
-                    <div className="space-y-2">
-                        {tasks.map((task) => {
-                            const isSelected = activeTaskId === task.id;
-                            const subTextClass = isSelected ? "text-primary-foreground/80" : "text-muted-foreground";
-                            return (
-                                <ListItemButton
-                                    key={task.id}
-                                    isSelected={isSelected}
-                                    onClick={() => setActiveTaskId(task.id)}
-                                    className="h-auto items-start py-2"
-                                >
-                                    <div className="flex items-start w-full gap-2">
-                                        <div className="min-w-0 flex-1">
-                                            <div className={`text-sm font-medium truncate ${isSelected ? "text-primary-foreground" : "text-foreground"}`}>
-                                                {task.name}
-                                            </div>
-                                            <div className={`text-xs mt-0.5 ${subTextClass}`}>
-                                                {task.scheduleType === "once" ? "单次" : "周期"} · {task.isEnabled ? "已启用" : "已停用"}
-                                                {task.butlerConversationId ? " · 管家" : ""}
-                                            </div>
-                                            {task.nextRunAt && (
-                                                <div className={`text-xs mt-1 flex items-center gap-1 ${subTextClass}`}>
-                                                    <Clock className="h-3 w-3" />
-                                                    下次 {formatShortDateTime(task.nextRunAt)}
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </ListItemButton>
-                            );
-                        })}
-                    </div>
-                )}
-            </SidebarList>
-        ),
-        [addButton, tasks, isLoading, activeTaskId]
-    );
-
-    const emptyState = useMemo(
-        () => (
-            <EmptyState
-                icon={<Clock className="h-8 w-8 text-muted-foreground" />}
-                title="还没有定时任务"
-                description="创建你的第一个定时任务，自动执行助手对话"
-                action={
-                    <Button size="icon" onClick={openCreateDialog} title="新建任务">
-                        <Plus className="h-4 w-4" />
-                    </Button>
-                }
-            />
-        ),
-        [openCreateDialog]
-    );
-
-    const content = useMemo(
-        () =>
-            selectedTask ? (
-                <ScheduleTaskDetail
-                    task={selectedTask}
-                    scheduleDescription={scheduleDescription}
-                    assistantName={assistantName}
-                    runs={runEntries}
-                    selectedRunId={selectedRunId}
-                    isRunsLoading={isRunsLoading}
-                    logs={logEntries}
-                    isLogsLoading={isLogLoading}
-                    runningRun={runningRun}
-                    isRunning={isRunning}
-                    isStopping={isStopping}
-                    onSelectRun={setSelectedRunId}
-                    onRefreshRuns={() => loadRuns(selectedTask.id)}
-                    onToggleEnabled={(value) => handleToggleEnabled(selectedTask, value)}
-                    onEdit={() => openEditDialog(selectedTask)}
-                    onRunNow={() => handleRunNow(selectedTask)}
-                    onStop={handleStopRun}
-                    onDelete={() => setDeleteTarget(selectedTask)}
-                    onOpenToolLog={setSelectedToolLog}
-                />
+            ) : filteredTasks.length === 0 ? (
+                <div className="py-6 text-center text-sm text-muted-foreground">{tasks.length ? "没有匹配的任务" : "暂无定时任务"}</div>
             ) : (
-                <EmptyState
-                    icon={<Calendar className="h-8 w-8 text-muted-foreground" />}
-                    title="选择一个任务"
-                    description="从左侧列表中选择一个定时任务查看详情"
-                    action={
-                        <Button size="icon" onClick={openCreateDialog} title="新建任务">
-                            <Plus className="h-4 w-4" />
-                        </Button>
-                    }
-                />
-            ),
-        [
-            assistantName,
-            handleRunNow,
-            handleStopRun,
-            handleToggleEnabled,
-            isLogLoading,
-            isRunning,
-            isRunsLoading,
-            isStopping,
-            loadRuns,
-            logEntries,
-            openCreateDialog,
-            openEditDialog,
-            runningRun,
-            runEntries,
-            scheduleDescription,
-            selectedRunId,
-            selectedTask,
-        ]
+                <div className="space-y-4" data-aipp-slot="schedule-task-groups">
+                    {grouped.map(({ group, items }) => (
+                        <div key={group} className="space-y-1.5">
+                            <div className={`px-1 text-[11px] font-medium ${group === "attention" ? "text-destructive" : "text-muted-foreground"}`}>
+                                {taskGroupLabels[group]} · {items.length}
+                            </div>
+                            {items.map((task) => (
+                                <TaskListRow key={task.id} task={task} selected={task.id === activeTaskId} onSelect={() => setActiveTaskId(task.id)} />
+                            ))}
+                        </div>
+                    ))}
+                </div>
+            )}
+        </SidebarList>
     );
+
+    const content = selectedTask ? (
+        <ScheduleTaskDetail
+            task={selectedTask}
+            runs={runs}
+            selectedRunId={selectedRunId}
+            isRunsLoading={isRunsLoading}
+            logs={logs}
+            isLogsLoading={isLogsLoading}
+            isStarting={isStarting}
+            isStopping={isStopping}
+            onSelectRun={setSelectedRunId}
+            onRefreshRuns={() => void loadRuns(selectedTask.id)}
+            onToggleEnabled={(enabled) => void handleToggleEnabled(selectedTask, enabled)}
+            onEdit={() => setEditor({ open: true, task: selectedTask })}
+            onRunNow={() => void handleRunNow(selectedTask)}
+            onStop={(run) => void handleStop(run)}
+            onDelete={() => setDeleteTarget(selectedTask)}
+            onOpenToolLog={setSelectedToolLog}
+        />
+    ) : (
+        <EmptyState
+            icon={<Calendar className="h-8 w-8 text-muted-foreground" />}
+            title="选择一个任务"
+            description="从左侧列表中选择一个定时任务查看详情"
+        />
+    );
+
+    const toolPayload = selectedToolLog ? parseToolLogPayload(selectedToolLog) : null;
 
     return (
-        <div className="flex justify-center items-center h-screen bg-background" data-aipp-window="schedule" data-aipp-slot="window-root">
-            <div className="bg-card shadow-none w-full h-screen overflow-hidden flex flex-col" data-aipp-slot="schedule-main-panel">
+        <div className="flex h-screen items-center justify-center bg-background" data-aipp-window="schedule" data-aipp-slot="window-root">
+            <div className="flex h-screen w-full flex-col overflow-hidden bg-card shadow-none" data-aipp-slot="schedule-main-panel">
                 <ConfigPageLayout
                     sidebar={sidebar}
                     content={content}
-                    selectOptions={selectOptions}
-                    selectedOptionId={activeTaskId ? activeTaskId.toString() : undefined}
-                    onSelectOption={handleSelectFromDropdown}
+                    selectOptions={tasks.map((task) => ({ id: String(task.id), label: task.name, icon: <Clock className="h-4 w-4" /> }))}
+                    selectedOptionId={activeTaskId ? String(activeTaskId) : undefined}
+                    onSelectOption={(id) => setActiveTaskId(Number(id))}
                     selectPlaceholder="选择任务"
                     addButton={addButton}
-                    emptyState={emptyState}
+                    emptyState={
+                        <EmptyState
+                            icon={<Clock className="h-8 w-8 text-muted-foreground" />}
+                            title="还没有定时任务"
+                            description="可以在这里新建，也可以直接在聊天里让助手帮你安排，比如「每天早上 9 点提醒我看日程」。"
+                            action={
+                                <Button size="sm" onClick={openCreate}>
+                                    <Plus className="h-4 w-4" />
+                                    新建任务
+                                </Button>
+                            }
+                        />
+                    }
                     showEmptyState={!isLoading && tasks.length === 0}
                 />
             </div>
 
-            <Dialog
-                open={isDialogOpen}
-                onOpenChange={(open) => {
-                    setIsDialogOpen(open);
-                    if (!open) {
-                        setEditingTaskId(null);
-                    }
-                }}
-            >
-                <DialogContent className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto" data-aipp-slot="schedule-editor-dialog">
-                    <DialogHeader>
-                        <DialogTitle className="text-base">{editingTaskId !== null ? "编辑任务" : "新建任务"}</DialogTitle>
-                    </DialogHeader>
-                    <div className="space-y-4 py-2">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">任务名称</Label>
-                                <Input
-                                    value={formValues.name}
-                                    onChange={(e) => setFormValues((prev) => ({ ...prev, name: e.target.value }))}
-                                    placeholder="例如：每日汇总报告"
-                                    className="h-8 text-sm"
-                                />
-                            </div>
-                            <div className="space-y-1.5">
-                                <Label className="text-xs">选择助手</Label>
-                                <Select
-                                    value={formValues.assistant_id}
-                                    onValueChange={(value) => setFormValues((prev) => ({ ...prev, assistant_id: value }))}
-                                >
-                                    <SelectTrigger className="h-8 text-sm">
-                                        <SelectValue placeholder="选择普通助手" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                        {assistantOptions.map((assistant) => (
-                                            <SelectItem key={assistant.id} value={assistant.id.toString()}>
-                                                {assistant.name}
-                                            </SelectItem>
-                                        ))}
-                                    </SelectContent>
-                                </Select>
-                            </div>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                            <Switch
-                                checked={formValues.is_enabled}
-                                onCheckedChange={(value) => setFormValues((prev) => ({ ...prev, is_enabled: value }))}
-                            />
-                            <Label className="text-xs">启用任务</Label>
-                        </div>
-
-                        <div className="space-y-2">
-                            <Label className="text-xs">执行时间</Label>
-                            <RadioGroup
-                                value={formValues.schedule_type}
-                                onValueChange={(value) =>
-                                    setFormValues((prev) => ({ ...prev, schedule_type: value as "once" | "interval" }))
-                                }
-                                className="flex flex-col gap-3"
-                            >
-                                <div className="flex items-start gap-2">
-                                    <RadioGroupItem value="once" id="schedule-once" className="mt-0.5" />
-                                    <div className="flex-1 space-y-1.5">
-                                        <Label htmlFor="schedule-once" className="text-xs">指定时间执行一次</Label>
-                                        <div className="flex gap-2">
-                                            <Popover>
-                                                <PopoverTrigger asChild>
-                                                    <Button
-                                                        type="button"
-                                                        variant="outline"
-                                                        disabled={formValues.schedule_type !== "once"}
-                                                        className="h-8 text-sm justify-start min-w-[180px]"
-                                                    >
-                                                        {onceSelectedDate ? format(onceSelectedDate, "yyyy/MM/dd") : "选择日期"}
-                                                    </Button>
-                                                </PopoverTrigger>
-                                                <PopoverContent className="w-auto p-0" align="start">
-                                                    <DateCalendar
-                                                        mode="single"
-                                                        selected={onceSelectedDate}
-                                                        onSelect={handleOnceDateChange}
-                                                    />
-                                                </PopoverContent>
-                                            </Popover>
-                                            <Input
-                                                type="time"
-                                                step={60}
-                                                value={onceTimePart}
-                                                onChange={(e) => handleOnceTimeChange(e.target.value)}
-                                                disabled={formValues.schedule_type !== "once" || !onceDatePart}
-                                                className="h-8 text-sm w-28"
-                                            />
-                                        </div>
-                                        <div className="text-[11px] text-muted-foreground">
-                                            {onceRunAtParts ? `已选择: ${onceRunAtParts.date} ${onceRunAtParts.time}` : "请先选择日期和时间"}
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="flex items-start gap-2">
-                                    <RadioGroupItem value="interval" id="schedule-interval" className="mt-0.5" />
-                                    <div className="flex-1 space-y-2">
-                                        <Label htmlFor="schedule-interval" className="text-xs">按周期重复执行</Label>
-                                        <div className="flex gap-2">
-                                            <Input
-                                                type="number"
-                                                min={1}
-                                                value={formValues.interval_value}
-                                                onChange={(e) =>
-                                                    setFormValues((prev) => ({ ...prev, interval_value: e.target.value }))
-                                                }
-                                                disabled={formValues.schedule_type !== "interval"}
-                                                className="h-8 text-sm w-20"
-                                            />
-                                            <Select
-                                                value={formValues.interval_unit}
-                                                onValueChange={(value) =>
-                                                    setFormValues((prev) => ({ ...prev, interval_unit: value }))
-                                                }
-                                                disabled={formValues.schedule_type !== "interval"}
-                                            >
-                                                <SelectTrigger className="w-24 h-8 text-sm">
-                                                    <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    {Object.entries(intervalUnitLabels).map(([value, label]) => (
-                                                        <SelectItem key={value} value={value}>
-                                                            {label}
-                                                        </SelectItem>
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-
-                                        {/* Day: start time */}
-                                        {formValues.schedule_type === "interval" && formValues.interval_unit === "day" && (
-                                            <div className="flex items-center gap-2 mt-2">
-                                                <Label className="text-xs text-muted-foreground">开始时间:</Label>
-                                                <Input
-                                                    type="time"
-                                                    value={formValues.start_time}
-                                                    onChange={(e) => setFormValues((prev) => ({ ...prev, start_time: e.target.value }))}
-                                                    className="h-8 text-sm w-28"
-                                                />
-                                            </div>
-                                        )}
-
-                                        {/* Week: weekday checkboxes + start time */}
-                                        {formValues.schedule_type === "interval" && formValues.interval_unit === "week" && (
-                                            <div className="space-y-2 mt-2">
-                                                <Label className="text-xs text-muted-foreground">选择星期几:</Label>
-                                                <div className="flex flex-wrap gap-3">
-                                                    {Object.entries(weekDayLabels).map(([value, label]) => {
-                                                        const dayNum = Number(value);
-                                                        const isChecked = formValues.week_days.includes(dayNum);
-                                                        return (
-                                                            <label key={value} className="flex items-center gap-1.5 cursor-pointer">
-                                                                <Checkbox
-                                                                    checked={isChecked}
-                                                                    onCheckedChange={(checked) => {
-                                                                        setFormValues((prev) => ({
-                                                                            ...prev,
-                                                                            week_days: checked
-                                                                                ? [...prev.week_days, dayNum].sort()
-                                                                                : prev.week_days.filter((d) => d !== dayNum),
-                                                                        }));
-                                                                    }}
-                                                                />
-                                                                <span className="text-xs">{label}</span>
-                                                            </label>
-                                                        );
-                                                    })}
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    <Label className="text-xs text-muted-foreground">开始时间:</Label>
-                                                    <Input
-                                                        type="time"
-                                                        value={formValues.start_time}
-                                                        onChange={(e) => setFormValues((prev) => ({ ...prev, start_time: e.target.value }))}
-                                                        className="h-8 text-sm w-28"
-                                                    />
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Month: day checkboxes + start time */}
-                                        {formValues.schedule_type === "interval" && formValues.interval_unit === "month" && (
-                                            <div className="space-y-2 mt-2">
-                                                <Label className="text-xs text-muted-foreground">选择日期 (1-31):</Label>
-                                                <div className="flex flex-wrap gap-1.5">
-                                                    {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => {
-                                                        const isChecked = formValues.month_days.includes(day);
-                                                        return (
-                                                            <Button
-                                                                key={day}
-                                                                type="button"
-                                                                variant="outline"
-                                                                size="sm"
-                                                                onClick={() => {
-                                                                    setFormValues((prev) => ({
-                                                                        ...prev,
-                                                                        month_days: isChecked
-                                                                            ? prev.month_days.filter((d) => d !== day)
-                                                                            : [...prev.month_days, day].sort((a, b) => a - b),
-                                                                    }));
-                                                                }}
-                                                                className={`w-7 h-7 p-0 text-xs transition-colors ${isChecked
-                                                                    ? "bg-primary text-primary-foreground border-primary hover:bg-primary/90"
-                                                                    : "border-input hover:bg-muted"
-                                                                    }`}
-                                                            >
-                                                                {day}
-                                                            </Button>
-                                                        );
-                                                    })}
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    <Label className="text-xs text-muted-foreground">开始时间:</Label>
-                                                    <Input
-                                                        type="time"
-                                                        value={formValues.start_time}
-                                                        onChange={(e) => setFormValues((prev) => ({ ...prev, start_time: e.target.value }))}
-                                                        className="h-8 text-sm w-28"
-                                                    />
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </RadioGroup>
-                        </div>
-
-                        <div className="space-y-1.5">
-                            <Label className="text-xs">任务指令</Label>
-                            <Textarea
-                                rows={3}
-                                value={formValues.task_prompt}
-                                onChange={(e) => setFormValues((prev) => ({ ...prev, task_prompt: e.target.value }))}
-                                placeholder="描述要执行的任务和结果提取要求"
-                                className="text-sm"
-                            />
-                        </div>
-                        <div className="space-y-1.5">
-                            <Label className="text-xs">通知判定规则 <span className="text-muted-foreground">(留空使用默认规则)</span></Label>
-                            <Textarea
-                                rows={2}
-                                value={formValues.notify_prompt}
-                                onChange={(e) => setFormValues((prev) => ({ ...prev, notify_prompt: e.target.value }))}
-                                placeholder="例如：如果结果包含错误或异常则通知"
-                                className="text-sm"
-                            />
-                        </div>
-                    </div>
-                    <DialogFooter className="gap-2">
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                                setEditingTaskId(null);
-                                setIsDialogOpen(false);
-                            }}
-                        >
-                            取消
-                        </Button>
-                        <Button size="sm" onClick={handleSave} disabled={isSaving}>
-                            {isSaving ? "保存中..." : "保存任务"}
-                        </Button>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
+            <ScheduleTaskEditor
+                open={editor.open}
+                task={editor.task}
+                assistants={assistantOptions}
+                saving={isSaving}
+                onOpenChange={(open) => setEditor((prev) => ({ open, task: open ? prev.task : null }))}
+                onSubmit={(input) => void handleSave(input)}
+            />
 
             <Dialog open={!!selectedToolLog} onOpenChange={(open) => !open && setSelectedToolLog(null)}>
-                <DialogContent className="sm:max-w-[680px] max-h-[80vh] overflow-y-auto">
+                <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-[680px]">
                     <DialogHeader>
                         <DialogTitle className="text-base">工具调用详情</DialogTitle>
                     </DialogHeader>
-                    {selectedToolPayload ? (
+                    {toolPayload ? (
                         <div className="space-y-3 text-xs">
                             <div className="rounded border bg-muted/20 p-2">
-                                <div><span className="text-muted-foreground">工具：</span>{selectedToolPayload.serverName ?? "-"} / {selectedToolPayload.toolName ?? "-"}</div>
-                                <div><span className="text-muted-foreground">Call ID：</span>{selectedToolPayload.callId ?? "-"}</div>
-                                {"success" in selectedToolPayload && (
+                                <div>
+                                    <span className="text-muted-foreground">工具：</span>
+                                    {toolPayload.serverName ?? "-"} / {toolPayload.toolName ?? "-"}
+                                </div>
+                                {"success" in toolPayload && (
                                     <div>
                                         <span className="text-muted-foreground">状态：</span>
-                                        {selectedToolPayload.success ? "成功" : "失败"}
+                                        {toolPayload.success ? "成功" : "未执行或失败"}
                                     </div>
                                 )}
                             </div>
                             <div className="space-y-1">
                                 <div className="font-medium">参数</div>
-                                <pre className="rounded border bg-muted/20 p-2 whitespace-pre-wrap break-all max-h-44 overflow-auto">
-                                    {formatToolLogValue(selectedToolPayload.parameters)}
+                                <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all rounded border bg-muted/20 p-2">
+                                    {formatToolLogValue(toolPayload.parameters)}
                                 </pre>
                             </div>
-                            {"result" in selectedToolPayload && (
+                            {"result" in toolPayload && (
                                 <div className="space-y-1">
                                     <div className="font-medium">返回结果</div>
-                                    <pre className="rounded border bg-muted/20 p-2 whitespace-pre-wrap break-all max-h-56 overflow-auto">
-                                        {formatToolLogValue(selectedToolPayload.result)}
+                                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded border bg-muted/20 p-2">
+                                        {formatToolLogValue(toolPayload.result)}
                                     </pre>
                                 </div>
                             )}
                         </div>
                     ) : (
-                        <pre className="rounded border bg-muted/20 p-2 text-xs whitespace-pre-wrap break-all max-h-[60vh] overflow-auto">
+                        <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded border bg-muted/20 p-2 text-xs">
                             {selectedToolLog?.content ?? ""}
                         </pre>
                     )}
                 </DialogContent>
             </Dialog>
 
-            {/* Help Dialog */}
-            <Dialog open={isHelpDialogOpen} onOpenChange={setIsHelpDialogOpen}>
-                <DialogContent className="sm:max-w-[500px]">
+            <Dialog open={isHelpOpen} onOpenChange={setIsHelpOpen}>
+                <DialogContent className="sm:max-w-[520px]">
                     <DialogHeader>
-                        <DialogTitle className="text-base">定时任务使用说明</DialogTitle>
+                        <DialogTitle className="text-base">定时任务怎么工作</DialogTitle>
                     </DialogHeader>
-                    <div className="space-y-4 text-sm">
-                        <div>
-                            <h4 className="font-medium mb-1">基本说明</h4>
-                            <p className="text-muted-foreground text-xs leading-relaxed">
-                                定时任务会在指定时间自动执行 AI 助手对话。任务仅在程序运行时执行，错过的任务会在下次启动时立即执行一次。因为执行任务的是AI，所以<strong>配置更好的助手Prompt、工具、模型等就能够大大提高任务的准确性和效率。</strong>
-                            </p>
-                        </div>
-                        <div>
-                            <h4 className="font-medium mb-1">执行周期</h4>
-                            <ul className="text-xs text-muted-foreground space-y-1 list-disc list-inside">
-                                <li><strong>分钟/小时</strong>：按固定间隔重复执行</li>
-                                <li><strong>天</strong>：每 N 天在指定时间执行</li>
-                                <li><strong>周</strong>：选择星期几，在指定时间执行</li>
-                                <li><strong>月</strong>：选择每月几号，在指定时间执行</li>
-                            </ul>
-                        </div>
-                        <div>
-                            <h4 className="font-medium mb-1">通知判定</h4>
-                            <p className="text-muted-foreground text-xs leading-relaxed">
-                                任务执行完成后，系统会根据通知判定规则决定是否弹出通知。留空则使用默认规则（有重要信息时通知）。
-                                你只需要描述判定逻辑，例如："如果结果能够确定是xxx则进行通知"。
-                            </p>
-                        </div>
-                        <div>
-                            <h4 className="font-medium mb-1">使用示例</h4>
-                            <ul className="text-xs text-muted-foreground space-y-1 list-disc list-inside">
-                                <li>每天 9:00 执行"获取工作任务"</li>
-                                <li>每周五 17:00 执行"读取git仓库提交情况生成周报"</li>
-                                <li>每月 1 号和 15 号执行"生成半月报告"</li>
-                            </ul>
-                        </div>
+                    <div className="space-y-4 text-xs leading-relaxed text-muted-foreground">
+                        <p>
+                            到点后，执行助手会在一个全新的会话里完成指令，然后把结果以它的身份发给你：默认发到它的管家私聊，也可以让结果单独出现在聊天列表里。
+                            助手看不到之前的聊天，所以背景和要求都要写进指令。
+                        </p>
+                        <p>
+                            运行时你不在场：普通的读取和查询直接执行；有副作用的操作由审核模型对照指令判断，超出指令范围的会交给总管家裁决，删除类操作一律需要你本人处理。
+                        </p>
+                        <p>
+                            每次到点都会留下记录：已发送、无新内容、失败、跳过或错过，并写明原因。连续失败 2 次会提醒你，5 次会自动暂停。应用没开时错过的时段默认补跑最近一次。
+                        </p>
+                        <p>也可以直接在聊天里让助手安排，例如「每周四下午 4 点提醒我今天休息」「工作日每天 9 点帮我看一下 X 有没有更新，有变化再告诉我」。</p>
                     </div>
                     <DialogFooter>
-                        <Button size="sm" onClick={() => setIsHelpDialogOpen(false)}>
+                        <Button size="sm" onClick={() => setIsHelpOpen(false)}>
                             知道了
                         </Button>
                     </DialogFooter>
@@ -1365,24 +479,18 @@ export default function ScheduleWindow() {
             <ConfirmDialog
                 isOpen={!!deleteTarget}
                 title="删除任务"
-                confirmText={`确认删除定时任务 “${deleteTarget?.name ?? ""}” 吗？`}
+                confirmText={`确认删除定时任务「${deleteTarget?.name ?? ""}」吗？运行记录会一起删除。`}
                 onCancel={() => setDeleteTarget(null)}
                 onConfirm={async () => {
                     if (!deleteTarget) return;
                     try {
                         await invoke("delete_scheduled_task", { taskId: deleteTarget.id });
                         setDeleteTarget(null);
-                        if (activeTaskId === deleteTarget.id) {
-                            setActiveTaskId(null);
-                        }
-                        toast({ title: "删除成功" });
-                        loadTasks();
+                        if (activeTaskId === deleteTarget.id) setActiveTaskId(null);
+                        toast({ title: "已删除" });
+                        await loadTasks();
                     } catch (error) {
-                        toast({
-                            title: "删除失败",
-                            description: error as string,
-                            variant: "destructive",
-                        });
+                        toast({ title: "删除失败", description: errorText(error), variant: "destructive" });
                     }
                 }}
             />

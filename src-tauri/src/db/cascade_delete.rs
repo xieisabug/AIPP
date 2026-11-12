@@ -302,6 +302,14 @@ impl<'a> Tables<'a> {
         // detaches surviving children instead of recursively erasing history.
         self.update("conversation", "parent_butler_conversation_id", "NULL", "parent_butler_conversation_id=?1", id)?;
         self.update("scheduled_task", "butler_conversation_id", "NULL", "butler_conversation_id=?1", id)?;
+        // 投递会话被删除：任务暂停并写明原因，用户换一个投递位置后再恢复。
+        if self.has("scheduled_task", "deliver_conversation_id") && self.has("scheduled_task", "paused_reason") {
+            let name = &self.names["scheduled_task"];
+            self.conn.execute(
+                &format!("UPDATE {name} SET is_enabled=0, paused_reason='投递会话已删除，请改到其他位置后恢复', deliver_conversation_id=NULL WHERE deliver_conversation_id=?1"),
+                [id],
+            ).map_err(|e| diagnostic(format!("pause scheduled tasks delivering to conversation {id}: {e}")))?;
+        }
         self.remove("conversation", "id=?1", id)
     }
 

@@ -16,7 +16,6 @@ export const EXPERIMENTAL_CONFIG_DEFAULT_VALUES = {
     butler_task_dispatch_enabled: "true",
     butler_peer_collaboration_enabled: "true",
     butler_work_continuation_enabled: "true",
-    butler_background_checks_enabled: "true",
 
     butler_display_name: "总管家",
     default_home_window: "ask",
@@ -109,7 +108,6 @@ export function buildExperimentalConfigFormValues(
         butler_task_dispatch_enabled: experimentalConfig?.get("butler_task_dispatch_enabled") ?? "true",
         butler_peer_collaboration_enabled: experimentalConfig?.get("butler_peer_collaboration_enabled") ?? "true",
         butler_work_continuation_enabled: experimentalConfig?.get("butler_work_continuation_enabled") ?? "true",
-        butler_background_checks_enabled: experimentalConfig?.get("butler_background_checks_enabled") ?? "true",
         butler_display_name: experimentalConfig?.get("butler_display_name") || "总管家",
         default_home_window: experimentalConfig?.get("default_home_window") || "ask",
         butler_model_id: experimentalConfig?.get("butler_model_id") || "",
@@ -179,7 +177,6 @@ export async function saveExperimentalConfigValues(
         butler_task_dispatch_enabled: String(values.butler_task_dispatch_enabled),
         butler_peer_collaboration_enabled: String(values.butler_peer_collaboration_enabled),
         butler_work_continuation_enabled: String(values.butler_work_continuation_enabled),
-        butler_background_checks_enabled: String(values.butler_background_checks_enabled),
         butler_display_name: String(values.butler_display_name || "总管家"),
         default_home_window: String(values.default_home_window || "ask"),
         butler_model_id: String(values.butler_model_id || ""),

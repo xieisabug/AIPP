@@ -7,7 +7,6 @@ pub(crate) enum ButlerCapability {
     TaskDispatch,
     PeerCollaboration,
     WorkContinuation,
-    BackgroundChecks,
 }
 
 impl ButlerCapability {
@@ -16,7 +15,6 @@ impl ButlerCapability {
             Self::TaskDispatch => "butler_task_dispatch_enabled",
             Self::PeerCollaboration => "butler_peer_collaboration_enabled",
             Self::WorkContinuation => "butler_work_continuation_enabled",
-            Self::BackgroundChecks => "butler_background_checks_enabled",
         }
     }
 
@@ -25,7 +23,6 @@ impl ButlerCapability {
             Self::TaskDispatch => "新建独立任务",
             Self::PeerCollaboration => "发起成员协作",
             Self::WorkContinuation => "继续执行已有工作",
-            Self::BackgroundChecks => "后台检查",
         }
     }
 }
