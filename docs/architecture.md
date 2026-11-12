@@ -118,8 +118,8 @@ GitHub Agent 插件包由 `mcp/apps/bundles` 管理（格式、文件存储、Ta
 
 The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 
--   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`)
--   **UI Interaction Tools**: `ask_user_question`, `preview_file`
+-   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`); Butler-only `preview_message` shows another assistant reply by `message_id` or `work_ref` (`api/message_preview.rs` + `db/message_preview.rs`, frontend card `MessagePreviewToolCall`)
+-   **UI Interaction Tools**: `ask_user_question`, `preview_file`, `preview_code`
 -   **Search Tools**: `search_web`, `fetch_url` with browser profile/fingerprint support
 -   **Operation Tools**: `read_file`, `write_file`, `edit_file`, `list_directory`, `execute_bash`, `get_bash_output`
 -   **Artifact Tools**: `get_artifact_workspace`, `show_artifact`

@@ -36,6 +36,9 @@ const COLLAPSED_REASONING_HEIGHT_PX = 52;
 const MCP_MARKUP_PATTERN = /<!--\s*MCP_TOOL_CALL(?:_STREAMING)?[\s\S]*?-->|<mcp_tool_call[\s\S]*?<\/mcp_tool_call>/gi;
 const PREVIEW_CODE_PATTERN = /"tool_name"\s*:\s*"preview_code"|<tool_name>\s*preview_code\s*<\/tool_name>/i;
 const INTERACTIVE_TOOL_PATTERN = /"tool_name"\s*:\s*"(ask_user_question|ask_user|request_user_input)"/;
+/** preview_message 引用卡片：标题行 + 原文（长文折叠在 384px 内），按常见高度估算。 */
+const PREVIEW_MESSAGE_PATTERN = /"tool_name"\s*:\s*"preview_message"/;
+const PREVIEW_MESSAGE_CARD_HEIGHT_PX = 260;
 const FENCE_PATTERN = /^\s{0,3}(`{3,}|~{3,})/;
 const LIST_ITEM_PATTERN = /^\s*(?:[-*+]|\d{1,9}[.)])\s+/;
 const HEADING_PATTERN = /^\s{0,3}#{1,6}\s/;
@@ -173,6 +176,8 @@ function estimateToolCardsHeight(rawContent: string, isLastMessage: boolean): { 
             height += PREVIEW_CODE_DEFAULT_VIEWPORT_HEIGHT_PX + (isLastMessage ? 32 : 8);
         } else if (INTERACTIVE_TOOL_PATTERN.test(segment)) {
             height += 120;
+        } else if (PREVIEW_MESSAGE_PATTERN.test(segment) && !segment.includes("MCP_TOOL_CALL_STREAMING")) {
+            height += PREVIEW_MESSAGE_CARD_HEIGHT_PX;
         } else {
             height += MCP_CARD_HEIGHT_PX;
         }

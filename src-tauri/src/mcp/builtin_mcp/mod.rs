@@ -1686,7 +1686,7 @@ pub async fn execute_aipp_builtin_tool(
                         .map_err(|e|format!("search_own_history conversation={id}: {e:#}"))?;
                     serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
                 }
-                "message_bot" | "search_bot_history" | "read_bot_message_context"
+                "message_bot" | "search_bot_history" | "read_bot_message_context" | "preview_message"
                 | "read_work_context" | "continue_work" | "resume_work"
                 | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" | "stop_assistant_exchange" => {
                     let id = conversation_id.ok_or("此工具需要管家联系人会话")?;
@@ -2461,6 +2461,19 @@ pub async fn execute_aipp_builtin_tool(
                             match db.read_task(task_id) {
                                 Ok(Some(task)) => {
                                     let runs = db.list_runs_by_task(task_id, 5).unwrap_or_default();
+                                    // 保留了产出的运行附上 final_message_id，可直接用 preview_message 展示。
+                                    let finals = db.run_final_messages(task_id).unwrap_or_default();
+                                    let runs: Vec<serde_json::Value> = runs
+                                        .into_iter()
+                                        .map(|run| {
+                                            let final_message_id = finals.get(&run.run_id).copied();
+                                            let mut value = serde_json::to_value(run).unwrap_or_default();
+                                            if let Some(id) = final_message_id {
+                                                value["final_message_id"] = serde_json::json!(id);
+                                            }
+                                            value
+                                        })
+                                        .collect();
                                     let dto = crate::api::scheduled_task_api::to_dto(task);
                                     serde_json::json!({
                                         "content": [{"type": "json", "json": {

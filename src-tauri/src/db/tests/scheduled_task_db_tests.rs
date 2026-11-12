@@ -112,6 +112,28 @@ fn test_scheduled_run_read_existing_missing_and_deleted() {
     assert!(db.read_run("outcome-run").unwrap().is_none());
 }
 
+/// 完整结果里的会话与最终答复同步到运行记录，`preview_message` 可按 run_id 找到产出。
+#[test]
+fn test_scheduled_run_outcome_records_kept_output_message() {
+    let db = outcome_test_db();
+    db.save_run_outcome(
+        "outcome-run", "success", false, Some("完成"), None, Some(Utc::now()),
+        r#"{"status":"success","end_reason":"completed","notify":false,"conversation_id":30,"final_message_id":31}"#,
+    ).unwrap();
+    let (conversation, message): (Option<i64>, Option<i64>) = db.conn.query_row(
+        "SELECT conversation_id, final_message_id FROM scheduled_task_run WHERE run_id='outcome-run'",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!((conversation, message), (Some(30), Some(31)));
+    assert_eq!(db.run_final_messages(1).unwrap().get("outcome-run"), Some(&31));
+    // 没有保留产出（被清理或失败）的运行不带引用。
+    db.save_run_outcome(
+        "outcome-run", "failed", false, None, Some("超时"), Some(Utc::now()),
+        r#"{"status":"failed","end_reason":"timeout","notify":false}"#,
+    ).unwrap();
+    assert!(db.run_final_messages(1).unwrap().is_empty());
+}
+
 /// 完整结果和终态一起保存；重启读取不能丢失执行详情、结束原因或通知判定诊断。
 #[test]
 fn test_scheduled_run_outcome_preserves_full_payload_and_queues_report() {

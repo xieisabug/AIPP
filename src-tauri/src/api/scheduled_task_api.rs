@@ -585,6 +585,12 @@ pub(crate) struct ScheduledRunOutcome {
     pub(crate) judged_task_state: Option<String>,
     /// 通知判定失败原因（不改写执行状态）
     pub(crate) notify_error: Option<String>,
+    /// 保留下来的运行会话与最终答复（`preview_message` 用它展示产出，不必转述）。
+    /// 运行会话被清理时为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) conversation_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) final_message_id: Option<i64>,
 }
 
 impl<'de> Deserialize<'de> for ScheduledRunOutcome {
@@ -602,6 +608,10 @@ impl<'de> Deserialize<'de> for ScheduledRunOutcome {
             detail: Option<String>,
             judged_task_state: Option<String>,
             notify_error: Option<String>,
+            #[serde(default)]
+            conversation_id: Option<i64>,
+            #[serde(default)]
+            final_message_id: Option<i64>,
         }
         let stored = StoredOutcome::deserialize(deserializer)?;
         let status = match stored.status.as_str() {
@@ -622,6 +632,7 @@ impl<'de> Deserialize<'de> for ScheduledRunOutcome {
             status, end_reason, notify: stored.notify, summary: stored.summary,
             error: stored.error, detail: stored.detail,
             judged_task_state: stored.judged_task_state, notify_error: stored.notify_error,
+            conversation_id: stored.conversation_id, final_message_id: stored.final_message_id,
         })
     }
 }
@@ -727,6 +738,8 @@ impl ScheduledRunOutcome {
             detail,
             judged_task_state: None,
             notify_error: None,
+            conversation_id: None,
+            final_message_id: None,
         }
     }
 }
@@ -1434,6 +1447,62 @@ fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
 
 
     Ok(())
+}
+
+/// 每个管家定时任务最多保留的隐藏运行会话数（不含本次运行）。
+const SCHEDULED_RUN_HIDDEN_KEEP: u32 = 20;
+
+/// 运行会话里最后一条完整的助手答复（不含工具调用），即这次运行的产出。
+fn final_response_message_id(db: &ConversationDatabase, conversation_id: i64) -> Option<i64> {
+    let conn = db.get_connection().ok()?;
+    conn.query_row(
+        "SELECT id FROM message WHERE conversation_id=?1 AND message_type IN ('response','assistant')
+           AND trim(content)!='' AND content NOT LIKE '%MCP_TOOL_CALL%' ORDER BY id DESC LIMIT 1",
+        [conversation_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// 管家定时任务不通知时：运行会话改为隐藏的 `scheduled_run`，不进聊天列表，只供引用展示；
+/// 同一任务只保留最近若干次，更早的隐藏运行会话删除。
+fn hide_scheduled_run_conversation(
+    app_handle: &tauri::AppHandle,
+    task: &ScheduledTask,
+    run_id: &str,
+    conversation_db: &ConversationDatabase,
+    conversation: &mut crate::db::conversation_db::Conversation,
+) {
+    conversation.name = format!("计划任务: {}", task.name);
+    conversation.conversation_kind = crate::db::message_preview::SCHEDULED_RUN_KIND.to_string();
+    conversation.is_hidden_from_normal_chat_list = true;
+    match conversation_db
+        .conversation_repo()
+        .map_err(|e| e.to_string())
+        .and_then(|repo| repo.update(conversation).map_err(|e| e.to_string()))
+    {
+        Ok(()) => log_task_message(app_handle, task.id, run_id, "cleanup", "未通知，运行会话已隐藏保留，供管家引用展示"),
+        Err(e) => log_task_message(app_handle, task.id, run_id, "cleanup_error", format!("隐藏运行会话失败: {e}")),
+    }
+    let stale = conversation_db
+        .get_connection()
+        .map_err(|e| e.to_string())
+        .and_then(|conn| {
+            crate::db::message_preview::scheduled_run_conversation_ids_beyond(&conn, task.id, SCHEDULED_RUN_HIDDEN_KEEP)
+                .map_err(|e| e.to_string())
+        });
+    match stale {
+        Ok(ids) => {
+            for id in ids {
+                if let Err(e) = cleanup_conversation(app_handle, id) {
+                    log_task_message(app_handle, task.id, run_id, "cleanup_error", format!("清理更早的隐藏运行会话 {id} 失败: {e}"));
+                }
+            }
+        }
+        Err(e) => log_task_message(app_handle, task.id, run_id, "cleanup_error", format!("查询更早的隐藏运行会话失败: {e}")),
+    }
 }
 
 /// Configuration for schedule calculation
@@ -2314,6 +2383,8 @@ pub(crate) fn outcome_from_recorded_run(run: &ScheduledTaskRun) -> ScheduledRunO
             detail: None,
             judged_task_state: None,
             notify_error: None,
+            conversation_id: None,
+            final_message_id: None,
         }
     } else {
         ScheduledRunOutcome::failed(
@@ -2849,9 +2920,20 @@ async fn execute_scheduled_task_inner(
         }
     };
 
+    // 管家定时任务的运行会话总是保留：通知时照常出现在聊天列表；不通知时隐藏，
+    // 只供总管家用 `preview_message` 展示产出，避免把结论再转述一遍。
+    let is_butler_task = task.butler_conversation_id.is_some();
+    let keeps_conversation = notify || is_butler_task;
+    let final_message_id = if keeps_conversation {
+        final_response_message_id(&conversation_db, conversation_id)
+    } else {
+        None
+    };
     let outcome = ScheduledRunOutcome {
         status: "success", end_reason: "completed", notify, summary: summary.clone(), error: None,
         detail, judged_task_state, notify_error: notify_error.clone(),
+        conversation_id: keeps_conversation.then_some(conversation_id),
+        final_message_id,
     };
     let journal = ScheduledOutcomeJournal {
         task_id: task.id, run_id: run_id.to_string(), finished_time: Utc::now(), outcome: outcome.clone(),
@@ -2890,6 +2972,8 @@ async fn execute_scheduled_task_inner(
             Ok(()) => log_task_message(app_handle, task.id, run_id, "notify", "已发送系统通知"),
             Err(e) => log_task_message(app_handle, task.id, run_id, "error", format!("发送系统通知失败: {e}")),
         }
+    } else if is_butler_task {
+        hide_scheduled_run_conversation(app_handle, task, run_id, &conversation_db, &mut conversation);
     } else if notify_error.is_some() || !journal_saved {
         // 通知判定或结果持久化失败时保留对话，方便用户查看执行结果
         log_task_message(app_handle, task.id, run_id, "cleanup", "通知判定失败，保留对话记录");
@@ -2949,6 +3033,7 @@ error={error}
 scheduled_task_id={task_id}
 scheduled_task_name={name}
 run_id={run_id}
+final_message_id={final_message_id}
 assistant_name={assistant_name}
 task_prompt={task_prompt}
 notify_decision={notify}
@@ -2963,6 +3048,7 @@ detail_excerpt={detail}
         task_id = task.id,
         name = task.name,
         run_id = run_id,
+        final_message_id = outcome.final_message_id.map_or_else(|| "null".to_string(), |id| id.to_string()),
         assistant_name = assistant_name,
         task_prompt = task_prompt,
         notify = outcome.notify,
@@ -2982,10 +3068,12 @@ pub(crate) fn build_butler_scheduled_task_followup_prompt(task: &ScheduledTask, 
         (_, "interrupted") => "因应用退出而中断，结果未知".to_string(),
         _ => "失败".to_string(),
     };
-    let next = if outcome.status == "success" {
-        "`notify_decision=false` 时不打扰用户；为 true 时简要告知结果。"
-    } else {
-        "如实告知用户原因和已完成部分，不要把未完成说成已完成，也不要自动重做可能已产生外部影响的操作。"
+    let next = match (outcome.status, outcome.final_message_id) {
+        ("success", Some(id)) => format!(
+            "`notify_decision=false` 时不打扰用户；为 true 时用 `preview_message`（message_id={id}）展示产出原文，再补一句结论或需要用户关注的点，不复述正文。"
+        ),
+        ("success", None) => "`notify_decision=false` 时不打扰用户；为 true 时简要告知结果。".to_string(),
+        _ => "如实告知用户原因和已完成部分，不要把未完成说成已完成，也不要自动重做可能已产生外部影响的操作。".to_string(),
     };
     format!(
         "系统定时任务回流：定时任务《{name}》执行{status_desc}，详情见上方的 <butler_scheduled_task_result>。{next}\n{guidance}",

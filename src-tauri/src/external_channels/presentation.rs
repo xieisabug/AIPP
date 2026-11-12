@@ -211,6 +211,36 @@ fn parse_tool_calls_from_response(content: &str) -> Vec<ExternalToolCall> {
     calls
 }
 
+/// 成功的 `preview_message` 工具结果的参数；失败结果交给通用渲染说明原因。
+pub fn successful_preview_message_parameters(content: &str) -> Option<Value> {
+    let result = parse_tool_result(content)?;
+    if result.tool_name.as_deref() != Some("preview_message") || !tool_result_effective_success(&result) {
+        return None;
+    }
+    result.parameters
+}
+
+/// 外部渠道看不到 AIPP 里的引用卡片：投递时把被引用的原文作为正文发出。
+pub fn render_previewed_message_for_external_channel(
+    title: Option<&str>,
+    author: &str,
+    source: &str,
+    content: &str,
+    channel: &str,
+) -> Vec<String> {
+    let heading = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{author} 的回复"));
+    let text = format!("📎 {heading}（{source}）\n\n{}", content.trim());
+    if channel == ORIGIN_FEISHU {
+        split_assistant_content_for_feishu(&text, FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT)
+    } else {
+        vec![text]
+    }
+}
+
 fn parse_tool_result(content: &str) -> Option<ExternalToolResult> {
     let success = if content.contains("Tool execution completed:") {
         true
@@ -1457,12 +1487,25 @@ impl ToolPresenter for AgentToolPresenter {
             "task_conversation_operation" => {
                 present_task_conversation_operation_call(&tool_call.parameters)
             }
+            // 原文在工具结果投递时展开，调用本身不再单独发一行。
+            "preview_message" => Some(String::new()),
             _ => None,
         }
     }
 
     fn present_result(&self, tool_result: &ExternalToolResult) -> Option<String> {
         match tool_result.tool_name.as_deref() {
+            Some("preview_message") if tool_result_effective_success(tool_result) => {
+                // Agent 工具把回执 JSON 放在文本内容里。
+                let receipt = tool_result_content_text(tool_result)
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok());
+                let author = receipt.as_ref().and_then(|value| value_string(value, "author")).unwrap_or("助手");
+                let excerpt = receipt.as_ref().and_then(|value| value_string(value, "excerpt")).unwrap_or_default();
+                Some(format!("📎 已展示 {author} 的回复：{excerpt}"))
+            }
+            Some("preview_message") => {
+                Some(format!("❌ 消息展示失败：{}", tool_result_text_preview(tool_result, 180)))
+            }
             Some("load_mcp_server") if tool_result_effective_success(tool_result) => {
                 tool_result_content_json(tool_result)
                     .and_then(|payload| json_array(payload, "servers"))
@@ -2045,6 +2088,46 @@ mod tests {
                 .unwrap();
 
         assert_eq!(rendered, "下午三点。");
+    }
+
+    #[test]
+    fn preview_message_call_line_is_hidden_and_result_is_expanded_by_caller() {
+        let call = build_message(
+            "response",
+            "<!-- MCP_TOOL_CALL:{\"server_name\":\"Agent 工具\",\"tool_name\":\"preview_message\",\"parameters\":\"{\\\"message_id\\\":12}\"} -->",
+        );
+        assert!(render_joined(&call, &RenderContext { channel: "feishu", relay_origin: "aipp" }).is_none());
+
+        let receipt = json!({"status": "preview_shown", "author": "写作", "excerpt": "周报初稿"}).to_string();
+        let ok = build_tool_result_message(
+            "preview_message",
+            "Agent 工具",
+            json!({"message_id": 12, "title": "初稿"}),
+            json!({"content": [{"type": "text", "text": receipt}], "isError": false}),
+        );
+        let params = super::successful_preview_message_parameters(&ok.content).unwrap();
+        assert_eq!(params["message_id"], 12);
+        let fallback = render_joined(&ok, &RenderContext { channel: "feishu", relay_origin: "aipp" }).unwrap();
+        assert!(fallback.contains("已展示 写作 的回复：周报初稿"));
+
+        let failed = build_message(
+            "tool_result",
+            "Tool execution failed:\n\nTool Call ID: call_1\nTool: preview_message\nServer: Agent 工具\nParameters: {\"message_id\":12}\nError:\n消息 #12 已删除或不存在",
+        );
+        assert!(super::successful_preview_message_parameters(&failed.content).is_none());
+        let rendered = render_joined(&failed, &RenderContext { channel: "feishu", relay_origin: "aipp" }).unwrap();
+        assert!(rendered.contains("消息展示失败") && rendered.contains("已删除"));
+    }
+
+    #[test]
+    fn previewed_message_renders_heading_and_splits_long_content_for_feishu() {
+        let parts = super::render_previewed_message_for_external_channel(None, "写作", "与写作的私聊", "正文", "feishu");
+        assert_eq!(parts, vec!["📎 写作 的回复（与写作的私聊）\n\n正文".to_string()]);
+        let titled = super::render_previewed_message_for_external_channel(Some("初稿"), "写作", "s", "正文", "other");
+        assert!(titled[0].starts_with("📎 初稿（s）"));
+        let long = "段落内容。\n\n".repeat(FEISHU_ASSISTANT_MESSAGE_SOFT_LIMIT / 4);
+        let parts = super::render_previewed_message_for_external_channel(None, "写作", "s", &long, "feishu");
+        assert!(parts.len() > 1, "长原文按飞书长度分段，不截断");
     }
 
     #[test]

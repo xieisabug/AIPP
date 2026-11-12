@@ -43,19 +43,25 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
         }
         if (message.content.trim() === BUTLER_SILENT_REPLY) continue;
         if (unpublished.has(message.id) || message.finish_time === null || parseStreamRetryMeta(message)?.status === "interrupted") continue;
+        // preview_message 展示的是另一条回复，本身就是交给用户的结果，不是执行过程：简洁聊天里保留这张卡片。
+        const shownPreviews: string[] = [];
         const content = /MCP_TOOL_CALL/i.test(message.content) ? message.content.replace(
             /(`+)[\s\S]*?\1|(~{3,})[\s\S]*?\2|<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:[\s\S]*?(?:-->|$)|<mcp_tool_call(?:\s[^>]*)?>[\s\S]*?(?:<\/mcp_tool_call>|$)/gi,
             (segment, backticks, tildes) => {
                 if (backticks || tildes) return segment;
+                if (isCompletePreviewMessageCall(segment)) shownPreviews.push(segment);
                 return "";
             },
         ) : message.content;
         const hasTool = content !== message.content
             || (!!message.tool_calls_json && !["[]", "null"].includes(message.tool_calls_json.trim()))
             || message.large_message_preview?.reason === "mcp_payload";
-        if (!content.trim() && !message.attachment_list?.length) continue;
+        if (!content.trim() && !message.attachment_list?.length && !shownPreviews.length) continue;
         if (hasTool) {
-            if (message.attachment_list?.length) {
+            if (shownPreviews.length) {
+                // 只留引用卡片：同一条里的过程说明与其他工具调用仍不显示。
+                result.push({ ...message, content: shownPreviews.join("\n\n"), large_message_preview: null });
+            } else if (message.attachment_list?.length) {
                 result.push({ ...message, content: "", tool_calls_json: null, large_message_preview: null });
             }
         } else {
@@ -63,6 +69,13 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
         }
     }
     return result;
+}
+
+const PREVIEW_MESSAGE_TOOL = /"tool_name"\s*:\s*"preview_message"/;
+
+/** 已完整写出的 preview_message 调用标记（流式中的半截标记不算）。 */
+function isCompletePreviewMessageCall(segment: string): boolean {
+    return /^<!--\s*MCP_TOOL_CALL\s*:/i.test(segment) && segment.endsWith("-->") && PREVIEW_MESSAGE_TOOL.test(segment);
 }
 
 /** 回复开头的 `[[QUOTE:原话]]` 显示成引用标签（指向已显示的那条消息），正文里不再出现标记。 */

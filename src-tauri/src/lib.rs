@@ -1092,6 +1092,7 @@ pub fn run() {
             search_conversations,
             crate::api::butler_peer::list_butler_peer_posts,
             crate::api::butler_peer::get_butler_exchange_context,
+            crate::api::message_preview::get_message_preview,
             crate::api::butler_control::control_butler_task,
             crate::api::butler_group::create_butler_group,
             crate::api::butler_group::list_butler_groups,

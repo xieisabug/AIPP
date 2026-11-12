@@ -10,11 +10,24 @@ mod tests {
             detail: Some("完整成果\n".repeat(3000)),
             judged_task_state: Some("done".into()),
             notify_error: Some("通知模型暂不可用".into()),
+            conversation_id: Some(30),
+            final_message_id: Some(31),
         };
         let saved = serde_json::to_string(&outcome).unwrap();
         let recovered: ScheduledRunOutcome = serde_json::from_str(&saved).unwrap();
         assert_eq!(serde_json::to_value(&outcome).unwrap(), serde_json::to_value(&recovered).unwrap());
         assert_eq!(recovered.detail.as_ref().unwrap().len(), outcome.detail.unwrap().len());
+        assert_eq!((recovered.conversation_id, recovered.final_message_id), (Some(30), Some(31)));
+    }
+
+    #[test]
+    fn test_scheduled_outcome_reads_journals_written_before_message_refs() {
+        let legacy = r#"{"status":"success","end_reason":"completed","notify":true,"summary":"s","error":null,
+            "detail":"d","judged_task_state":null,"notify_error":null}"#;
+        let recovered: ScheduledRunOutcome = serde_json::from_str(legacy).unwrap();
+        assert_eq!((recovered.conversation_id, recovered.final_message_id), (None, None));
+        let saved = serde_json::to_value(&ScheduledRunOutcome::failed("error", "x".into(), None)).unwrap();
+        assert!(saved.get("final_message_id").is_none(), "没有保留产出时不写字段");
     }
 
     #[test]
@@ -383,6 +396,25 @@ mod run_outcome_tests {
             assistant_id: 1, task_prompt: prompt.into(), notify_prompt: String::new(),
             butler_conversation_id: Some(1), created_time: Utc::now(), updated_time: Utc::now(),
         }
+    }
+
+    #[test]
+    fn test_butler_result_message_offers_preview_of_kept_output() {
+        let mut outcome = ScheduledRunOutcome::failed("error", "x".into(), None);
+        outcome.status = "success";
+        outcome.end_reason = "completed";
+        outcome.error = None;
+        outcome.notify = true;
+        outcome.final_message_id = Some(512);
+        let msg = build_butler_scheduled_task_result_message(&task("日报"), "run-9", &outcome, "助手");
+        assert!(msg.contains("run_id=run-9\nfinal_message_id=512\n"));
+        let prompt = build_butler_scheduled_task_followup_prompt(&task("日报"), &outcome);
+        assert!(prompt.contains("`preview_message`（message_id=512）") && prompt.contains("不复述正文"));
+        outcome.final_message_id = None;
+        let msg = build_butler_scheduled_task_result_message(&task("日报"), "run-9", &outcome, "助手");
+        assert!(msg.contains("final_message_id=null"));
+        let prompt = build_butler_scheduled_task_followup_prompt(&task("日报"), &outcome);
+        assert!(!prompt.contains("preview_message") && prompt.contains("简要告知结果"));
     }
 
     #[test]

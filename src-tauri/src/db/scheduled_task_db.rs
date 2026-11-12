@@ -223,6 +223,12 @@ impl ScheduledTaskDatabase {
                 [],
             )?;
         }
+        // Migration: 保留下来的运行会话与最终答复，供 `preview_message` 展示产出。
+        for column in ["conversation_id", "final_message_id"] {
+            if !run_columns.iter().any(|existing| existing == column) {
+                conn.execute(&format!("ALTER TABLE scheduled_task_run ADD COLUMN {column} INTEGER"), [])?;
+            }
+        }
 
         self.with_write_lock(|| migrate_scheduled_run_missed(conn))?;
 
@@ -538,6 +544,8 @@ impl ScheduledTaskDatabase {
             let updated = tx.execute(
                 "UPDATE scheduled_task_run
                  SET status = ?1, notify = ?2, summary = ?3, error_message = ?4, finished_time = ?5,
+                     conversation_id = CASE WHEN json_valid(?7) THEN json_extract(?7, '$.conversation_id') END,
+                     final_message_id = CASE WHEN json_valid(?7) THEN json_extract(?7, '$.final_message_id') END,
                      butler_followup_status = CASE
                          WHEN butler_followup_status IS NULL AND EXISTS (
                              SELECT 1 FROM scheduled_task
@@ -548,7 +556,7 @@ impl ScheduledTaskDatabase {
                  WHERE run_id = ?6 AND EXISTS (
                      SELECT 1 FROM scheduled_task WHERE id = scheduled_task_run.task_id
                  )",
-                params![status, notify, summary, error_message, finished_time, run_id],
+                params![status, notify, summary, error_message, finished_time, run_id, outcome_json],
             )?;
             if updated == 0 {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
@@ -573,6 +581,17 @@ impl ScheduledTaskDatabase {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// 某个任务各次运行保留下来的最终答复消息（按 run_id），供 `preview_message` 引用。
+    pub fn run_final_messages(&self, task_id: i64) -> Result<std::collections::HashMap<String, i64>> {
+        self.conn
+            .prepare(
+                "SELECT run_id, final_message_id FROM scheduled_task_run
+                 WHERE task_id = ?1 AND final_message_id IS NOT NULL",
+            )?
+            .query_map([task_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect()
     }
 
     /// List scheduled tasks created from Butler context.

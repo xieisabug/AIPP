@@ -318,7 +318,7 @@ fn test_review_exempt_tools_require_builtin_identity() {
     for (command, tool) in [
         ("aipp:agent", "load_skill"), ("aipp:agent", "load_mcp_tool"),
         ("aipp:agent", "load_mcp_server"), ("aipp:agent", "todo_write"),
-        ("aipp:agent", "spawn_task_conversation"),
+        ("aipp:agent", "spawn_task_conversation"), ("aipp:agent", "preview_message"),
         ("aipp:ui_interaction", "preview_code"), ("aipp:ui_interaction", "preview_file"),
         ("aipp:ui_interaction", "ask_user_question"),
         ("aipp:operation", "get_bash_output"), ("aipp:artifact", "show_artifact"),

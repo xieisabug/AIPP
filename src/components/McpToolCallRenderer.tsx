@@ -93,17 +93,24 @@ const renderDefaultMcpToolCall = (props: McpToolComponentProps) => (
     />
 );
 
+/** 展示的是交给用户的结果（不是执行过程）的工具：管家简洁聊天里也要显示。 */
+const RESULT_TOOL_NAMES = new Set(["preview_message"]);
+
 const McpToolCallRenderer: React.FC<McpToolComponentProps> = (props) => {
     // Gate before resolving registry components: custom and preview renderers can show
     // transient execution UI even when their message is already marked complete.
     const resultsOnly = useContext(ButlerResultsOnlyContext);
-    return resultsOnly ? null : <ExecutionToolCall {...props} />;
+    if (resultsOnly && !RESULT_TOOL_NAMES.has(props.toolName ?? "")) return null;
+    return <ExecutionToolCall {...props} />;
 };
 
 const ExecutionToolCall: React.FC<McpToolComponentProps> = (props) => {
     useMcpToolComponentRegistrySnapshot();
     const { config } = useDisplayConfig();
-    const selectedComponentId = config?.mcp_tool_call_component_id || AUTO_MCP_TOOL_COMPONENT_ID;
+    // 结果类工具的卡片就是内容本身，不受“统一使用默认工具卡片”的显示设置影响。
+    const selectedComponentId = RESULT_TOOL_NAMES.has(props.toolName ?? "")
+        ? AUTO_MCP_TOOL_COMPONENT_ID
+        : config?.mcp_tool_call_component_id || AUTO_MCP_TOOL_COMPONENT_ID;
     const enhancedProps = {
         ...props,
         currentToolCall: resolveCurrentToolCall(props),

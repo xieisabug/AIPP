@@ -23,6 +23,7 @@ pub mod assistant_db;
 pub mod butler_history;
 pub mod butler_memory;
 pub mod butler_result_refs;
+pub mod message_preview;
 pub mod butler_resume;
 pub mod butler_check;
 pub mod butler_peer;

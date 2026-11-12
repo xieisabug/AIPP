@@ -27,6 +27,7 @@ pub mod genai_client;
 pub(crate) mod live_test_client;
 pub mod highlight_api;
 pub mod llm_api;
+pub mod message_preview;
 pub mod mobile_capability;
 pub mod mobile_recovery;
 pub mod mobile_tasks;

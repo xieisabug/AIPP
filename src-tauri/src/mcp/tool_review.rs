@@ -141,6 +141,8 @@ pub fn is_review_exempt_tool(
         Some("aipp:ui_interaction") => matches!(tool_name, "ask_user_question" | "preview_code" | "preview_file"),
         Some("aipp:agent") => match tool_name {
             "load_skill" | "todo_write" | "load_mcp_server" | "load_mcp_tool" | "spawn_task_conversation" => true,
+            // 只读展示已有的助手回复（范围在执行时校验），本身就是交给用户看的结果。
+            "preview_message" => true,
             // 助手间消息只发起内部协作；接收方后续工具调用仍独立审核。
             "message_bot" => true,
             "task_conversation_operation" => matches!(args["action"].as_str(), Some("read" | "reply_prompt")),

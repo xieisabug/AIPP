@@ -1,6 +1,7 @@
 import InlineCodePreviewCard from "@/components/InlineCodePreviewCard";
 import FetchUrlToolCall from "@/components/mcp-tool-components/FetchUrlToolCall";
 import LoadMcpCatalogToolCall from "@/components/mcp-tool-components/LoadMcpCatalogToolCall";
+import MessagePreviewToolCall from "@/components/mcp-tool-components/MessagePreviewToolCall";
 import SearchWebToolCall from "@/components/mcp-tool-components/SearchWebToolCall";
 import {
     mcpToolComponentRegistry,
@@ -36,6 +37,15 @@ export function ensureBuiltinMcpToolComponentsRegistered(): void {
                 isLastMessage={props.isLastMessage}
             />
         ),
+    });
+
+    mcpToolComponentRegistry.register("builtin", {
+        id: "builtin.preview-message",
+        label: "preview_message 引用卡片",
+        description: "用于 preview_message 工具：在当前会话里原样展示另一条助手回复",
+        match: [{ toolName: "preview_message" }],
+        priority: 110,
+        render: (props: McpToolComponentProps) => <MessagePreviewToolCall {...props} />,
     });
 
     mcpToolComponentRegistry.register("builtin", {
