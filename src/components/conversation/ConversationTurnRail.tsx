@@ -8,7 +8,7 @@ import {
     type RefObject,
 } from "react";
 import { visibleText } from "@/utils/turnContext";
-import { sampleTickIndices, tickOffset, turnIndexFromOffset } from "./turnRailLayout";
+import { railOffsetTop, tickOffset, tickThickness, turnIndexFromOffset } from "./turnRailLayout";
 
 export interface TurnRailItem {
     id: number;
@@ -35,8 +35,6 @@ export interface ConversationTurnRailProps {
 const SLOT_PX = 16;
 /** 轮次多时整条轨道最多占滚动区高度的比例，不再随轮数变长。 */
 const TRACK_HEIGHT_RATIO = 0.5;
-/** 刻度间距小于此值时抽样绘制，避免糊成一整条。 */
-const MIN_TICK_GAP_PX = 8;
 /** 首尾刻度外的额外热区。 */
 const TRACK_PADDING_PX = 6;
 /** 键盘 PageUp/PageDown 一次跨越的轮数。 */
@@ -69,30 +67,66 @@ export function findActiveTurnId(
 }
 
 /**
- * 跟踪滚动容器高度与当前阅读位置所在的轮次，供桌面导航条与移动端轮次滑轨共用。
+ * 跟踪滚动容器的位置与高度，以及当前阅读位置所在的轮次，供桌面导航条与移动端轮次滑轨共用。
  */
 export function useTurnRailTracking(
     turns: TurnRailItem[],
     scrollContainerRef: RefObject<HTMLDivElement | null>,
 ) {
     const [containerHeight, setContainerHeight] = useState(0);
+    const [containerTop, setContainerTop] = useState(0);
     const [activeTurnId, setActiveTurnId] = useState<number | null>(null);
     const syncFrameRef = useRef<number | null>(null);
+    /** 供后续重新尝试挂载测量（ref 晚就绪时兜底）。 */
+    const attachRef = useRef<() => void>(() => {});
 
     useLayoutEffect(() => {
-        const el = scrollContainerRef.current;
-        if (!el) {
-            return;
-        }
-        setContainerHeight(el.clientHeight);
-        const observer = new ResizeObserver((entries) => {
-            const entry = entries[0];
-            if (entry) {
-                setContainerHeight(entry.contentRect.height);
+        let observed: HTMLDivElement | null = null;
+        let observer: ResizeObserver | null = null;
+        let retryFrame = 0;
+        let retries = 0;
+        let disposed = false;
+
+        // 导航条必须对齐滚动区（上方可能有标题/横幅，下方是输入区），不能按整个会话根容器居中。
+        const measure = () => {
+            if (!observed) {
+                return;
             }
-        });
-        observer.observe(el);
-        return () => observer.disconnect();
+            setContainerHeight(observed.clientHeight);
+            setContainerTop(observed.offsetTop);
+        };
+
+        // 同一个 commit 里导航条会先于滚动区挂载（它渲染在滚动区之前），此时 ref 还是空的，
+        // 量不到尺寸就只能等到它挂上（管家窗口按会话 key 重挂时每次都会碰到）。
+        const attach = () => {
+            if (disposed) {
+                return;
+            }
+            const el = scrollContainerRef.current;
+            if (!el) {
+                if (retries < 30) {
+                    retries += 1;
+                    retryFrame = requestAnimationFrame(attach);
+                }
+                return;
+            }
+            if (el !== observed) {
+                observed = el;
+                observer?.disconnect();
+                observer = new ResizeObserver(measure);
+                observer.observe(el);
+            }
+            measure();
+        };
+
+        attach();
+        attachRef.current = attach;
+        return () => {
+            attachRef.current = () => {};
+            disposed = true;
+            cancelAnimationFrame(retryFrame);
+            observer?.disconnect();
+        };
     }, [scrollContainerRef]);
 
     const turnsRef = useRef(turns);
@@ -100,6 +134,8 @@ export function useTurnRailTracking(
     const turnsKey = useMemo(() => turns.map((turn) => turn.id).join(","), [turns]);
 
     useEffect(() => {
+        // 轮次变化时再试一次：即使首帧的重试帧用完，只要消息/会话继续变化就能重新挂上测量。
+        attachRef.current();
         const container = scrollContainerRef.current;
         if (!container || turnsRef.current.length === 0) {
             setActiveTurnId(null);
@@ -212,7 +248,7 @@ export function useTurnRailTracking(
         };
     }, [scrollContainerRef, turnsKey]);
 
-    return { containerHeight, activeTurnId, setActiveTurnId };
+    return { containerHeight, containerTop, activeTurnId, setActiveTurnId };
 }
 
 /** 桌面导航条轨道高度：轮次少时每轮 SLOT_PX，多了就封顶在滚动区高度的 TRACK_HEIGHT_RATIO。 */
@@ -227,7 +263,8 @@ export function railTrackHeight(count: number, containerHeight: number): number 
  * 左侧对话轮次导航条。
  *
  * 每轮用户提问对应轨道上的一个位置，当前阅读轮次用实心刻度标出。
- * 轨道高度有上限：轮次少时逐轮画刻度，轮次多时轨道不再变长，刻度抽样绘制成「标尺」。
+ * 轨道高度有上限：轮次少时逐轮画刻度，轮次多时轨道不再变长，刻度自动变薄（最细 1px），
+ * 每一轮都保留自己的刻度，不会漏轮。整条轨道与消息区对齐并垂直居中。
  * 整条轨道是一个滑块：悬浮时吸附到最近的一轮并显示「第 i / N 轮」与提问片段，点击跳转；
  * 获得键盘焦点后可用方向键 / PageUp / PageDown / Home / End 预览，Enter 跳转。
  */
@@ -236,18 +273,30 @@ export default function ConversationTurnRail({
     scrollContainerRef,
     onSelect,
 }: ConversationTurnRailProps) {
-    const { containerHeight, activeTurnId, setActiveTurnId } = useTurnRailTracking(turns, scrollContainerRef);
+    const { containerHeight, containerTop, activeTurnId, setActiveTurnId } = useTurnRailTracking(turns, scrollContainerRef);
     const [previewIndex, setPreviewIndex] = useState<number | null>(null);
     const trackRef = useRef<HTMLDivElement>(null);
 
     const count = turns.length;
     const trackHeight = railTrackHeight(count, containerHeight);
-    const tickIndices = useMemo(
-        () => sampleTickIndices(count, trackHeight, MIN_TICK_GAP_PX),
-        [count, trackHeight],
+    const thickness = tickThickness(count, trackHeight);
+    // 每轮一根刻度（不抽样）；数量大时 memo，避免滚动时反复重建几百个节点。
+    const ticks = useMemo(
+        () =>
+            turns.map((turn, index) => (
+                <span
+                    key={turn.id}
+                    aria-hidden
+                    data-turn-tick=""
+                    className="absolute left-1 w-3 -translate-y-1/2 rounded-full bg-foreground/35"
+                    style={{ top: tickOffset(index, trackHeight, count), height: thickness }}
+                />
+            )),
+        [turns, count, trackHeight, thickness],
     );
 
-    if (count === 0) {
+    // 还没量到消息区高度时不画：此时轨道高度为 0，所有刻度会叠在顶部变成一根。
+    if (count === 0 || containerHeight <= 0) {
         return null;
     }
 
@@ -315,7 +364,8 @@ export default function ConversationTurnRail({
 
     return (
         <div
-            className="pointer-events-none absolute left-1 top-1/2 z-10 -translate-y-1/2"
+            className="pointer-events-none absolute left-1 z-10"
+            style={{ top: containerTop, height: containerHeight }}
             data-aipp-slot="chat-turn-rail"
         >
             <div
@@ -329,8 +379,12 @@ export default function ConversationTurnRail({
                 aria-valuetext={
                     valueIndex >= 0 ? `第 ${valueIndex + 1} 轮：${turns[valueIndex].preview}` : undefined
                 }
-                className="pointer-events-auto relative w-6 cursor-pointer rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                style={{ height: trackHeight + TRACK_PADDING_PX * 2, paddingTop: TRACK_PADDING_PX }}
+                className="pointer-events-auto absolute left-0 w-6 cursor-pointer rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                style={{
+                    top: railOffsetTop(trackHeight, containerHeight, TRACK_PADDING_PX),
+                    height: trackHeight + TRACK_PADDING_PX * 2,
+                    paddingTop: TRACK_PADDING_PX,
+                }}
                 // 点击导航条不抢输入框焦点；键盘用户仍可 Tab 进入。
                 onMouseDown={(event) => event.preventDefault()}
                 onPointerMove={(event) => {
@@ -344,15 +398,7 @@ export default function ConversationTurnRail({
                 data-aipp-slot="chat-turn-rail-track"
             >
                 <div ref={trackRef} className="relative" style={{ height: trackHeight }}>
-                    {tickIndices.map((index) => (
-                        <span
-                            key={turns[index].id}
-                            aria-hidden
-                            data-turn-tick=""
-                            className="absolute left-1 h-[3px] w-3 -translate-y-1/2 rounded-full bg-foreground/35"
-                            style={{ top: markerTop(index) }}
-                        />
-                    ))}
+                    {ticks}
                     {shownPreview !== null && shownPreview !== activeIndex ? (
                         <span
                             aria-hidden
@@ -369,20 +415,20 @@ export default function ConversationTurnRail({
                         />
                     ) : null}
                 </div>
-            </div>
 
-            {previewTurn && shownPreview !== null ? (
-                <div
-                    className="pointer-events-none absolute left-full ml-1.5 w-max max-w-[260px] -translate-y-1/2 rounded-md border border-border bg-popover px-3 py-1.5 text-xs text-popover-foreground shadow-md"
-                    style={{ top: TRACK_PADDING_PX + markerTop(shownPreview) }}
-                    data-aipp-slot="chat-turn-rail-preview"
-                >
-                    <div className="text-muted-foreground">第 {shownPreview + 1} / {count} 轮</div>
-                    {previewTurn.preview ? (
-                        <div className="line-clamp-2 break-all">{previewTurn.preview}</div>
-                    ) : null}
-                </div>
-            ) : null}
+                {previewTurn && shownPreview !== null ? (
+                    <div
+                        className="pointer-events-none absolute left-full ml-1.5 w-max max-w-[260px] -translate-y-1/2 rounded-md border border-border bg-popover px-3 py-1.5 text-xs text-popover-foreground shadow-md"
+                        style={{ top: TRACK_PADDING_PX + markerTop(shownPreview) }}
+                        data-aipp-slot="chat-turn-rail-preview"
+                    >
+                        <div className="text-muted-foreground">第 {shownPreview + 1} / {count} 轮</div>
+                        {previewTurn.preview ? (
+                            <div className="line-clamp-2 break-all">{previewTurn.preview}</div>
+                        ) : null}
+                    </div>
+                ) : null}
+            </div>
         </div>
     );
 }

@@ -1281,6 +1281,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         );
 
         // 左侧对话轮次导航条：从当前展示的消息中抽取用户提问轮次
+        // 纯附件（只有图片/文件、没有正文）也是一次提问，必须有刻度。
         const userTurns = useMemo(
             () =>
                 transcript
@@ -1288,11 +1289,11 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                         (m) =>
                             m.message_type === "user" &&
                             !m.content?.startsWith("Tool execution results:\n") &&
-                            (m.content?.trim().length ?? 0) > 0,
+                            ((m.content?.trim().length ?? 0) > 0 || (m.attachment_list?.length ?? 0) > 0),
                     )
                     .map((m) => ({
                         id: m.id,
-                        preview: makeTurnPreview(m.content),
+                        preview: makeTurnPreview(m.content ?? ""),
                     })),
             [transcript],
         );
