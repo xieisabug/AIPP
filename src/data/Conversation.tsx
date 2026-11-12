@@ -165,6 +165,10 @@ export interface AgentActivityEvent {
     session_id?: string | null;
     item_id: string;
     sequence: number;
+    /** Immutable first-seen position; sequence is only the item's update revision. */
+    order?: number;
+    started_at?: string;
+    finished_at?: string;
     kind: "tool" | "command" | "patch" | "approval" | "status" | "sub_agent" | string;
     status: "pending" | "executing" | "success" | "failed" | "cancelled" | string;
     title?: string | null;

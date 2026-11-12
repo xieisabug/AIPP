@@ -35,6 +35,7 @@ interface AgentActivityShellProps {
   title: string;
   status: string;
   headerExtra?: React.ReactNode;
+  autoExpand?: boolean;
   children?: React.ReactNode;
 }
 
@@ -50,6 +51,7 @@ export function AgentActivityShell({
   title,
   status,
   headerExtra,
+  autoExpand = true,
   children,
 }: AgentActivityShellProps) {
   const executionState = toExecutionState(status);
@@ -71,8 +73,8 @@ export function AgentActivityShell({
     // 失败/运行中的任务自动展开以便查看，成功后自动收起（不覆盖用户手动操作）
     if (
       executionState === "failed" ||
-      executionState === "executing" ||
-      executionState === "pending"
+      (autoExpand && userExpandedRef.current == null &&
+        (executionState === "executing" || executionState === "pending"))
     ) {
       setIsExpanded(true);
       return;
@@ -84,7 +86,7 @@ export function AgentActivityShell({
       const timer = setTimeout(() => setIsExpanded(false), 3000);
       return () => clearTimeout(timer);
     }
-  }, [executionState, expandable]);
+  }, [executionState, expandable, autoExpand]);
 
   const isRunning =
     executionState === "executing" || executionState === "pending";
@@ -104,14 +106,14 @@ export function AgentActivityShell({
           title={title}
         >
           {icon}
-          <span className="truncate text-muted-foreground" title={sourceLabel}>
+          <span className="shrink-0 whitespace-nowrap text-muted-foreground" title={sourceLabel}>
             {sourceLabel}
           </span>
           <span className="text-xs font-bold text-muted-foreground flex-shrink-0">
             {" "}
             -{" "}
           </span>
-          <span className="truncate">{title}</span>
+          <span className="min-w-0 flex-1 truncate">{title}</span>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
           {headerExtra}

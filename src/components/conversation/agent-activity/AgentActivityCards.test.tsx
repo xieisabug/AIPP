@@ -214,3 +214,27 @@ describe("SubAgentActivityCard 与 GenericActivityCard", () => {
     expect(screen.getByText("waiting approval")).toBeInTheDocument();
   });
 });
+
+describe("Agent activity sources", () => {
+  const sources = [
+    ["codex_app_server", "Codex"], ["claude_sdk", "Claude Code"], ["pi", "Pi"],
+    ["cursor", "Cursor"], ["opencode", "OpenCode"], ["kiro", "Kiro"],
+    ["antigravity", "Antigravity"], ["acp", "ACP"], ["custom_driver", "custom_driver"], ["", "Agent"],
+  ];
+  for (const Card of [CommandActivityCard, PatchActivityCard, ToolCallActivityCard, SubAgentActivityCard, GenericActivityCard]) {
+    it.each(sources)(`should show actual source in ${Card.name} when driver is %s`, (agent_kind, label) => {
+      render(<Card activity={buildActivity({ agent_kind, status: "success" })} />);
+      expect(screen.getByText(label)).toBeInTheDocument();
+      if (label !== "Codex") expect(screen.queryByText("Codex")).not.toBeInTheDocument();
+    });
+  }
+
+  it("should keep both agent identity and MCP service when server metadata exists", () => {
+    render(<ToolCallActivityCard activity={buildActivity({
+      agent_kind: "cursor", kind: "tool", metadata: { server: "aipp:operation", tool: "read_file" },
+    })} />);
+    expect(screen.getByText("Cursor")).toBeInTheDocument();
+    expect(screen.getByText("aipp:operation")).toBeInTheDocument();
+    expect(screen.queryByText("Codex")).not.toBeInTheDocument();
+  });
+});

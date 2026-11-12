@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openPi } from './pi.mjs';
-import { tick, piFixture } from './test-helpers.mjs';
+import { piFixture } from './test-helpers.mjs';
 
 test('should inject the scoped MCP bridge into the Pi extension when tools are selected', async () => {
   const fixture = piFixture();
@@ -94,4 +94,71 @@ test('should pass the assistant approval scope to the Pi extension and reject un
   const fixture = piFixture();
   await assert.rejects(openPi({ cwd: process.cwd(), pi_approval: 'yolo' }, () => {}, fixture), /Unsupported Pi approval scope 'yolo'/);
   assert.equal(fixture.launches.length, 0, 'an invalid scope never starts Pi');
+});
+
+test('should classify Pi operations and preserve input and readable results across execution updates', async () => {
+  const fixture = piFixture(), events = [];
+  const runtime = await openPi({ cwd: '/repo' }, event => events.push(event), fixture);
+  try {
+    await runtime.prompt('task', 'turn');
+    const operations = [
+      ['bash', { command: 'echo hi' }, 'command', 'echo hi'],
+      ['powershell', { command: 'Get-ChildItem' }, 'command', 'Get-ChildItem'],
+      ['read', { path: 'README.md', offset: 2, limit: 10 }, 'file_read', '读取 README.md'],
+      ['grep', { pattern: 'needle', path: 'src' }, 'file_search', '搜索 needle src'],
+      ['find', { pattern: '*.rs' }, 'file_search', '搜索 *.rs'],
+      ['ls', { path: 'src' }, 'file_search', '列出目录 src'],
+      ['edit', { path: 'a.ts', edits: [{ oldText: 'a', newText: 'b' }] }, 'patch', '编辑 a.ts'],
+      ['write', { path: 'existing.ts', content: 'b' }, 'file_write', '写入 existing.ts'],
+      ['mcp_read_file', { path: 'remote' }, 'tool', 'mcp_read_file'],
+    ];
+    for (const [toolName, args, kind, title] of operations) {
+      const toolCallId = `call:${toolName}`;
+      fixture.emit({ type: 'tool_execution_start', toolCallId, toolName, args });
+      fixture.emit({ type: 'tool_execution_update', toolCallId, toolName, args, partialResult: { content: [{ type: 'text', text: 'partial' }] } });
+      const result = { content: [{ type: 'text', text: 'done' }], details: { diff: '+b', patch: '@@\n-a\n+b' } };
+      fixture.emit({ type: 'tool_execution_end', toolCallId, toolName, result, isError: false });
+      const updates = events.filter(event => event.id === toolCallId);
+      assert.equal(updates.length, 3);
+      assert.deepEqual(updates.map(event => event.kind), [kind, kind, kind]);
+      assert.equal(updates[0].output, undefined, 'no fake null output before a result exists');
+      assert.equal(updates[1].output, 'partial');
+      assert.equal(updates[2].title, title);
+      assert.deepEqual(updates[2].input, args, 'end events omit args; retain the original invocation');
+      assert.equal(updates[2].output, 'done');
+      assert.equal(updates[2].status, 'success');
+      assert.deepEqual(updates[2].metadata.rawResult, result);
+      assert.equal(updates[2].metadata.cwd, '/repo');
+      if (toolName === 'edit') assert.equal(updates[2].metadata.changes[0].diff, result.details.patch);
+      if (toolName === 'write') assert.equal(updates[2].metadata.changes, undefined, 'write does not imply file creation');
+    }
+    fixture.emit({ type: 'agent_end' });
+    await runtime.prompt('next', 'next');
+    fixture.emit({ type: 'tool_execution_start', toolCallId: 'call:read', toolName: 'read', args: { path: 'other.md' } });
+    assert.equal(events.at(-1).title, '读取 other.md');
+    assert.equal(events.at(-1).metadata.rawResult, undefined, 'new turns do not inherit old results');
+  } finally { await runtime.close(); }
+});
+
+test('should preserve Pi tool failures and finish individual thinking blocks when native events arrive', async () => {
+  const fixture = piFixture(), events = [];
+  const runtime = await openPi({ cwd: '/repo' }, event => events.push(event), fixture);
+  try {
+    await runtime.prompt('task', 'turn');
+    fixture.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'first' } });
+    fixture.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_end' } });
+    const thought = events.at(-1);
+    assert.equal(thought.kind, 'reasoning');
+    assert.equal(thought.status, 'success');
+    assert.equal(thought.id, events.at(-2).id);
+    fixture.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'next' } });
+    assert.notEqual(events.at(-1).id, thought.id);
+    fixture.emit({ type: 'tool_execution_start', toolCallId: 'read', toolName: 'read', args: { path: 'missing' } });
+    fixture.emit({ type: 'tool_execution_end', toolCallId: 'read', toolName: 'read', result: { content: [{ type: 'text', text: 'ENOENT: missing' }] }, isError: true });
+    assert.equal(events.at(-1).status, 'failed');
+    assert.equal(events.at(-1).error, 'ENOENT: missing');
+    assert.equal(events.at(-1).kind, 'file_read');
+    await runtime.cancel();
+    assert.equal(fixture.commands.at(-1).type, 'abort');
+  } finally { await runtime.close(); }
 });

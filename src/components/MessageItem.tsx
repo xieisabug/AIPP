@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { ButlerMessageQuoteLabel } from "./butler/ButlerQuote";
 import UnifiedMarkdown from "./UnifiedMarkdown";
-import ReasoningMessage from "./ReasoningMessage";
+import { ReasoningDisplay } from "./ReasoningDisplay";
 import ErrorMessage from "./message-item/ErrorMessage";
 import MessageActionButtons, { type MessageActionButtonsProps } from "./message-item/MessageActionButtons";
 import MessageContextMenu from "./message-item/MessageContextMenu";
@@ -10,7 +10,7 @@ import RawTextRenderer from "./RawTextRenderer";
 import { ShineBorder } from "./magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
 import { Message, StreamEvent, MCPToolCallUpdateEvent, AgentActivityEvent } from "../data/Conversation";
-import { AgentActivityList } from "./conversation/AgentActivityList";
+import { AgentActivityTranscript } from "./conversation/AgentActivityTranscript";
 import { AgentPlanCard } from "./conversation/AgentPlanCard";
 import { buildActivitySegments } from "./conversation/agent-activity/activitySegments";
 import { useCopyHandler } from "../hooks/useCopyHandler";
@@ -28,7 +28,7 @@ import { resolveMessageDisplayContent } from "../utils/streamingOverlayHandoff";
 import { splitTurnContext } from "../utils/turnContext";
 import { collapseUserMessage } from "../utils/userMessageCollapse";
 import type { InlineInteractionItem } from "./ConversationUI";
-import { ChevronDown, ChevronUp, ListEnd, Loader2, Send, Zap } from "lucide-react";
+import { ChevronDown, ChevronUp, ListEnd, Send, Zap } from "lucide-react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -342,7 +342,7 @@ const MessageItem = React.memo<MessageItemProps>(
         }, [turnContext, shouldMaskContent, message.content, streamEvent, maskContent]);
 
         const { copyIconState, handleCopy } = useCopyHandler(displayContent);
-        const { isUserMessageMarkdownEnabled, isShowThinking } = useDisplayConfig();
+        const { isUserMessageMarkdownEnabled } = useDisplayConfig();
         const { pendingMessageId, resendMessageToFeishuDebug } = useFeishuDebugResend();
         const isFeishuDebugSending = pendingMessageId === message.id;
         const [expandedUserMessage, setExpandedUserMessage] = useState<{
@@ -460,6 +460,19 @@ const MessageItem = React.memo<MessageItemProps>(
             ? buildActivitySegments(renderedDisplayContent, agentActivities)
             : null;
 
+        const renderAgentActivities = (activities: AgentActivityEvent[]) => (
+            <AgentActivityTranscript
+                activities={activities}
+                message={message}
+                responseComplete={message.finish_time !== null || streamEvent?.is_done === true}
+                conversationId={conversationId}
+                mcpToolCallStates={mcpToolCallStates}
+                shiningMcpCallId={shiningMcpCallId}
+                inlineInteractionItems={inlineInteractionItems}
+                useRawTextRenderer={shouldMaskContent}
+            />
+        );
+
         const rawMessageBodyContent = activitySegments ? (
             <>
                 {activitySegments.map((segment, segmentIndex) => (
@@ -467,7 +480,7 @@ const MessageItem = React.memo<MessageItemProps>(
                         {segment.text.length > 0
                             && renderSegmentContent(segment.text, segmentIndex === activitySegments.length - 1)}
                         {segment.activities.length > 0 && (
-                            <AgentActivityList activities={segment.activities} />
+                            renderAgentActivities(segment.activities)
                         )}
                     </React.Fragment>
                 ))}
@@ -478,7 +491,7 @@ const MessageItem = React.memo<MessageItemProps>(
                     {richMessageContent}
                 </div>
                 {agentActivities && agentActivities.length > 0 && (
-                    <AgentActivityList activities={agentActivities} />
+                    renderAgentActivities(agentActivities)
                 )}
             </>
         );
@@ -490,27 +503,8 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 早期返回：reasoning 类型消息
         if (message.message_type === "reasoning") {
-            // 不展示思考过程：思考中时显示加载指示器，思考完成后不渲染
-            if (!isShowThinking) {
-                const isReasoningComplete = message.finish_time !== null || streamEvent?.is_done === true;
-                if (isReasoningComplete) {
-                    return null;
-                }
-                // 思考中：展示一个 loading badge
-                return (
-                    <div
-                        data-message-item
-                        data-message-id={message.id}
-                        data-message-type="reasoning"
-                        className="my-2 flex items-center gap-2 px-3 py-1.5"
-                    >
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                        <span className="text-xs text-muted-foreground">思考中...</span>
-                    </div>
-                );
-            }
             return (
-                <ReasoningMessage
+                <ReasoningDisplay
                     message={message}
                     streamEvent={streamEvent}
                     displayedContent={displayContent}

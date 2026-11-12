@@ -3,6 +3,8 @@ import { Blocks } from "lucide-react";
 import { JsonDisplay } from "@/components/McpToolCall";
 import type { AgentActivityEvent } from "@/data/Conversation";
 import { AgentActivityShell } from "./AgentActivityShell";
+import { activitySource } from "./activitySource";
+import { ActivityTextDetails } from "./ActivityDetails";
 
 interface ToolCallActivityCardProps {
   activity: AgentActivityEvent;
@@ -33,10 +35,13 @@ export function ToolCallActivityCard({ activity }: ToolCallActivityCardProps) {
   return (
     <AgentActivityShell
       icon={<Blocks className="h-4 w-4 flex-shrink-0" />}
-      sourceLabel={metadata.server ?? "Codex"}
+      sourceLabel={activitySource(activity)}
       title={metadata.tool ?? activity.title ?? "工具调用"}
       status={activity.status}
+      headerExtra={metadata.server ? <span className="text-xs text-muted-foreground truncate max-w-40" title={metadata.server}>{metadata.server}</span> : undefined}
+      autoExpand={activity.agent_kind !== "pi"}
     >
+      {activity.agent_kind === "pi" ? <ActivityTextDetails activity={activity} /> : <>
       {parameters != null && (
         <div className="max-w-full overflow-hidden">
           <span className="text-xs font-medium mb-1 text-muted-foreground">
@@ -67,6 +72,7 @@ export function ToolCallActivityCard({ activity }: ToolCallActivityCardProps) {
           <JsonDisplay content={activity.error} maxHeight="200px" className="mt-1" />
         </div>
       )}
+      </>}
     </AgentActivityShell>
   );
 }

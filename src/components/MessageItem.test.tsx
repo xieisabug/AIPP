@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import MessageItem from './MessageItem';
-import type { Message } from '@/data/Conversation';
+import type { AgentActivityEvent, Message } from '@/data/Conversation';
 import {
     getMessageItemRenderCount,
     resetMessageItemRenderCounts,
@@ -127,6 +127,20 @@ function createMessage(overrides: Partial<Message> = {}): Message {
         ...overrides,
     };
 }
+
+it('should interleave ordinary reasoning and tool operations before response text at their original positions', () => {
+    const activities: AgentActivityEvent[] = [
+        { conversation_id: 1, response_message_id: 1, agent_kind: 'pi', item_id: 'tool', order: 1, sequence: 2, content_offset: 0,
+            kind: 'command', title: 'echo hi', status: 'success' },
+        { conversation_id: 1, response_message_id: 1, agent_kind: 'pi', item_id: 'thought', order: 0, sequence: 100, content_offset: 0,
+            kind: 'reasoning', output: 'thought text', status: 'success' },
+    ];
+    const { container } = render(<MessageItem message={createMessage({ content: 'final answer' })} agentActivities={activities} />);
+    const text = container.textContent!;
+    expect(text.indexOf('reasoning')).toBeLessThan(text.indexOf('echo hi'));
+    expect(text.indexOf('echo hi')).toBeLessThan(text.indexOf('final answer'));
+    expect(container.querySelector('[data-agent-activity-list]')?.textContent).not.toContain('reasoning');
+});
 
 describe('MessageItem attachment updates', () => {
     it.each([false, true])("keeps usage in the info panel in merged mode %s", (mergedMode) => {

@@ -4,6 +4,45 @@ import { fileURLToPath } from 'node:url';
 // all: every tool call; read_only: read/grep/find/ls run without asking; none: Pi's native behaviour.
 export const PI_APPROVAL_SCOPES = ['all', 'read_only', 'none'];
 
+// Pi's execution events cover both built-in operations and extension/MCP tools.
+// Keep the native result for inspection, but expose readable content to the UI.
+function resultText(result) {
+  if (result == null) return undefined;
+  if (typeof result === 'string') return result;
+  if (Array.isArray(result.content)) return result.content.map(part =>
+    part.type === 'text' ? part.text : part.type === 'image' ? '[图片结果]' : `[${part.type || '非文本结果'}]`).join('\n');
+  return JSON.stringify(result);
+}
+
+function toolActivity(frame, previous, cwd) {
+  const tool = frame.toolName || previous?.metadata.tool;
+  const input = frame.args ?? previous?.input;
+  const result = frame.result ?? frame.partialResult;
+  const metadata = { ...previous?.metadata, tool, cwd };
+  if (result !== undefined) metadata.rawResult = result;
+  const path = typeof input?.path === 'string' ? input.path : '';
+  let kind = 'tool', title = tool;
+  if (['bash', 'powershell'].includes(tool)) {
+    kind = 'command'; title = input?.command || tool;
+    metadata.command = title;
+  } else if (tool === 'read') {
+    kind = 'file_read'; title = `读取 ${path}`.trim();
+  } else if (['grep', 'find', 'ls'].includes(tool)) {
+    kind = 'file_search';
+    title = [tool === 'ls' ? '列出目录' : '搜索', input?.pattern, path].filter(Boolean).join(' ');
+  } else if (tool === 'edit') {
+    kind = 'patch'; title = `编辑 ${path}`.trim();
+    metadata.changes = [{ path, kind: 'update', diff: result?.details?.patch || result?.details?.diff }];
+  } else if (tool === 'write') {
+    kind = 'file_write'; title = `写入 ${path}`.trim();
+  }
+  const output = resultText(result);
+  return { type: 'activity', id: frame.toolCallId, kind, title, input, metadata,
+    status: frame.type === 'tool_execution_end' ? (frame.isError ? 'failed' : 'success') : 'running',
+    ...(output !== undefined ? { output } : {}),
+    ...(frame.isError ? { error: output || 'Pi 工具执行失败，但原生结果未提供错误详情' } : {}) };
+}
+
 export async function openPi(config, emit, dependencies = {}) {
   const approval = config.pi_approval || 'all';
   if (!PI_APPROVAL_SCOPES.includes(approval)) throw new Error(`Unsupported Pi approval scope '${approval}'; expected ${PI_APPROVAL_SCOPES.join(', ')}`);
@@ -12,6 +51,8 @@ export async function openPi(config, emit, dependencies = {}) {
   let sequence = 0, turn = null, failure, session, closing = false;
   const pending = new Map();
   const questions = new Map();
+  const tools = new Map();
+  let thinkingId, thinkingSequence = 0;
   const send = data => child.stdin.write(`${JSON.stringify(data)}\n`);
   const fail = error => {
     for (const { reject } of pending.values()) reject(error);
@@ -55,12 +96,21 @@ export async function openPi(config, emit, dependencies = {}) {
     if (frame.type === 'message_update') {
       const event = frame.assistantMessageEvent;
       if (event?.type === 'text_delta') emit({ ...base, type: 'text', text: event.delta });
-      if (event?.type === 'thinking_delta') emit({ ...base, type: 'activity', id: 'thinking', kind: 'reasoning', status: 'running', output: event.delta, append: true });
+      if (event?.type === 'thinking_delta') {
+        thinkingId ||= `thinking:${++thinkingSequence}`;
+        emit({ ...base, type: 'activity', id: thinkingId, kind: 'reasoning', status: 'running', output: event.delta, append: true });
+      }
+      if (event?.type === 'thinking_end' && thinkingId) {
+        emit({ ...base, type: 'activity', id: thinkingId, kind: 'reasoning', status: 'success' });
+        thinkingId = undefined;
+      }
     }
-    if (frame.type.startsWith('tool_execution_')) emit({ ...base, type: 'activity', id: frame.toolCallId,
-      title: frame.toolName, kind: 'tool', input: frame.args,
-      status: frame.type === 'tool_execution_end' ? (frame.isError ? 'failed' : 'success') : 'running',
-      output: JSON.stringify(frame.result ?? frame.partialResult ?? null) });
+    if (['tool_execution_start', 'tool_execution_update', 'tool_execution_end'].includes(frame.type)) {
+      if (!frame.toolCallId) { fail(new Error('Pi tool execution event omitted toolCallId')); return; }
+      const activity = toolActivity(frame, tools.get(frame.toolCallId), config.cwd);
+      tools.set(frame.toolCallId, activity);
+      emit({ ...base, ...activity });
+    }
     if (frame.type === 'message_end' && frame.message?.stopReason === 'error') failure = frame.message.errorMessage || 'Pi model error has no errorMessage';
     if (frame.type === 'extension_ui_request' && frame.method === 'confirm') {
       emit({ type: 'permission', turn, id: frame.id, title: frame.title, input: frame.message,
@@ -77,7 +127,7 @@ export async function openPi(config, emit, dependencies = {}) {
     }
     if (frame.type === 'agent_end') {
       emit({ ...base, type: 'done', error: failure });
-      turn = null; failure = undefined; questions.clear();
+      turn = null; failure = undefined; questions.clear(); tools.clear(); thinkingId = undefined;
     }
   }, fail);
   try {
@@ -98,7 +148,7 @@ export async function openPi(config, emit, dependencies = {}) {
       session,
       async prompt(text, id) {
         if (turn) throw new Error('Pi already has an active turn');
-        turn = id; failure = undefined;
+        turn = id; failure = undefined; tools.clear(); thinkingId = undefined; thinkingSequence = 0;
         const receipt = await request({ type: 'prompt', message: text });
         if (turn === id && receipt?.disposition === 'handled') {
           const state = await request({ type: 'get_state' });
