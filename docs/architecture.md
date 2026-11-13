@@ -97,6 +97,7 @@ src-tauri/
 
 -   `ai_api.rs`: Main AI entry points (ask/regenerate/cancel/runtime state/title generation)
 -   `assistant_api.rs`: Assistant CRUD + model/MCP binding
+-   `agent_workspace_api.rs`: Agent 会话工作目录的 Git 操作（状态/改动统计、分支列表与切换、提交与推送），工作目录只按 会话→助手 在服务端解析；手动压缩 `/compact` 由各驱动识别（`api/ai/agent_driver/manual_compact.rs`）
 -   `conversation_api.rs`: Conversation/message management with versioning
 -   `llm_api.rs`: Provider/model management and model list sync
 -   `scheduled_task_api.rs`: Scheduled task CRUD, structured scheduling, run, logs, cancellation

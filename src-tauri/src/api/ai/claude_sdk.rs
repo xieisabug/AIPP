@@ -882,6 +882,25 @@ fn claude_full_plan_from_tool_use(block: &Value) -> Option<&str> {
     block.pointer("/input/plan").and_then(Value::as_str).filter(|plan| !plan.trim().is_empty())
 }
 
+/// `system/compact_boundary` 帧：`/compact` 压缩完成。返回 Some(压缩前 token 数)。
+pub(crate) fn claude_compact_boundary(frame: &Value) -> Option<Option<u64>> {
+    (frame.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))
+        .then(|| frame.pointer("/compact_metadata/pre_tokens").and_then(Value::as_u64))
+}
+
+/// 流式正文为空时，用 result 帧补正文：result 文本 → 错误说明 → 本轮发生过压缩则写压缩说明。
+pub(crate) fn claude_result_fallback_content(frame: &Value, compact_boundary: Option<Option<u64>>) -> String {
+    if let Some(text) = frame.get("result").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+        return text.to_string();
+    }
+    if let Some(error) = frame.get("error").and_then(Value::as_str) {
+        return format!("Claude Code 返回错误：{error}");
+    }
+    compact_boundary
+        .map(crate::api::ai::agent_driver::manual_compact::compact_done_text)
+        .unwrap_or_default()
+}
+
 fn claude_session_snapshot(
     conversation_id: i64,
     session_id: Option<String>,
@@ -1316,6 +1335,8 @@ pub fn spawn_claude_session_task(
                     )
                     .await;
                     let mut usage = Value::Null;
+                    // `/compact` 完成时 CLI 发 system/compact_boundary；记录下来，结果为空时写入压缩说明
+                    let mut compact_boundary: Option<Option<u64>> = None;
                     let mut stream_error: Option<String> = None;
                     let mut stream_failure_stage = AgentFailureStage::Stream;
                     loop {
@@ -1389,6 +1410,9 @@ pub fn spawn_claude_session_task(
                         }
                         match frame.get("type").and_then(Value::as_str).unwrap_or("") {
                             "system" => {
+                                if let Some(pre_tokens) = claude_compact_boundary(&frame) {
+                                    compact_boundary = Some(pre_tokens);
+                                }
                                 if let Some(model) = frame.get("model").and_then(Value::as_str) {
                                     config.model = Some(model.to_string());
                                 }
@@ -1494,16 +1518,7 @@ pub fn spawn_claude_session_task(
                                     break;
                                 }
                                 if content.is_empty() {
-                                    content = frame
-                                        .get("result")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .into();
-                                    if content.is_empty() {
-                                        if let Some(error) = frame.get("error").and_then(Value::as_str) {
-                                            content = format!("Claude Code 返回错误：{error}");
-                                        }
-                                    }
+                                    content = claude_result_fallback_content(&frame, compact_boundary);
                                 }
                                 usage = frame.get("usage").cloned().unwrap_or(Value::Null);
                                 break;
@@ -1585,6 +1600,26 @@ pub fn spawn_claude_session_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_claude_compact_boundary_reads_pre_tokens() {
+        let frame = json!({"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":52000}});
+        assert_eq!(claude_compact_boundary(&frame), Some(Some(52000)));
+        assert_eq!(claude_compact_boundary(&json!({"type":"system","subtype":"compact_boundary"})), Some(None));
+        assert_eq!(claude_compact_boundary(&json!({"type":"system","subtype":"init"})), None);
+    }
+
+    #[test]
+    fn test_claude_result_fallback_content_after_manual_compact() {
+        let empty_result = json!({"type":"result","subtype":"success","result":""});
+        assert_eq!(claude_result_fallback_content(&empty_result, Some(Some(52000))), "上下文已压缩（压缩前约 52000 tokens）。");
+        assert_eq!(claude_result_fallback_content(&empty_result, None), "");
+        let text_result = json!({"type":"result","subtype":"success","result":"done"});
+        assert_eq!(claude_result_fallback_content(&text_result, Some(None)), "done");
+        let error_result = json!({"type":"result","error":"boom"});
+        assert_eq!(claude_result_fallback_content(&error_result, Some(None)), "Claude Code 返回错误：boom");
+    }
+
     #[test]
     fn defaults_to_official_cli() {
         assert_eq!(extract_claude_sdk_config(&[], &[], None, Vec::new()).unwrap().cli_command, "claude");

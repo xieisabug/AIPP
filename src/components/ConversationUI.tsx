@@ -42,7 +42,14 @@ import { useConversationEvents } from "@/hooks/useConversationEvents";
 import { useAssistantListListener } from "@/hooks/useAssistantListListener";
 import { AssistantListItem } from "@/data/Assistant";
 import { claimAgentConnectionEvent } from "./conversation/agentSessionNotice";
-import { agentSupportsPlanToggle } from "@/utils/agentPlanMode";
+import { shouldShowPlanToggle } from "@/utils/agentPlanMode";
+import {
+    COMMIT_MESSAGE_PROMPT,
+    MANUAL_COMPACT_PROMPT,
+    agentSupportsManualCompact,
+    extractCommitMessage,
+} from "@/utils/agentWorkspace";
+import AgentWorkspacePanel from "./chat-sidebar/AgentWorkspacePanel";
 import { agentAllowsConfigMutation } from "@/utils/agentCapabilities";
 
 interface AgentRuntimeInfo {
@@ -381,7 +388,8 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
 
         // ACP assistant working directory (resolved by backend)
         const [acpWorkingDirectory, setAcpWorkingDirectory] = useState<string | null>(null);
-        const [configuredAgentKind, setConfiguredAgentKind] = useState<string | null>(null);
+        // 运行时信息按助手记录，换助手后旧助手迟到的结果不会被当成当前助手的 Agent 类型
+        const [configuredAgent, setConfiguredAgent] = useState<{ assistantId: number; kind: string | null } | null>(null);
         const [acpMutationKey, setAcpMutationKey] = useState<string | null>(null);
 
         // 常规消息列表
@@ -1182,6 +1190,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             handleEditSave,
             handleEditSaveAndRegenerate,
             handleSend,
+            sendAgentCommand,
             handleArtifact: handleDesktopArtifact,
             editDialogIsOpen,
             editingMessage,
@@ -1467,15 +1476,22 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             ),
         });
 
-        const activeAssistantId = conversation?.assistant_id ?? selectedAssistant;
-        const isAcpAssistant = useMemo(() => {
-            if (!activeAssistantId) {
+        // 打开已有会话时只认“已加载的这个会话”的助手。加载期间（包括切换会话后 conversation 仍是上一个的那一帧）
+        // 不回退到新建页残留的 selectedAssistant，否则会拿别的助手去判断/连接当前会话的 Agent。
+        const loadedConversation = conversationId && conversation?.id === Number(conversationId) ? conversation : null;
+        const activeAssistantId = conversationId ? (loadedConversation?.assistant_id ?? null) : selectedAssistant;
+        // true/false：助手列表里查得到；null：助手列表未加载（如直接打开会话的窗口），无法判断
+        const activeAssistantIsAgent = useMemo<boolean | null>(() => {
+            if (!activeAssistantId || activeAssistantId < 0) {
                 return false;
             }
-            return assistants.some(
-                (assistant) => assistant.id === activeAssistantId && assistant.assistant_type === 4
-            );
+            const assistant = assistants.find((item) => item.id === activeAssistantId);
+            return assistant ? assistant.assistant_type === 4 : null;
         }, [activeAssistantId, assistants]);
+        const isAcpAssistant = activeAssistantIsAgent === true;
+        const configuredAgentKind = configuredAgent && configuredAgent.assistantId === activeAssistantId
+            ? configuredAgent.kind
+            : null;
 
         // 移动端不能连接/启动本机 CLI Agent（MOB-02），不自动连接 ACP 会话
         const isMobilePlatform = useIsMobilePlatform();
@@ -1483,22 +1499,31 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         // Fetch ACP working directory for current assistant
         useEffect(() => {
             const assistantId = activeAssistantId;
+            const conversationIdNum = Number(conversationId);
+            const connectKey = assistantId && conversationIdNum && !Number.isNaN(conversationIdNum)
+                ? `${conversationIdNum}:${assistantId}`
+                : null;
+            // 目标变了（换助手、换会话、变成普通助手）：作废还在路上的自动连接，
+            // 避免上一个 Agent 的会话状态迟到后套到当前界面上。
+            if (acpAutoConnectKeyRef.current !== connectKey) {
+                acpAutoConnectKeyRef.current = null;
+            }
             if (!assistantId || !isAcpAssistant || isMobilePlatform) {
                 setAcpWorkingDirectory(null);
-                setConfiguredAgentKind(null);
+                setConfiguredAgent(null);
                 applyAcpSessionState(null);
                 return;
             }
 
+            let cancelled = false;
             invoke<AgentRuntimeInfo>("get_agent_runtime_info", { assistantId })
                 .then((runtimeInfo) => {
+                    if (cancelled) return;
                     setAcpWorkingDirectory(runtimeInfo.working_directory);
-                    setConfiguredAgentKind(runtimeInfo.agent_kind);
-                    const conversationIdNum = Number(conversationId);
-                    if (!conversationIdNum || Number.isNaN(conversationIdNum)) {
+                    setConfiguredAgent({ assistantId, kind: runtimeInfo.agent_kind });
+                    if (!connectKey) {
                         return;
                     }
-                    const connectKey = `${conversationIdNum}:${assistantId}`;
                     if (acpAutoConnectKeyRef.current === connectKey) {
                         return;
                     }
@@ -1515,18 +1540,23 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             applyAcpSessionState(state);
                         })
                         .catch((error) => {
-                            if (acpAutoConnectKeyRef.current === connectKey) {
-                                acpAutoConnectKeyRef.current = null;
+                            console.warn("[ACP] Auto connect failed", { connectKey, error });
+                            if (acpAutoConnectKeyRef.current !== connectKey) {
+                                return;
                             }
-                            console.warn("[ACP] Auto connect failed", error);
+                            acpAutoConnectKeyRef.current = null;
                             showAcpConnectionError(assistantId, error, runtimeInfo.agent_kind);
                         });
                 })
                 .catch((error) => {
+                    if (cancelled) return;
                     setAcpWorkingDirectory(null);
-                    setConfiguredAgentKind(null);
+                    setConfiguredAgent(null);
                     showAcpConnectionError(assistantId, error);
                 });
+            return () => {
+                cancelled = true;
+            };
         }, [
             activeAssistantId,
             isAcpAssistant,
@@ -1582,10 +1612,12 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
         const executionModeChoice = planModeOption?.options.find(
             (choice) => choice.value.toLowerCase() === "default"
         ) ?? planModeOption?.options.find((choice) => choice.value !== planModeChoice?.value) ?? null;
-        const showPlanModeToggle = agentSupportsPlanToggle(
-            acpSessionState?.agent_kind ?? configuredAgentKind,
-            Boolean(planModeOption),
-        );
+        const showPlanModeToggle = shouldShowPlanToggle({
+            isAgentAssistant: activeAssistantIsAgent,
+            agentKind: acpSessionState?.agent_kind ?? configuredAgentKind,
+            hasSessionPlanOption: Boolean(planModeOption),
+            isMobilePlatform,
+        });
         const isPlanMode = planModeOption && planModeChoice
             ? planModeOption.current_value === planModeChoice.value
             : selectedAgentMode === "plan";
@@ -1643,6 +1675,89 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
             pendingPlanExecutionRef.current = false;
             handleSend();
         }, [handleSend, inputText]);
+
+        // ============= 详情面板：Agent 工作区（分支/提交/改动/压缩） =============
+        // 只在聊天窗口的 Agent 会话里显示；助手列表未加载时以会话快照里的 Agent 类型为准
+        const isAgentConversation = activeAssistantIsAgent === true
+            || (activeAssistantIsAgent === null && Boolean(acpSessionState?.agent_kind));
+        const showAgentWorkspacePanel = windowLabel === "chat_ui"
+            && Boolean(conversationId)
+            && !readOnly
+            && !isMobilePlatform
+            && isAgentConversation;
+        const manualCompactSupported = agentSupportsManualCompact(
+            acpSessionState?.agent_kind ?? configuredAgentKind,
+            acpSessionState?.available_commands,
+        );
+        const handleCompactAgentContext = useCallback(
+            () => sendAgentCommand(MANUAL_COMPACT_PROMPT),
+            [sendAgentCommand]
+        );
+
+        // 让 Agent 起草提交信息：作为一轮普通对话发送，等这一轮结束后取它的回复
+        const commitMessageWaiterRef = useRef<{
+            baselineId: number;
+            sawBusy: boolean;
+            settleTimer: ReturnType<typeof setTimeout> | null;
+            resolve: (text: string) => void;
+            reject: (error: Error) => void;
+        } | null>(null);
+        const settleCommitMessageWaiter = useCallback((outcome: { text: string } | { error: Error }) => {
+            const waiter = commitMessageWaiterRef.current;
+            if (!waiter) return;
+            commitMessageWaiterRef.current = null;
+            if (waiter.settleTimer) clearTimeout(waiter.settleTimer);
+            if ("text" in outcome) waiter.resolve(outcome.text);
+            else waiter.reject(outcome.error);
+        }, []);
+        const handleGenerateCommitMessage = useCallback(() => new Promise<string>((resolve, reject) => {
+            settleCommitMessageWaiter({ error: new Error("已发起新的生成请求") });
+            const baselineId = allDisplayMessages.reduce((max, message) => Math.max(max, message.id), 0);
+            const waiter = { baselineId, sawBusy: false, settleTimer: null, resolve, reject };
+            commitMessageWaiterRef.current = waiter;
+            sendAgentCommand(COMMIT_MESSAGE_PROMPT).catch((error) => {
+                if (commitMessageWaiterRef.current !== waiter) return;
+                settleCommitMessageWaiter({ error: error instanceof Error ? error : new Error(String(error)) });
+            });
+        }), [allDisplayMessages, sendAgentCommand, settleCommitMessageWaiter]);
+        useEffect(() => {
+            const waiter = commitMessageWaiterRef.current;
+            if (!waiter) return;
+            if (effectiveAiIsResponsing) {
+                waiter.sawBusy = true;
+                return;
+            }
+            if (!waiter.sawBusy) return;
+            const replies = allDisplayMessages.filter((message) =>
+                message.id > waiter.baselineId
+                && ["response", "agent_plan", "error"].includes(message.message_type)
+            );
+            const last = replies[replies.length - 1];
+            if (last?.message_type === "error") {
+                settleCommitMessageWaiter({ error: new Error(last.content || `Agent 返回错误（消息 ${last.id}）`) });
+            } else if (last && last.content.trim()) {
+                settleCommitMessageWaiter({ text: extractCommitMessage(last.content) });
+            } else if (!waiter.settleTimer) {
+                // 回复结束与最终消息落地可能有先后；稍等一会儿仍没有回复再报错
+                waiter.settleTimer = setTimeout(() => {
+                    settleCommitMessageWaiter({
+                        error: new Error(`会话 ${conversationId} 本轮结束，但没有找到 Agent 的回复（起点消息 ${waiter.baselineId}）`),
+                    });
+                }, 5000);
+            }
+        }, [allDisplayMessages, conversationId, effectiveAiIsResponsing, settleCommitMessageWaiter]);
+        useEffect(() => () => settleCommitMessageWaiter({ error: new Error("会话已切换") }), [conversationId, settleCommitMessageWaiter]);
+
+        const renderAgentWorkspacePanel = (mobile: boolean) => showAgentWorkspacePanel ? (
+            <AgentWorkspacePanel
+                conversationId={conversationId}
+                compactSupported={manualCompactSupported}
+                busy={effectiveAiIsResponsing}
+                onCompact={handleCompactAgentContext}
+                onGenerateCommitMessage={handleGenerateCommitMessage}
+                mobile={mobile}
+            />
+        ) : null;
 
         const pluginHeaderActions = useMemo(() => {
             const actionContext = {
@@ -2306,6 +2421,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                             onOpenWindow={handleOpenSidebarWindow}
                             onArtifactClick={(artifact) => handleArtifact(artifact.language, artifact.code)}
                             onPreviewFileClick={handlePreviewFileContextClick}
+                            topPanel={renderAgentWorkspacePanel(false)}
                         />
                     )}
 
@@ -2344,6 +2460,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     </Button>
                                 </div>
                                 <div ref={detailsScrollRef} className="min-h-0 flex-1 overflow-y-auto">
+                                    {renderAgentWorkspacePanel(true)}
                                     <ChatSidebarContent
                                         mobile
                                         restoreState={detailsRestoreState}
