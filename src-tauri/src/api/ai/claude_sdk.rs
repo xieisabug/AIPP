@@ -8,7 +8,8 @@ use crate::api::ai::agent_completion::{handle_agent_success, AgentKind};
 use crate::api::ai::agent_plan::AgentPlanMessage;
 use crate::api::ai::agent_driver::events::{AgentEventIdentity, emit_to_window, emit_to_chat_windows};
 use crate::api::ai::agent_driver::failure::{AgentDiagnosticBuffer, AgentFailure, AgentFailureStage, AgentProcessDiagnostics, emit_normalized_failure_to_window};
-use crate::api::ai::codex_app_server::AgentActivityEvent;
+use crate::api::ai::claude_activity::ClaudeActivities;
+use crate::api::ai::agent_activity::persist_activities;
 use crate::api::ai::events::{ConversationEvent, MessageUpdateEvent};
 use crate::acp_mcp_bridge::{
     ensure_proxy_server, ACP_MCP_BRIDGE_ARG, ACP_MCP_CONVERSATION_ID_ENV,
@@ -915,65 +916,29 @@ fn message_content_blocks(frame: &Value) -> &[Value] {
         .unwrap_or(&[])
 }
 
-fn tool_result_text(block: &Value) -> Option<String> {
-    let content = block.get("content")?;
-    match content {
-        Value::String(value) => Some(value.clone()),
-        Value::Array(items) => {
-            let parts = items
-                .iter()
-                .map(|item| {
-                    item.get("text")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| item.to_string())
-                })
-                .collect::<Vec<_>>();
-            (!parts.is_empty()).then(|| parts.join("\n"))
-        }
-        Value::Null => None,
-        value => Some(value.to_string()),
+fn publish_claude_activities(
+    app: &tauri::AppHandle, window: &tauri::Window, identity: &AgentEventIdentity,
+    message_id: i64, activities: &mut ClaudeActivities, changes: Vec<Value>,
+) -> Result<(), String> {
+    if changes.is_empty() { return Ok(()); }
+    let mut events = Vec::new();
+    for mut activity in changes {
+        let native_id = activity["item_id"].as_str().ok_or("Claude activity omitted item ID")?.to_string();
+        activity["item_id"] = json!(format!("{message_id}:{native_id}"));
+        activity["conversation_id"] = json!(identity.conversation_id);
+        activity["response_message_id"] = json!(message_id);
+        activity["agent_kind"] = json!(CLAUDE_SDK_API_TYPE);
+        activity["session_id"] = json!(identity.native_session_id);
+        activities.items.insert(native_id, activity.clone());
+        events.push(activity);
     }
-}
-
-fn emit_activity(
-    identity: &AgentEventIdentity,
-    window: &tauri::Window,
-    conversation_id: i64,
-    message_id: i64,
-    session_id: Option<&str>,
-    item_id: &str,
-    sequence: u64,
-    kind: &str,
-    status: &str,
-    title: Option<String>,
-    input: Option<Value>,
-    output: Option<String>,
-    error: Option<String>,
-) {
-    let event = AgentActivityEvent {
-        conversation_id,
-        response_message_id: message_id,
-        agent_kind: CLAUDE_SDK_API_TYPE.into(),
-        session_id: session_id.map(str::to_string),
-        item_id: item_id.into(),
-        sequence,
-        kind: kind.into(),
-        status: status.into(),
-        title,
-        input,
-        output,
-        error,
-        metadata: json!({"source":"claude"}),
-        content_offset: None,
-    };
-    let _ = emit_to_window(
-        window, identity.clone(),
-        ConversationEvent {
-            r#type: "agent_activity".into(),
-            data: serde_json::to_value(event).unwrap(),
-        },
-    );
+    let db = ConversationDatabase::new(app).map_err(|e| e.to_string())?;
+    let repo = db.message_repo().map_err(|e| e.to_string())?;
+    persist_activities(&repo, message_id, &activities.items)?;
+    for activity in events {
+        emit_to_window(window, identity.clone(), ConversationEvent { r#type: "agent_activity".into(), data: activity })?;
+    }
+    Ok(())
 }
 
 async fn spawn_claude_process(
@@ -1334,7 +1299,8 @@ pub fn spawn_claude_session_task(
                     }
                     let mut content = String::new();
                     let mut agent_plan_message: Option<AgentPlanMessage> = None;
-                    let mut sequence = 0_u64;
+                    let mut activities = ClaudeActivities::default();
+                    let mut was_cancelled = false;
                     emit_snapshot(&event_identity,
                         &app,
                         _conversation_id,
@@ -1356,6 +1322,7 @@ pub fn spawn_claude_session_task(
                         let frame = match read_claude_prompt_input(&mut stdin, &mut lines, &mut rx).await {
                             Ok(ClaudePromptInput::Frame(frame)) => frame,
                             Ok(ClaudePromptInput::Interrupted) => {
+                                was_cancelled = true;
                                 if let Some(manager) = app.try_state::<ConversationActivityManager>() {
                                     manager.clear_agent_focus(&app, &event_identity, false).await;
                                 }
@@ -1413,6 +1380,12 @@ pub fn spawn_claude_session_task(
                                 stream_error = Some(format!("Claude Code session persistence failed: {error}"));
                                 break;
                             }
+                        }
+                        let changes = activities.consume(&frame, content.chars().count());
+                        if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, changes) {
+                            stream_failure_stage = AgentFailureStage::Persistence;
+                            stream_error = Some(format!("Claude Code activity persistence/delivery failed [message_id={message_id}]: {error}"));
+                            break;
                         }
                         match frame.get("type").and_then(Value::as_str).unwrap_or("") {
                             "system" => {
@@ -1500,61 +1473,7 @@ pub fn spawn_claude_session_task(
                                         }
                                         continue;
                                     }
-                                    if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                                    {
-                                        sequence += 1;
-                                        emit_activity(&event_identity,
-                                            &window,
-                                            _conversation_id,
-                                            message_id,
-                                            session_id.as_deref(),
-                                            block
-                                                .get("id")
-                                                .and_then(Value::as_str)
-                                                .unwrap_or("tool"),
-                                            sequence,
-                                            "tool",
-                                            "executing",
-                                            block
-                                                .get("name")
-                                                .and_then(Value::as_str)
-                                                .map(str::to_string),
-                                            block.get("input").cloned(),
-                                            None,
-                                            None,
-                                        );
-                                    }
-                                }
-                            }
-                            "user" => {
-                                for block in message_content_blocks(&frame) {
-                                    if block.get("type").and_then(Value::as_str)
-                                        == Some("tool_result")
-                                    {
-                                        let result = tool_result_text(block);
-                                        let is_error = block
-                                            .get("is_error")
-                                            .and_then(Value::as_bool)
-                                            .unwrap_or(false);
-                                        sequence += 1;
-                                        emit_activity(&event_identity,
-                                            &window,
-                                            _conversation_id,
-                                            message_id,
-                                            session_id.as_deref(),
-                                            block
-                                                .get("tool_use_id")
-                                                .and_then(Value::as_str)
-                                                .unwrap_or("tool"),
-                                            sequence,
-                                            "tool",
-                                            if is_error { "failed" } else { "success" },
-                                            None,
-                                            None,
-                                            (!is_error).then(|| result.clone()).flatten(),
-                                            is_error.then(|| result.unwrap_or_else(|| "Claude Code tool failed".into())),
-                                        );
-                                    }
+
                                 }
                             }
                             "control_request" => {
@@ -1592,6 +1511,11 @@ pub fn spawn_claude_session_task(
                             _ => {}
                         }
                     }
+                    let settled = activities.finish(was_cancelled, stream_error.as_deref());
+                    if let Err(error) = publish_claude_activities(&app, &window, &event_identity, message_id, &mut activities, settled) {
+                        stream_failure_stage = AgentFailureStage::Persistence;
+                        stream_error = Some(format!("Claude Code final activity persistence/delivery failed [message_id={message_id}]: {error}"));
+                    }
                     if let Some(error) = stream_error.as_deref() {
                         emit_claude_run_failure(&app, &event_identity, message_id, &window, error, stream_failure_stage, diagnostics.diagnostics(child.try_wait().ok().flatten().map(|status| status.to_string()), None));
                         if let Some(manager) = app.try_state::<ConversationActivityManager>() {
@@ -1599,7 +1523,7 @@ pub fn spawn_claude_session_task(
                         }
                         break;
                     }
-                    if content.is_empty() && agent_plan_message.is_none() {
+                    if content.is_empty() && agent_plan_message.is_none() && !activities.items.values().any(|item| item["kind"] == "reasoning" && item["output"].as_str().is_some_and(|text| !text.is_empty())) {
                         emit_claude_run_failure(
                             &app,
                             &event_identity,
@@ -1870,7 +1794,7 @@ mod tests {
             ],
             "is_error": true
         });
-        assert_eq!(tool_result_text(&result).as_deref(), Some("first\nsecond"));
+        assert_eq!(crate::api::ai::claude_activity::result_text(&result["content"]), "first\nsecond");
         assert_eq!(result.get("is_error").and_then(Value::as_bool), Some(true));
     }
 

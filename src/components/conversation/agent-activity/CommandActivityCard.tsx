@@ -4,6 +4,8 @@ import { JsonDisplay } from "@/components/McpToolCall";
 import { Badge } from "@/components/ui/badge";
 import type { AgentActivityEvent } from "@/data/Conversation";
 import { AgentActivityShell } from "./AgentActivityShell";
+import { activitySource, isOperationActivity } from "./activitySource";
+import { ActivityRawDetails } from "./ActivityDetails";
 
 interface CommandActivityCardProps {
   activity: AgentActivityEvent;
@@ -38,10 +40,11 @@ export function CommandActivityCard({ activity }: CommandActivityCardProps) {
   return (
     <AgentActivityShell
       icon={<Terminal className="h-4 w-4 flex-shrink-0" />}
-      sourceLabel="Codex"
+      sourceLabel={activitySource(activity)}
       title={command}
       status={activity.status}
       headerExtra={headerExtra}
+      autoExpand={!isOperationActivity(activity)}
     >
       {metadata.cwd && (
         <div className="text-xs text-muted-foreground font-mono truncate">
@@ -63,6 +66,7 @@ export function CommandActivityCard({ activity }: CommandActivityCardProps) {
           <JsonDisplay content={activity.error} maxHeight="200px" className="mt-1" />
         </div>
       )}
+      {isOperationActivity(activity) && <ActivityRawDetails activity={activity} />}
     </AgentActivityShell>
   );
 }

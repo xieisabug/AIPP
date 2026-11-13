@@ -75,12 +75,12 @@ describe("AgentActivityList", () => {
     expect(screen.getByText("mystery")).toBeInTheDocument();
   });
 
-  it("should order activities by sequence", () => {
+  it("should order activities by first position instead of latest revision", () => {
     const { container } = render(
       <AgentActivityList
         activities={[
-          buildActivity({ item_id: "item-b", sequence: 2, title: "second" }),
-          buildActivity({ item_id: "item-a", sequence: 1, title: "first" }),
+          buildActivity({ item_id: "item-b", order: 1, sequence: 2, title: "second" }),
+          buildActivity({ item_id: "item-a", order: 0, sequence: 100, title: "first" }),
         ]}
       />,
     );

@@ -169,6 +169,7 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 - 已有 `AcpSessionState`、`CodexSessionState`、`ClaudeSessionState` 继续拥有对应会话。Pi/Cursor/OpenCode/Kiro/Antigravity 的 `native_agents.rs` actor 管理自己的进程、配置签名和空闲回收；恢复 ID 复用统一实例归属及现有 conversation 持久化，不新增数据库表。
 - 新驱动通过嵌入的 Node bridge 对接 Pi RPC/扩展、Cursor 官方 SDK 本机执行、OpenCode 本机 HTTP/SSE、Kiro V3 与 Antigravity 官方 ACP；桥接脚本随应用编译，Node 与 CLI/SDK 由用户配置。MCP 使用现有作用域 token 和 bridge，审批/提问使用现有共享状态，取消会撤销待办并在超时后终止所拥有的进程树。
 - 原生协议层继续处理流式事件、MCP、权限请求、Plan 与 session 快照。已有前端命令和事件格式不变。失败事件写入复用同一帮助函数。
+- `api/ai/agent_activity.rs` 统一活动快照合并、首次 `order`、更新版本 `sequence`、终态与操作分类；`claude_activity.rs` 处理 Claude stream-json 的思考/工具分块及完整消息去重，持久化保留其他消息元数据。分类依据协议 kind 或对应驱动内置工具白名单，MCP/未知扩展不冒充内置操作。Codex 的 reasoning 只走独立消息。前端 `AgentActivityTranscript` 按固定顺序组合操作卡片与共享 `ReasoningDisplay`，所有思考服从普通显示配置。
 - 控制通道关闭导致 prompt 提交失败时，记录具体通道、conversation/message 标识和底层错误并结束响应，不在本次提交中自动重建会话并重试。
 
 参考 t3code 的类型化 provider adapter 边界与可控命令通道测试方法，固定版本为 [`d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4`](https://github.com/pingdotgg/t3code/tree/d5fc29fe5cb62db68bfbf824cfabe0ae94ac6ac4)，主要参考 `packages/provider-core/src/server/ProviderAdapter.ts`、`adapterDriver.ts` 和 `packages/provider-testing`。上游为 MIT（©2026 T3 Tools Inc.）；本实现未复制上游源码或引入其 Effect 编排框架。

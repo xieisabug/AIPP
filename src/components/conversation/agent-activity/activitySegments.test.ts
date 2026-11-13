@@ -18,6 +18,16 @@ const buildActivity = (
 });
 
 describe("buildActivitySegments", () => {
+  it("should keep thoughts before tools at the same text offset when thoughts stream more updates", () => {
+    const activities = [
+      buildActivity({ agent_kind: "pi", item_id: "tool", kind: "command", order: 1, sequence: 2, content_offset: 0 }),
+      buildActivity({ agent_kind: "pi", item_id: "think", kind: "reasoning", order: 0, sequence: 100, content_offset: 0 }),
+    ];
+    const segments = buildActivitySegments("answer", activities);
+    expect(segments![0].activities.map(a => a.item_id)).toEqual(["think", "tool"]);
+    expect(segments![1].text).toBe("answer");
+  });
+
   it("should return null when there are no activities", () => {
     expect(buildActivitySegments("hello", [])).toBeNull();
   });
@@ -52,8 +62,8 @@ describe("buildActivitySegments", () => {
 
   it("should group activities that share the same offset", () => {
     const activities = [
-      buildActivity({ item_id: "item-b", sequence: 2, content_offset: 2 }),
-      buildActivity({ item_id: "item-a", sequence: 1, content_offset: 2 }),
+      buildActivity({ item_id: "item-b", order: 1, sequence: 2, content_offset: 2 }),
+      buildActivity({ item_id: "item-a", order: 0, sequence: 100, content_offset: 2 }),
     ];
 
     const segments = buildActivitySegments("正文内容", activities);

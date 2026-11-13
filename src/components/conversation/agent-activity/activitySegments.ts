@@ -1,4 +1,5 @@
 import type { AgentActivityEvent } from "@/data/Conversation";
+import { orderAgentActivities } from "./activityOrder";
 
 export interface ActivitySegment {
     /** 该分段内的正文文本（可能为空字符串） */
@@ -23,7 +24,7 @@ export function buildActivitySegments(
     const codePoints = Array.from(content);
     const withOffset: AgentActivityEvent[] = [];
     const tailActivities: AgentActivityEvent[] = [];
-    for (const activity of activities) {
+    for (const activity of orderAgentActivities(activities)) {
         if (
             typeof activity.content_offset === "number"
             && activity.content_offset >= 0
@@ -37,8 +38,7 @@ export function buildActivitySegments(
     if (withOffset.length === 0) return null;
 
     withOffset.sort(
-        (a, b) => (a.content_offset as number) - (b.content_offset as number)
-            || a.sequence - b.sequence,
+        (a, b) => (a.content_offset as number) - (b.content_offset as number),
     );
 
     const segments: ActivitySegment[] = [];

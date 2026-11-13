@@ -104,6 +104,8 @@ pub struct AgentActivityEvent {
     pub session_id: Option<String>,
     pub item_id: String,
     pub sequence: u64,
+    #[serde(default)]
+    pub order: Option<u64>,
     pub kind: String,
     pub status: String,
     pub title: Option<String>,
@@ -1751,6 +1753,16 @@ fn activity_content_offset(
     )
 }
 
+fn activity_order(orders: &mut HashMap<String, u64>, item: &Value) -> Option<u64> {
+    let id = item.get("id")?.as_str()?.to_string();
+    let next = orders.len() as u64;
+    Some(*orders.entry(id).or_insert(next))
+}
+
+fn has_dedicated_message(kind: &str) -> bool {
+    matches!(kind, "userMessage" | "agentMessage" | "plan" | "reasoning") || kind.starts_with("reasoning/")
+}
+
 fn emit_activity(
     identity: &AgentEventIdentity,
     window: &tauri::Window,
@@ -1761,10 +1773,11 @@ fn emit_activity(
     item: &Value,
     fallback_status: &str,
     content_offset: Option<u64>,
+    order: Option<u64>,
 ) {
     let (item_id, kind, title, input) = item_identity(item);
     // 用户输入、agent 正文和 Plan 都有专属展示，不再生成通用活动卡片
-    if matches!(kind.as_str(), "userMessage" | "agentMessage" | "plan") {
+    if has_dedicated_message(&kind) {
         return;
     }
     let activity = AgentActivityEvent {
@@ -1774,6 +1787,7 @@ fn emit_activity(
         session_id: thread_id.map(str::to_string),
         item_id,
         sequence,
+        order,
         kind,
         status: activity_status(item, fallback_status),
         title,
@@ -2403,6 +2417,7 @@ async fn run_session(
                 let mut plan_messages = HashMap::<String, AgentPlanMessage>::new();
                 // 记录每个 item 开始时的正文字符数，供前端把活动卡片穿插到正文对应位置
                 let mut item_content_offsets = HashMap::<String, u64>::new();
+                let mut item_orders = HashMap::<String, u64>::new();
                 loop {
                     let frame = if let Some(frame) = pending_notifications.pop_front() {
                         frame
@@ -2591,7 +2606,8 @@ async fn run_session(
                                             }
                                         } else {
                                             let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                            emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset);
+                                            let order = activity_order(&mut item_orders, &item);
+                                            emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, if method == "item/completed" { "success" } else { "executing" }, offset, order);
                                         }
                                     }
                                 }
@@ -2621,7 +2637,8 @@ async fn run_session(
                                     sequence += 1;
                                     if let Some(item) = merge_activity_notification(&mut activity_items, method, &params) {
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                        let order = activity_order(&mut item_orders, &item);
+                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset, order);
                                     }
                                 }
                                 "turn/plan/updated" => {
@@ -2673,7 +2690,8 @@ async fn run_session(
                                     if let Some(item) = generic_item_notification(method, &params) {
                                         sequence += 1;
                                         let offset = activity_content_offset(&mut item_content_offsets, &item, &content);
-                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset);
+                                        let order = activity_order(&mut item_orders, &item);
+                                        emit_activity(event_identity, &window, conversation_id, message_id, Some(&thread_id), sequence, &item, "executing", offset, order);
                                     } else if !method.is_empty() {
                                         warn!(conversation_id, method, "Unhandled Codex notification");
                                     }
@@ -3402,3 +3420,7 @@ mod permission_tests;
 #[cfg(all(test, unix))]
 #[path = "codex_app_server_protocol_tests.rs"]
 mod protocol_tests;
+
+#[cfg(test)]
+#[path = "codex_app_server_activity_tests.rs"]
+mod activity_tests;

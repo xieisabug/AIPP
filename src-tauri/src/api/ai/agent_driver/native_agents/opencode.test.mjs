@@ -3,6 +3,24 @@ import assert from 'node:assert/strict';
 import { openOpenCode } from './opencode.mjs';
 import { tick, openCodeFixture } from './test-helpers.mjs';
 
+test('should retain OpenCode tool identity, actual diff and exit code for semantic activity rendering', async () => {
+  const f = openCodeFixture(), events = [];
+  const runtime = await openOpenCode({ cwd: '/repo', session: 's1' }, e => events.push(e), f);
+  try {
+    await runtime.prompt('task', 'turn');
+    f.event('message.updated', { info: { id: 'answer', sessionID: 's1', role: 'assistant' } });
+    for (const [tool, input, metadata] of [['read', { filePath: 'a.rs' }, {}], ['edit', { filePath: 'a.rs' }, { diff: '+real' }], ['bash', { command: 'echo hi' }, { exit: 0 }]]) {
+      f.event('message.part.updated', { part: { id: tool, callID: tool, messageID: 'answer', sessionID: 's1', type: 'tool', tool,
+        state: { status: 'completed', input, output: 'plain result', metadata } } });
+    }
+    await tick();
+    assert.deepEqual(events.filter(e => e.type === 'activity').map(e => e.metadata.tool), ['read', 'edit', 'bash']);
+    assert.equal(events.find(e => e.id === 'edit').metadata.diff, '+real');
+    assert.equal(events.find(e => e.id === 'bash').metadata.exitCode, 0);
+    assert.equal(events.find(e => e.id === 'read').input.filePath, 'a.rs');
+  } finally { await runtime.close(); }
+});
+
 test('should authenticate the owned OpenCode server and merge MCP without replacing native permissions', async () => {
   const previous = process.env.OPENCODE_CONFIG_CONTENT;
   process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ permission: { bash: 'ask' }, mcp: { existing: { type: 'remote', url: 'https://example.invalid/mcp' } } });

@@ -11,6 +11,8 @@ import type { AgentActivityEvent } from "@/data/Conversation";
 import { useTheme } from "@/hooks/useTheme";
 import { cn } from "@/utils/utils";
 import { AgentActivityShell } from "./AgentActivityShell";
+import { activitySource, isOperationActivity } from "./activitySource";
+import { ActivityRawDetails } from "./ActivityDetails";
 
 interface PatchActivityCardProps {
   activity: AgentActivityEvent;
@@ -71,9 +73,10 @@ export function PatchActivityCard({ activity }: PatchActivityCardProps) {
   return (
     <AgentActivityShell
       icon={<FileDiff className="h-4 w-4 flex-shrink-0" />}
-      sourceLabel="Codex"
-      title={`文件变更（${changes.length} 个文件）`}
+      sourceLabel={activitySource(activity)}
+      title={isOperationActivity(activity) ? activity.title ?? "文件变更" : `文件变更（${changes.length} 个文件）`}
       status={activity.status}
+      autoExpand={!isOperationActivity(activity)}
     >
       <div className="space-y-2">
         {changes.map((change, index) => (
@@ -83,11 +86,15 @@ export function PatchActivityCard({ activity }: PatchActivityCardProps) {
             isDark={resolvedTheme === "dark"}
           />
         ))}
-        {changes.length === 0 && activity.output && (
+        {(changes.length === 0 || isOperationActivity(activity)) && activity.output && (
           <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground max-h-80 overflow-auto">
             {activity.output}
           </pre>
         )}
+        {activity.error && activity.error !== activity.output && (
+          <div className="text-xs text-destructive whitespace-pre-wrap break-words">{activity.error}</div>
+        )}
+        {isOperationActivity(activity) && <ActivityRawDetails activity={activity} />}
       </div>
     </AgentActivityShell>
   );

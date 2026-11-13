@@ -96,7 +96,8 @@ export async function openOpenCode(config, emit, dependencies = {}) {
           const interrupted = state.metadata?.interrupted === true || ['Interrupted', 'Tool execution aborted', 'Task cancelled'].includes(state.error);
           const badExit = typeof state.metadata?.exit === 'number' && state.metadata.exit !== 0;
           const status = interrupted ? 'cancelled' : state.status === 'error' || badExit ? 'failed' : state.status === 'completed' ? 'success' : state.status === 'pending' ? 'pending' : 'running';
-          emit({ type: 'activity', turn, id: part.callID, kind: 'tool', title: part.tool, status,
+          emit({ type: 'activity', turn, id: part.callID, kind: 'tool', title: state.title || part.tool, status,
+            metadata: { ...state.metadata, tool: part.tool, rawResult: state.output, ...(typeof state.metadata?.exit === 'number' ? { exitCode: state.metadata.exit } : {}) },
             input: state.input, output: state.output, error: state.error || (badExit ? `Process exited with code ${state.metadata.exit}` : undefined) });
         }
       } else if (event.type === 'message.part.delta' && p.field === 'text') {

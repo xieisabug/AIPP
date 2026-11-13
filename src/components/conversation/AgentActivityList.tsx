@@ -4,10 +4,18 @@ import { CommandActivityCard } from "./agent-activity/CommandActivityCard";
 import { PatchActivityCard } from "./agent-activity/PatchActivityCard";
 import { ToolCallActivityCard } from "./agent-activity/ToolCallActivityCard";
 import { GenericActivityCard, SubAgentActivityCard } from "./agent-activity/SubAgentActivityCard";
+import { FileActivityCard } from "./agent-activity/FileActivityCard";
+import { normalizePiActivity } from "./agent-activity/piActivity";
+import { orderAgentActivities } from "./agent-activity/activityOrder";
 
 /** 按活动类型分发到专用卡片组件，与 McpToolCallRenderer 的分发模式一致 */
 const renderActivityCard = (activity: AgentActivityEvent): React.ReactNode => {
     switch (activity.kind) {
+        case "file_read":
+        case "file_search":
+        case "file_write":
+        case "file_delete":
+            return <FileActivityCard activity={activity} />;
         case "command":
             return <CommandActivityCard activity={activity} />;
         case "patch":
@@ -25,7 +33,9 @@ const renderActivityCard = (activity: AgentActivityEvent): React.ReactNode => {
 const HIDDEN_ACTIVITY_KINDS = new Set(["userMessage", "agentMessage"]);
 
 export function isHiddenAgentActivity(activity: AgentActivityEvent): boolean {
-    return HIDDEN_ACTIVITY_KINDS.has(activity.kind);
+    return HIDDEN_ACTIVITY_KINDS.has(activity.kind)
+        // Codex already provides an ordinary reasoning message with the actual text.
+        || (activity.agent_kind === "codex_app_server" && (activity.kind === "reasoning" || activity.kind.startsWith("reasoning/")));
 }
 
 class AgentActivityErrorBoundary extends React.Component<
@@ -49,9 +59,9 @@ class AgentActivityErrorBoundary extends React.Component<
 
 export function AgentActivityList({ activities }: { activities: AgentActivityEvent[] }) {
     const ordered = useMemo(
-        () => activities
-            .filter((activity) => !isHiddenAgentActivity(activity))
-            .sort((a, b) => a.sequence - b.sequence),
+        () => orderAgentActivities(activities)
+            .filter((activity) => !isHiddenAgentActivity(activity) && activity.kind !== "reasoning")
+            .map(normalizePiActivity),
         [activities],
     );
     if (ordered.length === 0) return null;

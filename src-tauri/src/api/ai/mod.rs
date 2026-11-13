@@ -1,5 +1,7 @@
 pub mod acp;
 pub(crate) mod agent_driver;
+pub(crate) mod agent_activity;
+pub(crate) mod claude_activity;
 pub(crate) mod agent_completion;
 pub(crate) mod agent_plan;
 pub(crate) mod agent_session_lifecycle;

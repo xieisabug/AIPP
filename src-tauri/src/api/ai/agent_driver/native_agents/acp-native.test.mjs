@@ -68,7 +68,7 @@ for (const driver of ['kiro', 'antigravity']) {
       assert.equal(f.commands.filter(c => c.method === 'session/cancel').length, 1);
       f.finish('cancelled'); await prompt;
       assert.equal(f.events.find(e => e.type === 'text').text, '答案\u2028next');
-      assert.equal(f.events.find(e => e.status === 'failed').output, '"permission denied"');
+      assert.equal(f.events.find(e => e.status === 'failed').output, 'permission denied');
       assert.equal(f.events.at(-1).cancelled, true);
     } finally { await runtime.close(); }
   });
@@ -251,3 +251,27 @@ test('should name the advertised Antigravity modes when the chosen one is missin
   await assert.rejects(f.open('antigravity', { antigravity_mode: 'yolo' }), /did not advertise the yolo permission mode \(advertised: default, plan\)/);
   await assert.rejects(fixture().open('antigravity', { antigravity_mode: 'turbo' }), /Unsupported Antigravity permission mode 'turbo'/);
 });
+
+for (const driver of ['kiro', 'antigravity']) {
+  test(`should separate ${driver} thoughts and retain typed tool metadata without ending a later thought on progress`, async () => {
+    const f = fixture(); const runtime = await f.open(driver);
+    try {
+      const prompt = runtime.prompt('task', 'turn');
+      f.update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'before' } });
+      f.update({ sessionUpdate: 'tool_call', toolCallId: 'read', kind: 'read', title: 'Read file', status: 'in_progress', rawInput: { path: 'a.rs' } });
+      assert.equal(f.events.at(-1).metadata.native_kind, 'read');
+      f.update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'after' } });
+      f.update({ sessionUpdate: 'tool_call_update', toolCallId: 'read', status: 'completed', rawOutput: [{ type: 'text', text: 'file text' }] });
+      assert.equal(f.events.at(-1).output, 'file text');
+      assert.deepEqual(f.events.at(-1).metadata.rawResult, [{ type: 'text', text: 'file text' }]);
+      f.update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer' } });
+      const thoughts = f.events.filter(e => e.kind === 'reasoning');
+      assert.deepEqual(thoughts.map(e => e.status), ['running', 'success', 'running', 'success']);
+      assert.notEqual(thoughts[0].id, thoughts[2].id);
+      assert.equal(thoughts[0].id, thoughts[1].id);
+      assert.equal(thoughts[2].id, thoughts[3].id);
+      f.finish(); await prompt;
+      assert.equal(f.events.at(-1).type, 'done');
+    } finally { await runtime.close(); }
+  });
+}

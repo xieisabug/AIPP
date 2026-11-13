@@ -7,6 +7,7 @@ use super::failure::{AgentDiagnosticBuffer, AgentFailure, AgentFailureStage, emi
 use super::capabilities::{AgentCapabilities, AgentCapabilityDeclaration};
 use super::AgentTurnRequest;
 use crate::api::ai::events::ConversationEvent;
+use crate::api::ai::agent_activity::{merge_activity, settle_activity, ordered_activities, normalize_tool_activity};
 use crate::db::conversation_db::{ConversationDatabase, MessageAttachment, Repository};
 use crate::db::llm_db::LLMProviderConfig;
 use crate::db::assistant_db::AssistantModelConfig;
@@ -414,7 +415,8 @@ async fn run_actor(app: tauri::AppHandle, cid: i64, run: String, mut prepared: P
                         Some("text") => { turn.text.push_str(frame["text"].as_str().ok_or("Native text frame omitted text")?); publish_text(&identity, turn, false); }
                         Some("activity") => {
                             let id = frame["id"].as_str().ok_or("Native activity omitted ID")?.to_string();
-                            let mut activity = merge_activity(turn.activities.get(&id), &frame, turn.text.chars().count());
+                            let mut activity = merge_activity(turn.activities.get(&id), &frame, turn.text.chars().count(), turn.activities.len() as u64);
+                            if driver.0 != "pi" { normalize_tool_activity(driver.0, &mut activity); }
                             activity["conversation_id"] = json!(cid);
                             activity["response_message_id"] = json!(turn.id);
                             activity["item_id"] = json!(format!("{}:{id}", turn.id));
@@ -571,34 +573,13 @@ fn publish_text(identity: &AgentEventIdentity, turn: &ActiveTurn, done: bool) {
     let _ = emit_to_window(&turn.window, identity.clone(), ConversationEvent { r#type:"message_update".into(),
         data: json!({"message_id":turn.id,"message_type":"response","content":turn.text,"is_done":done}) });
 }
-fn merge_activity(previous: Option<&Value>, frame: &Value, offset: usize) -> Value {
-    let mut activity = previous.cloned().unwrap_or_else(||json!({"item_id":frame["id"],"content_offset":offset,"metadata":{}}));
-    activity["sequence"] = json!(previous.and_then(|v|v["sequence"].as_u64()).unwrap_or(0) + 1);
-    for key in ["kind", "title", "input", "error"] {
-        if let Some(value) = frame.get(key) { activity[key] = value.clone(); }
-    }
-    activity["status"] = if frame["status"] == "running" { json!("executing") } else { frame["status"].clone() };
-    if frame["append"] == true {
-        activity["output"] = json!(format!("{}{}", previous.and_then(|p|p["output"].as_str()).unwrap_or_default(), frame["output"].as_str().unwrap_or_default()));
-    } else if let Some(output) = frame.get("output") { activity["output"] = output.clone(); }
-    activity
-}
-fn settle_activity(activity: &mut Value, cancelled: bool, failure: Option<&str>) -> bool {
-    if activity["status"] != "executing" && activity["status"] != "pending" { return false; }
-    activity["sequence"] = json!(activity["sequence"].as_u64().unwrap_or(0) + 1);
-    let unfinished_tool = activity["kind"] == "tool";
-    activity["status"] = json!(if failure.is_some() { "failed" } else if cancelled || unfinished_tool { "cancelled" } else { "success" });
-    if let Some(detail) = failure { activity["error"] = json!(detail); }
-    else if unfinished_tool { activity["error"] = json!("智能体已结束本轮，但未返回工具终态，执行结果尚未确认"); }
-    true
-}
 fn persist_success(app: &tauri::AppHandle, turn: &ActiveTurn) -> Result<(), String> {
     let db = ConversationDatabase::new(app).map_err(|e|e.to_string())?;
     let repo = db.message_repo().map_err(|e|e.to_string())?;
     let mut message = repo.read(turn.id).map_err(|e|e.to_string())?.ok_or("Native response message disappeared")?;
     message.content = turn.text.clone(); message.finish_time = Some(chrono::Utc::now());
     let mut metadata: Value = message.metadata_json.as_deref().and_then(|raw|serde_json::from_str(raw).ok()).filter(Value::is_object).unwrap_or_else(||json!({}));
-    metadata["agent_activities"] = json!(turn.activities.values().collect::<Vec<_>>());
+    metadata["agent_activities"] = json!(ordered_activities(&turn.activities));
     message.metadata_json = Some(metadata.to_string());
     repo.update(&message).map_err(|e|e.to_string())?;
     Ok(())

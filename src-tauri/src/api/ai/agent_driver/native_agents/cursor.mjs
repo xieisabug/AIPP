@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-import { deadline } from './common.mjs';
+import { deadline, thinkingStream, readableResult } from './common.mjs';
 
 const loadSdk = config => createRequire(resolve(config.sdk_directory || config.cwd, 'package.json'))('@cursor/sdk');
 
@@ -99,22 +99,34 @@ export async function openCursor(config, emit, dependencies = {}) {
       const current = { cancelled: false };
       active = current;
       let sawText = false, diagnosticText = '';
+      const thinking = thinkingStream(emit), calls = new Map();
       try {
         admission = Promise.resolve(agent.send(text, { ...(model ? { model: { id: model } } : {}), onDelta(update) {
           if (active !== current) return;
           if (update.type === 'text-delta') {
+            thinking.end(turn);
             sawText = true;
             if (diagnosticText !== null) diagnosticText = diagnosticText.length + update.text.length <= 16384 ? diagnosticText + update.text : null;
             emit({ type: 'text', turn, text: update.text });
           }
-          else if (update.type === 'thinking-delta') emit({ type: 'activity', turn, id: 'thinking', kind: 'reasoning', status: 'running', output: update.text, append: true });
+          else if (update.type === 'thinking-delta') thinking.delta(turn, update.text);
+          else if (update.type === 'thinking-completed') thinking.end(turn);
           else if (['tool-call-started', 'partial-tool-call', 'tool-call-completed'].includes(update.type)) {
-            const result = update.toolCall?.result;
-            const failed = result?.status === 'error' || result?.status === 'failed';
-            emit({ type: 'activity', turn, id: update.callId, kind: 'tool', title: update.toolCall?.type,
-              status: update.type === 'tool-call-completed' ? (failed ? 'failed' : 'success') : 'running', input: update.toolCall,
-              error: failed ? JSON.stringify(result.error || result) : undefined,
-              output: update.type === 'tool-call-completed' ? JSON.stringify(update.toolCall) : undefined });
+            if (!update.callId) throw new Error('Cursor tool event omitted callId');
+            if (update.type === 'tool-call-started') thinking.end(turn);
+            const previous = calls.get(update.callId) || {};
+            const call = { ...previous, ...update.toolCall, args: update.toolCall?.args ? { ...previous.args, ...update.toolCall.args } : previous.args };
+            calls.set(update.callId, call);
+            const result = call.result;
+            const value = result?.value ?? result;
+            const failed = result?.status === 'error' || result?.status === 'failed' || value?.isError === true || (typeof value?.exitCode === 'number' && value.exitCode !== 0);
+            emit({ type: 'activity', turn, id: update.callId, kind: 'tool', title: call.type,
+              status: update.type === 'tool-call-completed' ? (failed ? 'failed' : 'success') : 'running', input: call.args,
+              metadata: { tool: call.type, ...(call.type === 'mcp' ? { server: call.args?.providerIdentifier || 'MCP', display_tool: call.args?.toolName } : {}),
+                cwd: call.args?.workingDirectory || config.cwd, ...(result !== undefined ? { rawResult: result } : {}),
+                ...(typeof value?.exitCode === 'number' ? { exitCode: value.exitCode } : {}), ...(typeof value?.diffString === 'string' ? { diff: value.diffString } : {}) },
+              error: failed ? (result?.error ? readableResult(result.error) : typeof value?.exitCode === 'number' && value.exitCode !== 0 ? `Process exited with code ${value.exitCode}` : readableResult(value)) : undefined,
+              output: update.type === 'tool-call-completed' ? readableResult(value) : undefined });
           }
         } }));
         run = await admission;
@@ -124,6 +136,7 @@ export async function openCursor(config, emit, dependencies = {}) {
           const diagnostic = result.status === 'finished' ? transportDiagnostic(result.result ?? diagnosticText) : undefined;
           const unexpected = !['finished', 'error', 'cancelled'].includes(result.status);
           const error = diagnostic || (result.status === 'error' ? JSON.stringify(result) : unexpected ? `Cursor returned unsupported run status: ${JSON.stringify(result)}` : undefined);
+          thinking.end(turn, result.status === 'cancelled' ? 'cancelled' : error ? 'failed' : 'success');
           if (!error && !sawText && typeof result.result === 'string' && result.result) emit({ type: 'text', turn, text: result.result });
           emit({ type: 'done', turn, error,
             cancelled: result.status === 'cancelled' });
@@ -131,9 +144,11 @@ export async function openCursor(config, emit, dependencies = {}) {
           if (active !== current) return;
           active = null; run = undefined;
           const cancelled = current.cancelled && isAbort(error);
+          thinking.end(turn, cancelled ? 'cancelled' : 'failed');
           emit({ type: 'done', turn, cancelled, error: cancelled ? undefined : error.message });
         });
       } catch (error) {
+        thinking.end(turn, current.cancelled && isAbort(error) ? 'cancelled' : 'failed');
         if (active === current) active = null;
         if (current.cancelled && isAbort(error)) emit({ type: 'done', turn, cancelled: true });
         else throw error;

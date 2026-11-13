@@ -3,8 +3,8 @@ use super::*;
 /// T3 Cursor lifecycle: a completed agent turn does not prove unfinished tools succeeded.
 #[test]
 fn test_native_agents_unfinished_tools_never_become_success_on_turn_completion() {
-    for status in ["pending", "executing"] {
-        let mut tool = json!({"kind":"tool", "status":status,"sequence":3});
+    for (kind, status) in ["tool", "command", "patch", "file_read", "file_search", "file_write"].iter().flat_map(|kind| ["pending", "executing"].map(|status| (*kind, status))) {
+        let mut tool = json!({"kind":kind, "status":status,"sequence":3});
         assert!(settle_activity(&mut tool, false, None));
         assert_eq!(tool["status"], "cancelled");
         assert_eq!(tool["sequence"], 4);
@@ -31,14 +31,55 @@ fn test_native_agents_terminal_activity_preserves_failure_and_cancellation() {
 
 #[test]
 fn test_native_agents_activity_updates_advance_sequence_and_keep_initial_position() {
-    let first = merge_activity(None, &json!({"id":"tool", "kind":"tool", "status":"running", "input":{"path":"a"}, "output":"one"}), 2);
-    let next = merge_activity(Some(&first), &json!({"id":"tool", "status":"success", "output":"two", "append":true}), 9);
+    let first = merge_activity(None, &json!({"id":"tool", "kind":"tool", "status":"running", "input":{"path":"a"}, "output":"one"}), 2, 0);
+    let next = merge_activity(Some(&first), &json!({"id":"tool", "status":"success", "output":"two", "append":true}), 9, 5);
     assert_eq!(first["status"], "executing");
     assert_eq!(next["sequence"], 2);
     assert_eq!(next["content_offset"], 2);
     assert_eq!(next["input"]["path"], "a");
     assert_eq!(next["output"], "onetwo");
     assert_eq!(next["status"], "success");
+    assert_eq!(next["order"], 0);
+    assert_eq!(next["started_at"], first["started_at"]);
+    assert!(next["finished_at"].is_string());
+}
+
+#[test]
+fn test_native_agents_activity_metadata_survives_partial_and_terminal_frames() {
+    let first = merge_activity(None, &json!({"id":"edit", "kind":"patch", "status":"running", "input":{"path":"a.rs"}, "metadata":{"tool":"edit", "cwd":"/repo"}}), 2, 0);
+    let done = merge_activity(Some(&first), &json!({"id":"edit", "status":"failed", "error":"file missing", "metadata":{"changes":[{"path":"a.rs", "diff":"+hello"}], "rawResult":{"content":[]}}}), 9, 1);
+    assert_eq!(done["metadata"]["tool"], "edit");
+    assert_eq!(done["metadata"]["cwd"], "/repo");
+    assert_eq!(done["metadata"]["changes"][0]["diff"], "+hello");
+    assert_eq!(done["metadata"]["rawResult"], json!({"content":[]}));
+    assert_eq!(done["input"]["path"], "a.rs");
+    assert_eq!(done["error"], "file missing");
+    assert_eq!(done["content_offset"], 2);
+    assert_eq!(done["kind"], "patch");
+    assert_eq!(done["status"], "failed");
+}
+
+#[test]
+fn test_native_agents_replay_order_tracks_first_seen_position_not_update_count() {
+    let mut activities = HashMap::new();
+    let thought = merge_activity(None, &json!({"id":"thinking:1","kind":"reasoning","status":"running","output":"think","append":true}), 0, 0);
+    activities.insert("thinking:1".into(), thought);
+    let command = merge_activity(None, &json!({"id":"command","kind":"command","status":"running"}), 0, 1);
+    activities.insert("command".into(), command);
+    for _ in 0..30 {
+        let next = merge_activity(activities.get("thinking:1"), &json!({"id":"thinking:1","kind":"reasoning","status":"running","output":"more","append":true}), 0, 2);
+        activities.insert("thinking:1".into(), next);
+    }
+    let saved = json!({"agent_activities":ordered_activities(&activities)});
+    let restored: Value = serde_json::from_str(&saved.to_string()).unwrap();
+    assert_eq!(restored["agent_activities"][0]["item_id"], "thinking:1");
+    assert_eq!(restored["agent_activities"][1]["item_id"], "command");
+    assert_eq!(restored["agent_activities"][0]["order"], 0);
+    assert_eq!(restored["agent_activities"][0]["sequence"], 31);
+    let thought = activities.get_mut("thinking:1").unwrap();
+    assert!(settle_activity(thought, true, None));
+    assert_eq!(thought["order"], 0);
+    assert!(thought["finished_at"].is_string());
 }
 
 #[test]

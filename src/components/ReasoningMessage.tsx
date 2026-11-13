@@ -7,7 +7,7 @@ import { useCustomTagParser } from "../hooks/useCustomTagParser";
 import type { InlineInteractionItem } from "./ConversationUI";
 import { useIsMobilePlatform } from "../hooks/use-platform";
 
-interface ReasoningMessageProps {
+export interface ReasoningMessageProps {
     message: Message;
     streamEvent?: StreamEvent;
     displayedContent: string;
@@ -18,6 +18,7 @@ interface ReasoningMessageProps {
     shiningMcpCallId?: number | null;
     inlineInteractionItems?: InlineInteractionItem[];
     useRawTextRenderer?: boolean; // 脱敏内容使用纯文本渲染，避免 Markdown 解析问题
+    embedded?: boolean;
 }
 
 const ReasoningMessage = React.memo(
@@ -32,6 +33,7 @@ const ReasoningMessage = React.memo(
         shiningMcpCallId,
         inlineInteractionItems,
         useRawTextRenderer = false,
+        embedded = false,
     }: ReasoningMessageProps) => {
         const [currentTime, setCurrentTime] = useState(new Date());
         const isMobilePlatform = useIsMobilePlatform();
@@ -44,6 +46,9 @@ const ReasoningMessage = React.memo(
         const isComplete =
             message.finish_time !== null || streamEvent?.is_done === true;
         const isThinking = message.start_time !== null && !isComplete;
+        const rowAttributes = embedded
+            ? { "data-agent-reasoning": true }
+            : { "data-message-item": true, "data-message-id": message.id };
 
         const { parseCustomTags } = useCustomTagParser();
         // 折叠完成的 reasoning 只需要状态行；MCP 标记仍需保留预览。
@@ -229,8 +234,7 @@ const ReasoningMessage = React.memo(
         if (isComplete && !isReasoningExpanded) {
             return (
                 <div
-                    data-message-item
-                    data-message-id={message.id}
+                    {...rowAttributes}
                     data-message-type="reasoning"
                     className={`my-2 p-2 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg ${isMobilePlatform ? "w-full min-h-11" : "w-80 max-w-[60%]"} cursor-pointer hover:bg-gray-100 transition-colors`}
                     onClick={() => onToggleReasoningExpand?.()}
@@ -256,8 +260,7 @@ const ReasoningMessage = React.memo(
         // 完整展示（思考完成展开或思考中）
         return (
             <div
-                data-message-item
-                data-message-id={message.id}
+                {...rowAttributes}
                 data-message-type="reasoning"
                 className="my-2 p-3 bg-gray-50 border-l-4 border-gray-400 rounded-r-lg max-w-[80%]"
             >
@@ -350,6 +353,7 @@ const ReasoningMessage = React.memo(
 
         // 脱敏模式比较
         if (prevProps.useRawTextRenderer !== nextProps.useRawTextRenderer) return false;
+        if (prevProps.embedded !== nextProps.embedded) return false;
 
         return true; // 所有关键属性都相同，不需要重新渲染
     },
