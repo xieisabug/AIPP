@@ -14,6 +14,7 @@ const renderActivityCard = (activity: AgentActivityEvent): React.ReactNode => {
         case "file_read":
         case "file_search":
         case "file_write":
+        case "file_delete":
             return <FileActivityCard activity={activity} />;
         case "command":
             return <CommandActivityCard activity={activity} />;
@@ -32,7 +33,9 @@ const renderActivityCard = (activity: AgentActivityEvent): React.ReactNode => {
 const HIDDEN_ACTIVITY_KINDS = new Set(["userMessage", "agentMessage"]);
 
 export function isHiddenAgentActivity(activity: AgentActivityEvent): boolean {
-    return HIDDEN_ACTIVITY_KINDS.has(activity.kind);
+    return HIDDEN_ACTIVITY_KINDS.has(activity.kind)
+        // Codex already provides an ordinary reasoning message with the actual text.
+        || (activity.agent_kind === "codex_app_server" && (activity.kind === "reasoning" || activity.kind.startsWith("reasoning/")));
 }
 
 class AgentActivityErrorBoundary extends React.Component<

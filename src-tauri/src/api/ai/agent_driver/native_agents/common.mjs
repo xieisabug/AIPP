@@ -85,3 +85,34 @@ export async function stopChild(child) {
   }
   child.kill();
 }
+
+// Explicit phase boundaries keep later reasoning out of an earlier thought block.
+export function thinkingStream(emit) {
+  let turn, id, count = 0;
+  return {
+    delta(current, text) {
+      if (turn !== current) { turn = current; count = 0; id = undefined; }
+      id ||= `thinking:${++count}`;
+      emit({ type: 'activity', turn, id, kind: 'reasoning', status: 'running', append: true, output: text });
+    },
+    end(current, status = 'success') {
+      if (!id || current !== turn) return;
+      emit({ type: 'activity', turn, id, kind: 'reasoning', status });
+      id = undefined;
+    },
+  };
+}
+
+export function readableResult(value) {
+  if (value == null) return undefined;
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(readableResult).filter(Boolean).join('\n');
+  if (typeof value.text === 'string') return value.text;
+  if (typeof value.text?.text === 'string') return value.text.text;
+  if (value.image) return '[图片结果]';
+  if (Array.isArray(value.content)) return value.content.map(part => part.type === 'image' ? '[图片结果]' : readableResult(part)).filter(Boolean).join('\n');
+  if (typeof value.stdout === 'string' || typeof value.stderr === 'string') return [value.stdout, value.stderr].filter(Boolean).join('\n');
+  for (const key of ['output', 'fileContent', 'fileText', 'content', 'message']) if (typeof value[key] === 'string') return value[key];
+  if (Array.isArray(value.files)) return value.files.map(file => typeof file === 'string' ? file : file.path || JSON.stringify(file)).join('\n');
+  return JSON.stringify(value);
+}

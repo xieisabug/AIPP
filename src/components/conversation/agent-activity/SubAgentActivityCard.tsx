@@ -3,7 +3,8 @@ import { Bot, Wrench } from "lucide-react";
 import { JsonDisplay } from "@/components/McpToolCall";
 import type { AgentActivityEvent } from "@/data/Conversation";
 import { AgentActivityShell } from "./AgentActivityShell";
-import { activitySource } from "./activitySource";
+import { activitySource, isOperationActivity } from "./activitySource";
+import { ActivityTextDetails } from "./ActivityDetails";
 
 interface ActivityCardProps {
   activity: AgentActivityEvent;
@@ -46,8 +47,9 @@ export function SubAgentActivityCard({ activity }: ActivityCardProps) {
       sourceLabel={activitySource(activity)}
       title={activity.title ?? "子 Agent"}
       status={activity.status}
+      autoExpand={!isOperationActivity(activity)}
     >
-      {hasDetails(activity) ? <ActivitySections activity={activity} /> : undefined}
+      {isOperationActivity(activity) ? <ActivityTextDetails activity={activity} /> : hasDetails(activity) ? <ActivitySections activity={activity} /> : undefined}
     </AgentActivityShell>
   );
 }

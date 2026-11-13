@@ -62,8 +62,8 @@ describe("buildActivitySegments", () => {
 
   it("should group activities that share the same offset", () => {
     const activities = [
-      buildActivity({ item_id: "item-b", sequence: 2, content_offset: 2 }),
-      buildActivity({ item_id: "item-a", sequence: 1, content_offset: 2 }),
+      buildActivity({ item_id: "item-b", order: 1, sequence: 2, content_offset: 2 }),
+      buildActivity({ item_id: "item-a", order: 0, sequence: 100, content_offset: 2 }),
     ];
 
     const segments = buildActivitySegments("正文内容", activities);

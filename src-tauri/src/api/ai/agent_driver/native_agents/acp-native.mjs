@@ -5,7 +5,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deadline, jsonLines, launch, stopChild } from './common.mjs';
+import { deadline, jsonLines, launch, stopChild, thinkingStream, readableResult } from './common.mjs';
 
 const AUTH_PREFIX = 'Open the following link to authenticate the ACP server: ';
 const AUTH_MARKER = '__AIPP_ANTIGRAVITY_AUTH_URL__';
@@ -81,6 +81,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
   let sequence = 0, session, turn = null, closing = false, ready = false, fatal, options = [], cancelTimer;
   let started = false, cancelling = false, cancelSent = false;
   const pending = new Map(), approvals = new Map(), optionWaiters = new Set();
+  const thinking = thinkingStream(emit);
   const send = frame => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...frame })}\n`);
   const fail = error => {
     if (fatal || closing) return;
@@ -158,15 +159,18 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
           || (update.sessionUpdate === 'info' && update._meta?.kiro?.kind === 'turn_start')) {
           started = true; if (cancelling) sendCancel();
         }
-        if (update.sessionUpdate === 'agent_message_chunk' && update.content?.type === 'text') emit({ type: 'text', turn, text: update.content.text });
-        if (update.sessionUpdate === 'agent_thought_chunk' && update.content?.type === 'text') emit({ type: 'activity', turn, id: 'thinking', kind: 'reasoning', status: 'running', append: true, output: update.content.text });
+        if (update.sessionUpdate === 'agent_message_chunk' && update.content?.type === 'text') { thinking.end(turn); emit({ type: 'text', turn, text: update.content.text }); }
+        if (update.sessionUpdate === 'agent_thought_chunk' && update.content?.type === 'text') thinking.delta(turn, update.content.text);
         if (['tool_call', 'tool_call_update'].includes(update.sessionUpdate)) {
+          if (update.sessionUpdate === 'tool_call') thinking.end(turn);
           if (!update.toolCallId) throw new Error(`${driver} tool update omitted toolCallId`);
           const event = { type: 'activity', turn, id: update.toolCallId, kind: 'tool',
+            metadata: { ...(update.kind ? { native_kind: update.kind } : {}),
+              ...(update.rawOutput !== undefined || update.content ? { rawResult: update.rawOutput ?? update.content } : {}) },
             ...(update.status ? { status: ({ completed: 'success', failed: 'failed', pending: 'running', in_progress: 'running' })[update.status] || update.status } : {}),
             ...(update.title ? { title: update.title } : {}),
             ...(update.rawInput !== undefined ? { input: update.rawInput } : {}),
-            ...(update.rawOutput !== undefined || update.content ? { output: JSON.stringify(update.rawOutput ?? update.content) } : {}) };
+            ...(update.rawOutput !== undefined || update.content ? { output: readableResult(update.rawOutput ?? update.content) } : {}) };
           emit(event);
         }
       } else if (frame.method === 'session/request_permission') {
@@ -295,6 +299,7 @@ export async function openAcpNative(driver, config, emit, dependencies = {}) {
         try {
           const result = await request('session/prompt', { sessionId: session, prompt: [{ type: 'text', text }] }, 24 * 60 * 60 * 1000);
           if (!['end_turn', 'cancelled', 'max_tokens', 'max_turn_requests', 'refusal'].includes(result.stopReason)) throw new Error(`${driver} prompt omitted a supported stopReason: ${result.stopReason}`);
+          thinking.end(id, result.stopReason === 'cancelled' ? 'cancelled' : result.stopReason === 'end_turn' ? 'success' : 'failed');
           emit({ type: 'done', turn: id, cancelled: result.stopReason === 'cancelled',
             ...(['max_tokens', 'max_turn_requests', 'refusal'].includes(result.stopReason) ? { error: `${driver} stopped: ${result.stopReason}` } : {}) });
         } finally { clearTimeout(cancelTimer); cancelApprovals(); turn = null; }

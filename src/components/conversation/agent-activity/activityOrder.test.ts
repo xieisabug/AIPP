@@ -16,13 +16,13 @@ describe("orderAgentActivities", () => {
     expect(input).toEqual([tool, thought]);
   });
 
-  it.each(["pi", "cursor", "opencode", "kiro", "antigravity"])("should preserve recorded order for old %s items without position data", agent_kind => {
+  it.each(["codex_app_server", "claude_sdk", "pi", "cursor", "opencode", "kiro", "antigravity"])("should preserve recorded order for old %s items without position data", agent_kind => {
     const input = [item("think", { agent_kind, sequence: 100 }), item("tool", { agent_kind, sequence: 2 })];
     expect(orderAgentActivities(input)).toEqual(input);
   });
 
   it("should retain existing sequence ordering when the provider has no native per-item revisions", () => {
-    const input = [item("second", { agent_kind: "codex_app_server", sequence: 2 }), item("first", { agent_kind: "codex_app_server", sequence: 1 })];
+    const input = [item("second", { agent_kind: "custom_driver", sequence: 2 }), item("first", { agent_kind: "custom_driver", sequence: 1 })];
     expect(orderAgentActivities(input).map(a => a.item_id)).toEqual(["first", "second"]);
   });
 });

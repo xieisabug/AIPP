@@ -3,7 +3,7 @@ import { Blocks } from "lucide-react";
 import { JsonDisplay } from "@/components/McpToolCall";
 import type { AgentActivityEvent } from "@/data/Conversation";
 import { AgentActivityShell } from "./AgentActivityShell";
-import { activitySource } from "./activitySource";
+import { activitySource, isOperationActivity } from "./activitySource";
 import { ActivityTextDetails } from "./ActivityDetails";
 
 interface ToolCallActivityCardProps {
@@ -13,6 +13,7 @@ interface ToolCallActivityCardProps {
 interface ToolCallMetadata {
   server?: string;
   tool?: string;
+  display_tool?: string;
 }
 
 function toDisplayString(value: unknown): string {
@@ -36,12 +37,12 @@ export function ToolCallActivityCard({ activity }: ToolCallActivityCardProps) {
     <AgentActivityShell
       icon={<Blocks className="h-4 w-4 flex-shrink-0" />}
       sourceLabel={activitySource(activity)}
-      title={metadata.tool ?? activity.title ?? "工具调用"}
+      title={metadata.display_tool ?? metadata.tool ?? activity.title ?? "工具调用"}
       status={activity.status}
       headerExtra={metadata.server ? <span className="text-xs text-muted-foreground truncate max-w-40" title={metadata.server}>{metadata.server}</span> : undefined}
-      autoExpand={activity.agent_kind !== "pi"}
+      autoExpand={!isOperationActivity(activity)}
     >
-      {activity.agent_kind === "pi" ? <ActivityTextDetails activity={activity} /> : <>
+      {isOperationActivity(activity) ? <ActivityTextDetails activity={activity} /> : <>
       {parameters != null && (
         <div className="max-w-full overflow-hidden">
           <span className="text-xs font-medium mb-1 text-muted-foreground">

@@ -30,6 +30,50 @@ const command = item({ item_id: "command", kind: "command", order: 1, sequence: 
 describe("AgentActivityTranscript", () => {
   beforeEach(() => { displayConfig.isShowThinking = true; });
 
+  it.each([
+    ["claude_sdk", "Claude Code"], ["cursor", "Cursor"], ["opencode", "OpenCode"],
+    ["kiro", "Kiro"], ["antigravity", "Antigravity"],
+  ])("should render readable operation details and ordinary configurable thoughts when the driver is %s", async (agent_kind, label) => {
+    const user = userEvent.setup();
+    const activities = JSON.parse(JSON.stringify([
+      item({ agent_kind }),
+      { ...command, agent_kind, metadata: { presentation: "operation", tool: "shell", rawResult: { stdout: "hi" } } },
+    ]));
+    const { rerender, container } = render(<AgentActivityTranscript activities={activities} message={message} responseComplete />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText(/^思考完成/)).toBeInTheDocument();
+    expect(screen.queryByText("hi")).not.toBeInTheDocument();
+    await user.click(screen.getByTitle("展开详情"));
+    expect(screen.getByText("hi")).toBeInTheDocument();
+    expect(screen.getByText("参数与原始结果")).toBeInTheDocument();
+    expect(container.querySelector("[data-agent-activity-list] [data-agent-reasoning]")).toBeNull();
+    displayConfig.isShowThinking = false;
+    rerender(<AgentActivityTranscript activities={activities} message={message} responseComplete />);
+    expect(screen.queryByText(/^思考完成/)).not.toBeInTheDocument();
+  });
+
+  it("should suppress historical empty Codex thought activities while keeping actual commands", () => {
+    const { container } = render(<AgentActivityTranscript activities={[
+      item({ agent_kind: "codex_app_server", output: undefined }),
+      item({ agent_kind: "codex_app_server", item_id: "part", kind: "reasoning/summaryPartAdded", output: undefined }),
+      { ...command, agent_kind: "codex_app_server" },
+    ]} message={message} responseComplete />);
+    expect(container.querySelector("[data-agent-reasoning]")).toBeNull();
+    expect(screen.getByText("echo hi")).toBeInTheDocument();
+    expect(screen.queryByText("reasoning/summaryPartAdded")).not.toBeInTheDocument();
+  });
+
+  it("should keep Codex command order when the earlier command receives a later update", () => {
+    const a = { ...command, agent_kind: "codex_app_server", item_id: "a", order: 0, sequence: 1, title: "command A" };
+    const b = { ...a, item_id: "b", order: 1, sequence: 2, title: "command B" };
+    const { container, rerender } = render(<AgentActivityTranscript activities={[a, b]} message={message} responseComplete={false} />);
+    const order = () => Array.from(container.querySelectorAll("[data-mcp-motion='card']")).map(el => el.textContent);
+    expect(order()[0]).toContain("command A");
+    rerender(<AgentActivityTranscript activities={[{ ...a, sequence: 100 }, b]} message={message} responseComplete={false} />);
+    expect(order()[0]).toContain("command A");
+    expect(order()[1]).toContain("command B");
+  });
+
   it("should use ordinary reasoning styling outside tool cards and preserve first-seen order during updates and replay", async () => {
     const user = userEvent.setup();
     const thought = item({});

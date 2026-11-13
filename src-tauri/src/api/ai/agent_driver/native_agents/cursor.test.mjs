@@ -28,6 +28,52 @@ function cursorFixture() {
   return { turns, events, sdk: { Agent: { async create() { return agent; } } } };
 }
 
+test('should split Cursor thinking phases at native completion and tool boundaries', async () => {
+  const f = cursorFixture();
+  const runtime = await openCursor({ cwd: '/repo' }, e => f.events.push(e), f);
+  try {
+    await runtime.prompt('task', 'turn');
+    const delta = f.turns[0].options.onDelta;
+    delta({ type: 'thinking-delta', text: 'before' });
+    delta({ type: 'thinking-completed', thinkingDurationMs: 10 });
+    delta({ type: 'tool-call-started', callId: 'shell', toolCall: { type: 'shell', args: { command: 'echo hi' } } });
+    delta({ type: 'thinking-delta', text: 'after' });
+    // A late update from an earlier tool must not end a newer thinking block.
+    delta({ type: 'tool-call-completed', callId: 'shell', toolCall: { type: 'shell', result: { status: 'success', value: { stdout: 'hi', stderr: '', exitCode: 0 } } } });
+    const call = f.events.at(-1);
+    assert.equal(call.input.command, 'echo hi');
+    assert.equal(call.output, 'hi');
+    assert.equal(call.metadata.exitCode, 0);
+    delta({ type: 'text-delta', text: 'answer' });
+    const thoughts = f.events.filter(e => e.kind === 'reasoning');
+    assert.deepEqual(thoughts.map(e => e.status), ['running', 'success', 'running', 'success']);
+    assert.equal(thoughts[0].id, thoughts[1].id);
+    assert.equal(thoughts[2].id, thoughts[3].id);
+    assert.notEqual(thoughts[0].id, thoughts[2].id);
+    f.turns[0].finish({ status: 'finished' }); await tick();
+  } finally { await runtime.close(); }
+});
+
+test('should expose Cursor real edits and MCP identity and reject unsuccessful tool results', async () => {
+  const f = cursorFixture();
+  const runtime = await openCursor({ cwd: '/repo' }, e => f.events.push(e), f);
+  try {
+    await runtime.prompt('task', 'turn');
+    const delta = f.turns[0].options.onDelta;
+    delta({ type: 'tool-call-completed', callId: 'edit', toolCall: { type: 'edit', args: { path: 'a.rs' }, result: { status: 'success', value: { diffString: '+actual' } } } });
+    assert.equal(f.events.at(-1).metadata.diff, '+actual');
+    delta({ type: 'tool-call-completed', callId: 'shell', toolCall: { type: 'shell', args: { command: 'false' }, result: { status: 'success', value: { exitCode: 1, stdout: '', stderr: 'bad exit' } } } });
+    assert.equal(f.events.at(-1).status, 'failed');
+    assert.equal(f.events.at(-1).metadata.exitCode, 1);
+    delta({ type: 'tool-call-completed', callId: 'mcp', toolCall: { type: 'mcp', args: { providerIdentifier: 'aipp', toolName: 'read', args: { path: 'remote' } }, result: { status: 'success', value: { isError: true, content: [{ text: { text: 'MCP rejected' } }] } } } });
+    assert.equal(f.events.at(-1).metadata.server, 'aipp');
+    assert.equal(f.events.at(-1).metadata.display_tool, 'read');
+    assert.equal(f.events.at(-1).output, 'MCP rejected');
+    assert.equal(f.events.at(-1).status, 'failed');
+    f.turns[0].finish({ status: 'finished' }); await tick();
+  } finally { await runtime.close(); }
+});
+
 for (const [output, failed] of [
   ['Error: RetriableError: WritableIterable is closed', true],
   ['Error: ConnectError: [unavailable] transport closed', true],

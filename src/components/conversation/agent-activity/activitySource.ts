@@ -16,3 +16,7 @@ export function activitySource(activity: AgentActivityEvent): string {
     ? AGENT_NAMES[activity.agent_kind]
     : activity.agent_kind?.trim() || "Agent";
 }
+
+export function isOperationActivity(activity: AgentActivityEvent): boolean {
+  return activity.agent_kind === "pi" || (activity.metadata as { presentation?: string } | null)?.presentation === "operation";
+}
