@@ -19,21 +19,24 @@ where F: FnOnce(Target) -> Fut, Fut: std::future::Future<Output = Result<String,
 }
 
 pub(super) fn resolve_target(
-    db: &MCPDatabase, source: MCPServer, tool_name: &str, parameters: &str,
+    db: &MCPDatabase, mut source: MCPServer, tool_name: &str, parameters: &str,
     conversation: i64, access: &Restrictions,
 ) -> Result<Target,String> {
     if !access.server(source.id) { return Err(format!("助手已禁用 MCP 服务 #{}",source.id)); }
+    if source.command.as_deref()==Some("aipp:agent") && matches!(tool_name,"load_mcp_server"|"load_mcp_tool"|"call_mcp_tool") {
+        source = db.get_mcp_server(source.id).map_err(|e|format!("动态 MCP 入口已不存在：{e}"))?;
+        let entry = db.get_mcp_server_tools(source.id).map_err(|e|e.to_string())?.into_iter()
+            .find(|t|t.tool_name==tool_name).ok_or_else(||format!("动态 MCP 入口 {tool_name} 已不存在"))?;
+        if source.command.as_deref()!=Some("aipp:agent") || !source.is_enabled || !entry.is_enabled || !access.tool(source.id,entry.id) {
+            return Err(format!("动态 MCP 入口 {tool_name} 已停用或重新配置，旧会话不能继续使用"));
+        }
+    }
     if source.command.as_deref()!=Some("aipp:agent") || tool_name!="call_mcp_tool" {
         let tools = db.get_mcp_server_tools(source.id).map_err(|e|e.to_string())?;
         if tools.iter().any(|t|(t.tool_name==tool_name || crate::api::ai_api::sanitize_tool_name(&t.tool_name)==tool_name) && !access.tool(source.id,t.id)) {
             return Err(format!("助手已禁用工具 {tool_name}"));
         }
         return Ok(Target {server:source,tool_name:tool_name.into(),parameters:parameters.into()});
-    }
-    let wrapper = db.get_mcp_server_tools(source.id).map_err(|e|e.to_string())?.into_iter()
-        .find(|t|t.tool_name=="call_mcp_tool").ok_or("原生 Agent 的 call_mcp_tool 入口已不存在")?;
-    if !source.is_enabled || !wrapper.is_enabled || !access.tool(source.id,wrapper.id) {
-        return Err("原生 Agent 的 call_mcp_tool 入口已禁用".into());
     }
     let (server_name,tool_name,parameters) = crate::mcp::execution_api::project_call_mcp_tool(tool_name,parameters)
         .ok_or("call_mcp_tool 需要非空 server_name、tool_name 和有效的参数对象")?;

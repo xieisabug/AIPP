@@ -11,6 +11,9 @@ mod tests;
 #[path = "assistant_channel.rs"]
 pub(crate) mod channel;
 
+#[path = "assistant_permissions.rs"]
+pub(crate) mod permissions;
+
 pub(crate) fn editable(db: &AssistantDatabase, id: i64) -> Result<crate::db::assistant_db::Assistant, String> {
     let assistant = db.get_assistant(id).map_err(|e| format!("读取助手 #{id} 失败：{e}"))?;
     if crate::api::butler_api::is_butler_system_assistant(&assistant) {
@@ -196,4 +199,24 @@ pub(crate) fn directory(raw: &str) -> Result<String,String> {
 
 pub(crate) fn config_value(db: &AssistantDatabase, id: i64, name: &str) -> Result<Option<String>,String> {
     db.conn.query_row("SELECT value FROM assistant_model_config WHERE assistant_id=?1 AND name=?2",params![id,name],|r|r.get(0)).optional().map(|v|v.flatten()).map_err(|e|e.to_string())
+}
+
+pub(crate) fn config_model_id(db: &AssistantDatabase, id: i64) -> Result<i64,String> {
+    let models = db.get_assistant_model(id).map_err(|e|e.to_string())?;
+    let configs = db.get_assistant_model_configs(id).map_err(|e|e.to_string())?;
+    models.first().map(|m|m.id)
+        .or_else(||configs.iter().find(|c|c.name=="acp_provider").map(|c|c.assistant_model_id))
+        .ok_or_else(||"助手没有模型绑定行或旧版 Agent 提供商配置行".into())
+}
+
+pub(crate) fn set_mcp_mode(db: &AssistantDatabase, id: i64, mode: &str, dry_run: bool) -> Result<Value,String> {
+    if !matches!(mode,"dynamic"|"static") {return Err("mode 须为 dynamic 或 static".into());}
+    let tx = db.conn.unchecked_transaction().map_err(|e|e.to_string())?;
+    editable(db,id)?;
+    let model = config_model_id(db,id)?;
+    for (name,value) in [("dynamic_mcp_loading_enabled",(mode=="dynamic").to_string()),("mcp_loading_mode_explicit","true".to_string())] {
+        db.conn.execute("INSERT INTO assistant_model_config(assistant_id,assistant_model_id,name,value,value_type) VALUES(?1,?2,?3,?4,'boolean') ON CONFLICT(assistant_id,name) DO UPDATE SET value=excluded.value,value_type=excluded.value_type",params![id,model,name,value]).map_err(|e|e.to_string())?;
+    }
+    if !dry_run {tx.commit().map_err(|e|e.to_string())?;}
+    Ok(json!({"assistant_id":id,"mode":mode,"saved":!dry_run,"dry_run":dry_run,"effective_when":"后续请求生效；不会更改 Skills、服务连接或工具审核"}))
 }

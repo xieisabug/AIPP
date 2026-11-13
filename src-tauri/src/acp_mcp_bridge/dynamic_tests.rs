@@ -8,6 +8,7 @@ fn fixture() -> (MCPDatabase,MCPServer,i64,i64) {
     let agent = db.upsert_mcp_server_with_builtin("Agent",None,"stdio",Some("aipp:agent"),None,None,None,None,false,true,true,false,false).unwrap();
     let wrapper = db.upsert_mcp_server_tool(agent,"call_mcp_tool",None,Some("{}")).unwrap();
     db.update_mcp_server_tool(wrapper,true,false).unwrap();
+    for name in ["load_mcp_server","load_mcp_tool"] {db.upsert_mcp_server_tool(agent,name,None,Some("{}")).unwrap();}
     let target = db.upsert_mcp_server_with_builtin("Notes",None,"http",None,None,None,Some("http://127.0.0.1/mcp"),None,false,true,false,true,false).unwrap();
     let tool = db.upsert_mcp_server_tool(target,"read_notes",None,Some("{\"type\":\"object\"}")).unwrap();
     db.update_mcp_server_tool(tool,true,false).unwrap();
@@ -110,4 +111,25 @@ async fn test_native_dynamic_call_reaches_transport_and_returns_its_result() {
         Err("original transport error".into())
     }).await.unwrap_err();
     assert_eq!(error,"original transport error");
+}
+
+#[tokio::test]
+async fn test_native_dynamic_entries_recheck_global_flags_after_session_start() {
+    for name in ["load_mcp_server","load_mcp_tool","call_mcp_tool"] {
+        let (db,agent,_,tool) = fixture();
+        db.upsert_conversation_loaded_tool(7,tool,None).unwrap();
+        let entry = db.get_mcp_server_tools(agent.id).unwrap().into_iter().find(|t|t.tool_name==name).unwrap();
+        assert!(resolve_target(&db,agent.clone(),name,&arguments(),7,&Restrictions::default()).is_ok());
+        db.update_mcp_server_tool(entry.id,false,false).unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let failure = dispatch(&db,agent.clone(),name,&arguments(),7,&Restrictions::default(),|_| {
+            calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            async {Ok("must not execute".into())}
+        }).await.unwrap_err();
+        assert!(failure.contains("已停用"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0);
+        db.update_mcp_server_tool(entry.id,true,false).unwrap();
+        db.conn.execute("UPDATE mcp_server SET is_enabled=0 WHERE id=?1",[agent.id]).unwrap();
+        assert!(error(resolve_target(&db,agent,name,&arguments(),7,&Restrictions::default())).contains("已停用"));
+    }
 }

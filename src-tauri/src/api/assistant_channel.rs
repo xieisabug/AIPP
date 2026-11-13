@@ -73,7 +73,14 @@ pub(crate) fn read(db: &AssistantDatabase, llm: &LLMDatabase, id: i64) -> Result
 }
 
 pub(crate) fn patch(db: &AssistantDatabase, llm: &LLMDatabase, id: i64, set: &Value, remove: &Value, dry_run: bool) -> Result<Value,String> {
+    patch_managed(db,llm,id,set,remove,dry_run,None)
+}
+
+pub(crate) fn patch_managed(db: &AssistantDatabase, llm: &LLMDatabase, id: i64, set: &Value, remove: &Value, dry_run: bool, policy: Option<super::permissions::Policy<'_>>) -> Result<Value,String> {
+    let _provider_lock = if policy.is_some() {Some(rusqlite::Transaction::new_unchecked(&llm.conn,rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?)} else {None};
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn,rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
     super::editable(db,id)?;
+    let before = if let Some(policy)=policy {let before=super::permissions::state(db,llm,id)?; super::permissions::check_before(policy,&before)?; Some(before)} else {None};
     let (kind,api,providers) = context(db,llm,id)?;
     let fields = schema(kind,&api,&providers)?;
     let set = set.as_object().ok_or("set 必须为对象")?;
@@ -95,30 +102,34 @@ pub(crate) fn patch(db: &AssistantDatabase, llm: &LLMDatabase, id: i64, set: &Va
         let name = name.as_str().ok_or("remove 元素必须为参数名")?;
         if !fields.iter().any(|f|f.name==name) || set.contains_key(name) { return Err(format!("删除参数不支持或与 set 冲突：{name}")); }
     }
-    let tx = db.conn.unchecked_transaction().map_err(|e|e.to_string())?;
-    let models = db.get_assistant_model(id).map_err(|e|e.to_string())?;
-    let configs = db.get_assistant_model_configs(id).map_err(|e|e.to_string())?;
-    let model = models.first().map(|m|m.id)
-        .or_else(||configs.iter().find(|c|c.name=="acp_provider").map(|c|c.assistant_model_id))
-        .ok_or("助手没有模型绑定行或旧版 Agent 提供商配置行")?;
+    let model = super::config_model_id(db,id)?;
     for name in remove { db.conn.execute("DELETE FROM assistant_model_config WHERE assistant_id=?1 AND name=?2",params![id,name.as_str().unwrap()]).map_err(|e|e.to_string())?; }
     for (name,value,ty) in values {
         db.conn.execute("INSERT INTO assistant_model_config(assistant_id,assistant_model_id,name,value,value_type) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(assistant_id,name) DO UPDATE SET value=excluded.value,value_type=excluded.value_type",params![id,model,name,value,ty]).map_err(|e|e.to_string())?;
     }
     let mut result = read(db,llm,id)?;
+    if let (Some(policy),Some(before))=(policy,before) {
+        result["permission_change"] = super::permissions::finish(policy,before,super::permissions::state(db,llm,id)?,dry_run,"assistant.patch_agent_permissions")?;
+    }
     result["saved"] = json!(!dry_run); result["dry_run"] = json!(dry_run);
     if !dry_run { tx.commit().map_err(|e|e.to_string())?; }
     Ok(result)
 }
 
 pub(crate) fn workspace(db: &AssistantDatabase, llm: &LLMDatabase, id: i64, args: &Value, dry_run: bool) -> Result<Value,String> {
+    workspace_managed(db,llm,id,args,dry_run,None)
+}
+
+pub(crate) fn workspace_managed(db: &AssistantDatabase, llm: &LLMDatabase, id: i64, args: &Value, dry_run: bool, policy: Option<super::permissions::Policy<'_>>) -> Result<Value,String> {
     let assistant = super::editable(db,id)?;
     let action = args["action"].as_str().unwrap_or("list");
     if action=="set_directory" {
         if assistant.assistant_type != Some(4) { return Err("只有 Agent 助手支持执行工作目录".into()); }
-        return patch(db,llm,id,&json!({"acp_working_directory":args.get("path").ok_or("需要 path")?}),&json!([]),dry_run);
+        return patch_managed(db,llm,id,&json!({"acp_working_directory":args.get("path").ok_or("需要 path")?}),&json!([]),dry_run,policy);
     }
-    let tx = db.conn.unchecked_transaction().map_err(|e|e.to_string())?;
+    let _provider_lock = if policy.is_some() {Some(rusqlite::Transaction::new_unchecked(&llm.conn,rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?)} else {None};
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn,rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+    let before = if let Some(policy)=policy {let before=super::permissions::state(db,llm,id)?; super::permissions::check_before(policy,&before)?; Some(before)} else {None};
     match action {
         "list" => {},
         "add" => {
@@ -144,9 +155,12 @@ pub(crate) fn workspace(db: &AssistantDatabase, llm: &LLMDatabase, id: i64, args
         _ => return Err(format!("不支持的工作区操作：{action}")),
     }
     let channel = if assistant.assistant_type==Some(4) { read(db,llm,id)? } else { Value::Null };
-    let result = json!({"assistant_id":id,"action":action,"saved":!dry_run,"dry_run":dry_run,
+    let mut result = json!({"assistant_id":id,"action":action,"saved":!dry_run,"dry_run":dry_run,
         "workspaces":db.get_assistant_workspaces(id).map_err(|e|e.to_string())?,"channel_config":channel,
         "permissions":"工作区仅表示 AIPP 内置操作的路径信任；目录登记不更改 Agent 沙箱或审批，移除不撤销其他独立授权。执行起点仅由 acp_working_directory 决定，与工作区列表顺序无关。"});
+    if let (Some(policy),Some(before))=(policy,before) {
+        result["permission_change"] = super::permissions::finish(policy,before,super::permissions::state(db,llm,id)?,dry_run,"assistant.grant_workspace")?;
+    }
     if !dry_run { tx.commit().map_err(|e|e.to_string())?; }
     Ok(result)
 }

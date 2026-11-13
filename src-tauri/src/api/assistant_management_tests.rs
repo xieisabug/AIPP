@@ -217,3 +217,111 @@ fn test_assistant_management_provider_priority_does_not_replace_missing_modern_b
     assert!(channel::read(&db,&llm,id).unwrap_err().contains("999999"));
     assert!(channel::workspace(&db,&llm,id,&json!({"action":"list"}),false).unwrap_err().contains("999999"));
 }
+
+#[test]
+fn test_assistant_management_mcp_mode_uses_legacy_config_target_in_preview_and_save() {
+    for has_model in [true,false] {
+        let (db,llm,_,codex) = fixture();
+        let id = create(&db,&llm,codex,4);
+        db.add_assistant_model_config(id,0,"acp_provider",&codex.to_string(),"string").unwrap();
+        if !has_model {db.conn.execute("DELETE FROM assistant_model WHERE assistant_id=?1",[id]).unwrap();}
+        else {db.conn.execute("UPDATE assistant_model SET provider_id=0 WHERE assistant_id=?1",[id]).unwrap();}
+        set_mcp_mode(&db,id,"static",true).unwrap();
+        assert_eq!(config_value(&db,id,"dynamic_mcp_loading_enabled").unwrap().as_deref(),Some("true"));
+        for mode in ["static","dynamic"] {
+            set_mcp_mode(&db,id,mode,false).unwrap();
+            assert_eq!(config_value(&db,id,"dynamic_mcp_loading_enabled").unwrap().as_deref(),Some(if mode=="dynamic" {"true"}else{"false"}));
+            assert_eq!(config_value(&db,id,"mcp_loading_mode_explicit").unwrap().as_deref(),Some("true"));
+        }
+        assert!(set_mcp_mode(&db,id,"bad-mode",false).is_err());
+        assert_eq!(crate::api::assistant_api::resolve_acp_provider_id(&db.get_assistant_model(id).unwrap(),&db.get_assistant_model_configs(id).unwrap()),Some(codex));
+    }
+}
+
+#[test]
+fn test_assistant_permissions_channel_expansion_requires_approval_and_rechecks_snapshot() {
+    use permissions::Policy;
+    let (db,llm,_,codex) = fixture();
+    let id = create(&db,&llm,codex,4);
+    let set = json!({"codex_sandbox":"danger-full-access","codex_approval_policy":"never","codex_approvals_reviewer":"auto_review"});
+    for single in [json!({"codex_sandbox":"danger-full-access"}),json!({"codex_approval_policy":"never"}),json!({"codex_approvals_reviewer":"auto_review"}),json!({"tool_review_mode":"auto_model"})] {
+        assert!(channel::patch_managed(&db,&llm,id,&single,&json!([]),false,Some(Policy::Ordinary)).is_err());
+    }
+    let preview = channel::patch_managed(&db,&llm,id,&set,&json!([]),true,Some(Policy::Ordinary)).unwrap();
+    let snapshot = &preview["permission_change"];
+    assert_eq!(snapshot["requires_user_approval"],true);
+    assert!(channel::patch_managed(&db,&llm,id,&set,&json!([]),false,Some(Policy::Ordinary)).unwrap_err().contains("assistant.patch_agent_permissions"));
+    assert!(config_value(&db,id,"codex_sandbox").unwrap().is_none());
+    channel::patch_managed(&db,&llm,id,&set,&json!([]),false,Some(Policy::Approved(snapshot))).unwrap();
+    assert_eq!(config_value(&db,id,"codex_sandbox").unwrap().as_deref(),Some("danger-full-access"));
+    assert!(channel::patch_managed(&db,&llm,id,&set,&json!([]),false,Some(Policy::Approved(snapshot))).unwrap_err().contains("等待批准期间"));
+    // Tightening remains an ordinary configuration change.
+    channel::patch_managed(&db,&llm,id,&json!({"codex_sandbox":"read-only","codex_approval_policy":"untrusted","codex_approvals_reviewer":"user"}),&json!([]),false,Some(Policy::Ordinary)).unwrap();
+}
+
+#[test]
+fn test_assistant_permissions_inherited_expansion_and_provider_drift_are_rejected() {
+    use permissions::Policy;
+    let (db,llm,_,codex) = fixture();
+    let id = create(&db,&llm,codex,4);
+    llm.add_llm_provider_config(codex,"codex_sandbox","danger-full-access","",false).unwrap();
+    channel::patch(&db,&llm,id,&json!({"codex_sandbox":"read-only"}),&json!([]),false).unwrap();
+    assert!(channel::patch_managed(&db,&llm,id,&json!({}),&json!(["codex_sandbox"]),false,Some(Policy::Ordinary)).is_err());
+    assert_eq!(config_value(&db,id,"codex_sandbox").unwrap().as_deref(),Some("read-only"));
+    let preview = channel::patch_managed(&db,&llm,id,&json!({}),&json!(["codex_sandbox"]),true,Some(Policy::Ordinary)).unwrap();
+    llm.conn.execute("UPDATE llm_provider_config SET value='workspace-write' WHERE llm_provider_id=?1 AND name='codex_sandbox'",[codex]).unwrap();
+    assert!(channel::patch_managed(&db,&llm,id,&json!({}),&json!(["codex_sandbox"]),false,Some(Policy::Approved(&preview["permission_change"]))).is_err());
+    assert_eq!(config_value(&db,id,"codex_sandbox").unwrap().as_deref(),Some("read-only"));
+}
+
+#[test]
+fn test_assistant_permissions_workspace_grant_is_one_time_and_narrowing_is_ordinary() {
+    use permissions::Policy;
+    let (db,llm,normal,_) = fixture();
+    let id = create(&db,&llm,normal,0);
+    let path = directory(std::env::current_dir().unwrap().to_str().unwrap()).unwrap();
+    let args = json!({"action":"add","path":path});
+    let preview = channel::workspace_managed(&db,&llm,id,&args,true,Some(Policy::Ordinary)).unwrap();
+    assert!(db.get_assistant_workspaces(id).unwrap().is_empty());
+    assert!(channel::workspace_managed(&db,&llm,id,&args,false,Some(Policy::Ordinary)).unwrap_err().contains("assistant.grant_workspace"));
+    assert!(db.get_assistant_workspaces(id).unwrap().is_empty());
+    let other = std::path::Path::new(&path).parent().unwrap().to_string_lossy().to_string();
+    assert!(channel::workspace_managed(&db,&llm,id,&json!({"action":"add","path":other}),false,Some(Policy::Approved(&preview["permission_change"]))).is_err());
+    assert!(db.get_assistant_workspaces(id).unwrap().is_empty());
+    channel::workspace_managed(&db,&llm,id,&args,false,Some(Policy::Approved(&preview["permission_change"]))).unwrap();
+    channel::workspace_managed(&db,&llm,id,&args,false,Some(Policy::Ordinary)).unwrap();
+    let wid = db.get_assistant_workspaces(id).unwrap()[0].id;
+    channel::workspace_managed(&db,&llm,id,&json!({"action":"remove","workspace_id":wid}),false,Some(Policy::Ordinary)).unwrap();
+    assert!(db.get_assistant_workspaces(id).unwrap().is_empty());
+}
+
+#[test]
+fn test_assistant_permissions_grant_actions_have_static_user_gates() {
+    use crate::mcp::builtin_mcp::superadmin::{registry::build_registry,types::ApprovalPolicy};
+    let registry = build_registry();
+    for id in ["assistant.patch_agent_permissions","assistant.grant_workspace"] {
+        let meta = registry.get_meta(id).unwrap();
+        assert!(meta.requires_approval);
+        assert_eq!(meta.approval_policy,ApprovalPolicy::UserApprovalRequired);
+        assert!(crate::mcp::builtin_mcp::superadmin::action_approval_gate(id,false).is_some());
+        assert!(crate::mcp::builtin_mcp::superadmin::action_approval_gate(id,true).is_none());
+    }
+    assert!(!registry.get_meta("assistant.patch_channel_config").unwrap().requires_approval);
+    assert!(!registry.get_meta("assistant.workspace").unwrap().requires_approval);
+}
+
+#[test]
+fn test_assistant_permissions_cwd_expansion_tracks_workspace_write_scope() {
+    let cwd = std::env::current_dir().unwrap();
+    let parent = cwd.parent().unwrap();
+    let before = json!({"workspace_paths":[],"permissions":{"codex_sandbox":"workspace-write","acp_working_directory":cwd.to_string_lossy()}});
+    let mut after = before.clone();
+    after["permissions"]["acp_working_directory"] = json!(parent.to_string_lossy());
+    assert!(permissions::expands(&before,&after));
+    after["permissions"]["codex_sandbox"]=json!("read-only");
+    assert!(!permissions::expands(&before,&after));
+    // Changing an execution start directory alone does not grant AIPP path trust.
+    let before = json!({"workspace_paths":[],"permissions":{"acp_working_directory":cwd.to_string_lossy()}});
+    let after = json!({"workspace_paths":[],"permissions":{"acp_working_directory":parent.to_string_lossy()}});
+    assert!(!permissions::expands(&before,&after));
+}

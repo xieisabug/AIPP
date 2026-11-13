@@ -18,9 +18,8 @@ pub(super) async fn profile_action(app: &AppHandle, op: &str, args: Value, dry_r
 }
 
 struct Handler(&'static str);
-#[async_trait]
-impl ActionHandler for Handler {
-    async fn execute(&self, app: &AppHandle, args: Value, dry_run: bool) -> Result<Value,String> {
+impl Handler {
+    async fn run(&self, app: &AppHandle, mut args: Value, dry_run: bool, approved: Option<&Value>) -> Result<Value,String> {
         if matches!(self.0,"update"|"copy") { return profile_action(app,self.0,args,dry_run).await; }
         if self.0.starts_with("group_") { return group_action(app,self.0,args,dry_run).await; }
         let id = args["assistant_id"].as_i64().ok_or("需要 assistant_id")?;
@@ -30,8 +29,11 @@ impl ActionHandler for Handler {
             db.get_assistant(id).map_err(|e|format!("助手 #{id} 不存在：{e}"))?;
             match self.0 {
                 "channel_get" => channel::read(&db,&llm,id)?,
-                "channel_patch" => channel::patch(&db,&llm,id,&args["set"],&args["remove"],dry_run)?,
-                "workspace" => channel::workspace(&db,&llm,id,&args,dry_run)?,
+                "channel_patch"|"permission_patch" => channel::patch_managed(&db,&llm,id,&args["set"],&args["remove"],dry_run,Some(approved.map(management::permissions::Policy::Approved).unwrap_or(management::permissions::Policy::Ordinary)))?,
+                "workspace"|"workspace_grant" => {
+                    if self.0=="workspace_grant" {args["action"]=json!("add");}
+                    channel::workspace_managed(&db,&llm,id,&args,dry_run,Some(approved.map(management::permissions::Policy::Approved).unwrap_or(management::permissions::Policy::Ordinary)))?
+                },
                 "mcp_get" => {
                     let mcp = crate::db::mcp_db::MCPDatabase::new(app).map_err(|e|e.to_string())?;
                     let servers = mcp.get_mcp_servers().map_err(|e|e.to_string())?;
@@ -44,18 +46,7 @@ impl ActionHandler for Handler {
                         "runtime_note":"此处为助手显式配置；动态发现继续受全局启用、连接、工具开关与审核约束。管家运行时统一注入能力，不代表助手显式绑定。"})
                 },
                 "mcp_mode" => {
-                    management::editable(&db,id)?;
-                    let mode = args["mode"].as_str().ok_or("需要 mode=dynamic 或 static")?;
-                    if !matches!(mode,"dynamic"|"static") { return Err("mode 须为 dynamic 或 static".into()); }
-                    if !dry_run {
-                        let model = db.get_assistant_model(id).map_err(|e|e.to_string())?.first().map(|m|m.id).ok_or("助手缺少模型绑定行")?;
-                        let tx = db.conn.unchecked_transaction().map_err(|e|e.to_string())?;
-                        for (name,value) in [("dynamic_mcp_loading_enabled",(mode=="dynamic").to_string()),("mcp_loading_mode_explicit","true".to_string())] {
-                            db.conn.execute("INSERT INTO assistant_model_config(assistant_id,assistant_model_id,name,value,value_type) VALUES(?1,?2,?3,?4,'boolean') ON CONFLICT(assistant_id,name) DO UPDATE SET value=excluded.value,value_type=excluded.value_type",rusqlite::params![id,model,name,value]).map_err(|e|e.to_string())?;
-                        }
-                        tx.commit().map_err(|e|e.to_string())?;
-                    }
-                    json!({"assistant_id":id,"mode":mode,"saved":!dry_run,"dry_run":dry_run,"effective_when":"后续请求生效；不会更改 Skills、服务连接或工具审核"})
+                    management::set_mcp_mode(&db,id,args["mode"].as_str().ok_or("需要 mode=dynamic 或 static")?,dry_run)?
                 },
                 "skills_get" => {
                     let skill_db = crate::db::skill_db::SkillDatabase::new(app).map_err(|e|e.to_string())?;
@@ -68,13 +59,36 @@ impl ActionHandler for Handler {
                 _ => return Err(format!("未知助手配置操作：{}",self.0)),
             }
         };
-        if !dry_run && matches!(self.0,"channel_patch"|"workspace"|"mcp_mode") { management::changed(app,id).await; }
+        if !dry_run && matches!(self.0,"channel_patch"|"permission_patch"|"workspace"|"workspace_grant"|"mcp_mode") { management::changed(app,id).await; }
         if self.0=="mcp_get" {
             let mut result = result;
             result["dynamic_effective"] = json!(crate::mcp::is_dynamic_mcp_loading_enabled_for_assistant(app,id).await);
             return Ok(result);
         }
         Ok(result)
+    }
+}
+
+#[async_trait]
+impl ActionHandler for Handler {
+    async fn execute(&self, app: &AppHandle, args: Value, dry_run: bool) -> Result<Value,String> {
+        if !dry_run && matches!(self.0,"permission_patch"|"workspace_grant") {
+            return Err("扩大权限的操作必须经 superadmin_execute 请求用户本次批准；未修改配置".into());
+        }
+        self.run(app,args,dry_run,None).await
+    }
+    async fn snapshot_before(&self, app: &AppHandle, args: &Value) -> Option<Value> {
+        if !matches!(self.0,"permission_patch"|"workspace_grant") {return None;}
+        Some(match self.run(app,args.clone(),true,None).await {
+            Ok(value) => value["permission_change"].clone(),
+            Err(error) => json!({"error":error}),
+        })
+    }
+    async fn execute_approved(&self, app: &AppHandle, args: Value, snapshot: Option<&Value>) -> Result<Value,String> {
+        if !matches!(self.0,"permission_patch"|"workspace_grant") {return Err("该动作不是权限授予入口".into());}
+        let snapshot = snapshot.ok_or("权限批准缺少操作对象快照；未执行，请重新预览")?;
+        if let Some(error)=snapshot["error"].as_str() {return Err(format!("权限预览失败：{error}；未执行"));}
+        self.run(app,args,false,Some(snapshot)).await
     }
 }
 
@@ -110,10 +124,11 @@ async fn group_action(app: &AppHandle, op: &str, args: Value, dry_run: bool) -> 
 
 fn register_action(registry: &mut ActionRegistry, id: &str, op: &'static str, summary: &str, description: &str, schema: Value, write: bool, scope: ActionScope) {
     let domain = id.split('.').next().unwrap();
+    let grant = matches!(op,"permission_patch"|"workspace_grant");
     registry.register(ActionMeta {
         action_id:id.into(),domain:domain.into(),summary:summary.into(),description:description.into(),
-        risk_level:if write {RiskLevel::MEDIUM}else{RiskLevel::SAFE},requires_approval:false,
-        approval_policy:if write {ApprovalPolicy::AllowInScope}else{ApprovalPolicy::AutoAllow},
+        risk_level:if grant {RiskLevel::HIGH}else if write {RiskLevel::MEDIUM}else{RiskLevel::SAFE},requires_approval:grant,
+        approval_policy:if grant {ApprovalPolicy::UserApprovalRequired}else if write {ApprovalPolicy::AllowInScope}else{ApprovalPolicy::AutoAllow},
         allowed_scopes:vec![scope],tags:vec![domain.into(),if write {"write".into()}else{"read".into()},"configuration".into()],
         args_schema:schema,result_schema:json!({"type":"object"}),supports_dry_run:write && op!="group_create",rollback_hint:None,
     },Box::new(Handler(op)));
@@ -129,11 +144,14 @@ pub fn register(registry: &mut ActionRegistry) {
     register_action(registry,"assistant.copy","copy","复制助手配置","保留来源模型参数、MCP、Skills、工作区及提示词参数，可覆盖基础资料；不应用新建默认值。",profile,true,ActionScope::Assistant);
     let assistant = json!({"type":"object","required":["assistant_id"],"properties":{"assistant_id":{"type":"integer"}}});
     register_action(registry,"assistant.get_channel_config","channel_get","查询通道配置与合法值","返回适用字段、合法值、助手覆盖、provider 默认、最终值与来源；不启动 Agent。",assistant.clone(),false,ActionScope::Assistant);
-    register_action(registry,"assistant.patch_channel_config","channel_patch","修改或清除助手通道参数","先查询支持字段；set 设置严格类型，remove 清除覆盖并恢复继承。不会切换模型或通道。",json!({"type":"object","required":["assistant_id","set","remove"],"properties":{"assistant_id":{"type":"integer"},"set":{"type":"object"},"remove":{"type":"array","items":{"type":"string"}}}}),true,ActionScope::Assistant);
+    register_action(registry,"assistant.patch_channel_config","channel_patch","修改或清除助手通道参数","先查询支持字段；普通修改与收紧可直接保存，扩大权限须使用 assistant.patch_agent_permissions 请求用户批准。remove 恢复继承也校验权限变化。",json!({"type":"object","required":["assistant_id","set","remove"],"properties":{"assistant_id":{"type":"integer"},"set":{"type":"object"},"remove":{"type":"array","items":{"type":"string"}}}}),true,ActionScope::Assistant);
     register_action(registry,"assistant.get_mcp_config","mcp_get","查询助手 MCP 可用项与设置","返回服务与工具显式绑定，区分管家自动注入与助手设置。",assistant.clone(),false,ActionScope::Assistant);
     register_action(registry,"assistant.get_skill_config","skills_get","查询助手 Skills 可用项与设置","返回发现的技能及当前启停、优先级；设置使用独立的 assistant.update_skill_config。",assistant,false,ActionScope::Assistant);
     register_action(registry,"assistant.set_mcp_mode","mcp_mode","设置助手 MCP 加载模式","只修改动态/静态 MCP，不改变服务开关或 Skills；服务设置使用 assistant.update_mcp_config。",json!({"type":"object","required":["assistant_id","mode"],"properties":{"assistant_id":{"type":"integer"},"mode":{"enum":["dynamic","static"]}}}),true,ActionScope::Assistant);
-    register_action(registry,"assistant.workspace","workspace","管理助手工作区与执行目录","list 查询、add 注册路径、remove 按 workspace_id 撤销路径信任、set_directory 显式设置 Agent cwd。移除当前 cwd 前必须先显式改目录。登记路径不改变原生沙箱或审批。",json!({"type":"object","required":["assistant_id","action"],"properties":{"assistant_id":{"type":"integer"},"action":{"enum":["list","add","remove","set_directory"]},"path":{"type":"string"},"workspace_id":{"type":"integer"}}}),true,ActionScope::Assistant);
+    register_action(registry,"assistant.workspace","workspace","管理助手工作区与执行目录","list 查询、add 注册路径、remove 按 workspace_id 撤销路径信任、set_directory 显式设置 Agent cwd。移除当前 cwd 前必须先显式改目录。新增可信范围须使用 assistant.grant_workspace 请求用户批准；工作目录扩大范围须使用 assistant.patch_agent_permissions。",json!({"type":"object","required":["assistant_id","action"],"properties":{"assistant_id":{"type":"integer"},"action":{"enum":["list","add","remove","set_directory"]},"path":{"type":"string"},"workspace_id":{"type":"integer"}}}),true,ActionScope::Assistant);
+    let channel_schema = registry.get_meta("assistant.patch_channel_config").unwrap().args_schema.clone();
+    register_action(registry,"assistant.patch_agent_permissions","permission_patch","批准助手权限变更","仅本次用户批准后保存持久沙箱、审批或执行目录等配置；显示前后权限并在执行时复核，配置/路径变化即失效。普通参数或收紧权限仍用 assistant.patch_channel_config。",channel_schema,true,ActionScope::Assistant);
+    register_action(registry,"assistant.grant_workspace","workspace_grant","批准新增可信工作区","新增持久可信范围需用户亲自批准本次目录。确认前后范围和路径；执行时重新核对权限及规范路径，变化即失效。已被信任路径覆盖的目录可用 assistant.workspace 添加。",json!({"type":"object","required":["assistant_id","path"],"properties":{"assistant_id":{"type":"integer"},"path":{"type":"string"}}}),true,ActionScope::Assistant);
     register_action(registry,"conversation.group_list","group_list","查询管家群聊","返回群 ID 与名称，以 ID 消歧同名群。",json!({"type":"object"}),false,ActionScope::App);
     register_action(registry,"conversation.group_get","group_get","查询管家群详情","按 group_id 查询当前名称及成员。",json!({"type":"object","required":["group_id"],"properties":{"group_id":{"type":"integer"}}}),false,ActionScope::App);
     register_action(registry,"conversation.group_create","group_create","创建命名管家群","指定名称和成员，使用现有群聊服务；不支持 dry_run。",json!({"type":"object","required":["name","assistant_ids"],"properties":{"name":{"type":"string"},"assistant_ids":{"type":"array","items":{"type":"integer"}},"include_chief":{"type":"boolean"}}}),true,ActionScope::App);
