@@ -4,6 +4,9 @@ pub mod butler_group_runtime;
 mod butler_group_router;
 pub mod ai;
 pub mod ai_api;
+pub(crate) mod agent_model_cache;
+#[cfg(desktop)]
+pub(crate) mod agent_model_prewarm;
 pub mod assistant_api;
 pub mod assistant_summary_api;
 pub(crate) mod approval_attention;

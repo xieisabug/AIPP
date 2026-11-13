@@ -1,10 +1,12 @@
 use crate::api::ai::acp::{
     apply_network_proxy_to_env_vars, build_acp_launch_plan, extract_acp_config,
     probe_acp_session_config_options, resolve_acp_cli_path,
-    AcpSessionConfigOptionPayload,
+    AcpConfig, AcpSessionConfigOptionPayload,
 };
+use crate::api::agent_model_cache::ProbeCache;
 use crate::api::ai::codex_app_server::{
-    extract_codex_app_server_config, probe_codex_model_options, CODEX_APP_SERVER_API_TYPE,
+    extract_codex_app_server_config, probe_codex_model_options, CodexAppServerConfig,
+    CodexModelProbe, CODEX_APP_SERVER_API_TYPE,
 };
 use crate::api::ai::claude_sdk::{
     claude_model_choices, extract_claude_sdk_config, is_claude_code_provider,
@@ -27,6 +29,8 @@ use crate::{
     FeatureConfigState, NameCacheState,
 };
 use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tracing::{debug, info, instrument, warn};
 
@@ -105,6 +109,57 @@ fn add_acp_protocol_model_options(
     }
 }
 
+/// 模型列表在这段时间内视为新鲜；更旧的缓存仍立即返回，同时后台重新探测（见 `agent_model_cache`）。
+const AGENT_MODEL_PROBE_FRESH_FOR: Duration = Duration::from_secs(60);
+static CODEX_MODEL_PROBES: LazyLock<ProbeCache<CodexModelProbe>> =
+    LazyLock::new(|| ProbeCache::new(AGENT_MODEL_PROBE_FRESH_FOR));
+static NATIVE_MODEL_PROBES: LazyLock<ProbeCache<Vec<(String, String)>>> =
+    LazyLock::new(|| ProbeCache::new(AGENT_MODEL_PROBE_FRESH_FOR));
+static ACP_MODEL_PROBES: LazyLock<ProbeCache<Vec<AcpSessionConfigOptionPayload>>> =
+    LazyLock::new(|| ProbeCache::new(AGENT_MODEL_PROBE_FRESH_FOR));
+
+/// 探测要拉起进程的 Agent 都只用到启动命令与参数、工作目录、环境变量，用它们区分缓存。
+fn launch_cache_key(
+    cli_command: &str,
+    additional_args: &[String],
+    working_directory: &std::path::Path,
+    env_vars: &HashMap<String, String>,
+) -> String {
+    let env: std::collections::BTreeMap<_, _> = env_vars.iter().collect();
+    format!("{cli_command}:{additional_args:?}:{}:{env:?}", working_directory.display())
+}
+
+/// Codex 的 `model/list` 每次都联网刷新目录，网络差时要等约 5s 超时，所以按启动配置缓存。
+async fn probe_codex_models_cached(
+    app_handle: &tauri::AppHandle,
+    config: CodexAppServerConfig,
+) -> Result<CodexModelProbe, String> {
+    // working_directory 同时也是 config/read 的 cwd
+    let key = launch_cache_key(
+        &config.cli_command,
+        &config.additional_args,
+        &config.working_directory,
+        &config.env_vars,
+    );
+    let app_handle = app_handle.clone();
+    CODEX_MODEL_PROBES
+        .get_or_probe(key, move || async move { probe_codex_model_options(&app_handle, &config).await })
+        .await
+}
+
+/// 通用 ACP 探测要 initialize + session/new，按启动配置缓存（当前模型/思考强度不影响探测结果）。
+async fn probe_acp_models_cached(config: AcpConfig) -> Result<Vec<AcpSessionConfigOptionPayload>, String> {
+    let key = launch_cache_key(
+        &config.cli_command,
+        &config.additional_args,
+        &config.working_directory,
+        &config.env_vars,
+    );
+    ACP_MODEL_PROBES
+        .get_or_probe(key, move || async move { probe_acp_session_config_options(&config).await })
+        .await
+}
+
 #[tauri::command]
 #[instrument(skip(app_handle), fields(assistant_id))]
 pub async fn get_agent_model_options(
@@ -147,7 +202,7 @@ pub async fn get_agent_model_options(
         CODEX_APP_SERVER_API_TYPE => {
             let config = extract_codex_app_server_config(&detail.model_configs, &provider_configs, current_model.clone())
                 .map_err(|e| e.to_string())?;
-            let probe = probe_codex_model_options(&app_handle, &config).await?;
+            let probe = probe_codex_models_cached(&app_handle, config).await?;
             let effective_default_model = current_model.clone().or_else(|| probe.default_model.clone());
             for entry in probe.models {
                 let is_default = effective_default_model.as_deref() == Some(entry.id.as_str())
@@ -220,7 +275,7 @@ pub async fn get_agent_model_options(
                 }
             }
 
-            match probe_acp_session_config_options(&config).await {
+            match probe_acp_models_cached(config).await {
                 Ok(config_options) => {
                     add_acp_protocol_model_options(
                         &mut options,
@@ -254,7 +309,9 @@ pub async fn get_agent_model_options(
             use crate::api::ai::agent_driver::native_agents::{configuration, probe_models, DEFAULT_MODEL};
             let mut config = configuration(&detail.model_configs, &provider_configs, None).map_err(|e|e.to_string())?;
             crate::api::ai::agent_driver::native_agents::configure_instance(&app_handle, provider_id, api_type, &mut config).map_err(|e|e.to_string())?;
-            let models = probe_models(api_type, config).await?;
+            let key = config.probe_cache_key(api_type);
+            let driver = api_type.to_string();
+            let models = NATIVE_MODEL_PROBES.get_or_probe(key, move || async move { probe_models(&driver, config).await }).await?;
             add_agent_model_option(&mut options, AgentModelOption { code: format!("{DEFAULT_MODEL}%%{provider_id}"),
                 name: "使用智能体本机默认模型".into(), provider_id, efforts: Vec::new(), default_effort: None,
                 is_default: current_model.is_none() || current_model.as_deref() == Some(DEFAULT_MODEL) });

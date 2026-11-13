@@ -1,4 +1,4 @@
-import { jsonLines } from './common.mjs';
+import { jsonLines, probeModels } from './common.mjs';
 import { openPi } from './pi.mjs';
 import { loginCursor, openCursor } from './cursor.mjs';
 import { openOpenCode } from './opencode.mjs';
@@ -34,8 +34,8 @@ jsonLines(process.stdin, request => {
     } else if (request.type === 'probe') {
       const open = drivers[request.driver];
       if (!open) throw new Error(`Unknown native agent driver '${request.driver}'`);
-      const probe = await open({ ...request.config, probe: true }, emit);
-      try { data = await probe.models(); } finally { await probe.close(); }
+      await probeModels(open, request.config, emit, models => emit({ type: 'response', id: request.id, ok: true, data: models }));
+      return;
     } else if (request.type === 'init') {
       if (runtime || initializing) throw new Error('Native agent bridge already initialized');
       initializing = true;

@@ -324,6 +324,15 @@ async fn bridge_call(node: &str, cwd: &Path, env: &HashMap<String, String>, requ
             return Ok(frame["data"].clone());
         }
     }).await.unwrap_or_else(|_| Err(format!("Node 桥接进程 {} 秒内没有完成", limit.as_secs())));
+    if result.is_ok() {
+        // 结果已拿到；Windows 上结束进程树本身要 ~0.5s，放到后台，解包的桥接文件等进程结束后再删
+        tokio::spawn(async move {
+            terminate_tree(&mut child).await;
+            let _ = timeout(Duration::from_secs(2), stderr_task).await;
+            drop(files);
+        });
+        return result;
+    }
     terminate_tree(&mut child).await;
     let _ = timeout(Duration::from_secs(2), stderr_task).await;
     result.map_err(|error| {

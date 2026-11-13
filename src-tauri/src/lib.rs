@@ -902,6 +902,9 @@ pub fn run() {
             crate::api::butler_peer::start(app_handle.clone());
             #[cfg(desktop)]
             crate::api::butler_group_runtime::start_runtime(app_handle.clone());
+            // 后台预读 Agent 助手的模型列表，新建对话第一次打开也不用等 CLI 冷启动
+            #[cfg(desktop)]
+            crate::api::agent_model_prewarm::spawn(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );
