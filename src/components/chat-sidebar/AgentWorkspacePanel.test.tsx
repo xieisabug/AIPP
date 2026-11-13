@@ -101,7 +101,7 @@ describe("AgentWorkspacePanel", () => {
         expect(screen.getByText("对比 origin/main")).toBeInTheDocument();
         expect(screen.getByText("+1,331")).toBeInTheDocument();
         expect(screen.getByText("−37")).toBeInTheDocument();
-        expect(screen.getByRole("button", { name: /压缩上下文/ })).toBeEnabled();
+        expect(screen.getByRole("button", { name: /压缩/ })).toBeEnabled();
         expect(invoke).toHaveBeenCalledWith("get_agent_git_status", { conversationId: 42 });
     });
 
@@ -110,7 +110,7 @@ describe("AgentWorkspacePanel", () => {
         renderPanel();
 
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_agent_git_status", { conversationId: 42 }));
-        expect(screen.getByRole("button", { name: /压缩上下文/ })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /压缩/ })).toBeInTheDocument();
         expect(screen.queryByText("main")).not.toBeInTheDocument();
         expect(screen.queryByText(/改动/)).not.toBeInTheDocument();
     });
@@ -136,7 +136,7 @@ describe("AgentWorkspacePanel", () => {
         const { onCompact, rerender } = renderPanel();
         await screen.findByText("main");
 
-        await user.click(screen.getByRole("button", { name: /压缩上下文/ }));
+        await user.click(screen.getByRole("button", { name: /压缩/ }));
         expect(onCompact).toHaveBeenCalledOnce();
 
         rerender(
@@ -148,7 +148,7 @@ describe("AgentWorkspacePanel", () => {
                 onGenerateCommitMessage={async () => ""}
             />,
         );
-        const compact = screen.getByRole("button", { name: /压缩上下文/ });
+        const compact = screen.getByRole("button", { name: /压缩/ });
         expect(compact).toBeDisabled();
         expect(compact).toHaveTextContent("不支持");
     });
@@ -159,7 +159,7 @@ describe("AgentWorkspacePanel", () => {
         await screen.findByText("main");
 
         expect(screen.getByText("main").closest("button")).toBeDisabled();
-        expect(screen.getByRole("button", { name: /压缩上下文/ })).toBeDisabled();
+        expect(screen.getByRole("button", { name: /压缩/ })).toBeDisabled();
     });
 
     it("should refresh git status when the agent finishes a turn", async () => {

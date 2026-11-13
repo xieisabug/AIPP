@@ -282,7 +282,7 @@ const AgentWorkspacePanel: React.FC<AgentWorkspacePanelProps> = ({
         "flex w-full min-w-0 items-center gap-2 px-3 text-left text-sm transition-colors",
         mobile ? "min-h-11" : "h-8",
     );
-    const interactiveRowClass = cn(rowClass, "hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent");
+    const interactiveRowClass = cn(rowClass, "rounded-md hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent");
     const iconClass = "h-4 w-4 shrink-0 text-muted-foreground";
     const busyTitle = "Agent 回复中，结束后再操作";
 
@@ -312,7 +312,7 @@ const AgentWorkspacePanel: React.FC<AgentWorkspacePanelProps> = ({
 
     return (
         <section
-            className={cn("shrink-0 overflow-hidden rounded-xl border bg-background", mobile ? "mx-1 mb-2" : "mx-2 mt-2")}
+            className={cn("shrink-0", mobile ? "mx-1 mt-2 mb-3" : "mx-2 mt-3 mb-2")}
             data-aipp-slot="chat-sidebar-agent-workspace"
             aria-label="Agent 工作区"
         >
@@ -521,25 +521,32 @@ const AgentWorkspacePanel: React.FC<AgentWorkspacePanelProps> = ({
                 </>
             ) : null}
 
-            {/* 压缩上下文 */}
-            <button
-                type="button"
-                className={cn(interactiveRowClass, isRepo && "border-t")}
-                onClick={() => void handleCompact()}
-                disabled={!compactSupported || busy || compactPending}
-                title={
-                    !compactSupported
-                        ? "当前 Agent 暂不支持手动压缩"
-                        : busy
-                            ? busyTitle
-                            : "让 Agent 压缩当前会话的上下文，释放上下文窗口"
-                }
-                data-aipp-slot="chat-sidebar-agent-compact"
-            >
-                {compactPending ? <Loader2 className={cn(iconClass, "animate-spin")} /> : <Shrink className={iconClass} />}
-                <span className="min-w-0 flex-1 truncate">{compactPending ? "正在压缩上下文…" : "压缩上下文"}</span>
-                {!compactSupported ? <span className="shrink-0 text-xs text-muted-foreground">不支持</span> : null}
-            </button>
+            {/* 短操作：压缩，以及以后并排的其它按钮 */}
+            <div className="flex flex-wrap items-center gap-1 px-1" data-aipp-slot="chat-sidebar-agent-actions">
+                <button
+                    type="button"
+                    className={cn(
+                        "inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 text-sm transition-colors hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent",
+                        mobile ? "min-h-11" : "h-8",
+                    )}
+                    onClick={() => void handleCompact()}
+                    disabled={!compactSupported || busy || compactPending}
+                    title={
+                        !compactSupported
+                            ? "当前 Agent 暂不支持手动压缩"
+                            : compactPending
+                                ? "正在压缩上下文…"
+                                : busy
+                                    ? busyTitle
+                                    : "让 Agent 压缩当前会话的上下文，释放上下文窗口"
+                    }
+                    data-aipp-slot="chat-sidebar-agent-compact"
+                >
+                    {compactPending ? <Loader2 className={cn(iconClass, "animate-spin")} /> : <Shrink className={iconClass} />}
+                    <span>压缩</span>
+                    {!compactSupported ? <span className="text-xs text-muted-foreground">不支持</span> : null}
+                </button>
+            </div>
         </section>
     );
 };
