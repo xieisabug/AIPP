@@ -5,6 +5,14 @@ fn fixture() -> (AssistantDatabase, LLMDatabase, i64, i64) {
     let db = AssistantDatabase {conn:Connection::open_in_memory().unwrap(),mcp_conn:Connection::open_in_memory().unwrap()};
     db.create_tables().unwrap();
     db.conn.execute_batch("CREATE TABLE assistant_skill_config(id INTEGER PRIMARY KEY,assistant_id INTEGER,skill_identifier TEXT,is_enabled BOOLEAN,priority INTEGER,created_time TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(assistant_id,skill_identifier));").unwrap();
+    db.conn.execute_batch("ATTACH DATABASE ':memory:' AS assistant_copy_plugins;
+        CREATE TABLE assistant_copy_plugins.Plugins(plugin_id INTEGER PRIMARY KEY);
+        INSERT INTO assistant_copy_plugins.Plugins VALUES(101),(102);
+        CREATE TABLE assistant_copy_plugins.PluginAssistantConfigurations(
+            config_id INTEGER PRIMARY KEY AUTOINCREMENT,plugin_id INTEGER NOT NULL,
+            assistant_id INTEGER NOT NULL,config_key TEXT NOT NULL,config_value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(plugin_id) REFERENCES Plugins(plugin_id),UNIQUE(plugin_id,assistant_id,config_key));").unwrap();
     let llm = LLMDatabase {conn:Connection::open_in_memory().unwrap()};
     llm.create_tables().unwrap();
     llm.add_llm_provider("local mock","openai","",false,true).unwrap();
@@ -17,6 +25,97 @@ fn fixture() -> (AssistantDatabase, LLMDatabase, i64, i64) {
 
 fn create(db: &AssistantDatabase, llm: &LLMDatabase, provider: i64, kind: i64) -> i64 {
     profile(db,llm,"create",&json!({"name":"助手","description":"简介","assistant_type":kind,"prompt":"system","provider_id":provider,"model_code":if kind==4{""}else{"mock-model"}}),&["agents:one".into(),"agents:two".into()],false).unwrap()["assistant_id"].as_i64().unwrap()
+}
+
+fn copy_configuration_counts(db: &AssistantDatabase) -> Vec<i64> {
+    ["assistant","assistant_prompt","assistant_prompt_param","assistant_model","assistant_model_config",
+        "assistant_mcp_config","assistant_mcp_tool_config","assistant_skill_config","assistant_workspace",
+        "assistant_copy_plugins.PluginAssistantConfigurations"].iter()
+        .map(|table|db.conn.query_row(&format!("SELECT count(*) FROM {table}"),[],|row|row.get(0)).unwrap()).collect()
+}
+
+#[test]
+fn test_assistant_management_copy_preserves_plugin_configuration_and_isolates_edits() {
+    let (db,llm,normal,_) = fixture();
+    let source = create(&db,&llm,normal,0);
+    let other = create(&db,&llm,normal,0);
+    let model = config_model_id(&db,source).unwrap();
+    db.add_assistant_model_config(source,model,"legacyPluginContext","legacy context","string").unwrap();
+    for (plugin,key,value) in [
+        (101,"content",Some("隐藏首轮上下文\n{\"instructions\":\"保持原样\"}")),
+        (101,"enabled",Some("false")),(101,"empty",Some("")),(101,"nullable",None),
+        (102,"content",Some("另一个插件的同名配置")),
+    ] {
+        db.conn.execute("INSERT INTO assistant_copy_plugins.PluginAssistantConfigurations(plugin_id,assistant_id,config_key,config_value) VALUES(?1,?2,?3,?4)",params![plugin,source,key,value]).unwrap();
+    }
+    db.conn.execute("INSERT INTO assistant_copy_plugins.PluginAssistantConfigurations(plugin_id,assistant_id,config_key,config_value) VALUES(101,?1,'other-only','独立助手')",[other]).unwrap();
+    db.conn.execute_batch("CREATE TABLE assistant_copy_plugins.PluginConfigurations(config_key TEXT,config_value TEXT);
+        INSERT INTO assistant_copy_plugins.PluginConfigurations VALUES('global','unchanged');
+        CREATE TABLE assistant_copy_plugins.PluginStatus(plugin_id INTEGER,is_active BOOLEAN);
+        INSERT INTO assistant_copy_plugins.PluginStatus VALUES(101,1),(102,0);
+        CREATE TABLE assistant_copy_plugins.PluginData(data_value TEXT);
+        INSERT INTO assistant_copy_plugins.PluginData VALUES('runtime-state');").unwrap();
+    let copied = profile(&db,&llm,"copy",&json!({"assistant_id":source,"name":"独立副本"}),&[],false).unwrap()["assistant_id"].as_i64().unwrap();
+    assert_eq!(config_value(&db,copied,"legacyPluginContext").unwrap().as_deref(),Some("legacy context"));
+    assert_eq!(db.conn.query_row("SELECT count(*) FROM assistant_copy_plugins.PluginConfigurations WHERE config_key='global' AND config_value='unchanged'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(db.conn.query_row("SELECT count(*) FROM assistant_copy_plugins.PluginStatus WHERE (plugin_id=101 AND is_active=1) OR (plugin_id=102 AND is_active=0)",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(db.conn.query_row("SELECT count(*) FROM assistant_copy_plugins.PluginData WHERE data_value='runtime-state'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    // Use the actual assistantConfig repository API, whose unqualified table
+    // resolves to this attached in-memory plugin database.
+    let plugins = crate::db::plugin_db::PluginDatabase {conn:db.conn};
+    for plugin in [101,102] {
+        let original = plugins.get_plugin_assistant_configurations(plugin,source).unwrap();
+        let clone = plugins.get_plugin_assistant_configurations(plugin,copied).unwrap();
+        assert_eq!(clone.len(),original.len());
+        for (a,b) in original.iter().zip(&clone) {
+            assert_ne!(a.config_id,b.config_id);
+            assert_eq!((a.plugin_id,a.config_key.as_str(),&a.config_value,a.updated_at),(b.plugin_id,b.config_key.as_str(),&b.config_value,b.updated_at));
+            assert_eq!(b.assistant_id,copied);
+        }
+    }
+    assert_eq!(plugins.get_plugin_assistant_configurations(101,other).unwrap().len(),1);
+    plugins.set_plugin_assistant_configuration(101,copied,"content",Some("副本新内容".into())).unwrap();
+    assert_eq!(plugins.get_plugin_assistant_configurations(101,source).unwrap().iter().find(|c|c.config_key=="content").unwrap().config_value.as_deref(),Some("隐藏首轮上下文\n{\"instructions\":\"保持原样\"}"));
+    plugins.set_plugin_assistant_configuration(101,source,"enabled",Some("true".into())).unwrap();
+    assert_eq!(plugins.get_plugin_assistant_configurations(101,copied).unwrap().iter().find(|c|c.config_key=="enabled").unwrap().config_value.as_deref(),Some("false"));
+    plugins.delete_plugin_assistant_configurations(102,copied).unwrap();
+    assert_eq!(plugins.get_plugin_assistant_configurations(102,source).unwrap().len(),1);
+}
+
+#[test]
+fn test_assistant_management_copy_plugin_preview_rolls_back_both_stores() {
+    let (db,llm,normal,_) = fixture();
+    let source = create(&db,&llm,normal,0);
+    db.conn.execute("INSERT INTO assistant_copy_plugins.PluginAssistantConfigurations(plugin_id,assistant_id,config_key,config_value) VALUES(101,?1,'content','preview-context')",[source]).unwrap();
+    let before = copy_configuration_counts(&db);
+    let preview = profile(&db,&llm,"copy",&json!({"assistant_id":source}),&[],true).unwrap();
+    assert_eq!(preview["saved"],false);
+    assert_eq!(preview["dry_run"],true);
+    assert_eq!(copy_configuration_counts(&db),before);
+}
+
+#[test]
+fn test_assistant_management_copy_plugin_failure_rolls_back_entire_assistant() {
+    let (db,llm,normal,_) = fixture();
+    let source = create(&db,&llm,normal,0);
+    db.conn.execute("INSERT INTO assistant_copy_plugins.PluginAssistantConfigurations(plugin_id,assistant_id,config_key,config_value) VALUES(101,?1,'content','source-context')",[source]).unwrap();
+    db.conn.execute_batch(&format!("CREATE TRIGGER assistant_copy_plugins.reject_plugin_copy BEFORE INSERT ON PluginAssistantConfigurations WHEN NEW.assistant_id<>{source} BEGIN SELECT RAISE(ABORT,'plugin copy rejected'); END;")).unwrap();
+    let before = copy_configuration_counts(&db);
+    let error = profile(&db,&llm,"copy",&json!({"assistant_id":source}),&[],false).unwrap_err();
+    assert!(error.contains("复制插件助手配置失败"),"{error}");
+    assert!(error.contains("plugin copy rejected"),"{error}");
+    assert_eq!(copy_configuration_counts(&db),before);
+}
+
+#[test]
+fn test_assistant_management_copy_missing_plugin_store_fails_without_partial_copy() {
+    let (db,llm,normal,_) = fixture();
+    let source = create(&db,&llm,normal,0);
+    db.conn.execute_batch("DETACH DATABASE assistant_copy_plugins").unwrap();
+    let before = db.get_assistants().unwrap().len();
+    let error = profile(&db,&llm,"copy",&json!({"assistant_id":source}),&[],false).unwrap_err();
+    assert!(error.contains("复制插件助手配置失败"),"{error}");
+    assert_eq!(db.get_assistants().unwrap().len(),before);
 }
 
 #[test]

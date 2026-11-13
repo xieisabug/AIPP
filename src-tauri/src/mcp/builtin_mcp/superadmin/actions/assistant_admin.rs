@@ -7,12 +7,7 @@ use crate::db::{assistant_db::AssistantDatabase, llm_db::LLMDatabase};
 use super::super::{registry::{ActionHandler, ActionRegistry}, types::*};
 
 pub(super) async fn profile_action(app: &AppHandle, op: &str, args: Value, dry_run: bool) -> Result<Value,String> {
-    let result = {
-        let db = AssistantDatabase::new(app).map_err(|e|e.to_string())?;
-        let llm = LLMDatabase::new(app).map_err(|e|e.to_string())?;
-        let skills = if op=="create" {management::agents_skills(app)} else {Vec::new()};
-        management::profile(&db,&llm,op,&args,&skills,dry_run)?
-    };
+    let result = management::profile_in_app(app,op,&args,dry_run)?;
     if !dry_run { management::changed(app,result["assistant_id"].as_i64().ok_or("操作未返回助手 ID")?).await; }
     Ok(result)
 }

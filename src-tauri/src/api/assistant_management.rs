@@ -28,6 +28,23 @@ pub(crate) fn agents_skills(app: &tauri::AppHandle) -> Vec<String> {
         .map(|skill| skill.identifier).collect()
 }
 
+/// Copy both configuration stores through the same SQLite connection/transaction.
+pub(crate) fn profile_in_app(app: &tauri::AppHandle, op: &str, args: &Value, dry_run: bool) -> Result<Value,String> {
+    let db = AssistantDatabase::new(app).map_err(|e|e.to_string())?;
+    let llm = LLMDatabase::new(app).map_err(|e|e.to_string())?;
+    if op=="copy" {
+        let path = crate::db::get_db_path(app,"plugin.db")?;
+        let mut uri = tauri::Url::from_file_path(&path).map_err(|_|"复制助手：无法解析插件配置数据库路径")?;
+        // A missing/corrupt plugin store must fail the copy, not silently create
+        // an empty store and report an incomplete assistant as successfully copied.
+        uri.query_pairs_mut().append_pair("mode","rw");
+        db.conn.execute("ATTACH DATABASE ?1 AS assistant_copy_plugins",[uri.as_str()])
+            .map_err(|e|format!("复制助手：连接插件配置数据库失败：{e}"))?;
+    }
+    let skills = if op=="create" {agents_skills(app)} else {Vec::new()};
+    profile(&db,&llm,op,args,&skills,dry_run)
+}
+
 pub(crate) async fn changed(app: &tauri::AppHandle, id: i64) {
     if let Ok(db) = AssistantDatabase::new(app) {
         if let Ok(assistant) = db.get_assistant(id) {
@@ -181,6 +198,10 @@ fn copy_config(db: &AssistantDatabase, source: i64, name: &str, description: &st
         ("assistant_skill_config","skill_identifier,is_enabled,priority"), ("assistant_workspace","path")] {
         db.conn.execute(&format!("INSERT INTO {table}(assistant_id,{columns}) SELECT ?1,{columns} FROM {table} WHERE assistant_id=?2"),params![id,source]).map_err(|e|e.to_string())?;
     }
+    // Plugin identity and values belong to the configuration; the new row IDs
+    // and assistant ID make edits independent. Global settings/runtime data stay put.
+    db.conn.execute("INSERT INTO assistant_copy_plugins.PluginAssistantConfigurations(plugin_id,assistant_id,config_key,config_value,updated_at) SELECT plugin_id,?1,config_key,config_value,updated_at FROM assistant_copy_plugins.PluginAssistantConfigurations WHERE assistant_id=?2",params![id,source])
+        .map_err(|e|format!("复制助手：复制插件助手配置失败：{e}"))?;
     Ok(id)
 }
 

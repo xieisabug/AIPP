@@ -819,9 +819,7 @@ pub fn copy_assistant(
     app_handle: tauri::AppHandle,
     assistant_id: i64,
 ) -> Result<AssistantDetail, String> {
-    let db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let llm = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let result = management::profile(&db,&llm,"copy",&serde_json::json!({"assistant_id":assistant_id}),&[],false)?;
+    let result = management::profile_in_app(&app_handle,"copy",&serde_json::json!({"assistant_id":assistant_id}),false)?;
     let id = result["assistant_id"].as_i64().ok_or("复制助手未返回 ID")?;
     management::notify(&app_handle);
     get_assistant(app_handle,id)
