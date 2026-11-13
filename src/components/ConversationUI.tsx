@@ -2463,6 +2463,7 @@ const ConversationUI = forwardRef<ConversationUIRef, ConversationUIProps>(
                                     {renderAgentWorkspacePanel(true)}
                                     <ChatSidebarContent
                                         mobile
+                                        separatePlan={showAgentWorkspacePanel}
                                         restoreState={detailsRestoreState}
                                         todos={sidebarTodos}
                                         artifacts={artifacts}

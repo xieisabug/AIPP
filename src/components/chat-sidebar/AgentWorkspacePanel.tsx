@@ -312,7 +312,7 @@ const AgentWorkspacePanel: React.FC<AgentWorkspacePanelProps> = ({
 
     return (
         <section
-            className={cn("shrink-0", mobile ? "mx-1 mt-2 mb-3" : "mx-2 mt-3 mb-2")}
+            className={cn("shrink-0", mobile ? "mx-1 my-4" : "mx-2 my-5")}
             data-aipp-slot="chat-sidebar-agent-workspace"
             aria-label="Agent 工作区"
         >

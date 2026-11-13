@@ -215,6 +215,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                         {topPanel}
                         <ChatSidebarContent
                             className="min-h-0 flex-1"
+                            separatePlan={Boolean(topPanel)}
                             todos={todos}
                             artifacts={artifacts}
                             contextItems={contextItems}

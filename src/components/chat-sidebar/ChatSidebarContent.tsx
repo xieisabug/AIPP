@@ -23,6 +23,8 @@ interface ChatSidebarContentProps {
     onArtifactClick?: (artifact: CodeArtifact) => void;
     onContextClick?: (item: ContextItem) => void;
     onPreviewFileClick?: (item: ContextItem) => void;
+    /** 规划标题上方画分隔线，用来和上方的工作区面板分开 */
+    separatePlan?: boolean;
 }
 
 interface SectionState {
@@ -130,6 +132,7 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     onArtifactClick,
     onContextClick,
     onPreviewFileClick,
+    separatePlan = false,
 }) => {
     const restored = mobile ? restoreState : null;
     const previousCounts = React.useRef({ todo: todos.length, artifact: artifacts.length, context: contextItems.length, plugin: -1 });
@@ -188,6 +191,9 @@ const ChatSidebarContent: React.FC<ChatSidebarContentProps> = ({
     return (
         <SectionsContext.Provider value={contextValue}>
             <div className={cn("flex flex-col gap-1", mobile ? "px-1 pb-2" : "h-full", className)}>
+                {separatePlan ? (
+                    <div className="border-t border-border" role="separator" data-aipp-slot="chat-sidebar-plan-separator" />
+                ) : null}
                 {/* Planning Section */}
                 <CollapsibleSection
                     id="todo"
