@@ -460,3 +460,38 @@ it("should group legacy stored plugin fields as extensions without changing thei
     field("confirmBeforeGenerate").config.onChange?.(false);
     expect(onConfigChange).toHaveBeenCalledWith("confirmBeforeGenerate", false, "boolean");
 });
+
+
+describe("new assistant explicit MCP defaults", () => {
+    beforeEach(() => {
+        clearAllMockHandlers();
+        mockInvokeHandler("get_all_feature_config", () => []);
+    });
+
+    it.each([0, 4])("should show the saved dynamic mode when a new assistant of type %s owns its default", async (assistantType) => {
+        const assistant: AssistantDetail = {
+            ...baseAssistantDetail,
+            assistant: { ...baseAssistantDetail.assistant, assistant_type: assistantType },
+            model_configs: [
+                { id: 1, assistant_id: 1, assistant_model_id: 1, name: "dynamic_mcp_loading_enabled", value: "true", value_type: "boolean" },
+                { id: 2, assistant_id: 1, assistant_model_id: 1, name: "mcp_loading_mode_explicit", value: "true", value_type: "boolean" },
+            ],
+        };
+        const onConfigChange = vi.fn();
+        const { result } = renderHook(() => useAssistantFormConfig({
+            currentAssistant: assistant, assistantTypeNameMap: new Map([[0, "普通助手"]]),
+            assistantTypeCustomField: [], assistantTypeCustomLabel: new Map(), assistantTypeCustomTips: new Map(),
+            assistantTypeHideField: [], navigateTo: vi.fn(), onConfigChange, onPromptChange: vi.fn(),
+            pluginAssistantFormFields: [], pluginAssistantConfigValues: {}, onPluginConfigChange: vi.fn(),
+            agentModelOptions: [], agentModelLoading: false, agentModelError: null,
+            onAgentProviderChange: vi.fn(), onAgentModelChange: vi.fn(),
+        }));
+        await waitFor(() => expect(result.current.formConfig.some(item => item.key === "dynamic_mcp_loading_enabled")).toBe(true));
+        const mode = result.current.formConfig.find(item => item.key === "dynamic_mcp_loading_enabled")!;
+        expect(mode.config.value).toBe(true);
+        expect(result.current.formConfig.some(item => item.key === "mcp_loading_mode_explicit")).toBe(false);
+        expect(result.current.formConfig.some(item => item.key === "mcp_config")).toBe(false);
+        mode.config.onChange?.(false);
+        expect(onConfigChange).toHaveBeenCalledWith("dynamic_mcp_loading_enabled", false, "boolean");
+    });
+});

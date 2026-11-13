@@ -28,6 +28,8 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 **移动端**：移动端（Android）相关的开发任务必须先阅读 [AGENTS-mobile.md](./AGENTS-mobile.md)，其中包含移动端现状、检测机制、导航方案、桌面功能兼容性与改动规范。移动端优化规划见 `docs/mobile-optimization-prd.md`。
 
+**总管家配置管理**：通过现有 SuperAdmin action 管理助手基础资料/复制、通道参数、MCP/Skills、工作区与群名，复用 `assistant_api::management` 应用服务和审计。新建助手默认动态 MCP 和创建时发现的 `.agents` Skills；复制完整保留来源配置，不应用新建默认值。`mcp_loading_mode_explicit` 让新建或显式设置过模式的助手独立保存加载模式，旧助手保留全局实验开关行为。动态发现、加载和调用均尊重助手显式禁用（管家统一运行能力除外）。工作区信任、Agent cwd 与原生沙箱/审批独立；移除当前 cwd 对应工作区须先显式改 cwd。见 [总管家配置管理](./docs/product/18-Butler任务系统.md#通过总管家管理助手配置)。
+
 ## Essential Build Commands
 
 **GitHub Agent 插件包**：`mcp/apps/bundles` 管理 marketplace、完整包文件、固定提交更新与回退，`AgentPluginsConfig` 在应用详情内展示介绍、应用与 Skills；高级来源管理从添加菜单进入。目录/详情/下载统一请求 aipp-helper `/api/agent-plugins`，客户端不直连 GitHub；helper 随版本发布预解析详情，归档随 helper 发布并流式下发。插件 Skills/commands 使用 `agent_plugin` 来源；HTTP/stdio 连接复用应用凭据链。stdio 必须经 bundles/runtime 的结构化 argv/cwd/环境变量及摘要校验，不能把其 command 标记当 shell 命令运行；MCP 表单请求复用对话审批 UI。与原 JavaScript 插件分离；不能把平台私有连接器 ID 或未适配的宿主扩展标成可用。见 [GitHub 插件包](./docs/product/21-GitHub插件包.md)。

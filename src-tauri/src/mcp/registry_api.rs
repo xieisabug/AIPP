@@ -1097,11 +1097,13 @@ pub fn is_agent_load_skill_ready(
     let assistant_db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let assistant_mcp_configs =
         assistant_db.get_assistant_mcp_configs(assistant_id).map_err(|e| e.to_string())?;
+    let explicit_dynamic = crate::api::assistant_api::management::config_value(&assistant_db,assistant_id,"mcp_loading_mode_explicit")?.as_deref()==Some("true")
+        && crate::api::assistant_api::management::config_value(&assistant_db,assistant_id,"dynamic_mcp_loading_enabled")?.as_deref()==Some("true");
     let assistant_enabled = assistant_mcp_configs
         .iter()
         .find(|c| c.mcp_server_id == agent_server.id)
         .map(|c| c.is_enabled)
-        .unwrap_or(false);
+        .unwrap_or(explicit_dynamic);
     if !assistant_enabled {
         return Ok(false);
     }
@@ -1112,7 +1114,7 @@ pub fn is_agent_load_skill_ready(
         .iter()
         .find(|c| c.mcp_tool_id == load_skill.id)
         .map(|c| c.is_enabled)
-        .unwrap_or(false);
+        .unwrap_or(explicit_dynamic);
 
     Ok(load_skill_assistant_enabled)
 }

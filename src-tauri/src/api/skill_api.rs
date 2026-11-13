@@ -130,7 +130,7 @@ pub async fn get_mobile_skill_compatibility(app_handle: tauri::AppHandle, identi
     Ok("兼容性未验证：安装不代表可执行，请核对工具、账号和本地运行依赖".into())
 }
 
-fn create_scanner(app_handle: &tauri::AppHandle) -> SkillScanner {
+pub(crate) fn create_scanner(app_handle: &tauri::AppHandle) -> SkillScanner {
     SkillScanner::new(get_home_dir(), get_app_data_dir(app_handle))
 }
 

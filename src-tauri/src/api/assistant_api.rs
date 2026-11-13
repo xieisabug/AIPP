@@ -48,6 +48,9 @@ pub struct AgentRuntimeInfo {
 
 pub const CLAUDE_CODE_DEFAULT_MODEL: &str = "__claude_code_default__";
 
+#[path = "assistant_management.rs"]
+pub(crate) mod management;
+
 fn add_agent_model_option(options: &mut Vec<AgentModelOption>, option: AgentModelOption) {
     if !options.iter().any(|existing| existing.code == option.code) {
         options.push(option);
@@ -794,125 +797,20 @@ pub fn add_assistant(
     assistant_type: i64,
     model_selection: Option<String>,
 ) -> Result<AssistantDetail, String> {
-    info!("add assistant start");
-    reject_reserved_butler_assistant_name(&name)?;
-    // Validate before creating any rows; never silently substitute another model.
-    let (provider_id, model_code) = if let Some(selection) = model_selection {
-        let models = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?
-            .get_filtered_models_for_select(assistant_type)?;
-        resolve_new_assistant_model(models, &selection, assistant_type)?
-    } else {
-        (0, String::new())
-    };
-    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-
-    // Add a default assistant
-    let assistant_id = assistant_db
-        .add_assistant(&name, &description, Some(assistant_type), false)
-        .map_err(|e| e.to_string())?;
-
-    // Get the newly added assistant
-    let assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
-    info!(id = assistant_id, name = ?assistant.name, "assistant created");
-
-    let default_prompt = "You are a helpful assistant.";
-    let prompt_id = assistant_db
-        .add_assistant_prompt(assistant_id, default_prompt)
-        .map_err(|e| e.to_string())?;
-    let prompts = vec![AssistantPrompt {
-        id: prompt_id,
-        assistant_id: assistant_id,
-        prompt: default_prompt.to_string(),
-        created_time: Option::None,
-    }];
-
-    let model_id =
-        assistant_db.add_assistant_model(assistant_id, provider_id, &model_code, "").map_err(|e| e.to_string())?;
-    debug!(model_id, "added default model");
-
-    // Add default model configs
-    let default_model_configs = vec![
-        AssistantModelConfig {
-            id: 0,
-            assistant_id,
-            assistant_model_id: model_id, // Assuming 0 is a default model ID
-            name: "max_tokens".to_string(),
-            value: Some("2000".to_string()),
-            value_type: "number".to_string(),
-        },
-        AssistantModelConfig {
-            id: 0,
-            assistant_id,
-            assistant_model_id: model_id, // Assuming 0 is a default model ID
-            name: "temperature".to_string(),
-            value: Some("0.7".to_string()),
-            value_type: "float".to_string(),
-        },
-        AssistantModelConfig {
-            id: 0,
-            assistant_id,
-            assistant_model_id: model_id, // Assuming 0 is a default model ID
-            name: "top_p".to_string(),
-            value: Some("1.0".to_string()),
-            value_type: "float".to_string(),
-        },
-        AssistantModelConfig {
-            id: 0,
-            assistant_id,
-            assistant_model_id: model_id, // Assuming 0 is a default model ID
-            name: "stream".to_string(),
-            value: Some("true".to_string()),
-            value_type: "boolean".to_string(),
-        },
-    ];
-    let mut model_configs = Vec::new();
-    for config in default_model_configs {
-        let config_id = assistant_db
-            .add_assistant_model_config(
-                config.assistant_id,
-                config.assistant_model_id,
-                &config.name,
-                config.value.as_deref().unwrap_or(""),
-                &config.value_type,
-            )
-            .map_err(|e| e.to_string())?;
-        model_configs.push(AssistantModelConfig {
-            id: config_id,
-            assistant_id: config.assistant_id,
-            assistant_model_id: config.assistant_model_id,
-            name: config.name,
-            value: config.value,
-            value_type: config.value_type,
-        });
+    management::kind(&serde_json::json!(assistant_type))?;
+    let llm = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let mut args = serde_json::json!({"name":name,"description":description,"assistant_type":assistant_type});
+    if let Some(selection) = model_selection {
+        let models = llm.get_filtered_models_for_select(assistant_type)?;
+        let (provider, code) = resolve_new_assistant_model(models, &selection, assistant_type)?;
+        args["provider_id"] = serde_json::json!(provider);
+        args["model_code"] = serde_json::json!(code);
     }
-    debug!(model_config_count = model_configs.len(), "default model configs inserted");
-
-    // Model and prompt params are empty
-    let model = vec![AssistantModel {
-        id: model_id,
-        assistant_id,
-        provider_id,
-        model_code,
-        alias: "".to_string(),
-    }];
-    let prompt_params = Vec::new();
-
-    // Build AssistantDetail object
-    let assistant_detail = AssistantDetail {
-        assistant,
-        prompts,
-        model,
-        model_configs,
-        prompt_params,
-        mcp_configs: Vec::new(),
-        mcp_tool_configs: Vec::new(),
-    };
-
-    // 广播助手列表更新事件
-    let _ = app_handle.emit("assistant_list_changed", ());
-    crate::sync::schedule_sync_after_local_change(&app_handle);
-
-    Ok(assistant_detail)
+    let db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let result = management::profile(&db,&llm,"create",&args,&management::agents_skills(&app_handle),false)?;
+    let id = result["assistant_id"].as_i64().ok_or("创建助手未返回 ID")?;
+    management::notify(&app_handle);
+    get_assistant(app_handle,id)
 }
 
 #[tauri::command]
@@ -921,109 +819,12 @@ pub fn copy_assistant(
     app_handle: tauri::AppHandle,
     assistant_id: i64,
 ) -> Result<AssistantDetail, String> {
-    info!("copy assistant start");
-    let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-
-    // Get the original assistant
-    let original_assistant = assistant_db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
-    if is_butler_system_assistant(&original_assistant) {
-        return Err("系统保留的总管家助手不能复制".to_string());
-    }
-
-    // Create a new assistant based on the original
-    let new_assistant_id = assistant_db
-        .add_assistant(
-            &format!("副本 {}", original_assistant.name),
-            &original_assistant.description.unwrap(),
-            original_assistant.assistant_type,
-            original_assistant.is_addition,
-        )
-        .map_err(|e| e.to_string())?;
-
-    // Copy prompts
-    let original_prompts =
-        assistant_db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
-    let mut new_prompts = Vec::new();
-    for prompt in original_prompts {
-        let new_prompt_id = assistant_db
-            .add_assistant_prompt(new_assistant_id, &prompt.prompt)
-            .map_err(|e| e.to_string())?;
-        new_prompts.push(AssistantPrompt {
-            id: new_prompt_id,
-            assistant_id: new_assistant_id,
-            prompt: prompt.prompt,
-            created_time: None,
-        });
-    }
-
-    // Copy models and their configs
-    let original_models =
-        assistant_db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-    let mut new_models = Vec::new();
-    let mut new_model_configs = Vec::new();
-    for model in original_models {
-        let new_model_id = assistant_db
-            .add_assistant_model(
-                new_assistant_id,
-                model.provider_id,
-                &model.model_code,
-                &model.alias,
-            )
-            .map_err(|e| e.to_string())?;
-        new_models.push(AssistantModel {
-            id: new_model_id,
-            assistant_id: new_assistant_id,
-            provider_id: model.provider_id,
-            model_code: model.model_code,
-            alias: model.alias,
-        });
-
-        // Copy model configs
-        let original_configs = assistant_db
-            .get_assistant_model_configs_with_model_id(assistant_id, model.id)
-            .map_err(|e| e.to_string())?;
-        for config in original_configs {
-            let new_config_id = assistant_db
-                .add_assistant_model_config(
-                    new_assistant_id,
-                    new_model_id,
-                    &config.name,
-                    config.value.as_deref().unwrap_or(""),
-                    &config.value_type,
-                )
-                .map_err(|e| e.to_string())?;
-            new_model_configs.push(AssistantModelConfig {
-                id: new_config_id,
-                assistant_id: new_assistant_id,
-                assistant_model_id: new_model_id,
-                name: config.name,
-                value: config.value,
-                value_type: config.value_type,
-            });
-        }
-    }
-
-    // Get the newly created assistant
-    let new_assistant = assistant_db.get_assistant(new_assistant_id).map_err(|e| e.to_string())?;
-
-    // Build AssistantDetail object
-    let assistant_detail = AssistantDetail {
-        assistant: new_assistant,
-        prompts: new_prompts,
-        model: new_models,
-        model_configs: new_model_configs,
-        prompt_params: Vec::new(), // Assuming prompt_params are not copied
-        mcp_configs: Vec::new(),
-        mcp_tool_configs: Vec::new(),
-    };
-
-    info!(new_assistant_id, "assistant copied");
-
-    // 广播助手列表更新事件
-    let _ = app_handle.emit("assistant_list_changed", ());
-    crate::sync::schedule_sync_after_local_change(&app_handle);
-
-    Ok(assistant_detail)
+    let db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let llm = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    let result = management::profile(&db,&llm,"copy",&serde_json::json!({"assistant_id":assistant_id}),&[],false)?;
+    let id = result["assistant_id"].as_i64().ok_or("复制助手未返回 ID")?;
+    management::notify(&app_handle);
+    get_assistant(app_handle,id)
 }
 
 #[tauri::command]
@@ -1657,7 +1458,9 @@ pub async fn add_assistant_workspace(
     path: String,
 ) -> Result<(), String> {
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    assistant_db.add_assistant_workspace(assistant_id, &path).map_err(|e| e.to_string())?;
+    let llm = LLMDatabase::new(&app_handle).map_err(|e|e.to_string())?;
+    management::channel::workspace(&assistant_db,&llm,assistant_id,&serde_json::json!({"action":"add","path":path}),false)?;
+    management::notify(&app_handle);
     info!(assistant_id, path = %path, "Added assistant workspace");
     Ok(())
 }
@@ -1669,7 +1472,10 @@ pub async fn remove_assistant_workspace(
     id: i64,
 ) -> Result<(), String> {
     let assistant_db = AssistantDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    assistant_db.remove_assistant_workspace(id).map_err(|e| e.to_string())?;
+    let assistant_id:i64 = assistant_db.conn.query_row("SELECT assistant_id FROM assistant_workspace WHERE id=?1",[id],|r|r.get(0)).map_err(|e|format!("工作区 #{id} 不存在：{e}"))?;
+    let llm = LLMDatabase::new(&app_handle).map_err(|e|e.to_string())?;
+    management::channel::workspace(&assistant_db,&llm,assistant_id,&serde_json::json!({"action":"remove","workspace_id":id}),false)?;
+    management::notify(&app_handle);
     info!(id, "Removed assistant workspace");
     Ok(())
 }

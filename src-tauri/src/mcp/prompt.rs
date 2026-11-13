@@ -43,7 +43,13 @@ pub async fn is_dynamic_mcp_loading_enabled_for_assistant(
         } else {
             false
         };
-    if !global_enabled {
+    let assistant_db = crate::db::assistant_db::AssistantDatabase::new(app_handle);
+    let explicit = assistant_db.as_ref().ok().and_then(|db|
+        crate::api::assistant_api::management::config_value(db,assistant_id,"mcp_loading_mode_explicit").ok().flatten())
+        .as_deref() == Some("true");
+    // New assistants and explicit mode changes own their mode. Legacy assistants
+    // retain the existing global experiment gate until explicitly reconfigured.
+    if !global_enabled && !explicit {
         return false;
     }
     match get_assistant_field_value(app_handle.clone(), assistant_id, "dynamic_mcp_loading_enabled")
@@ -53,7 +59,7 @@ pub async fn is_dynamic_mcp_loading_enabled_for_assistant(
     }
 }
 
-fn collect_all_enabled_servers_for_dynamic_mode(
+pub(crate) fn collect_all_enabled_servers_for_dynamic_mode(
     app_handle: &tauri::AppHandle,
 ) -> Result<Vec<MCPServerWithTools>, AppError> {
     let db = MCPDatabase::new(app_handle)
@@ -196,13 +202,19 @@ pub async fn collect_mcp_info_for_assistant(
         .and_then(|config| config.use_native_toolcall)
         .unwrap_or(use_native_toolcall);
 
-    let all_servers = if dynamic_loading_enabled {
+    let mut all_servers = if dynamic_loading_enabled {
         collect_all_enabled_servers_for_dynamic_mode(app_handle)?
     } else {
         get_assistant_mcp_servers_with_tools(app_handle.clone(), assistant_id)
             .await
             .map_err(|e| AppError::DatabaseError(format!("Failed to get MCP servers: {}", e)))?
     };
+    if dynamic_loading_enabled {
+        let db = crate::db::assistant_db::AssistantDatabase::new(app_handle).map_err(|e|AppError::DatabaseError(e.to_string()))?;
+        let access = super::assistant_access::Restrictions::load(&db,assistant_id).map_err(AppError::DatabaseError)?;
+        all_servers.retain(|s|access.server(s.id));
+        for server in &mut all_servers { server.tools.retain(|t|access.tool(server.id,t.id)); }
+    }
     debug!(total_servers = all_servers.len(), "Loaded assistant MCP servers");
 
     // 根据传入的 enabled_servers_filter 选择服务器：

@@ -2193,6 +2193,18 @@ async fn execute_mcp_tool_call_on_current_thread(
         ).await,
     };
     let butler_direct = crate::mcp::butler_tools::is_direct_tool(&kind, server.command.as_deref(), &tool_call.tool_name);
+    let permission = (|| -> Result<(),String> {
+        let access = crate::mcp::assistant_access::Restrictions::conversation(&app_handle,Some(tool_call.conversation_id))?;
+        if !access.server(server.id) { return Err(format!("助手已禁用 MCP 服务 #{}，已加载工具也不可继续调用",server.id)); }
+        let tools = db.get_mcp_server_tools(server.id).map_err(|e|e.to_string())?;
+        if tools.iter().any(|t| (t.tool_name==tool_call.tool_name || sanitize_tool_name(&t.tool_name)==tool_call.tool_name) && !access.tool(server.id,t.id)) {
+            return Err(format!("助手已禁用工具 {}",tool_call.tool_name));
+        }
+        Ok(())
+    })();
+    if let Err(error) = permission {
+        return handle_tool_execution_result(&app_handle,&state,&feature_config_state,&window,call_id,tool_call,Err(error),is_retry,trigger_continuation).await;
+    }
     if let Err(error) = crate::mcp::apps::access::validate_call(&db.conn, server.id, call_id) {
         return handle_tool_execution_result(
             &app_handle, &state, &feature_config_state, &window, call_id, tool_call,
