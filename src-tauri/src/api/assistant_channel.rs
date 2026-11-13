@@ -24,12 +24,16 @@ fn context(db: &AssistantDatabase, llm: &LLMDatabase, id: i64) -> Result<(i64,St
     let assistant = db.get_assistant(id).map_err(|e|format!("读取助手 #{id} 失败：{e}"))?;
     let kind = assistant.assistant_type.unwrap_or(0);
     let models = db.get_assistant_model(id).map_err(|e|e.to_string())?;
-    let Some(model) = models.first().filter(|m|m.provider_id>0) else {
+    let configs = db.get_assistant_model_configs(id).map_err(|e|e.to_string())?;
+    let provider_id = if kind==4 {
+        crate::api::assistant_api::resolve_acp_provider_id(&models,&configs)
+    } else {models.first().map(|m|m.provider_id).filter(|id|*id>0)};
+    let Some(provider_id) = provider_id else {
         if kind == 4 { return Err("Agent 助手未绑定提供商，请先配置模型绑定".into()); }
         return Ok((kind,String::new(),Vec::new()));
     };
-    let provider = llm.get_llm_provider(model.provider_id).map_err(|e|format!("助手提供商 #{} 不存在：{e}",model.provider_id))?;
-    let configs = llm.get_llm_provider_config(model.provider_id).map_err(|e|e.to_string())?;
+    let provider = llm.get_llm_provider(provider_id).map_err(|e|format!("助手提供商 #{provider_id} 不存在：{e}"))?;
+    let configs = llm.get_llm_provider_config(provider_id).map_err(|e|e.to_string())?;
     Ok((kind,provider.api_type,configs))
 }
 
@@ -48,11 +52,14 @@ pub(crate) fn read(db: &AssistantDatabase, llm: &LLMDatabase, id: i64) -> Result
             "codex_approval_policy" => Some("on-request".to_string()),
             "codex_approvals_reviewer" => Some("user".to_string()),
             "tool_review_mode" => Some("off".to_string()),
-            "stream" => Some("true".to_string()),
+            "stream" => Some(crate::api::ai::config::DEFAULT_STREAM.to_string()),
             "acp_working_directory" => Some(dirs::home_dir().ok_or("无法确定通道默认工作目录")?.to_string_lossy().to_string()),
             _ => None,
         };
         let effective = override_value.or(provider_value).map(str::to_owned).or(default);
+        let effective = if field.name=="stream" {
+            Some(crate::api::ai::config::stream_enabled(effective.as_deref()).to_string())
+        } else {effective};
         // ACP/other native adapters expand ~; Codex uses the literal configured path.
         let effective = effective.map(|value| if field.name=="acp_working_directory" && api!="codex_app_server" && (value=="~" || value.starts_with("~/") || value.starts_with("~\\")) {
             dirs::home_dir().map(|p|p.join(value.trim_start_matches('~').trim_start_matches(['/', '\\'])).to_string_lossy().to_string()).unwrap_or(value)
@@ -89,7 +96,11 @@ pub(crate) fn patch(db: &AssistantDatabase, llm: &LLMDatabase, id: i64, set: &Va
         if !fields.iter().any(|f|f.name==name) || set.contains_key(name) { return Err(format!("删除参数不支持或与 set 冲突：{name}")); }
     }
     let tx = db.conn.unchecked_transaction().map_err(|e|e.to_string())?;
-    let model = db.get_assistant_model(id).map_err(|e|e.to_string())?.first().map(|m|m.id).ok_or("助手没有模型绑定行")?;
+    let models = db.get_assistant_model(id).map_err(|e|e.to_string())?;
+    let configs = db.get_assistant_model_configs(id).map_err(|e|e.to_string())?;
+    let model = models.first().map(|m|m.id)
+        .or_else(||configs.iter().find(|c|c.name=="acp_provider").map(|c|c.assistant_model_id))
+        .ok_or("助手没有模型绑定行或旧版 Agent 提供商配置行")?;
     for name in remove { db.conn.execute("DELETE FROM assistant_model_config WHERE assistant_id=?1 AND name=?2",params![id,name.as_str().unwrap()]).map_err(|e|e.to_string())?; }
     for (name,value,ty) in values {
         db.conn.execute("INSERT INTO assistant_model_config(assistant_id,assistant_model_id,name,value,value_type) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(assistant_id,name) DO UPDATE SET value=excluded.value,value_type=excluded.value_type",params![id,model,name,value,ty]).map_err(|e|e.to_string())?;

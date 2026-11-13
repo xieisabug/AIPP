@@ -1903,7 +1903,7 @@ pub async fn ask_ai(
             })
             .collect::<HashMap<String, String>>();
 
-        let stream = config_map.get("stream").and_then(|v| v.parse().ok()).unwrap_or(false);
+        let stream = crate::api::ai::config::stream_enabled(config_map.get("stream").map(String::as_str));
 
         let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
@@ -2457,7 +2457,7 @@ pub(crate) async fn tool_result_continue_ask_ai_impl(
         })
         .collect::<HashMap<String, String>>();
 
-    let stream = config_map.get("stream").and_then(|v| v.parse().ok()).unwrap_or(false);
+    let stream = crate::api::ai::config::stream_enabled(config_map.get("stream").map(String::as_str));
 
     let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
@@ -2863,7 +2863,7 @@ pub(crate) async fn batch_tool_result_continue_ask_ai_impl(
         })
         .collect::<HashMap<String, String>>();
 
-    let stream = config_map.get("stream").and_then(|v| v.parse().ok()).unwrap_or(false);
+    let stream = crate::api::ai::config::stream_enabled(config_map.get("stream").map(String::as_str));
 
     let model_name = config_map.get("model").cloned().unwrap_or_else(|| model_code.clone());
 
@@ -3408,7 +3408,7 @@ pub async fn regenerate_ai(
             })
             .collect::<HashMap<String, String>>();
 
-        let stream = config_map.get("stream").and_then(|v| v.parse().ok()).unwrap_or(false);
+        let stream = crate::api::ai::config::stream_enabled(config_map.get("stream").map(String::as_str));
 
         let model_name =
             config_map.get("model").cloned().unwrap_or_else(|| regenerate_model_code.clone());

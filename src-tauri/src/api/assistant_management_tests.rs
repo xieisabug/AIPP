@@ -155,3 +155,65 @@ fn test_assistant_management_actions_are_discoverable_with_distinct_schemas() {
     }
     assert!(registry.get_meta("assistant.create").unwrap().args_schema["properties"].get("provider_id").is_some());
 }
+
+fn channel_field(value: &Value, name: &str) -> Value {
+    value["parameters"].as_array().unwrap().iter().find(|p|p["name"]==name).unwrap().clone()
+}
+
+#[test]
+fn test_assistant_management_stream_readback_matches_requests_after_clear() {
+    let (db,llm,normal,_) = fixture();
+    let id = create(&db,&llm,normal,0);
+    assert_eq!(channel_field(&channel::read(&db,&llm,id).unwrap(),"stream")["effective_value"],"true");
+    let cleared = channel::patch(&db,&llm,id,&json!({}),&json!(["stream"]),false).unwrap();
+    assert_eq!(channel_field(&cleared,"stream")["source"],"channel_default");
+    assert_eq!(channel_field(&cleared,"stream")["effective_value"],"false");
+    assert!(!crate::api::ai::config::stream_enabled(config_value(&db,id,"stream").unwrap().as_deref()));
+    for value in [false,true] {
+        let saved = channel::patch(&db,&llm,id,&json!({"stream":value}),&json!([]),false).unwrap();
+        let runtime = crate::api::ai::config::stream_enabled(config_value(&db,id,"stream").unwrap().as_deref());
+        assert_eq!(runtime,value);
+        assert_eq!(channel_field(&saved,"stream")["effective_value"],value.to_string());
+    }
+}
+
+#[test]
+fn test_assistant_management_legacy_provider_supports_channel_patch_and_workspace() {
+    for has_model_row in [true,false] {
+        let (db,llm,_,codex) = fixture();
+        let id = create(&db,&llm,codex,4);
+        let model = db.get_assistant_model(id).unwrap()[0].id;
+        db.add_assistant_model_config(id,if has_model_row{model}else{0},"acp_provider",&codex.to_string(),"string").unwrap();
+        if has_model_row {
+            db.conn.execute("UPDATE assistant_model SET provider_id=0 WHERE assistant_id=?1",[id]).unwrap();
+        } else { db.conn.execute("DELETE FROM assistant_model WHERE assistant_id=?1",[id]).unwrap(); }
+        let before = channel::read(&db,&llm,id).unwrap();
+        assert_eq!(before["channel"],"codex_app_server");
+        let saved = channel::patch(&db,&llm,id,&json!({"codex_sandbox":"read-only"}),&json!([]),false).unwrap();
+        assert_eq!(channel_field(&saved,"codex_sandbox")["effective_value"],"read-only");
+        let cwd = directory(std::env::current_dir().unwrap().to_str().unwrap()).unwrap();
+        channel::workspace(&db,&llm,id,&json!({"action":"add","path":cwd}),false).unwrap();
+        channel::workspace(&db,&llm,id,&json!({"action":"set_directory","path":cwd}),false).unwrap();
+        let workspaces = channel::workspace(&db,&llm,id,&json!({"action":"list"}),false).unwrap();
+        assert_eq!(workspaces["workspaces"].as_array().unwrap().len(),1);
+        let models = db.get_assistant_model(id).unwrap();
+        let configs = db.get_assistant_model_configs(id).unwrap();
+        assert_eq!(crate::api::assistant_api::resolve_acp_provider_id(&models,&configs),Some(codex));
+        let runtime = crate::api::ai::codex_app_server::extract_codex_app_server_config(&configs,&[],None).unwrap();
+        assert_eq!(runtime.working_directory,std::path::PathBuf::from(cwd));
+        assert_eq!(runtime.sandbox.as_deref(),Some("read-only"));
+        assert_eq!(models.first().map(|m|m.provider_id),if has_model_row{Some(0)}else{None});
+    }
+}
+
+#[test]
+fn test_assistant_management_provider_priority_does_not_replace_missing_modern_binding() {
+    let (db,llm,normal,codex) = fixture();
+    let id = create(&db,&llm,codex,4);
+    let model = db.get_assistant_model(id).unwrap()[0].id;
+    db.add_assistant_model_config(id,model,"acp_provider",&normal.to_string(),"string").unwrap();
+    assert_eq!(channel::read(&db,&llm,id).unwrap()["channel"],"codex_app_server");
+    db.conn.execute("UPDATE assistant_model SET provider_id=999999 WHERE assistant_id=?1",[id]).unwrap();
+    assert!(channel::read(&db,&llm,id).unwrap_err().contains("999999"));
+    assert!(channel::workspace(&db,&llm,id,&json!({"action":"list"}),false).unwrap_err().contains("999999"));
+}
