@@ -1,6 +1,41 @@
 use super::*;
 use rusqlite::Connection;
 
+#[test]
+fn test_assistant_management_plugin_database_uri_keeps_local_path_and_rw_mode() {
+    let path = std::env::temp_dir().join("用户 数据#%&").join("plugin.db");
+    let mut previous = tauri::Url::from_file_path(&path).unwrap();
+    previous.query_pairs_mut().append_pair("mode","rw");
+    let value = plugin_database_uri(&path).unwrap();
+    assert_eq!(value,previous.as_str());
+    let parsed = tauri::Url::parse(&value).unwrap();
+    assert_eq!(parsed.to_file_path().unwrap(),path);
+    assert_eq!(parsed.query_pairs().collect::<Vec<_>>(),vec![("mode".into(),"rw".into())]);
+    assert_eq!(parsed.fragment(),None);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_assistant_management_plugin_database_uri_moves_unc_host_into_path() {
+    for path in [r"\\server\share\plugin.db",r"\\?\UNC\server\share\plugin.db"] {
+        let value = plugin_database_uri(std::path::Path::new(path)).unwrap();
+        assert_eq!(value,"file:////server/share/plugin.db?mode=rw");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn test_assistant_management_plugin_database_uri_preserves_encoded_unc_filename() {
+    let value = plugin_database_uri(std::path::Path::new(r"\\server\共享 目录\中文 #?%&\plugin.db")).unwrap();
+    assert!(value.starts_with("file:////server/"));
+    assert!(value.contains("%20") && value.contains("%23") && value.contains("%3F") && value.contains("%25"));
+    // Browser-style URL parsing on Windows normalizes the leading path slashes;
+    // assert the actual SQLite wire format, then decode only the filename bytes.
+    assert_eq!(value,"file:////server/%E5%85%B1%E4%BA%AB%20%E7%9B%AE%E5%BD%95/%E4%B8%AD%E6%96%87%20%23%3F%25&/plugin.db?mode=rw");
+    let filename = value.strip_prefix("file://").unwrap().strip_suffix("?mode=rw").unwrap();
+    assert_eq!(urlencoding::decode(filename).unwrap(),"//server/共享 目录/中文 #?%&/plugin.db");
+}
+
 fn fixture() -> (AssistantDatabase, LLMDatabase, i64, i64) {
     let db = AssistantDatabase {conn:Connection::open_in_memory().unwrap(),mcp_conn:Connection::open_in_memory().unwrap()};
     db.create_tables().unwrap();

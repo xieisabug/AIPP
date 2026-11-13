@@ -34,15 +34,24 @@ pub(crate) fn profile_in_app(app: &tauri::AppHandle, op: &str, args: &Value, dry
     let llm = LLMDatabase::new(app).map_err(|e|e.to_string())?;
     if op=="copy" {
         let path = crate::db::get_db_path(app,"plugin.db")?;
-        let mut uri = tauri::Url::from_file_path(&path).map_err(|_|"复制助手：无法解析插件配置数据库路径")?;
-        // A missing/corrupt plugin store must fail the copy, not silently create
-        // an empty store and report an incomplete assistant as successfully copied.
-        uri.query_pairs_mut().append_pair("mode","rw");
+        let uri = plugin_database_uri(&path)?;
         db.conn.execute("ATTACH DATABASE ?1 AS assistant_copy_plugins",[uri.as_str()])
             .map_err(|e|format!("复制助手：连接插件配置数据库失败：{e}"))?;
     }
     let skills = if op=="create" {agents_skills(app)} else {Vec::new()};
     profile(&db,&llm,op,args,&skills,dry_run)
+}
+
+fn plugin_database_uri(path: &std::path::Path) -> Result<String,String> {
+    let mut uri = tauri::Url::from_file_path(path).map_err(|_|"复制助手：无法解析插件配置数据库路径")?;
+    // Never create a missing plugin database. URL handles filename encoding.
+    uri.query_pairs_mut().append_pair("mode","rw");
+    if let Some(host) = uri.host_str() {
+        // SQLite rejects non-local authorities by default. Keep the encoded UNC
+        // host/share in the path, with an empty authority: file:////server/share.
+        return Ok(format!("file:////{host}{}?{}",uri.path(),uri.query().unwrap_or_default()));
+    }
+    Ok(uri.into())
 }
 
 pub(crate) async fn changed(app: &tauri::AppHandle, id: i64) {
