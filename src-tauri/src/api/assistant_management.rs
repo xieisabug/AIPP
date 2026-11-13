@@ -187,14 +187,10 @@ fn copy_config(db: &AssistantDatabase, source: i64, name: &str, description: &st
 pub(crate) fn directory(raw: &str) -> Result<String,String> {
     let path = std::path::Path::new(raw);
     if !path.is_absolute() { return Err("工作区/工作目录必须为绝对路径".into()); }
-    let path = path.canonicalize().map_err(|e|format!("无法访问目录 {raw}：{e}"))?;
+    let path = dunce::canonicalize(path).map_err(|e|format!("无法访问目录 {raw}：{e}"))?;
     if !path.is_dir() { return Err(format!("路径不是目录：{raw}")); }
     std::fs::read_dir(&path).map_err(|e|format!("目录不可读 {raw}：{e}"))?;
-    let value = path.to_string_lossy().to_string();
-    #[cfg(windows)]
-    let value = value.strip_prefix(r"\\?\UNC\").map(|p| format!(r"\\{p}"))
-        .unwrap_or_else(|| value.strip_prefix(r"\\?\").unwrap_or(&value).to_string());
-    Ok(value)
+    Ok(path.to_string_lossy().into_owned())
 }
 
 pub(crate) fn config_value(db: &AssistantDatabase, id: i64, name: &str) -> Result<Option<String>,String> {

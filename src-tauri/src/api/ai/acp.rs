@@ -1874,22 +1874,6 @@ pub fn build_acp_launch_plan(
     plan
 }
 
-fn expand_home_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        dirs::home_dir()
-            .map(|home| home.join(&path[2..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else if path == "~" {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from(path))
-    } else if path.starts_with('~') {
-        dirs::home_dir()
-            .map(|home| home.join(&path[1..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else {
-        PathBuf::from(path)
-    }
-}
-
 /// Extract text content from a ContentBlock
 fn extract_content_text(content: &acp::ContentBlock) -> String {
     match content {
@@ -5971,8 +5955,6 @@ pub fn extract_acp_config(
     model_configs: &[AssistantModelConfig],
     provider_configs: &[LLMProviderConfig],
 ) -> Result<AcpConfig, AppError> {
-    use std::path::PathBuf;
-
     // Helper to get value from provider_configs
     let get_provider_config = |name: &str| -> Option<String> {
         provider_configs
@@ -6021,10 +6003,7 @@ pub fn extract_acp_config(
 
     // 获取工作目录
     // 优先级: assistant_model_config > llm_provider_config > home_dir
-    let working_directory = get_model_config("acp_working_directory")
-        .or_else(|| get_provider_config("acp_working_directory"))
-        .map(|path| expand_home_path(&path))
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let working_directory = super::working_directory::from_configs(model_configs, provider_configs, true)?;
 
     // 收集环境变量
     // 从两个配置源收集，model_config 优先级更高

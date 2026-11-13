@@ -374,10 +374,7 @@ pub fn extract_codex_app_server_config(
     };
 
     let cli_command = provider_value("codex_cli_command").unwrap_or_else(|| "codex".to_string());
-    let working_directory = model_value("acp_working_directory")
-        .or_else(|| provider_value("acp_working_directory"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let working_directory = super::working_directory::from_configs(model_configs, provider_configs, false)?;
     // 与 ACP 通道一致：assistant_model_config（助手级）优先于 provider 默认值
     let additional_args = model_value("acp_additional_args")
         .or_else(|| provider_value("codex_additional_args"))

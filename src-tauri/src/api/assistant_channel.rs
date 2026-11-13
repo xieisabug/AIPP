@@ -53,17 +53,16 @@ pub(crate) fn read(db: &AssistantDatabase, llm: &LLMDatabase, id: i64) -> Result
             "codex_approvals_reviewer" => Some("user".to_string()),
             "tool_review_mode" => Some("off".to_string()),
             "stream" => Some(crate::api::ai::config::DEFAULT_STREAM.to_string()),
-            "acp_working_directory" => Some(dirs::home_dir().ok_or("无法确定通道默认工作目录")?.to_string_lossy().to_string()),
             _ => None,
         };
         let effective = override_value.or(provider_value).map(str::to_owned).or(default);
         let effective = if field.name=="stream" {
             Some(crate::api::ai::config::stream_enabled(effective.as_deref()).to_string())
         } else {effective};
-        // ACP/other native adapters expand ~; Codex uses the literal configured path.
-        let effective = effective.map(|value| if field.name=="acp_working_directory" && api!="codex_app_server" && (value=="~" || value.starts_with("~/") || value.starts_with("~\\")) {
-            dirs::home_dir().map(|p|p.join(value.trim_start_matches('~').trim_start_matches(['/', '\\'])).to_string_lossy().to_string()).unwrap_or(value)
-        } else { value });
+        let effective = if field.name=="acp_working_directory" {
+            Some(crate::api::ai::working_directory::from_configs(&configs,&providers,api!="codex_app_server")
+                .map_err(|e|e.to_string())?.to_string_lossy().into_owned())
+        } else {effective};
         fields.push(json!({"name":field.name,"schema":field.value_type,"assistant_override":override_value,
             "provider_default":provider_value,"effective_value":effective,
             "source":if override_value.is_some(){"assistant"}else if provider_value.is_some(){"provider"}else{"channel_default"}}));

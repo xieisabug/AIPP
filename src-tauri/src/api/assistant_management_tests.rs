@@ -20,6 +20,69 @@ fn create(db: &AssistantDatabase, llm: &LLMDatabase, provider: i64, kind: i64) -
 }
 
 #[test]
+fn test_assistant_management_claude_directory_readback_matches_launch_config() {
+    let (db,llm,_,_) = fixture();
+    llm.add_llm_provider("Claude mock","claude_sdk","",false,true).unwrap();
+    let provider = llm.conn.last_insert_rowid();
+    let id = create(&db,&llm,provider,4);
+    llm.add_llm_provider_config(provider,"acp_working_directory","~/provider-project","",false).unwrap();
+    let model_id = config_model_id(&db,id).unwrap();
+    let field = |value: &Value| value["parameters"].as_array().unwrap().iter()
+        .find(|p|p["name"]=="acp_working_directory").unwrap().clone();
+    // Simulate existing persisted values, bypassing the new absolute-path setter.
+    let absolute = std::env::temp_dir().join("explicit project");
+    for raw in ["~/project", "~", r"~\project", "~other/project", absolute.to_str().unwrap(), " "] {
+        db.conn.execute("INSERT INTO assistant_model_config(assistant_id,assistant_model_id,name,value,value_type) VALUES(?1,?2,'acp_working_directory',?3,'string') ON CONFLICT(assistant_id,name) DO UPDATE SET value=excluded.value",params![id,model_id,raw]).unwrap();
+        let value = field(&channel::read(&db,&llm,id).unwrap());
+        let config = crate::api::ai::claude_sdk::extract_claude_sdk_config(
+            &db.get_assistant_model_configs(id).unwrap(),&llm.get_llm_provider_config(provider).unwrap(),None,vec![]).unwrap();
+        assert_eq!(value["effective_value"].as_str().unwrap(), config.working_directory.to_str().unwrap(),"{raw}");
+        let expected = match raw {
+            "~/project" => dirs::home_dir().unwrap().join("project"),
+            "~" => dirs::home_dir().unwrap(),
+            " " => dirs::home_dir().unwrap().join("provider-project"),
+            #[cfg(windows)]
+            r"~\project" => dirs::home_dir().unwrap().join("project"),
+            _ => std::path::PathBuf::from(raw),
+        };
+        assert_eq!(config.working_directory,expected);
+        assert_eq!(value["source"],if raw.trim().is_empty(){"provider"}else{"assistant"});
+    }
+    db.conn.execute("DELETE FROM assistant_model_config WHERE assistant_id=?1 AND name='acp_working_directory'",[id]).unwrap();
+    let inherited = field(&channel::read(&db,&llm,id).unwrap());
+    assert_eq!(inherited["source"],"provider");
+    assert_eq!(std::path::Path::new(inherited["effective_value"].as_str().unwrap()),dirs::home_dir().unwrap().join("provider-project"));
+    llm.conn.execute("DELETE FROM llm_provider_config WHERE llm_provider_id=?1 AND name='acp_working_directory'",[provider]).unwrap();
+    let default = field(&channel::read(&db,&llm,id).unwrap());
+    let config = crate::api::ai::claude_sdk::extract_claude_sdk_config(&db.get_assistant_model_configs(id).unwrap(),&[],None,vec![]).unwrap();
+    assert_eq!(default["source"],"channel_default");
+    assert_eq!(default["effective_value"].as_str().unwrap(),config.working_directory.to_str().unwrap());
+}
+
+#[test]
+fn test_assistant_management_other_agent_directory_readback_matches_launch_config() {
+    let (db,llm,_,_) = fixture();
+    for api in ["acp","pi","codex_app_server"] {
+        llm.add_llm_provider("Agent mock",api,"",false,true).unwrap();
+        let provider = llm.conn.last_insert_rowid();
+        if api=="acp" { llm.add_llm_provider_config(provider,"acp_cli_command","gemini","",false).unwrap(); }
+        llm.add_llm_provider_config(provider,"acp_working_directory","~","",false).unwrap();
+        let id = create(&db,&llm,provider,4);
+        let configs = db.get_assistant_model_configs(id).unwrap();
+        let providers = llm.get_llm_provider_config(provider).unwrap();
+        let runtime = match api {
+            "acp" => crate::api::ai::acp::extract_acp_config(&configs,&providers).unwrap().working_directory,
+            "pi" => crate::api::ai::agent_driver::native_agents::configuration(&configs,&providers,None).unwrap().cwd,
+            _ => crate::api::ai::codex_app_server::extract_codex_app_server_config(&configs,&providers,None).unwrap().working_directory,
+        };
+        let read = channel::read(&db,&llm,id).unwrap();
+        let field = read["parameters"].as_array().unwrap().iter().find(|p|p["name"]=="acp_working_directory").unwrap();
+        assert_eq!(field["effective_value"].as_str().unwrap(),runtime.to_str().unwrap(),"{api}");
+        assert_eq!(runtime,if api=="codex_app_server" {std::path::PathBuf::from("~")} else {dirs::home_dir().unwrap()});
+    }
+}
+
+#[test]
 fn test_assistant_management_create_defaults_and_partial_update() {
     let (db,llm,normal,_) = fixture();
     let id = create(&db,&llm,normal,0);
