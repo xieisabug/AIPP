@@ -90,9 +90,9 @@ use crate::api::plugin_api::{
     set_plugin_data, submit_js_plugin_hook_result, uninstall_plugin, verify_plugin_entry_checksum,
 };
 use crate::api::scheduled_task_api::{
-    create_scheduled_task, delete_scheduled_task, list_butler_scheduled_tasks,
-    list_scheduled_task_logs, list_scheduled_task_runs, list_scheduled_tasks,
-    run_scheduled_task_now, stop_scheduled_task_run, update_scheduled_task,
+    create_scheduled_task, delete_scheduled_task, get_scheduled_task, list_scheduled_task_logs,
+    list_scheduled_task_runs, list_scheduled_tasks, preview_schedule, run_scheduled_task_now,
+    set_scheduled_task_enabled, stop_scheduled_task_run, update_scheduled_task,
 };
 use crate::api::skill_api::{
     bulk_update_assistant_skills, cleanup_orphaned_skill_configs, delete_skill,
@@ -1092,6 +1092,7 @@ pub fn run() {
             search_conversations,
             crate::api::butler_peer::list_butler_peer_posts,
             crate::api::butler_peer::get_butler_exchange_context,
+            crate::api::message_preview::get_message_preview,
             crate::api::butler_control::control_butler_task,
             crate::api::butler_group::create_butler_group,
             crate::api::butler_group::list_butler_groups,
@@ -1359,15 +1360,14 @@ pub fn run() {
             download_and_install_update_with_proxy,
             get_app_version,
             list_scheduled_tasks,
-            list_butler_scheduled_tasks,
+            get_scheduled_task,
+            preview_schedule,
             create_scheduled_task,
             update_scheduled_task,
+            set_scheduled_task_enabled,
             delete_scheduled_task,
             run_scheduled_task_now,
             stop_scheduled_task_run,
-            crate::api::scheduled_task_api::get_butler_check_policy,
-            crate::api::scheduled_task_api::configure_butler_check,
-            crate::api::scheduled_task_api::control_butler_check,
             list_scheduled_task_logs,
             list_scheduled_task_runs,
             // Plugin commands

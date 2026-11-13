@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { sampleTickIndices, tickOffset, turnIndexFromOffset } from "./turnRailLayout";
+import { railOffsetTop, tickOffset, tickThickness, turnIndexFromOffset } from "./turnRailLayout";
 
 describe("turnIndexFromOffset", () => {
     it("should snap to the nearest turn when offset is inside the track", () => {
@@ -29,37 +29,31 @@ describe("tickOffset", () => {
     });
 });
 
-describe("sampleTickIndices", () => {
-    it("should draw every tick when spacing is wide enough", () => {
-        // 4 轮铺在 48px：间距 16px ≥ 8px
-        expect(sampleTickIndices(4, 48, 8)).toEqual([0, 1, 2, 3]);
+describe("railOffsetTop", () => {
+    it("should center the track plus its padding inside the message area", () => {
+        // 32px 轨道 + 上下各 6px，在 800px 消息区里
+        expect(railOffsetTop(32, 800, 6)).toBe(378);
+        expect(railOffsetTop(400, 800, 6)).toBe(194);
     });
 
-    it("should sample with a fixed stride and keep both ends when ticks are crowded", () => {
-        // 201 轮铺在 400px：间距 2px，步长 4 → 0,4,…,200
-        const indices = sampleTickIndices(201, 400, 8);
-        expect(indices[0]).toBe(0);
-        expect(indices[indices.length - 1]).toBe(200);
-        expect(indices).toHaveLength(51);
-        for (let i = 1; i < indices.length; i += 1) {
-            expect((indices[i] - indices[i - 1]) * 2).toBeGreaterThanOrEqual(8);
-        }
+    it("should clamp to the top when the message area is shorter than the track", () => {
+        expect(railOffsetTop(400, 100, 6)).toBe(0);
+        expect(railOffsetTop(0, 0, 6)).toBe(0);
+    });
+});
+
+describe("tickThickness", () => {
+    it("should use the full 3px tick while turns have room", () => {
+        // 4 轮铺在 48px：间距 16px
+        expect(tickThickness(4, 48)).toBe(3);
+        expect(tickThickness(1, 0)).toBe(3);
+        expect(tickThickness(2, 0)).toBe(3);
     });
 
-    it("should replace the last sample instead of crowding it against the final turn", () => {
-        // 10 轮铺在 45px：间距 5px，步长 2 → 0,2,4,6,8；8 与 9 只差 5px，改为 9
-        expect(sampleTickIndices(10, 45, 8)).toEqual([0, 2, 4, 6, 9]);
-    });
-
-    it("should keep the tick count bounded by the track height", () => {
-        const indices = sampleTickIndices(5000, 400, 8);
-        expect(indices.length).toBeLessThanOrEqual(400 / 8 + 1);
-        expect(indices[indices.length - 1]).toBe(4999);
-    });
-
-    it("should handle empty, single and unmeasured tracks", () => {
-        expect(sampleTickIndices(0, 100, 8)).toEqual([]);
-        expect(sampleTickIndices(1, 0, 8)).toEqual([0]);
-        expect(sampleTickIndices(5, 0, 8)).toEqual([0, 4]);
+    it("should thin ticks instead of dropping turns when they crowd together", () => {
+        // 101 轮铺在 400px：间距 4px，刻度 2px + 空隙 2px
+        expect(tickThickness(101, 400)).toBe(2);
+        // 301 轮铺在 400px：间距 1.33px，最细 1px
+        expect(tickThickness(301, 400)).toBe(1);
     });
 });

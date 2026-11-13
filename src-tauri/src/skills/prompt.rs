@@ -97,6 +97,26 @@ pub async fn collect_skills_info_for_assistant_with_additions(
     Ok(SkillsInfoForAssistant { enabled_skills: merged_skills })
 }
 
+/// 管家模式：与总管家一致，已安装的 Skills 全部可用（只在本次对话生效，不写回助手配置）。
+pub async fn collect_all_skills_for_assistant(
+    app_handle: &tauri::AppHandle,
+    assistant_id: i64,
+    temporary_skill_identifiers: &[String],
+) -> Result<SkillsInfoForAssistant, AppError> {
+    let mut skills = collect_skills_info_for_assistant_with_additions(app_handle, assistant_id, temporary_skill_identifiers)
+        .await?
+        .enabled_skills;
+    let mut available = scan_skills(app_handle.clone()).await.map_err(AppError::UnknownError)?;
+    available.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+    let mut seen: HashSet<String> = skills.iter().map(|skill| skill.identifier.clone()).collect();
+    for skill in available {
+        if seen.insert(skill.identifier.clone()) {
+            skills.push(skill);
+        }
+    }
+    Ok(SkillsInfoForAssistant { enabled_skills: skills })
+}
+
 /// Format skills into the assistant prompt
 /// This appends skill information to the existing prompt
 #[instrument(level = "debug", skip(assistant_prompt_result, skills_info, _app_handle), fields(skills_count = skills_info.enabled_skills.len()))]

@@ -166,7 +166,7 @@ async fn get_conversations_needing_summary(
         INNER JOIN message m ON m.conversation_id = c.id
         LEFT JOIN conversation_summary cs ON cs.conversation_id = c.id
         WHERE cs.id IS NULL
-          AND COALESCE(c.conversation_kind, 'normal') != 'butler_main'
+          AND COALESCE(c.conversation_kind, 'normal') NOT IN ('butler_main', 'scheduled_run')
           AND (
               SELECT MAX(m2.created_time)
               FROM message m2

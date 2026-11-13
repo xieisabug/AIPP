@@ -1121,6 +1121,36 @@ pub(super) fn preview_tool_result_has_inline_content(
         })
 }
 
+/// `preview_message` 的工具结果：飞书看不到 AIPP 里的引用卡片，投递时按同一套范围规则读取原文并展开。
+/// 读取失败（原消息已删除等）时如实说明原因。不是成功的 preview_message 结果时返回 None。
+async fn render_preview_message_tool_result_for_feishu(
+    app_handle: &AppHandle,
+    delivery_message: &crate::db::conversation_db::Message,
+) -> Option<Vec<String>> {
+    if delivery_message.message_type != "tool_result" {
+        return None;
+    }
+    let params = crate::external_channels::presentation::successful_preview_message_parameters(
+        &delivery_message.content,
+    )?;
+    let preview = match crate::api::message_preview::reference_from_args(&params) {
+        Ok(reference) => {
+            crate::api::message_preview::build(app_handle, delivery_message.conversation_id, reference).await
+        }
+        Err(error) => Err(error),
+    };
+    Some(match preview {
+        Ok(preview) => crate::external_channels::presentation::render_previewed_message_for_external_channel(
+            params.get("title").and_then(Value::as_str),
+            &preview.author,
+            &preview.source,
+            &preview.content,
+            "feishu",
+        ),
+        Err(error) => vec![format!("❌ 引用的消息无法展示：{error}")],
+    })
+}
+
 pub(super) fn render_inline_preview_tool_result_parts_for_feishu(
     delivery_message: &crate::db::conversation_db::Message,
     relay_origin: &str,
@@ -1144,6 +1174,10 @@ pub(super) async fn render_message_for_feishu_delivery(
     preview_tool_call: Option<MCPToolCall>,
     relay_origin: &str,
 ) -> Result<Vec<String>, String> {
+    if let Some(rendered) = render_preview_message_tool_result_for_feishu(app_handle, delivery_message).await {
+        return Ok(rendered);
+    }
+
     if let Some(tool_call) = preview_tool_call {
         if let Some(rendered) = render_preview_file_mcp_call_for_feishu(
             app_handle,

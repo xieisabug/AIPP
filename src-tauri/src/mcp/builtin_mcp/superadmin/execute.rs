@@ -20,15 +20,6 @@ pub(crate) fn approval_gate_error(meta: &ActionMeta, dry_run: bool) -> Option<St
     None
 }
 
-/// Legacy schedule.create does not carry trusted ownership. Never let a Butler
-/// call silently become an unrestricted ordinary schedule (including batch calls).
-fn schedule_origin_error(action: &str, dry_run: bool, kind: Option<&str>) -> Option<String> {
-    if action == "schedule.create" && !dry_run
-        && matches!(kind, Some("butler_main" | "butler_contact" | "butler_task" | "butler_group_member")) {
-        Some("管家不能通过旧版 schedule.create 创建无归属的日程。请使用 schedule_task 的 create 操作并绑定当前总管家主会话；创建后须由用户确认来源、模式和期限才会启用。".into())
-    } else { None }
-}
-
 /// Handle the `superadmin_execute` tool call.
 #[instrument(skip(app_handle, registry))]
 pub async fn handle_execute(
@@ -56,25 +47,6 @@ pub async fn handle_execute(
     };
 
     let meta = &registered.meta;
-
-    let origin_check = (|| -> Result<(), String> {
-        if request.action_id != "schedule.create" || request.dry_run { return Ok(()); }
-        if let Some(id) = butler_conversation_id {
-            use crate::db::conversation_db::Repository;
-            let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
-            let origin = db.conversation_repo().map_err(|e| e.to_string())?.read(id)
-                .map_err(|e| e.to_string())?.ok_or("调用会话不存在，不能创建日程")?;
-            if let Some(error) = schedule_origin_error(&request.action_id, request.dry_run, Some(&origin.conversation_kind)) {
-                return Err(error);
-            }
-        }
-        Ok(())
-    })();
-    if let Err(error) = origin_check {
-        log_audit(app_handle, &audit_id, meta, &request, false, None, Some(&error), false, butler_conversation_id, None);
-        return ExecuteResult { success: false, action_id: request.action_id.clone(), risk_level: meta.risk_level,
-            approval_used: false, result: serde_json::Value::Null, audit_id, error: Some(error) };
-    }
 
     // 3. Capture before-snapshot for write actions (risk > 0)
     let before_snapshot = if meta.risk_level.0 > 0 && !request.dry_run {
@@ -234,6 +206,3 @@ fn log_audit(
     }
 }
 
-#[cfg(test)]
-#[path = "execute_origin_tests.rs"]
-mod schedule_origin_tests;

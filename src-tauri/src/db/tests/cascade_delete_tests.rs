@@ -346,6 +346,28 @@ fn test_cascade_delete_scheduled_task_failure_keeps_task_logs_and_runs() {
     for table in ["scheduled_task_log","scheduled_task_run"] { assert_eq!(count(&conn,table,"task_id=1"),0); assert_eq!(count(&conn,table,"task_id=2"),1); }
 }
 
+/// 管家定时任务隐藏保留的运行会话随任务删除；用户能看到的运行会话与其他任务的不受影响。
+#[test]
+fn test_cascade_delete_scheduled_task_removes_hidden_run_conversations_only() {
+    let conn=Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE conversation(id INTEGER PRIMARY KEY,conversation_kind TEXT);
+        CREATE TABLE message(id INTEGER PRIMARY KEY,conversation_id INTEGER,parent_id INTEGER);
+        CREATE TABLE scheduled_task(id INTEGER PRIMARY KEY); CREATE TABLE scheduled_task_log(task_id INTEGER);
+        CREATE TABLE scheduled_task_run(task_id INTEGER,conversation_id INTEGER,final_message_id INTEGER);
+        INSERT INTO conversation VALUES(10,'scheduled_run'),(11,'normal'),(12,'scheduled_run');
+        INSERT INTO message VALUES(100,10,NULL),(110,11,NULL),(120,12,NULL);
+        INSERT INTO scheduled_task VALUES(1),(2);
+        INSERT INTO scheduled_task_run VALUES(1,10,100),(1,11,110),(2,12,120);").unwrap();
+    cascade_delete::delete(&conn,"scheduled_task",1).unwrap();
+    assert_eq!(count(&conn,"conversation","id=10"),0);
+    assert_eq!(count(&conn,"message","conversation_id=10"),0);
+    assert_eq!(count(&conn,"conversation","id IN (11,12)"),2, "可见的运行会话与其他任务的隐藏会话保留");
+    assert_eq!(count(&conn,"scheduled_task_run","task_id=2 AND final_message_id=120"),1);
+    // 单独删除被引用的消息时，运行记录的引用随之清空。
+    cascade_delete::delete(&conn,"message",120).unwrap();
+    assert_eq!(count(&conn,"scheduled_task_run","task_id=2 AND final_message_id IS NULL"),1);
+}
+
 #[test]
 fn test_cascade_delete_prompt_and_model_replacement_cleans_parameters() {
     let db=assistant_db();

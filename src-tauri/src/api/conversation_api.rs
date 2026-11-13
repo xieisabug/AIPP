@@ -123,7 +123,7 @@ fn collect_mcp_tool_call_preview_info(content: &str) -> Vec<McpToolCallPreviewIn
     infos
 }
 
-fn strip_mcp_tool_call_segments(content: &str) -> String {
+pub(crate) fn strip_mcp_tool_call_segments(content: &str) -> String {
     let without_comments = MCP_TOOL_CALL_COMMENT_RE.replace_all(content, "");
     MCP_TOOL_CALL_XML_RE
         .replace_all(&without_comments, "")

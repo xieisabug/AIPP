@@ -18,8 +18,8 @@ fn test_capability_disabled_or_invalid_values_fail_closed() {
 fn test_capability_keys_are_independent_and_scoped_to_butler() {
     let keys: std::collections::HashSet<_> = [
         ButlerCapability::TaskDispatch, ButlerCapability::PeerCollaboration,
-        ButlerCapability::WorkContinuation, ButlerCapability::BackgroundChecks,
+        ButlerCapability::WorkContinuation,
     ].into_iter().map(ButlerCapability::key).collect();
-    assert_eq!(keys.len(), 4);
+    assert_eq!(keys.len(), 3);
     assert!(keys.iter().all(|key| key.starts_with("butler_")));
 }

@@ -38,6 +38,15 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([user,peer,answer,user,answer])).toEqual([user,user,answer]);
     });
 
+    it("should show a scheduled task delivery even right after an internal turn", () => {
+        const peer = message(2, "user", "[助手协作请求 · 内部协作]", {metadata_json:'{"origin":"butler_peer","leg":"request","audience":"peer"}'});
+        const internalAnswer = message(3, "response", "给对方的素材");
+        const trigger = message(4, "user", "[定时任务] 《周四休息提醒》", {metadata_json:'{"origin":"scheduled_task","role":"trigger","scheduled_task_id":6}'});
+        const delivered = message(5, "response", "今天是休息日，记得拉伸。", {metadata_json:'{"origin":"scheduled_task","role":"result","scheduled_task_id":6,"scheduled_task_name":"周四休息提醒"}'});
+        expect(butlerTranscript([peer, internalAnswer, trigger, delivered])).toEqual([delivered]);
+        expect(butlerTranscript([peer, internalAnswer, delivered])).toEqual([delivered]);
+    });
+
     it("should show the delegate's own answer and question when the work was handed over to it", () => {
         const handed = message(2, "user", "[助手协作请求 · 来自 总管家]", {metadata_json:'{"origin":"butler_peer","leg":"request","audience":"user"}'});
         const answer = message(3, "response", "这是我写好的稿子");
@@ -74,6 +83,21 @@ describe("Butler transcript", () => {
         const preview = '<!-- MCP_TOOL_CALL:{"tool_name":"preview_code","call_id":8} -->';
         const delivered = message(3, "response", step.content + preview);
         expect(butlerTranscript([delivered, history[4]])).toEqual([history[4]]);
+    });
+
+    it("should keep a preview_message card as a result but drop the narration around it", () => {
+        const call = '<!-- MCP_TOOL_CALL:{"server_name":"Agent 工具","tool_name":"preview_message","parameters":"{\\"message_id\\":12}","call_id":9} -->';
+        const shown = message(3, "response", `写作助手的初稿如下：${call}<!-- MCP_TOOL_CALL:{"tool_name":"read_file"} -->`);
+        const [card, answer] = butlerTranscript([shown, history[4]]);
+        expect(card.id).toBe(3);
+        expect(card.content).toBe(call);
+        expect(answer).toBe(history[4]);
+        // 流式中的半截调用、内部回合与静默回复里的引用都不提前显示
+        const streaming = message(3, "response", '<!-- MCP_TOOL_CALL_STREAMING:{"tool_name":"preview_message"');
+        expect(butlerTranscript([streaming])).toEqual([]);
+        expect(butlerTranscript([{ ...shown, finish_time: null } as Message])).toEqual([]);
+        const internal = message(2, "user", "内部协作", { metadata_json: '{"origin":"butler_peer","leg":"request","audience":"peer"}' });
+        expect(butlerTranscript([internal, shown])).toEqual([]);
     });
 
     it("should hide silent replies from internal turns but keep a later summary", () => {

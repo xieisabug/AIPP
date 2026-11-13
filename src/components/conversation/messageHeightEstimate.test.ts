@@ -65,6 +65,12 @@ describe("estimateMessageHeight", () => {
         expect(height).toBeLessThan(400);
     });
 
+    it("should reserve a quoted card when a response contains preview_message", () => {
+        const plain = estimateMessageHeight(message("response", toolCall("read_file")), { mergedMode: true });
+        const quoted = estimateMessageHeight(message("response", toolCall("preview_message")), { mergedMode: true });
+        expect(quoted - plain).toBeGreaterThan(150);
+    });
+
     it("should estimate a one-line user message as one bubble line", () => {
         expect(estimateMessageHeight(message("user", "继续"))).toBe(54);
     });

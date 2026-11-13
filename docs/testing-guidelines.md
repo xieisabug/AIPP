@@ -73,6 +73,31 @@ src/
 3. **集成测试**: 测试完整用户流程（配置修改→保存→读取）
 4. **测试命名**: `test_[功能]_[场景]` (Rust) / `should [行为] when [条件]` (TS)
 
+## 展示 / 布局类改动的测试
+
+jsdom 没有真实布局（`clientHeight` 默认 0、拿不到像素位置），所以这类改动用三层写：
+
+1. **布局数学抽纯函数，直接单测数值**
+   - 例：`src/components/conversation/turnRailLayout.ts` 的 `tickOffset` / `tickThickness` / `railOffsetTop`、
+     `virtualizedMessageListLayout.ts`。
+   - 居中、间距、封顶、抽样/变薄这类规则全部放这里，用例断言具体数字，最容易回归。
+2. **组件层断言 DOM 约定，不断言真实像素**
+   - 数量：每个数据项都有对应节点（例：`[data-turn-tick]` 数量 === 轮次数，而不是“抽样后的 N 根”）。
+   - 位置：内联 `style.top` **单调、互不相同**（能抓住“高度为 0，刻度全叠在 0”这类塌陷）。
+   - 锚定：外层容器的定位/高度来自哪个盒子（例：`top = scrollContainer.offsetTop`、`height = clientHeight`）。
+   - 半成品保护：量不到尺寸时不渲染，而不是画一堆零位节点。
+   - `ResizeObserver`：mock 里保存回调，测试内触发一次，断言重新测量/重新排布。
+   - 优先把可算的坐标写成内联样式（如 `style={{ top }}`）再断言，不要把“居中”全靠 Tailwind class
+     （jsdom 不解析 class），否则测试只能断言 class 字符串，既脆弱又测不出回归。
+3. **时序 / 挂载顺序要单独覆盖**
+   - React 同一 commit 里，**前面的兄弟节点的 `useLayoutEffect` 读后面兄弟节点的 ref 是 `null`**。
+     依赖 ref 的 effect 必须可重试，并补用例：初始 ref 为 `null` → 填上 → flush `requestAnimationFrame` →
+     断言重新渲染出完整内容（见 `ConversationTurnRail.test.tsx` 的迟挂用例）。
+4. **真实像素 / 视觉回归走打包应用 harness**（可选）
+   - `tmp/readme-shots`：fake LLM + CDP 驱动打包应用，用 `page.evaluate` 查
+     `[data-aipp-slot]` / `[data-turn-tick]` 的 `getBoundingClientRect` 断言（例如“轨道在消息区内且垂直居中”、
+     “刻度数量等于轮次数”）。适合 jsdom 测不了的“位置真的对”与截图对比。
+
 ## Test Data Isolation (重要)
 
 > ⚠️ **关键**: 所有后端测试必须使用内存数据库，确保不影响真实的 db 文件

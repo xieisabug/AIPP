@@ -1591,12 +1591,24 @@ pub async fn ask_ai(
         &app_handle,
         &processed_request.conversation_id,
     )?;
-    let skills_info = collect_skills_info_for_assistant_with_additions(
-        &app_handle,
-        processed_request.assistant_id,
-        &temporary_skill_identifiers,
-    )
-    .await?;
+    let butler_mode_conversation = existing_conversation.as_ref().is_some_and(|conversation| {
+        crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&conversation.conversation_kind)
+    });
+    let skills_info = if butler_mode_conversation {
+        crate::skills::collect_all_skills_for_assistant(
+            &app_handle,
+            processed_request.assistant_id,
+            &temporary_skill_identifiers,
+        )
+        .await?
+    } else {
+        collect_skills_info_for_assistant_with_additions(
+            &app_handle,
+            processed_request.assistant_id,
+            &temporary_skill_identifiers,
+        )
+        .await?
+    };
     let assistant_prompt_result = if !skills_info.enabled_skills.is_empty() {
         let prompt = format_skills_prompt(&app_handle, assistant_prompt_result, &skills_info).await;
         info!(enabled_skills = skills_info.enabled_skills.len(), "Skills formatted into prompt");

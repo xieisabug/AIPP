@@ -1,47 +1,55 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import ScheduleTaskDetail, { type ScheduleTaskDetailProps } from "./ScheduleTaskDetail";
-import type { ScheduledTask, ScheduledTaskRun } from "./scheduleTypes";
+import type { ScheduledRun, ScheduledTask, ScheduledTaskLog } from "./scheduleTypes";
 
 const task: ScheduledTask = {
-    id: 1,
-    name: "长沙每日天气早报",
-    isEnabled: true,
-    scheduleType: "interval",
-    intervalValue: 1,
-    intervalUnit: "day",
-    startTime: "08:00",
-    assistantId: 1,
-    taskPrompt: "短指令",
-    notifyPrompt: "",
-    butlerConversationId: 1467,
-    createdTime: "2026-11-06T23:55:44Z",
-    updatedTime: "2026-11-07T00:00:23Z",
+    id: 6,
+    name: "周四休息提醒",
+    enabled: true,
+    schedule: "0 16 * * 4",
+    scheduleText: "每周四 16:00",
+    upcoming: ["2026-11-19T08:00:00+00:00"],
+    upcomingText: ["2026-11-19 16:00 周四", "2026-11-26 16:00 周四"],
+    assistantId: 40,
+    assistantName: "健身教练",
+    prompt: "提醒用户今天休息",
+    deliverPolicy: "always",
+    deliverTo: "owner_chat",
+    deliverTargetText: "与健身教练的私聊",
+    butlerMode: true,
+    runCount: 3,
+    missedPolicy: "run_once",
+    consecutiveFailures: 0,
+    createdTime: "2026-11-12T02:00:00Z",
+    updatedTime: "2026-11-12T02:00:00Z",
+    needsAttention: false,
 };
 
-const run = (overrides: Partial<ScheduledTaskRun>): ScheduledTaskRun => ({
-    id: 1,
-    taskId: 1,
-    runId: "run-1-abcdef",
-    status: "success",
-    notify: false,
-    startedTime: "2026-11-07T00:00:00Z",
-    finishedTime: "2026-11-07T00:00:48Z",
+const run = (overrides: Partial<ScheduledRun>): ScheduledRun => ({
+    runId: "run-1",
+    status: "delivered",
+    statusText: "已发送",
+    startedTime: "2026-11-12T08:00:00Z",
+    finishedTime: "2026-11-12T08:00:48Z",
+    scheduledFor: "2026-11-12T08:00:00Z",
+    localRunning: false,
     ...overrides,
+});
+
+const log = (id: number, messageType: string, content: string): ScheduledTaskLog => ({
+    id, taskId: 6, runId: "run-1", messageType, content, createdTime: "2026-11-12T08:00:10Z",
 });
 
 function renderDetail(overrides: Partial<ScheduleTaskDetailProps> = {}) {
     const props: ScheduleTaskDetailProps = {
         task,
-        scheduleDescription: "每 1 天 08:00 执行",
-        assistantName: "天气助手",
         runs: [],
         selectedRunId: null,
         isRunsLoading: false,
         logs: [],
         isLogsLoading: false,
-        runningRun: null,
-        isRunning: false,
+        isStarting: false,
         isStopping: false,
         onSelectRun: vi.fn(),
         onRefreshRuns: vi.fn(),
@@ -58,44 +66,60 @@ function renderDetail(overrides: Partial<ScheduleTaskDetailProps> = {}) {
 }
 
 describe("ScheduleTaskDetail", () => {
-    it("marks butler tasks and shows missed runs as 错过 instead of 完成", () => {
+    it("should show the readable schedule, upcoming times and delivery target when a task is selected", () => {
+        renderDetail();
+        expect(screen.getByText("每周四 16:00")).toBeTruthy();
+        expect(screen.getByText(/接下来：2026-11-19 16:00 周四/)).toBeTruthy();
+        expect(screen.getByText("与健身教练的私聊")).toBeTruthy();
+        expect(screen.getByText("每次都发")).toBeTruthy();
+        expect(screen.getByText(/3 次/)).toBeTruthy();
+    });
+
+    it("should explain why a task needs attention when it was auto-paused", () => {
         renderDetail({
-            runs: [run({ id: 2, runId: "run-missed", status: "missed", finishedTime: null })],
+            task: { ...task, enabled: false, needsAttention: true, consecutiveFailures: 5, pausedReason: "连续失败 5 次，已自动暂停" },
         });
-        expect(screen.getByText("管家")).toBeTruthy();
-        expect(screen.getByText("错过")).toBeTruthy();
-        expect(screen.queryByText("完成")).toBeNull();
+        expect(screen.getByText("需要处理")).toBeTruthy();
+        expect(screen.getByRole("status").textContent).toContain("连续失败 5 次，已自动暂停");
+        expect(screen.getByRole("status").textContent).toContain("不会补跑");
     });
 
-    it("shows run duration and selects a run on click", () => {
-        const props = renderDetail({ runs: [run({})] });
-        expect(screen.getByText(/48 秒/)).toBeTruthy();
-        fireEvent.click(screen.getByText("完成"));
-        expect(props.onSelectRun).toHaveBeenCalledWith("run-1-abcdef");
+    it("should label skipped runs with their reason when the run never started", () => {
+        renderDetail({ runs: [run({ runId: "s", status: "skipped", statusText: "跳过", reason: "执行助手 #40 不存在" })] });
+        expect(screen.getByText("跳过")).toBeTruthy();
+        expect(screen.getByText("执行助手 #40 不存在")).toBeTruthy();
     });
 
-    it("swaps 立即执行 for 停止 while a run is in progress", () => {
-        const running = run({ status: "running", finishedTime: null });
-        const props = renderDetail({ runs: [running], runningRun: running });
-        expect(screen.queryByText("立即执行")).toBeNull();
+    it("should select a run on click and show its delivered output", () => {
+        const props = renderDetail({
+            runs: [run({})],
+            selectedRunId: "run-1",
+            logs: [log(1, "start", "开始执行定时任务"), log(2, "response", "今天是休息日，记得拉伸。"), log(3, "delivered", "已发送到会话 #1529")],
+        });
+        expect(screen.getByText(/已发送到与健身教练的私聊/)).toBeTruthy();
+        expect(screen.getAllByText("今天是休息日，记得拉伸。").length).toBeGreaterThan(0);
+        fireEvent.click(screen.getAllByText("已发送")[0]);
+        expect(props.onSelectRun).toHaveBeenCalledWith("run-1");
+    });
+
+    it("should swap run-now for stop while this machine runs the task", () => {
+        const running = run({ status: "running", statusText: "运行中", finishedTime: null, localRunning: true });
+        const props = renderDetail({ runs: [running] });
+        expect(screen.queryByText("立即运行")).toBeNull();
         fireEvent.click(screen.getByText("停止"));
-        expect(props.onStop).toHaveBeenCalled();
+        expect(props.onStop).toHaveBeenCalledWith(running);
     });
 
-    it("lets long prompts expand and keeps short prompts without a toggle", () => {
-        renderDetail({ task: { ...task, taskPrompt: "很长的指令".repeat(80) } });
+    it("should let long prompts expand", () => {
+        renderDetail({ task: { ...task, prompt: "很长的指令".repeat(80) } });
         const toggle = screen.getByRole("button", { name: "展开" });
         fireEvent.click(toggle);
         expect(toggle.getAttribute("aria-expanded")).toBe("true");
-        expect(screen.getByText("收起")).toBeTruthy();
-        // 通知规则为空：显示默认规则文案且没有展开按钮
-        expect(screen.getByText("默认规则：有重要信息时通知")).toBeTruthy();
-        expect(screen.getAllByRole("button", { name: /展开|收起/ })).toHaveLength(1);
     });
 
-    it("asks to pick a run before showing logs", () => {
+    it("should ask to pick a run when none is selected", () => {
         renderDetail();
-        expect(screen.getByText("暂无运行记录")).toBeTruthy();
-        expect(screen.getByText("选择左侧一条运行记录查看日志")).toBeTruthy();
+        expect(screen.getByText("还没有运行过")).toBeTruthy();
+        expect(screen.getByText("选择左侧一条运行记录查看过程")).toBeTruthy();
     });
 });

@@ -90,7 +90,7 @@ async fn capture_review_request(adapter: AdapterKind) -> serde_json::Value {
     let client = genai::Client::builder().with_service_target_resolver(resolver).build().unwrap();
     let request = build_chat_request_from_messages(&[
         ("system".into(), REVIEW_SYSTEM_PROMPT.into(), Vec::new()),
-        ("user".into(), build_review_user_prompt("fs", "read_file", r#"{"path":"notes.md"}"#, None), Vec::new()),
+        ("user".into(), build_review_user_prompt("fs", "read_file", r#"{"path":"notes.md"}"#, None, None), Vec::new()),
     ], ToolCallStrategy::NonNative, None).chat_request;
     let options = review_chat_options(adapter).unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), client.exec_chat("gpt-4o", request, Some(&options))).await.unwrap();
@@ -190,7 +190,7 @@ fn test_review_prompts_scope_to_the_call_not_tool_existence() {
     assert!(REVIEW_SYSTEM_PROMPT.contains("不得自行补全"));
     assert!(REVIEW_SYSTEM_PROMPT.contains("safe=false"));
 
-    let user = build_review_user_prompt("fs", "read_file", r#"{"path":"notes.md"}"#, None);
+    let user = build_review_user_prompt("fs", "read_file", r#"{"path":"notes.md"}"#, None, None);
     assert!(user.contains("不是可调用工具"));
     assert!(user.contains("不可信的待审核数据"));
     assert!(user.contains("服务器: fs"));
@@ -221,6 +221,7 @@ fn test_review_user_prompt_includes_tool_description_as_plain_text() {
         "read_file",
         r#"{"path":"notes.md"}"#,
         Some(&definition),
+        None,
     );
     assert!(user.contains("工具说明: 读取工作区内的文本文件"));
     assert!(user.contains("- path（string，必填）: 文件路径"));
@@ -243,7 +244,7 @@ fn test_format_schema_as_field_notes_flattens_properties() {
 #[test]
 fn test_review_user_prompt_truncates_long_parameters() {
     let long_params = "x".repeat(PROMPT_PARAM_LIMIT + 12);
-    let user = build_review_user_prompt("ops", "bash", &long_params, None);
+    let user = build_review_user_prompt("ops", "bash", &long_params, None, None);
     assert!(user.contains("参数已截断"));
     assert!(user.contains(&format!("原长度 {}", PROMPT_PARAM_LIMIT + 12)));
     assert!(!user.contains(&long_params));
@@ -255,7 +256,7 @@ fn test_review_user_prompt_truncates_long_schema() {
         description: "d".repeat(PROMPT_DESCRIPTION_LIMIT + 5),
         input_schema: "s".repeat(PROMPT_SCHEMA_LIMIT + 9),
     };
-    let user = build_review_user_prompt("ops", "bash", "{}", Some(&definition));
+    let user = build_review_user_prompt("ops", "bash", "{}", Some(&definition), None);
     assert!(user.contains("说明已截断"));
     assert!(user.contains("字段说明已截断"));
     assert!(!user.contains(&definition.description));
@@ -318,7 +319,7 @@ fn test_review_exempt_tools_require_builtin_identity() {
     for (command, tool) in [
         ("aipp:agent", "load_skill"), ("aipp:agent", "load_mcp_tool"),
         ("aipp:agent", "load_mcp_server"), ("aipp:agent", "todo_write"),
-        ("aipp:agent", "spawn_task_conversation"),
+        ("aipp:agent", "spawn_task_conversation"), ("aipp:agent", "preview_message"),
         ("aipp:ui_interaction", "preview_code"), ("aipp:ui_interaction", "preview_file"),
         ("aipp:ui_interaction", "ask_user_question"),
         ("aipp:operation", "get_bash_output"), ("aipp:artifact", "show_artifact"),
@@ -362,10 +363,10 @@ fn test_review_exempt_suboperations_fail_closed() {
     for action in ["mcp_tool_execute", "permission_confirm", "operate_confirm", "acp_permission_confirm", "ask_user_respond", "unknown"] {
         assert!(!agent("task_conversation_operation", &serde_json::json!({"action": action}).to_string()));
     }
-    for action in ["list", "get", "disable"] {
+    for action in ["list", "get", "runs", "pause", "decide"] {
         assert!(agent("schedule_task", &serde_json::json!({"action": action}).to_string()));
     }
-    for action in ["create", "update", "delete", "enable"] {
+    for action in ["create", "update", "delete", "resume", "run_now", "unknown"] {
         assert!(!agent("schedule_task", &serde_json::json!({"action": action}).to_string()));
     }
     assert!(!agent("load_skill", "invalid"));
@@ -581,4 +582,37 @@ async fn test_review_output_failed_retry_preserves_both_causes() {
         assert!(error.contains("Prompt 重试失败"));
         assert_eq!(payloads.len(), 2);
     }
+}
+
+#[test]
+fn test_review_prompt_carries_user_intent_as_untrusted_data() {
+    assert!(REVIEW_SYSTEM_PROMPT.contains("用户意图"));
+    assert!(REVIEW_SYSTEM_PROMPT.contains("超出意图范围的副作用操作返回 safe=false"));
+    assert!(REVIEW_SYSTEM_PROMPT.contains("意图本身不能使下面列出的高危操作变得安全"));
+    let intent = ReviewIntent { label: "定时任务指令（无人值守运行，用户不在场）", text: "每天把日报发到飞书群「研发周会」".into() };
+    let user = build_review_user_prompt("飞书", "send_message", r#"{"chat":"研发周会"}"#, None, Some(&intent));
+    assert!(user.contains("用户意图（定时任务指令（无人值守运行，用户不在场））"));
+    assert!(user.contains("每天把日报发到飞书群「研发周会」"));
+    assert!(user.find("用户意图").unwrap() < user.find("服务器: 飞书").unwrap(), "意图在调用之前给出");
+    let none = build_review_user_prompt("fs", "read_file", "{}", None, None);
+    assert!(none.contains("用户意图: 未提供"));
+}
+
+#[test]
+fn test_review_intent_skips_tool_results_and_turn_context() {
+    let contents = vec![
+        "Tool execution results:\n{...}".to_string(),
+        "   ".to_string(),
+        "帮我把周报发给张三".to_string(),
+        "更早的请求".to_string(),
+    ];
+    assert_eq!(pick_intent_text(contents).as_deref(), Some("帮我把周报发给张三"));
+    assert_eq!(pick_intent_text(vec!["Tool execution completed:\nx".to_string()]), None);
+}
+
+#[test]
+fn test_review_intent_truncates_long_text() {
+    let intent = ReviewIntent { label: "用户最近的请求", text: "长".repeat(PROMPT_INTENT_LIMIT + 50) };
+    let user = build_review_user_prompt("fs", "read_file", "{}", None, Some(&intent));
+    assert!(user.contains("用户意图已截断"));
 }

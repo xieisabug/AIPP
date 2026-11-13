@@ -18,8 +18,8 @@ interface Overview {
     tasks: ButlerTaskListItem[];
     local_permissions: { event: OperationPermissionRequest }[];
 }
-interface Schedule { id: number; name: string; assistantId: number; nextRunAt?: string; taskPrompt: string; isEnabled: boolean }
-export interface MobileTaskRun { runId: string; status: string; localRunning: boolean; summary?: string; errorMessage?: string }
+interface Schedule { id: number; name: string; enabled: boolean; scheduleText: string; upcomingText: string[]; prompt: string; pausedReason?: string | null }
+export interface MobileTaskRun { runId: string; status: string; statusText?: string; localRunning: boolean; summary?: string | null; reason?: string | null }
 interface FeishuStatus { running: boolean; connected: boolean; configured: boolean; status_text: string; last_error?: string; last_event_at?: string; status_detail?: string }
 interface Assistant { id: number; name: string; assistant_type?: number }
 
@@ -27,7 +27,7 @@ export function mobileRunLabel(run: MobileTaskRun): string {
     if (run.status === "running" && run.localRunning) return "本机执行中";
     if (run.status === "running") return "结果未知（本机没有运行实例）";
     if (run.status === "missed") return "已错过，未执行";
-    return `历史记录：${run.status}`;
+    return `历史记录：${run.statusText ?? run.status}`;
 }
 
 export default function MobileTasksConfig() {
@@ -66,15 +66,15 @@ export default function MobileTasksConfig() {
         const revision = ++runReadRevision.current;
         const current = () => isCurrent() && revision === runReadRevision.current && selectedScheduleRef.current === taskId;
         try {
-            const result = await invoke<{ runs: MobileTaskRun[] }>("list_scheduled_task_runs", { taskId, limit: 30 });
-            if (current()) setRuns(result.runs);
+            const result = await invoke<MobileTaskRun[]>("list_scheduled_task_runs", { taskId, limit: 30 });
+            if (current()) setRuns(result);
         } catch (error) {
             if (current()) { setRuns([]); throw error; }
         }
     };
     const refresh = useDataRefresh({
         initial: true,
-        events: ["assistant_list_changed", "butler_task_created", "butler_task_updated", "butler_task_permission_state_changed", "operation-permission-request", "operation-permission-resolved", "scheduled_task_run_updated", "scheduled_task_run_created", "butler_feishu_status_changed"],
+        events: ["assistant_list_changed", "butler_task_created", "butler_task_updated", "butler_task_permission_state_changed", "operation-permission-request", "operation-permission-resolved", "scheduled_task_run_updated", "scheduled_task_run_created", "scheduled_task_changed", "butler_feishu_status_changed"],
         refresh: async isCurrent => {
             const results = await Promise.allSettled([
                 invoke<Overview>("get_mobile_butler_overview"), invoke<Schedule[]>("list_scheduled_tasks"),
@@ -128,11 +128,11 @@ export default function MobileTasksConfig() {
             {overview && overview.main_conversation_id != null && overview.tasks.length === 0 && <p className="text-sm text-muted-foreground">暂无 Butler 任务</p>}
             {overview?.local_permissions.map(({ event }) => <article className="border rounded p-3" key={event.request_id}><h3>本机待审批：{event.operation}</h3><p className="break-all">{event.path}</p><p className="text-xs break-all">请求 {event.request_id}</p>{(["allow", "deny"] as const).map(decision => <Button className="min-h-11" key={decision} variant="outline" onClick={() => void act("提交本机审批", () => invoke("confirm_operation_permission", { requestId: event.request_id, decision }), true)}>{decision === "allow" ? "允许一次" : "拒绝"}</Button>)}</article>)}
         </section>
-        <section className="space-y-3"><h2 className="text-sm font-medium">定时任务</h2><p className="text-sm text-muted-foreground">自动触发依赖本机进程；应用启动前错过的触发不会自动补跑；进程仍存活时由系统决定能否继续调度。手动运行会在本机执行所选任务。</p>
-            {schedules.map(task => <article className="border rounded p-3 space-y-2" key={task.id}><h3>{task.name}</h3><p className="text-sm">{task.isEnabled ? "已启用" : "已停用"} · 下次：{task.nextRunAt ?? "无"}</p><p className="whitespace-pre-wrap break-words">{task.taskPrompt}</p>
+        <section className="space-y-3"><h2 className="text-sm font-medium">定时任务</h2><p className="text-sm text-muted-foreground">自动触发依赖本机进程；应用启动前错过的触发只记录、不补跑；进程仍存活时由系统决定能否继续调度。手动运行会在本机执行所选任务，结果按任务设置发送。</p>
+            {schedules.map(task => <article className="border rounded p-3 space-y-2" key={task.id}><h3>{task.name}</h3><p className="text-sm">{task.enabled ? "已启用" : task.pausedReason ?? "已停用"} · {task.scheduleText} · 下次：{task.enabled ? task.upcomingText[0] ?? "无" : "无"}</p><p className="whitespace-pre-wrap break-words">{task.prompt}</p>
                 <Button className="min-h-11" variant="outline" disabled={busy} onClick={() => void act("读取运行记录", async () => { selectedScheduleRef.current = task.id; setSelectedSchedule(task.id); setRuns([]); await readRuns(task.id); })}>查看运行记录</Button>
-                <Button className="min-h-11" disabled={busy} onClick={() => void act("手动运行", async () => { selectedScheduleRef.current = task.id; setSelectedSchedule(task.id); setRuns([]); const pending = invoke<{ success: boolean; error?: string }>("run_scheduled_task_now", { taskId: task.id }); refresh(); const result = await pending; if (!result.success) throw new Error(result.error ?? `task_id=${task.id}; 执行未返回失败原因`); })}>在本机运行一次</Button>
-                {selectedSchedule === task.id && runs.map(run => <div key={run.runId} className="border-t pt-2"><p>{mobileRunLabel(run)}</p><p className="text-xs break-all">{run.runId}</p><p className="whitespace-pre-wrap break-words">{run.errorMessage ?? run.summary}</p>{run.status === "running" && run.localRunning && <Button className="min-h-11" variant="outline" onClick={() => void act("停止本机运行", () => invoke("stop_scheduled_task_run", { taskId: task.id, runId: run.runId }), true)}>停止本机运行</Button>}</div>)}
+                <Button className="min-h-11" disabled={busy} onClick={() => void act("手动运行", async () => { selectedScheduleRef.current = task.id; setSelectedSchedule(task.id); setRuns([]); await invoke<string>("run_scheduled_task_now", { taskId: task.id }); await readRuns(task.id); })}>在本机运行一次</Button>
+                {selectedSchedule === task.id && runs.map(run => <div key={run.runId} className="border-t pt-2"><p>{mobileRunLabel(run)}</p><p className="text-xs break-all">{run.runId}</p><p className="whitespace-pre-wrap break-words">{run.reason ?? run.summary}</p>{run.status === "running" && run.localRunning && <Button className="min-h-11" variant="outline" onClick={() => void act("停止本机运行", () => invoke("stop_scheduled_task_run", { taskId: task.id, runId: run.runId }), true)}>停止本机运行</Button>}</div>)}
             </article>)}
             {!schedules.length && <p className="text-sm text-muted-foreground">暂无定时任务</p>}
         </section>

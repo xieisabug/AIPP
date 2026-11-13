@@ -40,7 +40,7 @@ const toolVisuals: [string[], ContactVisual][] = [
     [["load_skill", "load_mcp_server", "load_mcp_tool"], { state: "loading", label: "加载能力" }],
     [["superadmin_execute", "superadmin_batch", "superadmin_undo"], { state: "controlling", label: "操控中" }],
     [["message_bot", "spawn_task_conversation", "task_conversation_operation"], { state: "sending", label: "联络助手" }],
-    [["show_artifact", "preview_file", "preview_code", "capture_artifact_screenshot"], { state: "spawning", label: "生成展示" }],
+    [["show_artifact", "preview_file", "preview_code", "preview_message", "capture_artifact_screenshot"], { state: "spawning", label: "生成展示" }],
 ];
 export function toolVisual(tool?: string, path?: string): ContactVisual {
     if (tool === "write_file" || tool === "edit_file") {

@@ -30,10 +30,9 @@ fn add_task(db: &ScheduledTaskDatabase) {
 
 fn missed(db: &ScheduledTaskDatabase, run_id: &str) -> ScheduledTaskRun {
     db.create_run(&ScheduledTaskRun {
-        id: 0, task_id: 1, run_id: run_id.into(), status: "missed".into(),
-        notify: false, summary: None, error_message: Some("missed at startup".into()),
-        started_time: Utc::now(), finished_time: Some(Utc::now()),
-        butler_followup_status: None,
+        error_message: Some("missed at startup".into()),
+        finished_time: Some(Utc::now()),
+        ..ScheduledTaskRun::new(1, run_id, "missed", Utc::now())
     }).unwrap()
 }
 
@@ -88,7 +87,7 @@ fn test_scheduled_task_run_missed_migration_empty_preserves_sequence() {
 fn test_scheduled_task_run_missed_migration_failure_preserves_legacy() {
     let db = memory_db();
     legacy_table(&db);
-    db.conn.execute_batch("INSERT INTO scheduled_task_run(task_id, run_id, status) VALUES (1, 'old', 'success'); CREATE TABLE scheduled_task_run_missed_migration (sentinel TEXT);").unwrap();
+    db.conn.execute_batch("INSERT INTO scheduled_task_run(task_id, run_id, status) VALUES (1, 'old', 'success'); CREATE TABLE scheduled_task_run_status_migration (sentinel TEXT);").unwrap();
     assert!(db.create_tables().is_err());
     assert_eq!(db.conn.query_row("SELECT status FROM scheduled_task_run WHERE run_id='old'", [], |r| r.get::<_, String>(0)).unwrap(), "success");
     assert_eq!(db.conn.query_row("SELECT count(*) FROM sqlite_master WHERE name='sync_run_insert' AND type='trigger'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
@@ -110,4 +109,25 @@ fn test_scheduled_task_run_missed_migration_refuses_unknown_non_autoincrement_sc
     db.conn.execute_batch("CREATE TABLE scheduled_task_run (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running', 'success', 'failed')), notify BOOLEAN NOT NULL DEFAULT 0, summary TEXT, error_message TEXT, started_time DATETIME, finished_time DATETIME);").unwrap();
     let error = db.create_tables().unwrap_err().to_string();
     assert!(error.contains("without AUTOINCREMENT"), "{error}");
+}
+
+#[test]
+fn test_scheduled_task_run_previous_missed_schema_gains_new_statuses() {
+    let db = memory_db();
+    db.conn.execute_batch("\
+        CREATE TABLE scheduled_task_run (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            task_id INTEGER NOT NULL, run_id TEXT NOT NULL,\
+            status TEXT NOT NULL CHECK(status IN ('running', 'success', 'failed', 'missed')),\
+            notify BOOLEAN NOT NULL DEFAULT 0, summary TEXT, error_message TEXT,\
+            started_time DATETIME DEFAULT CURRENT_TIMESTAMP, finished_time DATETIME\
+        );\
+        INSERT INTO scheduled_task_run(task_id, run_id, status) VALUES (1, 'old', 'missed');\
+    ").unwrap();
+    db.create_tables().unwrap();
+    add_task(&db);
+    for status in ["delivered", "quiet", "skipped", "cancelled"] {
+        db.conn.execute("INSERT INTO scheduled_task_run(task_id, run_id, status) VALUES (1, ?1, ?1)", [status]).unwrap();
+    }
+    assert_eq!(db.conn.query_row("SELECT status FROM scheduled_task_run WHERE run_id='old'", [], |r| r.get::<_, String>(0)).unwrap(), "missed");
 }

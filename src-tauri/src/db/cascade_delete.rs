@@ -28,7 +28,8 @@ fn attach_related(conn: &Connection, table: &str) -> Result<()> {
     }
     let peers: &[&str] = match table {
         "assistant" => &["conversation", "plugin", "artifacts"],
-        "conversation" | "message" => &["mcp", "plugin"],
+        // 删除管家定时任务会连带它隐藏保留的运行会话。
+        "conversation" | "message" | "scheduled_task" => &["mcp", "plugin"],
         "mcp_server" | "mcp_server_tool" => &["assistant"],
         "llm_provider" => &["assistant", "conversation"],
         "llm_model" => &["conversation"],
@@ -277,6 +278,7 @@ impl<'a> Tables<'a> {
         for column in ["handoff_message_id", "final_message_id"] {
             self.update("butler_task_result", column, "NULL", &format!("{column} IN ({ids})"), id)?;
         }
+        self.update("scheduled_task_run", "final_message_id", "NULL", &format!("final_message_id IN ({ids})"), id)?;
         // Relay cursors are watermarks, not ownership references. Retain them
         // when an individual message disappears to avoid replaying old replies.
         self.remove("message", predicate, id)
@@ -300,6 +302,14 @@ impl<'a> Tables<'a> {
         // detaches surviving children instead of recursively erasing history.
         self.update("conversation", "parent_butler_conversation_id", "NULL", "parent_butler_conversation_id=?1", id)?;
         self.update("scheduled_task", "butler_conversation_id", "NULL", "butler_conversation_id=?1", id)?;
+        // 投递会话被删除：任务暂停并写明原因，用户换一个投递位置后再恢复。
+        if self.has("scheduled_task", "deliver_conversation_id") && self.has("scheduled_task", "paused_reason") {
+            let name = &self.names["scheduled_task"];
+            self.conn.execute(
+                &format!("UPDATE {name} SET is_enabled=0, paused_reason='投递会话已删除，请改到其他位置后恢复', deliver_conversation_id=NULL WHERE deliver_conversation_id=?1"),
+                [id],
+            ).map_err(|e| diagnostic(format!("pause scheduled tasks delivering to conversation {id}: {e}")))?;
+        }
         self.remove("conversation", "id=?1", id)
     }
 
@@ -407,6 +417,17 @@ impl<'a> Tables<'a> {
                 self.remove(table, "plugin_id=?1", id)
             }
             "scheduled_task" => {
+                // 管家定时任务隐藏保留的运行会话只为引用展示存在，随任务删除；用户可见的运行会话保留。
+                if self.has("scheduled_task_run", "conversation_id") && self.has("conversation", "conversation_kind") {
+                    let hidden: Vec<i64> = self.conn.prepare(&format!(
+                        "SELECT c.id FROM {} c JOIN {} r ON r.conversation_id=c.id
+                          WHERE r.task_id=?1 AND c.conversation_kind='scheduled_run'",
+                        self.names["conversation"], self.names["scheduled_task_run"],
+                    ))?.query_map([id], |r| r.get(0))?.collect::<Result<_>>()?;
+                    for conversation in hidden {
+                        self.conversation(conversation)?;
+                    }
+                }
                 self.remove("scheduled_task_log", "task_id=?1", id)?;
                 self.remove("scheduled_task_run", "task_id=?1", id)?;
                 self.remove(table, "id=?1", id)

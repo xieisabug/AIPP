@@ -67,7 +67,7 @@ src-tauri/
 ├── src/
 │   ├── api/                 # Tauri command handlers
 │   │   ├── ai/              # AI modules (chat/acp/config/summary/title/types)
-│   │   ├── scheduled_task_api.rs  # 定时任务（once/interval 调度、执行、日志、停止）
+│   │   ├── scheduled_task_api.rs  # 定时任务执行（隐藏运行会话、结果日志、投递入库、恢复）与界面命令
 │   │   ├── skill_api.rs     # Skills 扫描、安装、助手绑定
 │   │   ├── butler_api.rs    # Butler 主会话、任务派发、结果回流
 │   │   ├── plugin_api.rs    # 插件安装、启停、配置与数据
@@ -84,7 +84,7 @@ src-tauri/
 │   ├── artifacts/           # Artifact 渲染、运行与集合管理
 │   ├── feishu/              # 飞书运行时、消息接入、回发与卡片回调
 │   ├── external_channels/   # 外部渠道消息渲染抽象
-│   ├── scheduler/           # 定时任务调度运行时
+│   ├── scheduler/           # 定时任务：expr 时间表达、service 服务层、scheduled_task 登记派发、gate 运行准入、escalation 总管家裁决、delivery 投递、tool 模型工具
 │   ├── skills/              # Skills 扫描、解析、提示词拼装
 │   ├── db/                  # Database operations (SQLite)
 │   ├── sync.rs              # 自建同步客户端（outbox/shadow/cursor、推拉、冲突与死信）
@@ -118,8 +118,8 @@ GitHub Agent 插件包由 `mcp/apps/bundles` 管理（格式、文件存储、Ta
 
 The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 
--   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`)
--   **UI Interaction Tools**: `ask_user_question`, `preview_file`
+-   **Agent Tools**: `load_skill`, `todo_write`, dynamic MCP catalog loading (`load_mcp_server`, `load_mcp_tool`); Butler-only `preview_message` shows another assistant reply by `message_id` or `work_ref` (`api/message_preview.rs` + `db/message_preview.rs`, frontend card `MessagePreviewToolCall`)
+-   **UI Interaction Tools**: `ask_user_question`, `preview_file`, `preview_code`
 -   **Search Tools**: `search_web`, `fetch_url` with browser profile/fingerprint support
 -   **Operation Tools**: `read_file`, `write_file`, `edit_file`, `list_directory`, `execute_bash`, `get_bash_output`
 -   **Artifact Tools**: `get_artifact_workspace`, `show_artifact`
@@ -157,7 +157,7 @@ The application includes built-in MCP tools in `mcp/builtin_mcp/`:
 
 ### 管家会话的固定工具
 
-`mcp/butler_tools.rs` 统一按 `butler_main` / `butler_contact` / `butler_task` 会话注入 SuperAdmin 和助手协作工具（`butler_memory` 另外也注入群成员会话）；覆盖助手 MCP 选择，但不持久化配置变更。标准 AI 首轮、工具续答、重新生成、XML 检测及 Codex/Claude Code/ACP 的选中工具桥接共用该策略。执行器对同一白名单免除动态加载门槛，内置分发仍校验管家会话，普通聊天和普通定时任务不获得权限。助手发现/详情与协作查询/停止定义在 `api/butler_assistant_tools.rs`，停止原因存于 `butler_peer_stop`；不把“停止协作”解释为进程取消。
+`mcp/butler_tools.rs` 统一按管家会话（`butler_main` / `butler_contact` / `butler_task` / `butler_group_member`）注入 SuperAdmin、助手协作工具、`butler_memory` 与 `schedule_task`，并补齐全局启用的 MCP 服务（与总管家一致）；定时任务运行的工具由 `prepare_scheduled_run_tools` 准备；覆盖助手 MCP 选择，但不持久化配置变更。标准 AI 首轮、工具续答、重新生成、XML 检测及 Codex/Claude Code/ACP 的选中工具桥接共用该策略。执行器对同一白名单免除动态加载门槛，内置分发仍校验管家会话，普通聊天和普通定时任务不获得权限。助手发现/详情与协作查询/停止定义在 `api/butler_assistant_tools.rs`，停止原因存于 `butler_peer_stop`；不把“停止协作”解释为进程取消。
 
 ## Agent 驱动边界
 

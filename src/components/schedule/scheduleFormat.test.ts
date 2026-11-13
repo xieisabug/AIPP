@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { formatRunDuration, formatShortDateTime, parseToolLogPayload, runStatusLabel } from "./scheduleFormat";
+import { formatRunDuration, formatShortDateTime, parseToolLogPayload, runStatusLabel, taskGroup } from "./scheduleFormat";
 
 describe("scheduleFormat", () => {
-    it("labels every run status including missed", () => {
+    it("labels every run status including the new outcomes", () => {
         expect(runStatusLabel("running")).toBe("运行中");
-        expect(runStatusLabel("success")).toBe("完成");
+        expect(runStatusLabel("delivered")).toBe("已发送");
+        expect(runStatusLabel("quiet")).toBe("无新内容");
+        expect(runStatusLabel("skipped")).toBe("跳过");
+        expect(runStatusLabel("cancelled")).toBe("已停止");
         expect(runStatusLabel("failed")).toBe("失败");
         expect(runStatusLabel("missed")).toBe("错过");
         expect(runStatusLabel("unknown")).toBe("unknown");
+    });
+
+    it("groups tasks by what the user needs to do", () => {
+        expect(taskGroup({ enabled: true, needsAttention: true, pausedReason: null })).toBe("attention");
+        expect(taskGroup({ enabled: true, needsAttention: false, pausedReason: null })).toBe("active");
+        expect(taskGroup({ enabled: false, needsAttention: false, pausedReason: "已手动暂停" })).toBe("paused");
+        expect(taskGroup({ enabled: false, needsAttention: false, pausedReason: "已完成" })).toBe("finished");
     });
 
     it("formats run duration in readable units", () => {

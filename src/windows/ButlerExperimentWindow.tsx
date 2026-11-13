@@ -19,6 +19,7 @@ import { appearanceKey, ButlerAppearanceContext, parseAppearance, type ButlerApp
 import "@/components/butler/butlerDesktop.css";
 import { toast } from "sonner";
 import { openScheduleTask } from "@/lib/scheduleTaskFocus";
+import type { ScheduledTask } from "@/components/schedule/scheduleTypes";
 import {
     Check,
     ChevronDown,
@@ -97,18 +98,7 @@ import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { AntiLeakageProvider } from "@/contexts/AntiLeakageContext";
 import { pluginRuntime } from "@/services/PluginRuntime";
 
-interface ButlerScheduledTask {
-    id: number;
-    name: string;
-    isEnabled: boolean;
-    scheduleType: "once" | "interval";
-    intervalValue?: number | null;
-    intervalUnit?: string | null;
-    startTime?: string | null;
-    nextRunAt?: string | null;
-    lastRunAt?: string | null;
-    taskPrompt: string;
-}
+type ButlerScheduledTask = Pick<ScheduledTask, "id" | "name" | "enabled" | "scheduleText" | "assistantName" | "upcomingText" | "needsAttention" | "butlerMode">;
 
 function sortTasks(tasks: ButlerTaskListItem[]): ButlerTaskListItem[] {
     return [...tasks].sort((left, right) => {
@@ -129,17 +119,6 @@ function upsertTask(
         (task) => task.task_conversation_id !== nextTask.task_conversation_id
     );
     return sortTasks([...filtered, nextTask]);
-}
-
-function formatTime(value?: string | null): string {
-    if (!value) {
-        return "—";
-    }
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
-        return value;
-    }
-    return date.toLocaleString();
 }
 
 interface FeishuRuntimeStatus {
@@ -797,10 +776,9 @@ function ButlerExperimentWindow() {
     const loadButlerScheduledTasks = useCallback(async () => {
         if (!mainConversationId) return;
         try {
-            const result = await invoke<ButlerScheduledTask[]>("list_butler_scheduled_tasks", {
-                butlerConversationId: parseInt(mainConversationId, 10),
-            });
-            setScheduledTasks(result);
+            // 管家模式下各助手创建的任务（结果发到助手私聊）都在这里列出
+            const result = await invoke<ButlerScheduledTask[]>("list_scheduled_tasks");
+            setScheduledTasks(result.filter((task) => task.butlerMode));
         } catch (error) {
             console.error("[ButlerExperimentWindow] Failed to load scheduled tasks:", error);
         }
@@ -828,6 +806,9 @@ function ButlerExperimentWindow() {
                 void loadButlerScheduledTasks();
             }),
             listen("scheduled_task_run_updated", () => {
+                void loadButlerScheduledTasks();
+            }),
+            listen("scheduled_task_changed", () => {
                 void loadButlerScheduledTasks();
             }),
         ];
@@ -1170,20 +1151,18 @@ function ButlerExperimentWindow() {
                                             <div className="flex items-center justify-between gap-2">
                                                 <span className="font-medium truncate">{st.name}</span>
                                                 <Badge
-                                                    variant={st.isEnabled ? "default" : "secondary"}
+                                                    variant={st.needsAttention ? "destructive" : st.enabled ? "default" : "secondary"}
                                                     className="text-[10px] px-1.5 py-0"
                                                 >
-                                                    {st.isEnabled ? "运行中" : "已暂停"}
+                                                    {st.needsAttention ? "需要处理" : st.enabled ? "已启用" : "已暂停"}
                                                 </Badge>
                                             </div>
                                             <div className="mt-1 text-muted-foreground truncate">
-                                                {st.taskPrompt.length > 60
-                                                    ? st.taskPrompt.slice(0, 60) + "…"
-                                                    : st.taskPrompt}
+                                                {st.scheduleText} · {st.assistantName}
                                             </div>
-                                            {st.nextRunAt && (
+                                            {st.enabled && st.upcomingText[0] && (
                                                 <div className="mt-1 text-[11px] text-muted-foreground">
-                                                    下次执行：{formatTime(st.nextRunAt)}
+                                                    下次：{st.upcomingText[0]}
                                                 </div>
                                             )}
                                         </button>

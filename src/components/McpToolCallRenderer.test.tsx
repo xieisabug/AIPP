@@ -50,6 +50,13 @@ describe("McpToolCallRenderer review controls", () => {
         }
     });
 
+    it("should keep the preview_message card in compact Butler mode because it is the delivered result", () => {
+        render(<ButlerResultsOnlyContext.Provider value={true}>
+            <McpToolCallRenderer callId={96} conversationId={8} toolName="preview_message" status="success"/>
+        </ButlerResultsOnlyContext.Provider>);
+        expect(screen.getByText("专用工具卡片")).toBeInTheDocument();
+    });
+
     it("should use confirmation controls when a specialized tool receives a live review", async () => {
         mockInvokeHandler("get_tool_review", () => null);
         render(<McpToolCallRenderer callId={91} conversationId={8} status="pending" toolName="fetch_url" />);

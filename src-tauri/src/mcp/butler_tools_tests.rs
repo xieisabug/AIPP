@@ -19,7 +19,7 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
                 .map(|t|t.name.as_str()).collect();
             // 受托助手可在自己的会话里向用户提问；其余界面交互工具仍按助手自身配置。
             assert!(!names.contains(&"preview_code"),"{kind} should not force preview tools");
-            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","read_work_context","continue_work","resume_work","butler_memory","superadmin_execute","superadmin_undo","ask_user_question"] {
+            for expected in ["list_assistants","get_assistant_details","get_assistant_exchange","stop_assistant_exchange","message_bot","read_work_context","continue_work","resume_work","butler_memory","superadmin_execute","superadmin_undo","ask_user_question","schedule_task"] {
                 assert!(names.contains(&expected),"{kind} dynamic={dynamic} missing {expected}");
             }
             assert!(configured.iter().all(|s|s.is_enabled&&s.tools.iter().all(|t|t.is_enabled)));
@@ -30,22 +30,40 @@ fn test_butler_tools_inject_unconfigured_assistants_in_all_butler_conversations(
 }
 
 #[test]
-fn test_butler_tools_group_member_keeps_admin_and_questions_without_contact_collaboration() {
-    // 助手配置里勾选了协作工具，在群里也不会出现：群内协作通过 @ 完成。
+fn test_butler_tools_group_member_has_same_permissions_as_other_butler_assistants() {
+    // 管家模式下所有助手与总管家权限一致，群成员也能协作、管理定时任务；只有独立任务工具留在主会话。
     let mut configured=vec![server(1,"aipp:agent")];
     for tool in &mut configured[0].tools { tool.is_enabled=true; }
     merge_tools(&mut configured,vec![server(1,"aipp:agent"),server(2,"aipp:superadmin"),server(3,"aipp:ui_interaction")],"butler_group_member");
     let names:Vec<_>=configured.iter().flat_map(|s|s.tools.iter()).map(|t|t.name.as_str()).collect();
-    for expected in ["butler_memory","superadmin_execute","superadmin_undo","ask_user_question"] {
+    for expected in ["butler_memory","superadmin_execute","superadmin_undo","ask_user_question","message_bot","list_assistants","search_bot_history","schedule_task"] {
         assert!(names.contains(&expected),"group member missing {expected}");
     }
-    for hidden in ["message_bot","list_assistants","search_bot_history","spawn_task_conversation"] {
+    for hidden in ["spawn_task_conversation","task_conversation_operation"] {
         assert!(!names.contains(&hidden),"group member should not see {hidden}");
     }
-    assert!(!is_direct_tool("butler_group_member",Some("aipp:agent"),"message_bot"));
+    assert!(is_direct_tool("butler_group_member",Some("aipp:agent"),"message_bot"));
+    assert!(is_direct_tool("butler_group_member",Some("aipp:agent"),"schedule_task"));
     assert!(is_direct_tool("butler_group_member",Some("aipp:superadmin"),"superadmin_execute"));
     // 群成员读写的是本群记忆，所以记忆工具在群里保留。
     assert!(is_direct_tool("butler_group_member",Some("aipp:agent"),"butler_memory"));
+}
+
+#[test]
+fn test_butler_tools_global_baseline_merges_without_duplicates() {
+    let mut configured=vec![server(5,"aipp:operation")];
+    configured[0].tools.truncate(1);
+    let first=configured[0].tools[0].name.clone();
+    let mut baseline=server(5,"aipp:operation");
+    for tool in &mut baseline.tools { tool.is_enabled=true; }
+    let total=baseline.tools.len();
+    let mut search=server(6,"aipp:search");
+    search.is_enabled=true;
+    add_baseline(&mut configured,vec![baseline,search]);
+    assert_eq!(configured.len(),2);
+    assert_eq!(configured[0].tools.len(),total,"已有服务补齐缺少的工具");
+    assert!(configured[0].tools.iter().find(|t|t.name==first).unwrap().is_enabled,"已有工具改为启用而不是重复");
+    assert!(configured.iter().all(|s|s.is_enabled));
 }
 
 #[test]

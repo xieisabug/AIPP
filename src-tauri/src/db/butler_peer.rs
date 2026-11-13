@@ -104,6 +104,16 @@ const ACTIVE: &str = "('queued','sending','waiting','returning','reply_sending')
 pub const MAX_DEPTH: i64 = 3;
 /// 整条协作链的有效期；排队或等待超时后给发起方失败回执，避免互相等待卡死。
 pub const TTL_MINUTES: i64 = 120;
+
+/// 接收方答复所在的消息（`settle` 记录在时间线上），供回送时附上引用句柄。
+pub fn reply_message_id(conn: &Connection, exchange: i64) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT anchor FROM butler_peer_post WHERE exchange_id=?1 AND leg='reply' AND outgoing=1",
+        [exchange],
+        |r| r.get(0),
+    )
+    .optional()
+}
 fn row(r: &Row<'_>) -> rusqlite::Result<Exchange> {
     Ok(Exchange {
         id: r.get(0)?,

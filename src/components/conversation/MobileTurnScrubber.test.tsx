@@ -63,7 +63,7 @@ describe("MobileTurnScrubber", () => {
         const ref = makeRef(800);
         render(<MobileTurnScrubber turns={TURNS} scrollContainerRef={ref} onSelect={onSelect} />);
         const track = screen.getByRole("slider", { hidden: true });
-        // 3 轮 × 18px = 54px 轨道，轨道顶部位于 y=100
+        // 3 轮：轨道高 (3-1) × 18px = 36px，轨道顶部位于 y=100
         const inner = track.firstElementChild as HTMLElement;
         vi.spyOn(inner, "getBoundingClientRect").mockReturnValue({ top: 100 } as DOMRect);
 
@@ -77,6 +77,14 @@ describe("MobileTurnScrubber", () => {
         fireEvent.pointerUp(track, { clientY: 154, pointerId: 1 });
         expect(onSelect).toHaveBeenCalledWith(33);
         expect(screen.queryByText("第三个问题")).toBeNull();
+    });
+
+    it("should keep one tick per turn for long conversations", () => {
+        const turns = Array.from({ length: 40 }, (_, index) => ({ id: index + 1, preview: `q${index}` }));
+        const { container } = render(
+            <MobileTurnScrubber turns={turns} scrollContainerRef={makeRef(800)} onSelect={vi.fn()} />,
+        );
+        expect(container.querySelectorAll("[data-turn-tick]")).toHaveLength(40);
     });
 
     it("should not jump when the drag is cancelled", () => {

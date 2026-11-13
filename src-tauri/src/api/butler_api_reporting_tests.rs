@@ -16,11 +16,12 @@ fn reporting_system_prompt_holds_the_full_policy_once() {
         "原请求如果还没有任何人交付",
         "不能把部分完成说成全部完成",
         "未经用户明确允许，不换成员",
-        "`notify_decision=false`",
+        "`<scheduled_task_approval>`",
         "manual_review_required",
         "`<current_time>`",
         "`continue_work`",
         "`read_work_context`",
+        "`preview_message`",
     ] {
         assert!(prompt.contains(phrase), "缺少：{phrase}");
     }
@@ -39,6 +40,11 @@ fn reporting_single_result_preserves_direct_delivery_failure_and_cancellation() 
                 assert_eq!(prompt.contains("直接交付给用户，不要转述"), direct && status == STATUS_SUCCEEDED);
                 assert_eq!(prompt.contains("错误与修复"), status != STATUS_SUCCEEDED);
                 assert_eq!(prompt.contains("伴随过取消请求"), cancelled);
+                assert_eq!(
+                    prompt.contains("`preview_message`（work_ref=task:10）"),
+                    !direct && status == STATUS_SUCCEEDED,
+                    "只有交回给总管家的成功结果才引导原样展示"
+                );
             }
         }
     }
@@ -77,6 +83,7 @@ fn reporting_member_prompts_share_core_and_keep_user_intervention_exception() {
     assert!(core.contains("不能代替用户授权") && core.contains("未经用户允许的内容"));
     assert!(core.contains("配置修复由总管家或用户决定"), "成员不自行修复配置");
     assert!(core.contains("生成真实文件"), "成员直接交付，也要遵守交付格式");
+    assert!(core.contains("`preview_message`") && core.contains("不要转述"), "原样展示其他成员的答复");
     assert!(super::BUTLER_MEMBER_TASK_PROMPT.contains("等待答复时最终回复只写"));
     assert!(super::BUTLER_MEMBER_TASK_PROMPT.contains("默认是内部协作"));
     for specific in [super::BUTLER_MEMBER_CONTACT_PROMPT, super::BUTLER_MEMBER_TASK_PROMPT] {
