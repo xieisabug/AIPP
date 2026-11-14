@@ -11,7 +11,18 @@ vi.mock("@/hooks/feature/useAcpEnvironment", () => ({ useAcpEnvironment: () => (
 vi.mock("./TagInputContainer", () => ({ default: () => null }));
 vi.mock("./ModelSelectionDialog", () => ({ default: () => null }));
 vi.mock("./ReadOnlyModelList", () => ({ default: () => null }));
-vi.mock("../ConfigForm", () => ({ default: ({ useFormReturn, config }: { useFormReturn: any; config: any[] }) => <div><input aria-label="endpoint" {...useFormReturn.register("endpoint")} /><input aria-label="api key" {...useFormReturn.register("api_key")} /><span>{useFormReturn.formState.errors.endpoint?.message}</span><span>{config.find(item => item.key === "endpoint")?.config.hint}</span></div> }));
+vi.mock("../ConfigForm", async () => {
+    const { Controller } = await import("react-hook-form");
+    return { default: ({ useFormReturn, config }: { useFormReturn: any; config: any[] }) => {
+        const apiKey = config.find(item => item.key === "api_key")?.config;
+        return <div>
+            <input aria-label="endpoint" {...useFormReturn.register("endpoint")} />
+            {/* API Key 走真实的 customRender（保险箱引用字段），与 ConfigForm 的 custom 类型一致 */}
+            <Controller control={useFormReturn.control} name="api_key" render={({ field }) => apiKey?.customRender(field)} />
+            <span>{useFormReturn.formState.errors.endpoint?.message}</span><span>{config.find(item => item.key === "endpoint")?.config.hint}</span><span>{apiKey?.hint}</span>
+        </div>;
+    } };
+});
 
 const refresh = async () => { await act(async () => { await mocks.refresh!(() => true); }); };
 const waitDebounce = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 80)); }); };
@@ -61,7 +72,7 @@ describe("LLM provider field autosave", () => {
         mount(); await refresh();
         fireEvent.change(screen.getByLabelText("endpoint"), { target: { value: "first" } });
         fireEvent.change(screen.getByLabelText("endpoint"), { target: { value: "latest" } });
-        fireEvent.change(screen.getByLabelText("api key"), { target: { value: "secret" } });
+        fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
         await waitDebounce();
         const calls = mocks.invoke.mock.calls.filter(([command]) => command === "update_llm_provider_config");
         expect(calls).toHaveLength(2);
@@ -105,5 +116,34 @@ describe("LLM provider field autosave", () => {
         expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", { llmProviderId: "1", name: "endpoint", value: "new" });
         await act(async () => { resolveRead([{ name: "endpoint", value: "old" }]); await refreshPromise; });
         expect(input).toHaveValue("new");
+    });
+});
+
+describe("LLM provider API key from the vault", () => {
+    const vaultId = "0f8e2a52-6c1d-4b8a-9d3e-1a2b3c4d5e6f";
+    beforeEach(() => {
+        mocks.invoke.mockReset(); mocks.error.mockReset();
+        mocks.invoke.mockImplementation((command: string) => {
+            if (command === "get_llm_provider_config") return Promise.resolve([{ name: "endpoint", value: "https://api.example.com/v1" }, { name: "api_key", value: "sk-old" }]);
+            if (command === "get_llm_models") return Promise.resolve([]);
+            if (command === "vault_capability") return Promise.resolve({ available: true });
+            if (command === "vault_list") return Promise.resolve([{
+                id: vaultId, handle: "openai_key", name: "OpenAI Key", description: "", authKind: "bearer", injection: [],
+                fields: [{ key: "token", label: "令牌" }], allowedSites: [], syncEnabled: true, status: "ready", createdAt: 1, updatedAt: 1, lastUsedAt: null,
+            }]);
+            return Promise.resolve();
+        });
+    });
+
+    it("autosaves the chosen reference instead of a value and explains where it is sent", async () => {
+        render(<LLMProviderConfigForm id="1" index={0} apiType="anthropic" name="test" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
+        await refresh();
+        fireEvent.click(await screen.findByRole("button", { name: "从凭据保险箱选择" }));
+        expect(screen.getByText("保存配置后，此凭据将被确认用于 https://api.example.com")).toBeInTheDocument();
+        await act(async () => { fireEvent.click(screen.getByRole("button", { name: "确认" })); });
+        await waitDebounce();
+        expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", { llmProviderId: "1", name: "api_key", value: `vault://${vaultId}#token` });
+        expect(screen.getByText("OpenAI Key · 令牌")).toBeInTheDocument();
+        expect(screen.getByText(/只会发往已确认的网站；Claude Code 助手不能使用保险箱中的 Key/)).toBeInTheDocument();
     });
 });

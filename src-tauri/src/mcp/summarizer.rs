@@ -445,9 +445,11 @@ async fn generate_mcp_catalog_summary(
 
     let network_proxy = get_network_proxy_from_config(&config_map);
     let request_timeout = get_request_timeout_from_config(&config_map);
+    let provider_configs = crate::vault::config_ref::prepare_provider_configs(app_handle, model_detail.configs.clone())
+        .await.map_err(AppError::ProviderError)?;
     let client = genai_client::create_client_with_config(
         None,
-        &model_detail.configs,
+        &provider_configs,
         &model_detail.model.code,
         &model_detail.provider.api_type,
         Some(&model_detail.model.request_mode),

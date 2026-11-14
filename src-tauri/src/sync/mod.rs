@@ -31,6 +31,7 @@ mod secrets;
 mod server_switch;
 pub use server_switch::{begin_sync_server_switch, inspect_sync_server_switch, cancel_sync_server_switch, commit_sync_server_switch};
 pub(crate) mod vault;
+pub(crate) mod personal_vault;
 mod vault_sync;
 pub(crate) mod vault_refresh;
 mod provider_merge;
@@ -497,6 +498,13 @@ fn specs() -> Vec<SyncTableSpec> {
             natural_key_columns: &[], unique_key_columns: &["reference"], seed_official_ids: &[], official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
             where_clause: Some("server_id > 0"), order_by: "id",
+        },
+        SyncTableSpec {
+            // 凭据保险箱：value 是密文信封，只在同步口令就绪时推送；last_used_at 仅本机。
+            db_name: "system.db", table: "vault_item", object_type: personal_vault::OBJECT_TYPE,
+            columns: &["id", "uuid", "handle", "name", "description", "auth_kind", "injection", "allowed_sites", "sync_enabled", "value", "created_at", "updated_at", "config_bindings"],
+            natural_key_columns: &[], unique_key_columns: &["uuid"], seed_official_ids: &[], official_column: None,
+            foreign_keys: &[], where_clause: Some("sync_enabled = 1"), order_by: "id",
         },
         SyncTableSpec {
             db_name: "mcp.db",
@@ -1725,6 +1733,7 @@ struct SyncUiDomains {
     conversation: bool,
     feature: bool,
     artifacts: bool,
+    vault: bool,
 }
 
 impl SyncUiDomains {
@@ -1740,6 +1749,7 @@ impl SyncUiDomains {
                 t if t.starts_with("mcp.") => domains.mcp = true,
                 t if t.starts_with("llm.") => domains.llm = true,
                 t if t.starts_with("conversation.") => domains.conversation = true,
+                t if t.starts_with("vault.") => domains.vault = true,
                 _ => {}
             }
         }
@@ -1796,6 +1806,9 @@ async fn emit_sync_domain_events(app_handle: &AppHandle, types: &HashSet<String>
     }
     if domains.llm {
         if let Err(error) = emit("llm_provider_changed", app_handle.emit("llm_provider_changed", ())) { errors.push(error); }
+    }
+    if domains.vault {
+        if let Err(error) = emit("vault_changed", app_handle.emit("vault_changed", "sync_remote")) { errors.push(error); }
     }
     if domains.conversation {
         app_handle.state::<crate::mcp::builtin_mcp::TodoState>().invalidate_cache();
@@ -2150,6 +2163,7 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
             read_local_snapshots(app_handle, &spec, &sync_conn, &mut dangling)?;
         let snapshots = match secret_key {
             Some(key) if spec.object_type == vault::OBJECT_TYPE => vault_sync::seal_snapshots(&sync_conn, key, snapshots)?,
+            Some(key) if spec.object_type == personal_vault::OBJECT_TYPE => personal_vault::seal_snapshots(&sync_conn, key, snapshots)?,
             Some(key) => secrets::seal_snapshots(&sync_conn, key, snapshots)?,
             None => snapshots,
         };
@@ -3139,6 +3153,7 @@ fn apply_change(
     let db_path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&db_path)?;
     if spec.object_type == vault::OBJECT_TYPE { vault::init(&conn)?; }
+    if spec.object_type == personal_vault::OBJECT_TYPE { personal_vault::init(&conn)?; }
     if spec.object_type == vault::CONNECTION_TYPE { crate::mcp::apps::init(&conn)?; }
     // Only secret rows need the passphrase state; avoid touching system.db per message.
     let secret_state = if vault_sync::encrypted_type(spec.object_type) { Some(load_secret_state(app_handle)?) } else { None };
@@ -3254,6 +3269,7 @@ fn apply_change_to_db_inner(
     })?;
 
     if spec.object_type == vault::OBJECT_TYPE { return vault_sync::apply(sync_conn, conn, spec, change, &field_values); }
+    if spec.object_type == personal_vault::OBJECT_TYPE { return personal_vault::apply(sync_conn, conn, spec, change, &field_values); }
     if spec.object_type == vault::CONNECTION_TYPE {
         field_values.insert("status".into(), json!(if field_values.get("status").and_then(JsonValue::as_str) == Some("disconnected") { "disconnected" } else { "unchecked" }));
     }
@@ -4408,7 +4424,7 @@ fn load_outbox_from_db_with_secret_readiness(
             &format!("SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
              WHERE ({filter})
-               AND (?3 OR object_type NOT IN (?4, ?5))
+               AND (?3 OR object_type NOT IN (?4, ?5, ?6))
                AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM sync_outbox earlier
                    WHERE earlier.object_type = sync_outbox.object_type
                      AND earlier.object_id = sync_outbox.object_id
@@ -4420,7 +4436,7 @@ fn load_outbox_from_db_with_secret_readiness(
                         JOIN sync_object_map canonical ON canonical.object_type=alias.object_type AND canonical.local_id=alias.local_id
                         WHERE canonical.sync_id='{quick_model_id}' AND legacy.sent_once=1 AND legacy.outcome_known=0
                         AND legacy.status IN ('pending','pushing','failed')))
-               AND (operation='delete' OR object_type NOT IN ('llm.provider_secret','mcp.vault_secret') OR NOT EXISTS (
+               AND (operation='delete' OR object_type NOT IN ('llm.provider_secret','mcp.vault_secret','vault.item') OR NOT EXISTS (
                    SELECT 1 FROM sync_outbox key_event WHERE key_event.object_type='system.feature_config'
                    AND json_valid(key_event.payload_json) AND json_extract(key_event.payload_json,'$.fields.feature_code')='data_sync_secret'
                    AND key_event.status IN ('pending','pushing','failed')))
@@ -4436,7 +4452,7 @@ fn load_outbox_from_db_with_secret_readiness(
         )
         .map_err(|e| e.to_string())?;
     let raw_rows = stmt
-        .query_map(params![limit, Utc::now().timestamp(), secrets_ready, secrets::OBJECT_TYPE, vault::OBJECT_TYPE], |row| {
+        .query_map(params![limit, Utc::now().timestamp(), secrets_ready, secrets::OBJECT_TYPE, vault::OBJECT_TYPE, personal_vault::OBJECT_TYPE], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -5731,7 +5747,7 @@ async fn replay_secret_pending(app_handle: &AppHandle) -> Result<usize, String> 
         applied
     };
     if applied > 0 {
-        let types = HashSet::from([secrets::OBJECT_TYPE.to_string(), vault::OBJECT_TYPE.to_string(), vault::CONNECTION_TYPE.to_string()]);
+        let types = HashSet::from([secrets::OBJECT_TYPE.to_string(), vault::OBJECT_TYPE.to_string(), vault::CONNECTION_TYPE.to_string(), personal_vault::OBJECT_TYPE.to_string()]);
         emit_sync_domain_events(app_handle, &types).await?;
     }
     Ok(applied)
@@ -5815,7 +5831,7 @@ pub async fn set_sync_passphrase(
     let server_wins = has_record && !replace_existing;
     let sync = open_sync_db(&app_handle)?;
     if replace_existing {
-        let uncertain: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('llm.provider_secret','mcp.vault_secret') AND sent_once=1 AND outcome_known=0)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        let uncertain: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('llm.provider_secret','mcp.vault_secret','vault.item') AND sent_once=1 AND outcome_known=0)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         if uncertain || secrets::pending_count(&sync) > 0 {
             return Err("仍有结果未确认或无法解密的同步凭据，请先完成同步并解锁旧凭据，再更换口令".into());
         }

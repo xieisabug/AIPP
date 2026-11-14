@@ -9,6 +9,8 @@ import type { Message, StreamEvent } from "@/data/Conversation";
 import type { ButlerGroupMember, ButlerGroupMessage } from "@/data/ButlerGroup";
 import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { useAskUserQuestion } from "@/hooks/useInlineInteraction";
+import { useVaultUseRequests } from "@/hooks/useVaultUseRequests";
+import { VaultUseCard } from "@/components/conversation/VaultUseCard";
 import { useScrollManagement } from "@/hooks/useScrollManagement";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker, toChatMessage } from "./ButlerGroupMessageRow";
@@ -64,7 +66,8 @@ function TypingRow({ member }: { member: ButlerGroupMember }) {
 function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShown: () => void }) {
     const question = useAskUserQuestion({ conversationId: member.conversation_id });
     const elicitation = useAcpElicitation({ conversationId: member.conversation_id });
-    const shown = question.isDialogOpen || !!elicitation.questionRequest || !!elicitation.decisionError;
+    const vault = useVaultUseRequests(member.conversation_id);
+    const shown = question.isDialogOpen || !!elicitation.questionRequest || !!elicitation.decisionError || vault.requests.length > 0;
     useEffect(() => {
         if (shown) onShown();
     }, [shown, onShown]);
@@ -79,6 +82,7 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
                 errorMessage={elicitation.decisionError} onSubmit={elicitation.handleSubmit} onCancel={elicitation.handleCancel} />}
             {!elicitation.questionRequest && elicitation.decisionError &&
                 <p role="alert" className="text-sm text-destructive">{elicitation.decisionError}</p>}
+            {vault.requests.map(request => <VaultUseCard key={request.requestId} request={request} onRespond={vault.respond} />)}
         </div>
     </div>;
 }

@@ -113,6 +113,19 @@ pub fn infer_adapter_kind_simple(api_type: &str) -> AdapterKind {
     }
 }
 
+/// Where a provider's requests go before a model is chosen: used to confirm a vault-referenced API key
+/// when the user saves the provider. The client builder re-checks the exact endpoint per request.
+pub fn provider_destination(api_type: &str, endpoint_raw: Option<&str>) -> Result<String, String> {
+    if api_type == opencode_go::PROVIDER {
+        return opencode_go::route(Some("chat_completions")).map(|(_, base)| base.to_owned()).ok_or_else(|| "OpenCode Go 路由不可用".into());
+    }
+    if api_type == magpie::PROVIDER || api_type == "github_copilot" {
+        return Err("此类型的 Provider 不支持保险箱引用".into());
+    }
+    let resolution = resolve_provider_endpoint(endpoint_raw).map_err(|e| e.to_string())?;
+    Ok(effective_endpoint_url(&resolution, infer_adapter_kind("", api_type, None)))
+}
+
 /// 获取默认端点
 pub fn get_default_endpoint(adapter_kind: AdapterKind) -> &'static str {
     DEFAULT_ENDPOINTS
@@ -263,6 +276,9 @@ pub fn create_client_with_config(
         (ProviderEndpointResolution::Custom(base), None)
     } else { (resolved_endpoint, None) };
     let final_endpoint_url = effective_endpoint_url(&resolved_endpoint, adapter_kind);
+    // A vault-referenced key goes only to a site the user confirmed for it.
+    crate::vault::config_ref::check_provider_destination(configs, &api_key, &final_endpoint_url)
+        .map_err(AppError::ProviderError)?;
     match &resolved_endpoint {
         ProviderEndpointResolution::Unset => {
             info!(

@@ -1551,6 +1551,7 @@ fn item_identity(item: &Value) -> (String, String, Option<String>, Option<Value>
             Some(json!({"command": item.get("command"), "cwd": item.get("cwd")})),
         ),
         "fileChange" => (item_id, "patch".to_string(), Some("文件变更".to_string()), Some(item.clone())),
+        "contextCompaction" => (item_id, "status".to_string(), Some("压缩上下文".to_string()), None),
         "mcpToolCall" | "dynamicToolCall" => (
             item_id,
             "tool".to_string(),
@@ -2376,14 +2377,17 @@ async fn run_session(
                 request_cancellation.generation = cancellation_generation;
                 request_cancellation.source_message_id = Some(message_id);
                 let turn_start_time = chrono::Utc::now();
+                // 手动压缩：改发 thread/compact/start（立即返回 {}，压缩作为一轮 turn 以通知推进）
+                let manual_compact = super::agent_driver::manual_compact::is_manual_compact_prompt(&prompt);
+                let (turn_method, turn_params) = if manual_compact {
+                    ("thread/compact/start", json!({ "threadId": thread_id }))
+                } else {
+                    ("turn/start", codex_turn_start_params(&thread_id, &snapshot, &prompt))
+                };
                 request_id += 1;
                 write_frame(
                     &mut stdin,
-                    &json_rpc_request(
-                        request_id,
-                        "turn/start",
-                        codex_turn_start_params(&thread_id, &snapshot, &prompt),
-                    ),
+                    &json_rpc_request(request_id, turn_method, turn_params),
                 )
                 .await?;
                 let turn_result = read_rpc_response_with_approvals(
@@ -2699,6 +2703,9 @@ async fn run_session(
                     }
                     }
                 let turn_usage = usage_tracker.turn_usage();
+                if manual_compact && turn_error.is_none() && content.is_empty() {
+                    content = super::agent_driver::manual_compact::compact_done_text(None);
+                }
                 if turn_error.is_none() && content.is_empty() && reasoning.is_empty() && plan_messages.is_empty() {
                     turn_error = Some("Codex 本轮未返回任何内容".to_string());
                 }
@@ -2871,6 +2878,16 @@ mod tests {
         assert_eq!(title.as_deref(), Some("cargo check"));
         assert_eq!(input.unwrap()["cwd"], "C:/repo");
         assert_eq!(activity_status(&item, "pending"), "executing");
+    }
+
+    #[test]
+    fn maps_context_compaction_item_to_readable_status() {
+        let item = json!({"type":"contextCompaction","id":"item-compact"});
+        let (id, kind, title, input) = item_identity(&item);
+        assert_eq!(id, "item-compact");
+        assert_eq!(kind, "status");
+        assert_eq!(title.as_deref(), Some("压缩上下文"));
+        assert!(input.is_none());
     }
 
     /// item 首次出现时记录当前正文字符数，后续更新沿用同一偏移

@@ -281,6 +281,10 @@ pub async fn prepare_provider_configs(
 ) -> Result<Vec<crate::db::llm_db::LLMProviderConfig>, String> {
     use crate::db::llm_db::LLMProviderConfig;
 
+    // Vault references in the API key resolve here; the destination is enforced by the client builder.
+    let resolved = crate::vault::config_ref::prepare_provider_configs(app_handle, configs.to_vec()).await?;
+    let configs = resolved.as_slice();
+
     let session =
         resolve_copilot_session_if_needed(app_handle, api_type, configs, network_proxy).await?;
 

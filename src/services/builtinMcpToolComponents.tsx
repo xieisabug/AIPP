@@ -3,6 +3,7 @@ import FetchUrlToolCall from "@/components/mcp-tool-components/FetchUrlToolCall"
 import LoadMcpCatalogToolCall from "@/components/mcp-tool-components/LoadMcpCatalogToolCall";
 import MessagePreviewToolCall from "@/components/mcp-tool-components/MessagePreviewToolCall";
 import SearchWebToolCall from "@/components/mcp-tool-components/SearchWebToolCall";
+import VaultRequestToolCall, { VAULT_CARD_STATUSES } from "@/components/mcp-tool-components/VaultRequestToolCall";
 import {
     mcpToolComponentRegistry,
     type McpToolComponentProps,
@@ -46,6 +47,17 @@ export function ensureBuiltinMcpToolComponentsRegistered(): void {
         match: [{ toolName: "preview_message" }],
         priority: 110,
         render: (props: McpToolComponentProps) => <MessagePreviewToolCall {...props} />,
+    });
+
+    mcpToolComponentRegistry.register("builtin", {
+        id: "builtin.vault-request",
+        label: "vault_http_request 凭据请求卡片",
+        description: "用于保险箱凭据请求：一行显示访问了哪个网站，展开查看响应",
+        match: [{ toolName: "vault_http_request" }],
+        priority: 110,
+        shouldRender: (props: McpToolComponentProps) =>
+            VAULT_CARD_STATUSES.has(props.currentToolCall?.status ?? props.status ?? ""),
+        render: (props: McpToolComponentProps) => <VaultRequestToolCall {...props} />,
     });
 
     mcpToolComponentRegistry.register("builtin", {

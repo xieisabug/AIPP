@@ -118,6 +118,7 @@ fn switch_key_with(
             let value = encrypt(new, &reference, server_id, &plain)?;
             db.execute("UPDATE credential_vault SET value=?2 WHERE reference=?1", params![reference, value]).map_err(|e| e.to_string())?;
         }
+        personal_vault::reencrypt(db, old, new)?;
         let retain = old.is_some_and(|key| key.record.kdf != "local-random" && key.record != new.record);
         db.execute("INSERT OR IGNORE INTO credential_vault_retired_key(slot,retain) SELECT slot,?1 FROM credential_vault_key",[retain]).map_err(|e| e.to_string())?;
         db.execute("INSERT INTO credential_vault_key(id,slot,record) VALUES(1,?1,?2)
@@ -158,7 +159,7 @@ fn existing_key(
     let legacy: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM secure_config WHERE scope='data_sync' AND key='secret_key')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
     if !legacy {
         let has_credentials: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM credential_vault)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-        if has_credentials { return Err("已有凭据缺少原加密密钥，不会生成新密钥覆盖已有凭据".into()); }
+        if has_credentials || personal_vault::has_items(db)? { return Err("已有凭据缺少原加密密钥，不会生成新密钥覆盖已有凭据".into()); }
         return Ok(None);
     }
     let key = load_legacy()?.ok_or("无法解密旧同步密钥，保留旧数据，请恢复原密钥后重试")?;
@@ -301,7 +302,7 @@ pub(crate) fn remove(app: &AppHandle, reference: &str) -> Result<(), String> {
 /// to the new epoch. Until then they can decrypt a concurrent old-epoch write.
 pub(super) fn finish_rotation(app: &AppHandle) -> Result<(),String> {
     let sync = open_sync_db(app)?;
-    let pending: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('mcp.vault_secret','llm.provider_secret','system.feature_config')) OR EXISTS(SELECT 1 FROM sync_secret_pending)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let pending: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('mcp.vault_secret','llm.provider_secret','vault.item','system.feature_config')) OR EXISTS(SELECT 1 FROM sync_secret_pending)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     if pending { return Ok(()); }
     let _lock = LOCK.lock().map_err(|_|"凭据库锁已损坏")?;
     let system = SystemDatabase::new(app).map_err(|e|e.to_string())?;

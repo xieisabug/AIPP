@@ -20,6 +20,7 @@ mod sync;
 pub use sync::prepare_assistant_recovery;
 mod template_engine;
 mod utils;
+mod vault;
 mod window;
 
 pub use crate::feishu::{
@@ -902,6 +903,9 @@ pub fn run() {
             crate::api::butler_peer::start(app_handle.clone());
             #[cfg(desktop)]
             crate::api::butler_group_runtime::start_runtime(app_handle.clone());
+            // 后台预读 Agent 助手的模型列表，新建对话第一次打开也不用等 CLI 冷启动
+            #[cfg(desktop)]
+            crate::api::agent_model_prewarm::spawn(app_handle.clone());
             crate::mcp::summarizer::trigger_pending_mcp_catalog_summary_generation(
                 app_handle.clone(),
             );
@@ -1073,6 +1077,12 @@ pub fn run() {
             api::ai::agent_driver::native_agents::env::check_native_agent_update,
             api::ai::agent_driver::native_agents::env::run_native_agent_update,
             get_agent_runtime_info,
+            api::agent_workspace_api::get_agent_git_status,
+            api::agent_workspace_api::list_agent_git_changes,
+            api::agent_workspace_api::list_agent_git_branches,
+            api::agent_workspace_api::switch_agent_git_branch,
+            api::agent_workspace_api::commit_agent_git_changes,
+            api::agent_workspace_api::push_agent_git_branch,
             get_codex_agent_defaults,
             get_assistant_field_value,
             get_acp_working_directory,
@@ -1105,6 +1115,17 @@ pub fn run() {
             crate::api::butler_group::rename_butler_group,
             crate::api::butler_group::delete_butler_group,
             crate::api::butler_memory::list_butler_memories,
+            crate::api::vault_api::vault_capability,
+            crate::api::vault_api::vault_list,
+            crate::api::vault_api::vault_create,
+            crate::api::vault_api::vault_update,
+            crate::api::vault_api::vault_replace_secret,
+            crate::api::vault_api::vault_delete,
+            crate::api::vault_api::vault_usage,
+            crate::api::vault_api::vault_references,
+            crate::api::vault_api::vault_confirm_reference,
+            crate::vault::approval::vault_list_use_requests,
+            crate::vault::approval::vault_respond_use_request,
             crate::api::butler_memory::update_butler_memory,
             crate::api::butler_memory::delete_butler_memory,
             crate::api::butler_memory::get_butler_memory_source,

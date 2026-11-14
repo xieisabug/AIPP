@@ -49,10 +49,10 @@
  * - 此解决方案参考了业界最佳实践（Cherry Studio 等项目的处理方式）
  */
 
-import React, { useRef, useEffect, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
+import React, { useRef, useEffect, useState, useCallback, useId, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import "../../styles/InputArea.css";
 import CircleButton from "../CircleButton";
-import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Plus, Square, ArrowUp, Loader2 } from "lucide-react";
 import { AcpAvailableCommand, FileInfo } from "../../data/Conversation";
 import { invoke } from "@tauri-apps/api/core";
@@ -107,6 +107,10 @@ interface InputAreaProps {
     sendButtonIcon?: ReactNode;
     sendButtonVisual?: ReactNode;
     acpAvailableCommands?: AcpAvailableCommand[];
+    /**
+     * Plan 模式开关：只有支持 Plan 的 Agent 助手才传 onPlanModeToggle，
+     * 开关显示在输入框下方（仅底部输入框布局）。
+     */
     planMode?: boolean;
     planModeSwitching?: boolean;
     onPlanModeToggle?: () => void;
@@ -160,6 +164,7 @@ const InputArea = React.memo(
             // 图片区域的高度
             const textareaRef = useRef<HTMLTextAreaElement>(null);
             const rootRef = useRef<HTMLDivElement>(null);
+            const planSwitchId = useId();
 
             // 暴露给外部的方法
             useImperativeHandle(
@@ -1340,9 +1345,14 @@ const InputArea = React.memo(
                 textareaRef.current?.focus();
             }, [textareaRef]);
 
-            const showPlanModeButton = Boolean(onPlanModeToggle);
+            const showPlanModeToggle = Boolean(onPlanModeToggle) && placement === "bottom";
+            const planToggleDisabled = planModeSwitching || aiIsResponsing;
+            const planToggleTitle = aiIsResponsing
+                ? "回复进行中，结束后可切换"
+                : planMode
+                    ? "已开启：Agent 先出方案，你确认后再执行。点击关闭"
+                    : "开启后 Agent 先出方案，你确认后再执行";
             const addButtonRight = (sidebarVisible ? 150 : 190) + sidebarWidth;
-            const planButtonRight = addButtonRight + 40;
             const baseRight = sidebarVisible ? 130 : 170;
             const defaultSendButtonIcon = aiIsResponsing && !inputText.trim() ? (
                 <Square size={20} className="text-action-foreground" />
@@ -1356,7 +1366,7 @@ const InputArea = React.memo(
             return (
                 <div
                     ref={rootRef}
-                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeButton ? 'has-plan-mode' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
+                    className={`input-area ${placement} ${isMobile ? 'mobile' : ''} ${showPlanModeToggle ? 'has-footer' : ''} ${isMobile && hasAttachments ? 'has-attachments' : ''}`}
                     data-theme-slot="input-area"
                     data-aipp-slot="chat-input-area"
                     data-attachment-count={attachmentCount}
@@ -1376,7 +1386,7 @@ const InputArea = React.memo(
                         </div>
                     ) : null}
                     <div
-                        className={`input-area-textarea-container ${showPlanModeButton ? 'has-plan-mode' : ''}`}
+                        className="input-area-textarea-container"
                         style={isMobile ? undefined : { right: baseRight }}
                         data-theme-slot="input-area-container"
                         data-aipp-slot="chat-input-area-container"
@@ -1428,29 +1438,34 @@ const InputArea = React.memo(
                         />
                     </div>
 
-                    {showPlanModeButton ? (
-                        <Button
-                            type="button"
-                            size="sm"
-                            variant={planMode ? "default" : "outline"}
-                            onClick={() => onPlanModeToggle?.()}
-                            className={`input-area-plan-mode-button ${placement}${planMode ? " active" : " text-muted-foreground"}`}
-                            disabled={planModeSwitching || aiIsResponsing}
-                            aria-label="Plan"
-                            aria-pressed={planMode}
-                            title={planMode ? "切换到执行模式" : "切换到 Plan 模式"}
-                            data-theme-slot="input-area-plan-mode-button"
-                            data-aipp-slot="chat-input-plan-mode"
-                            data-state={planMode ? "active" : "idle"}
-                            style={
-                                placement === "bottom" && !isMobile
-                                    ? { right: planButtonRight }
-                                    : undefined
-                            }
+                    {showPlanModeToggle ? (
+                        <div
+                            className="input-area-footer"
+                            data-theme-slot="input-area-footer"
+                            data-aipp-slot="chat-input-footer"
                         >
-                            {planModeSwitching ? <Loader2 className="animate-spin" /> : null}
-                            Plan
-                        </Button>
+                            <div
+                                className="input-area-plan-mode"
+                                data-theme-slot="input-area-plan-mode"
+                                data-aipp-slot="chat-input-plan-mode"
+                                data-state={planMode ? "on" : "off"}
+                                title={planToggleTitle}
+                            >
+                                <Switch
+                                    id={planSwitchId}
+                                    checked={planMode}
+                                    onCheckedChange={() => onPlanModeToggle?.()}
+                                    disabled={planToggleDisabled}
+                                    aria-label="Plan 模式"
+                                />
+                                <label htmlFor={planSwitchId} className="input-area-plan-mode-label">
+                                    Plan 模式
+                                </label>
+                                {planModeSwitching ? (
+                                    <Loader2 className="input-area-plan-mode-spinner animate-spin" aria-label="正在切换" />
+                                ) : null}
+                            </div>
+                        </div>
                     ) : null}
 
                     {handleChooseFile ? (

@@ -39,6 +39,7 @@ pub(crate) fn delivery_metadata(task: &ScheduledTask, content: &DeliveryContent<
         "scheduled_task_name": task.name,
         "scheduled_run_id": content.run_id,
         "run_conversation_id": content.run_conversation_id,
+        "final_message_id": content.final_message_id,
     })
     .to_string()
 }
@@ -132,27 +133,30 @@ pub fn deliver(app: &tauri::AppHandle, task: &ScheduledTask, content: &DeliveryC
             Some(id) => id,
             None => {
                 let now = chrono::Utc::now();
-                if existing_delivery(&db, conversation_id, content.run_id, "user")?.is_none() {
-                    crate::api::ai_api::add_message_with_metadata(
-                        app,
-                        None,
-                        conversation_id,
-                        "user".to_string(),
-                        trigger_text(task, content.scheduled_for),
-                        None,
-                        None,
-                        Some(now),
-                        Some(now),
-                        0,
-                        None,
-                        None,
-                        Some(delivery_metadata(task, content, "trigger")),
-                    )
-                    .map_err(|e| format!("写入触发消息失败：{e}"))?;
-                }
-                crate::api::ai_api::add_message_with_metadata(
+                let trigger_id = match existing_delivery(&db, conversation_id, content.run_id, "user")? {
+                    Some(id) => id,
+                    None => {
+                        crate::api::ai_api::add_message_with_metadata(
+                            app,
+                            None,
+                            conversation_id,
+                            "user".to_string(),
+                            trigger_text(task, content.scheduled_for),
+                            None,
+                            None,
+                            Some(now),
+                            Some(now),
+                            0,
+                            None,
+                            None,
+                            Some(delivery_metadata(task, content, "trigger")),
+                        )
+                        .map_err(|e| format!("写入触发消息失败：{e}"))?.id
+                    }
+                };
+                crate::api::ai_api::add_scheduled_delivery_message(
                     app,
-                    None,
+                    Some(trigger_id),
                     conversation_id,
                     "response".to_string(),
                     content.text.to_string(),

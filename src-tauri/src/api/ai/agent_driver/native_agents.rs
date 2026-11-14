@@ -87,6 +87,13 @@ pub(crate) struct NativeConfig {
     /// Assistant `tool_review_mode=auto_model`: native permission requests go to AIPP's review model first.
     review: bool,
 }
+impl NativeConfig {
+    /// Everything a model probe depends on: launcher, working directory, environment and wire settings.
+    pub(crate) fn probe_cache_key(&self, driver: &str) -> String {
+        let env: std::collections::BTreeMap<_, _> = self.env.iter().collect();
+        format!("{driver}:{}:{}:{}:{:?}", self.node, self.cwd.display(), self.wire, env)
+    }
+}
 pub(crate) fn configure_instance(app: &tauri::AppHandle, provider_id: i64, driver: &str, config: &mut NativeConfig) -> Result<(), AppError> {
     if driver == "antigravity" {
         config.wire["profile"] = json!(app.path().app_data_dir().map_err(error)?.join("agent-profiles").join("antigravity").join(provider_id.to_string()));
@@ -565,6 +572,16 @@ pub(crate) async fn probe_models(driver: &str, mut config: NativeConfig) -> Resu
             }).collect::<Result<Vec<_>, String>>();
         }
     }).await.unwrap_or_else(|_|Err(format!("{driver} model discovery timed out")));
+    if result.is_ok() {
+        // The list is all the caller needs. A Windows process-tree kill alone takes ~0.5s, so tear
+        // the bridge down off the request path; the unpacked bridge files outlive its processes.
+        tokio::spawn(async move {
+            terminate_tree(&mut child).await;
+            let _ = timeout(Duration::from_secs(2), stderr_task).await;
+            drop(files);
+        });
+        return result;
+    }
     terminate_tree(&mut child).await;
     let _ = timeout(Duration::from_secs(2), stderr_task).await;
     result.map_err(|e|format!("{}; diagnostics: {:?}", diagnostics.sanitize(&e), diagnostics.diagnostics(child.try_wait().ok().flatten().map(|s|s.to_string()), None)))

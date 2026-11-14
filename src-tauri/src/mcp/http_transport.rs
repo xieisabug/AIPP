@@ -97,11 +97,12 @@ pub(crate) fn create_http_transport(
     server: &MCPServer,
     builder: reqwest::ClientBuilder,
 ) -> Result<StreamableHttpClientTransport<reqwest::Client>, String> {
-    let (client, url) = build_plain_client(server, builder)?;
+    let (client, url) = build_plain_client(server, builder, &[])?;
     Ok(StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)))
 }
 
-fn build_plain_client(server: &MCPServer, builder: reqwest::ClientBuilder) -> Result<(reqwest::Client, String), String> {
+/// `secrets` are values already substituted from vault references; headers carrying them are sensitive.
+fn build_plain_client(server: &MCPServer, builder: reqwest::ClientBuilder, secrets: &[String]) -> Result<(reqwest::Client, String), String> {
     let url = server.url.as_deref().ok_or("No URL specified for HTTP transport")?;
     if let Some(raw) = server.headers.as_deref().filter(|raw| !raw.trim().is_empty()) {
         let parsed: serde_json::Value = serde_json::from_str(raw)
@@ -118,10 +119,15 @@ fn build_plain_client(server: &MCPServer, builder: reqwest::ClientBuilder) -> Re
         if name.eq_ignore_ascii_case(super::apps::credentials::REFERENCE_HEADER) {
             return Err("目录应用凭据必须通过受控 HTTP 执行入口解析".into());
         }
+        if crate::vault::config_ref::contains(&value) {
+            return Err("保险箱引用必须通过受控 HTTP 执行入口解析".into());
+        }
         let name = HeaderName::try_from(name.as_str())
             .map_err(|error| format!("Invalid MCP HTTP header name: {error}"))?;
-        let value = HeaderValue::from_str(&value)
-            .map_err(|error| format!("Invalid MCP HTTP header value for {name}: {error}"))?;
+        let sensitive = secrets.iter().any(|secret| value.contains(secret.as_str()));
+        let mut value = HeaderValue::from_str(&value)
+            .map_err(|_| format!("Invalid MCP HTTP header value for {name}"))?;
+        value.set_sensitive(sensitive);
         header_map.insert(name, value);
     }
     let client = builder.redirect(reqwest::redirect::Policy::none()).default_headers(header_map).build()
@@ -152,9 +158,13 @@ pub(crate) async fn create_authenticated_http_transport(
     };
     let keys: Vec<_> = headers.keys().filter(|key| key.eq_ignore_ascii_case(super::apps::credentials::REFERENCE_HEADER)).cloned().collect();
     if keys.is_empty() {
-        let (client, url) = build_plain_client(server, builder)?;
+        // Vault references resolve only for the origin the user confirmed when saving this server.
+        let resolved = crate::vault::config_ref::resolve_http_server(app, server).await?;
+        let (server, secrets) = match &resolved { Some((server, secrets)) => (server, secrets.as_slice()), None => (server, &[][..]) };
+        let (client, url) = build_plain_client(server, builder, secrets)?;
         let (client, signal) = AuthAwareClient::new(client);
-        return Ok((StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)), ResponseRedactor::default(), signal));
+        let redactor = crate::vault::executor::redactor_for(secrets.iter().cloned());
+        return Ok((StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)), redactor, signal));
     }
     if keys.len() != 1 { return Err("连接包含重复凭据引用".into()); }
     let reference = headers.remove(&keys[0]).unwrap();
