@@ -1,5 +1,6 @@
 import { render, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { accessoryDefinitions } from "./avatarDefinition";
 import AnimatedAvatar from "./AnimatedAvatar";
 import { defaultAppearance } from "@/components/butler/butlerAppearance";
 
@@ -14,6 +15,19 @@ describe("avatar rendering", () => {
         rerender(<AnimatedAvatar animated appearance={appearance} actionRequest={{ action: "smile", sequence: 1 }} />);
         expect(container.firstChild).toHaveAttribute("data-avatar-action", "smile");
         expect(expression).toHaveAttribute("opacity", "0");
+    });
+
+    it("should tilt the equipped crown in place and settle it upright", async () => {
+        const { container } = render(<AnimatedAvatar animated size={160}
+            appearance={{ ...defaultAppearance, accessories: { eyes: null, head: "crown" } }}
+            actionRequest={{ action: accessoryDefinitions.crown.action, sequence: 1 }} />);
+        const crown = container.querySelector('[data-avatar-accessory="crown"]')!.firstElementChild;
+        await waitFor(() => expect(crown).toHaveAttribute("transform", "translate(0 0) rotate(30) scale(1 1)"));
+        const gaze = container.querySelector('[data-avatar-gaze="crown"]');
+        await waitFor(() => expect(gaze).toHaveAttribute("transform", "translate(13 -18) rotate(0) scale(1 1)"));
+        expect(crown).toHaveAttribute("transform", "translate(0 0) rotate(30) scale(1 1)");
+        await waitFor(() => expect(container.firstChild).toHaveAttribute("data-avatar-action", "none"), { timeout: 2200 });
+        expect(crown).toHaveAttribute("transform", "translate(0 0) rotate(0) scale(1 1)");
     });
 
     it("should serve rice for a whale smile and put the bowl away when the meal finishes", async () => {

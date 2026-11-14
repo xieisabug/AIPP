@@ -9,6 +9,8 @@ export const accessoryPreviewViewBox: Record<AccessoryId, string> = {
     blush: "-95 -20 190 116",
     "baseball-cap": "-125 -108 312 150",
     "baseball-cap-left": "-187 -108 312 150",
+    crown: "-116 -103 232 138",
+    headphones: "-244 -44 488 266",
     beret: "-140 -100 280 140",
     "bow-bell": "-76 -52 152 136",
     flower: "-38 -38 80 76",
@@ -67,6 +69,28 @@ export function BaseballCapArtwork({ reversed = false }: { reversed?: boolean })
         <path d="M-101 6Q-11 14 59-10Q116-24 167-5Q178 1 165 7Q139 14 116 11Q83 7 48 17Q-25 36-101 16Z"
             fill="#172536" stroke="#8191A2" strokeWidth="4" />
         <path d="M62-4Q111-16 149-7" fill="none" stroke="#ACBDC8" strokeWidth="3" />
+    </g>;
+}
+
+export function CrownArtwork() {
+    return <g transform="scale(0.86 1)" stroke="#915F23" strokeWidth="5" strokeLinejoin="round">
+        <path d="M-99-57L-52-30L-4-83Q0-88 4-83L52-30L99-57L82 11Q0 28-82 11Z" fill="#F6C34E" />
+        <path d="M-83-2Q0 12 83-2L80 17Q0 31-80 17Z" fill="#E8A637" />
+        <path d="M0-47L14-28L0-10L-14-28Z" fill="#AE4362" stroke="#FFE39A" />
+        {[-99, 0, 99].map(x => <circle key={x} cx={x} cy={x ? -59 : -85} r="7" fill="#FFE39A" />)}
+    </g>;
+}
+
+export function HeadphonesArtwork() {
+    const band = "M-201 141C-201 34-149-14-56-18Q0-21 56-18C149-14 201 34 201 141";
+    return <g strokeLinecap="round" strokeLinejoin="round">
+        <path d={band} fill="none" stroke="#8494A7" strokeWidth="26" />
+        <path d={band} fill="none" stroke="#273346" strokeWidth="17" />
+        {[-1, 1].map(side => <g key={side} transform={`scale(${side} 1) rotate(7 201 155)`}>
+            <rect x="174" y="100" width="35" height="103" rx="16" fill="#182436" stroke="#8291A0" strokeWidth="5" />
+            <rect x="192" y="107" width="36" height="88" rx="17" fill="#465C74" stroke="#A4B4C4" strokeWidth="5" />
+            <path d="M214 127V161" fill="none" stroke="#B5DAE8" strokeWidth="6" />
+        </g>)}
     </g>;
 }
 

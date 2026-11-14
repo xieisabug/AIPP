@@ -150,7 +150,7 @@ describe("Butler profile editor", () => {
         })));
     });
 
-    it.each([["棒球帽", "baseball-cap"], ["反向棒球帽", "baseball-cap-left"]])("should retain %s when changing shape and restoring colors", async (label, id) => {
+    it.each([["棒球帽", "baseball-cap"], ["反向棒球帽", "baseball-cap-left"], ["皇冠", "crown"], ["头戴式耳机", "headphones"]])("should retain %s when changing shape and restoring colors", async (label, id) => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
         fireEvent.click(screen.getByRole("button", { name: "脸部：圆框眼镜" }));

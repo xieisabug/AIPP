@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { accessoriesOf, accessoryDefinitions, avatarDefinitions, type AccessoryId, type AvatarAction } from "@/components/avatar/avatarDefinition";
-import { accessoryPreviewViewBox, BaseballCapArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork, ThickBrowsArtwork } from "@/components/avatar/AvatarAccessories";
+import { accessoryPreviewViewBox, BaseballCapArtwork, CrownArtwork, HeadphonesArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork, ThickBrowsArtwork } from "@/components/avatar/AvatarAccessories";
 import { Button } from "@/components/ui/button";
 import ButlerAvatar from "./ButlerAvatar";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
@@ -29,6 +29,7 @@ export const PROFILE_FOOTER_CLASS = "-mx-6 shrink-0 border-t border-border px-6 
 
 function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: ButlerAppearance }) {
     const artwork = {
+        crown: <CrownArtwork />, headphones: <HeadphonesArtwork />,
         "thick-brows": <ThickBrowsArtwork />,
         "round-glasses": <GlassesArtwork />, sunglasses: <SunglassesArtwork />, blush: <BlushArtwork />, beret: <HatArtwork />, "baseball-cap": <BaseballCapArtwork />,
         "baseball-cap-left": <BaseballCapArtwork reversed />,
