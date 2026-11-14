@@ -3,6 +3,7 @@
 pub mod builtin_mcp;
 pub mod apps;
 pub mod butler_tools;
+pub(crate) mod assistant_access;
 pub mod detection;
 pub mod execution_api;
 pub(crate) mod http_transport;

@@ -102,9 +102,7 @@ fn setting(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], key
         .or_else(|| providers.iter().find(|c| c.name == key).map(|c| c.value.clone())).filter(|s| !s.trim().is_empty())
 }
 pub(crate) fn expand_home(path: &str) -> PathBuf {
-    if path == "~" { dirs::home_dir().unwrap_or_else(|| PathBuf::from(path)) }
-    else if path.starts_with("~/") || path.starts_with("~\\") { dirs::home_dir().unwrap_or_default().join(&path[2..]) }
-    else { PathBuf::from(path) }
+    shellexpand::path::tilde_with_context(std::path::Path::new(path), dirs::home_dir).into_owned()
 }
 /// Bridge environment overrides: dedicated credential fields, then provider and
 /// assistant variables (later wins), then the chosen Node's directory on PATH.
@@ -136,8 +134,7 @@ pub(crate) fn with_node_on_path(node: &str, env: &mut HashMap<String, String>, i
 }
 pub(crate) fn configuration(models: &[AssistantModelConfig], providers: &[LLMProviderConfig], model: Option<String>) -> Result<NativeConfig, AppError> {
     let get = |key: &str| setting(models, providers, key);
-    let cwd = get("acp_working_directory").map(|path| expand_home(&path))
-        .or_else(dirs::home_dir).ok_or_else(|| error("Cannot resolve native agent working directory"))?;
+    let cwd = crate::api::ai::working_directory::from_configs(models, providers, true)?;
     if !cwd.is_dir() { return Err(error(format!("Agent working directory does not exist: {}", cwd.display()))); }
     let node = get("agent_node_command").unwrap_or_else(|| "node".into());
     let mut env = agent_environment(models, providers, &node)?;

@@ -4,6 +4,13 @@ use genai::chat::{CacheControl, ChatOptions};
 use genai::Client;
 use std::collections::HashMap;
 
+pub(crate) const DEFAULT_STREAM: bool = false;
+
+/// Shared by request execution and channel configuration readback.
+pub(crate) fn stream_enabled(value: Option<&str>) -> bool {
+    value.and_then(|v|v.trim().parse().ok()).unwrap_or(DEFAULT_STREAM)
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatConfig {
     pub model_name: String,

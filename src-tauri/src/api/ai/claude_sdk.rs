@@ -302,10 +302,7 @@ pub fn extract_claude_sdk_config(
         .or_else(|| provider_value(providers, "claude_cli_command"))
         .or_else(|| provider_value(providers, "acp_cli_command"))
         .unwrap_or_else(|| "claude".into());
-    let working_directory = model_value(models, "acp_working_directory")
-        .or_else(|| provider_value(providers, "acp_working_directory"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let working_directory = super::working_directory::from_configs(models, providers, true)?;
     let permission_mode = model_value(models, "claude_permission_mode")
         .or_else(|| provider_value(providers, "claude_permission_mode"));
     let effort = model_value(models, "claude_effort")
