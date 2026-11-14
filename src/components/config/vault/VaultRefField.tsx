@@ -23,14 +23,14 @@ interface VaultRefFieldProps {
     disabled?: boolean;
     /** 允许在引用前写文字前缀（请求头里的 "Bearer "）。 */
     allowPrefix?: boolean;
-    /** 请求头名：Authorization 配 Bearer 凭据时自动填 "Bearer "。 */
+    /** 请求头名：Authorization 默认补上 "Bearer " 前缀，可以修改。 */
     headerName?: string;
     /** 把当前值存入保险箱时预填的名称。 */
     suggestedName: string;
     targetHint?: string | null;
 }
 
-/** 秘密值输入框：可以直接填写，也可以引用保险箱里的凭据（显示为只读标签，不显示值）。 */
+/** 秘密值输入框：可以直接填写，也可以引用保险箱里的条目（显示为只读标签，不显示值）。 */
 export default function VaultRefField({
     vault, value, onChange, id, ariaLabel, placeholder, disabled, allowPrefix, headerName, suggestedName, targetHint,
 }: VaultRefFieldProps) {
@@ -40,8 +40,8 @@ export default function VaultRefField({
     const item = parsed ? vault.items.find((i) => i.id === parsed.id) : undefined;
 
     const pick = ({ ref, prefix }: VaultPick) => {
-        const chosen = vault.items.find((i) => i.id === ref.id);
-        const bearer = !prefix && allowPrefix && headerName?.toLowerCase() === "authorization" && (chosen?.authKind ?? "bearer") === "bearer";
+        // 条目只存值本身；Authorization 头默认补上 Bearer 前缀，用户可以在前缀框里改。
+        const bearer = !prefix && !parsed && allowPrefix && headerName?.toLowerCase() === "authorization";
         onChange(formatVaultRef(ref, prefix || (bearer ? "Bearer " : parsed?.prefix ?? "")));
     };
 
@@ -58,10 +58,9 @@ export default function VaultRefField({
     );
 
     if (parsed) {
-        const fieldLabel = item?.fields.find((f) => f.key === parsed.field)?.label;
         const label = item
-            ? `${item.name}${fieldLabel ? ` · ${fieldLabel}` : ""}`
-            : vault.available ? "凭据已删除，请重新选择" : "此设备不支持凭据保险箱";
+            ? item.name
+            : vault.available ? "条目已删除，请重新选择" : "此设备不支持凭据保险箱";
         return (
             <div className="flex min-w-0 items-center gap-2" data-aipp-slot="vault-ref-field">
                 {allowPrefix && (

@@ -51,8 +51,8 @@ export function ensureBuiltinMcpToolComponentsRegistered(): void {
 
     mcpToolComponentRegistry.register("builtin", {
         id: "builtin.vault-request",
-        label: "vault_http_request 凭据请求卡片",
-        description: "用于保险箱凭据请求：一行显示访问了哪个网站，展开查看响应",
+        label: "vault_http_request 保险箱请求卡片",
+        description: "用于带保险箱占位符的网页请求：一行显示方法、地址和状态码，展开查看响应",
         match: [{ toolName: "vault_http_request" }],
         priority: 110,
         shouldRender: (props: McpToolComponentProps) =>

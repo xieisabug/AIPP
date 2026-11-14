@@ -3357,7 +3357,14 @@ pub async fn execute_tool_by_transport(
     }
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
 
-    match server.transport_type.as_str() {
+    // Vault placeholders (`<vault:key>`): ask the user, substitute into a copy of the arguments, and
+    // clean whatever the tool returns. This is the only place they are resolved.
+    let prepared = tokio::select! {
+        prepared = crate::vault::placeholder::prepare(app_handle, conversation_id, server, tool_name, parameters) => prepared?,
+        _ = cancel_token.cancelled() => return Err("工具调用已取消".to_string()),
+    };
+    let parameters = prepared.parameters(parameters);
+    let outcome = prepared.run(async { match server.transport_type.as_str() {
         // If stdio but command is aipp:*, route to builtin executor
         "stdio" => {
             if let Some(cmd) = &server.command {
@@ -3433,7 +3440,9 @@ pub async fn execute_tool_by_transport(
             let error_msg = format!("不支持的传输类型: {}", server.transport_type);
             Err(error_msg)
         }
-    }
+    } }).await;
+    prepared.finish(app_handle, outcome.as_ref().err().map(String::as_str));
+    outcome.map(|result| prepared.clean(result)).map_err(|error| prepared.clean(error))
 }
 /// 通过 stdio 传输执行工具（外部进程）。
 /// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
@@ -3552,8 +3561,9 @@ async fn execute_builtin_tool(
     let skip_outer_timeout = (command == "aipp:ui_interaction"
         && matches!(tool_name, "ask_user_question" | "preview_code"))
         || (command == "aipp:operation" && tool_name == "execute_bash")
-        // 可能在等待用户确认首次访问的网站；执行器自带请求超时与 10 分钟确认超时。
-        || (command == crate::vault::tool::COMMAND && tool_name == crate::vault::tool::REQUEST_TOOL);
+        // 填写卡片等用户输入（自带 10 分钟超时）；HTTP 请求自带请求超时（30–120 秒）。
+        || (command == crate::vault::tool::COMMAND
+            && matches!(tool_name, crate::vault::tool::INPUT_TOOL | crate::vault::tool::REQUEST_TOOL));
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用

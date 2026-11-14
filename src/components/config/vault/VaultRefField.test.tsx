@@ -12,8 +12,7 @@ const ID = "0f8e2a52-6c1d-4b8a-9d3e-1a2b3c4d5e6f";
 const NEW_ID = "1a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d";
 
 const item: VaultItem = {
-    id: ID, handle: "github_pat", name: "GitHub 个人令牌", description: "", authKind: "bearer",
-    injection: ["Authorization: Bearer <值>"], fields: [{ key: "token", label: "令牌" }], allowedSites: [], syncEnabled: true,
+    id: ID, key: "github_pat", name: "GitHub 个人令牌", description: "", allowedSites: [], syncEnabled: true,
     status: "ready", createdAt: 1, updatedAt: 1, lastUsedAt: null,
 };
 
@@ -44,20 +43,25 @@ describe("VaultRefField", () => {
     beforeEach(() => {
         clearAllMockHandlers();
         vi.mocked(invoke).mockClear();
-        mockInvokeHandler("vault_create", () => ({ ...item, id: NEW_ID, handle: "openai_api_key", name: "OpenAI · API Key" }));
+        mockInvokeHandler("vault_create", () => ({ ...item, id: NEW_ID, key: "openai_api_key", name: "OpenAI · API Key" }));
     });
 
     it("shows a reference as a label and never as an editable value", () => {
-        const { container } = render(<Harness initial={`vault://${ID}#token`} onChange={vi.fn()} />);
-        expect(screen.getByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        const { container } = render(<Harness initial={`vault://${ID}`} onChange={vi.fn()} />);
+        expect(screen.getByText("GitHub 个人令牌")).toBeInTheDocument();
         expect(container.querySelector("input")).toBeNull();
         expect(screen.queryByText(/vault:\/\//)).not.toBeInTheDocument();
+    });
+
+    it("still reads references written with the old field suffix", () => {
+        render(<Harness initial={`vault://${ID}#token`} onChange={vi.fn()} />);
+        expect(screen.getByText("GitHub 个人令牌")).toBeInTheDocument();
     });
 
     it("clears the field on remove instead of restoring the previous plain value", async () => {
         const user = userEvent.setup();
         const onChange = vi.fn();
-        render(<Harness initial={`vault://${ID}#token`} onChange={onChange} />);
+        render(<Harness initial={`vault://${ID}`} onChange={onChange} />);
         await user.click(screen.getByRole("button", { name: "移除" }));
         expect(onChange).toHaveBeenLastCalledWith("");
         expect(screen.getByLabelText("API Key")).toHaveValue("");
@@ -68,19 +72,19 @@ describe("VaultRefField", () => {
         const onChange = vi.fn();
         render(<Harness initial="sk-live-123" onChange={onChange} />);
         await user.click(screen.getByRole("button", { name: "从凭据保险箱选择" }));
-        expect(screen.getByText("保存配置后，此凭据将被确认用于 https://api.openai.com")).toBeInTheDocument();
+        expect(screen.getByText("保存配置后，这个值将被确认用于 https://api.openai.com")).toBeInTheDocument();
         await user.click(screen.getByRole("radio", { name: "把当前填写的值存入保险箱" }));
         expect(screen.getByLabelText("名称")).toHaveValue("OpenAI · API Key");
         await user.click(screen.getByRole("button", { name: "确认" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_create", {
             input: expect.objectContaining({
                 name: "OpenAI · API Key",
-                handle: "openai_api_key",
-                auth: { kind: "bearer", token: "sk-live-123" },
+                key: "openai_api_key",
+                value: "sk-live-123",
                 allowedSites: [],
             }),
         }));
-        await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(`vault://${NEW_ID}#token`));
+        await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(`vault://${NEW_ID}`));
         expect(screen.queryByDisplayValue("sk-live-123")).not.toBeInTheDocument();
     });
 
@@ -92,34 +96,35 @@ describe("VaultRefField", () => {
         await user.click(screen.getByRole("radio", { name: "把当前填写的值存入保险箱" }));
         await user.click(screen.getByRole("button", { name: "确认" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_create", {
-            input: expect.objectContaining({ auth: { kind: "bearer", token: "ghp_abc" } }),
+            input: expect.objectContaining({ value: "ghp_abc" }),
         }));
-        await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(`Bearer vault://${NEW_ID}#token`));
+        await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(`Bearer vault://${NEW_ID}`));
         expect(screen.getByLabelText("前缀")).toHaveValue("Bearer ");
     });
 
-    it("adds the Bearer prefix when picking a bearer credential for Authorization", async () => {
+    it("adds a Bearer prefix by default when picking an entry for Authorization", async () => {
         const user = userEvent.setup();
         const onChange = vi.fn();
         render(<Harness initial="" onChange={onChange} allowPrefix headerName="Authorization" />);
         await user.click(screen.getByRole("button", { name: "从凭据保险箱选择" }));
         await user.click(screen.getByRole("button", { name: "确认" }));
-        expect(onChange).toHaveBeenLastCalledWith(`Bearer vault://${ID}#token`);
+        expect(onChange).toHaveBeenLastCalledWith(`Bearer vault://${ID}`);
         expect(invoke).not.toHaveBeenCalledWith("vault_create", expect.anything());
-        expect(screen.getByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        expect(screen.getByText("GitHub 个人令牌")).toBeInTheDocument();
+        expect(screen.getByLabelText("前缀")).toHaveValue("Bearer ");
     });
 
     it("hides the vault button on devices without a vault and explains synced references", () => {
         const { unmount } = render(<Harness initial="" onChange={vi.fn()} available={false} />);
         expect(screen.queryByRole("button", { name: "从凭据保险箱选择" })).not.toBeInTheDocument();
         unmount();
-        render(<Harness initial={`vault://${ID}#token`} onChange={vi.fn()} available={false} />);
+        render(<Harness initial={`vault://${ID}`} onChange={vi.fn()} available={false} />);
         expect(screen.getByText("此设备不支持凭据保险箱")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "更换" })).not.toBeInTheDocument();
     });
 
-    it("marks a reference to a deleted credential", () => {
-        render(<Harness initial={`vault://${NEW_ID}#token`} onChange={vi.fn()} />);
-        expect(screen.getByText("凭据已删除，请重新选择")).toBeInTheDocument();
+    it("marks a reference to a deleted entry", () => {
+        render(<Harness initial={`vault://${NEW_ID}`} onChange={vi.fn()} />);
+        expect(screen.getByText("条目已删除，请重新选择")).toBeInTheDocument();
     });
 });

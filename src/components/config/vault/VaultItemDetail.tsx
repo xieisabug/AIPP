@@ -1,17 +1,18 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Check, Globe, KeyRound, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, Globe, KeyRound, Trash2, X } from "lucide-react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { VAULT_AUTH_KIND_LABELS, type VaultConfigReference, type VaultItem, type VaultUsageEntry } from "@/data/Vault";
-import { formatTime, handleError } from "./vaultHelpers";
+import { vaultPlaceholder, type VaultConfigReference, type VaultItem, type VaultUsageEntry } from "@/data/Vault";
+import { formatTime, keyError } from "./vaultHelpers";
 
 export interface VaultItemPatch {
     name?: string;
-    handle?: string;
+    key?: string;
     description?: string;
     allowedSites?: string[];
     syncEnabled?: boolean;
@@ -20,9 +21,9 @@ export interface VaultItemPatch {
 interface VaultItemDetailProps {
     item: VaultItem;
     usage: VaultUsageEntry[];
-    takenHandles: string[];
+    takenKeys: string[];
     syncReady: boolean;
-    /** 引用此凭据的 MCP / Provider 配置及其当前目标。 */
+    /** 引用此条目的 MCP / Provider 配置及其当前目标。 */
     references: VaultConfigReference[];
     onConfirmReference: (reference: VaultConfigReference) => void;
     onUpdate: (patch: VaultItemPatch) => Promise<boolean>;
@@ -40,33 +41,43 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function outcomeText(entry: VaultUsageEntry): string {
-    if (entry.outcome === "ok") return entry.status ? String(entry.status) : "完成";
+    if (entry.outcome === "ok") return "完成";
     if (entry.outcome === "denied") return "已拒绝";
     return "失败";
 }
 
-export default function VaultItemDetail({ item, usage, takenHandles, syncReady, references, onConfirmReference, onUpdate, onReplace, onDelete }: VaultItemDetailProps) {
+export default function VaultItemDetail({ item, usage, takenKeys, syncReady, references, onConfirmReference, onUpdate, onReplace, onDelete }: VaultItemDetailProps) {
     const [name, setName] = useState(item.name);
-    const [handle, setHandle] = useState(item.handle);
+    const [key, setKey] = useState(item.key);
     const [description, setDescription] = useState(item.description);
     const [newSite, setNewSite] = useState("");
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
         setName(item.name);
-        setHandle(item.handle);
+        setKey(item.key);
         setDescription(item.description);
         setNewSite("");
-    }, [item.id, item.name, item.handle, item.description]);
+    }, [item.id, item.name, item.key, item.description]);
 
-    const handleProblem = handle === item.handle ? null : handleError(handle, takenHandles.filter((h) => h !== item.handle));
-    const dirty = name.trim() !== item.name || handle !== item.handle || description.trim() !== item.description;
-    const canSave = dirty && !!name.trim() && !handleProblem && !saving;
+    const keyProblem = key === item.key ? null : keyError(key, takenKeys.filter((k) => k !== item.key));
+    const dirty = name.trim() !== item.name || key !== item.key || description.trim() !== item.description;
+    const canSave = dirty && !!name.trim() && !keyProblem && !saving;
+    const placeholder = vaultPlaceholder(item.key);
 
     const save = async () => {
         setSaving(true);
-        await onUpdate({ name: name.trim(), handle, description: description.trim() });
+        await onUpdate({ name: name.trim(), key, description: description.trim() });
         setSaving(false);
+    };
+
+    const copyPlaceholder = async () => {
+        try {
+            await navigator.clipboard.writeText(placeholder);
+            toast.success("已复制占位符");
+        } catch {
+            toast.error("复制失败");
+        }
     };
 
     const addSite = async () => {
@@ -84,9 +95,15 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                         <h2 className="truncate text-xl font-semibold">{item.name}</h2>
                         {item.status === "locked" && <Badge variant="outline">待解锁</Badge>}
                     </div>
-                    <p className="text-sm text-muted-foreground">
-                        <code className="font-mono">{item.handle}</code> · {VAULT_AUTH_KIND_LABELS[item.authKind]}
-                    </p>
+                    <button
+                        type="button"
+                        className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+                        aria-label={`复制占位符 ${placeholder}`}
+                        onClick={() => void copyPlaceholder()}
+                    >
+                        <code className="font-mono">{placeholder}</code>
+                        <Copy className="h-3.5 w-3.5" />
+                    </button>
                 </div>
                 <Button variant="outline" size="sm" className="gap-1" onClick={onDelete}>
                     <Trash2 className="h-4 w-4" />
@@ -94,7 +111,7 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                 </Button>
             </header>
 
-            <Section title="凭据">
+            <Section title="值">
                 <div className="space-y-3 rounded-lg border border-border p-4">
                     <div className="flex items-center justify-between gap-4">
                         <div className="min-w-0">
@@ -105,12 +122,9 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                         </div>
                         <Button variant="outline" size="sm" onClick={onReplace}>替换</Button>
                     </div>
-                    <div className="space-y-1 border-t border-border pt-3">
-                        <p className="text-xs text-muted-foreground">发送时注入为</p>
-                        {item.injection.map((line) => (
-                            <code key={line} className="block font-mono text-sm">{line}</code>
-                        ))}
-                    </div>
+                    <p className="border-t border-border pt-3 text-xs text-muted-foreground">
+                        助手在工具调用里写 <code className="font-mono">{placeholder}</code>，AIPP 在执行时换成真实的值；每次使用都会先问你。
+                    </p>
                 </div>
             </Section>
 
@@ -121,18 +135,18 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                         <Input id="vault-detail-name" value={name} onChange={(event) => setName(event.target.value)} />
                     </div>
                     <div className="space-y-2">
-                        <Label htmlFor="vault-detail-handle">引用名</Label>
+                        <Label htmlFor="vault-detail-key">键</Label>
                         <Input
-                            id="vault-detail-handle"
+                            id="vault-detail-key"
                             className="font-mono"
                             autoCapitalize="none"
                             spellCheck={false}
-                            value={handle}
-                            aria-invalid={handleProblem ? true : undefined}
-                            onChange={(event) => setHandle(event.target.value.trim())}
+                            value={key}
+                            aria-invalid={keyProblem ? true : undefined}
+                            onChange={(event) => setKey(event.target.value.trim())}
                         />
-                        <p className={handleProblem ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
-                            {handleProblem ?? "助手用这个名字引用凭据。改名后，助手需要用新名字。"}
+                        <p className={keyProblem ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+                            {keyProblem ?? "占位符里用的名字。改了之后，助手需要用新的占位符。"}
                         </p>
                     </div>
                     <div className="space-y-2">
@@ -144,7 +158,7 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                             value={description}
                             onChange={(event) => setDescription(event.target.value)}
                         />
-                        <p className="text-xs text-muted-foreground">助手可以看到这段说明，不要在这里填写密钥。</p>
+                        <p className="text-xs text-muted-foreground">助手可以看到这段说明，不要在这里填写值本身。</p>
                     </div>
                     <div className="flex justify-end">
                         <Button size="sm" disabled={!canSave} onClick={save}>保存</Button>
@@ -152,12 +166,12 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                 </div>
             </Section>
 
-            <Section title="允许的网站">
+            <Section title="自动允许的网站">
                 <p className="text-xs text-muted-foreground">
-                    助手第一次用这条凭据访问某个网站时会先问你；选择「总是允许」的网站会出现在这里，之后直接使用。
+                    发往这些网站时不再询问，定时任务等无人值守的运行也只能在这里列出的网站使用。本机命令、本机程序每次都会问你，不能自动允许。
                 </p>
                 {item.allowedSites.length === 0 ? (
-                    <p className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">还没有允许的网站</p>
+                    <p className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">还没有自动允许的网站</p>
                 ) : (
                     <ul className="divide-y divide-border rounded-lg border border-border">
                         {item.allowedSites.map((site) => (
@@ -180,7 +194,7 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                 )}
                 <div className="flex gap-2">
                     <Input
-                        aria-label="添加允许的网站"
+                        aria-label="添加自动允许的网站"
                         placeholder="https://api.example.com"
                         autoCapitalize="none"
                         spellCheck={false}
@@ -203,7 +217,7 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                         <Label htmlFor="vault-detail-sync">同步到我的其他设备</Label>
                         <p className="text-xs text-muted-foreground">
                             {syncReady
-                                ? "端到端加密，同步服务器只能看到密文。关闭后，其他设备上的这条凭据会被移除。"
+                                ? "端到端加密，同步服务器只能看到密文。关闭后，其他设备上的这个条目会被移除。"
                                 : "设置同步口令后才会同步；未设置时只保存在本机。"}
                         </p>
                     </div>
@@ -240,7 +254,7 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                                             配置已变化
                                         </span>
                                         <Button type="button" variant="outline" size="sm" className="h-7"
-                                            aria-label={`确认 ${reference.name} 使用此凭据访问 ${reference.target}`}
+                                            aria-label={`确认 ${reference.name} 使用此条目访问 ${reference.target}`}
                                             onClick={() => onConfirmReference(reference)}>
                                             确认
                                         </Button>
@@ -260,8 +274,7 @@ export default function VaultItemDetail({ item, usage, takenHandles, syncReady, 
                         {usage.map((entry) => (
                             <li key={entry.id} className="flex items-center gap-3 px-3 py-2" title={entry.reason ?? undefined}>
                                 <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{formatTime(entry.createdAt)}</span>
-                                <span className="shrink-0 font-mono text-xs">{entry.method}</span>
-                                <span className="min-w-0 flex-1 truncate font-mono text-xs">{entry.url}</span>
+                                <span className="min-w-0 flex-1 truncate text-xs" title={entry.tool}>{entry.destination}</span>
                                 <span className={entry.outcome === "ok" ? "shrink-0 text-xs" : "shrink-0 text-xs text-muted-foreground"}>
                                     {outcomeText(entry)}
                                 </span>

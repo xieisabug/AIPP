@@ -1,7 +1,9 @@
-//! Pause-and-ask for credential use toward a site the user has not approved yet.
+//! Pause-and-ask before a vault value is used in a tool call.
 //!
-//! The executor awaits the user's decision; the chat UI shows an inline card. Pending requests live
-//! in memory only: after a restart nothing is approved implicitly (the safe direction).
+//! `placeholder::prepare` awaits the user's decision; the chat UI shows an inline card. One approval
+//! covers exactly one tool call. Pending requests live in memory only: after a restart nothing is
+//! approved implicitly (the safe direction).
+use super::placeholder::Destination;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -13,22 +15,29 @@ pub const REQUEST_EVENT: &str = "vault-use-request";
 pub const RESOLVED_EVENT: &str = "vault-use-resolved";
 const TIMEOUT: Duration = Duration::from_secs(600);
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryLabel { pub id: String, pub key: String, pub name: String }
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultUseRequest {
     pub request_id: String,
     pub conversation_id: Option<i64>,
+    /// The message the tool call belongs to, so the card can sit next to it.
+    pub message_id: Option<i64>,
     pub assistant_name: Option<String>,
-    pub credential_id: String,
-    pub credential_name: String,
-    pub credential_handle: String,
-    pub method: String,
-    /// The URL as the assistant wrote it (injected query secrets are never part of it).
-    pub url: String,
-    pub origin: String,
-    pub insecure: bool,
-    pub header_names: Vec<String>,
-    pub has_body: bool,
+    /// Entries that need approval for this call (already-allowed ones are not listed).
+    pub entries: Vec<EntryLabel>,
+    /// `server · tool`.
+    pub tool: String,
+    pub destination: Destination,
+    /// The call as the assistant wrote it, placeholders included: the command text for shell
+    /// commands, otherwise pretty JSON arguments. Never contains values.
+    pub preview: String,
+    pub preview_kind: &'static str,
+    /// "Always allow" is offered only for network destinations.
+    pub can_always: bool,
     pub created_at: i64,
 }
 
@@ -60,10 +69,12 @@ impl Drop for Cleanup {
 }
 
 pub(crate) fn pending_conversation_ids() -> Vec<i64> {
-    PENDING.lock().map(|p| p.values().filter_map(|e| e.request.conversation_id).collect()).unwrap_or_default()
+    let mut ids: Vec<i64> = PENDING.lock().map(|p| p.values().filter_map(|e| e.request.conversation_id).collect()).unwrap_or_default();
+    ids.extend(super::input::pending_conversation_ids());
+    ids
 }
 
-/// Ask the user and wait. Errors carry a stable code prefix for the executor.
+/// Ask the user and wait. Errors carry a stable code for the caller.
 pub(crate) async fn ask(app: &AppHandle, request: VaultUseRequest) -> Result<Decision, (&'static str, String)> {
     let (sender, receiver) = oneshot::channel();
     let request_id = request.request_id.clone();
@@ -71,13 +82,13 @@ pub(crate) async fn ask(app: &AppHandle, request: VaultUseRequest) -> Result<Dec
     PENDING.lock().map_err(|_| ("vault_error", "确认队列锁已损坏".to_string()))?
         .insert(request_id.clone(), Pending { request: request.clone(), sender: Some(sender) });
     let _cleanup = Cleanup { app: app.clone(), request_id, conversation_id };
-    app.emit(REQUEST_EVENT, &request).map_err(|e| ("vault_error", format!("无法显示凭据使用确认: {e}")))?;
-    let detail = format!("使用凭据「{}」访问 {}", request.credential_name, request.origin);
-    crate::api::approval_attention::vault_use_requested(app, conversation_id, detail);
+    app.emit(REQUEST_EVENT, &request).map_err(|e| ("vault_error", format!("无法显示保险箱使用确认: {e}")))?;
+    let names = request.entries.iter().map(|e| format!("「{}」", e.name)).collect::<String>();
+    crate::api::approval_attention::vault_use_requested(app, conversation_id, format!("在 {} 中使用{names}", request.destination.label));
     match tokio::time::timeout(TIMEOUT, receiver).await {
         Ok(Ok(decision)) => Ok(decision),
         Ok(Err(_)) => Err(("user_denied", "确认请求已被取消".into())),
-        Err(_) => Err(("approval_timeout", "等待用户确认超过 10 分钟，已放弃本次请求".into())),
+        Err(_) => Err(("approval_timeout", "等待用户确认超过 10 分钟，已放弃本次调用".into())),
     }
 }
 
@@ -93,8 +104,11 @@ pub async fn vault_list_use_requests(conversation_id: Option<i64>) -> Result<Vec
 
 #[tauri::command]
 pub async fn vault_respond_use_request(request_id: String, decision: Decision) -> Result<(), String> {
-    let sender = PENDING.lock().map_err(|_| "确认队列锁已损坏")?
-        .get_mut(&request_id).and_then(|e| e.sender.take())
-        .ok_or("该确认请求已处理或已失效")?;
+    let mut pending = PENDING.lock().map_err(|_| "确认队列锁已损坏")?;
+    let entry = pending.get_mut(&request_id).ok_or("该确认请求已处理或已失效")?;
+    if decision == Decision::Always && !entry.request.can_always {
+        return Err("本机工具不能设为总是允许".into());
+    }
+    let sender = entry.sender.take().ok_or("该确认请求已处理或已失效")?;
     sender.send(decision).map_err(|_| "等待确认的请求已结束".to_string())
 }

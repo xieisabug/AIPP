@@ -297,7 +297,7 @@ pub(crate) fn permission_resolved(app: &AppHandle, conversation_id: Option<i64>)
     }
 }
 
-/// 保险箱凭据首次访问某个网站，等用户确认（卡片在消息流里）。
+/// 保险箱的值等用户确认使用或填写（卡片在消息流里）。
 pub(crate) fn vault_use_requested(app: &AppHandle, conversation_id: Option<i64>, detail: String) {
     if let Some(id) = conversation_id {
         emit_changed(app, id);

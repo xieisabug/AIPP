@@ -95,8 +95,7 @@ describe("MCPServerDialog stdio gating", () => {
 describe("MCPServerDialog vault references", () => {
     const vaultId = "0f8e2a52-6c1d-4b8a-9d3e-1a2b3c4d5e6f";
     const vaultItem = {
-        id: vaultId, handle: "github_pat", name: "GitHub 个人令牌", description: "", authKind: "bearer",
-        injection: [], fields: [{ key: "token", label: "令牌" }], allowedSites: [], syncEnabled: true,
+        id: vaultId, key: "github_pat", name: "GitHub 个人令牌", description: "", allowedSites: [], syncEnabled: true,
         status: "ready", createdAt: 1, updatedAt: 1, lastUsedAt: null,
     };
 
@@ -118,9 +117,9 @@ describe("MCPServerDialog vault references", () => {
         await act(async () => {
             fireEvent.click(screen.getByRole("button", { name: "确认" }));
         });
-        const line = `GITHUB_PAT=vault://${vaultId}#token`;
+        const line = `GITHUB_PAT=vault://${vaultId}`;
         expect(screen.getByLabelText("环境变量")).toHaveValue(`# 注释\nDEBUG=1\n${line}`);
-        expect(screen.getByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        expect(screen.getByText("GitHub 个人令牌")).toBeInTheDocument();
         expect(screen.getByText(/保存后，引用的保险箱凭据将被确认用于 本机程序 npx -y/)).toBeInTheDocument();
         await submit();
         expect(vi.mocked(invoke)).toHaveBeenCalledWith("add_mcp_server", {
@@ -133,7 +132,7 @@ describe("MCPServerDialog vault references", () => {
         // 以打开状态直接挂载：初始化设置的请求头行不能被类型切换逻辑清掉
         render(<MCPServerDialog isOpen onClose={() => undefined} onSubmit={() => undefined} initialConfig={{ name: "gh", transport_type: "http", url: "https://mcp.example.com/mcp", headers }} />);
         fireEvent.click(screen.getByRole("button", { name: "高级设置" }));
-        expect(await screen.findByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        expect(await screen.findByText("GitHub 个人令牌")).toBeInTheDocument();
         expect(screen.getByLabelText("前缀")).toHaveValue("Bearer ");
         expect(screen.getByText("保存后，引用的保险箱凭据将被确认用于 https://mcp.example.com")).toBeInTheDocument();
         await submit();
@@ -150,7 +149,7 @@ describe("MCPServerDialog vault references", () => {
         fireEvent.click(screen.getByTitle("Stdio"));
         fireEvent.click(screen.getByText("HTTP"));
         fireEvent.click(screen.getByRole("button", { name: "高级设置" }));
-        expect(await screen.findByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        expect(await screen.findByText("GitHub 个人令牌")).toBeInTheDocument();
         await submit();
         const call = vi.mocked(invoke).mock.calls.find(([command]) => command === "add_mcp_server");
         const request = (call?.[1] as { request: { headers: string; transport_type: string } }).request;

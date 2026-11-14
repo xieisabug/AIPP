@@ -8,7 +8,7 @@ pub(super) fn encrypted_type(kind: &str) -> bool {
 pub(super) fn discard_obsolete_outbox(sync: &Connection, key: Option<&secrets::SecretKey>) -> Result<(),String> {
     let Some(key) = key else { return Ok(()) };
     let rows = sync.prepare("SELECT id,payload_json,sent_once,outcome_known FROM sync_outbox
-        WHERE object_type IN ('llm.provider_secret','mcp.vault_secret','vault.item') AND operation='upsert'")
+        WHERE object_type IN ('llm.provider_secret','mcp.vault_secret','vault.entry') AND operation='upsert'")
         .map_err(|e| e.to_string())?.query_map([], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,bool>(2)?,r.get::<_,bool>(3)?)))
         .map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
     for (id, raw, sent, known) in rows {

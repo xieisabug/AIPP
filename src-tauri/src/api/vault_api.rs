@@ -1,8 +1,9 @@
 //! Tauri commands for the personal credential vault (凭据保险箱).
 //!
-//! Red line: no command here returns a secret value or any fragment of one. Secrets go in through
-//! `vault_create` / `vault_replace_secret` and only come out inside the trusted executor.
-use crate::sync::personal_vault::{self, AuthInput, Capability, CreateInput, ItemMeta, UpdateInput, UsageEntry};
+//! Red line: no command here returns a secret value or any fragment of one. Values go in through
+//! `vault_create` / `vault_replace_secret` / `vault_submit_input` and only come out inside the
+//! trusted resolvers (`vault::placeholder`, `vault::config_ref`).
+use crate::sync::personal_vault::{self, Capability, CreateInput, ItemMeta, SecretValue, UpdateInput, UsageEntry};
 use crate::vault::config_ref::{self, ConfigReference};
 use tauri::{AppHandle, Emitter};
 
@@ -46,9 +47,9 @@ pub async fn vault_update(app_handle: AppHandle, id: String, input: UpdateInput)
 }
 
 #[tauri::command]
-pub async fn vault_replace_secret(app_handle: AppHandle, id: String, auth: AuthInput) -> Result<ItemMeta, String> {
+pub async fn vault_replace_secret(app_handle: AppHandle, id: String, value: SecretValue) -> Result<ItemMeta, String> {
     let app = app_handle.clone();
-    let meta = blocking(move || personal_vault::replace_secret(&app, &id, &auth)).await?;
+    let meta = blocking(move || personal_vault::replace_secret(&app, &id, &value)).await?;
     notify_changed(&app_handle);
     Ok(meta)
 }

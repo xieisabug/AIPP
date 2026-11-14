@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import VaultConfig from "./VaultConfig";
-import type { VaultCapability, VaultItem } from "@/data/Vault";
+import type { VaultCapability, VaultItem, VaultUsageEntry } from "@/data/Vault";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
@@ -11,23 +11,28 @@ vi.mock("@/hooks/use-platform", () => ({ useIsMobilePlatform: () => false }));
 
 const capability: VaultCapability = {
     available: true, backend: "Windows 凭据管理器", reason: null,
-    syncState: "not_configured", syncMessage: "未设置同步口令，凭据只保存在本机", pendingFromOtherDevices: 0,
+    syncState: "not_configured", syncMessage: "未设置同步口令，只保存在本机", pendingFromOtherDevices: 0,
 };
 
 const item: VaultItem = {
-    id: "a1", handle: "github_pat", name: "GitHub 个人令牌", description: "读取仓库", authKind: "bearer",
-    injection: ["Authorization: Bearer <值>"], fields: [{ key: "token", label: "令牌" }], allowedSites: ["https://api.github.com"], syncEnabled: true,
+    id: "a1", key: "github_token", name: "GitHub 令牌", description: "读取仓库",
+    allowedSites: ["https://api.github.com"], syncEnabled: true,
     status: "ready", createdAt: 1, updatedAt: 1, lastUsedAt: null,
 };
+
+const usage: VaultUsageEntry[] = [{
+    id: 1, itemId: "a1", conversationId: 3, assistantId: 2, tool: "操作 · execute_bash", destination: "本机命令",
+    outcome: "denied", reason: "用户拒绝", createdAt: Date.now(),
+}];
 
 function mockBackend(overrides: Record<string, unknown> = {}) {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
         if (command in overrides) return overrides[command];
         if (command === "vault_capability") return capability;
         if (command === "vault_list") return [item];
-        if (command === "vault_usage") return [];
+        if (command === "vault_usage") return usage;
         if (command === "vault_references") return [];
-        if (command === "vault_create") return { ...item, id: "b2", handle: "new_token", name: "New Token" };
+        if (command === "vault_create") return { ...item, id: "b2", key: "my_token", name: "My Token" };
         if (command === "vault_replace_secret") return item;
         throw new Error(`Unexpected command: ${command}`);
     });
@@ -40,48 +45,67 @@ describe("VaultConfig", () => {
         mockBackend();
     });
 
-    it("should show stored credentials as masked metadata only", async () => {
+    it("should show entries as masked metadata with their placeholder", async () => {
         render(<VaultConfig />);
-        expect(await screen.findByRole("heading", { name: "GitHub 个人令牌" })).toBeInTheDocument();
-        expect(screen.getByText("Authorization: Bearer <值>")).toBeInTheDocument();
+        expect(await screen.findByRole("heading", { name: "GitHub 令牌" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "复制占位符 <vault:github_token>" })).toBeInTheDocument();
         expect(screen.getByText("https://api.github.com")).toBeInTheDocument();
         expect(screen.getByText(/本机加密 · Windows 凭据管理器/)).toBeInTheDocument();
         expect(screen.getByText(/不会再显示/)).toBeInTheDocument();
+        expect(screen.queryByText(/发送时注入为/)).not.toBeInTheDocument();
     });
 
-    it("should create a credential with a suggested handle and site, then forget the value", async () => {
+    it("should list where each use went", async () => {
+        render(<VaultConfig />);
+        expect(await screen.findByText("本机命令")).toHaveAttribute("title", "操作 · execute_bash");
+        expect(screen.getByText("已拒绝")).toBeInTheDocument();
+    });
+
+    it("should create an entry with a suggested key, then forget the value", async () => {
         const user = userEvent.setup();
         mockBackend({ vault_list: [] });
         render(<VaultConfig />);
-        await user.click(await screen.findByRole("button", { name: /新建凭据/ }));
+        await user.click(await screen.findByRole("button", { name: /新建条目/ }));
         await user.type(screen.getByLabelText("名称"), "My Token");
-        expect(screen.getByLabelText("引用名")).toHaveValue("my_token");
-        await user.type(screen.getByLabelText("令牌"), "ghp_example123");
-        await user.click(screen.getByRole("button", { name: "建议：https://api.github.com" }));
+        expect(screen.getByLabelText("键")).toHaveValue("my_token");
+        expect(screen.getByText("<vault:my_token>")).toBeInTheDocument();
+        const value = screen.getByLabelText("值");
+        expect(value).toHaveAttribute("type", "password");
+        await user.type(value, "ghp_example123");
         await user.click(screen.getByRole("button", { name: "确认" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_create", {
-            input: expect.objectContaining({
-                name: "My Token",
-                handle: "my_token",
-                auth: { kind: "bearer", token: "ghp_example123" },
-                allowedSites: ["https://api.github.com"],
-            }),
+            input: { name: "My Token", key: "my_token", description: "", value: "ghp_example123", allowedSites: [], syncEnabled: true },
         }));
-        await user.click(await screen.findByRole("button", { name: /新建凭据/ }));
-        expect(screen.getByLabelText("令牌")).toHaveValue("");
+        await user.click(await screen.findByRole("button", { name: /新建条目/ }));
+        expect(screen.getByLabelText("值")).toHaveValue("");
+    });
+
+    it("should suggest a neutral key for names without latin letters", async () => {
+        const user = userEvent.setup();
+        mockBackend({ vault_list: [] });
+        render(<VaultConfig />);
+        await user.click(await screen.findByRole("button", { name: /新建条目/ }));
+        await user.type(screen.getByLabelText("名称"), "身份证号");
+        expect(screen.getByLabelText("键")).toHaveValue("entry");
+        await user.clear(screen.getByLabelText("键"));
+        await user.type(screen.getByLabelText("键"), "ID");
+        await user.type(screen.getByLabelText("值"), "x");
+        await user.click(screen.getByRole("button", { name: "确认" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent(/小写字母/);
+        expect(invoke).not.toHaveBeenCalledWith("vault_create", expect.anything());
     });
 
     it("should not prefill the old value when replacing", async () => {
         const user = userEvent.setup();
         render(<VaultConfig />);
         await user.click(await screen.findByRole("button", { name: "替换" }));
-        expect(screen.getByLabelText("令牌")).toHaveValue("");
-        await user.type(screen.getByLabelText("令牌"), "new-value");
+        expect(screen.getByLabelText("新的值")).toHaveValue("");
+        await user.type(screen.getByLabelText("新的值"), "new-value");
         await user.click(screen.getByRole("button", { name: "确认" }));
-        await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_replace_secret", { id: "a1", auth: { kind: "bearer", token: "new-value" } }));
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_replace_secret", { id: "a1", value: "new-value" }));
     });
 
-    it("should list configs that use the credential and confirm a changed target", async () => {
+    it("should list configs that use the entry and confirm a changed target", async () => {
         const user = userEvent.setup();
         mockBackend({
             vault_references: [
@@ -94,7 +118,7 @@ describe("VaultConfig", () => {
         expect(await screen.findByText("Provider「OpenAI」")).toBeInTheDocument();
         expect(screen.getByText("已确认")).toBeInTheDocument();
         expect(screen.getByText("配置已变化")).toBeInTheDocument();
-        await user.click(screen.getByRole("button", { name: "确认 MCP「GitHub」 使用此凭据访问 https://other.example" }));
+        await user.click(screen.getByRole("button", { name: "确认 MCP「GitHub」 使用此条目访问 https://other.example" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_confirm_reference", { kind: "mcp", configId: 7 }));
     });
 

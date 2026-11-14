@@ -128,8 +128,8 @@ describe("LLM provider API key from the vault", () => {
             if (command === "get_llm_models") return Promise.resolve([]);
             if (command === "vault_capability") return Promise.resolve({ available: true });
             if (command === "vault_list") return Promise.resolve([{
-                id: vaultId, handle: "openai_key", name: "OpenAI Key", description: "", authKind: "bearer", injection: [],
-                fields: [{ key: "token", label: "令牌" }], allowedSites: [], syncEnabled: true, status: "ready", createdAt: 1, updatedAt: 1, lastUsedAt: null,
+                id: vaultId, key: "openai_key", name: "OpenAI Key", description: "", allowedSites: [], syncEnabled: true,
+                status: "ready", createdAt: 1, updatedAt: 1, lastUsedAt: null,
             }]);
             return Promise.resolve();
         });
@@ -139,11 +139,11 @@ describe("LLM provider API key from the vault", () => {
         render(<LLMProviderConfigForm id="1" index={0} apiType="anthropic" name="test" description="" isOffical={false} enabled onDelete={() => {}} onToggleEnabled={() => {}} />);
         await refresh();
         fireEvent.click(await screen.findByRole("button", { name: "从凭据保险箱选择" }));
-        expect(screen.getByText("保存配置后，此凭据将被确认用于 https://api.example.com")).toBeInTheDocument();
+        expect(screen.getByText("保存配置后，这个值将被确认用于 https://api.example.com")).toBeInTheDocument();
         await act(async () => { fireEvent.click(screen.getByRole("button", { name: "确认" })); });
         await waitDebounce();
-        expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", { llmProviderId: "1", name: "api_key", value: `vault://${vaultId}#token` });
-        expect(screen.getByText("OpenAI Key · 令牌")).toBeInTheDocument();
+        expect(mocks.invoke).toHaveBeenCalledWith("update_llm_provider_config", { llmProviderId: "1", name: "api_key", value: `vault://${vaultId}` });
+        expect(screen.getByText("OpenAI Key")).toBeInTheDocument();
         expect(screen.getByText(/只会发往已确认的网站；Claude Code 助手不能使用保险箱中的 Key/)).toBeInTheDocument();
     });
 });

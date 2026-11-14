@@ -1,17 +1,13 @@
-// 凭据保险箱前端类型。后端任何接口都不会返回凭据值或其片段。
+// 凭据保险箱前端类型。后端任何接口都不会返回保险箱里的值或其片段。
 
-export type VaultAuthKind = "bearer" | "header" | "basic" | "query";
-
+/** 一个条目就是一个键对应一个值。助手在工具参数里写 `<vault:键>` 使用它。 */
 export interface VaultItem {
     id: string;
-    handle: string;
+    /** 占位符里的键，如 id_card、github_token。 */
+    key: string;
     name: string;
     description: string;
-    authKind: VaultAuthKind;
-    /** 注入方式的可读描述，如 "Authorization: Bearer <值>"。 */
-    injection: string[];
-    /** 配置引用可选的值（vault://<id>#<key>）。只有名称，没有值。 */
-    fields: VaultFieldMeta[];
+    /** 用户选过「总是允许」的网络地点（origin），在这些地方使用不再询问。 */
     allowedSites: string[];
     syncEnabled: boolean;
     /** ready：本机可用；locked：来自其他设备、需要同步口令才能解密。 */
@@ -21,12 +17,7 @@ export interface VaultItem {
     lastUsedAt: number | null;
 }
 
-export interface VaultFieldMeta {
-    key: string;
-    label: string;
-}
-
-/** 引用某条凭据的配置，以及它当前的发送目标是否已由用户确认。 */
+/** 引用某个条目的配置，以及它当前的发送目标是否已由用户确认。 */
 export interface VaultConfigReference {
     kind: "mcp" | "provider";
     configId: number;
@@ -51,51 +42,76 @@ export interface VaultUsageEntry {
     itemId: string;
     conversationId: number | null;
     assistantId: number | null;
-    method: string;
-    url: string;
-    status: number | null;
+    /** 用到这个值的工具，如「操作 · execute_bash」。 */
+    tool: string;
+    /** 值去了哪里，如 https://api.github.com 或「本机命令」。 */
+    destination: string;
     outcome: "ok" | "denied" | "error" | string;
     reason: string | null;
     createdAt: number;
 }
 
-export interface VaultNamedSecret {
+export interface VaultCreateInput {
     name: string;
-    prefix?: string;
+    key: string;
+    description: string;
+    /** 提交后前端立即清空。 */
     value: string;
+    allowedSites: string[];
+    syncEnabled: boolean;
 }
 
-/** 提交给后端的认证信息；提交后前端立即清空。 */
-export interface VaultAuthInput {
-    kind: VaultAuthKind;
-    token?: string;
-    username?: string;
-    password?: string;
-    headers?: VaultNamedSecret[];
-    query?: VaultNamedSecret[];
+export interface VaultEntryLabel {
+    id: string;
+    key: string;
+    name: string;
 }
 
+/** 这次调用会把值交给谁。site 可以「总是允许」；local 每次都要确认。 */
+export interface VaultDestination {
+    kind: "site" | "local";
+    label: string;
+    origin: string | null;
+    insecure: boolean;
+}
+
+/** 助手在工具调用里写了占位符，等待用户批准这一次使用。 */
 export interface VaultUseRequest {
     requestId: string;
     conversationId: number | null;
+    messageId: number | null;
     assistantName: string | null;
-    credentialId: string;
-    credentialName: string;
-    credentialHandle: string;
-    method: string;
-    url: string;
-    origin: string;
-    insecure: boolean;
-    headerNames: string[];
-    hasBody: boolean;
+    entries: VaultEntryLabel[];
+    tool: string;
+    destination: VaultDestination;
+    /** 助手写的调用原文（含占位符，不含值）：命令文本或 JSON 参数。 */
+    preview: string;
+    previewKind: "command" | "json";
+    canAlways: boolean;
     createdAt: number;
 }
 
 export type VaultUseDecision = "deny" | "once" | "always";
 
-export const VAULT_AUTH_KIND_LABELS: Record<VaultAuthKind, string> = {
-    bearer: "Bearer 令牌",
-    header: "自定义请求头",
-    basic: "用户名 + 密码",
-    query: "URL 参数",
-};
+export interface VaultInputField {
+    key: string;
+    name: string;
+    description: string;
+}
+
+/** 助手请用户填写它还没有的值。 */
+export interface VaultInputRequest {
+    requestId: string;
+    conversationId: number | null;
+    messageId: number | null;
+    assistantName: string | null;
+    purpose: string;
+    fields: VaultInputField[];
+    createdAt: number;
+}
+
+export const VAULT_KEY_PATTERN = /^[a-z][a-z0-9_]{1,39}$/;
+
+export function vaultPlaceholder(key: string): string {
+    return `<vault:${key}>`;
+}

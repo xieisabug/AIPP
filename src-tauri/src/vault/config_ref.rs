@@ -1,11 +1,12 @@
 //! References to personal-vault credentials inside user configuration: custom MCP headers and
 //! environment variables, and a provider's API key.
 //!
-//! The configuration stores `vault://<id>#<field>`. The real value is substituted only when a request
+//! The configuration stores `vault://<id>` (development builds wrote `vault://<id>#<field>`; the
+//! suffix is accepted and ignored). The real value is substituted only when a request
 //! is sent or a process starts, and only toward a destination the user confirmed by saving that
 //! configuration in Settings. SuperAdmin tools write the same tables directly and never record a
 //! confirmation, so a model that changes a URL, a launch command or a provider type cannot redirect a
-//! secret. This module and `executor.rs` are the only places that decide where a vault value may go.
+//! secret. This module and `placeholder.rs` are the only places that decide where a vault value may go.
 use crate::db::llm_db::LLMProviderConfig;
 use crate::db::mcp_db::MCPServer;
 use crate::sync::personal_vault::{self, normalize_origin, ConfigBinding, Resolved};
@@ -22,12 +23,12 @@ pub const MARKER: &str = "vault://";
 pub const PROVIDER_GUARD: &str = "__aipp_vault_guard";
 
 static REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"vault://([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})#([a-z][a-z0-9_]{0,39})")
+    Regex::new(r"vault://([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:#[a-z][a-z0-9_]{0,39})?")
         .expect("static regex")
 });
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Reference { pub id: String, pub field: String }
+pub struct Reference { pub id: String }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefError { pub code: &'static str, pub message: String }
@@ -45,8 +46,7 @@ pub fn contains(text: &str) -> bool { text.contains(MARKER) }
 /// All references in `text`. A `vault://` that is not a well-formed reference is an error rather than
 /// something to send verbatim.
 pub fn parse(text: &str) -> Result<Vec<Reference>, RefError> {
-    let refs: Vec<Reference> = REFERENCE.captures_iter(text)
-        .map(|c| Reference { id: c[1].to_owned(), field: c[2].to_owned() }).collect();
+    let refs: Vec<Reference> = REFERENCE.captures_iter(text).map(|c| Reference { id: c[1].to_owned() }).collect();
     if text.matches(MARKER).count() != refs.len() {
         return Err(RefError::new("invalid_reference", "保险箱引用格式无效，请重新从保险箱选择"));
     }
@@ -108,15 +108,13 @@ fn substitute(text: &str, items: &BTreeMap<String, Resolved>, context: &str, tar
                 "{context} 引用的凭据「{}」没有被确认用于 {}。配置可能被修改过，请在设置中检查后重新保存，或在凭据保险箱中确认。",
                 item.meta.name, target.detail())));
         }
-        let value = item.fields.get(&reference.field).ok_or_else(|| RefError::new("credential_field_missing",
-            format!("{context} 引用的凭据「{}」中没有这个值，请重新选择", item.meta.name)))?;
-        if value.contains(['\n', '\r']) {
-            return Err(RefError::new("invalid_reference", format!("凭据「{}」的值包含换行，不能用于请求头、环境变量或 API Key", item.meta.name)));
+        if item.value.contains(['\n', '\r']) {
+            return Err(RefError::new("invalid_reference", format!("条目「{}」的值包含换行，不能用于请求头、环境变量或 API Key", item.meta.name)));
         }
-        values.insert((reference.id.clone(), reference.field.clone()), value.clone());
+        values.insert(reference.id.clone(), item.value.clone());
     }
     secrets.extend(values.values().cloned());
-    Ok(REFERENCE.replace_all(text, |c: &regex::Captures<'_>| values[&(c[1].to_owned(), c[2].to_owned())].clone()).into_owned())
+    Ok(REFERENCE.replace_all(text, |c: &regex::Captures<'_>| values[&c[1]].clone()).into_owned())
 }
 
 /// Resolve the references in several values for one destination. Values without references pass
@@ -192,16 +190,15 @@ pub(crate) async fn stdio_env(app: &AppHandle, server: &MCPServer) -> Result<(Ve
 
 // ---------- confirmation (Settings save commands only) ----------
 
-/// Check that every reference in `texts` points at an existing credential and field.
+/// Check that every reference in `texts` points at an existing entry.
 pub fn validate(app: &AppHandle, texts: &[&str]) -> Result<(), String> {
     let mut refs = Vec::new();
     for text in texts { refs.extend(parse(text).map_err(|e| e.message)?); }
     if refs.is_empty() { return Ok(()); }
     let metas = personal_vault::metas(app, &ids(&refs))?;
     for reference in &refs {
-        let (meta, _) = metas.get(&reference.id).ok_or("引用的凭据已不在保险箱中（可能已被删除），请重新选择")?;
-        if !meta.fields.iter().any(|f| f.key == reference.field) {
-            return Err(format!("凭据「{}」中没有这个值，请重新选择", meta.name));
+        if !metas.contains_key(&reference.id) {
+            return Err("引用的条目已不在保险箱中（可能已被删除），请重新选择".into());
         }
     }
     Ok(())
@@ -338,7 +335,7 @@ pub struct ConfigReference {
 /// Every configuration referencing this credential, with its current destination and whether the
 /// user confirmed it. Recomputed from the configurations, so a model's edit shows up as unconfirmed.
 pub fn references(app: &AppHandle, id: &str) -> Result<Vec<ConfigReference>, String> {
-    let needle = format!("{MARKER}{id}#");
+    let needle = format!("{MARKER}{id}");
     let bindings = personal_vault::metas(app, &[id.to_owned()])?.remove(id).map(|(_, b)| b).unwrap_or_default();
     let entry = |kind, config_id, name: String, target: Result<Target, RefError>| match target {
         Ok(t) => ConfigReference { kind, config_id, name, approved: approved(&bindings, &t), target: Some(t.detail()), problem: None },

@@ -8,15 +8,24 @@ fn db() -> Connection {
     db
 }
 
-fn bearer(token: &str) -> AuthInput {
-    AuthInput { kind: AuthKind::Bearer, token: Some(token.into()), username: None, password: None, headers: vec![], query: vec![] }
+fn input(key: &str, value: &str) -> CreateInput {
+    CreateInput {
+        name: format!("{key} 名称"), key: key.into(), description: "测试".into(),
+        value: SecretValue::new(value), allowed_sites: vec![], sync_enabled: true,
+    }
 }
 
-fn create(db: &Connection, key: &secrets::SecretKey, handle: &str, token: &str) -> ItemMeta {
-    create_with(db, key, &CreateInput {
-        name: format!("{handle} 名称"), handle: handle.into(), description: "测试".into(),
-        auth: bearer(token), allowed_sites: vec![], sync_enabled: true,
-    }).unwrap()
+fn create(db: &Connection, key: &secrets::SecretKey, entry_key: &str, value: &str) -> ItemMeta {
+    create_with(db, key, &input(entry_key, value)).unwrap()
+}
+
+fn resolve_one(db: &Connection, key: Option<&secrets::SecretKey>, entry_key: &str) -> Result<Resolved, ResolveError> {
+    resolve_keys_with(db, key, &[entry_key.to_string()]).map(|mut m| m.remove(entry_key).unwrap())
+}
+
+fn usage<'a>(item_id: &'a str) -> NewUsage<'a> {
+    NewUsage { item_id, conversation_id: Some(1), assistant_id: Some(2), tool: "AIPP 内置 · vault_http_request",
+        destination: "https://api.github.com", outcome: "ok", reason: None }
 }
 
 #[test]
@@ -25,10 +34,8 @@ fn test_vault_create_resolve_roundtrip() {
     let key = secrets::random_local_key();
     let meta = create(&db, &key, "github_pat", FAKE);
     assert_eq!(meta.status, "ready");
-    assert_eq!(meta.injection, vec!["Authorization: Bearer <值>".to_string()]);
-    let resolved = resolve_with(&db, Some(&key), "github_pat").unwrap();
-    assert_eq!(resolved.fields.get("token").map(String::as_str), Some(FAKE));
-    assert!(matches!(&resolved.rules[..], [InjectionRule::Header { name, prefix, .. }] if name == "Authorization" && prefix == "Bearer "));
+    assert_eq!(meta.key, "github_pat");
+    assert_eq!(resolve_one(&db, Some(&key), "github_pat").unwrap().value, FAKE);
 }
 
 #[test]
@@ -41,8 +48,9 @@ fn test_vault_metadata_never_contains_secret() {
     assert!(!listed.contains(&FAKE[FAKE.len() - 4..]), "no fragments either");
     let raw: String = db.query_row("SELECT value FROM vault_item", [], |r| r.get(0)).unwrap();
     assert!(!raw.contains(FAKE), "stored value must be ciphertext");
-    let resolved = resolve_with(&db, Some(&key), "github_pat").unwrap();
+    let resolved = resolve_one(&db, Some(&key), "github_pat").unwrap();
     assert!(!format!("{resolved:?}").contains(FAKE));
+    assert!(!format!("{:?}", input("x", FAKE)).contains(FAKE), "inputs never print their value");
 }
 
 #[test]
@@ -52,9 +60,8 @@ fn test_vault_ciphertext_bound_to_item() {
     create(&db, &key, "first", "secret-one");
     create(&db, &key, "second", "secret-two");
     db.execute("UPDATE vault_item SET value=(SELECT value FROM vault_item WHERE handle='first') WHERE handle='second'", []).unwrap();
-    let error = resolve_with(&db, Some(&key), "second").unwrap_err();
-    assert_eq!(error.code, "vault_locked");
-    assert_eq!(list_with(&db, Some(&key)).unwrap().iter().find(|m| m.handle == "second").unwrap().status, "locked");
+    assert_eq!(resolve_one(&db, Some(&key), "second").unwrap_err().code, "vault_locked");
+    assert_eq!(list_with(&db, Some(&key)).unwrap().iter().find(|m| m.key == "second").unwrap().status, "locked");
 }
 
 #[test]
@@ -64,8 +71,8 @@ fn test_vault_reencrypt_on_key_switch() {
     let new = secrets::random_local_key();
     create(&db, &old, "github_pat", FAKE);
     reencrypt(&db, Some(&old), &new).unwrap();
-    assert_eq!(resolve_with(&db, Some(&new), "github_pat").unwrap().fields["token"], FAKE);
-    assert_eq!(resolve_with(&db, Some(&old), "github_pat").unwrap_err().code, "vault_locked");
+    assert_eq!(resolve_one(&db, Some(&new), "github_pat").unwrap().value, FAKE);
+    assert_eq!(resolve_one(&db, Some(&old), "github_pat").unwrap_err().code, "vault_locked");
 }
 
 #[test]
@@ -80,82 +87,43 @@ fn test_vault_reencrypt_requires_old_key_when_items_exist() {
 fn test_vault_resolve_errors() {
     let db = db();
     let key = secrets::random_local_key();
-    assert_eq!(resolve_with(&db, Some(&key), "missing").unwrap_err().code, "credential_not_found");
+    assert_eq!(resolve_one(&db, Some(&key), "missing").unwrap_err().code, "credential_not_found");
     create(&db, &key, "github_pat", FAKE);
-    assert_eq!(resolve_with(&db, None, "github_pat").unwrap_err().code, "vault_locked");
-    // Two devices created the same handle and both synced in: refuse instead of guessing.
-    db.execute("INSERT INTO vault_item(uuid, handle, name, auth_kind, injection, value, created_at, updated_at)
-        SELECT 'dup', handle, name, auth_kind, injection, value, created_at, updated_at FROM vault_item", []).unwrap();
-    assert_eq!(resolve_with(&db, Some(&key), "github_pat").unwrap_err().code, "credential_ambiguous");
+    assert_eq!(resolve_one(&db, None, "github_pat").unwrap_err().code, "vault_locked");
+    // Two devices created the same key and both synced in: refuse instead of guessing.
+    db.execute("INSERT INTO vault_item(uuid, handle, name, value, created_at, updated_at)
+        SELECT 'dup', handle, name, value, created_at, updated_at FROM vault_item", []).unwrap();
+    assert_eq!(resolve_one(&db, Some(&key), "github_pat").unwrap_err().code, "credential_ambiguous");
 }
 
 #[test]
-fn test_vault_handle_validation_and_uniqueness() {
+fn test_vault_key_validation_and_uniqueness() {
     let db = db();
     let key = secrets::random_local_key();
-    for bad in ["", "a", "GitHub", "1abc", "has-dash", "中文"] { assert!(validate_handle(bad).is_err(), "{bad}"); }
+    for bad in ["", "a", "GitHub", "1abc", "has-dash", "中文"] { assert!(validate_key(bad).is_err(), "{bad}"); }
     create(&db, &key, "github_pat", FAKE);
-    let duplicate = create_with(&db, &key, &CreateInput {
-        name: "x".into(), handle: "github_pat".into(), description: String::new(),
-        auth: bearer("other"), allowed_sites: vec![], sync_enabled: true,
-    });
-    assert!(duplicate.unwrap_err().contains("已被使用"));
+    assert!(create_with(&db, &key, &input("github_pat", "other")).unwrap_err().contains("已被使用"));
 }
 
 #[test]
-fn test_vault_empty_secret_rejected() {
+fn test_vault_value_is_trimmed_and_required() {
     let db = db();
     let key = secrets::random_local_key();
-    let result = create_with(&db, &key, &CreateInput {
-        name: "x".into(), handle: "empty".into(), description: String::new(),
-        auth: bearer("   "), allowed_sites: vec![], sync_enabled: true,
-    });
-    assert!(result.is_err());
+    assert!(create_with(&db, &key, &input("empty", "   ")).is_err());
+    create(&db, &key, "id_card", "  110101199001011234\n");
+    assert_eq!(resolve_one(&db, Some(&key), "id_card").unwrap().value, "110101199001011234");
 }
 
 #[test]
-fn test_vault_auth_kinds_build_rules() {
-    let basic = AuthInput { kind: AuthKind::Basic, token: None, username: Some("me".into()), password: Some("pw".into()), headers: vec![], query: vec![] };
-    let (rules, fields) = build_auth(&basic).unwrap();
-    assert_eq!(rules, vec![InjectionRule::Basic]);
-    assert_eq!(fields.len(), 2);
-
-    let headers = AuthInput { kind: AuthKind::Header, token: None, username: None, password: None, query: vec![],
-        headers: vec![
-            NamedSecret { name: "X-Algolia-Application-Id".into(), prefix: String::new(), value: "app".into() },
-            NamedSecret { name: "X-Algolia-API-Key".into(), prefix: String::new(), value: "key".into() },
-        ] };
-    let (rules, _) = build_auth(&headers).unwrap();
-    assert_eq!(rules.len(), 2);
-
-    let duplicate = AuthInput { kind: AuthKind::Header, token: None, username: None, password: None, query: vec![],
-        headers: vec![
-            NamedSecret { name: "X-Key".into(), prefix: String::new(), value: "a".into() },
-            NamedSecret { name: "x-key".into(), prefix: String::new(), value: "b".into() },
-        ] };
-    assert!(build_auth(&duplicate).is_err());
-
-    let bad_name = AuthInput { kind: AuthKind::Header, token: None, username: None, password: None, query: vec![],
-        headers: vec![NamedSecret { name: "Bad Name".into(), prefix: String::new(), value: "a".into() }] };
-    assert!(build_auth(&bad_name).is_err());
-
-    let query = AuthInput { kind: AuthKind::Query, token: None, username: None, password: None, headers: vec![],
-        query: vec![NamedSecret { name: "appid".into(), prefix: String::new(), value: "q".into() }] };
-    let (rules, _) = build_auth(&query).unwrap();
-    assert!(matches!(&rules[..], [InjectionRule::Query { name, .. }] if name == "appid"));
-}
-
-#[test]
-fn test_vault_basic_secret_values_include_pair() {
+fn test_vault_create_many_is_all_or_nothing() {
     let db = db();
     let key = secrets::random_local_key();
-    create_with(&db, &key, &CreateInput {
-        name: "nas".into(), handle: "nas".into(), description: String::new(),
-        auth: AuthInput { kind: AuthKind::Basic, token: None, username: Some("me".into()), password: Some("pw".into()), headers: vec![], query: vec![] },
-        allowed_sites: vec![], sync_enabled: true,
-    }).unwrap();
-    let resolved = resolve_with(&db, Some(&key), "nas").unwrap();
-    assert!(resolved.secret_values().contains(&"me:pw".to_string()));
+    create(&db, &key, "phone", "13800000000");
+    let error = create_many_with(&db, &key, &[input("id_card", "110101199001011234"), input("phone", "13900000000")]).unwrap_err();
+    assert!(error.contains("已被使用"));
+    assert!(resolve_one(&db, Some(&key), "id_card").is_err(), "the first entry is rolled back");
+    let created = create_many_with(&db, &key, &[input("id_card", "110101199001011234"), input("passport", "E12345678")]).unwrap();
+    assert_eq!(created.iter().map(|m| m.key.as_str()).collect::<Vec<_>>(), vec!["id_card", "passport"]);
 }
 
 #[test]
@@ -175,8 +143,7 @@ fn test_vault_approve_site_dedups() {
     let meta = create(&db, &key, "github_pat", FAKE);
     approve_site_with(&db, &meta.id, "https://api.github.com/user").unwrap();
     approve_site_with(&db, &meta.id, "https://API.github.com").unwrap();
-    let listed = list_with(&db, Some(&key)).unwrap();
-    assert_eq!(listed[0].allowed_sites, vec!["https://api.github.com".to_string()]);
+    assert_eq!(list_with(&db, Some(&key)).unwrap()[0].allowed_sites, vec!["https://api.github.com".to_string()]);
 }
 
 #[test]
@@ -185,12 +152,12 @@ fn test_vault_update_and_replace_secret() {
     let key = secrets::random_local_key();
     let meta = create(&db, &key, "github_pat", FAKE);
     let updated = update_with(&db, Some(&key), &meta.id, &UpdateInput {
-        handle: Some("gh".into()), allowed_sites: Some(vec!["api.github.com".into()]), ..Default::default()
+        key: Some("gh".into()), allowed_sites: Some(vec!["api.github.com".into()]), ..Default::default()
     }).unwrap();
-    assert_eq!(updated.handle, "gh");
+    assert_eq!(updated.key, "gh");
     assert_eq!(updated.allowed_sites, vec!["https://api.github.com".to_string()]);
-    replace_secret_with(&db, &key, &meta.id, &bearer("new-token")).unwrap();
-    assert_eq!(resolve_with(&db, Some(&key), "gh").unwrap().fields["token"], "new-token");
+    replace_secret_with(&db, &key, &meta.id, &SecretValue::new("new-token")).unwrap();
+    assert_eq!(resolve_one(&db, Some(&key), "gh").unwrap().value, "new-token");
 }
 
 #[test]
@@ -198,8 +165,8 @@ fn test_vault_delete_removes_item_and_usage() {
     let db = db();
     let key = secrets::random_local_key();
     let meta = create(&db, &key, "github_pat", FAKE);
-    log_usage_with(&db, &NewUsage { item_id: &meta.id, conversation_id: Some(1), assistant_id: Some(2), method: "GET",
-        url: "https://api.github.com/user", status: Some(200), outcome: "ok", reason: None }).unwrap();
+    log_usage_with(&db, &usage(&meta.id)).unwrap();
+    assert_eq!(usage_with(&db, &meta.id, 10).unwrap()[0].destination, "https://api.github.com");
     delete_with(&db, &meta.id).unwrap();
     assert!(list_with(&db, Some(&key)).unwrap().is_empty());
     assert!(usage_with(&db, &meta.id, 10).unwrap().is_empty());
@@ -212,13 +179,62 @@ fn test_vault_usage_log_updates_last_used_and_trims() {
     let key = secrets::random_local_key();
     let meta = create(&db, &key, "github_pat", FAKE);
     assert!(meta.last_used_at.is_none());
-    for _ in 0..(USAGE_KEEP_PER_ITEM + 5) {
-        log_usage_with(&db, &NewUsage { item_id: &meta.id, conversation_id: None, assistant_id: None, method: "GET",
-            url: "https://api.github.com/user", status: Some(200), outcome: "ok", reason: None }).unwrap();
-    }
+    for _ in 0..(USAGE_KEEP_PER_ITEM + 5) { log_usage_with(&db, &usage(&meta.id)).unwrap(); }
     let count: i64 = db.query_row("SELECT COUNT(*) FROM vault_usage_log", [], |r| r.get(0)).unwrap();
     assert_eq!(count, USAGE_KEEP_PER_ITEM);
     assert!(list_with(&db, Some(&key)).unwrap()[0].last_used_at.is_some());
+}
+
+// ---------- development-build entries ----------
+
+fn legacy_db(key: &secrets::SecretKey) -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE vault_item (id INTEGER PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, handle TEXT NOT NULL, name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '', auth_kind TEXT NOT NULL, injection TEXT NOT NULL, allowed_sites TEXT NOT NULL DEFAULT '[]',
+            sync_enabled INTEGER NOT NULL DEFAULT 1, value TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            last_used_at INTEGER, config_bindings TEXT NOT NULL DEFAULT '[]');
+         CREATE TABLE vault_usage_log (id INTEGER PRIMARY KEY, item_uuid TEXT NOT NULL, conversation_id INTEGER, assistant_id INTEGER,
+            method TEXT NOT NULL, url TEXT NOT NULL, status INTEGER, outcome TEXT NOT NULL, reason TEXT, created_at INTEGER NOT NULL);",
+    ).unwrap();
+    let insert = |uuid: &str, handle: &str, kind: &str, fields: &[(&str, &str)]| {
+        let payload = SecretPayload { value: None, fields: fields.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() };
+        db.execute("INSERT INTO vault_item(uuid, handle, name, auth_kind, injection, allowed_sites, value, created_at, updated_at)
+            VALUES(?1, ?2, ?2, ?3, '[]', '[\"https://nas.local\"]', ?4, 1, 1)",
+            params![uuid, handle, kind, seal_payload(key, uuid, &payload).unwrap()]).unwrap();
+    };
+    insert("11111111-1111-4111-8111-111111111111", "gh", "bearer", &[("token", FAKE)]);
+    insert("22222222-2222-4222-8222-222222222222", "nas", "basic", &[("username", "admin"), ("password", "pw-secret-1")]);
+    db
+}
+
+#[test]
+fn test_legacy_entries_convert_to_single_values() {
+    let key = secrets::random_local_key();
+    let db = legacy_db(&key);
+    init(&db).unwrap();
+    assert!(!has_column(&db, "vault_item", "auth_kind").unwrap());
+    assert!(has_column(&db, "vault_usage_log", "destination").unwrap());
+    assert!(has_legacy(&db));
+    migrate_legacy_with(&db, &key).unwrap();
+    assert!(!has_legacy(&db));
+    assert_eq!(resolve_one(&db, Some(&key), "gh").unwrap().value, FAKE);
+    let user = resolve_one(&db, Some(&key), "nas_username").unwrap();
+    let password = resolve_one(&db, Some(&key), "nas_password").unwrap();
+    assert_eq!((user.value.as_str(), password.value.as_str()), ("admin", "pw-secret-1"));
+    assert_eq!(password.meta.allowed_sites, vec!["https://nas.local".to_string()], "the split entry keeps its settings");
+    assert_eq!(user.meta.id, "22222222-2222-4222-8222-222222222222", "the original id (and its references) stays with the user name");
+}
+
+#[test]
+fn test_legacy_entries_are_not_synced_before_conversion() {
+    let key = secrets::random_local_key();
+    let db = legacy_db(&key);
+    init(&db).unwrap();
+    let sync = sync_db();
+    assert!(sealed_snapshots(&db, &sync, &key).is_empty());
+    migrate_legacy_with(&db, &key).unwrap();
+    assert_eq!(sealed_snapshots(&db, &sync, &key).len(), 3);
 }
 
 // ---------- sync ----------
@@ -250,15 +266,14 @@ fn test_vault_sync_roundtrip_without_plaintext_or_echo() {
     let (source_sync, target_sync) = (sync_db(), sync_db());
     let key = secrets::derive_key("same-passphrase", &[9; 16], 1000).unwrap();
     let meta = create(&source, &key, "github_pat", FAKE);
-    log_usage_with(&source, &NewUsage { item_id: &meta.id, conversation_id: None, assistant_id: None, method: "GET",
-        url: "https://api.github.com/", status: Some(200), outcome: "ok", reason: None }).unwrap();
+    log_usage_with(&source, &usage(&meta.id)).unwrap();
     let sealed = sealed_snapshots(&source, &source_sync, &key).remove(0);
     assert!(!sealed.payload_json.contains(FAKE), "wire payload must not contain the secret");
     assert!(!sealed.payload_json.contains("last_used_at"), "local usage time is not synced");
     let change = upsert_change(&sealed);
     secrets::with_state(Some(secrets::SecretState::Ready(key.clone())),
         || apply_change_to_db(&target_sync, &target, &spec(), &change, "target", |_| Ok(()))).unwrap();
-    assert_eq!(resolve_with(&target, Some(&key), "github_pat").unwrap().fields["token"], FAKE);
+    assert_eq!(resolve_one(&target, Some(&key), "github_pat").unwrap().value, FAKE);
     let rescan = sealed_snapshots(&target, &target_sync, &key).remove(0);
     assert_eq!(sealed.payload_json, rescan.payload_json);
     assert!(!enqueue_snapshot_if_changed(&target_sync, &rescan, "target").unwrap(), "applied remote state must not echo back");
@@ -279,7 +294,7 @@ fn test_vault_sync_wrong_key_parks_then_replays() {
     secrets::with_state(Some(secrets::SecretState::Ready(key.clone())),
         || secrets::replay_pending(&target_sync, |c| apply_change_to_db(&target_sync, &target, &spec(), c, "target", |_| Ok(())))).unwrap();
     assert_eq!(secrets::pending_count(&target_sync), 0);
-    assert_eq!(resolve_with(&target, Some(&key), "github_pat").unwrap().fields["token"], FAKE);
+    assert_eq!(resolve_one(&target, Some(&key), "github_pat").unwrap().value, FAKE);
 }
 
 #[test]
@@ -297,7 +312,6 @@ fn test_config_binding_replaces_previous_target_of_same_source() {
     let db = db();
     let key = secrets::random_local_key();
     let meta = create(&db, &key, "openai_key", FAKE);
-    assert_eq!(meta.fields, vec![FieldMeta { key: "token".into(), label: "令牌".into() }]);
     assert!(bind_config_with(&db, &meta.id, "provider:3", "https://api.op", "Provider「OpenAI」", "https://api.op").unwrap());
     // The endpoint autosaves while typed: the final value replaces the intermediate one.
     assert!(bind_config_with(&db, &meta.id, "provider:3", "https://api.openai.com", "Provider「OpenAI」", "https://api.openai.com").unwrap());
@@ -306,29 +320,10 @@ fn test_config_binding_replaces_previous_target_of_same_source() {
     let resolved = resolve_ids_with(&db, Some(&key), &[meta.id.clone()]).unwrap();
     let targets: Vec<_> = resolved[&meta.id].config_bindings.iter().map(|b| b.target.as_str()).collect();
     assert_eq!(targets, vec!["https://api.openai.com", "program:abc"]);
-    assert_eq!(resolved[&meta.id].fields.get("token").map(String::as_str), Some(FAKE));
+    assert_eq!(resolved[&meta.id].value, FAKE);
     // Metadata listing never decrypts and never carries the value.
     let metas = metas_with(&db, &[meta.id.clone(), "missing".into()]).unwrap();
     assert_eq!(metas.len(), 1);
     assert!(!format!("{:?}", metas[&meta.id]).contains(FAKE));
     assert_eq!(resolve_ids_with(&db, Some(&key), &["missing".into()]).unwrap_err().code, "credential_not_found");
-}
-
-#[test]
-fn test_field_labels_for_each_auth_kind() {
-    let db = db();
-    let key = secrets::random_local_key();
-    let basic = create_with(&db, &key, &CreateInput {
-        name: "NAS".into(), handle: "nas".into(), description: String::new(),
-        auth: AuthInput { kind: AuthKind::Basic, token: None, username: Some("admin".into()), password: Some("pw-123456".into()), headers: vec![], query: vec![] },
-        allowed_sites: vec![], sync_enabled: false,
-    }).unwrap();
-    assert_eq!(basic.fields.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), vec!["username", "password"]);
-    let header = create_with(&db, &key, &CreateInput {
-        name: "Weather".into(), handle: "weather".into(), description: String::new(),
-        auth: AuthInput { kind: AuthKind::Header, token: None, username: None, password: None,
-            headers: vec![NamedSecret { name: "X-Api-Key".into(), prefix: String::new(), value: "k-123456".into() }], query: vec![] },
-        allowed_sites: vec![], sync_enabled: false,
-    }).unwrap();
-    assert_eq!(header.fields, vec![FieldMeta { key: "header_0".into(), label: "X-Api-Key".into() }]);
 }

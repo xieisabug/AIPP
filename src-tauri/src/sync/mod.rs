@@ -502,7 +502,7 @@ fn specs() -> Vec<SyncTableSpec> {
         SyncTableSpec {
             // 凭据保险箱：value 是密文信封，只在同步口令就绪时推送；last_used_at 仅本机。
             db_name: "system.db", table: "vault_item", object_type: personal_vault::OBJECT_TYPE,
-            columns: &["id", "uuid", "handle", "name", "description", "auth_kind", "injection", "allowed_sites", "sync_enabled", "value", "created_at", "updated_at", "config_bindings"],
+            columns: &["id", "uuid", "handle", "name", "description", "allowed_sites", "sync_enabled", "value", "created_at", "updated_at", "config_bindings"],
             natural_key_columns: &[], unique_key_columns: &["uuid"], seed_official_ids: &[], official_column: None,
             foreign_keys: &[], where_clause: Some("sync_enabled = 1"), order_by: "id",
         },
@@ -4436,7 +4436,7 @@ fn load_outbox_from_db_with_secret_readiness(
                         JOIN sync_object_map canonical ON canonical.object_type=alias.object_type AND canonical.local_id=alias.local_id
                         WHERE canonical.sync_id='{quick_model_id}' AND legacy.sent_once=1 AND legacy.outcome_known=0
                         AND legacy.status IN ('pending','pushing','failed')))
-               AND (operation='delete' OR object_type NOT IN ('llm.provider_secret','mcp.vault_secret','vault.item') OR NOT EXISTS (
+               AND (operation='delete' OR object_type NOT IN ('llm.provider_secret','mcp.vault_secret','vault.entry') OR NOT EXISTS (
                    SELECT 1 FROM sync_outbox key_event WHERE key_event.object_type='system.feature_config'
                    AND json_valid(key_event.payload_json) AND json_extract(key_event.payload_json,'$.fields.feature_code')='data_sync_secret'
                    AND key_event.status IN ('pending','pushing','failed')))
@@ -5831,7 +5831,7 @@ pub async fn set_sync_passphrase(
     let server_wins = has_record && !replace_existing;
     let sync = open_sync_db(&app_handle)?;
     if replace_existing {
-        let uncertain: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('llm.provider_secret','mcp.vault_secret','vault.item') AND sent_once=1 AND outcome_known=0)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        let uncertain: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('llm.provider_secret','mcp.vault_secret','vault.entry') AND sent_once=1 AND outcome_known=0)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         if uncertain || secrets::pending_count(&sync) > 0 {
             return Err("仍有结果未确认或无法解密的同步凭据，请先完成同步并解锁旧凭据，再更换口令".into());
         }

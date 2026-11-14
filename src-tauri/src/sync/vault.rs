@@ -302,7 +302,7 @@ pub(crate) fn remove(app: &AppHandle, reference: &str) -> Result<(), String> {
 /// to the new epoch. Until then they can decrypt a concurrent old-epoch write.
 pub(super) fn finish_rotation(app: &AppHandle) -> Result<(),String> {
     let sync = open_sync_db(app)?;
-    let pending: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('mcp.vault_secret','llm.provider_secret','vault.item','system.feature_config')) OR EXISTS(SELECT 1 FROM sync_secret_pending)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let pending: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('mcp.vault_secret','llm.provider_secret','vault.entry','system.feature_config')) OR EXISTS(SELECT 1 FROM sync_secret_pending)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     if pending { return Ok(()); }
     let _lock = LOCK.lock().map_err(|_|"凭据库锁已损坏")?;
     let system = SystemDatabase::new(app).map_err(|e|e.to_string())?;

@@ -10,12 +10,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Textarea } from "@/components/ui/textarea";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
-import type { VaultAuthInput, VaultCapability, VaultConfigReference, VaultItem, VaultUsageEntry } from "@/data/Vault";
-import VaultAuthFields from "./vault/VaultAuthFields";
+import type { VaultCapability, VaultConfigReference, VaultCreateInput, VaultItem, VaultUsageEntry } from "@/data/Vault";
 import VaultItemDetail, { type VaultItemPatch } from "./vault/VaultItemDetail";
-import { authError, emptyAuth, formatRelative, handleError, suggestHandle, suggestSiteForToken } from "./vault/vaultHelpers";
+import { formatRelative, keyError, suggestKey } from "./vault/vaultHelpers";
 
 interface VaultConfigProps {
     navigateTo?: (menuKey: string) => void;
@@ -33,7 +33,7 @@ function StatusBar({ capability }: { capability: VaultCapability }) {
             <span className="flex items-center gap-1.5">
                 <RefreshCw className="h-3.5 w-3.5" />
                 {capability.syncMessage}
-                {capability.pendingFromOtherDevices > 0 && `（${capability.pendingFromOtherDevices} 条来自其他设备的凭据待解锁）`}
+                {capability.pendingFromOtherDevices > 0 && `（${capability.pendingFromOtherDevices} 个来自其他设备的条目待解锁）`}
             </span>
         </div>
     );
@@ -41,14 +41,13 @@ function StatusBar({ capability }: { capability: VaultCapability }) {
 
 interface CreateState {
     name: string;
-    handle: string;
-    handleEdited: boolean;
+    key: string;
+    keyEdited: boolean;
     description: string;
-    site: string;
-    auth: VaultAuthInput;
+    value: string;
 }
 
-const blankCreate = (): CreateState => ({ name: "", handle: "", handleEdited: false, description: "", site: "", auth: emptyAuth() });
+const blankCreate = (): CreateState => ({ name: "", key: "", keyEdited: false, description: "", value: "" });
 
 export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const [capability, setCapability] = useState<VaultCapability | null>(null);
@@ -59,13 +58,14 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const [createOpen, setCreateOpen] = useState(false);
     const [create, setCreate] = useState<CreateState>(blankCreate);
     const [createError, setCreateError] = useState<string | null>(null);
-    const [replaceAuth, setReplaceAuth] = useState<VaultAuthInput | null>(null);
+    /** 替换对话框里输入的新值；null 表示对话框关闭。 */
+    const [replaceValue, setReplaceValue] = useState<string | null>(null);
     const [replaceError, setReplaceError] = useState<string | null>(null);
     const [deleteOpen, setDeleteOpen] = useState(false);
     const [references, setReferences] = useState<VaultConfigReference[]>([]);
 
     const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
-    const handles = useMemo(() => items.map((item) => item.handle), [items]);
+    const keys = useMemo(() => items.map((item) => item.key), [items]);
 
     const refresh = useCallback(async (isCurrent: () => boolean) => {
         const nextCapability = await invoke<VaultCapability>("vault_capability");
@@ -104,7 +104,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const confirmReference = async (reference: VaultConfigReference) => {
         try {
             await invoke("vault_confirm_reference", { kind: reference.kind, configId: reference.configId });
-            toast.success(`已确认 ${reference.name} 使用此凭据访问 ${reference.target}`);
+            toast.success(`已确认 ${reference.name} 使用此条目访问 ${reference.target}`);
             reloadReferences();
         } catch (error) {
             toast.error(errorText(error));
@@ -114,7 +114,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const filtered = useMemo(() => {
         const query = search.trim().toLowerCase();
         if (!query) return items;
-        return items.filter((item) => [item.name, item.handle, item.description].some((text) => text.toLowerCase().includes(query)));
+        return items.filter((item) => [item.name, item.key, item.description].some((text) => text.toLowerCase().includes(query)));
     }, [items, search]);
 
     const openCreate = useCallback(() => {
@@ -129,26 +129,25 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
 
     const submitCreate = async () => {
         const name = create.name.trim();
-        const problem = !name ? "请填写名称" : handleError(create.handle, handles) ?? authError(create.auth);
+        const problem = !name ? "请填写名称" : keyError(create.key, keys) ?? (create.value.trim() ? null : "请填写值");
         if (problem) {
             setCreateError(problem);
             return;
         }
+        const input: VaultCreateInput = {
+            name,
+            key: create.key,
+            description: create.description.trim(),
+            value: create.value,
+            allowedSites: [],
+            syncEnabled: true,
+        };
         try {
-            const created = await invoke<VaultItem>("vault_create", {
-                input: {
-                    name,
-                    handle: create.handle,
-                    description: create.description.trim(),
-                    auth: create.auth,
-                    allowedSites: create.site.trim() ? [create.site.trim()] : [],
-                    syncEnabled: true,
-                },
-            });
+            const created = await invoke<VaultItem>("vault_create", { input });
             closeCreate();
             setSelectedId(created.id);
             reload();
-            toast.success("已加密保存，之后不会再显示凭据值");
+            toast.success("已加密保存，之后不会再显示这个值");
         } catch (error) {
             setCreateError(errorText(error));
         }
@@ -167,17 +166,16 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     }, [selected, reload]);
 
     const submitReplace = async () => {
-        if (!selected || !replaceAuth) return;
-        const problem = authError(replaceAuth);
-        if (problem) {
-            setReplaceError(problem);
+        if (!selected || replaceValue === null) return;
+        if (!replaceValue.trim()) {
+            setReplaceError("请填写新的值");
             return;
         }
         try {
-            await invoke<VaultItem>("vault_replace_secret", { id: selected.id, auth: replaceAuth });
-            setReplaceAuth(null);
+            await invoke<VaultItem>("vault_replace_secret", { id: selected.id, value: replaceValue });
+            setReplaceValue(null);
             reload();
-            toast.success("凭据已替换");
+            toast.success("值已替换");
         } catch (error) {
             setReplaceError(errorText(error));
         }
@@ -190,16 +188,14 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
             setDeleteOpen(false);
             setSelectedId(null);
             reload();
-            toast.success("凭据已删除");
+            toast.success("已删除");
         } catch (error) {
             toast.error(errorText(error));
         }
     };
 
-    const suggestedSite = create.auth.kind === "bearer" ? suggestSiteForToken(create.auth.token) : null;
-
     const addButton = useMemo(() => (
-        <Button aria-label="新建凭据" onClick={openCreate} className="gap-2">
+        <Button aria-label="新建条目" onClick={openCreate} className="gap-2">
             <Plus className="h-4 w-4" />
         </Button>
     ), [openCreate]);
@@ -207,7 +203,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const selectOptions: SelectOption[] = useMemo(() => items.map((item) => ({
         id: item.id,
         label: item.name,
-        description: `${item.handle} · ${formatRelative(item.lastUsedAt)}`,
+        description: `${item.key} · ${formatRelative(item.lastUsedAt)}`,
         icon: <KeyRound className="h-4 w-4" />,
     })), [items]);
 
@@ -225,11 +221,11 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const sidebar = (
         <SidebarList
             title="凭据保险箱"
-            description="助手只能引用，看不到凭据值"
+            description="助手用占位符使用，看不到值"
             icon={<KeyRound className="h-5 w-5" />}
             searchValue={search}
             onSearchChange={setSearch}
-            searchPlaceholder="搜索凭据..."
+            searchPlaceholder="搜索条目..."
             addButton={addButton}
         >
             {filtered.map((item) => (
@@ -239,7 +235,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                             <span className="truncate font-medium">{item.name}</span>
                             {item.status === "locked" && <Badge variant="outline" className="shrink-0">待解锁</Badge>}
                         </div>
-                        <div className="truncate text-xs text-muted-foreground">{item.handle} · {formatRelative(item.lastUsedAt)}</div>
+                        <div className="truncate text-xs text-muted-foreground"><span className="font-mono">{item.key}</span> · {formatRelative(item.lastUsedAt)}</div>
                     </div>
                 </ListItemButton>
             ))}
@@ -266,61 +262,51 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
 
     const dialogs = (
         <>
-            <FormDialog title="新建凭据" isOpen={createOpen} onClose={closeCreate} onSubmit={submitCreate}>
+            <FormDialog title="新建条目" isOpen={createOpen} onClose={closeCreate} onSubmit={submitCreate}>
                 <div className="space-y-5">
                     <div className="space-y-2">
                         <Label htmlFor="vault-create-name">名称</Label>
                         <Input
                             id="vault-create-name"
-                            placeholder="例如：GitHub 个人令牌"
+                            placeholder="例如：GitHub 令牌、身份证号"
                             value={create.name}
                             onChange={(event) => {
                                 const name = event.target.value;
-                                setCreate((state) => ({ ...state, name, handle: state.handleEdited ? state.handle : suggestHandle(name, handles) }));
+                                setCreate((state) => ({ ...state, name, key: state.keyEdited ? state.key : suggestKey(name, keys) }));
                             }}
                         />
                     </div>
                     <div className="space-y-2">
-                        <Label htmlFor="vault-create-handle">引用名</Label>
+                        <Label htmlFor="vault-create-key">键</Label>
                         <Input
-                            id="vault-create-handle"
+                            id="vault-create-key"
                             className="font-mono"
                             autoCapitalize="none"
                             spellCheck={false}
-                            placeholder="github_pat"
-                            value={create.handle}
-                            onChange={(event) => setCreate((state) => ({ ...state, handle: event.target.value.trim(), handleEdited: true }))}
+                            placeholder="github_token"
+                            value={create.key}
+                            onChange={(event) => setCreate((state) => ({ ...state, key: event.target.value.trim(), keyEdited: true }))}
                         />
-                        <p className="text-xs text-muted-foreground">助手用这个名字引用凭据。</p>
+                        <p className="text-xs text-muted-foreground">
+                            助手在工具调用里写 <code className="font-mono">{`<vault:${create.key || "键"}>`}</code> 使用这个值。
+                        </p>
                     </div>
-                    <VaultAuthFields idPrefix="vault-create" value={create.auth} onChange={(auth) => setCreate((state) => ({ ...state, auth }))} />
                     <div className="space-y-2">
-                        <Label htmlFor="vault-create-site">允许的网站（可选）</Label>
-                        <Input
-                            id="vault-create-site"
-                            autoCapitalize="none"
-                            spellCheck={false}
-                            placeholder="https://api.example.com"
-                            value={create.site}
-                            onChange={(event) => setCreate((state) => ({ ...state, site: event.target.value }))}
+                        <Label htmlFor="vault-create-value">值</Label>
+                        <PasswordInput
+                            id="vault-create-value"
+                            autoComplete="off"
+                            value={create.value}
+                            onChange={(event) => setCreate((state) => ({ ...state, value: event.target.value }))}
                         />
-                        {suggestedSite && create.site.trim() !== suggestedSite && (
-                            <button
-                                type="button"
-                                className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
-                                onClick={() => setCreate((state) => ({ ...state, site: suggestedSite }))}
-                            >
-                                建议：{suggestedSite}
-                            </button>
-                        )}
-                        <p className="text-xs text-muted-foreground">留空也可以：助手第一次访问某个网站时会先问你。</p>
+                        <p className="text-xs text-muted-foreground">只填值本身，例如令牌不需要带 Bearer 前缀；格式由助手在使用时拼好。</p>
                     </div>
                     <div className="space-y-2">
                         <Label htmlFor="vault-create-description">给助手的说明（可选）</Label>
                         <Textarea
                             id="vault-create-description"
                             rows={2}
-                            placeholder="例如：用于读取我的 GitHub 仓库和 Issue"
+                            placeholder="例如：GitHub API 令牌，可读写我的仓库"
                             value={create.description}
                             onChange={(event) => setCreate((state) => ({ ...state, description: event.target.value }))}
                         />
@@ -331,20 +317,28 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
 
             <FormDialog
                 title={`替换「${selected?.name ?? ""}」`}
-                isOpen={replaceAuth !== null}
-                onClose={() => setReplaceAuth(null)}
+                isOpen={replaceValue !== null}
+                onClose={() => setReplaceValue(null)}
                 onSubmit={submitReplace}
             >
                 <div className="space-y-4">
-                    <p className="text-sm text-muted-foreground">旧值不会显示，请输入新的值。已允许的网站保持不变。</p>
-                    {replaceAuth && <VaultAuthFields idPrefix="vault-replace" value={replaceAuth} onChange={setReplaceAuth} />}
+                    <p className="text-sm text-muted-foreground">旧值不会显示，请输入新的值。自动允许的网站保持不变。</p>
+                    <div className="space-y-2">
+                        <Label htmlFor="vault-replace-value">新的值</Label>
+                        <PasswordInput
+                            id="vault-replace-value"
+                            autoComplete="off"
+                            value={replaceValue ?? ""}
+                            onChange={(event) => setReplaceValue(event.target.value)}
+                        />
+                    </div>
                     {replaceError && <p role="alert" className="text-sm text-destructive">{replaceError}</p>}
                 </div>
             </FormDialog>
 
             <ConfirmDialog
                 isOpen={deleteOpen}
-                title="删除凭据"
+                title="删除条目"
                 confirmText={`删除「${selected?.name ?? ""}」后，助手将无法再使用它${selected?.syncEnabled ? "；开启同步时其他设备上的也会删除" : ""}。${references.length > 0 ? `以下配置正在使用它，删除后将无法工作：${references.map((r) => r.name).join("、")}。` : ""}聊天记录会保留。`}
                 onConfirm={confirmDelete}
                 onCancel={() => setDeleteOpen(false)}
@@ -362,12 +356,12 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                             <StatusBar capability={capability} />
                             <EmptyState
                                 icon={<KeyRound className="h-8 w-8 text-muted-foreground" />}
-                                title="还没有保存凭据"
-                                description="把 API Key、令牌等凭据放进保险箱，助手就能直接调用需要认证的 API，但看不到凭据值。"
+                                title="保险箱是空的"
+                                description="把 API Key、密码、身份证号等放进保险箱。助手在工具调用里写占位符来使用，每次使用都会先问你，助手看不到值。助手缺少某个值时也可以请你当场填写。"
                                 action={
                                     <Button onClick={openCreate} className="gap-2">
                                         <Plus className="h-4 w-4" />
-                                        新建凭据
+                                        新建条目
                                     </Button>
                                 }
                             />
@@ -391,14 +385,14 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                             <VaultItemDetail
                                 item={selected}
                                 usage={selected.id === selectedKey ? usage : []}
-                                takenHandles={handles}
+                                takenKeys={keys}
                                 syncReady={capability.syncState === "ready"}
                                 references={selected.id === selectedKey ? references : []}
                                 onConfirmReference={(reference) => void confirmReference(reference)}
                                 onUpdate={update}
                                 onReplace={() => {
                                     setReplaceError(null);
-                                    setReplaceAuth(emptyAuth(selected.authKind));
+                                    setReplaceValue("");
                                 }}
                                 onDelete={() => setDeleteOpen(true)}
                             />
@@ -408,7 +402,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                 selectOptions={selectOptions}
                 selectedOptionId={selected?.id}
                 onSelectOption={setSelectedId}
-                selectPlaceholder="选择凭据"
+                selectPlaceholder="选择条目"
                 addButton={addButton}
             />
             {dialogs}

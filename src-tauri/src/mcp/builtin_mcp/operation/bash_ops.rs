@@ -10,7 +10,12 @@ use uuid::Uuid;
 use super::state::OperationState;
 use super::types::*;
 use crate::db::mcp_db::MCPDatabase;
-use crate::utils::shell_utils::{decode_process_output, decode_process_output_line, resolve_shell, ShellCommand};
+use crate::mcp::http_transport::ResponseRedactor;
+use crate::utils::shell_utils::{decode_process_output, decode_process_output_line, resolve_shell, ShellCommand, ShellKind};
+use crate::vault::placeholder::ShellVault;
+
+/// Vault values for a command: environment variables for the child and a redactor for its output.
+type VaultEnv = Option<Arc<ShellVault>>;
 
 /// Bash 操作实现
 pub struct BashOperations;
@@ -53,10 +58,22 @@ impl BashOperations {
         None
     }
 
-    fn get_shell_command(app_handle: Option<&AppHandle>, command: &str) -> Result<ShellCommand, String> {
+    /// Placeholders become references to environment variables (as with 1Password `op run`): the
+    /// value never enters the command text, so shell metacharacters in it are not interpreted.
+    fn get_shell_command(app_handle: Option<&AppHandle>, command: &str, vault: Option<&ShellVault>) -> Result<ShellCommand, String> {
         let preferred_shell = Self::get_configured_default_shell(app_handle);
         let shell = resolve_shell(preferred_shell.as_deref())?;
-        Ok(shell.into_command(command))
+        let command = match vault {
+            Some(vault) => vault.rewrite(command, matches!(shell, ShellKind::Pwsh | ShellKind::WindowsPowerShell))?,
+            None => command.to_string(),
+        };
+        Ok(shell.into_command(&command))
+    }
+
+    fn apply_vault(cmd: &mut Command, vault: &VaultEnv) {
+        if let Some(vault) = vault {
+            cmd.envs(vault.env().iter().map(|(name, value)| (name.as_str(), value.as_str())));
+        }
     }
 
     /// 执行 Bash 命令
@@ -75,7 +92,8 @@ impl BashOperations {
         let command = &request.command;
         let run_in_background = request.run_in_background.unwrap_or(false);
         let timeout_ms = Self::resolve_timeout_ms(request.timeout);
-        let shell_command = Self::get_shell_command(app_handle, command)?;
+        let vault = crate::vault::placeholder::current_shell();
+        let shell_command = Self::get_shell_command(app_handle, command, vault.as_deref())?;
 
         info!(
             shell = %shell_command.program,
@@ -87,10 +105,10 @@ impl BashOperations {
 
         if run_in_background {
             // 后台执行
-            Self::execute_background(state, &shell_command, command).await
+            Self::execute_background(state, &shell_command, command, &vault).await
         } else {
-            // 前台执行（等待完成）
-            Self::execute_foreground(&shell_command, timeout_ms).await
+            // 前台执行（等待完成）；输出由 execute_tool_by_transport 统一遮盖保险箱的值
+            Self::execute_foreground(&shell_command, timeout_ms, &vault).await
         }
     }
 
@@ -98,9 +116,11 @@ impl BashOperations {
     async fn execute_foreground(
         shell_command: &ShellCommand,
         timeout_ms: u64,
+        vault: &VaultEnv,
     ) -> Result<ExecuteBashResponse, String> {
         let mut cmd = Command::new(&shell_command.program);
         cmd.args(&shell_command.args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        Self::apply_vault(&mut cmd, vault);
 
         let child = cmd.spawn().map_err(|e| format!("Failed to spawn command: {}", e))?;
 
@@ -149,6 +169,7 @@ impl BashOperations {
         state: &OperationState,
         shell_command: &ShellCommand,
         command: &str,
+        vault: &VaultEnv,
     ) -> Result<ExecuteBashResponse, String> {
         let bash_id = Uuid::new_v4().to_string();
 
@@ -162,6 +183,7 @@ impl BashOperations {
 
         let mut cmd = Command::new(&shell_command.program);
         cmd.args(&shell_command.args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        Self::apply_vault(&mut cmd, vault);
 
         let mut child = cmd.spawn().map_err(|e| {
             error!(error = %e, command = %command, "Failed to spawn background command");
@@ -181,9 +203,11 @@ impl BashOperations {
         let state_clone = state.clone();
         let bash_id_clone = bash_id.clone();
         let command_clone = command.to_string();
+        // Later get_bash_output calls run without the vault step, so clean lines as they arrive.
+        let redactor = vault.as_ref().map(|vault| vault.redactor());
 
         tokio::spawn(async move {
-            Self::read_output_streams(&state_clone, &bash_id_clone, &command_clone, stdout, stderr)
+            Self::read_output_streams(&state_clone, &bash_id_clone, &command_clone, stdout, stderr, redactor)
                 .await;
         });
 
@@ -207,6 +231,7 @@ impl BashOperations {
         command: &str,
         stdout: Option<tokio::process::ChildStdout>,
         stderr: Option<tokio::process::ChildStderr>,
+        redactor: Option<Arc<ResponseRedactor>>,
     ) {
         info!(bash_id = %bash_id, command = %command, "Starting to read output streams");
 
@@ -222,16 +247,18 @@ impl BashOperations {
         if let Some(stdout) = stdout {
             let state = Arc::clone(&state);
             let bash_id = bash_id.to_string();
+            let redactor = redactor.clone();
             tasks.push(tokio::spawn(async move {
-                Self::read_single_stream(state, bash_id, stdout, false).await;
+                Self::read_single_stream(state, bash_id, stdout, false, redactor).await;
             }));
         }
 
         if let Some(stderr) = stderr {
             let state = Arc::clone(&state);
             let bash_id = bash_id.to_string();
+            let redactor = redactor.clone();
             tasks.push(tokio::spawn(async move {
-                Self::read_single_stream(state, bash_id, stderr, true).await;
+                Self::read_single_stream(state, bash_id, stderr, true, redactor).await;
             }));
         }
 
@@ -254,6 +281,7 @@ impl BashOperations {
         bash_id: String,
         mut reader: R,
         is_stderr: bool,
+        redactor: Option<Arc<ResponseRedactor>>,
     ) where
         R: AsyncRead + Unpin,
     {
@@ -264,7 +292,7 @@ impl BashOperations {
             match reader.read(&mut buffer).await {
                 Ok(0) => {
                     if !pending.is_empty() {
-                        Self::append_decoded_line(&state, &bash_id, &pending, is_stderr).await;
+                        Self::append_decoded_line(&state, &bash_id, &pending, is_stderr, redactor.as_deref()).await;
                     }
                     break;
                 }
@@ -272,7 +300,7 @@ impl BashOperations {
                     pending.extend_from_slice(&buffer[..read]);
                     while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
                         let line = pending.drain(..=newline_index).collect::<Vec<_>>();
-                        Self::append_decoded_line(&state, &bash_id, &line, is_stderr).await;
+                        Self::append_decoded_line(&state, &bash_id, &line, is_stderr, redactor.as_deref()).await;
                     }
                 }
                 Err(e) => {
@@ -292,8 +320,10 @@ impl BashOperations {
         bash_id: &str,
         bytes: &[u8],
         is_stderr: bool,
+        redactor: Option<&ResponseRedactor>,
     ) {
         let line = decode_process_output_line(bytes);
+        let line = match redactor { Some(redactor) => redactor.clean(&line), None => line };
         debug!(bash_id = %bash_id, line = %line, is_stderr, "Process output line");
 
         let formatted = if is_stderr {

@@ -10,7 +10,9 @@ import type { ButlerGroupMember, ButlerGroupMessage } from "@/data/ButlerGroup";
 import { useAcpElicitation } from "@/hooks/useAcpElicitation";
 import { useAskUserQuestion } from "@/hooks/useInlineInteraction";
 import { useVaultUseRequests } from "@/hooks/useVaultUseRequests";
+import { useVaultInputRequests } from "@/hooks/useVaultInputRequests";
 import { VaultUseCard } from "@/components/conversation/VaultUseCard";
+import { VaultInputCard } from "@/components/conversation/VaultInputCard";
 import { useScrollManagement } from "@/hooks/useScrollManagement";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker, toChatMessage } from "./ButlerGroupMessageRow";
@@ -67,7 +69,9 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
     const question = useAskUserQuestion({ conversationId: member.conversation_id });
     const elicitation = useAcpElicitation({ conversationId: member.conversation_id });
     const vault = useVaultUseRequests(member.conversation_id);
-    const shown = question.isDialogOpen || !!elicitation.questionRequest || !!elicitation.decisionError || vault.requests.length > 0;
+    const vaultInput = useVaultInputRequests(member.conversation_id);
+    const shown = question.isDialogOpen || !!elicitation.questionRequest || !!elicitation.decisionError
+        || vault.requests.length > 0 || vaultInput.requests.length > 0;
     useEffect(() => {
         if (shown) onShown();
     }, [shown, onShown]);
@@ -83,6 +87,8 @@ function MemberQuestion({ member, onShown }: { member: ButlerGroupMember; onShow
             {!elicitation.questionRequest && elicitation.decisionError &&
                 <p role="alert" className="text-sm text-destructive">{elicitation.decisionError}</p>}
             {vault.requests.map(request => <VaultUseCard key={request.requestId} request={request} onRespond={vault.respond} />)}
+            {vaultInput.requests.map(request => <VaultInputCard key={request.requestId} request={request}
+                onSubmit={vaultInput.submit} onDecline={vaultInput.decline} />)}
         </div>
     </div>;
 }

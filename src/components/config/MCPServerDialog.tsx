@@ -15,7 +15,7 @@ import { isAippBuiltinCommand, isMobileExecutableMcpServer } from '@/lib/mobileU
 import { KeyRound } from 'lucide-react';
 import { useVaultItems } from '@/hooks/useVaultItems';
 import VaultRefField from './vault/VaultRefField';
-import VaultPickerDialog from './vault/VaultPickerDialog';
+import VaultPickerDialog, { type VaultPick } from './vault/VaultPickerDialog';
 import { containsVaultRef, envVaultRefs, formatVaultRef } from './vault/vaultRefs';
 
 interface MCPServerDialogProps {
@@ -193,7 +193,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
     const envRefs = envVaultRefs(formData.environment_variables);
     const usesVault = containsVaultRef(formData.environment_variables) || containsVaultRef(formData.headers);
 
-    const insertEnvReference = useCallback(({ ref, prefix, variableName }: { ref: { id: string; field: string }; prefix: string; variableName?: string }) => {
+    const insertEnvReference = useCallback(({ ref, prefix, variableName }: VaultPick) => {
         setFormData(prev => {
             const current = prev.environment_variables || '';
             const line = `${variableName}=${formatVaultRef(ref, prefix)}`;
@@ -385,15 +385,14 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                 <ul className="space-y-1 text-xs" data-aipp-slot="mcp-env-vault-refs">
                                     {envRefs.map((ref, index) => {
                                         const item = vault.items.find(i => i.id === ref.id);
-                                        const field = item?.fields.find(f => f.key === ref.field)?.label;
                                         return (
                                             <li key={`${ref.name}-${index}`} className="flex items-center gap-1.5">
                                                 <span className="font-mono">{ref.name}</span>
                                                 <span className="text-muted-foreground">→</span>
                                                 <KeyRound className="h-3 w-3 text-muted-foreground" />
                                                 {item
-                                                    ? <span>{item.name}{field ? ` · ${field}` : ''}</span>
-                                                    : <span className="text-destructive">{vault.available ? '凭据已删除，请重新选择' : '此设备不支持凭据保险箱'}</span>}
+                                                    ? <span>{item.name}</span>
+                                                    : <span className="text-destructive">{vault.available ? '条目已删除，请重新选择' : '此设备不支持凭据保险箱'}</span>}
                                             </li>
                                         );
                                     })}
