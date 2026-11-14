@@ -6,6 +6,7 @@
 //! see), never follows redirects, and drops `Set-Cookie`.
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE as BASE64_URL};
 use base64::Engine;
+use crate::mcp::http_transport::ResponseRedactor;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -104,6 +105,17 @@ fn headers_has_authorization(headers: &BTreeMap<String, String>) -> bool {
     headers.keys().any(|name| name.trim().eq_ignore_ascii_case("authorization"))
 }
 
+/// Basic encodes the combined username/password, not each value separately. Register exactly
+/// the credential material this application builds when either field uses a vault placeholder.
+pub(crate) fn basic_auth_secret(original: &Value, substituted: &Value) -> Option<String> {
+    let original = original.get("basic_auth")?;
+    if !original.to_string().contains(super::placeholder::MARKER) { return None; }
+    let auth = substituted.get("basic_auth")?;
+    let username = auth.get("username")?.as_str()?;
+    let password = auth.get("password").and_then(Value::as_str).unwrap_or_default();
+    Some(format!("{username}:{password}"))
+}
+
 /// Literal values plus the encodings a service is likely to echo back (base64, URL-encoding; JSON
 /// escaping is added by `ResponseRedactor`). Shared by placeholders and configuration references.
 pub(crate) fn redactor_for(secrets: impl IntoIterator<Item = String>) -> crate::mcp::http_transport::ResponseRedactor {
@@ -111,9 +123,14 @@ pub(crate) fn redactor_for(secrets: impl IntoIterator<Item = String>) -> crate::
     for value in secrets {
         values.push(BASE64.encode(&value));
         values.push(BASE64_URL.encode(&value));
+        values.push(BASE64_URL.encode(&value).trim_end_matches('=').to_string());
         values.push(BASE64.encode(&value).trim_end_matches('=').to_string());
         let encoded = urlencoding::encode(&value).into_owned();
         if encoded != value { values.push(encoded); }
+        // reqwest/Url query_pairs_mut uses form encoding: spaces become '+', not '%20'.
+        let mut query = reqwest::Url::parse("https://redaction.invalid/").expect("static URL");
+        query.query_pairs_mut().append_pair("", &value);
+        values.push(query.query().unwrap_or_default().trim_start_matches('=').to_owned());
         values.push(value);
     }
     values.retain(|v| v.len() >= 4);
@@ -127,8 +144,21 @@ fn is_text(content_type: &str) -> bool {
     ct.is_empty() || ct.starts_with("text/") || ["json", "xml", "javascript", "x-www-form-urlencoded", "yaml", "graphql"].iter().any(|t| ct.contains(t))
 }
 
+/// Clean the bounded text before the character cap. Drop an incomplete final UTF-8 code point
+/// at a transport cutoff even if earlier bytes were malformed; replacement would break matching.
+fn clean_body(bytes: &[u8], truncated: bool, redactor: &ResponseRedactor) -> String {
+    let end = if truncated {
+        (bytes.len().saturating_sub(3)..bytes.len()).find(|&start| {
+            std::str::from_utf8(&bytes[start..]).err()
+                .is_some_and(|error| error.valid_up_to() == 0 && error.error_len().is_none())
+        }).unwrap_or(bytes.len())
+    } else { bytes.len() };
+    let text = String::from_utf8_lossy(&bytes[..end]);
+    if truncated { redactor.clean_truncated(&text) } else { redactor.clean(&text) }
+}
+
 /// Send and read a bounded body.
-pub(crate) async fn send(request: reqwest::RequestBuilder) -> Result<Output, ExecError> {
+pub(crate) async fn send(request: reqwest::RequestBuilder, redactor: &ResponseRedactor) -> Result<Output, ExecError> {
     let mut response = request.send().await.map_err(|e| {
         let kind = if e.is_timeout() { "请求超时" } else if e.is_connect() { "无法连接目标服务" } else { "请求失败" };
         ExecError::new("upstream_error", format!("{kind}: {}", e.without_url()))
@@ -137,7 +167,7 @@ pub(crate) async fn send(request: reqwest::RequestBuilder) -> Result<Output, Exe
     let mut headers = BTreeMap::new();
     for (name, value) in response.headers() {
         if name == reqwest::header::SET_COOKIE { continue; }
-        let text = String::from_utf8_lossy(value.as_bytes()).into_owned();
+        let text = redactor.clean(&String::from_utf8_lossy(value.as_bytes()));
         headers.entry(name.as_str().to_string()).and_modify(|v: &mut String| { v.push_str(", "); v.push_str(&text); }).or_insert(text);
     }
     let content_type = headers.get("content-type").cloned().unwrap_or_default();
@@ -152,7 +182,7 @@ pub(crate) async fn send(request: reqwest::RequestBuilder) -> Result<Output, Exe
         bytes.extend_from_slice(&chunk);
     }
     let body = if is_text(&content_type) || std::str::from_utf8(&bytes).is_ok() {
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let text = clean_body(&bytes, truncated, redactor);
         if text.chars().count() > MAX_BODY_CHARS {
             truncated = true;
             text.chars().take(MAX_BODY_CHARS).collect()
@@ -177,17 +207,22 @@ async fn global_proxy(app: &AppHandle) -> Option<String> {
     crate::api::ai::config::get_network_proxy_from_config(&config).filter(|p| !p.trim().is_empty())
 }
 
-/// Entry point for the `vault_http_request` tool. Returns the JSON shown to the model (before redaction).
+/// Entry point for `vault_http_request`. Clean raw output before truncation and JSON wrappers.
 pub(crate) async fn run(app: &AppHandle, args: &Value) -> Result<Value, ExecError> {
-    let args: RequestArgs = serde_json::from_value(args.clone()).map_err(|e| ExecError::new("invalid_request", format!("参数无效: {e}")))?;
-    let client = client(global_proxy(app).await.as_deref())?;
-    let output = send(build_request(&client, &args)?).await?;
-    Ok(json!({
-        "status": output.status,
-        "headers": output.headers,
-        "body": output.body,
-        "truncated": output.truncated,
-    }))
+    let redactor = super::placeholder::current_redactor().unwrap_or_default();
+    let result = async {
+        let args: RequestArgs = serde_json::from_value(args.clone()).map_err(|e| ExecError::new("invalid_request", format!("参数无效: {e}")))?;
+        let client = client(global_proxy(app).await.as_deref())?;
+        let output = send(build_request(&client, &args)?, &redactor).await?;
+        Ok(json!({
+            "status": output.status,
+            "headers": output.headers,
+            "body": output.body,
+            "truncated": output.truncated,
+        }))
+    }.await;
+    // Error messages can quote a substituted argument. Clean them before error_json adds wrappers.
+    result.map_err(|mut error: ExecError| { error.message = redactor.clean(&error.message); error })
 }
 
 #[cfg(test)]

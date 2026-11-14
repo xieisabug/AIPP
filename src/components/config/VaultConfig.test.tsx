@@ -71,10 +71,10 @@ describe("VaultConfig", () => {
         expect(screen.getByText("<vault:my_token>")).toBeInTheDocument();
         const value = screen.getByLabelText("值");
         expect(value).toHaveAttribute("type", "password");
-        await user.type(value, "ghp_example123");
+        await user.type(value, " ghp_example123 ");
         await user.click(screen.getByRole("button", { name: "确认" }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_create", {
-            input: { name: "My Token", key: "my_token", description: "", value: "ghp_example123", allowedSites: [], syncEnabled: true },
+            input: { name: "My Token", key: "my_token", description: "", value: " ghp_example123 ", allowedSites: [], syncEnabled: true },
         }));
         await user.click(await screen.findByRole("button", { name: /新建条目/ }));
         expect(screen.getByLabelText("值")).toHaveValue("");
@@ -100,9 +100,9 @@ describe("VaultConfig", () => {
         render(<VaultConfig />);
         await user.click(await screen.findByRole("button", { name: "替换" }));
         expect(screen.getByLabelText("新的值")).toHaveValue("");
-        await user.type(screen.getByLabelText("新的值"), "new-value");
+        await user.type(screen.getByLabelText("新的值"), " new-value ");
         await user.click(screen.getByRole("button", { name: "确认" }));
-        await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_replace_secret", { id: "a1", value: "new-value" }));
+        await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_replace_secret", { id: "a1", value: " new-value " }));
     });
 
     it("should list configs that use the entry and confirm a changed target", async () => {

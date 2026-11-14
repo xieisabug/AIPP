@@ -130,3 +130,111 @@ fn test_plugin_structured_content_is_preserved_without_host_private_metadata() {
     let output=super::serialize_tool_response(&response).unwrap();
     assert!(output.contains("42"));assert!(!output.contains("host-only"));
 }
+
+#[test]
+fn test_mcp_response_redacts_before_structured_json_wrappers() {
+    let secret = "synthetic-quoted\"value\\with\nnewline";
+    let redactor = crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter());
+    let response: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+        "content": [{"type": "text", "text": secret}],
+        "structuredContent": {"nested": [{"secret": secret}]}
+    })).unwrap();
+    let output = serialize_tool_response_with_redactor(&response, &redactor).unwrap();
+    assert!(!output.contains("synthetic-quoted"));
+    assert!(!output.contains("newline"));
+    let content: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(content[0]["text"], "[REDACTED]");
+    let structured: serde_json::Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(structured["nested"][0]["secret"], "[REDACTED]");
+}
+
+#[test]
+fn test_mcp_error_redaction_combines_config_and_placeholder_credentials() {
+    let config = "synthetic-config-token";
+    let placeholder = "synthetic-placeholder\"token";
+    let config_redactor = crate::vault::executor::redactor_for([config.to_owned()]);
+    let call_redactor = crate::vault::executor::redactor_for([placeholder.to_owned()]);
+    let redactor = config_redactor.merged(Some(&call_redactor));
+    let response: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+        "isError": true, "content": [{"type": "text", "text": format!("{config} / {placeholder}")}]
+    })).unwrap();
+    let error = serialize_tool_response_with_redactor(&response, &redactor).unwrap_err();
+    let error_for_log = redactor.clean(&format!("Tool execution failed: {error:#}"));
+    assert!(!error_for_log.contains("synthetic-config"));
+    assert!(!error_for_log.contains("synthetic-placeholder"));
+    assert!(error_for_log.contains("工具执行错误"));
+    assert!(error_for_log.contains("[REDACTED]"));
+}
+
+
+#[test]
+fn test_mcp_error_json_text_is_redacted_before_error_wrapper() {
+    let secret = "synthetic-error\"quoted\\value\nlast-line";
+    let redactor = crate::vault::executor::redactor_for([secret.to_owned()]);
+    let response: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+        "isError": true,
+        "content": [{"type": "text", "text": serde_json::json!({"credential": secret}).to_string()}]
+    })).unwrap();
+    let error = serialize_tool_response_with_redactor(&response, &redactor).unwrap_err().to_string();
+    assert!(!error.contains("synthetic-error"));
+    assert!(!error.contains("last-line"));
+    assert!(error.contains("[REDACTED]"));
+}
+
+#[test]
+fn test_builtin_response_preserves_envelope_semantics_when_credentials_match_field_names() {
+    for secret in ["content", "is_error", "isError"] {
+        let redactor = crate::vault::executor::redactor_for([secret.to_owned()]);
+        for flag in ["is_error", "isError"] {
+            for expected_error in [false, true] {
+                let raw = serde_json::json!({
+                    (flag): expected_error,
+                    "content": [{"type": "text", "text": format!("echo: {secret}")}]
+                }).to_string();
+                let (is_error, content) = builtin_response_payload(&raw, &redactor).unwrap();
+                assert_eq!(is_error, expected_error);
+                assert_eq!(content[0]["text"], "echo: [REDACTED]");
+                assert!(!content.to_string().contains(secret));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_builtin_response_still_redacts_nested_payload_keys_and_values() {
+    let secret = "synthetic-secret\"with\\escaping\nlast-line";
+    let redactor = crate::vault::executor::redactor_for([secret.to_owned()]);
+    let raw = serde_json::json!({
+        "is_error": true,
+        "content": { (secret): [secret, {"text": serde_json::json!({"echo": secret}).to_string()}] }
+    }).to_string();
+    let (is_error, content) = builtin_response_payload(&raw, &redactor).unwrap();
+    assert!(is_error);
+    assert_eq!(content["[REDACTED]"][0], "[REDACTED]");
+    let wrapped = format!("工具执行错误: {content}");
+    assert!(!wrapped.contains("synthetic-secret"));
+    assert!(!wrapped.contains("last-line"));
+}
+
+#[test]
+fn test_stdio_response_redacts_plugin_connection_credentials_without_placeholders() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let secret = "synthetic-plugin-connection\"secret";
+    // The process redactor includes credentials resolved by the plugin launcher, even with
+    // no vault placeholder or vault:// environment reference on this call.
+    let redactor = crate::vault::executor::redactor_for([secret.to_owned()]);
+    for is_error in [false, true] {
+        let response: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+            "isError": is_error,
+            "content": [{"type": "text", "text": format!("literal {secret}; encoded {}", STANDARD.encode(secret))}],
+            "structuredContent": {"credential": secret}
+        })).unwrap();
+        let output = match serialize_tool_response_with_redactor(&response, &redactor) {
+            Ok(output) => { assert!(!is_error); output }
+            Err(error) => { assert!(is_error); error.to_string() }
+        };
+        assert!(!output.contains("synthetic-plugin"));
+        assert!(!output.contains(&STANDARD.encode(secret)));
+        assert!(output.contains("[REDACTED]"));
+    }
+}

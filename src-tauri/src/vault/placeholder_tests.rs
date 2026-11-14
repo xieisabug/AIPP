@@ -117,8 +117,9 @@ async fn test_shell_receives_the_value_as_an_environment_variable() {
     let request = ExecuteBashRequest { command: echo_command().into(), description: None, timeout: Some(30_000), run_in_background: Some(false) };
     let response = with_shell(test_shell(&[("gh", TOKEN)]), BashOperations::execute_bash(None, &state, request)).await.unwrap();
     let output = response.output.unwrap();
-    // The child saw the real value; execute_tool_by_transport redacts it before the model sees it.
-    assert!(output.contains(&format!("value={TOKEN}")), "{output}");
+    // The child receives the value, but foreground output is redacted before truncation.
+    assert!(output.contains("value=[REDACTED]"), "{output}");
+    assert!(!output.contains(TOKEN));
 }
 
 #[tokio::test]
@@ -137,4 +138,20 @@ async fn test_background_output_is_redacted_as_it_arrives() {
     }
     assert!(collected.contains("value=[REDACTED]"), "{collected}");
     assert!(!collected.contains(TOKEN));
+}
+
+#[tokio::test]
+async fn test_prepared_redactor_is_scoped_to_invocation() {
+    let prepared = Prepared {
+        redactor: Some(Arc::new(super::super::executor::redactor_for([TOKEN.to_owned()]))),
+        ..Default::default()
+    };
+    assert!(current_redactor().is_none());
+    prepared.run(async {
+        assert_eq!(current_redactor().unwrap().clean(TOKEN), "[REDACTED]");
+        // A separate, unapproved invocation must not inherit another invocation's secret set.
+        Prepared::default().run(async { assert!(current_redactor().is_none()); }).await;
+        assert!(current_redactor().is_some());
+    }).await;
+    assert!(current_redactor().is_none());
 }

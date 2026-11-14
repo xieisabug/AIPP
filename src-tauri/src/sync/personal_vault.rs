@@ -84,8 +84,8 @@ impl SecretValue {
     #[cfg(test)]
     pub(crate) fn new(value: impl Into<String>) -> Self { Self(value.into()) }
     fn checked(&self) -> Result<&str, String> {
-        let value = self.0.trim();
-        if value.is_empty() { return Err("值不能为空".into()); }
+        let value = self.0.as_str();
+        if value.trim().is_empty() { return Err("值不能为空".into()); }
         if value.len() > MAX_VALUE_BYTES { return Err("值过长（最多 64KB）".into()); }
         Ok(value)
     }
@@ -154,6 +154,7 @@ pub struct ConfigBinding {
 }
 
 /// Decrypted entry for the trusted resolvers only. Never serialized, never printed.
+#[derive(Clone)]
 pub(crate) struct Resolved {
     pub meta: ItemMeta,
     pub value: String,
@@ -468,6 +469,35 @@ pub(super) fn resolve_keys_with(db: &Connection, key: Option<&secrets::SecretKey
     Ok(out)
 }
 
+/// Re-read after the user approves. Validation and any "always allow" writes share one transaction:
+/// a stale approval must neither use an old value nor grant a destination to its replacement.
+pub(super) fn confirm_use_with(db: &Connection, key: &secrets::SecretKey, expected: &BTreeMap<String, Resolved>,
+    always: Option<(&[String], &str)>) -> Result<BTreeMap<String, Resolved>, ResolveError> {
+    let tx = db.unchecked_transaction().map_err(|e| ResolveError::new("vault_error", e.to_string()))?;
+    let keys: Vec<String> = expected.keys().cloned().collect();
+    let current = resolve_keys_with(&tx, Some(key), &keys)?;
+    for (entry_key, previous) in expected {
+        let entry = &current[entry_key];
+        let mut approved_meta = previous.meta.clone();
+        // Another completed use is not an edit to the value or the user's policy.
+        approved_meta.last_used_at = entry.meta.last_used_at;
+        if entry.meta != approved_meta || entry.value != previous.value || entry.config_bindings != previous.config_bindings {
+            return Err(ResolveError::new("credential_changed",
+                "等待确认期间保险箱条目已更改，本次调用已取消，请重新发起并确认"));
+        }
+    }
+    if let Some((ids, origin)) = always {
+        for id in ids {
+            if !current.values().any(|entry| &entry.meta.id == id) {
+                return Err(ResolveError::new("vault_error", "确认条目不在本次调用中"));
+            }
+            approve_site_with(&tx, id, origin).map_err(|e| ResolveError::new("vault_error", e))?;
+        }
+    }
+    tx.commit().map_err(|e| ResolveError::new("vault_error", e.to_string()))?;
+    Ok(current)
+}
+
 /// Decrypt entries by id for configuration references. Missing ids are `credential_not_found`.
 pub(super) fn resolve_ids_with(db: &Connection, key: Option<&secrets::SecretKey>, uuids: &[String]) -> Result<BTreeMap<String, Resolved>, ResolveError> {
     init(db).map_err(|e| ResolveError::new("vault_error", e))?;
@@ -713,12 +743,6 @@ pub(crate) fn replace_secret(app: &AppHandle, uuid: &str, value: &SecretValue) -
     Ok(meta)
 }
 
-pub(crate) fn approve_site(app: &AppHandle, uuid: &str, origin: &str) -> Result<(), String> {
-    with_optional_key(app, |db, _| approve_site_with(db, uuid, origin))?;
-    schedule_sync_after_local_change(app);
-    Ok(())
-}
-
 pub(crate) fn delete(app: &AppHandle, uuid: &str) -> Result<(), String> {
     with_optional_key(app, |db, _| delete_with(db, uuid))?;
     schedule_sync_after_local_change(app);
@@ -728,6 +752,12 @@ pub(crate) fn delete(app: &AppHandle, uuid: &str) -> Result<(), String> {
 /// Decrypt entries named in placeholders (trusted resolver only).
 pub(crate) fn resolve_keys(app: &AppHandle, keys: &[String]) -> Result<BTreeMap<String, Resolved>, ResolveError> {
     with_resolver(app, |db, key| resolve_keys_with(db, Some(key), keys))
+}
+
+pub(crate) fn confirm_use(app: &AppHandle, expected: &BTreeMap<String, Resolved>, always: Option<(&[String], &str)>) -> Result<BTreeMap<String, Resolved>, ResolveError> {
+    let current = with_resolver(app, |db, key| confirm_use_with(db, key, expected, always))?;
+    if always.is_some() { schedule_sync_after_local_change(app); }
+    Ok(current)
 }
 
 /// Decrypt the referenced entries for a configuration reference (trusted resolver only).

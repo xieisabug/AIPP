@@ -106,12 +106,103 @@ fn test_vault_key_validation_and_uniqueness() {
 }
 
 #[test]
-fn test_vault_value_is_trimmed_and_required() {
+fn test_vault_value_preserves_whitespace_and_is_required() {
     let db = db();
     let key = secrets::random_local_key();
+    assert!(create_with(&db, &key, &input("empty", "")).is_err());
     assert!(create_with(&db, &key, &input("empty", "   ")).is_err());
-    create(&db, &key, "id_card", "  110101199001011234\n");
-    assert_eq!(resolve_one(&db, Some(&key), "id_card").unwrap().value, "110101199001011234");
+    let value = " \t password with spaces \r\n";
+    let meta = create(&db, &key, "password", value);
+    assert_eq!(resolve_one(&db, Some(&key), "password").unwrap().value, value);
+    let replacement = "\n second password \t ";
+    replace_secret_with(&db, &key, &meta.id, &SecretValue::new(replacement)).unwrap();
+    assert_eq!(resolve_one(&db, Some(&key), "password").unwrap().value, replacement);
+    assert!(replace_secret_with(&db, &key, &meta.id, &SecretValue::new(" \t\n")).is_err());
+    assert_eq!(resolve_one(&db, Some(&key), "password").unwrap().value, replacement);
+}
+
+#[test]
+fn test_vault_value_limit_counts_original_bytes() {
+    let value = format!(" {} ", "x".repeat(MAX_VALUE_BYTES - 2));
+    assert_eq!(SecretValue::new(&value).checked().unwrap(), value);
+    assert!(SecretValue::new(format!(" {value}")).checked().is_err());
+}
+
+#[test]
+fn test_vault_create_many_preserves_original_values() {
+    let db = db();
+    let key = secrets::random_local_key();
+    create_many_with(&db, &key, &[input("first", " first "), input("second", "\tsecond\n")]).unwrap();
+    assert_eq!(resolve_one(&db, Some(&key), "first").unwrap().value, " first ");
+    assert_eq!(resolve_one(&db, Some(&key), "second").unwrap().value, "\tsecond\n");
+}
+
+/// An edit while the approval card is open must invalidate the old decision, even within the same
+/// millisecond. Neither the old nor the new value is returned, and "always" does not persist.
+#[test]
+fn test_vault_confirm_use_rejects_replaced_value_without_granting_site() {
+    let db = db();
+    let key = secrets::random_local_key();
+    let first = create(&db, &key, "first", FAKE);
+    let second = create(&db, &key, "second", "old-second");
+    let expected = resolve_keys_with(&db, Some(&key), &["first".into(), "second".into()]).unwrap();
+    replace_secret_with(&db, &key, &second.id, &SecretValue::new("new-second")).unwrap();
+    db.execute("UPDATE vault_item SET updated_at=?2 WHERE uuid=?1", params![second.id, second.updated_at]).unwrap();
+    let error = confirm_use_with(&db, &key, &expected,
+        Some((&[first.id.clone(), second.id.clone()], "https://example.com"))).unwrap_err();
+    assert_eq!(error.code, "credential_changed");
+    assert!(!error.message.contains(FAKE));
+    assert!(!error.message.contains("old-second"));
+    assert!(!error.message.contains("new-second"));
+    assert!(list_with(&db, Some(&key)).unwrap().iter().all(|item| item.allowed_sites.is_empty()));
+}
+
+#[test]
+fn test_vault_confirm_use_rejects_deleted_or_recreated_entry() {
+    let db = db();
+    let key = secrets::random_local_key();
+    let meta = create(&db, &key, "token", FAKE);
+    let expected = resolve_keys_with(&db, Some(&key), &["token".into()]).unwrap();
+    delete_with(&db, &meta.id).unwrap();
+    assert_eq!(confirm_use_with(&db, &key, &expected, None).unwrap_err().code, "credential_not_found");
+    create(&db, &key, "token", FAKE);
+    assert_eq!(confirm_use_with(&db, &key, &expected, None).unwrap_err().code, "credential_changed");
+}
+
+#[test]
+fn test_vault_confirm_use_rejects_changed_policy() {
+    let db = db();
+    let key = secrets::random_local_key();
+    let meta = create(&db, &key, "token", FAKE);
+    approve_site_with(&db, &meta.id, "https://example.com").unwrap();
+    let expected = resolve_keys_with(&db, Some(&key), &["token".into()]).unwrap();
+    update_with(&db, Some(&key), &meta.id, &UpdateInput { allowed_sites: Some(vec![]), ..Default::default() }).unwrap();
+    assert_eq!(confirm_use_with(&db, &key, &expected, None).unwrap_err().code, "credential_changed");
+}
+
+#[test]
+fn test_vault_confirm_use_allows_unchanged_entries_after_another_use() {
+    let db = db();
+    let key = secrets::random_local_key();
+    let meta = create(&db, &key, "token", " token ");
+    let expected = resolve_keys_with(&db, Some(&key), &["token".into()]).unwrap();
+    log_usage_with(&db, &usage(&meta.id)).unwrap();
+    let current = confirm_use_with(&db, &key, &expected, None).unwrap();
+    assert_eq!(current["token"].value, " token ");
+    assert!(current["token"].meta.last_used_at.is_some());
+    confirm_use_with(&db, &key, &expected, Some((&[meta.id], "https://example.com"))).unwrap();
+    assert_eq!(list_with(&db, Some(&key)).unwrap()[0].allowed_sites, vec!["https://example.com"]);
+}
+
+#[test]
+fn test_vault_confirm_use_rolls_back_partial_site_grants() {
+    let db = db();
+    let key = secrets::random_local_key();
+    let meta = create(&db, &key, "token", FAKE);
+    let expected = resolve_keys_with(&db, Some(&key), &["token".into()]).unwrap();
+    assert!(confirm_use_with(&db, &key, &expected,
+        Some((&[meta.id, "not-approved".into()], "https://example.com"))).is_err());
+    assert!(list_with(&db, Some(&key)).unwrap()[0].allowed_sites.is_empty());
 }
 
 #[test]

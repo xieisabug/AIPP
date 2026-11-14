@@ -254,11 +254,18 @@ pub(crate) fn rewrite_command(command: &str, powershell: bool, vars: &BTreeMap<S
 
 tokio::task_local! {
     static SHELL: Option<Arc<ShellVault>>;
+    static REDACTOR: Option<Arc<ResponseRedactor>>;
 }
 
 /// The vault values for the shell command currently executing, if it used placeholders.
 pub(crate) fn current_shell() -> Option<Arc<ShellVault>> {
     SHELL.try_with(|shell| shell.clone()).ok().flatten()
+}
+
+/// Only in-memory, scoped to this invocation. Output sinks must clean before logging,
+/// serializing or cutting output; the final cleanup remains a second boundary.
+pub(crate) fn current_redactor() -> Option<Arc<ResponseRedactor>> {
+    REDACTOR.try_with(|redactor| redactor.clone()).ok().flatten()
 }
 
 /// Test helper: shell values for `key = value` pairs, as `prepare` would build them.
@@ -301,7 +308,7 @@ impl Prepared {
     }
     /// Run the tool with the shell values in scope (only shell commands read them).
     pub(crate) async fn run<F: std::future::Future>(&self, future: F) -> F::Output {
-        SHELL.scope(self.shell.clone(), future).await
+        REDACTOR.scope(self.redactor.clone(), SHELL.scope(self.shell.clone(), future)).await
     }
     pub(crate) fn finish(&self, app: &AppHandle, error: Option<&str>) {
         let reason = error.map(|e| self.clean(e.to_string()));
@@ -346,19 +353,26 @@ pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, serve
         .map_err(|e| UseError::new(e.code, e.message).to_string())?;
     let caller = caller(app, conversation_id);
     let tool = tool_label(server, tool_name);
-    if let Err(error) = authorize(app, conversation_id, &caller, server, tool_name, &args, &entries, &destination, &tool).await {
-        log_refusal(app, &entries, conversation_id, &caller, &tool, &destination.label, &error);
-        return Err(error.to_string());
-    }
+    let entries = match authorize(app, conversation_id, &caller, server, tool_name, &args, &entries, &destination, &tool).await {
+        Ok(current) => current,
+        Err(error) => {
+            log_refusal(app, &entries, conversation_id, &caller, &tool, &destination.label, &error);
+            return Err(error.to_string());
+        }
+    };
     let values: BTreeMap<String, String> = entries.iter().map(|(k, e)| (k.clone(), e.value.clone())).collect();
-    let redactor = Arc::new(super::executor::redactor_for(values.values().cloned()));
+    let mut substituted = args.clone();
+    substitute_value(&mut substituted, &values);
+    let mut secrets: Vec<String> = values.values().cloned().collect();
+    if server.command.as_deref() == Some(super::tool::COMMAND) && tool_name == super::tool::REQUEST_TOOL {
+        secrets.extend(super::executor::basic_auth_secret(&args, &substituted));
+    }
+    let redactor = Arc::new(super::executor::redactor_for(secrets));
     let (parameters, shell) = if is_shell(server, tool_name) {
         let vars: BTreeMap<String, String> = keys.iter().map(|k| (k.clone(), env_var(k))).collect();
         let env = values.iter().map(|(k, v)| (env_var(k), v.clone())).collect();
         (None, Some(Arc::new(ShellVault { env, vars, redactor: redactor.clone() })))
     } else {
-        let mut substituted = args;
-        substitute_value(&mut substituted, &values);
         (Some(substituted.to_string()), None)
     };
     Ok(Prepared {
@@ -370,9 +384,10 @@ pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, serve
 
 #[allow(clippy::too_many_arguments)]
 async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Caller, server: &MCPServer, tool_name: &str, args: &Value,
-    entries: &BTreeMap<String, Resolved>, destination: &Destination, tool: &str) -> Result<(), UseError> {
+    entries: &BTreeMap<String, Resolved>, destination: &Destination, tool: &str) -> Result<BTreeMap<String, Resolved>, UseError> {
     let allowed = |entry: &Resolved| destination.origin.as_ref().is_some_and(|o| entry.meta.allowed_sites.contains(o));
     let pending: Vec<&Resolved> = entries.values().filter(|e| !allowed(e) && !has_once(conversation_id, &e.meta.id)).collect();
+    let mut always: Option<(Vec<String>, String)> = None;
     if !pending.is_empty() {
         let names = pending.iter().map(|e| format!("「{}」", e.meta.name)).collect::<Vec<_>>().join("");
         if !caller.attended {
@@ -401,16 +416,20 @@ async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Calle
                     return Err(UseError::new("invalid_request", "本机工具不能设为总是允许"));
                 };
                 let ids: Vec<String> = pending.iter().map(|e| e.meta.id.clone()).collect();
-                let approve_app = app.clone();
-                tauri::async_runtime::spawn_blocking(move || ids.iter().try_for_each(|id| personal_vault::approve_site(&approve_app, id, &origin))).await
-                    .map_err(|e| UseError::new("vault_error", e.to_string()))?
-                    .map_err(|e| UseError::new("vault_error", format!("记录自动允许的网站失败: {e}")))?;
-                crate::api::vault_api::notify_changed(app);
+                always = Some((ids, origin));
             }
         }
     }
+    let confirm_app = app.clone();
+    let expected = entries.clone();
+    let changed_policy = always.is_some();
+    let current = tauri::async_runtime::spawn_blocking(move || personal_vault::confirm_use(&confirm_app, &expected,
+        always.as_ref().map(|(ids, origin)| (ids.as_slice(), origin.as_str())))).await
+        .map_err(|e| UseError::new("vault_error", format!("复核保险箱失败: {e}")))?
+        .map_err(|e| UseError::new(e.code, e.message))?;
+    if changed_policy { crate::api::vault_api::notify_changed(app); }
     for entry in entries.values().filter(|e| !allowed(e)) { consume_once(conversation_id, &entry.meta.id); }
-    Ok(())
+    Ok(current)
 }
 
 #[cfg(test)]

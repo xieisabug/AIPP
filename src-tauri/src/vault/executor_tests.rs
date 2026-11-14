@@ -40,7 +40,7 @@ fn test_client() -> reqwest::Client {
 }
 
 async fn run_against(args: &RequestArgs) -> Result<Output, ExecError> {
-    send(build_request(&test_client(), args)?).await
+    send(build_request(&test_client(), args)?, &ResponseRedactor::default()).await
 }
 
 #[tokio::test]
@@ -120,5 +120,92 @@ fn test_vault_redactor_covers_encodings() {
     for leaked in variants {
         let cleaned = redactor.clean(&format!("prefix {leaked} suffix"));
         assert_eq!(cleaned, "prefix [REDACTED] suffix", "{leaked}");
+    }
+}
+
+
+#[test]
+fn test_vault_redactor_tracks_application_basic_and_query_encodings() {
+    let secret = "vault space+tilde~slash/quote\"value";
+    let original = json!({"basic_auth": {"username": "prefix-<vault:user>", "password": "<vault:password>"}});
+    let substituted = json!({"basic_auth": {"username": "prefix-alice", "password": secret}});
+    let combined = basic_auth_secret(&original, &substituted).unwrap();
+    let redactor = redactor_for([secret.to_owned(), combined.clone()]);
+    let basic = BASE64.encode(&combined);
+    let mut url = reqwest::Url::parse("https://example.com/").unwrap();
+    url.query_pairs_mut().append_pair("token", secret);
+    let query_value = url.query().unwrap().strip_prefix("token=").unwrap();
+    assert!(query_value.contains('+'));
+    assert_eq!(redactor.clean(&format!("Basic {basic}")), "Basic [REDACTED]");
+    assert_eq!(redactor.clean(query_value), "[REDACTED]");
+    assert_eq!(basic_auth_secret(&json!({"basic_auth": {"username": "public"}}), &substituted), None);
+}
+
+#[tokio::test]
+async fn test_vault_http_cleans_echoed_basic_and_query_before_json_wrappers() {
+    let secret = "vault query+and quote\"value";
+    let (base, server) = serve(echo).await;
+    let mut request = args(&base);
+    request.query.insert("key".into(), json!(secret));
+    request.basic_auth = Some(BasicAuth { username: "alice".into(), password: secret.into() });
+    let combined = format!("alice:{secret}");
+    let redactor = redactor_for([secret.to_owned(), combined.clone()]);
+    let output = send(build_request(&test_client(), &request).unwrap(), &redactor).await.unwrap();
+    let seen = server.await.unwrap();
+    assert!(seen.contains(&BASE64.encode(combined)));
+    assert!(output.body.contains("Basic [REDACTED]"));
+    assert!(output.body.contains("key=[REDACTED]"));
+    let wrapped = json!({"content": [{"text": json!({"body": output.body}).to_string()}]}).to_string();
+    assert!(!wrapped.contains("vault"));
+}
+
+#[tokio::test]
+async fn test_vault_http_cleans_json_escaped_values_before_nested_serialization() {
+    let secret = "first\"quoted\\second\nlast-line";
+    let body = json!({"secret": secret}).to_string();
+    let (base, server) = serve(move |_| ("200 OK".into(), "content-type: application/json\r\n".into(), body.clone())).await;
+    let redactor = redactor_for([secret.to_owned()]);
+    let output = send(build_request(&test_client(), &args(&base)).unwrap(), &redactor).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&output.body).unwrap()["secret"], "[REDACTED]");
+    let wrapped = json!({"content": [{"text": json!({"body": output.body}).to_string()}]}).to_string();
+    assert!(!wrapped.contains("first"));
+    assert!(!wrapped.contains("last-line"));
+}
+
+#[tokio::test]
+async fn test_vault_http_redacts_before_character_limit() {
+    let body = format!("{}{TOKEN} end", "x".repeat(MAX_BODY_CHARS - 10));
+    let (base, server) = serve(move |_| ("200 OK".into(), "content-type: text/plain\r\n".into(), body.clone())).await;
+    let output = send(build_request(&test_client(), &args(&base)).unwrap(), &redactor_for([TOKEN.to_owned()])).await.unwrap();
+    server.await.unwrap();
+    assert!(output.truncated);
+    assert!(!output.body.contains(&TOKEN[..10]));
+    assert!(output.body.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn test_vault_http_hides_value_cut_by_byte_limit() {
+    // A known value larger than the transport limit must not leak its surviving prefix.
+    let secret = "s".repeat(MAX_BODY_BYTES + 100);
+    let body = format!("safe {secret}");
+    let (base, server) = serve(move |_| ("200 OK".into(), "content-type: text/plain\r\n".into(), body.clone())).await;
+    let redactor = ResponseRedactor::new([secret].into_iter());
+    let output = send(build_request(&test_client(), &args(&base)).unwrap(), &redactor).await.unwrap();
+    server.await.unwrap();
+    assert!(output.truncated);
+    assert_eq!(output.body, "safe [REDACTED]");
+}
+
+
+#[test]
+fn test_vault_http_cutoff_after_malformed_bytes_hides_unicode_secret_prefix() {
+    let secret = "synthetic-secret-中-tail";
+    let redactor = redactor_for([secret.to_owned()]);
+    for kept in [1, 2] {
+        let mut bytes = vec![0xff];
+        bytes.extend_from_slice(b"safe synthetic-secret-");
+        bytes.extend_from_slice(&"中".as_bytes()[..kept]);
+        assert_eq!(clean_body(&bytes, true, &redactor), "\u{fffd}safe [REDACTED]");
     }
 }

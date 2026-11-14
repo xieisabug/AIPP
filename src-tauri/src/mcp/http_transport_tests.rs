@@ -164,3 +164,46 @@ fn test_unresolved_vault_reference_is_never_sent() {
         .err().expect("unresolved reference must fail");
     assert!(error.contains("保险箱引用"));
 }
+
+
+#[test]
+fn test_response_redactor_stream_preserves_multiline_and_unicode_across_every_boundary() {
+    let secret = "first-secret-line\r\n第二行-secret";
+    let redactor = std::sync::Arc::new(ResponseRedactor::new([secret.to_owned()].into_iter()));
+    let text = format!("safe {secret} end");
+    for split in (0..=text.len()).filter(|&index| text.is_char_boundary(index)) {
+        let mut stream = redactor.stream();
+        let mut output = stream.push(&text[..split]);
+        // No prefix of the secret is released while waiting for its next line.
+        assert!(!output.contains("first-secret"));
+        output.push_str(&stream.push(&text[split..]));
+        output.push_str(&stream.finish());
+        assert_eq!(output, "safe [REDACTED] end", "split {split}");
+    }
+}
+
+#[test]
+fn test_response_redactor_stream_does_not_release_overlapping_prefix() {
+    let redactor = std::sync::Arc::new(ResponseRedactor::new(["abcd".into(), "abcdef".into()].into_iter()));
+    let mut stream = redactor.stream();
+    assert_eq!(stream.push("before abcd"), "before ");
+    assert_eq!(stream.push("ef after"), "[REDACTED] after");
+    assert_eq!(stream.finish(), "");
+    let mut stream = redactor.stream();
+    assert_eq!(stream.push("safe abc"), "safe ");
+    assert_eq!(stream.finish_truncated(), "[REDACTED]");
+    let mut stream = redactor.stream();
+    assert_eq!(stream.push("safe abc"), "safe ");
+    assert_eq!(stream.finish(), "abc");
+}
+
+#[test]
+fn test_response_redactor_cleans_json_before_serialization() {
+    let secret = "first\"quoted\\second\nlast-line";
+    let redactor = ResponseRedactor::new([secret.to_owned()].into_iter());
+    let mut value = serde_json::json!({"nested": [{"value": secret}]});
+    redactor.clean_json(&mut value);
+    assert_eq!(value["nested"][0]["value"], "[REDACTED]");
+    let serialized = serde_json::to_string(&value).unwrap();
+    assert!(!serialized.contains("first"));
+}

@@ -1,6 +1,7 @@
 //! Structured stdio launches: never interpolate package arguments into a shell command.
 use super::{format, store};
 use crate::db::mcp_db::MCPServer;
+use crate::mcp::http_transport::ResponseRedactor;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Arc, Mutex}};
@@ -107,13 +108,84 @@ async fn prepare(app: &tauri::AppHandle, server: &MCPServer) -> Result<Option<(C
     }).await.map_err(|e| format!("准备 stdio 工作进程：{e}"))?
 }
 
-pub struct Diagnostics { buffer: Arc<Mutex<Vec<u8>>>, secrets: Vec<String>, task: tokio::task::JoinHandle<()>, id: i64, pid: Option<u32>, key: Option<String> }
+pub struct Diagnostics { buffer: Arc<Mutex<String>>, redactor: Arc<ResponseRedactor>, task: tokio::task::JoinHandle<()>, id: i64, pid: Option<u32>, key: Option<String> }
 impl Diagnostics {
+    /// The complete secret set includes plugin connection credentials resolved at spawn time.
+    /// Normal tool responses must use it too, not just process/transport diagnostics.
+    pub(crate) fn redactor(&self) -> &ResponseRedactor { &self.redactor }
+
     pub fn error(&self, stage: &str, error: impl std::fmt::Display) -> String {
-        let bytes = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-        let mut text = format!("stdio 连接 {} / 进程 {:?} / {stage}：{error}；stderr：{}；退出码由 MCP 传输层管理，未暴露", self.id,self.pid, if bytes.is_empty() { "未收到输出".into() } else { String::from_utf8_lossy(&bytes).into_owned() });
-        for secret in &self.secrets { text = text.replace(secret,"[REDACTED]"); }
-        text
+        let output = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        diagnostic_error(self.id, self.pid, stage, error, &output, &self.redactor)
+    }
+}
+
+pub(super) fn diagnostic_error(id: i64, pid: Option<u32>, stage: &str, error: impl std::fmt::Display, output: &str, redactor: &ResponseRedactor) -> String {
+    // The retained stderr is already sanitized. Also scrub protocol/transport errors,
+    // which can echo tool arguments even when the subprocess writes nothing to stderr.
+    redactor.clean(&format!("stdio 连接 {} / 进程 {:?} / {stage}：{error}；stderr：{}；退出码由 MCP 传输层管理，未暴露",
+        id, pid, if output.is_empty() { "未收到输出" } else { output }))
+}
+
+/// Decode exactly as lossy UTF-8 would at EOF, retaining only incomplete code points
+/// between reads so a chunk boundary cannot change a known value before matching.
+pub(super) fn decode_stderr(bytes: &mut Vec<u8>, eof: bool) -> String {
+    let mut result = String::new();
+    let mut consumed = 0;
+    while consumed < bytes.len() {
+        match std::str::from_utf8(&bytes[consumed..]) {
+            Ok(text) => { result.push_str(text); consumed = bytes.len(); }
+            Err(error) => {
+                let valid_end = consumed + error.valid_up_to();
+                result.push_str(std::str::from_utf8(&bytes[consumed..valid_end]).expect("valid UTF-8 prefix"));
+                consumed = valid_end;
+                match error.error_len() {
+                    Some(length) => { result.push('\u{fffd}'); consumed += length; }
+                    None if eof => { result.push('\u{fffd}'); consumed = bytes.len(); }
+                    None => break,
+                }
+            }
+        }
+    }
+    bytes.drain(..consumed);
+    result
+}
+
+fn retain_diagnostic(buffer: &Mutex<String>, safe: &str) {
+    let mut output = buffer.lock().unwrap_or_else(|e| e.into_inner());
+    output.push_str(safe);
+    if output.len() > 16384 {
+        let mut excess = output.len() - 16384;
+        while !output.is_char_boundary(excess) { excess += 1; }
+        output.drain(..excess);
+    }
+}
+
+pub(super) async fn capture_stderr<R: tokio::io::AsyncRead + Unpin>(mut stderr: R, buffer: Arc<Mutex<String>>, redactor: Arc<ResponseRedactor>) {
+    use tokio::io::AsyncReadExt;
+    let mut stream = redactor.stream();
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 2048];
+    loop {
+        match stderr.read(&mut chunk).await {
+            Ok(0) => {
+                let decoded = decode_stderr(&mut pending, true);
+                retain_diagnostic(&buffer, &stream.push(&decoded));
+                retain_diagnostic(&buffer, &stream.finish());
+                break;
+            }
+            Ok(n) => {
+                pending.extend_from_slice(&chunk[..n]);
+                let decoded = decode_stderr(&mut pending, false);
+                retain_diagnostic(&buffer, &stream.push(&decoded));
+            }
+            Err(error) => {
+                // A failed stream is not EOF. Do not expose a withheld secret prefix.
+                retain_diagnostic(&buffer, &stream.finish_truncated());
+                retain_diagnostic(&buffer, &redactor.clean(&format!("\n[stderr read error: {error}]")));
+                break;
+            }
+        }
     }
 }
 impl Drop for Diagnostics { fn drop(&mut self) { self.task.abort(); if let Some(key)=&self.key { let mut active=ACTIVE.lock().unwrap_or_else(|e|e.into_inner()); if let Some(count)=active.get_mut(key) { *count=count.saturating_sub(1); } } } }
@@ -121,24 +193,20 @@ impl Drop for Diagnostics { fn drop(&mut self) { self.task.abort(); if let Some(
 /// `extra_secrets` are values the fallback command received from vault references; like plugin
 /// credentials they are scrubbed from stderr diagnostics.
 pub async fn spawn(app: &tauri::AppHandle, server: &MCPServer, fallback: Command, extra_secrets: Vec<String>) -> Result<(rmcp::transport::TokioChildProcess,Diagnostics),String> {
-    use tokio::io::AsyncReadExt;
     let key = binding(server.command.as_deref())?.map(|b|b.key);
     let _guard = if key.is_some() { Some(super::api::INSTALL_LOCK.lock().await) } else { None };
     let (command,mut secrets) = prepare(app,server).await?.unwrap_or((fallback,vec![]));
     secrets.extend(extra_secrets);
+    let context_redactor = crate::vault::placeholder::current_redactor();
+    let redactor = Arc::new(crate::vault::executor::redactor_for(secrets).merged(context_redactor.as_deref()));
     let (transport,stderr) = rmcp::transport::TokioChildProcess::builder(command).stderr(std::process::Stdio::piped()).spawn()
-        .map_err(|e| format!("stdio 连接 {} 启动失败：{e}",server.id))?;
-    let buffer = Arc::new(Mutex::new(Vec::new())); let capture = buffer.clone();
+        .map_err(|e| redactor.clean(&format!("stdio 连接 {} 启动失败：{e}",server.id)))?;
+    let buffer = Arc::new(Mutex::new(String::new())); let capture = buffer.clone();
+    let capture_redactor = redactor.clone();
     let task = tokio::spawn(async move {
-        if let Some(mut stderr) = stderr {
-            let mut chunk = [0u8;2048];
-            while let Ok(n) = stderr.read(&mut chunk).await { if n == 0 { break; }
-                let mut output = capture.lock().unwrap_or_else(|e| e.into_inner()); output.extend_from_slice(&chunk[..n]);
-                if output.len() > 16384 { let excess = output.len()-16384; output.drain(..excess); }
-            }
-        }
+        if let Some(stderr) = stderr { capture_stderr(stderr, capture, capture_redactor).await; }
     });
     let pid = transport.id();
     if let Some(key)=&key { *ACTIVE.lock().unwrap_or_else(|e|e.into_inner()).entry(key.clone()).or_default() += 1; }
-    Ok((transport,Diagnostics { buffer,secrets,task,id:server.id,pid,key }))
+    Ok((transport,Diagnostics { buffer,redactor,task,id:server.id,pid,key }))
 }

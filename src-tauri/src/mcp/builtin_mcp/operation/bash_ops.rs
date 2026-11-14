@@ -11,7 +11,7 @@ use super::state::OperationState;
 use super::types::*;
 use crate::db::mcp_db::MCPDatabase;
 use crate::mcp::http_transport::ResponseRedactor;
-use crate::utils::shell_utils::{decode_process_output, decode_process_output_line, resolve_shell, ShellCommand, ShellKind};
+use crate::utils::shell_utils::{decode_process_output, resolve_shell, ShellCommand, ShellKind};
 use crate::vault::placeholder::ShellVault;
 
 /// Vault values for a command: environment variables for the child and a redactor for its output.
@@ -107,7 +107,7 @@ impl BashOperations {
             // 后台执行
             Self::execute_background(state, &shell_command, command, &vault).await
         } else {
-            // 前台执行（等待完成）；输出由 execute_tool_by_transport 统一遮盖保险箱的值
+            // 前台执行（等待完成）；在截断之前遮盖保险箱的值
             Self::execute_foreground(&shell_command, timeout_ms, &vault).await
         }
     }
@@ -129,23 +129,12 @@ impl BashOperations {
 
         match result {
             Ok(Ok(output)) => {
-                let mut combined_output = String::new();
-                combined_output.push_str(&decode_process_output(&output.stdout));
-                if !output.stderr.is_empty() {
-                    combined_output.push_str("\n[stderr]\n");
-                    combined_output.push_str(&decode_process_output(&output.stderr));
-                }
-
-                // 截断过长输出
-                let truncated = if combined_output.len() > Self::MAX_OUTPUT_LENGTH {
-                    format!(
-                        "{}...\n[Output truncated at {} characters]",
-                        &combined_output[..Self::MAX_OUTPUT_LENGTH],
-                        Self::MAX_OUTPUT_LENGTH
-                    )
-                } else {
-                    combined_output
-                };
+                // Redact the complete streams before adding labels or truncating: either
+                // transformation could otherwise cut a credential into unmatchable pieces.
+                let redactor = vault.as_ref().map(|vault| vault.redactor());
+                let truncated = Self::foreground_output(
+                    &output.stdout, &output.stderr, redactor.as_deref(),
+                );
 
                 let exit_code = output.status.code();
 
@@ -162,6 +151,33 @@ impl BashOperations {
                 timeout_ms
             )),
         }
+    }
+
+    pub(super) fn foreground_output(
+        stdout: &[u8],
+        stderr: &[u8],
+        redactor: Option<&ResponseRedactor>,
+    ) -> String {
+        let clean = |bytes: &[u8]| {
+            let decoded = decode_process_output(bytes);
+            match redactor {
+                Some(redactor) => redactor.clean(&decoded),
+                None => decoded,
+            }
+        };
+        let mut output = clean(stdout);
+        if !stderr.is_empty() {
+            output.push_str("\n[stderr]\n");
+            output.push_str(&clean(stderr));
+        }
+        // The advertised limit is characters, not bytes. Never slice inside UTF-8.
+        if let Some((end, _)) = output.char_indices().nth(Self::MAX_OUTPUT_LENGTH) {
+            output.truncate(end);
+            output.push_str(&format!(
+                "...\n[Output truncated at {} characters]", Self::MAX_OUTPUT_LENGTH,
+            ));
+        }
+        output
     }
 
     /// 后台执行命令
@@ -203,7 +219,7 @@ impl BashOperations {
         let state_clone = state.clone();
         let bash_id_clone = bash_id.clone();
         let command_clone = command.to_string();
-        // Later get_bash_output calls run without the vault step, so clean lines as they arrive.
+        // Later get_bash_output calls run without the vault step; clean before storage.
         let redactor = vault.as_ref().map(|vault| vault.redactor());
 
         tokio::spawn(async move {
@@ -276,7 +292,7 @@ impl BashOperations {
         state.mark_bash_completed(bash_id, exit_code).await;
     }
 
-    async fn read_single_stream<R>(
+    pub(super) async fn read_single_stream<R>(
         state: Arc<OperationState>,
         bash_id: String,
         mut reader: R,
@@ -287,45 +303,84 @@ impl BashOperations {
     {
         let mut buffer = [0u8; 4096];
         let mut pending = Vec::new();
+        let mut safe_lines = String::new();
+        let mut stream = redactor.as_ref().map(|redactor| redactor.stream());
 
         loop {
             match reader.read(&mut buffer).await {
                 Ok(0) => {
                     if !pending.is_empty() {
-                        Self::append_decoded_line(&state, &bash_id, &pending, is_stderr, redactor.as_deref()).await;
+                        let decoded = decode_process_output(&pending);
+                        let safe = match stream.as_mut() {
+                            Some(stream) => stream.push(&decoded),
+                            None => decoded,
+                        };
+                        safe_lines.push_str(&safe);
                     }
+                    if let Some(stream) = stream.as_mut() {
+                        safe_lines.push_str(&stream.finish());
+                    }
+                    Self::append_safe_lines(&state, &bash_id, &mut safe_lines, is_stderr, true).await;
                     break;
                 }
                 Ok(read) => {
                     pending.extend_from_slice(&buffer[..read]);
+                    // Decode complete byte lines using the existing platform decoder, not
+                    // individual reads (which may split UTF-8/GBK characters). Keep CR/LF
+                    // intact for matching multiline secrets across decoding frames.
                     while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
-                        let line = pending.drain(..=newline_index).collect::<Vec<_>>();
-                        Self::append_decoded_line(&state, &bash_id, &line, is_stderr, redactor.as_deref()).await;
+                        let bytes = pending.drain(..=newline_index).collect::<Vec<_>>();
+                        let decoded = decode_process_output(&bytes);
+                        let safe = match stream.as_mut() {
+                            Some(stream) => stream.push(&decoded),
+                            None => decoded,
+                        };
+                        safe_lines.push_str(&safe);
+                        Self::append_safe_lines(&state, &bash_id, &mut safe_lines, is_stderr, false).await;
                     }
                 }
                 Err(e) => {
+                    // This is not EOF: discard undecoded bytes and hide any held secret
+                    // prefix rather than exposing a partial credential on read failure.
+                    if let Some(stream) = stream.as_mut() {
+                        safe_lines.push_str(&stream.finish_truncated());
+                    }
+                    Self::append_safe_lines(&state, &bash_id, &mut safe_lines, is_stderr, true).await;
                     let label = if is_stderr { "stderr" } else { "stdout" };
-                    error!(bash_id = %bash_id, error = %e, stream = %label, "Error reading process output");
-                    state
-                        .append_bash_output(&bash_id, &format!("[error reading {}: {}]\n", label, e))
-                        .await;
+                    let message = format!("[error reading {}: {}]", label, e);
+                    let message = match redactor.as_ref() {
+                        Some(redactor) => redactor.clean(&message),
+                        None => message,
+                    };
+                    error!(bash_id = %bash_id, error = %message, stream = %label, "Error reading process output");
+                    state.append_bash_output(&bash_id, &format!("{}\n", message)).await;
                     break;
                 }
             }
         }
     }
 
-    async fn append_decoded_line(
+    /// Only sanitized text may reach line formatting, tracing, or OperationState.
+    async fn append_safe_lines(
         state: &OperationState,
         bash_id: &str,
-        bytes: &[u8],
+        pending: &mut String,
         is_stderr: bool,
-        redactor: Option<&ResponseRedactor>,
+        finished: bool,
     ) {
-        let line = decode_process_output_line(bytes);
-        let line = match redactor { Some(redactor) => redactor.clean(&line), None => line };
-        debug!(bash_id = %bash_id, line = %line, is_stderr, "Process output line");
+        while let Some(newline_index) = pending.find('\n') {
+            let line = pending.drain(..=newline_index).collect::<String>();
+            Self::append_safe_line(state, bash_id, &line, is_stderr).await;
+        }
+        if finished && !pending.is_empty() {
+            let line = std::mem::take(pending);
+            Self::append_safe_line(state, bash_id, &line, is_stderr).await;
+        }
+    }
 
+    async fn append_safe_line(state: &OperationState, bash_id: &str, line: &str, is_stderr: bool) {
+        let line = line.trim_end_matches(&['\r', '\n'][..]);
+        debug!(bash_id = %bash_id, line = %line, is_stderr, "Process output line");
         let formatted = if is_stderr {
             format!("[stderr] {}\n", line)
         } else {

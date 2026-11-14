@@ -64,6 +64,15 @@ describe("VaultInputCard", () => {
         expect(screen.getByLabelText("手机号")).toHaveValue("13800000000");
     });
 
+    it("should preserve surrounding whitespace when submitting a secret", async () => {
+        const user = userEvent.setup();
+        const onSubmit = vi.fn(async () => {});
+        render(<VaultInputCard request={{ ...request, fields: [{ key: "password", name: "密码", description: "" }] }} onSubmit={onSubmit} onDecline={vi.fn(async () => {})} />);
+        await user.type(screen.getByLabelText("密码"), "  password with spaces  ");
+        await user.click(screen.getByRole("button", { name: "保存并继续" }));
+        expect(onSubmit).toHaveBeenCalledWith("in1", { password: "  password with spaces  " }, true);
+    });
+
     it("should let the user decline", async () => {
         const user = userEvent.setup();
         const onDecline = vi.fn(async () => {});
