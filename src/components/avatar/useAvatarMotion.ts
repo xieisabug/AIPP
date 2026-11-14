@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { useReducedMotion } from "motion/react";
-import { actionDurations, type AvatarAction, type AvatarState } from "./avatarDefinition";
+import { actionDuration, type AvatarShape, type AvatarAction, type AvatarState } from "./avatarDefinition";
 
 export interface AvatarActionRequest { action: AvatarAction; sequence: number }
 
-export function useAvatarMotion(ref: RefObject<HTMLElement | null>, enabled: boolean, state: AvatarState, request?: AvatarActionRequest, equipment = "") {
+export function useAvatarMotion(ref: RefObject<HTMLElement | null>, enabled: boolean, state: AvatarState, request?: AvatarActionRequest, equipment = "", shape?: AvatarShape) {
     const reduced = useReducedMotion();
     const [visible, setVisible] = useState(!document.hidden);
     const [action, setAction] = useState<AvatarAction | null>(null);
@@ -29,14 +29,14 @@ export function useAvatarMotion(ref: RefObject<HTMLElement | null>, enabled: boo
         clearTimeout(timer.current);
         setAction(null);
         return () => clearTimeout(timer.current);
-    }, [state, active, equipment]);
+    }, [state, active, equipment, shape]);
 
     useEffect(() => {
         if (!active || !request) return;
         clearTimeout(timer.current);
         setAction(request.action);
         setSequence(previous => previous + 1);
-        timer.current = setTimeout(() => setAction(null), actionDurations[request.action]);
+        timer.current = setTimeout(() => setAction(null), actionDuration(request.action, shape));
         return () => clearTimeout(timer.current);
         // A completed/interrupted request must never replay when visibility returns.
         // eslint-disable-next-line react-hooks/exhaustive-deps

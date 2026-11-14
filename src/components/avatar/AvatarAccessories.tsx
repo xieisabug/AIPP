@@ -3,16 +3,27 @@ import { SvgPose } from "./SvgPose";
 
 /** 编辑器里装饰缩略图的取景框。 */
 export const accessoryPreviewViewBox: Record<AccessoryId, string> = {
-    "round-glasses": "-115 -65 230 130",
+    "round-glasses": "-146 -65 292 130",
     sunglasses: "-132 -62 264 124",
+    "thick-brows": "-94 -91 188 102",
     blush: "-95 -20 190 116",
+    "baseball-cap": "-125 -108 312 150",
+    "baseball-cap-left": "-187 -108 312 150",
+    crown: "-116 -103 232 138",
+    headphones: "-244 -44 488 266",
+    mustache: "-104 25 208 75",
+    bandage: "-57 0 114 71",
+    eyepatch: "-129 -75 258 137",
+    rotor: "-151 -102 302 125",
+    sprout: "-72 -103 150 120",
+    nightcap: "-111 -102 250 211",
     beret: "-140 -100 280 140",
     "bow-bell": "-76 -52 152 136",
     flower: "-38 -38 80 76",
 };
 
 export function GlassesArtwork() {
-    return <g fill="none" stroke="#253449" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round">
+    return <g transform="scale(1.28)" fill="none" stroke="#253449" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round">
         <path d="M-101-10L-83-7M83-7L101-10M-12-5Q0-14 12-5" />
         <rect x="-82" y="-34" width="70" height="62" rx="25" fill="#B5DBF5" fillOpacity="0.2" />
         <rect x="12" y="-34" width="70" height="62" rx="25" fill="#B5DBF5" fillOpacity="0.2" />
@@ -32,12 +43,59 @@ export function SunglassesArtwork() {
     </g>;
 }
 
+/** 两条眉毛按双眼中心定位，保持水平等宽；浅色细边让深色脸上也能看清。 */
+export function ThickBrowsArtwork({ raised = false }: { raised?: boolean }) {
+    return <g fill="#302D35" stroke="#E6DFDC" strokeWidth="3" strokeLinejoin="round">
+        {[-1, 1].map(side => <g key={side} transform={`translate(${side * 44} -54)`}>
+            <SvgPose pose={{ y: raised && side === 1 ? [0, -12, -12, 0] : 0 }}
+                transition={{ duration: raised ? 1 : 0.15, ease: "easeInOut" }}>
+                <rect x="-31" y="-14" width="62" height="28" rx="7" />
+            </SvgPose>
+        </g>)}
+    </g>;
+}
+
 /** 腮红：静态的两团红晕。 */
 export function BlushArtwork() {
     return <g>
         {[-1, 1].map(side => <g key={side} transform={`translate(${side * 60} 40)`} opacity="0.6">
             <ellipse rx="23" ry="12" fill="#FF8FA3" />
             <path d="M-11-5L-16 5M-1-5L-6 5M9-5L4 5" stroke="#E25E78" strokeWidth="3.5" strokeLinecap="round" opacity="0.7" />
+        </g>)}
+    </g>;
+}
+
+export function BaseballCapArtwork({ reversed = false }: { reversed?: boolean }) {
+    return <g transform={reversed ? "scale(-1 1) rotate(-6)" : "rotate(-6)"} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M-110 8C-111-46-81-88-28-91C30-96 69-64 82-12L77 7Q-12 27-110 8Z"
+            fill="#28384A" stroke="#8191A2" strokeWidth="4" />
+        <path d="M-28-88Q4-68 9-9M-32-88Q-70-62-72 2" fill="none" stroke="#536779" strokeWidth="4" />
+        <ellipse cx="-29" cy="-91" rx="10" ry="5" fill="#8191A2" />
+        <path d="M23-37L38-54L51-47L30-28Z" fill="#E1E9ED" />
+        <path d="M-101 6Q-11 14 59-10Q116-24 167-5Q178 1 165 7Q139 14 116 11Q83 7 48 17Q-25 36-101 16Z"
+            fill="#172536" stroke="#8191A2" strokeWidth="4" />
+        <path d="M62-4Q111-16 149-7" fill="none" stroke="#ACBDC8" strokeWidth="3" />
+    </g>;
+}
+
+export function CrownArtwork() {
+    return <g transform="scale(0.86 1)" stroke="#915F23" strokeWidth="5" strokeLinejoin="round">
+        <path d="M-99-57L-52-30L-4-83Q0-88 4-83L52-30L99-57L82 11Q0 28-82 11Z" fill="#F6C34E" />
+        <path d="M-83-2Q0 12 83-2L80 17Q0 31-80 17Z" fill="#E8A637" />
+        <path d="M0-47L14-28L0-10L-14-28Z" fill="#AE4362" stroke="#FFE39A" />
+        {[-99, 0, 99].map(x => <circle key={x} cx={x} cy={x ? -59 : -85} r="7" fill="#FFE39A" />)}
+    </g>;
+}
+
+export function HeadphonesArtwork() {
+    const band = "M-201 141C-201 34-149-14-56-18Q0-21 56-18C149-14 201 34 201 141";
+    return <g strokeLinecap="round" strokeLinejoin="round">
+        <path d={band} fill="none" stroke="#8494A7" strokeWidth="26" />
+        <path d={band} fill="none" stroke="#273346" strokeWidth="17" />
+        {[-1, 1].map(side => <g key={side} transform={`scale(${side} 1) rotate(7 201 155)`}>
+            <rect x="174" y="100" width="35" height="103" rx="16" fill="#182436" stroke="#8291A0" strokeWidth="5" />
+            <rect x="192" y="107" width="36" height="88" rx="17" fill="#465C74" stroke="#A4B4C4" strokeWidth="5" />
+            <path d="M214 127V161" fill="none" stroke="#B5DAE8" strokeWidth="6" />
         </g>)}
     </g>;
 }

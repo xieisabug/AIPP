@@ -2,7 +2,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { accessoriesOf, accessoryDefinitions, avatarDefinitions, type AccessoryId, type AvatarAction } from "@/components/avatar/avatarDefinition";
-import { accessoryPreviewViewBox, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "@/components/avatar/AvatarAccessories";
+import { accessoryPreviewViewBox, BaseballCapArtwork, CrownArtwork, HeadphonesArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork, ThickBrowsArtwork } from "@/components/avatar/AvatarAccessories";
+import { MustacheArtwork, BandageArtwork, EyepatchStrap, EyepatchArtwork, RotorArtwork, SproutArtwork, NightcapArtwork } from "@/components/avatar/PlayfulAccessories";
 import { Button } from "@/components/ui/button";
 import ButlerAvatar from "./ButlerAvatar";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
@@ -13,10 +14,11 @@ const lightColors = [
     ["樱花粉", "#FAD4E4"], ["浅紫", "#E4DAFF"], ["浅蓝", "#CDE9FF"],
     ["薄荷绿", "#CEF3DF"], ["青柠", "#E5F4B8"],
 ];
+const terracotta = "#D87855";
 const darkColors = [
     ["纯黑", "#000000"], ["石墨", "#343B48"], ["海军蓝", "#193B68"],
     ["靛蓝", "#39316D"], ["深紫", "#613C72"], ["酒红", "#793D50"],
-    ["墨绿", "#205448"], ["深棕", "#624735"],
+    ["墨绿", "#205448"], ["深棕", "#624735"], ["陶橘", terracotta], ["鲸蓝", "#4D6BFE"],
 ];
 
 const accessorySlots = [["eyes", "脸部"], ["head", "头部"]] as const;
@@ -28,7 +30,12 @@ export const PROFILE_FOOTER_CLASS = "-mx-6 shrink-0 border-t border-border px-6 
 
 function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: ButlerAppearance }) {
     const artwork = {
-        "round-glasses": <GlassesArtwork />, sunglasses: <SunglassesArtwork />, blush: <BlushArtwork />, beret: <HatArtwork />,
+        mustache: <MustacheArtwork />, bandage: <BandageArtwork />, eyepatch: <><EyepatchStrap /><EyepatchArtwork /></>,
+        rotor: <RotorArtwork />, sprout: <SproutArtwork />, nightcap: <NightcapArtwork />,
+        crown: <CrownArtwork />, headphones: <HeadphonesArtwork />,
+        "thick-brows": <ThickBrowsArtwork />,
+        "round-glasses": <GlassesArtwork />, sunglasses: <SunglassesArtwork />, blush: <BlushArtwork />, beret: <HatArtwork />, "baseball-cap": <BaseballCapArtwork />,
+        "baseball-cap-left": <BaseballCapArtwork reversed />,
         "bow-bell": <BowBellArtwork color={appearance.colors.primary} outline={appearance.colors.secondary} />, flower: <FlowerArtwork />,
     }[id];
     return <svg aria-hidden="true" viewBox={accessoryPreviewViewBox[id]} className="size-8">{artwork}</svg>;
@@ -55,7 +62,7 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
     const definition = avatarDefinitions[appearance.shape];
     const current = showcase.override ? { kind: "action" as const, action: showcase.override }
         : showcaseStep(showcase.step, accessoryActionsOf([appearance.accessories.eyes, appearance.accessories.head]));
-    const delay = showcaseDelay(current, showcase.id);
+    const delay = showcaseDelay(current, showcase.id, appearance.shape);
     useEffect(() => {
         if (reducedMotion) return;
         const timer = setTimeout(() => setShowcase(previous => ({ step: previous.step + 1, id: previous.id + 1 })), delay);
@@ -91,7 +98,7 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
                 <div className="flex items-center justify-between gap-2">
                     <h3 className="text-sm font-semibold">形象</h3>
                     <Button type="button" variant="ghost" size="sm" className="h-7 text-muted-foreground"
-                        onClick={() => update(previous => ({ ...previous, colors: defaultAppearance.colors }))}>恢复黑白配色</Button>
+                        onClick={() => update(previous => ({ ...previous, colors: definition.colorLabels.primary ? defaultAppearance.colors : { ...previous.colors, secondary: defaultAppearance.colors.secondary } }))}>{definition.colorLabels.primary ? "恢复黑白配色" : "恢复黑色"}</Button>
                 </div>
                 <fieldset className="space-y-2.5">
                     <legend className="mb-2.5 text-sm font-medium">形状</legend>
@@ -104,7 +111,7 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
                         </button>)}
                     </div>
                 </fieldset>
-                {palette("primary", `${definition.colorLabels.primary} · 亮色`, lightColors)}
+                {definition.colorLabels.primary && palette("primary", `${definition.colorLabels.primary} · 亮色`, lightColors)}
                 {palette("secondary", `${definition.colorLabels.secondary} · 深色`, darkColors)}
                 {accessorySlots.map(([slot, label]) => <fieldset key={slot} className="space-y-2.5">
                     <legend className="mb-2.5 text-sm font-medium">{label}</legend>
@@ -114,7 +121,8 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
                             aria-pressed={appearance.accessories[slot] === value}
                             onClick={() => {
                                 update(previous => ({ ...previous, accessories: { ...previous.accessories, [slot]: value } }));
-                                if (value) setShowcase(previous => ({ ...previous, id: previous.id + 1, override: accessoryDefinitions[value].action }));
+                                const previewAction = value && accessoryDefinitions[value].action;
+                                if (previewAction) setShowcase(previous => ({ ...previous, id: previous.id + 1, override: previewAction }));
                             }}
                             className="flex size-11 items-center justify-center rounded-lg border aria-pressed:border-primary aria-pressed:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
                             {value ? <AccessoryIcon id={value} appearance={appearance} /> : <X className="size-4 text-muted-foreground" />}

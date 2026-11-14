@@ -127,34 +127,57 @@ describe("Butler profile editor", () => {
         expect(onClose).not.toHaveBeenCalled();
     });
 
-    it("should retain accessories when changing shape and restoring colors", async () => {
+    it("should offer one body palette and keep decorations when saving the pixel shape", async () => {
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
+        const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+        click("脸部：腮红");
+        click("头部：小花");
+        click("像素仔");
+        expect(screen.queryByRole("button", { name: /亮色：/ })).toBeNull();
+        expect(screen.getByRole("button", { name: "身体 · 深色：纯黑" })).toHaveAttribute("aria-pressed", "true");
+        click("身体 · 深色：陶橘");
+        for (const [shape, area] of [["圆团", "外圈"], ["AIPP", "右侧"], ["像素仔", "身体"]]) {
+            click(shape);
+            expect(screen.getByRole("button", { name: `${area} · 深色：陶橘` })).toHaveAttribute("aria-pressed", "true");
+        }
+        click("恢复黑色");
+        expect(document.querySelectorAll('[data-aipp-slot="assistant-profile-preview"] path[fill="#FFFFFF"][stroke="#000000"]')).toHaveLength(2);
+        click("保存");
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", expect.objectContaining({
+            shape: "pixel", colors: { primary: "#FFFFFF", secondary: "#000000" },
+            accessories: { eyes: "blush", head: "flower" },
+        })));
+    });
+
+    it.each([["棒球帽", "baseball-cap"], ["反向棒球帽", "baseball-cap-left"], ["皇冠", "crown"], ["头戴式耳机", "headphones"], ["竹蜻蜓", "rotor"], ["嫩芽", "sprout"], ["睡帽", "nightcap"]])("should retain %s when changing shape and restoring colors", async (label, id) => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
         fireEvent.click(screen.getByRole("button", { name: "脸部：圆框眼镜" }));
-        fireEvent.click(screen.getByRole("button", { name: "头部：贝雷帽" }));
+        fireEvent.click(screen.getByRole("button", { name: `头部：${label}` }));
         fireEvent.click(screen.getByRole("button", { name: "圆团" }));
         fireEvent.click(screen.getByRole("button", { name: "脸部 · 亮色：蜜桃" }));
         fireEvent.click(screen.getByRole("button", { name: "恢复黑白配色" }));
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", {
             version: 2, shape: "pebble", colors: { primary: "#FFFFFF", secondary: "#000000" },
-            accessories: { eyes: "round-glasses", head: "beret" }, motion: true,
+            accessories: { eyes: "round-glasses", head: id }, motion: true,
         }));
     });
 
-    it("should offer face and head decorations without manual preview controls", async () => {
+    it.each([["墨镜", "sunglasses"], ["粗眉毛", "thick-brows"], ["卷翘小胡子", "mustache"], ["鼻梁创可贴", "bandage"], ["海盗眼罩", "eyepatch"]])("should save %s with an independent head decoration", async (label, eyes) => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" appearance={{ version: 2, shape: "aipp", colors: { primary: "#FAD4E4", secondary: "#000000" },
             accessories: { eyes: null, head: null }, motion: false }} onSave={onSave} onClose={vi.fn()} />);
         expect(screen.queryByRole("checkbox")).toBeNull();
         expect(screen.queryByRole("combobox")).toBeNull();
-        fireEvent.click(screen.getByRole("button", { name: "脸部：墨镜" }));
+        fireEvent.click(screen.getByRole("button", { name: `脸部：${label}` }));
         fireEvent.click(screen.getByRole("button", { name: "头部：铃铛蝴蝶结" }));
         expect(screen.getByRole("button", { name: "头部：铃铛蝴蝶结" })).toHaveAttribute("aria-pressed", "true");
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", {
             version: 2, shape: "aipp", colors: { primary: "#FAD4E4", secondary: "#000000" },
-            accessories: { eyes: "sunglasses", head: "bow-bell" }, motion: true,
+            accessories: { eyes, head: "bow-bell" }, motion: true,
         }));
     });
 });
