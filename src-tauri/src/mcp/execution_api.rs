@@ -3463,20 +3463,20 @@ async fn execute_stdio_tool(
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
     let start = std::time::Instant::now();
 
+    let (env, env_secrets) = crate::vault::config_ref::stdio_env(_app_handle, server).await.map_err(anyhow::Error::msg)?;
+    // Vault values handed to the process must not come back to the model through its output.
+    let redactor = crate::vault::executor::redactor_for(env_secrets.clone());
+
     // 定义实际的执行逻辑
     let execution = async {
         let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(_app_handle, server, Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
-                    if let Some(env_vars) = &server.environment_variables {
-                        for line in env_vars.lines() {
-                            if let Some((key, value)) = line.split_once('=') {
-                                cmd.env(key.trim(), value.trim());
-                            }
-                        }
+                    for (key, value) in &env {
+                        cmd.env(key, value);
                     }
-                })).await.map_err(anyhow::Error::msg)?;
+                }), env_secrets).await.map_err(anyhow::Error::msg)?;
         let client = crate::mcp::apps::bundles::client::PluginClient { app:_app_handle.clone(),conversation_id,server_id:server.id }.serve(transport).await.map_err(|e| anyhow!(diagnostics.error("初始化 MCP",e)))?;
 
         let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
@@ -3506,9 +3506,10 @@ async fn execute_stdio_tool(
     match result {
         Ok(r) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "stdio tool executed successfully");
-            Ok(r)
+            Ok(redactor.clean(&r))
         }
         Err(e) => {
+            let e = anyhow!(redactor.clean(&e.to_string()));
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "stdio tool execution failed");
             Err(e)
         }
@@ -3550,7 +3551,9 @@ async fn execute_builtin_tool(
     // 部分内置工具有自己的等待/超时语义，不应被 MCP server 的外层超时抢先截断。
     let skip_outer_timeout = (command == "aipp:ui_interaction"
         && matches!(tool_name, "ask_user_question" | "preview_code"))
-        || (command == "aipp:operation" && tool_name == "execute_bash");
+        || (command == "aipp:operation" && tool_name == "execute_bash")
+        // 可能在等待用户确认首次访问的网站；执行器自带请求超时与 10 分钟确认超时。
+        || (command == crate::vault::tool::COMMAND && tool_name == crate::vault::tool::REQUEST_TOOL);
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用

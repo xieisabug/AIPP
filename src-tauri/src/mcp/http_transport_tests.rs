@@ -156,3 +156,11 @@ fn test_response_redactor_plain_and_empty_values() {
         "[REDACTED] / [REDACTED] / safe");
     assert_eq!(ResponseRedactor::default().clean(r#"{"safe":true}"#), r#"{"safe":true}"#);
 }
+
+#[test]
+fn test_unresolved_vault_reference_is_never_sent() {
+    let reference = "Bearer vault://3f2a9c1e-0b7d-4e5f-9a12-6c8d0e1f2a3b#token";
+    let error = create_http_transport(&server("http://127.0.0.1:1/mcp".into(), serde_json::json!({ "Authorization": reference })), reqwest::Client::builder())
+        .err().expect("unresolved reference must fail");
+    assert!(error.contains("保险箱引用"));
+}

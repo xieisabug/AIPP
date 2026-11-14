@@ -297,6 +297,23 @@ pub(crate) fn permission_resolved(app: &AppHandle, conversation_id: Option<i64>)
     }
 }
 
+/// 保险箱凭据首次访问某个网站，等用户确认（卡片在消息流里）。
+pub(crate) fn vault_use_requested(app: &AppHandle, conversation_id: Option<i64>, detail: String) {
+    if let Some(id) = conversation_id {
+        emit_changed(app, id);
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        notify(&app, ApprovalKind::ToolCall, conversation_id, detail).await;
+    });
+}
+
+pub(crate) fn vault_use_resolved(app: &AppHandle, conversation_id: Option<i64>) {
+    if let Some(id) = conversation_id {
+        emit_changed(app, id);
+    }
+}
+
 /// 工具调用没有自动执行、停下来等用户确认。
 pub(crate) async fn tool_call_held(app: &AppHandle, call_id: i64) {
     let loaded = MCPDatabase::new(app).map_err(|e| e.to_string()).and_then(|db| {
@@ -367,6 +384,7 @@ pub(crate) async fn pending_approval_conversation_ids(app: &AppHandle) -> BTreeS
     if let Some(state) = app.try_state::<AcpPermissionState>() {
         ids.extend(state.pending_permission_conversation_ids().await);
     }
+    ids.extend(crate::vault::approval::pending_conversation_ids());
     ids
 }
 

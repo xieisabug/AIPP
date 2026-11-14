@@ -118,11 +118,14 @@ impl Diagnostics {
 }
 impl Drop for Diagnostics { fn drop(&mut self) { self.task.abort(); if let Some(key)=&self.key { let mut active=ACTIVE.lock().unwrap_or_else(|e|e.into_inner()); if let Some(count)=active.get_mut(key) { *count=count.saturating_sub(1); } } } }
 
-pub async fn spawn(app: &tauri::AppHandle, server: &MCPServer, fallback: Command) -> Result<(rmcp::transport::TokioChildProcess,Diagnostics),String> {
+/// `extra_secrets` are values the fallback command received from vault references; like plugin
+/// credentials they are scrubbed from stderr diagnostics.
+pub async fn spawn(app: &tauri::AppHandle, server: &MCPServer, fallback: Command, extra_secrets: Vec<String>) -> Result<(rmcp::transport::TokioChildProcess,Diagnostics),String> {
     use tokio::io::AsyncReadExt;
     let key = binding(server.command.as_deref())?.map(|b|b.key);
     let _guard = if key.is_some() { Some(super::api::INSTALL_LOCK.lock().await) } else { None };
-    let (command,secrets) = prepare(app,server).await?.unwrap_or((fallback,vec![]));
+    let (command,mut secrets) = prepare(app,server).await?.unwrap_or((fallback,vec![]));
+    secrets.extend(extra_secrets);
     let (transport,stderr) = rmcp::transport::TokioChildProcess::builder(command).stderr(std::process::Stdio::piped()).spawn()
         .map_err(|e| format!("stdio 连接 {} 启动失败：{e}",server.id))?;
     let buffer = Arc::new(Mutex::new(Vec::new())); let capture = buffer.clone();

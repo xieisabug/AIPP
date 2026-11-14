@@ -141,6 +141,7 @@ pub fn inject(app: &tauri::AppHandle, servers: &mut Vec<MCPServerWithTools>, kin
         }
     }
     merge_tools(servers, required, kind);
+    crate::vault::tool::inject(app, servers);
     Ok(())
 }
 
@@ -196,6 +197,7 @@ pub fn prepare_scheduled_run_tools(app: &tauri::AppHandle, servers: &mut Vec<MCP
             _ => {}
         }
     }
+    crate::vault::tool::inject(app, servers);
     servers.retain(|s| !s.tools.is_empty());
     servers.sort_by_key(|s| s.id);
     Ok(())

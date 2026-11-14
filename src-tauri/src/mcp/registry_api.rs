@@ -51,7 +51,7 @@ fn split_command_line(input: &str) -> Vec<String> {
 }
 
 // 环境变量解析：忽略空行与以#开头的注释，只处理 KEY=VALUE 形式
-fn parse_env_vars(env: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_env_vars(env: &str) -> Vec<(String, String)> {
     let mut result = Vec::new();
     for line in env.lines() {
         let line = line.trim();
@@ -228,6 +228,7 @@ pub async fn add_mcp_server(
     if let Some(existing) = db.get_mcp_servers().map_err(|e| e.to_string())?.into_iter().find(|s| s.name == request.name) {
         crate::mcp::apps::guard_update(&app_handle, existing.id, &request)?;
     }
+    validate_vault_references(&app_handle, &request)?;
 
     let server_id = db
         .upsert_mcp_server_with_builtin(
@@ -246,6 +247,7 @@ pub async fn add_mcp_server(
             request.proxy_enabled,
     )
     .map_err(|e| e.to_string())?;
+    confirm_vault_references(&app_handle, server_id, &request)?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
     let _ = app_handle.emit("mcp_state_changed", ());
@@ -261,6 +263,7 @@ pub async fn update_mcp_server(
     request: MCPServerRequest,
 ) -> Result<(), String> {
     crate::mcp::apps::guard_update(&app_handle, id, &request)?;
+    validate_vault_references(&app_handle, &request)?;
     let db = open_db(&app_handle)?;
 
     db.update_mcp_server_with_builtin(
@@ -279,11 +282,28 @@ pub async fn update_mcp_server(
         request.proxy_enabled,
     )
     .map_err(|e| e.to_string())?;
+    confirm_vault_references(&app_handle, id, &request)?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     crate::sync::schedule_sync_after_local_change(&app_handle);
     let _ = app_handle.emit("mcp_state_changed", ());
 
     Ok(())
+}
+
+/// Vault references must point at existing credentials, and only where AIPP resolves them.
+fn validate_vault_references(app: &tauri::AppHandle, request: &MCPServerRequest) -> Result<(), String> {
+    let texts: Vec<&str> = [request.environment_variables.as_deref(), request.headers.as_deref()].into_iter().flatten().collect();
+    if !texts.iter().any(|t| crate::vault::config_ref::contains(t)) { return Ok(()); }
+    crate::vault::config_ref::mcp_target(&request.transport_type, request.command.as_deref(), request.url.as_deref(), request.environment_variables.as_deref())
+        .map_err(|e| e.message)?;
+    crate::vault::config_ref::validate(app, &texts)
+}
+
+/// Saving in Settings is the user's confirmation of where the referenced credentials go. SuperAdmin
+/// writes the table directly and never reaches this, so its edits leave references unconfirmed.
+fn confirm_vault_references(app: &tauri::AppHandle, id: i64, request: &MCPServerRequest) -> Result<(), String> {
+    crate::vault::config_ref::confirm_mcp(app, id, &request.name, &request.transport_type, request.command.as_deref(),
+        request.url.as_deref(), request.environment_variables.as_deref(), request.headers.as_deref())
 }
 
 #[tauri::command]
@@ -416,18 +436,18 @@ async fn test_stdio_connection(app_handle: &tauri::AppHandle, server: &MCPServer
         return Err("Empty command".to_string());
     }
 
+    let (env, env_secrets) = crate::vault::config_ref::stdio_env(app_handle, server).await?;
+
     // 简短的连接测试，超时时间更短
     let client_result = tokio::time::timeout(STDIO_TEST_TIMEOUT, async {
         let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(app_handle, server, Command::new(&parts[0]).configure(|cmd| {
                 if parts.len() > 1 {
                     cmd.args(&parts[1..]);
                 }
-                if let Some(env_vars) = &server.environment_variables {
-                    for (k, v) in parse_env_vars(env_vars) {
-                        cmd.env(k, v);
-                    }
+                for (k, v) in &env {
+                    cmd.env(k, v);
                 }
-            })).await.map_err(anyhow::Error::msg)?;
+            }), env_secrets).await.map_err(anyhow::Error::msg)?;
             let client = ().serve(transport).await.map_err(|e| anyhow::anyhow!(diagnostics.error("初始化 MCP", e)))?;
         // Keep stderr capture alive through cancellation.
         let _diagnostics = diagnostics;
@@ -603,6 +623,8 @@ async fn get_stdio_capabilities(
         return Err("Empty command".to_string());
     }
 
+    let (env, env_secrets) = crate::vault::config_ref::stdio_env(&app_handle, &server).await?;
+
     // 创建MCP客户端 - 使用正确的API模式
     let client_result = tokio::time::timeout(
         std::time::Duration::from_millis(
@@ -613,12 +635,10 @@ async fn get_stdio_capabilities(
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
-                    if let Some(env_vars) = &server.environment_variables {
-                        for (k, v) in parse_env_vars(env_vars) {
-                            cmd.env(k, v);
-                        }
+                    for (k, v) in &env {
+                        cmd.env(k, v);
                     }
-                })).await.map_err(anyhow::Error::msg)?;
+                }), env_secrets).await.map_err(anyhow::Error::msg)?;
             let client = ().serve(transport).await.map_err(|e| anyhow::anyhow!(diagnostics.error("初始化 MCP", e)))?;
             // Return diagnostics alongside the live client.
             let client = (client, diagnostics);

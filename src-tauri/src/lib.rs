@@ -20,6 +20,7 @@ mod sync;
 pub use sync::prepare_assistant_recovery;
 mod template_engine;
 mod utils;
+mod vault;
 mod window;
 
 pub use crate::feishu::{
@@ -1114,6 +1115,17 @@ pub fn run() {
             crate::api::butler_group::rename_butler_group,
             crate::api::butler_group::delete_butler_group,
             crate::api::butler_memory::list_butler_memories,
+            crate::api::vault_api::vault_capability,
+            crate::api::vault_api::vault_list,
+            crate::api::vault_api::vault_create,
+            crate::api::vault_api::vault_update,
+            crate::api::vault_api::vault_replace_secret,
+            crate::api::vault_api::vault_delete,
+            crate::api::vault_api::vault_usage,
+            crate::api::vault_api::vault_references,
+            crate::api::vault_api::vault_confirm_reference,
+            crate::vault::approval::vault_list_use_requests,
+            crate::vault::approval::vault_respond_use_request,
             crate::api::butler_memory::update_butler_memory,
             crate::api::butler_memory::delete_butler_memory,
             crate::api::butler_memory::get_butler_memory_source,

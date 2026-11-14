@@ -91,3 +91,56 @@ describe("MCPServerDialog stdio gating", () => {
         expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("update_mcp_server", expect.anything());
     });
 });
+
+describe("MCPServerDialog vault references", () => {
+    const vaultId = "0f8e2a52-6c1d-4b8a-9d3e-1a2b3c4d5e6f";
+    const vaultItem = {
+        id: vaultId, handle: "github_pat", name: "GitHub 个人令牌", description: "", authKind: "bearer",
+        injection: [], fields: [{ key: "token", label: "令牌" }], allowedSites: [], syncEnabled: true,
+        status: "ready", createdAt: 1, updatedAt: 1, lastUsedAt: null,
+    };
+
+    beforeEach(() => {
+        platformState.mobile = false;
+        clearAllMockHandlers();
+        vi.mocked(invoke).mockClear();
+        toastMock.error.mockClear();
+        mockInvokeHandler("vault_capability", () => ({ available: true }));
+        mockInvokeHandler("vault_list", () => [vaultItem]);
+        mockInvokeHandler("add_mcp_server", () => 9);
+        mockInvokeHandler("refresh_mcp_server_capabilities", () => [[], [], []]);
+    });
+
+    it("inserts an environment variable line that references the credential", async () => {
+        render(<MCPServerDialog isOpen onClose={() => undefined} onSubmit={() => undefined} initialConfig={{ ...stdioConfig, environment_variables: "# 注释\nDEBUG=1" }} />);
+        fireEvent.click(await screen.findByRole("button", { name: "插入保险箱凭据" }));
+        expect(screen.getByLabelText("变量名")).toHaveAttribute("placeholder", "GITHUB_PAT");
+        await act(async () => {
+            fireEvent.click(screen.getByRole("button", { name: "确认" }));
+        });
+        const line = `GITHUB_PAT=vault://${vaultId}#token`;
+        expect(screen.getByLabelText("环境变量")).toHaveValue(`# 注释\nDEBUG=1\n${line}`);
+        expect(screen.getByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        expect(screen.getByText(/保存后，引用的保险箱凭据将被确认用于 本机程序 npx -y/)).toBeInTheDocument();
+        await submit();
+        expect(vi.mocked(invoke)).toHaveBeenCalledWith("add_mcp_server", {
+            request: expect.objectContaining({ environment_variables: `# 注释\nDEBUG=1\n${line}` }),
+        });
+    });
+
+    it("keeps the header prefix next to a referenced value and saves the reference", async () => {
+        const headers = JSON.stringify({ Authorization: `Bearer vault://${vaultId}#token` });
+        const config = { name: "gh", transport_type: "http", url: "https://mcp.example.com/mcp", headers };
+        // 与设置页一致：对话框先以关闭状态挂载，再带着初始配置打开
+        const { rerender } = render(<MCPServerDialog isOpen={false} onClose={() => undefined} onSubmit={() => undefined} initialConfig={config} />);
+        rerender(<MCPServerDialog isOpen onClose={() => undefined} onSubmit={() => undefined} initialConfig={config} />);
+        fireEvent.click(screen.getByRole("button", { name: "高级设置" }));
+        expect(await screen.findByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        expect(screen.getByLabelText("前缀")).toHaveValue("Bearer ");
+        expect(screen.getByText("保存后，引用的保险箱凭据将被确认用于 https://mcp.example.com")).toBeInTheDocument();
+        await submit();
+        const call = vi.mocked(invoke).mock.calls.find(([command]) => command === "add_mcp_server");
+        const request = (call?.[1] as { request: { headers: string } }).request;
+        expect(JSON.parse(request.headers)).toEqual({ Authorization: `Bearer vault://${vaultId}#token` });
+    });
+});

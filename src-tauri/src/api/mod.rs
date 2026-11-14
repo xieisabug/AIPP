@@ -17,6 +17,7 @@ pub(crate) mod butler_reporting;
 pub(crate) mod butler_capabilities;
 pub mod butler_contact_activity;
 pub mod butler_memory;
+pub mod vault_api;
 pub mod butler_progress;
 pub mod butler_peer;
 pub mod butler_work;

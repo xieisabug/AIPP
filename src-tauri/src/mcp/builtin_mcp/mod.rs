@@ -2319,6 +2319,7 @@ pub async fn execute_aipp_builtin_tool(
                 }),
             }
         }
+        "vault" => crate::vault::tool::dispatch(&app_handle, &tool_name, &args, conversation_id).await,
         "superadmin" => {
             // Runtime guard: superadmin tools require butler conversation
             // （管家模式创建的定时任务，其运行会话与管家会话同等对待）。

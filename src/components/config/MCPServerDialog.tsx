@@ -4,7 +4,6 @@ import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
 import { Textarea } from '../ui/textarea';
 import { Input } from '../ui/input';
-import { PasswordInput } from '../ui/password-input';
 import { Label } from '../ui/label';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '../ui/accordion';
@@ -13,6 +12,11 @@ import { MCPServer, MCPServerRequest, MCP_TRANSPORT_TYPES } from '../../data/MCP
 import CustomSelect from '../CustomSelect';
 import { useIsMobilePlatform } from '@/hooks/use-platform';
 import { isAippBuiltinCommand, isMobileExecutableMcpServer } from '@/lib/mobileUnsupported';
+import { KeyRound } from 'lucide-react';
+import { useVaultItems } from '@/hooks/useVaultItems';
+import VaultRefField from './vault/VaultRefField';
+import VaultPickerDialog from './vault/VaultPickerDialog';
+import { containsVaultRef, envVaultRefs, formatVaultRef } from './vault/vaultRefs';
 
 interface MCPServerDialogProps {
     isOpen: boolean;
@@ -47,6 +51,10 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         is_enabled: true,
         proxy_enabled: false,
     });
+
+    // 保险箱引用：只给用户自己配置的 HTTP / stdio 连接使用
+    const vault = useVaultItems();
+    const [envPickerOpen, setEnvPickerOpen] = useState(false);
 
     // UI state
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -173,6 +181,27 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
     }, []);
     const updateHeaderRow = useCallback((id: string, patch: Partial<HeaderRow>) => {
         setHeaderRows(prev => prev.map(r => (r.id === id ? { ...r, ...patch } : r)));
+    }, []);
+
+    const vaultCapable = formData.transport_type === 'http'
+        || (formData.transport_type === 'stdio' && !isAippBuiltinCommand(formData.command) && !formData.command?.startsWith('agent-plugin-stdio:'));
+    // 保存后会被确认的目标：HTTP 是地址的 origin，stdio 是这条启动命令
+    const vaultTarget = (() => {
+        if (formData.transport_type === 'http') {
+            try { return new URL(formData.url || '').origin; } catch { return null; }
+        }
+        const command = formData.command?.trim();
+        return command ? `本机程序 ${command.length > 60 ? `${command.slice(0, 60)}…` : command}` : null;
+    })();
+    const envRefs = envVaultRefs(formData.environment_variables);
+    const usesVault = containsVaultRef(formData.environment_variables) || containsVaultRef(formData.headers);
+
+    const insertEnvReference = useCallback(({ ref, prefix, variableName }: { ref: { id: string; field: string }; prefix: string; variableName?: string }) => {
+        setFormData(prev => {
+            const current = prev.environment_variables || '';
+            const line = `${variableName}=${formatVaultRef(ref, prefix)}`;
+            return { ...prev, environment_variables: current.trim() ? `${current.replace(/\s+$/, '')}\n${line}` : line };
+        });
     }, []);
 
     // 处理表单提交
@@ -338,7 +367,15 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                         )}
 
                         <div className="space-y-2">
-                            <Label htmlFor="environment_variables">环境变量</Label>
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="environment_variables">环境变量</Label>
+                                {vault.available && vaultCapable && (
+                                    <Button type="button" variant="ghost" size="sm" className="h-7 gap-1 px-2" onClick={() => setEnvPickerOpen(true)}>
+                                        <KeyRound className="h-3.5 w-3.5" />
+                                        插入保险箱凭据
+                                    </Button>
+                                )}
+                            </div>
                             <Textarea
                                 id="environment_variables"
                                 placeholder="KEY1=value1&#10;KEY2=value2"
@@ -346,6 +383,33 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                 className="font-mono text-xs resize-none h-40 overflow-auto leading-5"
                                 value={formData.environment_variables}
                                 onChange={(e) => updateField('environment_variables', e.target.value)}
+                            />
+                            {envRefs.length > 0 && (
+                                <ul className="space-y-1 text-xs" data-aipp-slot="mcp-env-vault-refs">
+                                    {envRefs.map((ref, index) => {
+                                        const item = vault.items.find(i => i.id === ref.id);
+                                        const field = item?.fields.find(f => f.key === ref.field)?.label;
+                                        return (
+                                            <li key={`${ref.name}-${index}`} className="flex items-center gap-1.5">
+                                                <span className="font-mono">{ref.name}</span>
+                                                <span className="text-muted-foreground">→</span>
+                                                <KeyRound className="h-3 w-3 text-muted-foreground" />
+                                                {item
+                                                    ? <span>{item.name}{field ? ` · ${field}` : ''}</span>
+                                                    : <span className="text-destructive">{vault.available ? '凭据已删除，请重新选择' : '此设备不支持凭据保险箱'}</span>}
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                            <VaultPickerDialog
+                                open={envPickerOpen}
+                                onClose={() => setEnvPickerOpen(false)}
+                                items={vault.items}
+                                suggestedName={`MCP ${formData.name || ''} · 环境变量`}
+                                targetHint={vaultTarget}
+                                askVariableName
+                                onPick={insertEnvReference}
                             />
                         </div>
                     </div>
@@ -391,23 +455,19 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                                                         onChange={(e) => updateHeaderRow(row.id, { key: e.target.value })}
                                                         className="flex-[0.45]"
                                                     />
-                                                    {isMobilePlatform ? (
-                                                        <div className="flex-1 min-w-0">
-                                                            <PasswordInput
-                                                                placeholder="Header 值，例如 Bearer ${API_KEY}"
-                                                                value={row.value}
-                                                                onChange={(e) => updateHeaderRow(row.id, { value: e.target.value })}
-                                                            />
-                                                        </div>
-                                                    ) : (
-                                                        <Input
+                                                    <div className="flex-1 min-w-0">
+                                                        <VaultRefField
+                                                            vault={vault}
+                                                            ariaLabel={`${row.key || 'Header'} 的值`}
                                                             placeholder="Header 值，例如 Bearer ${API_KEY}"
-                                                            type="password"
                                                             value={row.value}
-                                                            onChange={(e) => updateHeaderRow(row.id, { value: e.target.value })}
-                                                            className="flex-1"
+                                                            onChange={(value) => updateHeaderRow(row.id, { value })}
+                                                            allowPrefix
+                                                            headerName={row.key}
+                                                            suggestedName={`MCP ${formData.name || ''} · ${row.key || '请求头'}`}
+                                                            targetHint={vaultTarget}
                                                         />
-                                                    )}
+                                                    </div>
                                                     <Button
                                                         type="button"
                                                         variant="outline"
@@ -443,6 +503,11 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                         </AccordionItem>
                     </Accordion>
                 </fieldset>
+                {usesVault && vaultTarget && (
+                    <p className="text-xs text-muted-foreground" data-aipp-slot="mcp-vault-confirm-hint">
+                        保存后，引用的保险箱凭据将被确认用于 {vaultTarget}
+                    </p>
+                )}
                 <DialogFooter className="flex-shrink-0">
                     <Button
                         variant="outline"

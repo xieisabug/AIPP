@@ -315,6 +315,13 @@ pub fn extract_claude_sdk_config(
     // A regular Anthropic provider stores credentials as API fields, while
     // Claude Code consumes the corresponding environment variables.
     if let Some(api_key) = provider_value(providers, "api_key") {
+        // The agent inside Claude Code can read its own environment, so a vault value would no longer
+        // be hidden from it. Refuse rather than resolve.
+        if crate::vault::config_ref::contains(&api_key) {
+            return Err(AppError::ProviderError(
+                "此 Provider 的 API Key 保存在凭据保险箱中。Claude Code 在本机进程里运行，助手能读到它的环境变量，所以保险箱凭据不会交给它。请为 Claude Code 使用单独的 Provider，或使用 Claude 登录。".into(),
+            ));
+        }
         env_vars.insert("ANTHROPIC_API_KEY".into(), api_key);
     }
     if let Some(base_url) = provider_value(providers, "endpoint")

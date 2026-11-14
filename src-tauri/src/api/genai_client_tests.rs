@@ -334,3 +334,16 @@ async fn test_opencode_go_billing_survives_translated_streams() {
         server.await.unwrap();
     }
 }
+
+/// A vault reference that skipped the prepare step is never sent as an API key.
+#[test]
+fn test_unresolved_vault_reference_blocks_client_creation() {
+    let mut configs = endpoint_config("https://api.openai.com/v1/");
+    configs.push(LLMProviderConfig {
+        id: 2, llm_provider_id: 1, name: "api_key".into(), value: "vault://3f2a9c1e-0b7d-4e5f-9a12-6c8d0e1f2a3b#token".into(),
+        append_location: "header".into(), is_addition: false,
+    });
+    let error = create_client_with_config(None, &configs, "gpt-test", "openai_api", None, None, false, Some(2), false, &HashMap::new())
+        .err().expect("unresolved reference must fail");
+    assert!(error.to_string().contains("保险箱"));
+}

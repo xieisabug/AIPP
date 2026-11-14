@@ -80,6 +80,8 @@ pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_
         Some("aipp:ui_interaction") => {
             matches!(tool_name, "ask_user_question" | "preview_file" | "preview_code")
         }
+        // 只在保险箱里有凭据时注入，注入了就应直接可调用。
+        Some(crate::vault::tool::COMMAND) => crate::vault::tool::is_tool(tool_name),
         _ => false,
     }
 }
@@ -91,6 +93,16 @@ pub fn is_butler_conversation_kind(kind: &str) -> bool {
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
     vec![
+        // 凭据保险箱：保险箱里有凭据时自动对所有助手可用，关闭此工具集即停用。
+        BuiltinTemplateInfo {
+            id: "vault".into(),
+            name: "凭据保险箱".into(),
+            description: "让助手通过用户保存的凭据调用需要认证的 HTTP API。凭据值由 AIPP 在发送时注入，助手看不到；首次访问新网站需用户确认。保险箱中有凭据时自动对所有助手可用。".into(),
+            command: crate::vault::tool::COMMAND.into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: None,
+        },
         // Agent 工具
         BuiltinTemplateInfo {
             id: "agent".into(),
@@ -412,6 +424,7 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
 
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
+        Some("vault") => crate::vault::tool::definitions(),
         Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
             crate::api::butler_memory::definition(),
             BuiltinToolInfo {

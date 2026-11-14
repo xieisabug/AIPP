@@ -81,6 +81,7 @@ src-tauri/
 │   │   ├── registry_api.rs  # MCP server 管理
 │   │   ├── execution_api.rs # MCP tool call 执行与状态
 │   │   └── detection.rs     # AI 响应中的 tool call 检测
+│   ├── vault/               # 凭据保险箱执行层：aipp:vault 工具、注入/脱敏执行器、网站批准队列、配置引用解析
 │   ├── artifacts/           # Artifact 渲染、运行与集合管理
 │   ├── feishu/              # 飞书运行时、消息接入、回发与卡片回调
 │   ├── external_channels/   # 外部渠道消息渲染抽象
@@ -204,4 +205,18 @@ Members keep Butler-mode SuperAdmin tools, `butler_memory` (group scope + global
 `sync/vault.rs` 管理 system.db 中的加密凭据及 OS 安全存储中的实际加密密钥。没有同步口令时生成随机密钥；设置后与 provider secret 共用 PBKDF2 派生密钥。换钥使用 SQLite 事务，旧同步密钥保留至远端重加密完成。MCP 认证入口通过该模块读取、迁移和更新凭据，不向 React 或模型提供秘密明文。
 
 `sync/vault_sync.rs` 接入连接元数据、密文、跨设备归属、pending 和 tombstone；`sync/vault_refresh.rs` 与 Sync Server 的版本化刷新申请协调 OAuth refresh token，避免多端重复刷新。服务端仅处理密文、公开密钥版本与同步身份，不持有解密密钥；aipp-helper 提供应用目录与预解析插件详情，并分发固定版本插件归档；不持有连接凭据。
+
+### 个人凭据保险箱
+
+`sync/personal_vault.rs` 在 system.db 中保存 `vault_item`（元数据 + `value` 信封，AAD=`("pvault:{uuid}","secret")`）与仅本机的 `vault_usage_log`。同步类型为 `vault.item`：`sync_enabled=0` 的行被视为删除；只有 `value` 列在 `seal_snapshots` 中用同步密钥重新封装后上传，`apply` 在没有密钥或解密失败时 park 到 `sync_secret_pending`，拿到口令后重放。`vault::switch_key_with` 在同一事务中调用 `personal_vault::reencrypt`，因此设置或更换口令后保险箱仍可解密。
+
+`vault/` 是执行层：`tool.rs` 定义内置 `aipp:vault` 的两个工具，在 `butler_tools::inject` / `prepare_scheduled_run_tools` 中按“本机有凭据且内置工具集已启用”注入，属于动态加载固定工具，在 `tool_review` 中免审，并豁免外层超时。`executor.rs` 每次读库解析 handle，检查目标 origin 是否在 `allowed_sites`。如果不在：有人值守时经 `approval.rs`（内存中的 oneshot 队列，事件 `vault-use-request`/`vault-use-resolved`，接入 `approval_attention`）询问用户；`scheduled_run` 直接返回 `site_not_approved`。随后拒绝与注入位置同名的请求头和参数，按用户声明的规则注入（敏感头），`redirect(Policy::none())` 发送，并对响应体和响应头做原值/Base64/URL/JSON 转义变体脱敏，丢弃 `Set-Cookie`。`api/vault_api.rs` 的命令只返回元数据。
+
+`vault/config_ref.rs` 解析配置中的引用 `vault://<uuid>#<field>`（field 为 `token`/`username`/`password`/`header_N`/`query_N`，可带文字前缀）。引用只解析给 `vault_item.config_bindings` 中已确认的目标：HTTP MCP 与 Provider 用 origin，stdio MCP 用 `program:sha256(command + "
+" + env 原文)`。确认只在设置页保存命令（`add/update_mcp_server`、`update_llm_provider_config`、`update_llm_provider`）与 `vault_confirm_reference` 中写入，按来源（`mcp:{id}`/`provider:{id}`）替换旧目标；SuperAdmin 直接写库不会产生确认。接入点：
+- `http_transport` 普通路径用 `resolve_http_server` 解析请求头与 env，敏感头发送，`build_plain_client` 遇到残留 `vault://` 拒绝发送；
+- stdio 的测试、能力检测与 `execute_stdio_tool` 用 `stdio_env`，结果、错误与 stderr 诊断用 `executor::redactor_for` 脱敏；
+- Provider：`copilot_token_manager::prepare_provider_configs` 先调用 `config_ref::prepare_provider_configs` 解析 api_key，并附一条仅在内存中的 `__aipp_vault_guard`。`create_client_with_config` 算出最终 endpoint 后，用 `check_provider_destination` 核对 origin；api_key 仍含引用时 fail-closed。`claude_sdk` 与 `export_llm_provider` 拒绝引用。
+
+`vault_references` 扫描 mcp.db 与 llm.db 中的引用，并给出当前目标与是否已确认，供保险箱页展示和确认。
 
