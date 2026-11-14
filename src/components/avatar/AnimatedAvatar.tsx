@@ -108,13 +108,13 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                     <motion.g style={{ opacity: logoOpacity }}><g transform="translate(0 140)">
                     <SvgPose pose={sway} transition={swayTransition}><g transform={`translate(0 -140) scale(${definition.artworkScale ?? 1}) translate(-255 -255)`}>
                         {definition.parts.map(part => <g key={part.color}>
-                            <path d={part.path} fill={appearance.colors[part.color]} />
+                            <path d={part.path} fill={part.color === "white" ? "#FFFFFF" : appearance.colors[part.color]} />
                             {definition.colorLabels.primary && <path d={part.path} fill={`url(#${id}-${part.color})`} opacity="0.2" />}
                         </g>)}
                         <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}>
                             <motion.g style={{ x: faceX, y: faceY, opacity: eyeOpacity }}>
                                 {[-1, 1].map(side => <AvatarEye key={side} side={side} open={side < 0 ? v.left : v.right} happy={v.happy} sad={v.sad} yaw={v.yaw} tilt={v.tilt}
-                                    blink={blinking} forceSmile={smiling} squint={peering} squeeze={jingling} color={faceColor} />)}
+                                    blink={blinking} forceSmile={smiling} squint={peering} squeeze={jingling} color={faceColor} inkColor={definition.eyeColor} scale={definition.eyeScale} />)}
                             </motion.g>
                             {faceItem === "blush" && <g data-avatar-accessory="blush"><BlushArtwork /></g>}
                             {faceItem === "sunglasses" && <SvgPose data-avatar-accessory="sunglasses" pose={peering ? { y: [0, 0, -130, -130, 0], rotate: [0, 0, -5, -5, 0] } : { y: 0, rotate: 0 }}

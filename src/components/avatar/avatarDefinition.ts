@@ -1,18 +1,20 @@
 import { avatarRecipes } from "./avatarRecipes";
 export type { AvatarState } from "./avatarRecipes";
 export type AvatarAction = "blink" | "smile" | "glasses" | "hat" | "peer" | "blush" | "jingle" | "butterfly";
-export type AvatarShape = "aipp" | "pebble" | "pixel";
+export type AvatarShape = "aipp" | "pebble" | "pixel" | "whale";
 export interface AvatarAnchor { x: number; y: number; scale: number; rotation?: number }
 export interface AvatarDefinition {
     id: AvatarShape;
     label: string;
     // All artwork and anchors use the same 510-unit coordinate system.
-    parts: { path: string; color: "primary" | "secondary" }[];
+    parts: { path: string; color: "primary" | "secondary" | "white" }[];
     /** Uniform artwork scale around the avatar center, including equipped accessories. */
     artworkScale?: number;
+    eyeColor?: string;
+    eyeScale?: number;
     face: AvatarAnchor;
     crown: AvatarAnchor;
-    /** 斜戴发卡的位置：头顶偏左一侧。 */
+    /** 蝴蝶结和小花的佩戴位置。 */
     clip: AvatarAnchor;
     propDock: AvatarAnchor;
     colorLabels: { primary?: string; secondary: string };
@@ -35,6 +37,16 @@ export const avatarDefinitions: Record<AvatarShape, AvatarDefinition> = {
         parts: [{ color: "secondary", path: "M105 91H405Q429 91 429 115V205H465Q483 205 483 223V247Q483 265 465 265H429V379H405V319H375V379H351V319H159V379H135V319H105V379H81V265H45Q27 265 27 247V223Q27 205 45 205H81V115Q81 91 105 91Z" }],
         face: { x: 255, y: 178, scale: 1.23 }, crown: { x: 255, y: 91, scale: 1.08 },
         clip: { x: 114, y: 97, scale: 1, rotation: -16 }, propDock: { x: 380, y: 316, scale: 0.7, rotation: -20 },
+        colorLabels: { secondary: "身体" }, capabilities: ["eyes", "headwear"],
+    },
+    whale: {
+        id: "whale", label: "小鲸鱼", eyeColor: "#FFFFFF", eyeScale: 0.9,
+        parts: [
+            { color: "secondary", path: "M187 96C111 80 45 111 16 178C-18 255 6 347 69 400C131 452 246 463 316 404C337 413 373 415 396 405Q410 393 389 383L355 370C398 327 430 263 426 199C478 193 508 154 508 109Q508 94 498 104C469 137 447 111 415 143C412 107 373 115 363 83Q356 52 347 79C327 132 346 164 382 190L374 217C339 211 304 158 268 136Q239 119 264 95Q282 83 258 82C235 80 209 88 187 96Z" },
+            { color: "white", path: "M37 210C88 192 165 229 207 288C237 330 268 382 307 400C255 409 229 374 191 353C161 336 158 346 170 368C184 392 146 397 116 378C60 344 37 278 34 225Q33 214 37 210Z" },
+        ],
+        face: { x: 125, y: 173, scale: 0.87 }, crown: { x: 147, y: 96, scale: 0.88 },
+        clip: { x: 415, y: 157, scale: 0.78, rotation: -14 }, propDock: { x: 324, y: 353, scale: 0.72, rotation: -24 },
         colorLabels: { secondary: "身体" }, capabilities: ["eyes", "headwear"],
     },
     pebble: {
