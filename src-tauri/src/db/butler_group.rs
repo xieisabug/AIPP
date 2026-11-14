@@ -340,7 +340,7 @@ pub fn pending_routes(conn: &Connection) -> Result<Vec<Message>> {
     collect(conn, &format!("SELECT {MESSAGE_COLUMNS} FROM butler_chat_group_message WHERE route_state='pending' ORDER BY group_id,seq"), [], message_row)
 }
 
-fn validate_name(name: &str) -> Result<String> {
+pub(crate) fn validate_name(name: &str) -> Result<String> {
     let name = name.trim();
     ensure!(!name.is_empty() && name.chars().count() <= MAX_NAME_CHARS, "群聊名称须为 1–{MAX_NAME_CHARS} 个字符");
     Ok(name.to_string())

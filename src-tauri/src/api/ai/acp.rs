@@ -150,6 +150,8 @@ pub fn build_selected_mcp_tools_payload(
 ) -> Result<String, String> {
     use crate::api::assistant_api::{MCPServerWithTools, MCPToolInfo};
     let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let dynamic = crate::api::assistant_api::management::config_value(&db,assistant_id,"mcp_loading_mode_explicit")?.as_deref()==Some("true")
+        && crate::api::assistant_api::management::config_value(&db,assistant_id,"dynamic_mcp_loading_enabled")?.as_deref()==Some("true");
     let mut servers: Vec<MCPServerWithTools> = db.get_assistant_mcp_servers_with_tools(assistant_id)
         .map_err(|e| e.to_string())?.into_iter()
         .filter(|(_,name,command,enabled,_)| *enabled && name != "MCP 动态加载工具" && command.as_deref() != Some("aipp:dynamic_mcp"))
@@ -161,6 +163,12 @@ pub fn build_selected_mcp_tools_payload(
                 }).collect(),
         }).collect();
     let kind = crate::mcp::butler_tools::conversation_kind(app_handle, conversation_id).map_err(|e| e.to_string())?;
+    if dynamic {
+        servers = crate::mcp::prompt::collect_all_enabled_servers_for_dynamic_mode(app_handle).map_err(|e|e.to_string())?;
+        let access = crate::mcp::assistant_access::Restrictions::conversation(app_handle,conversation_id)?;
+        servers.retain(|s|access.server(s.id));
+        for server in &mut servers { server.tools.retain(|t|access.tool(server.id,t.id)); }
+    }
     crate::mcp::butler_tools::inject(app_handle, &mut servers, &kind).map_err(|e| e.to_string())?;
     // 原生智能体的工具调用显示为活动记录，不会渲染引用卡片；不提供 preview_message，
     // 避免模型以为用户已经看到原文而省略交付。
@@ -171,16 +179,28 @@ pub fn build_selected_mcp_tools_payload(
     if !crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind) {
         servers.retain(|s| s.command.as_deref() != Some("aipp:superadmin"));
     }
-    selected_tools_payload(servers)
+    if dynamic {
+        let butler = crate::mcp::builtin_mcp::templates::is_butler_conversation_kind(&kind);
+        for server in &mut servers {
+            server.tools.retain(|tool|crate::mcp::builtin_mcp::templates::is_dynamic_loading_fixed_tool(server.command.as_deref(),&tool.name,butler));
+        }
+        selected_tools_payload_with_mode(servers,true)
+    } else { selected_tools_payload(servers) }
 }
 
 pub(crate) fn selected_tools_payload(servers: Vec<crate::api::assistant_api::MCPServerWithTools>) -> Result<String, String> {
+    selected_tools_payload_with_mode(servers,false)
+}
+
+pub(crate) fn selected_tools_payload_with_mode(servers: Vec<crate::api::assistant_api::MCPServerWithTools>, dynamic: bool) -> Result<String,String> {
     let payload: Vec<_> = servers.into_iter().filter(|s| s.is_enabled && !s.tools.is_empty()).map(|server| {
         let tools: Vec<_> = server.tools.into_iter().map(|tool| serde_json::json!({
             "tool_id":tool.id,"server_id":server.id,"server_name":server.name,
             "tool_name":tool.name,"tool_description":tool.description,"parameters":tool.parameters,"is_enabled":true,
         })).collect();
-        serde_json::json!({"server_id":server.id,"server_name":server.name,"is_enabled":true,"tools":tools})
+        let mut item = serde_json::json!({"server_id":server.id,"server_name":server.name,"is_enabled":true,"tools":tools});
+        if dynamic { item["dynamic_loading_enabled"] = serde_json::json!(true); }
+        item
     }).collect();
     serde_json::to_string(&payload).map_err(|e| e.to_string())
 }
@@ -1852,22 +1872,6 @@ pub fn build_acp_launch_plan(
     }
 
     plan
-}
-
-fn expand_home_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        dirs::home_dir()
-            .map(|home| home.join(&path[2..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else if path == "~" {
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from(path))
-    } else if path.starts_with('~') {
-        dirs::home_dir()
-            .map(|home| home.join(&path[1..]))
-            .unwrap_or_else(|| PathBuf::from(path))
-    } else {
-        PathBuf::from(path)
-    }
 }
 
 /// Extract text content from a ContentBlock
@@ -5951,8 +5955,6 @@ pub fn extract_acp_config(
     model_configs: &[AssistantModelConfig],
     provider_configs: &[LLMProviderConfig],
 ) -> Result<AcpConfig, AppError> {
-    use std::path::PathBuf;
-
     // Helper to get value from provider_configs
     let get_provider_config = |name: &str| -> Option<String> {
         provider_configs
@@ -6001,10 +6003,7 @@ pub fn extract_acp_config(
 
     // 获取工作目录
     // 优先级: assistant_model_config > llm_provider_config > home_dir
-    let working_directory = get_model_config("acp_working_directory")
-        .or_else(|| get_provider_config("acp_working_directory"))
-        .map(|path| expand_home_path(&path))
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    let working_directory = super::working_directory::from_configs(model_configs, provider_configs, true)?;
 
     // 收集环境变量
     // 从两个配置源收集，model_config 优先级更高

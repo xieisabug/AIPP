@@ -556,6 +556,7 @@ fn execute_dynamic_mcp_tool(
 ) -> Result<serde_json::Value, String> {
     let db =
         MCPDatabase::new(app_handle).map_err(|e| format!("Failed to open MCP database: {}", e))?;
+    let access = crate::mcp::assistant_access::Restrictions::conversation(app_handle,conversation_id)?;
     let _ = db.rebuild_dynamic_mcp_catalog();
     let acp_native_operation_server_ids = if should_filter_acp_native_dynamic_tools(
         app_handle,
@@ -589,7 +590,7 @@ fn execute_dynamic_mcp_tool(
                 .map_err(|e| format!("Failed to list MCP tool catalog: {}", e))?;
             let mut matched_servers = Vec::new();
             for server in catalogs {
-                if server.summary_generated_at.is_none() {
+                if server.summary_generated_at.is_none() || !access.server(server.server_id) {
                     continue;
                 }
                 if !matches_keyword(&server.server_name, keyword)
@@ -601,6 +602,7 @@ fn execute_dynamic_mcp_tool(
                     .iter()
                     .filter(|tool| {
                         tool.server_id == server.server_id
+                            && access.tool(tool.server_id,tool.tool_id)
                             && !(hidden_search_server_ids.contains(&tool.server_id) && tool.tool_name == "search_web")
                             && tool.server_enabled
                             && tool.tool_enabled
@@ -674,7 +676,7 @@ fn execute_dynamic_mcp_tool(
                     if hidden_search_server_ids.contains(&tool.server_id) && tool.tool_name == "search_web" {
                         continue;
                     }
-                    if !tool.server_enabled || !tool.tool_enabled {
+                    if !tool.server_enabled || !tool.tool_enabled || !access.tool(tool.server_id,tool.tool_id) {
                         continue;
                     }
                     if tool.summary_generated_at.is_none() {

@@ -54,6 +54,30 @@ fn test_group_create_gives_each_member_a_private_hidden_conversation() {
 }
 
 #[test]
+fn test_group_rename_targets_id_and_preserves_members_history_context_and_memory() {
+    let mut conn = setup();
+    let (group,members_before) = group_with(&mut conn,&["张三","李四"]);
+    let (other,_) = group_with(&mut conn,&["张三","李四"]);
+    let message = post_user(&mut conn,group.id,"before-rename","保留历史",None).unwrap();
+    reply(&conn,members_before[0].conversation_id,"保留成员上下文");
+    crate::db::butler_memory::schema(&conn).unwrap();
+    conn.execute("INSERT INTO butler_memory(content,scope_type,scope_id,created_at,updated_at) VALUES('群记忆','group',?1,1,1)",[group.id]).unwrap();
+    rename(&mut conn,group.id,"新名称").unwrap();
+    assert_eq!(get(&conn,group.id).unwrap().name,"新名称");
+    assert_eq!(get(&conn,other.id).unwrap().name,"产品讨论");
+    let visible_name:String = conn.query_row("SELECT name FROM conversation WHERE id=?1",[group.id],|r|r.get(0)).unwrap();
+    assert_eq!(visible_name,"新名称");
+    assert_eq!(serde_json::to_value(members(&conn,group.id).unwrap()).unwrap(),serde_json::to_value(members_before.clone()).unwrap());
+    assert_eq!(super::message(&conn,group.id,message.seq).unwrap().body,"保留历史");
+    assert_eq!(conn.query_row("SELECT content FROM message WHERE conversation_id=?1",[members_before[0].conversation_id],|r|r.get::<_,String>(0)).unwrap(),"保留成员上下文");
+    assert_eq!(conn.query_row("SELECT content FROM butler_memory WHERE scope_id=?1",[group.id],|r|r.get::<_,String>(0)).unwrap(),"群记忆");
+    assert!(rename(&mut conn,group.id,"  ").is_err());
+    assert!(rename(&mut conn,group.id,&"字".repeat(MAX_NAME_CHARS+1)).is_err());
+    assert!(rename(&mut conn,99999,"不存在").is_err());
+    assert_eq!(get(&conn,group.id).unwrap().name,"新名称");
+}
+
+#[test]
 fn test_group_post_user_is_idempotent_and_waits_for_routing() {
     let mut conn = setup();
     let (group, _) = group_with(&mut conn, &["张三", "李四"]);

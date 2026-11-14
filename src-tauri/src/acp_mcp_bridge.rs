@@ -1,4 +1,5 @@
 pub(crate) mod provenance;
+mod dynamic;
 
 use crate::db::connection::Connection;
 use crate::db::mcp_db::MCPDatabase;
@@ -41,6 +42,8 @@ struct AcpSelectedMcpServer {
     is_enabled: bool,
     #[serde(default)]
     tools: Vec<AcpSelectedMcpTool>,
+    #[serde(default)]
+    dynamic_loading_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -178,20 +181,20 @@ async fn execute_proxy_tool(
     let db = MCPDatabase::new(app_handle).map_err(|error| error.to_string())?;
     let server = db.get_mcp_server(server_id).map_err(|error| error.to_string())?;
     let parameters = serde_json::to_string(&arguments).map_err(|error| error.to_string())?;
+    let access = crate::mcp::assistant_access::Restrictions::conversation(app_handle,Some(conversation_id))?;
     {
         let db = crate::db::conversation_db::ConversationDatabase::new(app_handle).map_err(|error| error.to_string())?;
         let conn = db.get_connection().map_err(|error| error.to_string())?;
         prompt.validate_connection(&conn)?;
     }
     prompt.ensure_active()?;
-    let execute = crate::mcp::execution_api::execute_tool_by_transport_on_large_stack(
-        app_handle,
-        &server,
-        tool_name,
-        &parameters,
-        Some(conversation_id),
-        Some(cancel),
-    );
+    let execute = dynamic::dispatch(&db,server,tool_name,&parameters,conversation_id,&access,
+        |target| async move {
+            crate::mcp::execution_api::execute_tool_by_transport_on_large_stack(
+                app_handle,&target.server,&target.tool_name,&target.parameters,
+                Some(conversation_id),Some(cancel),
+            ).await
+        });
     let result = prompt.run(execute).await?;
 
     Ok(json!({
@@ -289,7 +292,7 @@ fn parse_selected_mcp_tools(raw: &str) -> Result<Vec<AcpSelectedMcpTool>, String
             if tool.tool_name.trim().is_empty() || tool.tool_id <= 0 || tool.server_id <= 0 {
                 continue;
             }
-            if matches!(tool.tool_name.as_str(), "load_mcp_server" | "load_mcp_tool") {
+            if !server.dynamic_loading_enabled && matches!(tool.tool_name.as_str(), "load_mcp_server" | "load_mcp_tool") {
                 continue;
             }
             tools.push(tool);
@@ -609,6 +612,15 @@ mod tests {
             selected_tool_to_mcp_tool(&tools[0])["name"].as_str(),
             Some("aipp_t11_fetch_url")
         );
+    }
+
+    #[test]
+    fn test_native_dynamic_loaders_require_explicit_mode_in_bridge_payload() {
+        let tools = json!([{"tool_id":1,"tool_name":"load_mcp_tool"},{"tool_id":2,"tool_name":"load_mcp_server"},{"tool_id":3,"tool_name":"call_mcp_tool"}]);
+        let legacy = json!([{"server_id":7,"server_name":"Agent","tools":tools}]);
+        assert_eq!(parse_selected_mcp_tools(&legacy.to_string()).unwrap().len(),1);
+        let explicit = json!([{"server_id":7,"server_name":"Agent","tools":tools,"dynamic_loading_enabled":true}]);
+        assert_eq!(parse_selected_mcp_tools(&explicit.to_string()).unwrap().len(),3);
     }
 
     #[test]

@@ -104,36 +104,8 @@ impl ActionHandler for AssistantGetHandler {
 
 #[async_trait]
 impl ActionHandler for AssistantCreateHandler {
-    async fn execute(
-        &self,
-        app_handle: &AppHandle,
-        args: serde_json::Value,
-        dry_run: bool,
-    ) -> Result<serde_json::Value, String> {
-        let name =
-            args.get("name").and_then(|v| v.as_str()).ok_or("Missing required parameter: name")?;
-        let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let assistant_type = args.get("assistant_type").and_then(|v| v.as_i64());
-
-        if dry_run {
-            return Ok(json!({
-                "dry_run": true,
-                "would_create": { "name": name, "description": description, "assistant_type": assistant_type }
-            }));
-        }
-
-        let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let new_id =
-            db.add_assistant(name, description, assistant_type, true).map_err(|e| e.to_string())?;
-
-        // If a prompt was provided, set it
-        if let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) {
-            if !prompt.is_empty() {
-                db.add_assistant_prompt(new_id, prompt).map_err(|e| e.to_string())?;
-            }
-        }
-
-        Ok(json!({ "assistant_id": new_id, "name": name }))
+    async fn execute(&self, app: &AppHandle, args: serde_json::Value, dry_run: bool) -> Result<serde_json::Value,String> {
+        super::assistant_admin::profile_action(app,"create",args,dry_run).await
     }
 
     async fn snapshot_before(
@@ -161,49 +133,8 @@ impl ActionHandler for AssistantCreateHandler {
 
 #[async_trait]
 impl ActionHandler for AssistantUpdatePromptHandler {
-    async fn execute(
-        &self,
-        app_handle: &AppHandle,
-        args: serde_json::Value,
-        dry_run: bool,
-    ) -> Result<serde_json::Value, String> {
-        let assistant_id = args
-            .get("assistant_id")
-            .and_then(|v| v.as_i64())
-            .ok_or("Missing required parameter: assistant_id")?;
-        let prompt = args
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing required parameter: prompt")?;
-
-        let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
-
-        // Verify assistant exists
-        let _ = db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
-
-        if dry_run {
-            let old_prompts = db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
-            let old_text = old_prompts.first().map(|p| p.prompt.as_str()).unwrap_or("");
-            return Ok(json!({
-                "dry_run": true,
-                "assistant_id": assistant_id,
-                "old_prompt_length": old_text.len(),
-                "new_prompt_length": prompt.len(),
-            }));
-        }
-
-        let existing = db.get_assistant_prompt(assistant_id).map_err(|e| e.to_string())?;
-
-        if let Some(p) = existing.first() {
-            db.update_assistant_prompt(p.id, prompt).map_err(|e| e.to_string())?;
-        } else {
-            db.add_assistant_prompt(assistant_id, prompt).map_err(|e| e.to_string())?;
-        }
-
-        Ok(json!({
-            "assistant_id": assistant_id,
-            "updated_fields": ["prompt"],
-        }))
+    async fn execute(&self, app: &AppHandle, args: serde_json::Value, dry_run: bool) -> Result<serde_json::Value,String> {
+        super::assistant_admin::profile_action(app,"update",args,dry_run).await
     }
 
     async fn snapshot_before(
@@ -254,53 +185,8 @@ impl ActionHandler for AssistantUpdatePromptHandler {
 
 #[async_trait]
 impl ActionHandler for AssistantUpdateModelHandler {
-    async fn execute(
-        &self,
-        app_handle: &AppHandle,
-        args: serde_json::Value,
-        dry_run: bool,
-    ) -> Result<serde_json::Value, String> {
-        let assistant_id = args
-            .get("assistant_id")
-            .and_then(|v| v.as_i64())
-            .ok_or("Missing required parameter: assistant_id")?;
-        let provider_id = args
-            .get("provider_id")
-            .and_then(|v| v.as_i64())
-            .ok_or("Missing required parameter: provider_id")?;
-        let model_code = args
-            .get("model_code")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing required parameter: model_code")?;
-        let alias = args.get("alias").and_then(|v| v.as_str()).unwrap_or(model_code);
-
-        let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
-        let _ = db.get_assistant(assistant_id).map_err(|e| e.to_string())?;
-
-        if dry_run {
-            return Ok(json!({
-                "dry_run": true,
-                "assistant_id": assistant_id,
-                "would_set": { "provider_id": provider_id, "model_code": model_code, "alias": alias }
-            }));
-        }
-
-        let existing_models = db.get_assistant_model(assistant_id).map_err(|e| e.to_string())?;
-
-        if let Some(m) = existing_models.first() {
-            db.update_assistant_model(m.id, provider_id, model_code, alias)
-                .map_err(|e| e.to_string())?;
-        } else {
-            db.add_assistant_model(assistant_id, provider_id, model_code, alias)
-                .map_err(|e| e.to_string())?;
-        }
-
-        Ok(json!({
-            "assistant_id": assistant_id,
-            "updated_fields": ["model"],
-            "provider_id": provider_id,
-            "model_code": model_code,
-        }))
+    async fn execute(&self, app: &AppHandle, args: serde_json::Value, dry_run: bool) -> Result<serde_json::Value,String> {
+        super::assistant_admin::profile_action(app,"update",args,dry_run).await
     }
 
     async fn snapshot_before(
@@ -375,6 +261,11 @@ impl ActionHandler for AssistantUpdateMcpConfigHandler {
             .and_then(|v| v.as_bool())
             .ok_or("Missing required parameter: is_enabled")?;
 
+        let db = AssistantDatabase::new(app_handle).map_err(|e|e.to_string())?;
+        crate::api::assistant_api::management::editable(&db,assistant_id)?;
+        crate::db::mcp_db::MCPDatabase::new(app_handle).map_err(|e|e.to_string())?
+            .get_mcp_server(mcp_server_id).map_err(|e|format!("MCP 服务 #{mcp_server_id} 不存在：{e}"))?;
+
         if dry_run {
             return Ok(json!({
                 "dry_run": true,
@@ -387,6 +278,7 @@ impl ActionHandler for AssistantUpdateMcpConfigHandler {
         let db = AssistantDatabase::new(app_handle).map_err(|e| e.to_string())?;
         db.upsert_assistant_mcp_config(assistant_id, mcp_server_id, is_enabled)
             .map_err(|e| e.to_string())?;
+        crate::api::assistant_api::management::notify(app_handle);
 
         Ok(json!({
             "assistant_id": assistant_id,
@@ -458,7 +350,18 @@ impl ActionHandler for AssistantUpdateSkillConfigHandler {
             .get("is_enabled")
             .and_then(|v| v.as_bool())
             .ok_or("Missing required parameter: is_enabled")?;
-        let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let assistant_db = AssistantDatabase::new(app_handle).map_err(|e|e.to_string())?;
+        crate::api::assistant_api::management::editable(&assistant_db,assistant_id)?;
+        let scanner = crate::api::skill_api::create_scanner(app_handle);
+        if !scanner.scan_all_as_map().contains_key(skill_identifier) {
+            return Err(format!("Skill 不存在或已移除：{skill_identifier}"));
+        }
+        let existing = crate::db::skill_db::SkillDatabase::new(app_handle).map_err(|e|e.to_string())?
+            .get_assistant_skill_configs(assistant_id).map_err(|e|e.to_string())?;
+        let priority = match args.get("priority") {
+            Some(value) => value.as_i64().and_then(|v|i32::try_from(v).ok()).ok_or("priority 须为 32 位整数")?,
+            None => existing.iter().find(|c|c.skill_identifier==skill_identifier).map(|c|c.priority).unwrap_or(0),
+        };
 
         if dry_run {
             return Ok(json!({
@@ -476,6 +379,7 @@ impl ActionHandler for AssistantUpdateSkillConfigHandler {
         skill_db
             .upsert_assistant_skill_config(assistant_id, skill_identifier, is_enabled, priority)
             .map_err(|e| e.to_string())?;
+        crate::api::assistant_api::management::notify(app_handle);
 
         Ok(json!({
             "assistant_id": assistant_id,
@@ -544,6 +448,7 @@ impl ActionHandler for AssistantUpdateSkillConfigHandler {
 
 pub fn register(registry: &mut ActionRegistry) {
     super::assistant_model_config::register(registry);
+    super::assistant_admin::register(registry);
     registry.register(
         ActionMeta {
             action_id: "assistant.list".into(),
@@ -624,7 +529,10 @@ pub fn register(registry: &mut ActionRegistry) {
                     "name": { "type": "string", "description": "助手名称" },
                     "description": { "type": "string", "description": "助手描述" },
                     "assistant_type": { "type": "integer", "description": "助手类型 (0=普通, 1=多模型对比, 2=工作流, 3=展示, 4=ACP)" },
-                    "prompt": { "type": "string", "description": "初始系统提示词" }
+                    "prompt": { "type": "string", "description": "初始系统提示词" },
+                    "provider_id": { "type": "integer", "description": "模型提供商 ID；与 model_code 同时提供" },
+                    "model_code": { "type": "string", "description": "模型代码，Agent 可用通道默认模型代码" },
+                    "alias": { "type": "string" }
                 },
                 "required": ["name"]
             }),

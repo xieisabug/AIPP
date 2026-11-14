@@ -228,7 +228,10 @@ pub async fn create_butler_group(app_handle: AppHandle, name: Option<String>, as
     if members.len() < 2 {
         return Err("群聊至少需要两位成员".into());
     }
-    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| default_name(&members));
+    let name = match name {
+        Some(name) => group::validate_name(&name).map_err(|e|e.to_string())?,
+        None => default_name(&members),
+    };
     let created = database(&app_handle, "创建", move |conn| group::create(conn, &name, &members)).await?;
     changed(&app_handle, created.id);
     let roster = roster(&app_handle).await?;

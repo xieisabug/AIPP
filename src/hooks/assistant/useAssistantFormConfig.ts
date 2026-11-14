@@ -150,7 +150,8 @@ export const useAssistantFormConfig = ({
         if (!currentAssistant) return [];
 
         const globalDynamicMcpEnabled =
-            getConfigValue("experimental", "dynamic_mcp_loading_enabled") === "true";
+            getConfigValue("experimental", "dynamic_mcp_loading_enabled") === "true" ||
+            currentAssistant.model_configs.some(config => config.name === "mcp_loading_mode_explicit" && config.value === "true");
         const assistantDynamicEnabled =
             globalDynamicMcpEnabled &&
             (() => {
@@ -366,22 +367,28 @@ export const useAssistantFormConfig = ({
                       ]
                     : []),
                 ...nativeAgentApprovalFields,
-                {
+                ...(currentAssistant.model_configs.some(config => config.name === "mcp_loading_mode_explicit" && config.value === "true") ? [{
+                    key: "dynamic_mcp_loading_enabled",
+                    config: {
+                        type: "switch" as const,
+                        label: "MCP 动态加载（实验）",
+                        value: assistantDynamicEnabled,
+                        tooltip: "开启后按需加载工具；关闭后使用手动选择的 MCP 工具",
+                        onChange: (value: string | boolean) => handleConfigChange("dynamic_mcp_loading_enabled", value, "boolean"),
+                    },
+                }] : []),
+                ...(!currentAssistant.model_configs.some(config => config.name === "mcp_loading_mode_explicit" && config.value === "true") || !assistantDynamicEnabled ? [{
                     key: "mcp_config",
                     config: {
                         type: "custom" as const,
                         label: "MCP工具",
-                        customRender: () => {
-                            return React.createElement(AssistantMCPFieldDisplay, {
-                                assistantId: currentAssistant?.assistant.id ?? 0,
-                                onConfigChange: () => {
-                                    console.log("MCP configuration changed");
-                                },
-                                navigateTo: navigateTo,
-                            });
-                        },
+                        customRender: () => React.createElement(AssistantMCPFieldDisplay, {
+                            assistantId: currentAssistant.assistant.id,
+                            onConfigChange: () => {},
+                            navigateTo,
+                        }),
                     },
-                },
+                }] : []),
             ];
         }
 
@@ -422,6 +429,7 @@ export const useAssistantFormConfig = ({
                         !assistantTypeCustomField.find((field) => field.key === config.name) &&
                         config.name !== "reasoning_effort" &&
                         config.name !== "dynamic_mcp_loading_enabled" &&
+                        config.name !== "mcp_loading_mode_explicit" &&
                         config.name !== "use_native_toolcall" &&
                         config.name !== "tool_review_mode"
                 )
