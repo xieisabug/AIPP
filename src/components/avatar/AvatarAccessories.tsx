@@ -6,6 +6,8 @@ export const accessoryPreviewViewBox: Record<AccessoryId, string> = {
     "round-glasses": "-115 -65 230 130",
     sunglasses: "-132 -62 264 124",
     blush: "-95 -20 190 116",
+    "baseball-cap": "-125 -108 312 150",
+    "baseball-cap-left": "-187 -108 312 150",
     beret: "-140 -100 280 140",
     "bow-bell": "-76 -52 152 136",
     flower: "-38 -38 80 76",
@@ -39,6 +41,19 @@ export function BlushArtwork() {
             <ellipse rx="23" ry="12" fill="#FF8FA3" />
             <path d="M-11-5L-16 5M-1-5L-6 5M9-5L4 5" stroke="#E25E78" strokeWidth="3.5" strokeLinecap="round" opacity="0.7" />
         </g>)}
+    </g>;
+}
+
+export function BaseballCapArtwork({ reversed = false }: { reversed?: boolean }) {
+    return <g transform={reversed ? "scale(-1 1) rotate(-6)" : "rotate(-6)"} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M-110 8C-111-46-81-88-28-91C30-96 69-64 82-12L77 7Q-12 27-110 8Z"
+            fill="#28384A" stroke="#8191A2" strokeWidth="4" />
+        <path d="M-28-88Q4-68 9-9M-32-88Q-70-62-72 2" fill="none" stroke="#536779" strokeWidth="4" />
+        <ellipse cx="-29" cy="-91" rx="10" ry="5" fill="#8191A2" />
+        <path d="M23-37L38-54L51-47L30-28Z" fill="#E1E9ED" />
+        <path d="M-101 6Q-11 14 59-10Q116-24 167-5Q178 1 165 7Q139 14 116 11Q83 7 48 17Q-25 36-101 16Z"
+            fill="#172536" stroke="#8191A2" strokeWidth="4" />
+        <path d="M62-4Q111-16 149-7" fill="none" stroke="#ACBDC8" strokeWidth="3" />
     </g>;
 }
 

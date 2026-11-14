@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { accessoriesOf, accessoryDefinitions, avatarDefinitions, type AccessoryId, type AvatarAction } from "@/components/avatar/avatarDefinition";
-import { accessoryPreviewViewBox, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "@/components/avatar/AvatarAccessories";
+import { accessoryPreviewViewBox, BaseballCapArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "@/components/avatar/AvatarAccessories";
 import { Button } from "@/components/ui/button";
 import ButlerAvatar from "./ButlerAvatar";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
@@ -29,7 +29,8 @@ export const PROFILE_FOOTER_CLASS = "-mx-6 shrink-0 border-t border-border px-6 
 
 function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: ButlerAppearance }) {
     const artwork = {
-        "round-glasses": <GlassesArtwork />, sunglasses: <SunglassesArtwork />, blush: <BlushArtwork />, beret: <HatArtwork />,
+        "round-glasses": <GlassesArtwork />, sunglasses: <SunglassesArtwork />, blush: <BlushArtwork />, beret: <HatArtwork />, "baseball-cap": <BaseballCapArtwork />,
+        "baseball-cap-left": <BaseballCapArtwork reversed />,
         "bow-bell": <BowBellArtwork color={appearance.colors.primary} outline={appearance.colors.secondary} />, flower: <FlowerArtwork />,
     }[id];
     return <svg aria-hidden="true" viewBox={accessoryPreviewViewBox[id]} className="size-8">{artwork}</svg>;

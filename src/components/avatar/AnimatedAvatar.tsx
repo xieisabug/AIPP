@@ -2,7 +2,7 @@ import { useEffect, useId, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import type { ButlerAppearance } from "@/components/butler/butlerAppearance";
 import { avatarDefinitions, type AvatarAction, type AvatarState } from "./avatarDefinition";
-import { BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "./AvatarAccessories";
+import { BaseballCapArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "./AvatarAccessories";
 import { useAvatarMotion, type AvatarActionRequest } from "./useAvatarMotion";
 import { useAvatarPerformance } from "./useAvatarPerformance";
 import { WhaleRiceMeal } from "./WhaleRiceMeal";
@@ -34,7 +34,7 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     const faceItem = definition.capabilities.includes("eyes") ? appearance.accessories.eyes : null;
     const headItem = definition.capabilities.includes("headwear") ? appearance.accessories.head : null;
     const glasses = faceItem === "round-glasses";
-    const hat = headItem === "beret";
+    const hat = headItem === "beret" || headItem === "baseball-cap" || headItem === "baseball-cap-left";
     // 变形中心对齐可视区域中心：带头饰/大尺寸的 viewBox 整体上移了 45 单位。
     const morphCenterY = headItem || full ? 210 : 255;
     // 身体原地缩成圆核；绕竖轴的转身用 cos(spin) 压缩横向，半程正好侧对观众。
@@ -61,6 +61,7 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     const faceY = useTransform(() => v.pitch.get()*0.55 + gazeY.get() + v.gazeY.get());
     const performing = (name: AvatarAction, equipped: boolean) => active && full && equipped && action === name;
     const takingGlasses = performing("glasses", glasses);
+    const hatTilt = headItem === "baseball-cap-left" ? 15 : -15;
     const tippingHat = performing("hat", hat);
     const peering = performing("peer", faceItem === "sunglasses");
     const blushing = performing("blush", faceItem === "blush");
@@ -139,10 +140,10 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                         </motion.g>}
                         </AnimatePresence>
                         {hat && <g transform={`translate(${definition.crown.x} ${definition.crown.y}) scale(${definition.crown.scale})`}>
-                            <motion.g data-avatar-accessory="beret" initial={false}
-                                animate={{ y: tippingHat ? [0, -32, -32, 0] : 0, rotate: tippingHat ? [0, -15, -15, 0] : 0 }}
+                            <motion.g data-avatar-accessory={headItem} initial={false}
+                                animate={{ y: tippingHat ? [0, -32, -32, 0] : 0, rotate: tippingHat ? [0, hatTilt, hatTilt, 0] : 0 }}
                                 style={{ transformOrigin: "0px 0px" }} transition={{ duration: tippingHat ? 1.5 : 0, ease: "easeInOut" }}>
-                                <HatArtwork />
+                                {headItem === "beret" ? <HatArtwork /> : <BaseballCapArtwork reversed={headItem === "baseball-cap-left"} />}
                             </motion.g>
                         </g>}
                         {headItem === "bow-bell" && <g data-avatar-accessory="bow-bell"

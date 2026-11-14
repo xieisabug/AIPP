@@ -150,18 +150,18 @@ describe("Butler profile editor", () => {
         })));
     });
 
-    it("should retain accessories when changing shape and restoring colors", async () => {
+    it.each([["棒球帽", "baseball-cap"], ["反向棒球帽", "baseball-cap-left"]])("should retain %s when changing shape and restoring colors", async (label, id) => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
         fireEvent.click(screen.getByRole("button", { name: "脸部：圆框眼镜" }));
-        fireEvent.click(screen.getByRole("button", { name: "头部：贝雷帽" }));
+        fireEvent.click(screen.getByRole("button", { name: `头部：${label}` }));
         fireEvent.click(screen.getByRole("button", { name: "圆团" }));
         fireEvent.click(screen.getByRole("button", { name: "脸部 · 亮色：蜜桃" }));
         fireEvent.click(screen.getByRole("button", { name: "恢复黑白配色" }));
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", {
             version: 2, shape: "pebble", colors: { primary: "#FFFFFF", secondary: "#000000" },
-            accessories: { eyes: "round-glasses", head: "beret" }, motion: true,
+            accessories: { eyes: "round-glasses", head: id }, motion: true,
         }));
     });
 

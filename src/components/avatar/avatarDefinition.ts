@@ -75,6 +75,8 @@ export const accessoryDefinitions = {
     "round-glasses": { slot: "eyes", label: "圆框眼镜", capability: "eyes", action: "glasses" },
     sunglasses: { slot: "eyes", label: "墨镜", capability: "eyes", action: "peer" },
     blush: { slot: "eyes", label: "腮红", capability: "eyes", action: "blush" },
+    "baseball-cap": { slot: "head", label: "棒球帽", capability: "headwear", action: "hat" },
+    "baseball-cap-left": { slot: "head", label: "反向棒球帽", capability: "headwear", action: "hat" },
     beret: { slot: "head", label: "贝雷帽", capability: "headwear", action: "hat" },
     "bow-bell": { slot: "head", label: "铃铛蝴蝶结", capability: "headwear", action: "jingle" },
     flower: { slot: "head", label: "小花", capability: "headwear", action: "butterfly" },
