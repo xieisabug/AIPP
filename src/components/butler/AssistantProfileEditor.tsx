@@ -56,7 +56,7 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
     const definition = avatarDefinitions[appearance.shape];
     const current = showcase.override ? { kind: "action" as const, action: showcase.override }
         : showcaseStep(showcase.step, accessoryActionsOf([appearance.accessories.eyes, appearance.accessories.head]));
-    const delay = showcaseDelay(current, showcase.id);
+    const delay = showcaseDelay(current, showcase.id, appearance.shape);
     useEffect(() => {
         if (reducedMotion) return;
         const timer = setTimeout(() => setShowcase(previous => ({ step: previous.step + 1, id: previous.id + 1 })), delay);

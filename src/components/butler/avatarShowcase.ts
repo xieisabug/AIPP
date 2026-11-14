@@ -1,4 +1,4 @@
-import { accessoryDefinitions, actionDurations, type AccessoryId, type AvatarAction, type AvatarState } from "@/components/avatar/avatarDefinition";
+import { accessoryDefinitions, actionDuration, type AvatarShape, type AccessoryId, type AvatarAction, type AvatarState } from "@/components/avatar/avatarDefinition";
 
 /** 编辑形象时自动轮播的内容：状态与动作交替出现。 */
 export type ShowcaseStep = { kind: "state"; state: AvatarState } | { kind: "action"; action: AvatarAction };
@@ -19,7 +19,7 @@ export function showcaseStep(step: number, accessoryActions: AvatarAction[]): Sh
 }
 
 /** 每一幕停留 3–5 秒（由序号决定，渲染之间保持稳定）；动作至少要完整播完。 */
-export function showcaseDelay(current: ShowcaseStep, seed: number) {
+export function showcaseDelay(current: ShowcaseStep, seed: number, shape?: AvatarShape) {
     const base = 3000 + (Math.abs(seed * 7919) % 2001);
-    return current.kind === "action" ? Math.max(base, actionDurations[current.action] + 600) : base;
+    return current.kind === "action" ? Math.max(base, actionDuration(current.action, shape) + 600) : base;
 }

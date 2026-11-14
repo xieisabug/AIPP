@@ -87,4 +87,7 @@ export const accessoriesOf = <S extends "eyes" | "head">(slot: S) =>
     (Object.keys(accessoryDefinitions) as AccessoryId[]).filter(id => accessoryDefinitions[id].slot === slot) as (S extends "eyes" ? FaceAccessory : HeadAccessory)[];
 
 export const actionDurations: Record<AvatarAction, number> = { blink: 280, smile: 1300, glasses: 2400, hat: 1500, peer: 3000, blush: 2000, jingle: 1800, butterfly: 3400 };
+export const whaleMealDuration = 2400;
+export const actionDuration = (action: AvatarAction, shape?: AvatarShape) =>
+    shape === "whale" && action === "smile" ? whaleMealDuration : actionDurations[action];
 export const avatarStateLabels = Object.fromEntries(Object.entries(avatarRecipes).map(([key, recipe]) => [key, recipe.label]));

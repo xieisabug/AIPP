@@ -5,6 +5,7 @@ import { avatarDefinitions, type AvatarAction, type AvatarState } from "./avatar
 import { BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "./AvatarAccessories";
 import { useAvatarMotion, type AvatarActionRequest } from "./useAvatarMotion";
 import { useAvatarPerformance } from "./useAvatarPerformance";
+import { WhaleRiceMeal } from "./WhaleRiceMeal";
 import AvatarEye from "./AvatarEye";
 import { SvgPose } from "./SvgPose";
 import { ConfettiOverlay, MorphParts } from "./AvatarEffects";
@@ -25,7 +26,7 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     const definition = avatarDefinitions[appearance.shape];
     const id = useId().replace(/:/g, "");
     const ref = useRef<HTMLSpanElement>(null);
-    const { active, action } = useAvatarMotion(ref, animated && appearance.motion, state, actionRequest, `${appearance.accessories.eyes}-${appearance.accessories.head}`);
+    const { active, action, sequence } = useAvatarMotion(ref, animated && appearance.motion, state, actionRequest, `${appearance.accessories.eyes}-${appearance.accessories.head}`, appearance.shape);
     const full = size >= 48;
     const performance = useAvatarPerformance(action ? "idle" : state, active, !full, id);
     const v = performance.values;
@@ -113,6 +114,7 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                                 strokeWidth={whiteEdge ? 1 : part.outlineWidth} strokeLinejoin="round"
                                 vectorEffect={whiteEdge ? "non-scaling-stroke" : undefined} />;
                         })}
+                        {definition.id === "whale" && action === "smile" && <WhaleRiceMeal key={sequence} bodyColor={appearance.colors.secondary} />}
                         <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}>
                             <motion.g style={{ x: faceX, y: faceY, opacity: eyeOpacity }}>
                                 {blossom && <path data-avatar-expression="coding" opacity={codingFace ? 1 : 0}

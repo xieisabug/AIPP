@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import AnimatedAvatar from "./AnimatedAvatar";
 import { defaultAppearance } from "@/components/butler/butlerAppearance";
@@ -14,6 +14,15 @@ describe("avatar rendering", () => {
         rerender(<AnimatedAvatar animated appearance={appearance} actionRequest={{ action: "smile", sequence: 1 }} />);
         expect(container.firstChild).toHaveAttribute("data-avatar-action", "smile");
         expect(expression).toHaveAttribute("opacity", "0");
+    });
+
+    it("should serve rice for a whale smile and put the bowl away when the meal finishes", async () => {
+        const { container } = render(<AnimatedAvatar animated size={200}
+            appearance={{ ...defaultAppearance, shape: "whale" }} actionRequest={{ action: "smile", sequence: 1 }} />);
+        const bowl = () => container.querySelector('[data-avatar-prop="rice-meal"]');
+        expect(bowl()).toBeInTheDocument();
+        await waitFor(() => expect(bowl()).toBeNull(), { timeout: 3300 });
+        expect(container.firstChild).toHaveAttribute("data-avatar-action", "none");
     });
 
     it.each(["#4D6BFE", "#000000", "#D87855"])("should keep both eyes white on the whale when its body is %s", color => {
