@@ -150,7 +150,7 @@ describe("Butler profile editor", () => {
         })));
     });
 
-    it.each([["棒球帽", "baseball-cap"], ["反向棒球帽", "baseball-cap-left"], ["皇冠", "crown"], ["头戴式耳机", "headphones"]])("should retain %s when changing shape and restoring colors", async (label, id) => {
+    it.each([["棒球帽", "baseball-cap"], ["反向棒球帽", "baseball-cap-left"], ["皇冠", "crown"], ["头戴式耳机", "headphones"], ["竹蜻蜓", "rotor"], ["嫩芽", "sprout"], ["睡帽", "nightcap"]])("should retain %s when changing shape and restoring colors", async (label, id) => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
         fireEvent.click(screen.getByRole("button", { name: "脸部：圆框眼镜" }));
@@ -165,7 +165,7 @@ describe("Butler profile editor", () => {
         }));
     });
 
-    it.each([["墨镜", "sunglasses"], ["粗眉毛", "thick-brows"]])("should save %s with an independent head decoration", async (label, eyes) => {
+    it.each([["墨镜", "sunglasses"], ["粗眉毛", "thick-brows"], ["卷翘小胡子", "mustache"], ["鼻梁创可贴", "bandage"], ["海盗眼罩", "eyepatch"]])("should save %s with an independent head decoration", async (label, eyes) => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" appearance={{ version: 2, shape: "aipp", colors: { primary: "#FAD4E4", secondary: "#000000" },
             accessories: { eyes: null, head: null }, motion: false }} onSave={onSave} onClose={vi.fn()} />);

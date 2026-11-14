@@ -9,7 +9,7 @@ export const showcaseStates: readonly AvatarState[] = [
 ];
 
 export const accessoryActionsOf = (items: (AccessoryId | null)[]) =>
-    items.filter((item): item is AccessoryId => item !== null).map(item => accessoryDefinitions[item].action);
+    items.filter((item): item is AccessoryId => item !== null).flatMap(item => accessoryDefinitions[item].action ?? []);
 
 /** 偶数步展示状态，奇数步展示动作；戴了装饰时，装饰动作占动作轮次的大半，方便看清效果。 */
 export function showcaseStep(step: number, accessoryActions: AvatarAction[]): ShowcaseStep {

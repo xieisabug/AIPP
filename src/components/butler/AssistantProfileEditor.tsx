@@ -3,6 +3,7 @@ import { Check, X } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { accessoriesOf, accessoryDefinitions, avatarDefinitions, type AccessoryId, type AvatarAction } from "@/components/avatar/avatarDefinition";
 import { accessoryPreviewViewBox, BaseballCapArtwork, CrownArtwork, HeadphonesArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork, ThickBrowsArtwork } from "@/components/avatar/AvatarAccessories";
+import { MustacheArtwork, BandageArtwork, EyepatchStrap, EyepatchArtwork, RotorArtwork, SproutArtwork, NightcapArtwork } from "@/components/avatar/PlayfulAccessories";
 import { Button } from "@/components/ui/button";
 import ButlerAvatar from "./ButlerAvatar";
 import { defaultAppearance, type ButlerAppearance } from "./butlerAppearance";
@@ -29,6 +30,8 @@ export const PROFILE_FOOTER_CLASS = "-mx-6 shrink-0 border-t border-border px-6 
 
 function AccessoryIcon({ id, appearance }: { id: AccessoryId; appearance: ButlerAppearance }) {
     const artwork = {
+        mustache: <MustacheArtwork />, bandage: <BandageArtwork />, eyepatch: <><EyepatchStrap /><EyepatchArtwork /></>,
+        rotor: <RotorArtwork />, sprout: <SproutArtwork />, nightcap: <NightcapArtwork />,
         crown: <CrownArtwork />, headphones: <HeadphonesArtwork />,
         "thick-brows": <ThickBrowsArtwork />,
         "round-glasses": <GlassesArtwork />, sunglasses: <SunglassesArtwork />, blush: <BlushArtwork />, beret: <HatArtwork />, "baseball-cap": <BaseballCapArtwork />,
@@ -118,7 +121,8 @@ export default function AssistantProfileEditor({ name, appearance, onAppearanceC
                             aria-pressed={appearance.accessories[slot] === value}
                             onClick={() => {
                                 update(previous => ({ ...previous, accessories: { ...previous.accessories, [slot]: value } }));
-                                if (value) setShowcase(previous => ({ ...previous, id: previous.id + 1, override: accessoryDefinitions[value].action }));
+                                const previewAction = value && accessoryDefinitions[value].action;
+                                if (previewAction) setShowcase(previous => ({ ...previous, id: previous.id + 1, override: previewAction }));
                             }}
                             className="flex size-11 items-center justify-center rounded-lg border aria-pressed:border-primary aria-pressed:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring">
                             {value ? <AccessoryIcon id={value} appearance={appearance} /> : <X className="size-4 text-muted-foreground" />}

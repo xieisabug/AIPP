@@ -3,7 +3,7 @@ import { SvgPose } from "./SvgPose";
 
 /** 编辑器里装饰缩略图的取景框。 */
 export const accessoryPreviewViewBox: Record<AccessoryId, string> = {
-    "round-glasses": "-115 -65 230 130",
+    "round-glasses": "-146 -65 292 130",
     sunglasses: "-132 -62 264 124",
     "thick-brows": "-94 -91 188 102",
     blush: "-95 -20 190 116",
@@ -11,13 +11,19 @@ export const accessoryPreviewViewBox: Record<AccessoryId, string> = {
     "baseball-cap-left": "-187 -108 312 150",
     crown: "-116 -103 232 138",
     headphones: "-244 -44 488 266",
+    mustache: "-104 25 208 75",
+    bandage: "-57 0 114 71",
+    eyepatch: "-129 -75 258 137",
+    rotor: "-151 -102 302 125",
+    sprout: "-72 -103 150 120",
+    nightcap: "-111 -102 250 211",
     beret: "-140 -100 280 140",
     "bow-bell": "-76 -52 152 136",
     flower: "-38 -38 80 76",
 };
 
 export function GlassesArtwork() {
-    return <g fill="none" stroke="#253449" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round">
+    return <g transform="scale(1.28)" fill="none" stroke="#253449" strokeWidth="9" strokeLinecap="round" strokeLinejoin="round">
         <path d="M-101-10L-83-7M83-7L101-10M-12-5Q0-14 12-5" />
         <rect x="-82" y="-34" width="70" height="62" rx="25" fill="#B5DBF5" fillOpacity="0.2" />
         <rect x="12" y="-34" width="70" height="62" rx="25" fill="#B5DBF5" fillOpacity="0.2" />

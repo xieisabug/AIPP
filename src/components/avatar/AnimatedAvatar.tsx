@@ -6,6 +6,7 @@ import { BaseballCapArtwork, CrownArtwork, HeadphonesArtwork, BlushArtwork, BowB
 import { useAvatarMotion, type AvatarActionRequest } from "./useAvatarMotion";
 import { useAvatarPerformance } from "./useAvatarPerformance";
 import { WhaleRiceMeal } from "./WhaleRiceMeal";
+import { MustacheArtwork, BandageArtwork, EyepatchStrap, EyepatchArtwork, RotorArtwork, SproutArtwork, NightcapArtwork } from "./PlayfulAccessories";
 import AvatarEye from "./AvatarEye";
 import { SvgPose } from "./SvgPose";
 import { ConfettiOverlay, MorphParts } from "./AvatarEffects";
@@ -70,7 +71,11 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     const blushing = performing("blush", faceItem === "blush");
     const jingling = performing("jingle", headItem === "bow-bell");
     const fluttering = performing("butterfly", headItem === "flower");
-    const smiling = action === "smile" || action === "glasses" || blushing || fluttering;
+    const twirling = performing("twirl", faceItem === "mustache");
+    const flying = performing("fly", headItem === "rotor");
+    const swayingSprout = performing("sprout-sway", headItem === "sprout");
+    const dozing = performing("doze", headItem === "nightcap");
+    const smiling = twirling || action === "smile" || action === "glasses" || blushing || fluttering;
     const blinking = action === "blink";
     // 装饰动作带动整个身体：摇头晃铃铛、害羞地扭一扭。
     const listening = performing("listen", headItem === "headphones");
@@ -89,9 +94,10 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
         scale: [face.scale, face.scale * 1.08, dock.scale, dock.scale, face.scale],
     } : { x: face.x, y: face.y, rotate: 0, scale: face.scale };
 
-    const eyes = [-1, 1].map(side => <AvatarEye key={side} side={side} open={side < 0 ? v.left : v.right} happy={v.happy} sad={v.sad} yaw={v.yaw} tilt={v.tilt}
+    const eyes = (faceItem === "eyepatch" ? [-1] : [-1, 1]).map(side => <AvatarEye key={side} side={side} open={side < 0 ? v.left : v.right} happy={v.happy} sad={v.sad} yaw={v.yaw} tilt={v.tilt}
         blink={blinking} forceSmile={smiling} squint={peering} squeeze={jingling} color={faceColor} inkColor={definition.eyeColor} scale={definition.eyeScale} />);
-    const eyePair = correctingCrown ? <SvgPose key={sequence} data-avatar-gaze="crown" pose={{
+    const eyePair = dozing ? <SvgPose pose={{ scaleY: [1, .65, .08, .08, 1.12, 1] }}
+        transition={{ duration: 2, times: [0, .25, .48, .64, .72, 1] }}>{eyes}</SvgPose> : correctingCrown ? <SvgPose key={sequence} data-avatar-gaze="crown" pose={{
         x: [0, 0, 0, 13, 13, 8, 0, 0, 0],
         y: [0, 0, 0, -18, -18, -10, 0, 0, 0],
     }} transition={crownTiming}>{eyes}</SvgPose> : blossom ? <g opacity={codingFace ? 0 : 1} className="transition-opacity duration-150 motion-reduce:transition-none">{eyes}</g> : eyes;
@@ -113,7 +119,10 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                         <circle r="250" fill={coreColor} />
                     </motion.g>}
                     <motion.g style={{ opacity: logoOpacity }}><g transform="translate(0 140)">
-                    <SvgPose pose={sway} transition={swayTransition}><g transform={`translate(0 -140) scale(${definition.artworkScale ?? 1}) translate(-255 -255)`}>
+                    <SvgPose pose={flying ? { y: [0, 0, -24, -24, 0, 0] } : dozing ? { rotate: [0, 3, 9, 9, -5, 0] } :
+                        swayingSprout ? { rotate: [0, -5, 4, 0] } : { y: 0, ...sway }}
+                        transition={flying ? { duration: 1.8, times: [0, .32, .53, .85, .97, 1] } : dozing ? { duration: 2, times: [0, .25, .48, .64, .72, 1] } :
+                            swayingSprout ? { duration: 0.8 } : swayTransition}><g transform={`translate(0 -140) scale(${definition.artworkScale ?? 1}) translate(-255 -255)`}>
                         {definition.parts.map(part => {
                             const fill = part.color === "white" ? "#FFFFFF" : appearance.colors[part.color];
                             const whiteEdge = definition.id === "aipp" && fill.toUpperCase() === "#FFFFFF";
@@ -122,6 +131,14 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                                 strokeWidth={whiteEdge ? 1 : part.outlineWidth} strokeLinejoin="round"
                                 vectorEffect={whiteEdge ? "non-scaling-stroke" : undefined} />;
                         })}
+                        {faceItem === "eyepatch" && <g>
+                            <defs><clipPath id={`${id}-strap`}>
+                                {definition.parts.map(part => <path key={part.color} d={part.path} />)}
+                            </clipPath></defs>
+                            <g clipPath={`url(#${id}-strap)`}>
+                                <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}><EyepatchStrap reach={600} /></g>
+                            </g>
+                        </g>}
                         {definition.id === "whale" && action === "smile" && <WhaleRiceMeal key={sequence} bodyColor={appearance.colors.secondary} />}
                         <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}>
                             <motion.g style={{ x: faceX, y: faceY, opacity: eyeOpacity }}>
@@ -134,6 +151,9 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                                     <ThickBrowsArtwork raised={performing("raise-brow", true)} />
                                 </g>}
                             </motion.g>
+                            {faceItem === "mustache" && <g data-avatar-accessory="mustache"><MustacheArtwork playing={twirling} /></g>}
+                            {faceItem === "bandage" && <g data-avatar-accessory="bandage"><BandageArtwork /></g>}
+                            {faceItem === "eyepatch" && <g data-avatar-accessory="eyepatch"><EyepatchArtwork /></g>}
                             {faceItem === "blush" && <g data-avatar-accessory="blush"><BlushArtwork /></g>}
                             {faceItem === "sunglasses" && <SvgPose data-avatar-accessory="sunglasses" pose={peering ? { y: [0, 0, -130, -130, 0], rotate: [0, 0, -5, -5, 0] } : { y: 0, rotate: 0 }}
                                 transition={peering ? { duration: 3, times: [0, 0.1, 0.3, 0.8, 0.95], ease: "easeInOut" } : { duration: 0.2 }}>
@@ -149,6 +169,12 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                             <GlassesArtwork />
                         </motion.g>}
                         </AnimatePresence>
+                        {(headItem === "rotor" || headItem === "sprout" || headItem === "nightcap") &&
+                            <g data-avatar-accessory={headItem} transform={`translate(${definition.crown.x} ${definition.crown.y}) scale(${definition.crown.scale})`}>
+                                {headItem === "rotor" && <RotorArtwork playing={flying} />}
+                                {headItem === "sprout" && <SproutArtwork playing={swayingSprout} />}
+                                {headItem === "nightcap" && <NightcapArtwork playing={dozing} />}
+                            </g>}
                         {headItem === "crown" && <g data-avatar-accessory="crown" transform={`translate(${definition.crown.x} ${definition.crown.y}) scale(${definition.crown.scale})`}>
                             <SvgPose pose={{ rotate: correctingCrown ? [0, 30, 30, 30, 30, -5, 3, -1, 0] : 0 }}
                                 transition={correctingCrown ? crownTiming : { duration: 0.12 }}>

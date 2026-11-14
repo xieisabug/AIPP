@@ -1,6 +1,6 @@
 import { avatarRecipes } from "./avatarRecipes";
 export type { AvatarState } from "./avatarRecipes";
-export type AvatarAction = "blink" | "smile" | "glasses" | "hat" | "peer" | "blush" | "jingle" | "butterfly" | "raise-brow" | "listen" | "straighten-crown";
+export type AvatarAction = "blink" | "smile" | "glasses" | "hat" | "peer" | "blush" | "jingle" | "butterfly" | "raise-brow" | "listen" | "straighten-crown" | "twirl" | "fly" | "sprout-sway" | "doze";
 export type AvatarShape = "aipp" | "pebble" | "pixel" | "whale" | "blossom";
 export interface AvatarAnchor { x: number; y: number; scale: number; rotation?: number }
 export interface AvatarDefinition {
@@ -81,11 +81,17 @@ export const accessoryDefinitions = {
     "round-glasses": { slot: "eyes", label: "圆框眼镜", capability: "eyes", action: "glasses" },
     sunglasses: { slot: "eyes", label: "墨镜", capability: "eyes", action: "peer" },
     "thick-brows": { slot: "eyes", label: "粗眉毛", capability: "eyes", action: "raise-brow" },
+    mustache: { slot: "eyes", label: "卷翘小胡子", capability: "eyes", action: "twirl" },
+    bandage: { slot: "eyes", label: "鼻梁创可贴", capability: "eyes", action: null },
+    eyepatch: { slot: "eyes", label: "海盗眼罩", capability: "eyes", action: "blink" },
     blush: { slot: "eyes", label: "腮红", capability: "eyes", action: "blush" },
     "baseball-cap": { slot: "head", label: "棒球帽", capability: "headwear", action: "hat" },
     "baseball-cap-left": { slot: "head", label: "反向棒球帽", capability: "headwear", action: "hat" },
     crown: { slot: "head", label: "皇冠", capability: "headwear", action: "straighten-crown" },
     headphones: { slot: "head", label: "头戴式耳机", capability: "headwear", action: "listen" },
+    rotor: { slot: "head", label: "竹蜻蜓", capability: "headwear", action: "fly" },
+    sprout: { slot: "head", label: "嫩芽", capability: "headwear", action: "sprout-sway" },
+    nightcap: { slot: "head", label: "睡帽", capability: "headwear", action: "doze" },
     beret: { slot: "head", label: "贝雷帽", capability: "headwear", action: "hat" },
     "bow-bell": { slot: "head", label: "铃铛蝴蝶结", capability: "headwear", action: "jingle" },
     flower: { slot: "head", label: "小花", capability: "headwear", action: "butterfly" },
@@ -97,7 +103,7 @@ export type HeadAccessory = AccessoryOf<"head">;
 export const accessoriesOf = <S extends "eyes" | "head">(slot: S) =>
     (Object.keys(accessoryDefinitions) as AccessoryId[]).filter(id => accessoryDefinitions[id].slot === slot) as (S extends "eyes" ? FaceAccessory : HeadAccessory)[];
 
-export const actionDurations: Record<AvatarAction, number> = { blink: 280, smile: 1300, glasses: 2400, hat: 1500, peer: 3000, blush: 2000, jingle: 1800, butterfly: 3400, "raise-brow": 1000, listen: 1600, "straighten-crown": 2200 };
+export const actionDurations: Record<AvatarAction, number> = { blink: 280, smile: 1300, glasses: 2400, hat: 1500, peer: 3000, blush: 2000, jingle: 1800, butterfly: 3400, "raise-brow": 1000, listen: 1600, "straighten-crown": 2200, twirl: 1100, fly: 1800, "sprout-sway": 1500, doze: 2000 };
 export const whaleMealDuration = 2400;
 export const actionDuration = (action: AvatarAction, shape?: AvatarShape) =>
     shape === "whale" && action === "smile" ? whaleMealDuration : actionDurations[action];
