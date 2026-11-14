@@ -130,10 +130,8 @@ describe("MCPServerDialog vault references", () => {
 
     it("keeps the header prefix next to a referenced value and saves the reference", async () => {
         const headers = JSON.stringify({ Authorization: `Bearer vault://${vaultId}#token` });
-        const config = { name: "gh", transport_type: "http", url: "https://mcp.example.com/mcp", headers };
-        // 与设置页一致：对话框先以关闭状态挂载，再带着初始配置打开
-        const { rerender } = render(<MCPServerDialog isOpen={false} onClose={() => undefined} onSubmit={() => undefined} initialConfig={config} />);
-        rerender(<MCPServerDialog isOpen onClose={() => undefined} onSubmit={() => undefined} initialConfig={config} />);
+        // 以打开状态直接挂载：初始化设置的请求头行不能被类型切换逻辑清掉
+        render(<MCPServerDialog isOpen onClose={() => undefined} onSubmit={() => undefined} initialConfig={{ name: "gh", transport_type: "http", url: "https://mcp.example.com/mcp", headers }} />);
         fireEvent.click(screen.getByRole("button", { name: "高级设置" }));
         expect(await screen.findByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
         expect(screen.getByLabelText("前缀")).toHaveValue("Bearer ");
@@ -141,6 +139,22 @@ describe("MCPServerDialog vault references", () => {
         await submit();
         const call = vi.mocked(invoke).mock.calls.find(([command]) => command === "add_mcp_server");
         const request = (call?.[1] as { request: { headers: string } }).request;
+        expect(JSON.parse(request.headers)).toEqual({ Authorization: `Bearer vault://${vaultId}#token` });
+    });
+
+    it("keeps header rows when switching to stdio and back", async () => {
+        const headers = JSON.stringify({ Authorization: `Bearer vault://${vaultId}#token` });
+        render(<MCPServerDialog isOpen onClose={() => undefined} onSubmit={() => undefined} initialConfig={{ name: "gh", transport_type: "http", url: "https://mcp.example.com/mcp", headers }} />);
+        fireEvent.click(screen.getByTitle("HTTP"));
+        fireEvent.click(screen.getByText("Stdio"));
+        fireEvent.click(screen.getByTitle("Stdio"));
+        fireEvent.click(screen.getByText("HTTP"));
+        fireEvent.click(screen.getByRole("button", { name: "高级设置" }));
+        expect(await screen.findByText("GitHub 个人令牌 · 令牌")).toBeInTheDocument();
+        await submit();
+        const call = vi.mocked(invoke).mock.calls.find(([command]) => command === "add_mcp_server");
+        const request = (call?.[1] as { request: { headers: string; transport_type: string } }).request;
+        expect(request.transport_type).toBe("http");
         expect(JSON.parse(request.headers)).toEqual({ Authorization: `Bearer vault://${vaultId}#token` });
     });
 });

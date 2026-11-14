@@ -162,16 +162,13 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [headerRows, formData.transport_type]);
 
-    // When transport type changes away from http, clear header rows sync (but keep stored string)
-    useEffect(() => {
-        if (formData.transport_type !== 'http') {
-            setHeaderRows([]);
-        } else {
-            // ensure rows reflect current headers string once upon switch
-            setHeaderRows(parseHeadersToRows(formData.headers));
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [formData.transport_type]);
+    // 用户切换类型时才重建请求头行：切到 HTTP 用已保存的字符串重建，切走则清空行（字符串保留）。
+    // 不能写成依赖 transport_type 的 effect：挂载时它会和初始化 effect 在同一次提交里运行，
+    // 读到旧的空 headers，把初始化刚设置的行清掉。
+    const changeTransportType = useCallback((value: string) => {
+        setFormData(prev => ({ ...prev, transport_type: value }));
+        setHeaderRows(value === 'http' ? parseHeadersToRows(formData.headers) : []);
+    }, [formData.headers, parseHeadersToRows]);
 
     const addHeaderRow = useCallback(() => {
         setHeaderRows(prev => [...prev, { id: `${Date.now()}-${prev.length}`, key: '', value: '' }]);
@@ -327,7 +324,7 @@ const MCPServerDialog: React.FC<MCPServerDialogProps> = ({
                             <CustomSelect
                                 options={MCP_TRANSPORT_TYPES}
                                 value={formData.transport_type}
-                                onChange={(value) => updateField('transport_type', value)}
+                                onChange={changeTransportType}
                             />
                             {isMobilePlatform && formData.transport_type === 'stdio' && !isAippBuiltinCommand(formData.command) && (
                                 <p className="text-xs text-amber-600 dark:text-amber-400">

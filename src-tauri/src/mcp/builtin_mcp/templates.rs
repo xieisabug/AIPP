@@ -2025,7 +2025,8 @@ mod tests {
     #[test]
     fn test_all_env_vars_have_valid_field_type() {
         let templates = builtin_templates();
-        let valid_types = ["text", "select", "boolean", "number", "textarea"];
+        // 与 BuiltinToolDialog 支持的类型保持一致；password 用于搜索 API Key 等秘密值。
+        let valid_types = ["text", "password", "select", "boolean", "number", "textarea"];
 
         for template in templates {
             for env in template.required_envs {
