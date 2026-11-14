@@ -98,14 +98,6 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
             targetY.set(Math.max(-6, Math.min(6, (event.clientY - rect.top - rect.height / 2) / rect.height * 12)));
         }}>
         <svg viewBox={headItem || full ? "-55 -100 620 620" : "-12 -12 534 534"} className="h-full w-full overflow-visible" focusable="false">
-            <defs>
-                <linearGradient id={`${id}-primary`} x1="0" y1="0" x2="0.3" y2="1">
-                    <stop stopColor="white" /><stop offset="0.4" stopColor="#F5F5F5" /><stop offset="1" stopColor="#1A2437" />
-                </linearGradient>
-                <linearGradient id={`${id}-secondary`} x1="0" y1="0" x2="0.8" y2="1">
-                    <stop stopColor="white" /><stop offset="1" stopColor="black" />
-                </linearGradient>
-            </defs>
             <g transform="translate(255 255)">
                 <motion.g style={{ x: bodyX, y: bodyY, rotate: v.roll, scaleX: bodyScaleX, scaleY: bodyScaleY, opacity: m.opacity, transformOrigin: "0px 0px" }}>
                     {performance.kind && <motion.g data-avatar-core="" style={{ opacity: discOpacity }}>
@@ -113,11 +105,14 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                     </motion.g>}
                     <motion.g style={{ opacity: logoOpacity }}><g transform="translate(0 140)">
                     <SvgPose pose={sway} transition={swayTransition}><g transform={`translate(0 -140) scale(${definition.artworkScale ?? 1}) translate(-255 -255)`}>
-                        {definition.parts.map(part => <g key={part.color}>
-                            <path d={part.path} fill={part.color === "white" ? "#FFFFFF" : appearance.colors[part.color]}
-                                stroke={part.outlineWidth ? appearance.colors.secondary : undefined} strokeWidth={part.outlineWidth} strokeLinejoin="round" />
-                            {definition.colorLabels.primary && <path d={part.path} fill={`url(#${id}-${part.color})`} opacity="0.2" />}
-                        </g>)}
+                        {definition.parts.map(part => {
+                            const fill = part.color === "white" ? "#FFFFFF" : appearance.colors[part.color];
+                            const whiteEdge = definition.id === "aipp" && fill.toUpperCase() === "#FFFFFF";
+                            const stroke = whiteEdge ? "#E4E4E4" : part.outlineWidth ? appearance.colors.secondary : undefined;
+                            return <path key={part.color} d={part.path} fill={fill} stroke={stroke}
+                                strokeWidth={whiteEdge ? 1 : part.outlineWidth} strokeLinejoin="round"
+                                vectorEffect={whiteEdge ? "non-scaling-stroke" : undefined} />;
+                        })}
                         <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}>
                             <motion.g style={{ x: faceX, y: faceY, opacity: eyeOpacity }}>
                                 {blossom && <path data-avatar-expression="coding" opacity={codingFace ? 1 : 0}
