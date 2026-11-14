@@ -13,6 +13,8 @@ export interface VaultPick {
     /** 从当前值拆出的前缀（如 "Bearer "），选择已有条目时为空。 */
     prefix: string;
     variableName?: string;
+    /** 当前值转存时，调用方必须保留空前缀，不能自动补 Bearer。 */
+    storedCurrentValue?: boolean;
 }
 
 interface VaultPickerDialogProps {
@@ -36,7 +38,8 @@ type Mode = "existing" | "store";
 export default function VaultPickerDialog({
     open, onClose, items, currentValue, suggestedName, targetHint, askVariableName, onPick,
 }: VaultPickerDialogProps) {
-    const plain = currentValue?.trim() && !containsVaultRef(currentValue) ? currentValue.trim() : "";
+    // trim 只用于判断空值；转存必须保留原值的空格、制表符和换行。
+    const plain = currentValue?.trim() && !containsVaultRef(currentValue) ? currentValue : "";
     const [mode, setMode] = useState<Mode>("existing");
     const [query, setQuery] = useState("");
     const [selectedId, setSelectedId] = useState<string>("");
@@ -97,7 +100,7 @@ export default function VaultPickerDialog({
         setSaving(true);
         try {
             const created = await invoke<VaultItem>("vault_create", { input });
-            onPick({ ref: { id: created.id }, prefix, variableName: askVariableName ? effectiveVariable : undefined });
+            onPick({ ref: { id: created.id }, prefix, variableName: askVariableName ? effectiveVariable : undefined, storedCurrentValue: true });
             onClose();
         } catch (e) {
             setError(String(e));

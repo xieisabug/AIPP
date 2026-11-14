@@ -398,6 +398,363 @@ fn test_vault_sync_skips_local_only_items() {
     assert!(sealed_snapshots(&source, &sync, &key).is_empty());
 }
 
+// Exercise the production ready-key scan, queue, ACK, and receiver paths with in-memory DBs.
+fn scan_ready(data: &Connection, sync: &Connection, key: &secrets::SecretKey) {
+    let (snapshots, present) = read_local_snapshots_from_db(data, &spec(), sync,
+        &mut Default::default(), |_, _| Ok(true)).unwrap();
+    for snapshot in seal_snapshots(sync, key, snapshots).unwrap() {
+        enqueue_snapshot_if_changed(sync, &snapshot, "source").unwrap();
+    }
+    scan_local_deletes_in_db(sync, &spec(), &present,
+        |id| local_row_exists_in_db(sync, data, &spec(), id)).unwrap();
+}
+
+// Models a successful server response; the server's actual HTTP delete contract has a Python test.
+fn accept_one(sync: &Connection, version: i64, seq: i64) -> PullChange {
+    let events = load_outbox_from_db_with_secret_readiness(sync, 100, false, true).unwrap();
+    assert_eq!(events.len(), 1);
+    mark_events_pushing_in_db(sync, &events).unwrap();
+    let (id, event) = events.into_iter().next().unwrap();
+    consume_accepted_event(sync, id, &event, &AcceptedEvent {
+        event_id: event.event_id.clone(), object_type: event.object_type.clone(),
+        object_id: event.object_id.clone(), server_version: version, server_seq: seq,
+    }).unwrap();
+    PullChange { seq, event_id: event.event_id, device_id: "source".into(),
+        object_type: event.object_type, object_id: event.object_id, operation: event.operation.clone(),
+        version, payload: event.payload, deleted_at: (event.operation == "delete").then(now_string),
+        created_at: now_string() }
+}
+
+fn receive(data: &Connection, sync: &Connection, key: Option<&secrets::SecretKey>, change: &PullChange) {
+    secrets::with_state(key.cloned().map(secrets::SecretState::Ready),
+        || apply_change_to_db(sync, data, &spec(), change, "receiver", |_| Ok(()))).unwrap();
+}
+
+/// Disabling an already-synced item sends a payload-free tombstone, removes other devices' copies,
+/// preserves the source value, and does not echo or resurrect it. Explicit re-enabling still works.
+#[test]
+fn test_vault_disable_sync_withdraws_remote_copy_and_can_reenable() {
+    let (source, target) = (db(), db());
+    let (source_sync, target_sync) = (sync_db(), sync_db());
+    let key = secrets::derive_key("same-passphrase", &[8; 16], 1000).unwrap();
+    let default_input: CreateInput = serde_json::from_value(json!({
+        "name": "GitHub", "key": "github_pat", "value": FAKE,
+    })).unwrap();
+    let meta = create_with(&source, &key, &default_input).unwrap();
+    assert!(meta.sync_enabled, "new entries still default to syncing");
+    scan_ready(&source, &source_sync, &key);
+    let original = accept_one(&source_sync, 1, 1);
+    receive(&target, &target_sync, Some(&key), &original);
+    assert_eq!(resolve_one(&target, Some(&key), "github_pat").unwrap().value, FAKE);
+
+    update_with(&source, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&source, &source_sync, &key);
+    scan_ready(&source, &source_sync, &key); // Repeated scans deduplicate the withdrawal.
+    let deleted = accept_one(&source_sync, 2, 2);
+    assert_eq!(deleted.operation, "delete");
+    assert_eq!(deleted.object_id, original.object_id);
+    assert!(deleted.payload.is_none());
+    receive(&source, &source_sync, Some(&key), &deleted); // Its own pull echo is only an ACK.
+    receive(&target, &target_sync, Some(&key), &deleted);
+    assert!(list_with(&target, Some(&key)).unwrap().is_empty());
+    let kept = resolve_one(&source, Some(&key), "github_pat").unwrap();
+    assert_eq!(kept.value, FAKE);
+    assert!(!kept.meta.sync_enabled);
+    for sync in [&source_sync, &target_sync] {
+        assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_secret_server", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+    scan_ready(&source, &source_sync, &key);
+    scan_ready(&target, &target_sync, &key);
+    assert!(load_pending_outbox_from_db(&source_sync, 100).unwrap().is_empty());
+    assert!(load_pending_outbox_from_db(&target_sync, 100).unwrap().is_empty());
+
+    update_with(&source, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(true), ..Default::default() }).unwrap();
+    scan_ready(&source, &source_sync, &key);
+    let enabled = accept_one(&source_sync, 1, 3);
+    assert_eq!(enabled.operation, "upsert");
+    assert!(!serde_json::to_string(&enabled).unwrap().contains(FAKE));
+    receive(&target, &target_sync, Some(&key), &enabled);
+    assert_eq!(resolve_one(&target, Some(&key), "github_pat").unwrap().value, FAKE);
+}
+
+#[test]
+fn test_vault_reenable_before_withdrawal_ack_keeps_one_sync_identity() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[2; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    let original = accept_one(&sync, 1, 1);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(true), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    let deleted = accept_one(&sync, 2, 2);
+    assert_eq!(deleted.operation, "delete");
+    assert!(find_local_id_by_object_id(&sync, OBJECT_TYPE, &original.object_id).unwrap().is_some());
+    let restored = accept_one(&sync, 3, 3);
+    assert_eq!(restored.operation, "upsert");
+    assert_eq!(restored.object_id, original.object_id);
+    scan_ready(&data, &sync, &key);
+    assert!(load_pending_outbox_from_db(&sync, 100).unwrap().is_empty(), "no duplicate identity is uploaded");
+    assert!(resolve_one(&data, Some(&key), "github_pat").unwrap().meta.sync_enabled);
+}
+
+#[test]
+fn test_vault_reenable_matching_old_payload_still_restores_tombstoned_identity() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[2; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    let original = accept_one(&sync, 1, 1);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(true), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    accept_one(&sync, 2, 2); // Mapping is retained for the queued restore.
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    reconcile_withdrawals(&sync, &data).unwrap(); // Cancels that still-unsent restore.
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(true), ..Default::default() }).unwrap();
+    data.execute("UPDATE vault_item SET updated_at=?1", [meta.updated_at]).unwrap(); // Same payload/hash, including millisecond collisions.
+    scan_ready(&data, &sync, &key);
+    let events = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1.operation, "upsert");
+    assert_eq!(events[0].1.object_id, original.object_id);
+    assert_eq!(events[0].1.base_version, Some(2));
+}
+
+#[test]
+fn test_vault_disable_sync_drops_never_sent_upload() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::random_local_key();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    assert_eq!(load_pending_outbox_from_db(&sync, 100).unwrap().len(), 1);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    assert!(load_pending_outbox_from_db(&sync, 100).unwrap().is_empty());
+    assert_eq!(resolve_one(&data, Some(&key), "github_pat").unwrap().value, FAKE);
+}
+
+/// An uncertain upload must keep its immutable event for an idempotent retry; its queued withdrawal
+/// waits for that response and picks up the accepted server version before being sent.
+#[test]
+fn test_vault_disable_sync_withdraws_after_inflight_upload_recovers() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[7; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    let events = load_pending_outbox_from_db(&sync, 100).unwrap();
+    mark_events_pushing_in_db(&sync, &events).unwrap();
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    assert!(load_pending_outbox_from_db(&sync, 100).unwrap().is_empty(), "delete waits for uncertain upload");
+    record_event_failure(&sync, events[0].0, "test response lost").unwrap();
+    sync.execute("UPDATE sync_outbox SET next_retry_at=NULL", []).unwrap();
+    let recovered = accept_one(&sync, 1, 1);
+    assert_eq!(recovered.event_id, events[0].1.event_id);
+    assert_eq!(recovered.payload, events[0].1.payload);
+    let withdrawal = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(withdrawal.len(), 1);
+    assert_eq!(withdrawal[0].1.operation, "delete");
+    assert_eq!(withdrawal[0].1.base_version, Some(1));
+    accept_one(&sync, 2, 2);
+    assert_eq!(resolve_one(&data, Some(&key), "github_pat").unwrap().value, FAKE);
+}
+
+#[test]
+fn test_vault_disable_sync_survives_remote_update_before_scan() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[6; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    let mut remote = accept_one(&sync, 1, 1);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    remote.event_id = Uuid::new_v4().to_string();
+    remote.version = 2;
+    remote.seq = 2;
+    remote.payload.as_mut().unwrap()["fields"]["value"] = serde_json::from_str(&seal_value(&key, &meta.id, "remote-new").unwrap()).unwrap();
+    receive(&data, &sync, Some(&key), &remote);
+    let kept = resolve_one(&data, Some(&key), "github_pat").unwrap();
+    assert!(!kept.meta.sync_enabled);
+    assert_eq!(kept.value, FAKE);
+    scan_ready(&data, &sync, &key);
+    let events = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1.operation, "delete");
+    assert_eq!(events[0].1.base_version, Some(2));
+}
+
+#[test]
+fn test_vault_local_only_copy_survives_concurrent_delete_and_resurrected_identity() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[5; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    let original = accept_one(&sync, 1, 1);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    let tombstone = PullChange { event_id: Uuid::new_v4().to_string(), operation: "delete".into(),
+        version: 2, seq: 2, payload: None, deleted_at: Some(now_string()), ..original.clone() };
+    receive(&data, &sync, None, &tombstone); // No passphrase needed to preserve the opt-out.
+    assert!(find_local_id_by_object_id(&sync, OBJECT_TYPE, &original.object_id).unwrap().is_none());
+    assert_eq!(resolve_one(&data, Some(&key), "github_pat").unwrap().value, FAKE);
+    let newer = PullChange { event_id: Uuid::new_v4().to_string(), version: 3, seq: 3, ..original };
+    receive(&data, &sync, Some(&key), &newer); // Matched by entry UUID, not the cleared sync mapping.
+    assert!(!resolve_one(&data, Some(&key), "github_pat").unwrap().meta.sync_enabled);
+    scan_ready(&data, &sync, &key);
+    let events = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1.operation, "delete");
+    assert_eq!(events[0].1.base_version, Some(3));
+}
+
+#[test]
+fn test_vault_withdrawal_supersedes_locked_receiver_pending_copy() {
+    let (source, target) = (db(), db());
+    let (source_sync, target_sync) = (sync_db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[4; 16], 1000).unwrap();
+    let meta = create(&source, &key, "github_pat", FAKE);
+    scan_ready(&source, &source_sync, &key);
+    let original = accept_one(&source_sync, 1, 1);
+    receive(&target, &target_sync, None, &original);
+    assert_eq!(secrets::pending_count(&target_sync), 1);
+    update_with(&source, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&source, &source_sync, &key);
+    receive(&target, &target_sync, None, &accept_one(&source_sync, 2, 2));
+    secrets::replay_pending(&target_sync, |change| {
+        receive(&target, &target_sync, Some(&key), change);
+        Ok(())
+    }).unwrap();
+    assert_eq!(secrets::pending_count(&target_sync), 0);
+    assert!(list_with(&target, Some(&key)).unwrap().is_empty());
+}
+
+#[test]
+fn test_vault_dispatch_rechecks_opt_out_after_snapshot_and_batch_capture() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[3; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    accept_one(&sync, 1, 1);
+    replace_secret_with(&data, &key, &meta.id, &SecretValue::new("replacement")).unwrap();
+    let stale_snapshot = sealed_snapshots(&data, &sync, &key).remove(0);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    // The background scan resumes after the settings write, then an old batch is dispatched.
+    enqueue_snapshot_if_changed(&sync, &stale_snapshot, "source").unwrap();
+    let stale_batch = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(stale_batch[0].1.operation, "upsert");
+    assert!(prepare_vault_push_batch_in_db(&sync, &data, &stale_batch).unwrap().is_empty());
+    let next = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].1.operation, "delete");
+    assert!(next[0].1.payload.is_none());
+    assert_eq!(resolve_one(&data, Some(&key), "github_pat").unwrap().value, "replacement");
+}
+
+#[test]
+fn test_vault_opt_out_during_dispatched_request_withdraws_after_ack() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[3; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    let events = load_pending_outbox_from_db(&sync, 100).unwrap();
+    let prepared = prepare_vault_push_batch_in_db(&sync, &data, &events).unwrap();
+    assert_eq!(prepared.len(), 1);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    let (id, event) = &prepared[0];
+    consume_accepted_event(&sync, *id, event, &AcceptedEvent {
+        event_id: event.event_id.clone(), object_type: event.object_type.clone(),
+        object_id: event.object_id.clone(), server_version: 1, server_seq: 1,
+    }).unwrap();
+    // Same recheck as load_pending_outbox, without waiting for another whole sync round.
+    reconcile_withdrawals(&sync, &data).unwrap();
+    let next = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].1.operation, "delete");
+    assert_eq!(next[0].1.base_version, Some(1));
+}
+
+#[test]
+fn test_vault_withdrawal_drops_permanently_rejected_upload_but_not_unknown_outcome() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[3; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    accept_one(&sync, 1, 1);
+    replace_secret_with(&data, &key, &meta.id, &SecretValue::new("replacement")).unwrap();
+    scan_ready(&data, &sync, &key);
+    let events = load_pending_outbox_from_db(&sync, 100).unwrap();
+    mark_events_pushing_in_db(&sync, &events).unwrap();
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    sync.execute("UPDATE sync_outbox SET status='failed',outcome_known=0 WHERE id=?1", [events[0].0]).unwrap();
+    reconcile_withdrawals(&sync, &data).unwrap();
+    assert!(load_pending_outbox_from_db(&sync, 100).unwrap().is_empty());
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox WHERE id=?1", [events[0].0], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    // A definite rejection arrives; the already-queued withdrawal must now be allowed through.
+    sync.execute("UPDATE sync_outbox SET outcome_known=1 WHERE id=?1", [events[0].0]).unwrap();
+    reconcile_withdrawals(&sync, &data).unwrap();
+    let next = load_pending_outbox_from_db(&sync, 100).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].1.operation, "delete");
+    assert_eq!(next[0].1.base_version, Some(1));
+}
+
+#[test]
+fn test_vault_late_snapshot_cannot_restore_item_behind_inflight_withdrawal() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::derive_key("passphrase", &[3; 16], 1000).unwrap();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    scan_ready(&data, &sync, &key);
+    accept_one(&sync, 1, 1);
+    let stale_snapshot = sealed_snapshots(&data, &sync, &key).remove(0);
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    scan_ready(&data, &sync, &key);
+    let deletes = load_pending_outbox_from_db(&sync, 100).unwrap();
+    mark_events_pushing_in_db(&sync, &deletes).unwrap();
+    enqueue_snapshot_if_changed(&sync, &stale_snapshot, "source").unwrap();
+    reconcile_withdrawals(&sync, &data).unwrap();
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox WHERE operation='upsert'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(sync.query_row("SELECT COUNT(*) FROM sync_outbox WHERE operation='delete'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn test_vault_opt_out_exception_does_not_tombstone_other_filtered_rows() {
+    let (data, sync) = (db(), sync_db());
+    let key = secrets::random_local_key();
+    let meta = create(&data, &key, "github_pat", FAKE);
+    let mut other = spec();
+    other.object_type = "test.filtered";
+    let (snapshots, _) = read_local_snapshots_from_db(&data, &other, &sync,
+        &mut Default::default(), |_, _| Ok(true)).unwrap();
+    let snapshot = &snapshots[0];
+    let mut change = upsert_change(snapshot);
+    change.object_type = other.object_type.into();
+    upsert_shadow_from_remote(&sync, &change).unwrap();
+    update_with(&data, Some(&key), &meta.id,
+        &UpdateInput { sync_enabled: Some(false), ..Default::default() }).unwrap();
+    assert!(local_row_exists_in_db(&sync, &data, &other, &snapshot.object_id).unwrap());
+    assert_eq!(scan_local_deletes_in_db(&sync, &other, &HashSet::new(),
+        |id| local_row_exists_in_db(&sync, &data, &other, id)).unwrap(), 0);
+}
+
 #[test]
 fn test_config_binding_replaces_previous_target_of_same_source() {
     let db = db();

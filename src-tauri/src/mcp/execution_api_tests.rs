@@ -238,3 +238,56 @@ fn test_stdio_response_redacts_plugin_connection_credentials_without_placeholder
         assert!(output.contains("[REDACTED]"));
     }
 }
+
+#[test]
+fn test_mcp_response_preserves_content_schema_when_credentials_match_protocol() {
+    // Inject the test secret explicitly to isolate schema handling. This does not change
+    // redactor_for's short-value policy or prove complete short-credential leak protection.
+    for secret in ["text", "type", "image", "resource", "t"] {
+        let redactor = crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter());
+        for is_error in [false, true] {
+            let response: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+                "isError": is_error,
+                "content": [{"type":"text", "text":secret}],
+                "structuredContent": {(secret): secret}
+            })).unwrap();
+            let output = match serialize_tool_response_with_redactor(&response, &redactor) {
+                Ok(output) => {
+                    assert!(!is_error);
+                    // HTTP/stdio perform a second cleanup after serialization.
+                    redactor.clean_tool_output(&output)
+                }
+                Err(error) => {
+                    assert!(is_error);
+                    error.to_string().strip_prefix("工具执行错误: ").unwrap().to_owned()
+                }
+            };
+            let content: Vec<rmcp::model::Content> = serde_json::from_str(&output).unwrap();
+            assert_eq!(content[0].as_text().unwrap().text, "[REDACTED]");
+            if !is_error {
+                let structured: serde_json::Value = serde_json::from_str(&content[1].as_text().unwrap().text).unwrap();
+                assert_eq!(structured, serde_json::json!({"[REDACTED]":"[REDACTED]"}));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_builtin_response_preserves_content_schema_when_credentials_match_protocol() {
+    // Inject the test secret explicitly to isolate schema handling. This does not change
+    // redactor_for's short-value policy or prove complete short-credential leak protection.
+    for secret in ["text", "type", "content", "is_error", "isError", "t"] {
+        let redactor = crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter());
+        for flag in ["is_error", "isError"] {
+            for expected_error in [false, true] {
+                let raw = serde_json::json!({
+                    (flag):expected_error, "content":[{"type":"text", "text":secret}]
+                }).to_string();
+                let (is_error, content) = builtin_response_payload(&raw, &redactor).unwrap();
+                assert_eq!(is_error, expected_error);
+                let content: Vec<rmcp::model::Content> = serde_json::from_value(content).unwrap();
+                assert_eq!(content[0].as_text().unwrap().text, "[REDACTED]");
+            }
+        }
+    }
+}

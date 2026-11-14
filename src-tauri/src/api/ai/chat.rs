@@ -26,7 +26,7 @@ use anyhow::Context as _;
 use futures::StreamExt;
 use genai::chat::ChatStreamEvent;
 use genai::chat::{Binary, BinarySource, ChatOptions, ChatRequest, ContentPart, ToolCall, Usage};
-use genai::Client;
+use crate::api::genai_client::Client;
 use scraper::{Html, Selector};
 use serde::Serialize;
 use serde_json;
@@ -320,6 +320,10 @@ fn extract_http_error_details(error: &genai::Error) -> HttpErrorDetails {
     let mut details = HttpErrorDetails::default();
 
     match error {
+        genai::Error::HttpError { status, body, .. } => {
+            details.status_code = Some(status.as_u16());
+            details.response_body = Some(body.clone());
+        }
         // WebModelCall 和 WebAdapterCall 包含 webc_error
         genai::Error::WebModelCall { model_iden, webc_error } => {
             details.endpoint = Some(format!("{:?}", model_iden));

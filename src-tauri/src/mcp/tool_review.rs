@@ -631,7 +631,7 @@ fn configured_review_model(
 }
 
 async fn execute_review_output(
-    client: &genai::Client,
+    client: &crate::api::genai_client::Client,
     model_code: &str,
     provider_id: i64,
     call_id: i64,

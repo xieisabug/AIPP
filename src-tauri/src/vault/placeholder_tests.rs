@@ -44,6 +44,24 @@ fn test_substitution_keeps_json_valid() {
 }
 
 #[test]
+fn test_prepared_final_result_cleanup_preserves_mcp_content_schema() {
+    // Inject the test secret explicitly to isolate schema handling. This does not change
+    // redactor_for's short-value policy or prove complete short-credential leak protection.
+    for secret in ["text", "type", "image", "resource", "t"] {
+        let prepared = Prepared {
+            redactor: Some(Arc::new(crate::mcp::http_transport::ResponseRedactor::new([secret.to_owned()].into_iter()))),
+            ..Default::default()
+        };
+        let raw = json!([{"type":"text", "text":secret}]).to_string();
+        // Verify both initial cleanup and the final defense after transport-level cleanup.
+        let output = prepared.clean_result(prepared.clean_result(raw));
+        let content: Vec<rmcp::model::Content> = serde_json::from_str(&output).unwrap();
+        assert_eq!(content[0].as_text().unwrap().text, "[REDACTED]");
+        assert_eq!(prepared.clean(format!("failed: {secret}")), "failed: [REDACTED]");
+    }
+}
+
+#[test]
 fn test_destination_for_each_kind_of_tool() {
     let http = destination(&vault_server(), super::super::tool::REQUEST_TOOL,
         &json!({"method": "post", "url": "https://kyfw.12306.cn/passenger/add?x=<vault:id_card>"})).unwrap();
@@ -90,13 +108,46 @@ fn test_shell_placeholders_become_environment_references() {
 #[test]
 fn test_value_typed_by_the_user_is_used_once_without_asking() {
     let item = "00000000-0000-4000-8000-0000000000aa";
-    assert!(!has_once(Some(42), item));
+    assert!(!take_once(Some(42), item));
     grant_once(42, item);
-    assert!(has_once(Some(42), item));
-    assert!(!has_once(Some(43), item), "only in the conversation it was typed for");
-    assert!(!has_once(None, item));
-    consume_once(Some(42), item);
-    assert!(!has_once(Some(42), item));
+    assert!(!take_once(Some(43), item), "only in the conversation it was typed for");
+    assert!(!take_once(None, item));
+    assert!(take_once(Some(42), item));
+    assert!(!take_once(Some(42), item), "checking and consuming are one atomic operation");
+}
+
+/// Simultaneous calls cannot both skip approval for one freshly entered value.
+#[test]
+fn test_one_time_grant_has_exactly_one_concurrent_consumer() {
+    let item = "00000000-0000-4000-8000-0000000000ab";
+    const CALLS: usize = 32;
+    let start = Arc::new(std::sync::Barrier::new(CALLS + 1));
+    grant_once(44, item);
+    let workers: Vec<_> = (0..CALLS).map(|_| {
+        let start = start.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            take_once(Some(44), item)
+        })
+    }).collect();
+    start.wait();
+    let winners: usize = workers.into_iter().map(|worker| usize::from(worker.join().unwrap())).sum();
+    assert_eq!(winners, 1);
+    assert!(!take_once(Some(44), item));
+}
+
+#[test]
+fn test_one_time_grant_expiration_and_other_entries_fail_closed() {
+    let item = "00000000-0000-4000-8000-0000000000ac";
+    ONCE.lock().unwrap().insert((45, item.into()), Instant::now() - ONCE_TTL);
+    assert!(!take_once(Some(45), item));
+    assert!(!ONCE.lock().unwrap().contains_key(&(45, item.into())), "expired grants are removed");
+    grant_once(45, item);
+    assert!(!take_once(Some(45), "another-entry"));
+    assert!(take_once(Some(45), item));
+    assert!(!take_once(Some(45), item));
+    grant_once(45, item);
+    assert!(take_once(Some(45), item), "a newly entered value receives its own grant");
 }
 
 #[tokio::test]

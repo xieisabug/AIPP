@@ -102,6 +102,23 @@ describe("VaultRefField", () => {
         expect(screen.getByLabelText("前缀")).toHaveValue("Bearer ");
     });
 
+    it.each(["  fake-token  ", "  Bearer fake-token  ", "Basic fake-token  "])(
+        "preserves the exact Authorization value when migrating %j instead of adding Bearer", async (value) => {
+            const user = userEvent.setup();
+            const onChange = vi.fn();
+            render(<Harness initial={value} onChange={onChange} allowPrefix headerName="Authorization" />);
+            await user.click(screen.getByRole("button", { name: "从凭据保险箱选择" }));
+            await user.click(screen.getByRole("radio", { name: "把当前填写的值存入保险箱" }));
+            await user.click(screen.getByRole("button", { name: "确认" }));
+            await waitFor(() => expect(invoke).toHaveBeenCalledWith("vault_create", {
+                input: expect.objectContaining({ value }),
+            }));
+            await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(`vault://${NEW_ID}`));
+            expect(screen.getByLabelText("前缀")).toHaveValue("");
+            expect(screen.queryByDisplayValue(value)).not.toBeInTheDocument();
+        },
+    );
+
     it("adds a Bearer prefix by default when picking an entry for Authorization", async () => {
         const user = userEvent.setup();
         const onChange = vi.fn();

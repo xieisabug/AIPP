@@ -183,13 +183,12 @@ pub(crate) fn grant_once(conversation_id: i64, item_id: &str) {
     }
 }
 
-fn has_once(conversation_id: Option<i64>, item_id: &str) -> bool {
+/// Claim and consume under the same lock, before any approval wait or database recheck. A failed
+/// or cancelled call does not restore its claim: another concurrent call must ask again.
+fn take_once(conversation_id: Option<i64>, item_id: &str) -> bool {
     let Some(id) = conversation_id else { return false };
-    ONCE.lock().map(|once| once.get(&(id, item_id.to_owned())).is_some_and(|t| t.elapsed() < ONCE_TTL)).unwrap_or(false)
-}
-
-fn consume_once(conversation_id: Option<i64>, item_id: &str) {
-    if let (Some(id), Ok(mut once)) = (conversation_id, ONCE.lock()) { once.remove(&(id, item_id.to_owned())); }
+    ONCE.lock().map(|mut once| once.remove(&(id, item_id.to_owned()))
+        .is_some_and(|granted| granted.elapsed() < ONCE_TTL)).unwrap_or(false)
 }
 
 // ---------- shell commands ----------
@@ -255,6 +254,7 @@ pub(crate) fn rewrite_command(command: &str, powershell: bool, vars: &BTreeMap<S
 tokio::task_local! {
     static SHELL: Option<Arc<ShellVault>>;
     static REDACTOR: Option<Arc<ResponseRedactor>>;
+    static OPAQUE_AUDIT: bool;
 }
 
 /// The vault values for the shell command currently executing, if it used placeholders.
@@ -266,6 +266,42 @@ pub(crate) fn current_shell() -> Option<Arc<ShellVault>> {
 /// serializing or cutting output; the final cleanup remains a second boundary.
 pub(crate) fn current_redactor() -> Option<Arc<ResponseRedactor>> {
     REDACTOR.try_with(|redactor| redactor.clone()).ok().flatten()
+}
+
+// Short strings are deliberately not globally replaced in ordinary tool output. JSON credentials
+// can also be echoed as booleans/numbers/objects rather than strings. Audit storage must not retain
+// these ambiguous payloads at all; this policy does not change the tool's normal response.
+fn needs_opaque_audit(value: &str) -> bool {
+    value.len() < 4 || serde_json::from_str::<Value>(value).is_ok()
+}
+
+pub(crate) fn audit_requires_opaque_values() -> bool {
+    OPAQUE_AUDIT.try_with(|opaque| *opaque).unwrap_or(false)
+}
+
+/// Persistent sinks must clean while the invocation's credentials are still in scope. A later
+/// history query has no redactor and must never need to reopen the vault to be safe.
+pub(crate) fn clean_persisted_text(text: &str) -> String {
+    current_redactor().map_or_else(|| text.to_owned(), |redactor| redactor.clean(text))
+}
+
+pub(crate) fn clean_persisted_json(text: &str) -> String {
+    let Some(redactor) = current_redactor() else { return text.to_owned() };
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else { return redactor.clean(text) };
+    let original = value.clone();
+    redactor.clean_json(&mut value);
+    // Preserve untouched snapshots exactly, including formatting. Callers can then detect whether
+    // redaction changed undo inputs without mistaking serialization changes for lost information.
+    if value == original { text.to_owned() } else { value.to_string() }
+}
+
+#[cfg(test)]
+pub(crate) fn test_prepared(values: &[&str]) -> Prepared {
+    Prepared {
+        redactor: Some(Arc::new(super::executor::redactor_for(values.iter().map(|value| value.to_string())))),
+        opaque_audit: values.iter().any(|value| needs_opaque_audit(value)),
+        ..Default::default()
+    }
 }
 
 /// Test helper: shell values for `key = value` pairs, as `prepare` would build them.
@@ -293,6 +329,7 @@ struct UseRecord { item_id: String }
 pub(crate) struct Prepared {
     parameters: Option<String>,
     redactor: Option<Arc<ResponseRedactor>>,
+    opaque_audit: bool,
     shell: Option<Arc<ShellVault>>,
     uses: Vec<UseRecord>,
     tool: String,
@@ -306,9 +343,13 @@ impl Prepared {
     pub(crate) fn clean(&self, text: String) -> String {
         match &self.redactor { Some(redactor) => redactor.clean(&text), None => text }
     }
+    pub(crate) fn clean_result(&self, text: String) -> String {
+        match &self.redactor { Some(redactor) => redactor.clean_tool_output(&text), None => text }
+    }
     /// Run the tool with the shell values in scope (only shell commands read them).
     pub(crate) async fn run<F: std::future::Future>(&self, future: F) -> F::Output {
-        REDACTOR.scope(self.redactor.clone(), SHELL.scope(self.shell.clone(), future)).await
+        OPAQUE_AUDIT.scope(self.opaque_audit,
+            REDACTOR.scope(self.redactor.clone(), SHELL.scope(self.shell.clone(), future))).await
     }
     pub(crate) fn finish(&self, app: &AppHandle, error: Option<&str>) {
         let reason = error.map(|e| self.clean(e.to_string()));
@@ -377,6 +418,7 @@ pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, serve
     };
     Ok(Prepared {
         parameters, redactor: Some(redactor), shell,
+        opaque_audit: values.values().any(|value| needs_opaque_audit(value)),
         uses: entries.values().map(|e| UseRecord { item_id: e.meta.id.clone() }).collect(),
         tool, destination: destination.label, conversation_id, assistant_id: caller.assistant_id,
     })
@@ -386,7 +428,7 @@ pub(crate) async fn prepare(app: &AppHandle, conversation_id: Option<i64>, serve
 async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Caller, server: &MCPServer, tool_name: &str, args: &Value,
     entries: &BTreeMap<String, Resolved>, destination: &Destination, tool: &str) -> Result<BTreeMap<String, Resolved>, UseError> {
     let allowed = |entry: &Resolved| destination.origin.as_ref().is_some_and(|o| entry.meta.allowed_sites.contains(o));
-    let pending: Vec<&Resolved> = entries.values().filter(|e| !allowed(e) && !has_once(conversation_id, &e.meta.id)).collect();
+    let pending: Vec<&Resolved> = entries.values().filter(|e| !allowed(e) && !(caller.attended && take_once(conversation_id, &e.meta.id))).collect();
     let mut always: Option<(Vec<String>, String)> = None;
     if !pending.is_empty() {
         let names = pending.iter().map(|e| format!("「{}」", e.meta.name)).collect::<Vec<_>>().join("");
@@ -428,7 +470,6 @@ async fn authorize(app: &AppHandle, conversation_id: Option<i64>, caller: &Calle
         .map_err(|e| UseError::new("vault_error", format!("复核保险箱失败: {e}")))?
         .map_err(|e| UseError::new(e.code, e.message))?;
     if changed_policy { crate::api::vault_api::notify_changed(app); }
-    for entry in entries.values().filter(|e| !allowed(e)) { consume_once(conversation_id, &entry.meta.id); }
     Ok(current)
 }
 

@@ -92,7 +92,7 @@ pub fn generate_audit_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-#[instrument(skip(conn, args_json, result_json, before_snapshot_json))]
+#[instrument(skip(conn, args_json, reason, result_json, error, before_snapshot_json))]
 pub fn insert_audit_log(
     conn: &Connection,
     audit_id: &str,
@@ -110,6 +110,25 @@ pub fn insert_audit_log(
     source: &str,
     before_snapshot_json: Option<&str>,
 ) -> connection::Result<i64> {
+    // This is the shared persistence boundary for execute, batch steps and undo. The outer tool
+    // result cleanup runs too late: audit queries in later calls have no credential scope at all.
+    // Short/JSON-valued credentials are ambiguous with ordinary data. Omit the whole free-form
+    // payload in that case instead of weakening global output semantics or persisting a short value.
+    let opaque = crate::vault::placeholder::audit_requires_opaque_values();
+    let safe_args = args_json.filter(|_| !opaque).map(crate::vault::placeholder::clean_persisted_json);
+    let safe_reason = reason.filter(|_| !opaque).map(crate::vault::placeholder::clean_persisted_text);
+    let safe_result = result_json.filter(|_| !opaque).map(crate::vault::placeholder::clean_persisted_json);
+    let safe_error = error.filter(|_| !opaque).map(crate::vault::placeholder::clean_persisted_text);
+    let safe_snapshot = before_snapshot_json.filter(|_| !opaque).map(crate::vault::placeholder::clean_persisted_json);
+    // Undo must never write a redaction marker back as the old value, nor use altered original
+    // arguments to locate an entity. Keep the audit record, but remove its undo capability when
+    // either input lost information. Ordinary actions retain their exact snapshot and behavior.
+    let safe_snapshot = if safe_args.as_deref() != args_json
+        || safe_snapshot.as_deref() != before_snapshot_json {
+        None
+    } else {
+        safe_snapshot
+    };
     conn.execute(
         "INSERT INTO superadmin_audit_log
             (audit_id, action_id, domain, risk_level, args_json, reason,
@@ -121,16 +140,16 @@ pub fn insert_audit_log(
             action_id,
             domain,
             risk_level.0,
-            args_json,
-            reason,
+            safe_args,
+            safe_reason,
             dry_run as i32,
             approval_used as i32,
             success as i32,
-            result_json,
-            error,
+            safe_result,
+            safe_error,
             butler_conversation_id,
             source,
-            before_snapshot_json,
+            safe_snapshot,
         ],
     )?;
     Ok(conn.last_insert_rowid())

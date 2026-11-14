@@ -160,7 +160,7 @@ struct AgenticLoopResult {
 
 struct AgenticLoopContext<'a> {
     app_handle: &'a tauri::AppHandle,
-    client: &'a genai::Client,
+    client: &'a crate::api::genai_client::Client,
     model_name: &'a str,
     chat_options: &'a ChatOptions,
     conversation_id: i64,

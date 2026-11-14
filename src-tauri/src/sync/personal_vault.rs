@@ -798,6 +798,24 @@ pub(crate) fn usage(app: &AppHandle, uuid: &str, limit: i64) -> Result<Vec<Usage
 
 // ---------- sync ----------
 
+/// Opting out removes the shared copy without deleting or overwriting this device's entry.
+pub(super) fn is_local_only(db: &Connection, id: i64) -> Result<bool, String> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM vault_item WHERE id=?1 AND sync_enabled=0)", [id], |r| r.get(0))
+        .map_err(|e| e.to_string())
+}
+
+/// Recheck current rows rather than trusting a scan/batch captured before the user opted out.
+/// No decryption is needed; enabled rows still protect their shared copies from deletion.
+pub(super) fn reconcile_withdrawals(sync: &Connection, db: &Connection) -> Result<(), String> {
+    // As in scan_local_changes, parked server state must land before inferring any removals.
+    if secrets::server_wins_pending(sync) { return Ok(()); }
+    init(db)?;
+    let spec = specs().into_iter().find(|spec| spec.object_type == OBJECT_TYPE).ok_or("保险箱同步类型缺失")?;
+    scan_local_deletes_in_db(sync, &spec, &HashSet::new(),
+        |id| local_row_exists_in_db(sync, db, &spec, id))?;
+    Ok(())
+}
+
 /// Scan side: re-seal each local value with the sync key so the wire envelope is deterministic.
 /// Development-build entries that are not converted yet are held back until they are.
 pub(super) fn seal_snapshots(sync: &Connection, key: &secrets::SecretKey, snapshots: Vec<LocalObjectSnapshot>) -> Result<Vec<LocalObjectSnapshot>, String> {
@@ -839,7 +857,10 @@ pub(super) fn apply(sync: &Connection, db: &Connection, spec: &SyncTableSpec, ch
     let mapped = find_local_id_by_object_id(sync, OBJECT_TYPE, &change.object_id)?;
     let target = mapped.or(find_row_by_unique_key(db, spec, &local)?);
     let stale = match target { Some(id) => remote_row_change_is_stale(sync, change, id)?, None => false };
-    if !stale {
+    // An update received before the next scan (or during a retry) cannot opt the user back in.
+    // Record its remote version below so the scan can withdraw that version instead.
+    let local_only = match target { Some(id) => is_local_only(db, id)?, None => false };
+    if !stale && !local_only {
         match target {
             Some(id) => update_row(db, spec, id, &local)?,
             None => upsert_by_unique_key(sync, db, spec, &change.object_id, &local)?,

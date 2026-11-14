@@ -76,6 +76,6 @@ pub async fn vault_references(app_handle: AppHandle, id: String) -> Result<Vec<C
 
 /// The user confirms the destination shown on the vault page for an unconfirmed reference.
 #[tauri::command]
-pub async fn vault_confirm_reference(app_handle: AppHandle, kind: String, config_id: i64) -> Result<(), String> {
-    blocking(move || config_ref::confirm_reference(&app_handle, &kind, config_id)).await
+pub async fn vault_confirm_reference(app_handle: AppHandle, item_id: String, kind: String, config_id: i64, expected_snapshot: String) -> Result<(), String> {
+    blocking(move || config_ref::confirm_reference(&app_handle, &item_id, &kind, config_id, &expected_snapshot)).await
 }

@@ -26,6 +26,8 @@ export interface VaultConfigReference {
     target: string | null;
     approved: boolean;
     problem: string | null;
+    /** 绑定当前条目和展示时配置的摘要；确认时原样传回后端校验。 */
+    snapshot: string | null;
 }
 
 export interface VaultCapability {

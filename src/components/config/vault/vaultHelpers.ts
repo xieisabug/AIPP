@@ -1,5 +1,17 @@
 import { VAULT_KEY_PATTERN } from "@/data/Vault";
 
+/**
+ * A local hint, not a save restriction or a password-strength guarantee. Vault redaction matches
+ * substrings (including encoded values) from 4 UTF-8 bytes onward, so common short words can hide
+ * unrelated content too. Use a wider, human-readable threshold rather than suggesting 4 bytes is
+ * safe; also catch long values made by repeating a tiny pattern. Never trim the saved value.
+ */
+export function isSimpleVaultValue(value: string): boolean {
+    const candidate = value.trim(); // Assessment only; callers save the original value unchanged.
+    if (!candidate) return false;
+    return Array.from(candidate).length <= 8 || /^(.{1,4})\1+$/su.test(candidate);
+}
+
 export function keyError(key: string, taken: string[]): string | null {
     if (!VAULT_KEY_PATTERN.test(key)) return "键需为 2–40 位小写字母、数字或下划线，并以字母开头";
     if (taken.includes(key)) return "这个键已被使用";

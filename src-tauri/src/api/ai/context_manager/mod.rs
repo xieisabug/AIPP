@@ -8,7 +8,7 @@ mod live_cache_tests;
 
 use crate::db::conversation_db::MessageAttachment;
 use budget::ContextBudget;
-use genai::Client;
+use crate::api::genai_client::Client;
 use token_estimator::{estimate_by_content, estimate_message_tokens};
 use tracing::{debug, info, warn};
 

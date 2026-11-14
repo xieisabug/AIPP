@@ -15,13 +15,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { useDataRefresh } from "@/hooks/useDataRefresh";
 import type { VaultCapability, VaultConfigReference, VaultCreateInput, VaultItem, VaultUsageEntry } from "@/data/Vault";
 import VaultItemDetail, { type VaultItemPatch } from "./vault/VaultItemDetail";
-import { formatRelative, keyError, suggestKey } from "./vault/vaultHelpers";
+import { formatRelative, isSimpleVaultValue, keyError, suggestKey } from "./vault/vaultHelpers";
 
 interface VaultConfigProps {
     navigateTo?: (menuKey: string) => void;
 }
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const simpleValueWarning = "凭据过于简单可能导致普通内容被误遮盖，建议使用较长且独特的值。";
 
 function StatusBar({ capability }: { capability: VaultCapability }) {
     return (
@@ -62,7 +63,9 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const [replaceValue, setReplaceValue] = useState<string | null>(null);
     const [replaceError, setReplaceError] = useState<string | null>(null);
     const [deleteOpen, setDeleteOpen] = useState(false);
-    const [references, setReferences] = useState<VaultConfigReference[]>([]);
+    const [referenceState, setReferenceState] = useState<{ itemId: string; list: VaultConfigReference[] } | null>(null);
+    const createValueIsSimple = isSimpleVaultValue(create.value);
+    const replaceValueIsSimple = isSimpleVaultValue(replaceValue ?? "");
 
     const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
     const keys = useMemo(() => items.map((item) => item.key), [items]);
@@ -77,6 +80,7 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
     const reload = useDataRefresh({ events: ["vault_changed"], refresh, initial: true });
 
     const selectedKey = selected?.id;
+    const references = referenceState && referenceState.itemId === selectedKey ? referenceState.list : [];
     useDataRefresh({
         events: ["vault_changed"],
         identity: selectedKey,
@@ -97,17 +101,21 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
         refresh: async (isCurrent) => {
             if (!selectedKey) return;
             const list = await invoke<VaultConfigReference[]>("vault_references", { id: selectedKey });
-            if (isCurrent()) setReferences(list);
+            if (isCurrent()) setReferenceState({ itemId: selectedKey, list });
         },
     });
 
     const confirmReference = async (reference: VaultConfigReference) => {
+        if (!selectedKey || !reference.snapshot || !references.includes(reference)) return;
         try {
-            await invoke("vault_confirm_reference", { kind: reference.kind, configId: reference.configId });
+            await invoke("vault_confirm_reference", {
+                itemId: selectedKey, kind: reference.kind, configId: reference.configId, expectedSnapshot: reference.snapshot,
+            });
             toast.success(`已确认 ${reference.name} 使用此条目访问 ${reference.target}`);
-            reloadReferences();
         } catch (error) {
             toast.error(errorText(error));
+        } finally {
+            reloadReferences();
         }
     };
 
@@ -296,9 +304,11 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                         <PasswordInput
                             id="vault-create-value"
                             autoComplete="off"
+                            aria-describedby={createValueIsSimple ? "vault-create-value-warning" : undefined}
                             value={create.value}
                             onChange={(event) => setCreate((state) => ({ ...state, value: event.target.value }))}
                         />
+                        {createValueIsSimple && <p id="vault-create-value-warning" className="text-xs text-amber-600 dark:text-amber-400">{simpleValueWarning}</p>}
                         <p className="text-xs text-muted-foreground">只填值本身，例如令牌不需要带 Bearer 前缀；格式由助手在使用时拼好。</p>
                     </div>
                     <div className="space-y-2">
@@ -328,9 +338,11 @@ export default function VaultConfig({ navigateTo }: VaultConfigProps) {
                         <PasswordInput
                             id="vault-replace-value"
                             autoComplete="off"
+                            aria-describedby={replaceValueIsSimple ? "vault-replace-value-warning" : undefined}
                             value={replaceValue ?? ""}
                             onChange={(event) => setReplaceValue(event.target.value)}
                         />
+                        {replaceValueIsSimple && <p id="vault-replace-value-warning" className="text-xs text-amber-600 dark:text-amber-400">{simpleValueWarning}</p>}
                     </div>
                     {replaceError && <p role="alert" className="text-sm text-destructive">{replaceError}</p>}
                 </div>

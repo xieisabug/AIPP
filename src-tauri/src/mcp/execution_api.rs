@@ -1197,25 +1197,21 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
 }
 
 fn serialize_tool_response_with_redactor(response: &rmcp::model::CallToolResult, redactor: &crate::mcp::http_transport::ResponseRedactor) -> Result<String> {
+    let mut content = response.content.clone();
+    redactor.clean_mcp_content(&mut content);
     // 处理服务器标记的错误
     if response.is_error.unwrap_or(false) {
-        let mut content = serde_json::to_value(&response.content)?;
-        redactor.clean_json(&mut content);
-        return Err(anyhow!("工具执行错误: {}", content));
+        return Err(anyhow!("工具执行错误: {}", serde_json::to_string(&content)?));
     }
 
     // 优先尝试 JSON 序列化（与之前行为保持一致）
-    let mut content=response.content.clone();
     if let Some(structured)=&response.structured_content {
         // MCP structuredContent is model-visible; host-only _meta intentionally stays out.
         let mut structured = structured.clone();
         redactor.clean_json(&mut structured);
         content.push(rmcp::model::Content::text(serde_json::to_string(&structured)?));
     }
-    match serde_json::to_value(&content).and_then(|mut value| {
-        redactor.clean_json(&mut value);
-        serde_json::to_string(&value)
-    }) {
+    match serde_json::to_string(&content) {
         Ok(s) => Ok(s),
         Err(json_err) => {
             // 回退：使用 Debug 格式串联各个 content part，确保始终有可显示的结果
@@ -3455,7 +3451,7 @@ pub async fn execute_tool_by_transport(
         }
     } }).await;
     prepared.finish(app_handle, outcome.as_ref().err().map(String::as_str));
-    outcome.map(|result| prepared.clean(result)).map_err(|error| prepared.clean(error))
+    outcome.map(|result| prepared.clean_result(result)).map_err(|error| prepared.clean(error))
 }
 /// 通过 stdio 传输执行工具（外部进程）。
 /// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
@@ -3530,7 +3526,7 @@ async fn execute_stdio_tool(
     match result {
         Ok(r) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "stdio tool executed successfully");
-            Ok(redactor.clean(&r))
+            Ok(redactor.clean_tool_output(&r))
         }
         Err(e) => {
             let e = anyhow!(redactor.clean(&e.to_string()));
@@ -3560,7 +3556,7 @@ fn builtin_response_payload(raw: &str, redactor: &crate::mcp::http_transport::Re
     let is_error = envelope.get("is_error").or_else(|| envelope.get("isError"))
         .and_then(|value| value.as_bool()).unwrap_or(false);
     let mut content = envelope.get_mut("content").map(std::mem::take).unwrap_or(serde_json::Value::Null);
-    redactor.clean_json(&mut content);
+    redactor.clean_tool_content(&mut content).context("清理内置工具结果失败")?;
     Ok((is_error, content))
 }
 
@@ -3765,7 +3761,7 @@ async fn execute_http_tool(
     match result {
         Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "http tool executed successfully");
-            Ok(redactor.clean(&result))
+            Ok(redactor.clean_tool_output(&result))
         }
         Err(e) => {
             // Only a transport-level 401 marks the connection; tool output mentioning "401" does not.

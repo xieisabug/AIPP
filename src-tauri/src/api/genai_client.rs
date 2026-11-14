@@ -3,7 +3,10 @@ use crate::errors::AppError;
 use super::{magpie, opencode_go};
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{adapter::AdapterKind, ModelIden, ServiceTarget};
-use genai::{Client, WebConfig};
+use genai::{Client as RawClient, WebConfig};
+#[path = "provider_client.rs"]
+mod provider_client;
+pub use provider_client::Client;
 use genai::providers::magpie as magpie_provider;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
@@ -230,6 +233,29 @@ pub fn create_client_with_config(
         std::collections::HashMap<String, crate::db::system_db::FeatureConfig>,
     >,
 ) -> Result<Client, AppError> {
+    let redactor = std::sync::Arc::new(crate::vault::config_ref::provider_redactor(configs)
+        .map_err(AppError::ProviderError)?);
+    create_raw_client_with_config(conversation, configs, model_name, api_type, request_mode,
+        network_proxy, proxy_enabled, request_timeout, is_stream, config_feature_map)
+        .map(|inner| Client::new(inner, redactor.clone()))
+        .map_err(|error| match error {
+            AppError::ProviderError(detail) => AppError::ProviderError(redactor.clean(&detail)),
+            other => {
+                let detail = other.to_string();
+                let clean = redactor.clean(&detail);
+                if clean == detail { other } else { AppError::ProviderError(clean) }
+            }
+        })
+}
+
+fn create_raw_client_with_config(
+    conversation: Option<(&tauri::AppHandle, i64)>,
+    configs: &[crate::db::llm_db::LLMProviderConfig],
+    model_name: &str, api_type: &str, request_mode: Option<&str>,
+    network_proxy: Option<&str>, proxy_enabled: bool, request_timeout: Option<u64>,
+    is_stream: bool,
+    config_feature_map: &std::collections::HashMap<String, std::collections::HashMap<String, crate::db::system_db::FeatureConfig>>,
+) -> Result<RawClient, AppError> {
     let mut adapter_kind = infer_adapter_kind(model_name, api_type, request_mode);
 
     let mut api_key = String::new();
@@ -364,7 +390,7 @@ pub fn create_client_with_config(
 
 fn build_client(adapter_kind: AdapterKind, endpoint_url: String, api_key: String,
     go_model: Option<String>, session: Option<uuid::Uuid>, mut web_config: WebConfig,
-    custom_headers: std::collections::HashMap<String, String>) -> Result<Client, AppError> {
+    custom_headers: std::collections::HashMap<String, String>) -> Result<RawClient, AppError> {
     if !custom_headers.is_empty() || session.is_some() {
         let mut headers = HeaderMap::new();
         for (key, value) in custom_headers {
@@ -400,7 +426,7 @@ fn build_client(adapter_kind: AdapterKind, endpoint_url: String, api_key: String
         },
     );
 
-    Client::builder()
+    RawClient::builder()
         .with_service_target_resolver(target_resolver)
         .with_web_config(web_config)
         .build()

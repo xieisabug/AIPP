@@ -3,7 +3,7 @@ use crate::db::llm_db::LLMProviderConfig;
 use crate::db::system_db::FeatureConfig;
 use std::collections::HashMap;
 
-pub(crate) fn configured_client() -> (genai::Client, String) {
+pub(crate) fn configured_client() -> (crate::api::genai_client::Client, String) {
     let config = |name: &str, value| LLMProviderConfig {
         id: 0,
         name: name.into(),

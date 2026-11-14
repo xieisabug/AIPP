@@ -1,7 +1,7 @@
 use crate::db::assistant_db::AssistantModelConfig;
 use crate::db::system_db::FeatureConfig;
 use genai::chat::{CacheControl, ChatOptions};
-use genai::Client;
+use crate::api::genai_client::Client;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]

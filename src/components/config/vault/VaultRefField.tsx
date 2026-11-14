@@ -39,9 +39,9 @@ export default function VaultRefField({
     const parsed = parseVaultValue(value);
     const item = parsed ? vault.items.find((i) => i.id === parsed.id) : undefined;
 
-    const pick = ({ ref, prefix }: VaultPick) => {
+    const pick = ({ ref, prefix, storedCurrentValue }: VaultPick) => {
         // 条目只存值本身；Authorization 头默认补上 Bearer 前缀，用户可以在前缀框里改。
-        const bearer = !prefix && !parsed && allowPrefix && headerName?.toLowerCase() === "authorization";
+        const bearer = !storedCurrentValue && !prefix && !parsed && allowPrefix && headerName?.toLowerCase() === "authorization";
         onChange(formatVaultRef(ref, prefix || (bearer ? "Bearer " : parsed?.prefix ?? "")));
     };
 
