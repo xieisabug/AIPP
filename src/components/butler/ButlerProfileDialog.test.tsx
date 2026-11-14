@@ -165,19 +165,19 @@ describe("Butler profile editor", () => {
         }));
     });
 
-    it("should offer face and head decorations without manual preview controls", async () => {
+    it.each([["墨镜", "sunglasses"], ["粗眉毛", "thick-brows"]])("should save %s with an independent head decoration", async (label, eyes) => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" appearance={{ version: 2, shape: "aipp", colors: { primary: "#FAD4E4", secondary: "#000000" },
             accessories: { eyes: null, head: null }, motion: false }} onSave={onSave} onClose={vi.fn()} />);
         expect(screen.queryByRole("checkbox")).toBeNull();
         expect(screen.queryByRole("combobox")).toBeNull();
-        fireEvent.click(screen.getByRole("button", { name: "脸部：墨镜" }));
+        fireEvent.click(screen.getByRole("button", { name: `脸部：${label}` }));
         fireEvent.click(screen.getByRole("button", { name: "头部：铃铛蝴蝶结" }));
         expect(screen.getByRole("button", { name: "头部：铃铛蝴蝶结" })).toHaveAttribute("aria-pressed", "true");
         fireEvent.click(screen.getByRole("button", { name: "保存" }));
         await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", {
             version: 2, shape: "aipp", colors: { primary: "#FAD4E4", secondary: "#000000" },
-            accessories: { eyes: "sunglasses", head: "bow-bell" }, motion: true,
+            accessories: { eyes, head: "bow-bell" }, motion: true,
         }));
     });
 });

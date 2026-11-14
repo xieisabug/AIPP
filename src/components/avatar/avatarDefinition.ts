@@ -1,6 +1,6 @@
 import { avatarRecipes } from "./avatarRecipes";
 export type { AvatarState } from "./avatarRecipes";
-export type AvatarAction = "blink" | "smile" | "glasses" | "hat" | "peer" | "blush" | "jingle" | "butterfly";
+export type AvatarAction = "blink" | "smile" | "glasses" | "hat" | "peer" | "blush" | "jingle" | "butterfly" | "raise-brow";
 export type AvatarShape = "aipp" | "pebble" | "pixel" | "whale" | "blossom";
 export interface AvatarAnchor { x: number; y: number; scale: number; rotation?: number }
 export interface AvatarDefinition {
@@ -74,6 +74,7 @@ export const avatarDefinitions: Record<AvatarShape, AvatarDefinition> = {
 export const accessoryDefinitions = {
     "round-glasses": { slot: "eyes", label: "圆框眼镜", capability: "eyes", action: "glasses" },
     sunglasses: { slot: "eyes", label: "墨镜", capability: "eyes", action: "peer" },
+    "thick-brows": { slot: "eyes", label: "粗眉毛", capability: "eyes", action: "raise-brow" },
     blush: { slot: "eyes", label: "腮红", capability: "eyes", action: "blush" },
     "baseball-cap": { slot: "head", label: "棒球帽", capability: "headwear", action: "hat" },
     "baseball-cap-left": { slot: "head", label: "反向棒球帽", capability: "headwear", action: "hat" },
@@ -88,7 +89,7 @@ export type HeadAccessory = AccessoryOf<"head">;
 export const accessoriesOf = <S extends "eyes" | "head">(slot: S) =>
     (Object.keys(accessoryDefinitions) as AccessoryId[]).filter(id => accessoryDefinitions[id].slot === slot) as (S extends "eyes" ? FaceAccessory : HeadAccessory)[];
 
-export const actionDurations: Record<AvatarAction, number> = { blink: 280, smile: 1300, glasses: 2400, hat: 1500, peer: 3000, blush: 2000, jingle: 1800, butterfly: 3400 };
+export const actionDurations: Record<AvatarAction, number> = { blink: 280, smile: 1300, glasses: 2400, hat: 1500, peer: 3000, blush: 2000, jingle: 1800, butterfly: 3400, "raise-brow": 1000 };
 export const whaleMealDuration = 2400;
 export const actionDuration = (action: AvatarAction, shape?: AvatarShape) =>
     shape === "whale" && action === "smile" ? whaleMealDuration : actionDurations[action];

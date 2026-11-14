@@ -2,7 +2,7 @@ import { useEffect, useId, useRef } from "react";
 import { AnimatePresence, motion, useMotionValue, useSpring, useTransform } from "motion/react";
 import type { ButlerAppearance } from "@/components/butler/butlerAppearance";
 import { avatarDefinitions, type AvatarAction, type AvatarState } from "./avatarDefinition";
-import { BaseballCapArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork } from "./AvatarAccessories";
+import { BaseballCapArtwork, BlushArtwork, BowBellArtwork, GlassesArtwork, HatArtwork, FlowerArtwork, SunglassesArtwork, ThickBrowsArtwork } from "./AvatarAccessories";
 import { useAvatarMotion, type AvatarActionRequest } from "./useAvatarMotion";
 import { useAvatarPerformance } from "./useAvatarPerformance";
 import { WhaleRiceMeal } from "./WhaleRiceMeal";
@@ -123,6 +123,9 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                                     d="M-57-23L-38 0L-57 23M17 21H69" fill="none" stroke={appearance.colors.secondary}
                                     strokeWidth="13" strokeLinecap="round" strokeLinejoin="round" />}
                                 {eyePair}
+                                {faceItem === "thick-brows" && <g data-avatar-accessory="thick-brows">
+                                    <ThickBrowsArtwork raised={performing("raise-brow", true)} />
+                                </g>}
                             </motion.g>
                             {faceItem === "blush" && <g data-avatar-accessory="blush"><BlushArtwork /></g>}
                             {faceItem === "sunglasses" && <SvgPose data-avatar-accessory="sunglasses" pose={peering ? { y: [0, 0, -130, -130, 0], rotate: [0, 0, -5, -5, 0] } : { y: 0, rotate: 0 }}

@@ -5,6 +5,7 @@ import { SvgPose } from "./SvgPose";
 export const accessoryPreviewViewBox: Record<AccessoryId, string> = {
     "round-glasses": "-115 -65 230 130",
     sunglasses: "-132 -62 264 124",
+    "thick-brows": "-94 -91 188 102",
     blush: "-95 -20 190 116",
     "baseball-cap": "-125 -108 312 150",
     "baseball-cap-left": "-187 -108 312 150",
@@ -30,6 +31,18 @@ export function SunglassesArtwork() {
         {[1, -1].map(side => <g key={side} transform={`scale(${side} 1)`}>
             <path d={sunLens} fill="#1E2633" stroke="#151B26" strokeWidth="7" />
             <path d="M-88-20L-70-20M-92-7L-83-7" stroke="white" strokeWidth="6" opacity="0.45" />
+        </g>)}
+    </g>;
+}
+
+/** 两条眉毛按双眼中心定位，保持水平等宽；浅色细边让深色脸上也能看清。 */
+export function ThickBrowsArtwork({ raised = false }: { raised?: boolean }) {
+    return <g fill="#302D35" stroke="#E6DFDC" strokeWidth="3" strokeLinejoin="round">
+        {[-1, 1].map(side => <g key={side} transform={`translate(${side * 44} -54)`}>
+            <SvgPose pose={{ y: raised && side === 1 ? [0, -12, -12, 0] : 0 }}
+                transition={{ duration: raised ? 1 : 0.15, ease: "easeInOut" }}>
+                <rect x="-31" y="-14" width="62" height="28" rx="7" />
+            </SvgPose>
         </g>)}
     </g>;
 }
