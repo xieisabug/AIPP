@@ -11,20 +11,26 @@ export interface ButlerProgressSummary { conversation_id: number; epoch: number;
 export function useButlerProgress(conversationId: number): ButlerProgressSummary | undefined {
     const [summary, setSummary] = useState<ButlerProgressSummary>();
     useEffect(() => {
+        setSummary(undefined);
         if (!conversationId) return;
         let disposed = false;
         const accept = (next: ButlerProgressSummary | null | undefined) => {
             if (disposed || !next || next.conversation_id !== conversationId) return;
-            setSummary(previous => previous && previous.epoch > next.epoch ? previous : next);
+            setSummary(previous => previous?.conversation_id === conversationId && previous.epoch > next.epoch ? previous : next);
         };
-        const unlisten = listen<ButlerProgressSummary>(BUTLER_PROGRESS_EVENT, ({ payload }) => accept(payload));
-        invoke<ButlerProgressSummary | null>("get_butler_progress_summary", { conversationId })
-            .then(accept)
+        let receivedEvent = false;
+        const unlisten = listen<ButlerProgressSummary>(BUTLER_PROGRESS_EVENT, ({ payload }) => {
+            if (payload.conversation_id !== conversationId) return;
+            receivedEvent = true;
+            accept(payload);
+        });
+        void unlisten.then(() => invoke<ButlerProgressSummary | null>("get_butler_progress_summary", { conversationId }))
+            .then(snapshot => { if (!receivedEvent) accept(snapshot); })
             .catch(error => console.warn(`[Butler progress] snapshot failed (${conversationId}):`, error));
         return () => {
             disposed = true;
             void unlisten.then(stop => stop()).catch(() => {});
         };
     }, [conversationId]);
-    return summary;
+    return summary?.conversation_id === conversationId ? summary : undefined;
 }

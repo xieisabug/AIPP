@@ -29,6 +29,17 @@ describe("ButlerProgressRow", () => {
         await waitFor(() => expect(screen.getByText("阅读中")).toBeTruthy());
     });
 
+    it("should display the assistant's own words when a report arrives without helper steps", async () => {
+        mockInvokeHandler("get_butler_progress_summary", () => null);
+        mockInvokeHandler("get_conversation_runtime_state", () => null);
+        render(<ButlerProgressRow conversationId={7} />);
+        await act(async () => {
+            await emit(BUTLER_PROGRESS_EVENT, { conversation_id: 7, epoch: 3, text: "我先核对两份配置。", steps: [] });
+        });
+        expect(await screen.findByText("我先核对两份配置。")).toBeTruthy();
+        expect(screen.queryByRole("button")).toBeNull();
+    });
+
     it("shows the latest summary for its conversation and expands the steps", async () => {
         mockInvokeHandler("get_butler_progress_summary", () => null);
         mockInvokeHandler("get_conversation_runtime_state", () => null);

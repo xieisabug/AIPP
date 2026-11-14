@@ -72,7 +72,7 @@ pub fn is_peer_tool(name: &str) -> bool {
     super::butler_assistant_tools::is_tool(name) || super::butler_work::is_tool(name) || matches!(
         name,
         "message_bot" | "search_own_history" | "search_bot_history" | "read_bot_message_context"
-            | "preview_message"
+            | "preview_message" | "report_progress"
     )
 }
 
@@ -107,6 +107,9 @@ pub async fn tool(
     );
     if super::butler_assistant_tools::is_tool(name) {
         return super::butler_assistant_tools::tool(app,current,name,args).await;
+    }
+    if name == "report_progress" {
+        return super::butler_progress::report(app, current, args).await;
     }
     if name == "preview_message" {
         return super::message_preview::tool(app, current, args).await;

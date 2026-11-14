@@ -1688,7 +1688,7 @@ pub async fn execute_aipp_builtin_tool(
                         .map_err(|e|format!("search_own_history conversation={id}: {e:#}"))?;
                     serde_json::json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
                 }
-                "message_bot" | "search_bot_history" | "read_bot_message_context" | "preview_message"
+                "message_bot" | "search_bot_history" | "read_bot_message_context" | "preview_message" | "report_progress"
                 | "read_work_context" | "continue_work" | "resume_work"
                 | "list_assistants" | "get_assistant_details" | "get_assistant_exchange" | "stop_assistant_exchange" => {
                     let id = conversation_id.ok_or("此工具需要管家联系人会话")?;

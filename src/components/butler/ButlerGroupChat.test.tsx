@@ -86,6 +86,9 @@ beforeEach(() => {
     clearAllMockHandlers();
     // 通用输入框加载的 ! / # / 斜杠 / 全部助手 补全源；群聊的 @ 只用本群成员，不能出现全部助手里的人。
     mockInvokeHandler("get_bang_list", () => []);
+    mockInvokeHandler("vault_list_use_requests", () => []);
+    mockInvokeHandler("vault_list_input_requests", () => []);
+    mockInvokeHandler("get_butler_progress_summary", () => null);
     mockInvokeHandler("get_assistants", () => [{ id: 99, name: "写作外包" }]);
     mockInvokeHandler("get_artifacts_for_completion", () => []);
     mockInvokeHandler("get_skills_for_slash_completion", () => []);
@@ -253,6 +256,19 @@ describe("ButlerGroupChat", () => {
         fireEvent.keyDown(input, { key: "Enter" });
         await waitFor(() => expect(api.postButlerGroupMessage).toHaveBeenCalledWith(7, expect.any(String), "先停一下，改成三段", null));
         expect(api.stopButlerGroupReplies).not.toHaveBeenCalled();
+    });
+
+    it("should restore the reporting member's words when opening an active group", async () => {
+        api.getButlerGroup.mockResolvedValue(detail({ turns: [
+            { member_id: 1, state: "running", round: 1, rounds: 1 },
+            { member_id: 2, state: "running", round: 1, rounds: 1 },
+        ] }));
+        mockInvokeHandler("get_butler_progress_summary", args => args?.conversationId === 102
+            ? { conversation_id: 102, epoch: 1, text: "我先整理本周的交付。", steps: [] } : null);
+        renderChat();
+        const writer = await screen.findByRole("status", { name: "写作助手 正在输入" });
+        expect(await within(writer).findByText("我先整理本周的交付。")).toBeInTheDocument();
+        expect(screen.getAllByText("我先整理本周的交付。")).toHaveLength(1);
     });
 
     it("should show discussion progress when members are discussing in rounds", async () => {

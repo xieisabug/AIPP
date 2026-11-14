@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { AskUserQuestionCard } from "@/components/InlineInteractionCards";
 import type { InlineInteractionItem } from "@/components/ConversationUI";
 import ConversationTurnRail, { makeTurnPreview, type TurnRailItem } from "@/components/conversation/ConversationTurnRail";
@@ -17,7 +16,7 @@ import { useScrollManagement } from "@/hooks/useScrollManagement";
 import ButlerAvatar from "./ButlerAvatar";
 import ButlerGroupMessageRow, { ButlerGroupSpeaker, toChatMessage } from "./ButlerGroupMessageRow";
 import { ButlerQuoteJumpContext } from "./ButlerQuote";
-import { BUTLER_PROGRESS_EVENT, type ButlerProgressSummary } from "./butlerProgress";
+import { useButlerProgress } from "./butlerProgress";
 import { formatDivider, showTimeDivider } from "./butlerGroupModel";
 
 // 群聊只展示成员的最终发言：流式、推理、工具调用、版本切换都留在成员各自的执行会话里，列表的这些输入恒为空。
@@ -35,31 +34,15 @@ function toTranscriptMessage(groupId: number, message: ButlerGroupMessage, quote
     return message.kind === "message" ? chat : { ...chat, message_type: `butler_group_${message.kind}` };
 }
 
-/** 只显示这次回复开始之后的进展摘要，避免把上一轮的旧摘要当成当前进展。 */
-function useLiveProgress(conversationId: number) {
-    const [text, setText] = useState("");
-    useEffect(() => {
-        let disposed = false;
-        const unlisten = listen<ButlerProgressSummary>(BUTLER_PROGRESS_EVENT, ({ payload }) => {
-            if (!disposed && payload.conversation_id === conversationId) setText(payload.text);
-        });
-        return () => {
-            disposed = true;
-            void unlisten.then(stop => stop()).catch(() => {});
-        };
-    }, [conversationId]);
-    return text;
-}
-
 function TypingRow({ member }: { member: ButlerGroupMember }) {
-    const progress = useLiveProgress(member.conversation_id);
+    const progress = useButlerProgress(member.conversation_id)?.text;
     return <div role="status" aria-label={`${member.name} 正在输入`} data-aipp-slot="butler-group-typing">
         <ButlerGroupSpeaker assistantId={member.assistant_id} chief={member.is_chief} label={member.name}>
             <ButlerAvatar id={member.assistant_id} chief={member.is_chief} size={20} figure animated state="thinking" />
         </ButlerGroupSpeaker>
         <div className="butler-peer-bubble flex items-center gap-2 text-muted-foreground">
             <span className="butler-typing-dots" aria-hidden="true"><i /><i /><i /></span>
-            {progress && <span className="truncate text-xs">{progress}</span>}
+            {progress && <span className="break-words text-xs">{progress}</span>}
         </div>
     </div>;
 }

@@ -475,6 +475,11 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
                 input_schema: serde_json::json!({"type":"object","required":["message_id"],"properties":{"message_id":{"type":"integer"},"query":{"type":"string","description":"Optional original search phrase; center the hit excerpt near it for a long message"}}}),
             },
             BuiltinToolInfo {
+                name: "report_progress".into(),
+                description: "When starting a task, call this once before doing the work. In your own words, tell the user the specific next step in one short sentence. It appears immediately in this chat. After the receipt, continue the task and deliver the result. Skip greetings, simple answers and silent callbacks.".into(),
+                input_schema: serde_json::json!({"type":"object","required":["text"],"additionalProperties":false,"properties":{"text":{"type":"string","minLength":1,"maxLength":120}}}),
+            },
+            BuiltinToolInfo {
                 name: "preview_message".into(),
                 description: "Show an existing assistant reply to the user as a read-only card in this conversation, instead of restating, summarizing or pasting it. Use it when another member's answer, an independent task's final reply or a scheduled task's output should reach the user as written. Give exactly one of: message_id (from a collaboration reply header, final_message_id in <butler_task_result> or <butler_scheduled_task_result>, or search results), or work_ref to show that work's final reply: exchange:<id>, task:<task conversation id>, scheduled_run:<run_id>. Only replies in Butler conversations and Butler scheduled tasks can be shown. The user sees the full original text; you only get a short receipt with an excerpt to confirm it is the right message. Afterwards do not repeat its content: add only your own judgement, what changed, or next steps.".into(),
                 input_schema: serde_json::json!({"type":"object","additionalProperties":false,"properties":{

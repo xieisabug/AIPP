@@ -27,6 +27,11 @@ export default function ButlerProgressRow({ conversationId }: { conversationId: 
             className="butler-exchange flex justify-center text-xs text-muted-foreground">{live}</div>;
     }
 
+    if (!summary.steps.length) {
+        return <div role="status" data-aipp-slot="butler-processing"
+            className="butler-peer-bubble w-fit max-w-full break-words">{summary.text}</div>;
+    }
+
     return <div role="status" data-aipp-slot="butler-processing" className="butler-exchange flex flex-col items-center text-xs text-muted-foreground">
         <button type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}
             className="flex max-w-full items-center gap-1.5 rounded-md px-2 py-1 hover:bg-muted hover:text-foreground">

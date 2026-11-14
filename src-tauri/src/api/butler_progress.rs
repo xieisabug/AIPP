@@ -39,7 +39,7 @@ pub struct ProgressStep {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ButlerProgressSummary {
     pub conversation_id: i64,
     /// 生成时的运行轮次；前端/查询据此丢弃上一轮遗留的摘要。
@@ -153,6 +153,7 @@ pub(crate) fn step_label(call: &MCPToolCall) -> String {
 pub(crate) fn recent_steps(calls: &[MCPToolCall], after_message_id: i64) -> Vec<ProgressStep> {
     let mut steps: Vec<ProgressStep> = calls
         .iter()
+        .filter(|call| call.tool_name != "report_progress")
         .filter(|call| call.message_id.is_some_and(|id| id > after_message_id))
         .take(MAX_STEPS)
         .map(|call| ProgressStep { label: step_label(call), status: call.status.clone() })
@@ -165,6 +166,23 @@ pub(crate) fn clean_summary(text: &str) -> String {
     let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
     let trimmed = line.trim_matches(|c: char| "\"'「」“”`。.".contains(c)).trim();
     clip(trimmed, MAX_SUMMARY_CHARS)
+}
+
+fn report_text(args: &Value) -> anyhow::Result<String> {
+    let text = args["text"].as_str().unwrap_or("").trim();
+    anyhow::ensure!(!text.is_empty() && text.lines().count() == 1 && text.chars().count() <= 120,
+        "请用一句不超过 120 字的简短文字说明准备做什么");
+    Ok(text.to_owned())
+}
+
+pub(super) async fn report(app: &AppHandle, conversation_id: i64, args: &Value) -> anyhow::Result<Value> {
+    anyhow::ensure!(!crate::vault::placeholder::audit_requires_opaque_values(), "进度提示不能包含保险箱凭据");
+    let text = crate::vault::placeholder::clean_persisted_text(&report_text(args)?);
+    let epoch = app.state::<ConversationActivityManager>().get_runtime_state(conversation_id).await.epoch;
+    let summary = ButlerProgressSummary { conversation_id, epoch, text, steps: Vec::new() };
+    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(conversation_id, summary.clone());
+    app.emit(PROGRESS_EVENT, &summary)?;
+    Ok(serde_json::json!({"reported":true,"next":"继续执行原任务，完成后交付结果。"}))
 }
 
 /// 返回 Ok(false) 表示不适用（未配置模型 / 非管家会话 / 本轮没有步骤）。
@@ -208,6 +226,9 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64) -> Result<bool, S
         None => 0,
     };
 
+    // 若生成摘要期间助手发来了自己的进度，迟到的摘要不能盖住它。
+    let before = cache().lock().unwrap_or_else(|e| e.into_inner())
+        .get(&conversation_id).cloned();
     let step_lines = steps
         .iter()
         .enumerate()
@@ -260,7 +281,12 @@ async fn summarize_once(app: &AppHandle, conversation_id: i64) -> Result<bool, S
     }
 
     let summary = ButlerProgressSummary { conversation_id, epoch, text, steps };
-    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(conversation_id, summary.clone());
+    let mut summaries = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if summaries.get(&conversation_id).is_some_and(|s| s.epoch > epoch ||
+        (s.epoch == epoch && s.steps.is_empty() && before.as_ref() != Some(s))) {
+        return Ok(true);
+    }
+    summaries.insert(conversation_id, summary.clone());
     let _ = app.emit(PROGRESS_EVENT, &summary);
     Ok(true)
 }

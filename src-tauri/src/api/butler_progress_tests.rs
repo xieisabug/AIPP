@@ -36,3 +36,17 @@ fn test_clean_summary_strips_wrapping_and_clips() {
     assert_eq!(parse_model("gpt%%7"), Some(("gpt".into(), 7)));
     assert_eq!(parse_model(""), None);
 }
+
+#[test]
+fn test_report_progress_requires_one_short_sentence() {
+    for kind in ["butler_main", "butler_contact", "butler_task", "butler_group_member"] {
+        assert!(crate::mcp::butler_tools::is_direct_tool(kind, Some("aipp:agent"), "report_progress"));
+    }
+    assert!(!crate::mcp::butler_tools::is_direct_tool("chat", Some("aipp:agent"), "report_progress"));
+    let check = |text: &str| report_text(&serde_json::json!({"text": text}));
+    assert_eq!(check(" 我先核对配置。 ").unwrap(), "我先核对配置。");
+    for invalid in [" ", "第一行\n第二行", &"字".repeat(121)] {
+        assert!(check(invalid).is_err());
+    }
+    assert!(report_text(&serde_json::json!({})).is_err());
+}
