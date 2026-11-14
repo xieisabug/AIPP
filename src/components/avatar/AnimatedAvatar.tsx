@@ -71,7 +71,9 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
     const sway = jingling ? { rotate: [0, -11, 10, -9, 8, -5, 3, 0] } : blushing ? { rotate: [0, -5, 4, -4, 3, 0] } : { rotate: 0 };
     const swayTransition = jingling ? { duration: 1.7, ease: "easeInOut" as const } : blushing ? { duration: 2, ease: "easeInOut" as const } : { duration: 0.25 };
     const face = definition.face;
-    const faceColor = definition.colorLabels.primary ? appearance.colors.primary : appearance.colors.secondary;
+    const blossom = definition.id === "blossom";
+    const codingFace = blossom && active && performance.playingState === "coding";
+    const faceColor = blossom ? "#FFFFFF" : definition.colorLabels.primary ? appearance.colors.primary : appearance.colors.secondary;
     const coreColor = coreColorOf(appearance);
     const dock = definition.propDock;
     const glassesPose = takingGlasses ? {
@@ -80,6 +82,10 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
         rotate: [0, -5, dock.rotation ?? -28, dock.rotation ?? -28, 0],
         scale: [face.scale, face.scale * 1.08, dock.scale, dock.scale, face.scale],
     } : { x: face.x, y: face.y, rotate: 0, scale: face.scale };
+
+    const eyes = [-1, 1].map(side => <AvatarEye key={side} side={side} open={side < 0 ? v.left : v.right} happy={v.happy} sad={v.sad} yaw={v.yaw} tilt={v.tilt}
+        blink={blinking} forceSmile={smiling} squint={peering} squeeze={jingling} color={faceColor} inkColor={definition.eyeColor} scale={definition.eyeScale} />);
+    const eyePair = blossom ? <g opacity={codingFace ? 0 : 1} className="transition-opacity duration-150 motion-reduce:transition-none">{eyes}</g> : eyes;
 
     return <span ref={ref} aria-hidden="true" data-avatar-shape={definition.id} data-avatar-state={performance.playingState}
         data-avatar-action={action ?? "none"} data-avatar-active={active}
@@ -108,13 +114,17 @@ export default function AnimatedAvatar({ appearance, size = 32, animated = false
                     <motion.g style={{ opacity: logoOpacity }}><g transform="translate(0 140)">
                     <SvgPose pose={sway} transition={swayTransition}><g transform={`translate(0 -140) scale(${definition.artworkScale ?? 1}) translate(-255 -255)`}>
                         {definition.parts.map(part => <g key={part.color}>
-                            <path d={part.path} fill={part.color === "white" ? "#FFFFFF" : appearance.colors[part.color]} />
+                            <path d={part.path} fill={part.color === "white" ? "#FFFFFF" : appearance.colors[part.color]}
+                                stroke={part.outlineWidth ? appearance.colors.secondary : undefined} strokeWidth={part.outlineWidth} strokeLinejoin="round" />
                             {definition.colorLabels.primary && <path d={part.path} fill={`url(#${id}-${part.color})`} opacity="0.2" />}
                         </g>)}
                         <g transform={`translate(${face.x} ${face.y}) scale(${face.scale})`}>
                             <motion.g style={{ x: faceX, y: faceY, opacity: eyeOpacity }}>
-                                {[-1, 1].map(side => <AvatarEye key={side} side={side} open={side < 0 ? v.left : v.right} happy={v.happy} sad={v.sad} yaw={v.yaw} tilt={v.tilt}
-                                    blink={blinking} forceSmile={smiling} squint={peering} squeeze={jingling} color={faceColor} inkColor={definition.eyeColor} scale={definition.eyeScale} />)}
+                                {blossom && <path data-avatar-expression="coding" opacity={codingFace ? 1 : 0}
+                                    className="transition-opacity duration-150 motion-reduce:transition-none"
+                                    d="M-57-23L-38 0L-57 23M17 21H69" fill="none" stroke={appearance.colors.secondary}
+                                    strokeWidth="13" strokeLinecap="round" strokeLinejoin="round" />}
+                                {eyePair}
                             </motion.g>
                             {faceItem === "blush" && <g data-avatar-accessory="blush"><BlushArtwork /></g>}
                             {faceItem === "sunglasses" && <SvgPose data-avatar-accessory="sunglasses" pose={peering ? { y: [0, 0, -130, -130, 0], rotate: [0, 0, -5, -5, 0] } : { y: 0, rotate: 0 }}

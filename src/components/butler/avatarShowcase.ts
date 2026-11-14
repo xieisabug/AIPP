@@ -5,7 +5,7 @@ export type ShowcaseStep = { kind: "state"; state: AvatarState } | { kind: "acti
 
 export const showcaseStates: readonly AvatarState[] = [
     "idle", "listening", "thinking", "happy", "working", "curious", "waiting", "laughing",
-    "searching", "playful", "writing", "surprised", "shy", "bouncing", "humming", "celebrate",
+    "searching", "playful", "writing", "surprised", "shy", "bouncing", "humming", "celebrate", "coding",
 ];
 
 export const accessoryActionsOf = (items: (AccessoryId | null)[]) =>

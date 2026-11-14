@@ -1,13 +1,13 @@
 import { avatarRecipes } from "./avatarRecipes";
 export type { AvatarState } from "./avatarRecipes";
 export type AvatarAction = "blink" | "smile" | "glasses" | "hat" | "peer" | "blush" | "jingle" | "butterfly";
-export type AvatarShape = "aipp" | "pebble" | "pixel" | "whale";
+export type AvatarShape = "aipp" | "pebble" | "pixel" | "whale" | "blossom";
 export interface AvatarAnchor { x: number; y: number; scale: number; rotation?: number }
 export interface AvatarDefinition {
     id: AvatarShape;
     label: string;
     // All artwork and anchors use the same 510-unit coordinate system.
-    parts: { path: string; color: "primary" | "secondary" | "white" }[];
+    parts: { path: string; color: "primary" | "secondary" | "white"; outlineWidth?: number }[];
     /** Uniform artwork scale around the avatar center, including equipped accessories. */
     artworkScale?: number;
     eyeColor?: string;
@@ -48,6 +48,16 @@ export const avatarDefinitions: Record<AvatarShape, AvatarDefinition> = {
         face: { x: 125, y: 173, scale: 0.87 }, crown: { x: 147, y: 96, scale: 0.88 },
         clip: { x: 415, y: 157, scale: 0.78, rotation: -14 }, propDock: { x: 324, y: 353, scale: 0.72, rotation: -24 },
         colorLabels: { secondary: "身体" }, capabilities: ["eyes", "headwear"],
+    },
+    blossom: {
+        id: "blossom", label: "花团",
+        parts: [{
+            color: "white", outlineWidth: 24,
+            path: "M300 70C360 45 449 95 444 181C502 224 495 325 423 357C407 434 327 475 259 437C187 468 98 439 76 368C37 345 26 299 43 262C-1 206 24 126 99 112C128 31 231 8 300 70Z",
+        }],
+        face: { x: 251, y: 251, scale: 1.32 }, crown: { x: 231, y: 49, scale: 0.98 },
+        clip: { x: 137, y: 77, scale: 0.94, rotation: -22 }, propDock: { x: 402, y: 348, scale: 0.8, rotation: -24 },
+        colorLabels: { secondary: "轮廓" }, capabilities: ["eyes", "headwear"],
     },
     pebble: {
         id: "pebble", label: "圆团",
