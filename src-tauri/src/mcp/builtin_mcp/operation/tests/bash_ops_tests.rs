@@ -231,20 +231,8 @@ async fn test_execute_bash_timeout() {
 /// 测试长输出截断
 #[test]
 fn test_output_truncation_logic() {
-    let max_output_length = 30000;
-
-    // 创建超长输出
     let long_output = "x".repeat(40000);
-
-    let truncated = if long_output.len() > max_output_length {
-        format!(
-            "{}...\n[Output truncated at {} characters]",
-            &long_output[..max_output_length],
-            max_output_length
-        )
-    } else {
-        long_output.clone()
-    };
+    let truncated = BashOperations::foreground_output(long_output.as_bytes(), b"", None);
 
     assert!(truncated.len() < long_output.len());
     assert!(truncated.contains("[Output truncated"));
@@ -451,4 +439,101 @@ async fn test_incremental_output() {
     // 获取第二次增量（只应该有新内容）
     let resp2 = BashOperations::get_bash_output(&state, request).await.unwrap();
     assert_eq!(resp2.output, "output 3\n");
+}
+
+#[test]
+fn test_foreground_redacts_before_truncating_both_streams() {
+    use crate::mcp::http_transport::ResponseRedactor;
+    let secret = "synthetic-credential-at-boundary";
+    let redactor = ResponseRedactor::new(std::iter::once(secret.to_string()));
+    for stderr in [false, true] {
+        let prefix_len = if stderr { 29985 } else { 29995 };
+        let raw = format!("{}{}{}", "x".repeat(prefix_len), secret, "z".repeat(100));
+        let output = if stderr {
+            BashOperations::foreground_output(b"", raw.as_bytes(), Some(&redactor))
+        } else {
+            BashOperations::foreground_output(raw.as_bytes(), b"", Some(&redactor))
+        };
+        assert!(!output.contains("synth"));
+        assert!(output.contains("[Output truncated at 30000 characters]"));
+    }
+}
+
+#[test]
+fn test_foreground_unicode_truncation_and_no_vault_output() {
+    let raw = format!("{}{}", "x".repeat(29999), "你".repeat(5));
+    let output = BashOperations::foreground_output(raw.as_bytes(), b"", None);
+    assert!(output.starts_with(&format!("{}你...", "x".repeat(29999))));
+    assert_eq!(BashOperations::foreground_output(b"hello\n", b"error\n", None),
+        "hello\n\n[stderr]\nerror\n");
+}
+
+// Deterministic read boundaries, including boundaries within a UTF-8 character.
+struct OutputChunks(std::collections::VecDeque<Vec<u8>>, bool);
+
+impl tokio::io::AsyncRead for OutputChunks {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(chunk) = self.0.pop_front() {
+            let count = chunk.len().min(buf.remaining());
+            buf.put_slice(&chunk[..count]);
+            if count < chunk.len() {
+                self.0.push_front(chunk[count..].to_vec());
+            }
+            std::task::Poll::Ready(Ok(()))
+        } else if self.1 {
+            std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, "synthetic read failure")))
+        } else {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+}
+
+async fn collect_test_stream(chunks: OutputChunks, secret: Option<&str>, stderr: bool) -> String {
+    use crate::mcp::http_transport::ResponseRedactor;
+    use std::sync::Arc;
+    let state = Arc::new(OperationState::new());
+    let id = "redaction-stream";
+    state.bash_processes.lock().await.insert(id.to_string(), super::super::state::BashProcessInfo {
+        child: None, output_buffer: String::new(), completed: false,
+        exit_code: None, last_read_pos: 0,
+    });
+    let redactor = secret.map(|s| Arc::new(ResponseRedactor::new(std::iter::once(s.to_string()))));
+    BashOperations::read_single_stream(state.clone(), id.to_string(), chunks, stderr, redactor).await;
+    let output = state.bash_processes.lock().await.get(id).unwrap().output_buffer.clone();
+    output
+}
+
+#[tokio::test]
+async fn test_background_multiline_secret_split_across_reads_and_stderr() {
+    let secret = "synthetic-first\n秘密-second\nsynthetic-third";
+    let raw = format!("before\n{}\nafter\n", secret);
+    for stderr in [false, true] {
+        // One-byte reads force every multibyte character and secret across reads.
+        let chunks = OutputChunks(raw.as_bytes().iter().map(|b| vec![*b]).collect(), false);
+        let output = collect_test_stream(chunks, Some(secret), stderr).await;
+        let prefix = if stderr { "[stderr] " } else { "" };
+        assert_eq!(output, format!("{prefix}before\n{prefix}[REDACTED]\n{prefix}after\n"));
+        assert!(!output.contains("synthetic"));
+        assert!(!output.contains("秘密"));
+    }
+}
+
+#[tokio::test]
+async fn test_background_read_error_hides_held_secret_prefix() {
+    let chunks = OutputChunks(vec![b"before\nsynthetic-first\n".to_vec()].into(), true);
+    let output = collect_test_stream(chunks, Some("synthetic-first\nsecret-second"), false).await;
+    assert!(output.contains("before\n"));
+    assert!(!output.contains("synthetic-first"));
+    assert!(output.contains("error reading stdout"));
+}
+
+#[tokio::test]
+async fn test_background_no_vault_preserves_unicode_crlf_and_final_line() {
+    let raw = "hello\r\n中文\nlast";
+    let chunks = OutputChunks(raw.as_bytes().iter().map(|b| vec![*b]).collect(), false);
+    assert_eq!(collect_test_stream(chunks, None, false).await, "hello\n中文\nlast\n");
 }

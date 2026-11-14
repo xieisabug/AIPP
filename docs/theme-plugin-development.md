@@ -226,6 +226,8 @@ windowCss: {
 - `data-theme-slot="input-area-textarea"`
 - `data-theme-slot="input-area-add-button"`
 - `data-theme-slot="input-area-send-button"`
+- `data-theme-slot="input-area-footer"`（输入框下方控制行，仅支持 Plan 的 Agent 助手出现）
+- `data-theme-slot="input-area-plan-mode"`（Plan 模式开关，`data-state="on" | "off"`）
 
 ### 9.2 Settings 菜单容器（`ConfigWindow`）
 - `data-theme-slot="settings-menu-container"`（移动端 + 桌面端均有）

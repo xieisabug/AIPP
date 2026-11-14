@@ -513,6 +513,8 @@ async fn run_review_output_fixture(mode: &str, remembered: bool, responses: Vec<
         })
     });
     let client = genai::Client::builder().with_service_target_resolver(resolver).build().unwrap();
+    let client = crate::api::genai_client::Client::new(client, std::sync::Arc::new(
+        crate::vault::config_ref::provider_redactor(&[]).unwrap()));
     let request = build_chat_request_from_messages(&[
         ("system".into(), REVIEW_SYSTEM_PROMPT.into(), Vec::new()),
         ("user".into(), "审核只读调用".into(), Vec::new()),

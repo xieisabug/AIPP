@@ -1190,17 +1190,26 @@ fn build_call_tool_request(
 /// 这会导致直接 JSON 序列化失败。为保证稳健性：
 /// 1) 优先尝试将 content 做 JSON 序列化；
 /// 2) 若失败，则回退为 Debug 字符串拼接，并进行长度截断，避免超大结果引发内存压力。
+#[cfg(test)]
 fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<String> {
+    let redactor = crate::vault::placeholder::current_redactor().unwrap_or_default();
+    serialize_tool_response_with_redactor(response, &redactor)
+}
+
+fn serialize_tool_response_with_redactor(response: &rmcp::model::CallToolResult, redactor: &crate::mcp::http_transport::ResponseRedactor) -> Result<String> {
+    let mut content = response.content.clone();
+    redactor.clean_mcp_content(&mut content);
     // 处理服务器标记的错误
     if response.is_error.unwrap_or(false) {
-        return Err(anyhow!("工具执行错误: {:?}", response.content));
+        return Err(anyhow!("工具执行错误: {}", serde_json::to_string(&content)?));
     }
 
     // 优先尝试 JSON 序列化（与之前行为保持一致）
-    let mut content=response.content.clone();
     if let Some(structured)=&response.structured_content {
         // MCP structuredContent is model-visible; host-only _meta intentionally stays out.
-        content.push(rmcp::model::Content::text(serde_json::to_string(structured)?));
+        let mut structured = structured.clone();
+        redactor.clean_json(&mut structured);
+        content.push(rmcp::model::Content::text(serde_json::to_string(&structured)?));
     }
     match serde_json::to_string(&content) {
         Ok(s) => Ok(s),
@@ -1214,9 +1223,9 @@ fn serialize_tool_response(response: &rmcp::model::CallToolResult) -> Result<Str
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            let truncated = if joined.len() > MAX_LEN {
-                let mut s = joined;
-                s.truncate(MAX_LEN);
+            let joined = redactor.clean(&joined);
+            let truncated = if joined.chars().count() > MAX_LEN {
+                let mut s: String = joined.chars().take(MAX_LEN).collect();
                 s.push_str("\n...[truncated]...");
                 s
             } else {
@@ -3369,7 +3378,14 @@ pub async fn execute_tool_by_transport(
     }
     let cancel_token = cancel_token.unwrap_or_else(CancellationToken::new);
 
-    match server.transport_type.as_str() {
+    // Vault placeholders (`<vault:key>`): ask the user, substitute into a copy of the arguments, and
+    // clean whatever the tool returns. This is the only place they are resolved.
+    let prepared = tokio::select! {
+        prepared = crate::vault::placeholder::prepare(app_handle, conversation_id, server, tool_name, parameters) => prepared?,
+        _ = cancel_token.cancelled() => return Err("工具调用已取消".to_string()),
+    };
+    let parameters = prepared.parameters(parameters);
+    let outcome = prepared.run(async { match server.transport_type.as_str() {
         // If stdio but command is aipp:*, route to builtin executor
         "stdio" => {
             if let Some(cmd) = &server.command {
@@ -3445,7 +3461,9 @@ pub async fn execute_tool_by_transport(
             let error_msg = format!("不支持的传输类型: {}", server.transport_type);
             Err(error_msg)
         }
-    }
+    } }).await;
+    prepared.finish(app_handle, outcome.as_ref().err().map(String::as_str));
+    outcome.map(|result| prepared.clean_result(result)).map_err(|error| prepared.clean(error))
 }
 /// 通过 stdio 传输执行工具（外部进程）。
 /// cancel_token 用于支持取消操作，当收到取消信号时立即终止执行。
@@ -3475,20 +3493,21 @@ async fn execute_stdio_tool(
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
     let start = std::time::Instant::now();
 
+    let (env, env_secrets) = crate::vault::config_ref::stdio_env(_app_handle, server).await.map_err(anyhow::Error::msg)?;
+    // Vault values handed to the process must not come back to the model through its output.
+    let redactor = crate::vault::executor::redactor_for(env_secrets.clone())
+        .merged(crate::vault::placeholder::current_redactor().as_deref());
+
     // 定义实际的执行逻辑
     let execution = async {
         let (transport, diagnostics) = crate::mcp::apps::bundles::runtime::spawn(_app_handle, server, Command::new(&parts[0]).configure(|cmd| {
                     if parts.len() > 1 {
                         cmd.args(&parts[1..]);
                     }
-                    if let Some(env_vars) = &server.environment_variables {
-                        for line in env_vars.lines() {
-                            if let Some((key, value)) = line.split_once('=') {
-                                cmd.env(key.trim(), value.trim());
-                            }
-                        }
+                    for (key, value) in &env {
+                        cmd.env(key, value);
                     }
-                })).await.map_err(anyhow::Error::msg)?;
+                }), env_secrets).await.map_err(anyhow::Error::msg)?;
         let client = crate::mcp::apps::bundles::client::PluginClient { app:_app_handle.clone(),conversation_id,server_id:server.id }.serve(transport).await.map_err(|e| anyhow!(diagnostics.error("初始化 MCP",e)))?;
 
         let args = parse_tool_arguments(parameters).context("解析工具参数失败")?;
@@ -3496,9 +3515,10 @@ async fn execute_stdio_tool(
         crate::mcp::apps::access::validate_execution(_app_handle,server,tool_name,conversation_id).map_err(anyhow::Error::msg)?;
         let response = client.call_tool(request_param).await.map_err(|e| anyhow!(diagnostics.error("调用工具", e)))?;
         debug!(is_error=?response.is_error, parts=?response.content.len(), "received stdio tool response");
-        client.cancel().await.context("关闭客户端连接失败")?;
+        client.cancel().await.map_err(|e| anyhow!(diagnostics.error("关闭客户端连接", e)))?;
         // 不再包裹错误上下文，直接返回底层错误以保留真实原因（例如服务器返回的错误信息）
-        serialize_tool_response(&response)
+        // Plugin credentials are resolved by spawn, so its redactor is the complete secret set.
+        serialize_tool_response_with_redactor(&response, diagnostics.redactor())
     };
 
     // 使用 select! 同时监听取消信号和超时
@@ -3518,9 +3538,10 @@ async fn execute_stdio_tool(
     match result {
         Ok(r) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "stdio tool executed successfully");
-            Ok(r)
+            Ok(redactor.clean_tool_output(&r))
         }
         Err(e) => {
+            let e = anyhow!(redactor.clean(&e.to_string()));
             error!(elapsed_ms=?start.elapsed().as_millis(), error=%e, "stdio tool execution failed");
             Err(e)
         }
@@ -3538,6 +3559,17 @@ async fn execute_sse_tool(
     _cancel_token: Option<CancellationToken>,
 ) -> Result<String> {
     Err(anyhow!("SSE transport 已在当前 rmcp 版本移除，请改用 HTTP transport"))
+}
+
+/// Extract protocol semantics before scrubbing only the model-visible payload.
+fn builtin_response_payload(raw: &str, redactor: &crate::mcp::http_transport::ResponseRedactor) -> Result<(bool, serde_json::Value)> {
+    let mut envelope: serde_json::Value = serde_json::from_str(raw).context("解析内置工具结果失败")?;
+    // Read protocol fields before redaction: a credential may itself be "content" or "is_error".
+    let is_error = envelope.get("is_error").or_else(|| envelope.get("isError"))
+        .and_then(|value| value.as_bool()).unwrap_or(false);
+    let mut content = envelope.get_mut("content").map(std::mem::take).unwrap_or(serde_json::Value::Null);
+    redactor.clean_tool_content(&mut content).context("清理内置工具结果失败")?;
+    Ok((is_error, content))
 }
 
 /// 执行内置（aipp:*）工具：不经网络，直接在本地实现。
@@ -3562,7 +3594,10 @@ async fn execute_builtin_tool(
     // 部分内置工具有自己的等待/超时语义，不应被 MCP server 的外层超时抢先截断。
     let skip_outer_timeout = (command == "aipp:ui_interaction"
         && matches!(tool_name, "ask_user_question" | "preview_code"))
-        || (command == "aipp:operation" && tool_name == "execute_bash");
+        || (command == "aipp:operation" && tool_name == "execute_bash")
+        // 填写卡片等用户输入（自带 10 分钟超时）；HTTP 请求自带请求超时（30–120 秒）。
+        || (command == crate::vault::tool::COMMAND
+            && matches!(tool_name, crate::vault::tool::INPUT_TOOL | crate::vault::tool::REQUEST_TOOL));
     let start = std::time::Instant::now();
 
     // 验证是否为内置工具调用
@@ -3647,12 +3682,11 @@ async fn execute_builtin_tool(
     };
 
     // raw 是序列化后的 ToolResult，提取其中的 content 字段以与其他传输保持一致
-    let v: serde_json::Value = serde_json::from_str(&raw).context("解析内置工具结果失败")?;
-    let is_error =
-        v.get("is_error").or_else(|| v.get("isError")).and_then(|x| x.as_bool()).unwrap_or(false);
+    let redactor = crate::vault::placeholder::current_redactor().unwrap_or_default();
+    let (is_error, content) = builtin_response_payload(&raw, &redactor)?;
     if is_error {
         error!(tool_name=%tool_name, "builtin tool returned error flag");
-        bail!("工具执行错误: {}", v.get("content").unwrap_or(&serde_json::Value::Null));
+        bail!("工具执行错误: {}", content);
     }
     info!(
         server_id = server.id,
@@ -3661,7 +3695,6 @@ async fn execute_builtin_tool(
         elapsed_ms = start.elapsed().as_millis() as u64,
         "Builtin MCP tool executed successfully"
     );
-    let content = v.get("content").cloned().unwrap_or(serde_json::Value::Null);
     Ok(serde_json::to_string(&content).context("序列化结果失败")?)
 }
 
@@ -3689,6 +3722,8 @@ async fn execute_http_tool(
         // Credential-stage auth failures are recorded inside create_authenticated_http_transport.
         resolved.map_err(|error| anyhow!(error))?
     };
+    // Include per-call placeholder values before any response/error is serialized or logged.
+    let redactor = redactor.merged(crate::vault::placeholder::current_redactor().as_deref());
     let client_info = ClientInfo {
         meta: None,
         protocol_version: Default::default(),
@@ -3704,6 +3739,7 @@ async fn execute_http_tool(
     let timeout_ms = server.timeout.map(|v| v as u64).unwrap_or(DEFAULT_TIMEOUT_MS);
 
     // 定义实际的执行逻辑
+    let response_redactor = redactor.clone();
     let execution = async move {
         let client =
             client_info.serve(transport).await.context("Failed to initialize HTTP client")?;
@@ -3717,7 +3753,7 @@ async fn execute_http_tool(
         // Cancel the client connection
         client.cancel().await.context("Failed to cancel client")?;
 
-        serialize_tool_response(&response)
+        serialize_tool_response_with_redactor(&response, &response_redactor)
     };
 
     // 使用 select! 同时监听取消信号和超时
@@ -3737,7 +3773,7 @@ async fn execute_http_tool(
     match result {
         Ok(result) => {
             info!(elapsed_ms=?start.elapsed().as_millis(), "http tool executed successfully");
-            Ok(redactor.clean(&result))
+            Ok(redactor.clean_tool_output(&result))
         }
         Err(e) => {
             // Only a transport-level 401 marks the connection; tool output mentioning "401" does not.

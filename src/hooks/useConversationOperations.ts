@@ -58,6 +58,7 @@ export interface UseConversationOperationsReturn {
     handleEditSave: (content: string) => void;
     handleEditSaveAndRegenerate: (content: string) => void;
     handleSend: () => void;
+    sendAgentCommand: (prompt: string) => Promise<void>;
     handleArtifact: (lang: string, inputStr: string) => void;
 
     // 编辑对话框状态
@@ -263,6 +264,71 @@ export function useConversationOperations({
         setTitleEditDialogIsOpen(false);
     }, []);
 
+    // 新对话界面的 Agent 会话级覆盖（模型/思考强度/审批策略/沙箱/模式），仅在当前选中助手一致时下发
+    const buildAgentOverrides = (parsedAssistantId: number) => {
+        const agentOverrideConfig: Record<string, string> = {};
+        if (parsedAssistantId === +selectedAssistant) {
+            if (selectedAgentEffort) {
+                agentOverrideConfig.reasoning_effort = selectedAgentEffort;
+                agentOverrideConfig.claude_effort = selectedAgentEffort;
+            }
+            if (selectedAgentApprovalPolicy) {
+                agentOverrideConfig.approval_policy = selectedAgentApprovalPolicy;
+            }
+            if (selectedAgentSandbox) {
+                agentOverrideConfig.sandbox = selectedAgentSandbox;
+            }
+            if (selectedAgentMode) {
+                agentOverrideConfig.collaboration_mode = selectedAgentMode;
+                agentOverrideConfig.permission_mode = selectedAgentMode;
+            }
+        }
+        return {
+            overrideModelId: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,
+            overrideModelConfig: Object.keys(agentOverrideConfig).length > 0 ? agentOverrideConfig : undefined,
+        };
+    };
+
+    /**
+     * 界面动作（如详情面板的“压缩上下文”“生成提交信息”）直接给当前会话的助手发一条消息：
+     * 不读写输入框、附件和引用，失败时抛出带具体原因的错误由调用方展示。
+     */
+    const sendAgentCommand = async (prompt: string) => {
+        if (!conversation?.id) {
+            throw new Error("当前没有已打开的会话");
+        }
+        if (aiIsResponsing) {
+            throw new Error(`会话 ${conversation.id} 正在回复，请结束后再试`);
+        }
+        if (conversation.assistant_id == null) {
+            throw new Error(`会话 ${conversation.id} 没有绑定助手`);
+        }
+        const assistantId = conversation.assistant_id;
+        const agentOverrides = buildAgentOverrides(assistantId);
+        setAiIsResponsing(true);
+        let response: AskAiResponse;
+        try {
+            response = await invoke<AskAiResponse>("ask_ai", {
+                request: {
+                    prompt,
+                    conversation_id: String(conversation.id),
+                    assistant_id: assistantId,
+                    override_model_id: agentOverrides.overrideModelId,
+                },
+                override_model_config: agentOverrides.overrideModelConfig,
+            });
+        } catch (error) {
+            setAiIsResponsing(false);
+            clearShiningMessages();
+            throw new Error(describeAskAiError(error));
+        }
+        if (response.error_message) {
+            setAiIsResponsing(false);
+            clearShiningMessages();
+            throw new Error(response.error_message);
+        }
+    };
+
     // 发送消息的主要处理函数，使用节流防止频繁点击
     const handleSend = throttle(async () => {
         if (aiIsResponsing) {
@@ -460,36 +526,17 @@ export function useConversationOperations({
                     assistant_id: parsedAssistantId,
                     assistant_type: assistantData?.assistant_type,
                 });
-                // 新对话界面的 Agent 会话级覆盖（模型/思考强度/审批策略/沙箱），仅在当前选中助手一致时下发
-                const agentOverrideConfig: Record<string, string> = {};
-                if (parsedAssistantId === +selectedAssistant) {
-                    if (selectedAgentEffort) {
-                        agentOverrideConfig.reasoning_effort = selectedAgentEffort;
-                        agentOverrideConfig.claude_effort = selectedAgentEffort;
-                    }
-                    if (selectedAgentApprovalPolicy) {
-                        agentOverrideConfig.approval_policy = selectedAgentApprovalPolicy;
-                    }
-                    if (selectedAgentSandbox) {
-                        agentOverrideConfig.sandbox = selectedAgentSandbox;
-                    }
-                    if (selectedAgentMode) {
-                        agentOverrideConfig.collaboration_mode = selectedAgentMode;
-                        agentOverrideConfig.permission_mode = selectedAgentMode;
-                    }
-                }
+                const agentOverrides = buildAgentOverrides(parsedAssistantId);
                 await invoke<AskAiResponse>("ask_ai", {
                     request: {
                         prompt: finalPrompt,
                         conversation_id: conversationId,
                         assistant_id: parsedAssistantId,
                         attachment_list: fileInfoList?.map((i) => i.id),
-                        override_model_id: parsedAssistantId === +selectedAssistant ? selectedAgentModel || undefined : undefined,
+                        override_model_id: agentOverrides.overrideModelId,
                         quote: quote ? { kind: quote.kind, id: quote.id } : undefined,
                     },
-                    override_model_config: Object.keys(agentOverrideConfig).length > 0
-                        ? agentOverrideConfig
-                        : undefined,
+                    override_model_config: agentOverrides.overrideModelConfig,
                 })
                     .then((res) => {
                         console.log("ask ai response", res);
@@ -538,6 +585,7 @@ export function useConversationOperations({
         handleEditSave,
         handleEditSaveAndRegenerate,
         handleSend,
+        sendAgentCommand,
         handleArtifact,
 
         // 编辑对话框状态

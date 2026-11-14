@@ -157,6 +157,7 @@ pub async fn update_llm_provider(
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     db.update_llm_provider(id, &*name, &*api_type, &*description, is_enabled)
         .map_err(|e| e.to_string())?;
+    confirm_vault_key(&app_handle, id);
     crate::sync::schedule_sync_after_local_change(&app_handle);
     emit_llm_provider_changed(&app_handle);
     Ok(())
@@ -203,10 +204,27 @@ pub async fn update_llm_provider_config(
     value: String,
 ) -> Result<(), String> {
     let db = LLMDatabase::new(&app_handle).map_err(|e| e.to_string())?;
+    if name == "api_key" && crate::vault::config_ref::contains(&value) {
+        crate::vault::config_ref::validate_provider_key(&app_handle, llm_provider_id, &value)?;
+    }
     db.update_llm_provider_config(llm_provider_id, &*name, &*value).map_err(|e| e.to_string())?;
+    match name.as_str() {
+        "api_key" => crate::vault::config_ref::confirm_provider(&app_handle, llm_provider_id)?,
+        "endpoint" => confirm_vault_key(&app_handle, llm_provider_id),
+        _ => {}
+    }
     crate::sync::schedule_sync_after_local_change(&app_handle);
     emit_llm_provider_changed(&app_handle);
     Ok(())
+}
+
+/// Saving the provider in Settings confirms its current site for a vault-referenced API key. The
+/// endpoint autosaves while being typed, so an unusable intermediate value is not an error here; a
+/// request toward an unconfirmed site still fails with an explanation.
+fn confirm_vault_key(app: &tauri::AppHandle, provider_id: i64) {
+    if let Err(error) = crate::vault::config_ref::confirm_provider(app, provider_id) {
+        tracing::warn!(provider_id, %error, "Vault reference not confirmed for the provider's current site");
+    }
 }
 
 #[tauri::command]
@@ -691,6 +709,10 @@ pub async fn export_llm_provider(
 
     if api_key.is_empty() {
         return Err("API Key is required for export".to_string());
+    }
+    // Exporting would hand the real value to whoever holds the share password.
+    if crate::vault::config_ref::contains(&api_key) {
+        return Err("此 Provider 的 API Key 来自凭据保险箱，不能导出分享".to_string());
     }
 
     // Create share data

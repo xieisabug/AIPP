@@ -80,6 +80,8 @@ pub fn is_dynamic_loading_fixed_tool(command: Option<&str>, tool_name: &str, is_
         Some("aipp:ui_interaction") => {
             matches!(tool_name, "ask_user_question" | "preview_file" | "preview_code")
         }
+        // 注入了就应直接可调用；每次使用值由占位符审批把关。
+        Some(crate::vault::tool::COMMAND) => crate::vault::tool::is_tool(tool_name),
         _ => false,
     }
 }
@@ -91,6 +93,16 @@ pub fn is_butler_conversation_kind(kind: &str) -> bool {
 
 fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
     vec![
+        // 凭据保险箱：对所有助手可用，关闭此工具集即停用。
+        BuiltinTemplateInfo {
+            id: "vault".into(),
+            name: "凭据保险箱".into(),
+            description: "助手在任何工具参数里写占位符 <vault:键> 使用保险箱中的值，每次使用由用户确认，真实值由 AIPP 在执行前替换，助手看不到；缺少的值可以请用户当场填写。对所有助手可用。".into(),
+            command: crate::vault::tool::COMMAND.into(),
+            transport_type: "stdio".into(),
+            required_envs: vec![],
+            default_timeout: None,
+        },
         // Agent 工具
         BuiltinTemplateInfo {
             id: "agent".into(),
@@ -412,6 +424,7 @@ fn builtin_templates() -> Vec<BuiltinTemplateInfo> {
 
 pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
     match super::builtin_command_id(command).as_deref() {
+        Some("vault") => crate::vault::tool::definitions(),
         Some("agent") => crate::api::butler_assistant_tools::definitions().into_iter().chain(vec![
             crate::api::butler_memory::definition(),
             BuiltinToolInfo {
@@ -2012,7 +2025,8 @@ mod tests {
     #[test]
     fn test_all_env_vars_have_valid_field_type() {
         let templates = builtin_templates();
-        let valid_types = ["text", "select", "boolean", "number", "textarea"];
+        // 与 BuiltinToolDialog 支持的类型保持一致；password 用于搜索 API Key 等秘密值。
+        let valid_types = ["text", "password", "select", "boolean", "number", "textarea"];
 
         for template in templates {
             for env in template.required_envs {

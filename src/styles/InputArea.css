@@ -226,16 +226,16 @@
     /* 12 顶边距 + 48 胶囊 + 12 底边距 + safe-area；有附件时由 tray 撑开高度 */
     flex: 0 0 auto;
     width: 100%;
-    height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
-    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+    height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
     box-sizing: border-box;
 }
 
 .input-area.mobile.bottom.has-attachments {
     height: auto;
-    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+    min-height: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
     /* 为绝对定位胶囊/按钮预留底部空间，托盘内容在其上方 */
-    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px));
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
 }
 
 .input-area.mobile.bottom .input-area-attachment-tray {
@@ -307,7 +307,7 @@
     left: 12px;
     /* 右侧留给 44px 发送钮 + 间距；!important 防止桌面 inline right 残留 */
     right: 64px !important;
-    bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(12px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-footer, 0px));
     /* 底边锚定、向上生长：高度由 textarea 内容决定（JS 写入 textarea 高度），附件已移出胶囊 */
     height: auto !important;
     min-height: 48px !important;
@@ -340,7 +340,7 @@
  */
 .input-area.mobile.bottom .input-area-send-button {
     position: absolute !important;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-footer, 0px)) !important;
     right: 12px !important;
     left: auto !important;
     height: 44px !important;
@@ -356,7 +356,7 @@
  */
 .input-area.mobile.bottom .input-area-add-button {
     position: absolute !important;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px) + var(--aipp-composer-footer, 0px)) !important;
     left: 14px !important;
     right: auto !important;
     height: 44px !important;
@@ -368,23 +368,27 @@
 
 /* 键盘已经把壳体底边抬到输入法上方，不再叠加系统手势条。 */
 [data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom {
-    height: calc(72px + var(--aipp-composer-grow, 0px));
-    min-height: calc(72px + var(--aipp-composer-grow, 0px));
+    height: calc(72px + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
+    min-height: calc(72px + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
 }
 
 [data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom.has-attachments {
     height: auto;
-    min-height: calc(72px + var(--aipp-composer-grow, 0px));
-    padding-bottom: calc(72px + var(--aipp-composer-grow, 0px));
+    min-height: calc(72px + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
+    padding-bottom: calc(72px + var(--aipp-composer-grow, 0px) + var(--aipp-composer-footer, 0px));
 }
 
 [data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom .input-area-textarea-container {
-    bottom: 12px !important;
+    bottom: calc(12px + var(--aipp-composer-footer, 0px)) !important;
 }
 
 [data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom .input-area-send-button,
 [data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom .input-area-add-button {
-    bottom: 14px !important;
+    bottom: calc(14px + var(--aipp-composer-footer, 0px)) !important;
+}
+
+[data-aipp-mobile-shell][data-aipp-shell-keyboard-offset="true"] .input-area.mobile.bottom .input-area-footer {
+    bottom: 6px;
 }
 
 /* 横屏键盘：顶栏 44 + 输入 48 留在可视区内，托盘只占剩下的高度。 */
@@ -422,6 +426,15 @@
 
 [data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile .input-area-textarea {
     max-height: 44px;
+}
+
+/* 横屏键盘空间只够一行输入，底部 Plan 行先收起（键盘收起后恢复）。 */
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom {
+    --aipp-composer-footer: 0px;
+}
+
+[data-aipp-mobile-shell][data-aipp-keyboard-compact="true"] .input-area.mobile.bottom .input-area-footer {
+    display: none;
 }
 
 /* 视觉圆环从 44px 缩为 40px，外层保留 44px 点击范围。 */
@@ -475,39 +488,94 @@
     right: 190px;
 }
 
-.bottom .input-area-plan-mode-button {
-    position: fixed;
-    bottom: 80px;
-    right: 230px;
-    z-index: 20;
+/*
+ * 输入框下方的控制行（目前只有 Agent 的 Plan 模式开关）。
+ * 桌面：胶囊 bottom 30px（相对 .input-area），控制行贴在胶囊下方 6px，左侧与输入文字对齐；
+ * 消息会滚到输入框下面，所以开关本身带底色，外层不拦截滚动/点击。
+ */
+.input-area-footer {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 24px;
+    z-index: 11;
+    pointer-events: none;
 }
 
-.bottom .input-area-textarea-container.has-plan-mode {
-    padding-right: 128px;
+.input-area-footer > * {
+    pointer-events: auto;
 }
 
-.input-area.mobile.bottom .input-area-plan-mode-button {
-    position: absolute !important;
-    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
-    left: 20px !important;
-    right: auto !important;
-    /* 触控目标 ≥44px，与「+」/发送钮同高、同底边 */
-    height: 44px;
-    min-height: 44px;
-    border-radius: 22px;
-    width: auto;
-    padding-left: 8px;
-    padding-right: 8px;
+.bottom .input-area-footer {
+    left: 112px;
+    bottom: 0;
+}
+
+/* 移动端/窄窗：底部栏整体加高一行，胶囊与按钮随 --aipp-composer-footer 上移，控制行在胶囊下方。 */
+.input-area.mobile.bottom.has-footer {
+    --aipp-composer-footer: 26px;
+}
+
+.input-area.mobile.bottom .input-area-footer {
+    left: 16px;
+    bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+}
+
+.input-area-plan-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 8px 0 5px;
+    border-radius: 999px;
+    background-color: hsl(var(--background));
     font-size: 12px;
-    z-index: 20;
+    line-height: 1;
+    color: hsl(var(--muted-foreground));
+    white-space: nowrap;
+    user-select: none;
+    transition: color 0.15s ease, background-color 0.15s ease;
 }
 
-.input-area.mobile.bottom.has-plan-mode .input-area-add-button {
-    left: 96px !important;
+.input-area-plan-mode:hover:not(:has(button:disabled)) {
+    background-color: hsl(var(--muted));
 }
 
-.input-area.mobile.bottom.has-plan-mode .input-area-textarea-container {
-    padding-left: 148px !important;
+.input-area-plan-mode[data-state="on"] {
+    color: hsl(var(--foreground));
+}
+
+/* 迷你开关：与 12px 文字等高，避免默认 32×18 开关在输入框下方显得笨重 */
+.input-area-plan-mode [data-slot="switch"] {
+    width: 26px;
+    height: 16px;
+    box-shadow: none;
+}
+
+.input-area-plan-mode [data-slot="switch-thumb"] {
+    width: 12px;
+    height: 12px;
+    margin-left: 1px;
+}
+
+.input-area-plan-mode [data-slot="switch-thumb"][data-state="checked"] {
+    translate: 10px 0;
+}
+
+.input-area-plan-mode-label {
+    cursor: pointer;
+}
+
+.input-area-plan-mode:has(button:disabled) .input-area-plan-mode-label {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.input-area-plan-mode-spinner {
+    width: 12px;
+    height: 12px;
+    color: hsl(var(--muted-foreground));
 }
 
 .top .input-area-send-button {
@@ -520,17 +588,6 @@
     position: absolute;
     bottom: 10px;
     right: 62px;
-}
-
-.top .input-area-plan-mode-button {
-    position: absolute;
-    bottom: 10px;
-    right: 102px;
-    z-index: 20;
-}
-
-.top.has-plan-mode .input-area-textarea {
-    padding-right: 168px;
 }
 
 /* Unified completion list base styles */

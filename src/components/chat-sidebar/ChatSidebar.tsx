@@ -20,9 +20,11 @@ interface ChatSidebarProps {
     onContextClick?: (item: ContextItem) => void;
     onPreviewFileClick?: (item: ContextItem) => void;
     onExpandChange?: (isExpanded: boolean, width: number) => void;
+    /** 固定在详情最顶上的面板（如 Agent 工作区），不参与下方分区的高度分配 */
+    topPanel?: React.ReactNode;
 }
 
-export const DEFAULT_SIDEBAR_WIDTH = 280;
+export const DEFAULT_SIDEBAR_WIDTH = 320;
 export const MIN_SIDEBAR_WIDTH = 200;
 export const MAX_SIDEBAR_WIDTH = 500;
 export const COLLAPSED_WIDTH = 24;
@@ -41,6 +43,7 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
     onContextClick,
     onPreviewFileClick,
     onExpandChange,
+    topPanel,
 }) => {
     const [isExpanded, setIsExpanded] = useState(false);
     const [hasAutoExpanded, setHasAutoExpanded] = useState(false);
@@ -208,9 +211,11 @@ const ChatSidebar: React.FC<ChatSidebarProps> = ({
                     </div>
 
                     {/* Content */}
-                    <div className="flex-1 min-h-0 overflow-hidden" data-aipp-slot="chat-inline-sidebar-content">
+                    <div className="flex flex-1 min-h-0 flex-col overflow-hidden" data-aipp-slot="chat-inline-sidebar-content">
+                        {topPanel}
                         <ChatSidebarContent
-                            className="h-full"
+                            className="min-h-0 flex-1"
+                            separatePlan={Boolean(topPanel)}
                             todos={todos}
                             artifacts={artifacts}
                             contextItems={contextItems}

@@ -56,6 +56,17 @@ describe("ChatSidebarContent mobile details", () => {
         expect(screen.getByRole("button", { name: "展开搜索结果" })).toHaveClass("h-11", "w-11");
     });
 
+    it("should draw a separator above 规划 only when the workspace panel is present", () => {
+        const props = { todos: [], artifacts: [], contextItems: [] };
+        const { rerender } = render(<ChatSidebarContent {...props} />);
+        expect(document.querySelector('[data-aipp-slot="chat-sidebar-plan-separator"]')).not.toBeInTheDocument();
+
+        rerender(<ChatSidebarContent {...props} separatePlan />);
+        const separator = document.querySelector('[data-aipp-slot="chat-sidebar-plan-separator"]');
+        expect(separator).toBeInTheDocument();
+        expect(separator?.nextElementSibling?.querySelector("button")?.textContent).toContain("规划");
+    });
+
     it("should explain empty mobile plugins without changing desktop section visibility", () => {
         const props = { todos: [], artifacts: [], contextItems: [] };
         const { rerender } = render(<ChatSidebarContent {...props} mobile />);

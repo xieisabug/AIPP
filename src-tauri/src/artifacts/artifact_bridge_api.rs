@@ -222,9 +222,10 @@ pub async fn artifact_ai_ask(
     let proxy_enabled = false;
 
     // 创建 AI 客户端
+    let provider_configs = crate::vault::config_ref::prepare_provider_configs(&app_handle, model_detail.configs.clone()).await?;
     let client = genai_client::create_client_with_config(
         None,
-        &model_detail.configs,
+        &provider_configs,
         &model_detail.model.code,
         &model_detail.provider.api_type,
         Some(&model_detail.model.request_mode),
@@ -298,9 +299,10 @@ pub async fn artifact_model_ask(
     let request_timeout = get_request_timeout_from_config(&config_feature_map);
     let proxy_enabled = false;
 
+    let provider_configs = crate::vault::config_ref::prepare_provider_configs(&app_handle, model_detail.configs.clone()).await?;
     let client = genai_client::create_client_with_config(
         None,
-        &model_detail.configs,
+        &provider_configs,
         &model_detail.model.code,
         &model_detail.provider.api_type,
         Some(&model_detail.model.request_mode),

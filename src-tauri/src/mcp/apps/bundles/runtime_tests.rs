@@ -75,3 +75,93 @@ async fn test_plugin_runtime_real_upstream_stdio() {
         client.cancel().await.unwrap();
     }
 }
+
+#[test]
+fn test_plugin_stderr_decoder_preserves_lossy_utf8_across_every_split() {
+    let mut input = "before中文😀after".as_bytes().to_vec();
+    input.extend_from_slice(&[0xff, 0xe4, 0xb8, b'x', 0xe4, 0xb8]);
+    for split in 0..=input.len() {
+        let mut pending = input[..split].to_vec();
+        let mut output = runtime::decode_stderr(&mut pending, false);
+        pending.extend_from_slice(&input[split..]);
+        output.push_str(&runtime::decode_stderr(&mut pending, false));
+        output.push_str(&runtime::decode_stderr(&mut pending, true));
+        assert_eq!(output, String::from_utf8_lossy(&input));
+        assert!(pending.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_plugin_stderr_redacts_before_ring_truncation() {
+    use std::sync::{Arc, Mutex};
+    // Longer than the entire diagnostic buffer: neither its beginning nor its tail
+    // may survive the retention boundary, including before the process exits.
+    let secret = format!("credential-start-{}-credential-tail", "private".repeat(3000));
+    let redactor = Arc::new(crate::vault::executor::redactor_for(vec![secret.clone()]));
+    let buffer = Arc::new(Mutex::new(String::new()));
+    let input = format!("before\n{secret}\nafter");
+    runtime::capture_stderr(input.as_bytes(), buffer.clone(), redactor).await;
+    assert_eq!(&*buffer.lock().unwrap(), "before\n[REDACTED]\nafter");
+}
+
+#[tokio::test]
+async fn test_plugin_stderr_encoded_context_values_and_split_unicode_are_redacted() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::sync::{Arc, Mutex};
+    let credential = "plugin-credential-value";
+    let placeholder = "秘密-first\nsecond-value";
+    let configured = crate::vault::executor::redactor_for(vec![credential.to_string()]);
+    let context = crate::vault::executor::redactor_for(vec![placeholder.to_string()]);
+    let redactor = Arc::new(configured.merged(Some(&context)));
+    let buffer = Arc::new(Mutex::new(String::new()));
+    let escaped = serde_json::to_string(placeholder).unwrap();
+    // The first Chinese code point straddles the reader's 2048-byte chunk.
+    let input = format!("{}{placeholder}\n{}\n{}\nafter", "x".repeat(2047), STANDARD.encode(credential), &escaped[1..escaped.len()-1]);
+    runtime::capture_stderr(input.as_bytes(), buffer.clone(), redactor.clone()).await;
+    let output = buffer.lock().unwrap().clone();
+    assert_eq!(output, format!("{}[REDACTED]\n[REDACTED]\n[REDACTED]\nafter", "x".repeat(2047)));
+    let diagnostic = runtime::diagnostic_error(42, Some(1), "request", format!("echo: {escaped}"), &output, &redactor);
+    assert!(!diagnostic.contains("second-value"));
+    assert!(!diagnostic.contains("秘密"));
+    assert!(diagnostic.contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn test_plugin_stderr_no_secret_keeps_utf8_tail_within_limit() {
+    use std::sync::{Arc, Mutex};
+    let input = "你".repeat(6000);
+    let buffer = Arc::new(Mutex::new(String::new()));
+    let redactor = Arc::new(crate::vault::executor::redactor_for(Vec::<String>::new()));
+    runtime::capture_stderr(input.as_bytes(), buffer.clone(), redactor).await;
+    let output = buffer.lock().unwrap();
+    assert!(output.len() <= 16384);
+    assert_eq!(output.as_str(), "你".repeat(16384 / 3));
+}
+
+#[tokio::test]
+async fn test_plugin_stderr_read_error_hides_pending_prefix_and_error_secret() {
+    use std::sync::{Arc, Mutex};
+    struct FailingOutput(bool);
+    impl tokio::io::AsyncRead for FailingOutput {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.0 {
+                self.0 = false;
+                buf.put_slice(b"safe\nsynthetic-prefix");
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                std::task::Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, "transport-error-credential")))
+            }
+        }
+    }
+    let redactor = Arc::new(crate::vault::executor::redactor_for(vec![
+        "synthetic-prefix-rest".to_string(), "transport-error-credential".to_string(),
+    ]));
+    let buffer = Arc::new(Mutex::new(String::new()));
+    runtime::capture_stderr(FailingOutput(true), buffer.clone(), redactor).await;
+    let output = buffer.lock().unwrap();
+    assert_eq!(output.as_str(), "safe\n[REDACTED]\n[stderr read error: [REDACTED]]");
+}

@@ -19,3 +19,5 @@ mod native;
 pub(crate) mod native_agents;
 
 pub(crate) mod persistence;
+
+pub(crate) mod manual_compact;

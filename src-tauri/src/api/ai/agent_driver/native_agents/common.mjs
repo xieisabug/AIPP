@@ -86,6 +86,16 @@ export async function stopChild(child) {
   child.kill();
 }
 
+// Model discovery answers as soon as the list is known; tearing the agent down afterwards
+// (a process-tree kill on Windows, ~0.5s) stays off the caller's wait.
+export async function probeModels(open, config, emit, respond) {
+  const probe = await open({ ...config, probe: true }, emit);
+  let models;
+  try { models = await probe.models(); } catch (error) { await probe.close(); throw error; }
+  respond(models);
+  await probe.close();
+}
+
 // Explicit phase boundaries keep later reasoning out of an earlier thought block.
 export function thinkingStream(emit) {
   let turn, id, count = 0;

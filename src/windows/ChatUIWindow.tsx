@@ -28,6 +28,10 @@ import {
 import { useApprovalSurface } from "../hooks/useApprovalAttention";
 import { useAcpElicitation } from "../hooks/useAcpElicitation";
 import { useAskUserQuestion, usePreviewFile } from "../hooks/useInlineInteraction";
+import { useVaultUseRequests } from "../hooks/useVaultUseRequests";
+import { useVaultInputRequests } from "../hooks/useVaultInputRequests";
+import { vaultInlineItems } from "../components/conversation/VaultUseCard";
+import { vaultInputInlineItems } from "../components/conversation/VaultInputCard";
 import { useFeatureConfig } from "../hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
 import useConversationManager from "../hooks/useConversationManager";
@@ -274,8 +278,14 @@ function ChatUIWindow() {
     } = usePreviewFile({
         conversationId: selectedConversation ? parseInt(selectedConversation) : undefined,
     });
+    const { requests: vaultUseRequests, respond: respondVaultUse } = useVaultUseRequests(
+        selectedConversation ? parseInt(selectedConversation) : null,
+    );
+    const vaultInput = useVaultInputRequests(selectedConversation ? parseInt(selectedConversation) : null);
     const inlineInteractionItems = useMemo(() => {
         const items: InlineInteractionItem[] = [];
+        items.push(...vaultInlineItems(vaultUseRequests, respondVaultUse));
+        items.push(...vaultInputInlineItems(vaultInput.requests, vaultInput.submit, vaultInput.decline));
         if (isAskUserDialogOpen && pendingAskUserRequest) {
             items.push({
                 key: `ask-user-question-${pendingAskUserRequest.request_id}`,
@@ -345,6 +355,11 @@ function ChatUIWindow() {
         pendingPreviewFileRequest,
         previewFileCallId,
         previewFileMessageId,
+        respondVaultUse,
+        vaultInput.decline,
+        vaultInput.requests,
+        vaultInput.submit,
+        vaultUseRequests,
     ]);
     const hasInlineInteraction = inlineInteractionItems.length > 0;
 

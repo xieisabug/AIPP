@@ -414,3 +414,137 @@ fn query_with_offset() {
     let page3 = query_audit_log(&conn, None, None, None, false, 2, 4).unwrap();
     assert_eq!(page3.len(), 1);
 }
+
+/// Credentials are removed before the database write, not just while returning this tool call.
+/// Query again outside the invocation to model a later superadmin_audit_query without vault access.
+#[tokio::test]
+async fn test_audit_redacts_credentials_before_persistence_and_later_query() {
+    use base64::Engine;
+    use crate::vault::placeholder;
+    use serde_json::json;
+
+    let conn = setup_in_memory_db();
+    let secret = "audit-secret-\"quoted\\path /?=+中文";
+    let encoded = base64::engine::general_purpose::STANDARD.encode(secret);
+    let url_encoded = urlencoding::encode(secret).into_owned();
+    let args = json!({"payload": secret, "nested": [{(secret): encoded}]}).to_string();
+    let result = json!({"response": url_encoded, "debug": json!({"value": secret}).to_string()}).to_string();
+    let reason = format!("Updating with {secret}");
+    let snapshot = json!({"old_value": secret}).to_string();
+    placeholder::test_prepared(&[secret]).run(async {
+        insert_audit_log(&conn, "vault-success", "config.set", "config", RiskLevel::MEDIUM,
+            Some(&args), Some(&reason), false, true, true, Some(&result), None,
+            Some(42), "butler", Some(&snapshot)).unwrap();
+    }).await;
+    assert!(placeholder::current_redactor().is_none());
+
+    // Check raw stored columns as well as the public query path. No cleanup is active here.
+    let stored: (String, String, String, Option<String>) = conn.query_row(
+        "SELECT args_json, reason, result_json, before_snapshot_json FROM superadmin_audit_log WHERE audit_id = 'vault-success'",
+        (), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    let stored_args: serde_json::Value = serde_json::from_str(&stored.0).unwrap();
+    assert_eq!(stored_args["payload"], "[REDACTED]");
+    assert_eq!(stored_args["nested"][0]["[REDACTED]"], "[REDACTED]");
+    let stored_result: serde_json::Value = serde_json::from_str(&stored.2).unwrap();
+    assert_eq!(stored_result["response"], "[REDACTED]");
+    let embedded: serde_json::Value = serde_json::from_str(stored_result["debug"].as_str().unwrap()).unwrap();
+    assert_eq!(embedded["value"], "[REDACTED]");
+    assert!(stored.3.is_none(), "redacted undo inputs must not be replayable");
+    assert_eq!(stored.1, "Updating with [REDACTED]");
+
+    let entries = query_audit_log(&conn, None, None, None, false, 20, 0).unwrap();
+    let retained = serde_json::to_string(&entries).unwrap();
+    for sensitive in [secret.to_owned(), encoded, url_encoded] {
+        assert!(!retained.contains(&sensitive));
+    }
+    assert!(query_audit_log(&conn, None, None, None, true, 20, 0).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_audit_redacts_failure_reason_and_error_before_storage() {
+    use crate::vault::placeholder;
+
+    let conn = setup_in_memory_db();
+    let secret = "error-token-56789";
+    let error = format!("HTTP 401 for request req-42: invalid credential {secret}");
+    placeholder::test_prepared(&[secret]).run(async {
+        // Includes the shared failed-undo write path and malformed JSON fallback.
+        insert_audit_log(&conn, "vault-failure", "undo:config.set", "config", RiskLevel::MEDIUM,
+            Some(secret), Some(secret), false, false, false, None, Some(&error),
+            Some(42), "butler", None).unwrap();
+    }).await;
+    let entry = get_audit_entry(&conn, "vault-failure").unwrap().unwrap();
+    assert_eq!(entry.args_json.as_deref(), Some("[REDACTED]"));
+    assert_eq!(entry.reason.as_deref(), Some("[REDACTED]"));
+    assert_eq!(entry.error.as_deref(), Some("HTTP 401 for request req-42: invalid credential [REDACTED]"));
+}
+
+/// Sanitizing only one of the two undo inputs is enough to disable replay; result-only cleanup is
+/// not, because safe original arguments and snapshots can still restore the original state.
+#[tokio::test]
+async fn test_audit_disables_only_undo_with_redacted_inputs() {
+    use crate::vault::placeholder;
+
+    let conn = setup_in_memory_db();
+    let secret = "undo-token-98765";
+    let sensitive = serde_json::json!({"value": secret}).to_string();
+    let safe = "{ \"value\": \"unchanged\" }";
+    placeholder::test_prepared(&[secret]).run(async {
+        for (id, args, snapshot, result) in [
+            ("args-only", sensitive.as_str(), safe, safe),
+            ("snapshot-only", safe, sensitive.as_str(), safe),
+            ("result-only", safe, safe, sensitive.as_str()),
+            ("untouched", safe, safe, safe),
+        ] {
+            insert_audit_log(&conn, id, "config.set", "config", RiskLevel::MEDIUM,
+                Some(args), None, false, false, true, Some(result), None,
+                Some(42), "butler", Some(snapshot)).unwrap();
+        }
+    }).await;
+    for id in ["args-only", "snapshot-only"] {
+        assert!(get_audit_entry(&conn, id).unwrap().unwrap().before_snapshot_json.is_none());
+    }
+    for id in ["result-only", "untouched"] {
+        let entry = get_audit_entry(&conn, id).unwrap().unwrap();
+        assert_eq!(entry.args_json.as_deref(), Some(safe));
+        assert_eq!(entry.before_snapshot_json.as_deref(), Some(safe));
+    }
+    assert_eq!(query_audit_log(&conn, None, None, None, true, 20, 0).unwrap().len(), 2);
+}
+
+/// Short values and JSON scalars must not enter the audit store, but their ambiguous spelling must
+/// not trigger a new global replacement policy for ordinary tool messages.
+#[tokio::test]
+async fn test_audit_omits_payload_for_short_or_json_credentials_without_global_redaction() {
+    use crate::vault::placeholder;
+
+    let conn = setup_in_memory_db();
+    for secret in ["ab", "123", "true", "123456", r#"{"key":"value"}"#] {
+        let audit_id = generate_audit_id();
+        let original = serde_json::json!({"value": secret, "ordinary_flag": true}).to_string();
+        placeholder::test_prepared(&[secret]).run(async {
+            assert!(placeholder::audit_requires_opaque_values());
+            placeholder::Prepared::default().run(async {
+                assert!(!placeholder::audit_requires_opaque_values());
+            }).await;
+            assert!(placeholder::audit_requires_opaque_values());
+            if secret == "ab" {
+                // Retain the existing short-value policy outside persistent audit records.
+                assert_eq!(placeholder::current_redactor().unwrap().clean("table ab"), "table ab");
+            }
+            insert_audit_log(&conn, &audit_id, "config.set", "config", RiskLevel::MEDIUM,
+                Some(&original), Some(secret), false, true, false, Some(&original), Some(secret),
+                Some(42), "butler", Some(&original)).unwrap();
+        }).await;
+        assert!(!placeholder::audit_requires_opaque_values());
+        let entry = get_audit_entry(&conn, &audit_id).unwrap().unwrap();
+        assert!(entry.args_json.is_none());
+        assert!(entry.reason.is_none());
+        assert!(entry.result_json.is_none());
+        assert!(entry.error.is_none());
+        assert!(entry.before_snapshot_json.is_none());
+        assert_eq!(entry.action_id, "config.set");
+        assert!(!entry.success);
+    }
+}

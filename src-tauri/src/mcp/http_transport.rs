@@ -97,11 +97,12 @@ pub(crate) fn create_http_transport(
     server: &MCPServer,
     builder: reqwest::ClientBuilder,
 ) -> Result<StreamableHttpClientTransport<reqwest::Client>, String> {
-    let (client, url) = build_plain_client(server, builder)?;
+    let (client, url) = build_plain_client(server, builder, &[])?;
     Ok(StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)))
 }
 
-fn build_plain_client(server: &MCPServer, builder: reqwest::ClientBuilder) -> Result<(reqwest::Client, String), String> {
+/// `secrets` are values already substituted from vault references; headers carrying them are sensitive.
+fn build_plain_client(server: &MCPServer, builder: reqwest::ClientBuilder, secrets: &[String]) -> Result<(reqwest::Client, String), String> {
     let url = server.url.as_deref().ok_or("No URL specified for HTTP transport")?;
     if let Some(raw) = server.headers.as_deref().filter(|raw| !raw.trim().is_empty()) {
         let parsed: serde_json::Value = serde_json::from_str(raw)
@@ -118,10 +119,15 @@ fn build_plain_client(server: &MCPServer, builder: reqwest::ClientBuilder) -> Re
         if name.eq_ignore_ascii_case(super::apps::credentials::REFERENCE_HEADER) {
             return Err("目录应用凭据必须通过受控 HTTP 执行入口解析".into());
         }
+        if crate::vault::config_ref::contains(&value) {
+            return Err("保险箱引用必须通过受控 HTTP 执行入口解析".into());
+        }
         let name = HeaderName::try_from(name.as_str())
             .map_err(|error| format!("Invalid MCP HTTP header name: {error}"))?;
-        let value = HeaderValue::from_str(&value)
-            .map_err(|error| format!("Invalid MCP HTTP header value for {name}: {error}"))?;
+        let sensitive = secrets.iter().any(|secret| value.contains(secret.as_str()));
+        let mut value = HeaderValue::from_str(&value)
+            .map_err(|_| format!("Invalid MCP HTTP header value for {name}"))?;
+        value.set_sensitive(sensitive);
         header_map.insert(name, value);
     }
     let client = builder.redirect(reqwest::redirect::Policy::none()).default_headers(header_map).build()
@@ -152,9 +158,13 @@ pub(crate) async fn create_authenticated_http_transport(
     };
     let keys: Vec<_> = headers.keys().filter(|key| key.eq_ignore_ascii_case(super::apps::credentials::REFERENCE_HEADER)).cloned().collect();
     if keys.is_empty() {
-        let (client, url) = build_plain_client(server, builder)?;
+        // Vault references resolve only for the origin the user confirmed when saving this server.
+        let resolved = crate::vault::config_ref::resolve_http_server(app, server).await?;
+        let (server, secrets) = match &resolved { Some((server, secrets)) => (server, secrets.as_slice()), None => (server, &[][..]) };
+        let (client, url) = build_plain_client(server, builder, secrets)?;
         let (client, signal) = AuthAwareClient::new(client);
-        return Ok((StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)), ResponseRedactor::default(), signal));
+        let redactor = crate::vault::executor::redactor_for(secrets.iter().cloned());
+        return Ok((StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(url)), redactor, signal));
     }
     if keys.len() != 1 { return Err("连接包含重复凭据引用".into()); }
     let reference = headers.remove(&keys[0]).unwrap();
@@ -188,7 +198,7 @@ pub(crate) async fn create_authenticated_http_transport(
         StreamableHttpClientTransportConfig::with_uri(server.url.as_deref().ok_or("连接缺少服务地址")?)), redactor, signal))
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ResponseRedactor(Vec<String>);
 
 impl ResponseRedactor {
@@ -211,9 +221,79 @@ impl ResponseRedactor {
         secrets.dedup();
         Self(secrets)
     }
-    pub(crate) fn clean(&self, text: &str) -> String {
-        let mut result = text.to_owned();
-        for secret in &self.0 { result = result.replace(secret, "[REDACTED]"); }
-        result
+    pub(crate) fn merged(&self, other: Option<&Self>) -> Self {
+        let mut values = self.0.clone();
+        if let Some(other) = other { values.extend(other.0.iter().cloned()); }
+        values.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        values.dedup();
+        Self(values)
     }
+
+    /// Return only text that cannot still become a known secret when more input arrives.
+    /// Matching before line splitting/truncation keeps multiline values and boundary fragments out
+    /// of logs and retained output. This recognizes known values, not arbitrary transformations.
+    fn clean_prefix(&self, text: &str, hold_suffix: bool) -> (String, usize) {
+        if self.0.is_empty() { return (text.to_owned(), text.len()); }
+        let mut output = String::new();
+        let mut offset = 0;
+        while offset < text.len() {
+            let remaining = &text[offset..];
+            let mut matched = None;
+            for secret in &self.0 {
+                if remaining.starts_with(secret) { matched = Some(secret.len()); break; }
+                // Longer possible matches take precedence over a shorter complete match.
+                if hold_suffix && secret.starts_with(remaining) { return (output, offset); }
+            }
+            if let Some(length) = matched {
+                output.push_str("[REDACTED]");
+                offset += length;
+            } else {
+                let ch = remaining.chars().next().expect("nonempty remainder");
+                output.push(ch);
+                offset += ch.len_utf8();
+            }
+        }
+        (output, offset)
+    }
+
+    pub(crate) fn clean(&self, text: &str) -> String { self.clean_prefix(text, false).0 }
+
+    /// The source was cut off, so even an unfinished known value must not be released.
+    pub(crate) fn clean_truncated(&self, text: &str) -> String {
+        let (mut output, consumed) = self.clean_prefix(text, true);
+        if consumed < text.len() { output.push_str("[REDACTED]"); }
+        output
+    }
+
+    /// Clean before adding JSON wrappers, rather than guessing every possible escape depth.
+    pub(crate) fn clean_json(&self, value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => *text = self.clean(text),
+            serde_json::Value::Array(values) => values.iter_mut().for_each(|value| self.clean_json(value)),
+            serde_json::Value::Object(values) => {
+                *values = std::mem::take(values).into_iter().map(|(name, mut value)| {
+                    self.clean_json(&mut value);
+                    (self.clean(&name), value)
+                }).collect();
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn stream(self: &Arc<Self>) -> RedactionStream {
+        RedactionStream { redactor: self.clone(), pending: String::new() }
+    }
+}
+
+pub(crate) struct RedactionStream { redactor: Arc<ResponseRedactor>, pending: String }
+
+impl RedactionStream {
+    pub(crate) fn push(&mut self, text: &str) -> String {
+        self.pending.push_str(text);
+        let (output, consumed) = self.redactor.clean_prefix(&self.pending, true);
+        self.pending.drain(..consumed);
+        output
+    }
+    pub(crate) fn finish(&mut self) -> String { self.redactor.clean(&std::mem::take(&mut self.pending)) }
+    pub(crate) fn finish_truncated(&mut self) -> String { self.redactor.clean_truncated(&std::mem::take(&mut self.pending)) }
 }

@@ -89,6 +89,10 @@ import {
     ButlerTaskResultAvailableEvent,
 } from "@/data/Butler";
 import { useAskUserQuestion, usePreviewFile } from "@/hooks/useInlineInteraction";
+import { useVaultUseRequests } from "../hooks/useVaultUseRequests";
+import { useVaultInputRequests } from "../hooks/useVaultInputRequests";
+import { vaultInlineItems } from "../components/conversation/VaultUseCard";
+import { vaultInputInlineItems } from "../components/conversation/VaultInputCard";
 import { useFeatureConfig } from "@/hooks/feature/useFeatureConfig";
 import { useAppShortcuts } from "@/hooks/useAppShortcuts";
 import { useTheme } from "@/hooks/useTheme";
@@ -525,6 +529,10 @@ function ButlerExperimentWindow() {
     } = useAskUserQuestion({
         conversationId: contact?.conversationId ?? conversationIdNumber,
     });
+    const { requests: vaultUseRequests, respond: respondVaultUse } = useVaultUseRequests(
+        contact?.conversationId ?? conversationIdNumber ?? null,
+    );
+    const vaultInput = useVaultInputRequests(contact?.conversationId ?? conversationIdNumber ?? null);
     const {
         pendingRequest: pendingPreviewFileRequest,
         isDialogOpen: isPreviewFileDialogOpen,
@@ -550,6 +558,8 @@ function ButlerExperimentWindow() {
     useEffect(() => setQuote(null), [activeConversationId]);
     const quoteState = useMemo(() => ({ quote, setQuote }), [quote]);
     const inlineInteractionItems: InlineInteractionItem[] = [];
+    inlineInteractionItems.push(...vaultInlineItems(vaultUseRequests, respondVaultUse));
+    inlineInteractionItems.push(...vaultInputInlineItems(vaultInput.requests, vaultInput.submit, vaultInput.decline));
     if (isAskUserDialogOpen && pendingAskUserRequest) {
         inlineInteractionItems.push({
             key: `butler-ask-user-${pendingAskUserRequest.request_id}`,

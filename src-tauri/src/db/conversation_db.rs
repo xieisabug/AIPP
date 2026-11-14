@@ -898,9 +898,9 @@ impl MessageRepository {
         Ok(messages)
     }
 
-    fn insert_message(&self, message: &Message, touch_conversation: bool) -> Result<Message> {
+    fn insert_message(&self, message: &Message, touch_conversation: bool, track_goal: bool) -> Result<Message> {
         let mut anchored = message.clone();
-        if anchored.parent_id.is_none() && matches!(anchored.message_type.as_str(),"response"|"assistant"|"reasoning") {
+        if track_goal && anchored.parent_id.is_none() && matches!(anchored.message_type.as_str(),"response"|"assistant"|"reasoning") {
             anchored.parent_id = super::butler_goal::OUTPUT_SOURCE.try_with(|id|*id).ok().flatten();
         }
         let message=&anchored;
@@ -935,7 +935,7 @@ impl MessageRepository {
                 )?;
             }
             let id = conn.last_insert_rowid();
-            if matches!(message.message_type.as_str(), "response" | "assistant" | "reasoning") {
+            if track_goal && matches!(message.message_type.as_str(), "response" | "assistant" | "reasoning") {
                 super::butler_goal::bind_output(conn, message.conversation_id, id)?;
                 super::butler_goal::mark_obsolete_output(conn, id)?;
             }
@@ -963,9 +963,38 @@ impl MessageRepository {
         })
     }
 
+    /// Scheduler-only delivery: validate provenance, without borrowing or changing the chat goal.
+    pub(crate) fn create_scheduled_delivery(&self, message: &Message) -> anyhow::Result<Message> {
+        let invalid = || anyhow::anyhow!("定时任务投递来源校验失败：任务运行、原始回复或触发消息不匹配（投递会话 {}，触发消息 {:?}）", message.conversation_id, message.parent_id);
+        let metadata: serde_json::Value = serde_json::from_str(message.metadata_json.as_deref().unwrap_or(""))
+            .map_err(|_| invalid())?;
+        if message.message_type != "response" || metadata["origin"] != "scheduled_task" || metadata["role"] != "result" {
+            return Err(invalid().into());
+        }
+        let task = metadata["scheduled_task_id"].as_i64().ok_or_else(invalid)?;
+        let run = metadata["scheduled_run_id"].as_str().filter(|s| !s.is_empty()).ok_or_else(invalid)?;
+        let source = metadata["final_message_id"].as_i64().ok_or_else(invalid)?;
+        let conversation = metadata["run_conversation_id"].as_i64().ok_or_else(invalid)?;
+        let parent = message.parent_id.ok_or_else(invalid)?;
+        let valid: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scheduled_task_run r
+             JOIN message s ON s.id=?3 AND s.conversation_id=?4 AND s.message_type IN ('response','assistant')
+             JOIN message t ON t.id=?5 AND t.conversation_id=?6 AND t.message_type='user'
+             WHERE r.task_id=?1 AND r.run_id=?2 AND r.conversation_id=?4
+             AND json_valid(t.metadata_json)
+             AND json_extract(t.metadata_json,'$.origin')='scheduled_task'
+             AND json_extract(t.metadata_json,'$.role')='trigger'
+             AND json_extract(t.metadata_json,'$.scheduled_task_id')=?1
+             AND json_extract(t.metadata_json,'$.scheduled_run_id')=?2
+             AND json_extract(t.metadata_json,'$.run_conversation_id')=?4)",
+            rusqlite::params![task, run, source, conversation, parent, message.conversation_id], |r| r.get(0))?;
+        if !valid { return Err(invalid().into()); }
+        Ok(self.insert_message(message, true, false)?)
+    }
+
     #[instrument(level = "debug", skip(self, message), fields(conversation_id = message.conversation_id, message_type = message.message_type))]
     pub fn create_without_touch_conversation(&self, message: &Message) -> Result<Message> {
-        self.insert_message(message, false)
+        self.insert_message(message, false, true)
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
@@ -1291,7 +1320,7 @@ impl Repository<Message> for MessageRepository {
                 &self.conn, anchored.conversation_id, anchored.parent_id,
             ).map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
         }
-        self.insert_message(&anchored, true)
+        self.insert_message(&anchored, true, true)
     }
 
     #[instrument(level = "debug", skip(self), fields(id = id))]
@@ -3264,3 +3293,7 @@ impl ButlerRepository {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "scheduled_delivery_tests.rs"]
+mod scheduled_delivery_tests;

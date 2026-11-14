@@ -182,48 +182,73 @@ describe("InputArea Plan mode", () => {
         mockInvokeHandler("get_skills_for_slash_completion", () => []);
     });
 
-    it("toggles Plan mode from the input toolbar", async () => {
+    it("should render the Plan switch below the input when the assistant supports Plan", async () => {
+        const onPlanModeToggle = vi.fn();
+        const user = userEvent.setup();
+        const { container } = render(<InputAreaHarness onPlanModeToggle={onPlanModeToggle} />);
+
+        const toggle = screen.getByRole("switch", { name: "Plan 模式" });
+        expect(toggle).toHaveAttribute("aria-checked", "false");
+        expect(toggle.closest('[data-aipp-slot="chat-input-plan-mode"]')).toHaveAttribute("data-state", "off");
+        expect(toggle.closest('[data-aipp-slot="chat-input-footer"]')).not.toBeNull();
+        // 开关不在输入胶囊里，而是独立的输入框下方控制行
+        expect(container.querySelector(".input-area-textarea-container")?.contains(toggle)).toBe(false);
+        expect(container.querySelector(".input-area")).toHaveClass("has-footer");
+
+        await user.click(toggle);
+        expect(onPlanModeToggle).toHaveBeenCalledOnce();
+    });
+
+    it("should toggle Plan when the label is clicked", async () => {
         const onPlanModeToggle = vi.fn();
         const user = userEvent.setup();
         render(<InputAreaHarness onPlanModeToggle={onPlanModeToggle} />);
 
-        const button = screen.getByRole("button", { name: "Plan" });
-        expect(button).toHaveTextContent("Plan");
-        expect(button).toHaveAttribute("aria-pressed", "false");
-        expect(button).toHaveClass("input-area-plan-mode-button");
-        expect(button).not.toHaveClass("bg-primary");
-        expect(button).toHaveAttribute("data-aipp-slot", "chat-input-plan-mode");
-        await user.click(button);
+        await user.click(screen.getByText("Plan 模式"));
         expect(onPlanModeToggle).toHaveBeenCalledOnce();
     });
 
-    it("fills the Plan chip with primary color while mode is on", () => {
-        render(
-            <InputAreaHarness
-                planMode
-                onPlanModeToggle={() => {}}
-            />,
-        );
+    it("should show the checked state without extra text when Plan is on", () => {
+        render(<InputAreaHarness planMode onPlanModeToggle={() => {}} />);
 
-        const button = screen.getByRole("button", { name: "Plan" });
-        expect(button).toHaveTextContent("Plan");
-        expect(button).toHaveAttribute("aria-pressed", "true");
-        expect(button).toHaveClass("bg-primary");
-        expect(button).toHaveClass("text-primary-foreground");
+        const toggle = screen.getByRole("switch", { name: "Plan 模式" });
+        expect(toggle).toHaveAttribute("aria-checked", "true");
+        expect(toggle.closest('[data-aipp-slot="chat-input-plan-mode"]')).toHaveAttribute("data-state", "on");
+        expect(toggle.closest('[data-aipp-slot="chat-input-plan-mode"]')).toHaveTextContent(/^Plan 模式$/);
     });
 
-    it("shows and disables the Plan control while switching", () => {
-        render(
-            <InputAreaHarness
-                planMode
-                planModeSwitching
-                onPlanModeToggle={() => {}}
-            />,
-        );
+    it("should disable the switch and show progress when Plan is switching", () => {
+        render(<InputAreaHarness planMode planModeSwitching onPlanModeToggle={() => {}} />);
 
-        const button = screen.getByRole("button", { name: "Plan" });
-        expect(button).toHaveAttribute("aria-pressed", "true");
-        expect(button).toBeDisabled();
+        const toggle = screen.getByRole("switch", { name: "Plan 模式" });
+        expect(toggle).toBeDisabled();
+        expect(screen.getByLabelText("正在切换")).toBeInTheDocument();
+    });
+
+    it("should disable the switch when the AI is responding", () => {
+        render(<InputAreaHarness aiIsResponsing onPlanModeToggle={() => {}} />);
+
+        const toggle = screen.getByRole("switch", { name: "Plan 模式" });
+        expect(toggle).toBeDisabled();
+        expect(toggle.closest('[data-aipp-slot="chat-input-plan-mode"]')).toHaveAttribute(
+            "title",
+            "回复进行中，结束后可切换",
+        );
+    });
+
+    it("should not render the Plan row when the assistant has no Plan mode", () => {
+        const { container } = render(<InputAreaHarness />);
+
+        expect(screen.queryByRole("switch", { name: "Plan 模式" })).not.toBeInTheDocument();
+        expect(container.querySelector('[data-aipp-slot="chat-input-footer"]')).toBeNull();
+        expect(container.querySelector(".input-area")).not.toHaveClass("has-footer");
+    });
+
+    it("should keep the Plan row in the mobile layout", () => {
+        const { container } = render(<InputAreaHarness isMobile onPlanModeToggle={() => {}} />);
+
+        expect(screen.getByRole("switch", { name: "Plan 模式" })).toBeInTheDocument();
+        expect(container.querySelector(".input-area")).toHaveClass("mobile", "has-footer");
     });
 });
 

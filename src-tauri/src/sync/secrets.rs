@@ -473,7 +473,10 @@ pub(super) fn reconcile_server_wins(
         let envelope = fields.and_then(|f| f.get("value")).cloned().unwrap_or(JsonValue::Null);
         let vault_name = format!("vault:{}", fields.and_then(|f| f.get("reference")).and_then(JsonValue::as_str).unwrap_or_default());
         let name = if change.object_type == vault::OBJECT_TYPE { vault_name.as_str() } else { name };
-        if open(key, &change.object_id, name, &envelope).is_err() {
+        // Personal vault envelopes bind the item UUID (stable across devices), not the sync object id.
+        let personal_id = format!("pvault:{}", fields.and_then(|f| f.get("uuid")).and_then(JsonValue::as_str).unwrap_or_default());
+        let (aad_object, name) = if change.object_type == personal_vault::OBJECT_TYPE { (personal_id.as_str(), "secret") } else { (change.object_id.as_str(), name) };
+        if open(key, aad_object, name, &envelope).is_err() {
             continue; // Sealed with an older passphrase: a newer server write will follow.
         }
         let unpushed: bool = sync.query_row(

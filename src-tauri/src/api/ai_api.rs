@@ -3765,6 +3765,50 @@ pub(crate) fn add_message_with_metadata(
     Ok(message.clone())
 }
 
+pub(crate) fn add_scheduled_delivery_message(
+    app_handle: &tauri::AppHandle,
+    parent_id: Option<i64>,
+    conversation_id: i64,
+    message_type: String,
+    content: String,
+    llm_model_id: Option<i64>,
+    llm_model_name: Option<String>,
+    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    finish_time: Option<chrono::DateTime<chrono::Utc>>,
+    token_count: i32,
+    generation_group_id: Option<String>,
+    parent_group_id: Option<String>,
+    metadata_json: Option<String>,
+) -> Result<Message, AppError> {
+    let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    let message = db
+        .message_repo()?
+        .create_scheduled_delivery(&Message {
+            id: 0,
+            parent_id,
+            conversation_id,
+            message_type,
+            content,
+            llm_model_id,
+            llm_model_name,
+            start_time,
+            finish_time,
+            created_time: chrono::Utc::now(),
+            token_count,
+            input_token_count: 0,
+            output_token_count: 0,
+            generation_group_id,
+            parent_group_id,
+            tool_calls_json: None,
+            metadata_json,
+            first_token_time: None,
+            ttft_ms: None,
+        })
+        .map_err(AppError::from)?;
+
+    Ok(message.clone())
+}
+
 async fn initialize_conversation(
     app_handle: &tauri::AppHandle,
     request: &AiRequest,

@@ -31,6 +31,7 @@ mod secrets;
 mod server_switch;
 pub use server_switch::{begin_sync_server_switch, inspect_sync_server_switch, cancel_sync_server_switch, commit_sync_server_switch};
 pub(crate) mod vault;
+pub(crate) mod personal_vault;
 mod vault_sync;
 pub(crate) mod vault_refresh;
 mod provider_merge;
@@ -497,6 +498,13 @@ fn specs() -> Vec<SyncTableSpec> {
             natural_key_columns: &[], unique_key_columns: &["reference"], seed_official_ids: &[], official_column: None,
             foreign_keys: &[ForeignKeySpec { column: "server_id", object_type: "mcp.server", kind: FkKind::Structural }],
             where_clause: Some("server_id > 0"), order_by: "id",
+        },
+        SyncTableSpec {
+            // 凭据保险箱：value 是密文信封，只在同步口令就绪时推送；last_used_at 仅本机。
+            db_name: "system.db", table: "vault_item", object_type: personal_vault::OBJECT_TYPE,
+            columns: &["id", "uuid", "handle", "name", "description", "allowed_sites", "sync_enabled", "value", "created_at", "updated_at", "config_bindings"],
+            natural_key_columns: &[], unique_key_columns: &["uuid"], seed_official_ids: &[], official_column: None,
+            foreign_keys: &[], where_clause: Some("sync_enabled = 1"), order_by: "id",
         },
         SyncTableSpec {
             db_name: "mcp.db",
@@ -1529,7 +1537,11 @@ async fn push_event_batch_once(
         return Ok(PushBatchOutcome::Done { conflicts: 0 });
     }
     ensure_not_cancelled(cancel)?;
-    mark_events_pushing(app_handle, events)?;
+    let prepared = prepare_push_batch(app_handle, events)?;
+    let events = prepared.as_slice();
+    if events.is_empty() {
+        return Ok(PushBatchOutcome::Done { conflicts: 0 });
+    }
     let request = PushRequest {
         device_id: device_id.to_string(),
         device_name: device_name.to_string(),
@@ -1725,6 +1737,7 @@ struct SyncUiDomains {
     conversation: bool,
     feature: bool,
     artifacts: bool,
+    vault: bool,
 }
 
 impl SyncUiDomains {
@@ -1740,6 +1753,7 @@ impl SyncUiDomains {
                 t if t.starts_with("mcp.") => domains.mcp = true,
                 t if t.starts_with("llm.") => domains.llm = true,
                 t if t.starts_with("conversation.") => domains.conversation = true,
+                t if t.starts_with("vault.") => domains.vault = true,
                 _ => {}
             }
         }
@@ -1796,6 +1810,9 @@ async fn emit_sync_domain_events(app_handle: &AppHandle, types: &HashSet<String>
     }
     if domains.llm {
         if let Err(error) = emit("llm_provider_changed", app_handle.emit("llm_provider_changed", ())) { errors.push(error); }
+    }
+    if domains.vault {
+        if let Err(error) = emit("vault_changed", app_handle.emit("vault_changed", "sync_remote")) { errors.push(error); }
     }
     if domains.conversation {
         app_handle.state::<crate::mcp::builtin_mcp::TodoState>().invalidate_cache();
@@ -2150,6 +2167,7 @@ fn scan_local_changes(app_handle: &AppHandle) -> Result<(usize, DanglingFkScanRe
             read_local_snapshots(app_handle, &spec, &sync_conn, &mut dangling)?;
         let snapshots = match secret_key {
             Some(key) if spec.object_type == vault::OBJECT_TYPE => vault_sync::seal_snapshots(&sync_conn, key, snapshots)?,
+            Some(key) if spec.object_type == personal_vault::OBJECT_TYPE => personal_vault::seal_snapshots(&sync_conn, key, snapshots)?,
             Some(key) => secrets::seal_snapshots(&sync_conn, key, snapshots)?,
             None => snapshots,
         };
@@ -2276,7 +2294,8 @@ fn find_stale_pending_upserts(
     Ok(result)
 }
 
-/// 确认本地行是否仍然存在（忽略 where_clause 的同步范围过滤）。
+/// 确认本地行是否仍然存在（忽略普通 where_clause 的同步范围过滤）。
+/// 保险箱条目主动关闭同步是例外：保留本机行，但撤回已同步的副本。
 fn local_row_exists(
     app_handle: &AppHandle,
     sync_conn: &Connection,
@@ -2296,6 +2315,9 @@ fn local_row_exists_in_db(
         else {
             return Ok(false);
         };
+        if spec.object_type == personal_vault::OBJECT_TYPE && personal_vault::is_local_only(conn, local_id)? {
+            return Ok(false);
+        }
         let found = conn
             .query_row(
                 &format!("SELECT 1 FROM {} WHERE id = ?1", spec.table),
@@ -2333,6 +2355,14 @@ fn enqueue_delete_event(
     base_version: i64,
     device_id: &str,
 ) -> Result<bool, String> {
+    if spec.object_type == personal_vault::OBJECT_TYPE {
+        // Explicitly rejected uploads can no longer block a withdrawal. Also discard stale scans
+        // queued after an existing delete. Unknown outcomes must keep their immutable retry.
+        conn.execute("DELETE FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+            AND operation='upsert' AND status IN ('pending','failed')
+            AND (sent_once=0 OR (status='failed' AND outcome_known=1))",
+            params![spec.object_type, object_id]).map_err(|e| e.to_string())?;
+    }
     let pending_delete: Option<i64> = conn
         .query_row(
             "SELECT id FROM sync_outbox
@@ -3051,9 +3081,9 @@ fn enqueue_snapshot_if_changed(
 ) -> Result<bool, String> {
     let shadow = conn
         .query_row(
-            "SELECT server_version, payload_hash FROM sync_shadow WHERE object_type = ?1 AND object_id = ?2",
+            "SELECT server_version, payload_hash, deleted_at FROM sync_shadow WHERE object_type = ?1 AND object_id = ?2",
             params![snapshot.object_type, snapshot.object_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
@@ -3069,7 +3099,7 @@ fn enqueue_snapshot_if_changed(
         "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type = ?1 AND object_id = ?2 AND status IN ('pending', 'pushing', 'failed'))",
         params![snapshot.object_type, snapshot.object_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    if !outstanding && shadow.as_ref().is_some_and(|(_, hash)| hash == &snapshot.payload_hash) {
+    if !outstanding && shadow.as_ref().is_some_and(|(_, hash, deleted)| deleted.is_none() && hash == &snapshot.payload_hash) {
         return Ok(false);
     }
 
@@ -3091,7 +3121,7 @@ fn enqueue_snapshot_if_changed(
     // 新 payload 入队前清理同对象的 failed 旧事件，避免旧 payload 之后被重试覆盖新数据
     drop_failed_upserts_for_object(conn, &snapshot.object_type, &snapshot.object_id)?;
 
-    let base_version = shadow.map(|(version, _)| version);
+    let base_version = shadow.map(|(version, _, _)| version);
     let now = now_string();
     conn.execute(
         "INSERT INTO sync_outbox
@@ -3139,6 +3169,7 @@ fn apply_change(
     let db_path = get_db_path(app_handle, spec.db_name)?;
     let conn = open_data_db(&db_path)?;
     if spec.object_type == vault::OBJECT_TYPE { vault::init(&conn)?; }
+    if spec.object_type == personal_vault::OBJECT_TYPE { personal_vault::init(&conn)?; }
     if spec.object_type == vault::CONNECTION_TYPE { crate::mcp::apps::init(&conn)?; }
     // Only secret rows need the passphrase state; avoid touching system.db per message.
     let secret_state = if vault_sync::encrypted_type(spec.object_type) { Some(load_secret_state(app_handle)?) } else { None };
@@ -3254,6 +3285,7 @@ fn apply_change_to_db_inner(
     })?;
 
     if spec.object_type == vault::OBJECT_TYPE { return vault_sync::apply(sync_conn, conn, spec, change, &field_values); }
+    if spec.object_type == personal_vault::OBJECT_TYPE { return personal_vault::apply(sync_conn, conn, spec, change, &field_values); }
     if spec.object_type == vault::CONNECTION_TYPE {
         field_values.insert("status".into(), json!(if field_values.get("status").and_then(JsonValue::as_str) == Some("disconnected") { "disconnected" } else { "unchecked" }));
     }
@@ -4035,12 +4067,16 @@ fn apply_delete(
         return Ok(());
     }
     if let Some(local_id) = find_local_id_by_object_id(sync_conn, &change.object_type, &change.object_id)? {
-        let deleted = crate::db::cascade_delete::delete_tracked(conn, spec.table, local_id)
-            .map_err(|e| format!("sync delete {} object={} local_id={local_id}: {e}", change.object_type, change.object_id))?;
-        let tables = specs();
-        for row in deleted {
-            if let Some(child) = tables.iter().find(|candidate| candidate.table == row.table) {
-                clear_missing_row_mapping(sync_conn, child.object_type, row.id)?;
+        // A concurrent remote tombstone must not delete the copy the user kept on this device.
+        let local_only = spec.object_type == personal_vault::OBJECT_TYPE && personal_vault::is_local_only(conn, local_id)?;
+        if !local_only {
+            let deleted = crate::db::cascade_delete::delete_tracked(conn, spec.table, local_id)
+                .map_err(|e| format!("sync delete {} object={} local_id={local_id}: {e}", change.object_type, change.object_id))?;
+            let tables = specs();
+            for row in deleted {
+                if let Some(child) = tables.iter().find(|candidate| candidate.table == row.table) {
+                    clear_missing_row_mapping(sync_conn, child.object_type, row.id)?;
+                }
             }
         }
         // 同步删除 object_map 映射：同 object_id 后续 upsert 时应重新 insert（对象复活），
@@ -4379,6 +4415,11 @@ fn load_pending_outbox(app_handle: &AppHandle, limit: i64) -> Result<Vec<(i64, P
     let conn = open_sync_db(app_handle)?;
     let state = load_secret_state(app_handle)?;
     vault_sync::discard_obsolete_outbox(&conn, state.ready_key())?;
+    if state.ready_key().is_some() {
+        let _lock = vault::LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
+        let db = SystemDatabase::new(app_handle).map_err(|e| e.to_string())?;
+        personal_vault::reconcile_withdrawals(&conn, &db.conn)?;
+    }
     load_outbox_from_db_with_secret_readiness(&conn, limit, false, state.ready_key().is_some())
 }
 
@@ -4408,7 +4449,7 @@ fn load_outbox_from_db_with_secret_readiness(
             &format!("SELECT id, event_id, object_type, object_id, operation, payload_json, base_version, local_version, created_at
              FROM sync_outbox
              WHERE ({filter})
-               AND (?3 OR object_type NOT IN (?4, ?5))
+               AND (?3 OR object_type NOT IN (?4, ?5, ?6))
                AND ({bootstrap_only} OR NOT EXISTS (SELECT 1 FROM sync_outbox earlier
                    WHERE earlier.object_type = sync_outbox.object_type
                      AND earlier.object_id = sync_outbox.object_id
@@ -4420,7 +4461,7 @@ fn load_outbox_from_db_with_secret_readiness(
                         JOIN sync_object_map canonical ON canonical.object_type=alias.object_type AND canonical.local_id=alias.local_id
                         WHERE canonical.sync_id='{quick_model_id}' AND legacy.sent_once=1 AND legacy.outcome_known=0
                         AND legacy.status IN ('pending','pushing','failed')))
-               AND (operation='delete' OR object_type NOT IN ('llm.provider_secret','mcp.vault_secret') OR NOT EXISTS (
+               AND (operation='delete' OR object_type NOT IN ('llm.provider_secret','mcp.vault_secret','vault.entry') OR NOT EXISTS (
                    SELECT 1 FROM sync_outbox key_event WHERE key_event.object_type='system.feature_config'
                    AND json_valid(key_event.payload_json) AND json_extract(key_event.payload_json,'$.fields.feature_code')='data_sync_secret'
                    AND key_event.status IN ('pending','pushing','failed')))
@@ -4436,7 +4477,7 @@ fn load_outbox_from_db_with_secret_readiness(
         )
         .map_err(|e| e.to_string())?;
     let raw_rows = stmt
-        .query_map(params![limit, Utc::now().timestamp(), secrets_ready, secrets::OBJECT_TYPE, vault::OBJECT_TYPE], |row| {
+        .query_map(params![limit, Utc::now().timestamp(), secrets_ready, secrets::OBJECT_TYPE, vault::OBJECT_TYPE, personal_vault::OBJECT_TYPE], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -4497,6 +4538,31 @@ fn load_outbox_from_db_with_secret_readiness(
 fn mark_events_pushing(app_handle: &AppHandle, events: &[(i64, PushEvent)]) -> Result<(), String> {
     let conn = open_sync_db(app_handle)?;
     mark_events_pushing_in_db(&conn, events)
+}
+
+fn prepare_push_batch(app: &AppHandle, events: &[(i64, PushEvent)]) -> Result<Vec<(i64, PushEvent)>, String> {
+    if !events.iter().any(|(_, event)| event.object_type == personal_vault::OBJECT_TYPE) {
+        mark_events_pushing(app, events)?;
+        return Ok(events.to_vec());
+    }
+    // Serialize the last metadata check and dispatch marker with the user's opt-out. Do not hold
+    // this lock over HTTP: an already-dispatched request must be acknowledged, then withdrawn.
+    let _lock = vault::LOCK.lock().map_err(|_| "凭据库锁已损坏")?;
+    let sync = open_sync_db(app)?;
+    let db = SystemDatabase::new(app).map_err(|e| e.to_string())?;
+    prepare_vault_push_batch_in_db(&sync, &db.conn, events)
+}
+
+fn prepare_vault_push_batch_in_db(sync: &Connection, data: &Connection, events: &[(i64, PushEvent)]) -> Result<Vec<(i64, PushEvent)>, String> {
+    personal_vault::reconcile_withdrawals(sync, data)?;
+    let mut prepared = Vec::new();
+    for (id, event) in events {
+        let exists: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE id=?1 AND event_id=?2)",
+            params![id, event.event_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if exists { prepared.push((*id, event.clone())); }
+    }
+    mark_events_pushing_in_db(sync, &prepared)?;
+    Ok(prepared)
 }
 
 fn mark_events_pushing_in_db(conn: &Connection, events: &[(i64, PushEvent)]) -> Result<(), String> {
@@ -4634,6 +4700,14 @@ fn apply_ack_to_shadow(
             params![object_type, object_id, server_version, payload_hash, now, server_seq],
         )
         .map_err(|e| e.to_string())?;
+        // The user may have re-enabled an entry while its withdrawal was in flight. Its queued
+        // restore still uses this identity; dropping the mapping would create a second upload ID.
+        let restoring_vault = object_type == personal_vault::OBJECT_TYPE && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+             AND operation='upsert' AND status IN ('pending','pushing','failed'))",
+            params![object_type, object_id], |r| r.get::<_, bool>(0),
+        ).map_err(|e| e.to_string())?;
+        if restoring_vault { return Ok(()); }
         conn.execute(
             "DELETE FROM sync_object_alias WHERE object_type = ?1 AND local_id IN
              (SELECT local_id FROM sync_object_map WHERE object_type = ?1 AND sync_id = ?2)",
@@ -5731,7 +5805,7 @@ async fn replay_secret_pending(app_handle: &AppHandle) -> Result<usize, String> 
         applied
     };
     if applied > 0 {
-        let types = HashSet::from([secrets::OBJECT_TYPE.to_string(), vault::OBJECT_TYPE.to_string(), vault::CONNECTION_TYPE.to_string()]);
+        let types = HashSet::from([secrets::OBJECT_TYPE.to_string(), vault::OBJECT_TYPE.to_string(), vault::CONNECTION_TYPE.to_string(), personal_vault::OBJECT_TYPE.to_string()]);
         emit_sync_domain_events(app_handle, &types).await?;
     }
     Ok(applied)
@@ -5815,7 +5889,7 @@ pub async fn set_sync_passphrase(
     let server_wins = has_record && !replace_existing;
     let sync = open_sync_db(&app_handle)?;
     if replace_existing {
-        let uncertain: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('llm.provider_secret','mcp.vault_secret') AND sent_once=1 AND outcome_known=0)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        let uncertain: bool = sync.query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type IN ('llm.provider_secret','mcp.vault_secret','vault.entry') AND sent_once=1 AND outcome_known=0)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         if uncertain || secrets::pending_count(&sync) > 0 {
             return Err("仍有结果未确认或无法解密的同步凭据，请先完成同步并解锁旧凭据，再更换口令".into());
         }

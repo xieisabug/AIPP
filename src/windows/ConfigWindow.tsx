@@ -8,9 +8,10 @@ const MCPConfig = React.lazy(() => import("../components/config/ConnectedAppsCon
 const SkillsConfig = React.lazy(() => import("../components/config/SkillsConfig"));
 const PluginCenterConfig = React.lazy(() => import("../components/config/PluginCenterConfig"));
 const MobileTasksConfig = React.lazy(() => import("../components/config/MobileTasksConfig"));
+const VaultConfig = React.lazy(() => import("../components/config/VaultConfig"));
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Bot, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
+import { Bot, KeyRound, Puzzle, ServerCrash, Settings, Sparkles } from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { useIsMobile } from "../hooks/use-mobile";
 import { useIsMobilePlatform, usePlatform } from "../hooks/use-platform";
@@ -41,6 +42,7 @@ const contentMap: Record<string, React.ComponentType<any>> = {
     "skills-config": SkillsConfig,
     "plugins-config": PluginCenterConfig,
     "mobile-tasks": MobileTasksConfig,
+    "vault-config": VaultConfig,
 };
 
 // 设置页动态加载时的占位，保持黑白灰主色调
@@ -77,6 +79,12 @@ function ConfigWindow() {
                 name: "应用与工具",
                 icon: <MCP className="w-full h-full text-muted-foreground" />,
                 iconSelected: <MCP className="w-full h-full text-foreground" />,
+            },
+            {
+                id: "vault-config",
+                name: "凭据保险箱",
+                icon: <KeyRound className="w-full h-full text-muted-foreground" />,
+                iconSelected: <KeyRound className="w-full h-full text-foreground" />,
             },
         ];
         if (isMobilePlatform) items.push({ id: "mobile-tasks", name: "本机任务", icon: <Bot className="h-full w-full text-muted-foreground" />, iconSelected: <Bot className="h-full w-full text-foreground" /> });

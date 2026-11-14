@@ -31,6 +31,9 @@ import { useCopilot, type CopilotTokenScanResult } from "@/hooks/useCopilot";
 import { useAcpEnvironment } from "@/hooks/feature/useAcpEnvironment";
 import CliEnvironmentStatus from "./CliEnvironmentStatus";
 import { getProviderEndpointStatus } from "@/utils/providerEndpoint";
+import { useVaultItems } from "@/hooks/useVaultItems";
+import VaultRefField from "./vault/VaultRefField";
+import { containsVaultRef } from "./vault/vaultRefs";
 import {
     LLMModel,
     ModelForSelection,
@@ -188,6 +191,16 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
     const proxyEnabled = form.watch("proxy_enabled");
     const endpoint = form.watch("endpoint");
     const endpointStatus = useMemo(() => getProviderEndpointStatus(endpoint), [endpoint]);
+    const vault = useVaultItems();
+    const apiKeyIsVaultRef = containsVaultRef(form.watch("api_key"));
+    // 保存配置后被确认的目标：自定义地址的 origin，或该类型的默认地址。
+    const vaultTarget = useMemo(() => {
+        try {
+            return endpoint?.trim() ? new URL(endpoint.trim()).origin : "该 Provider 的默认接口地址";
+        } catch {
+            return null;
+        }
+    }, [endpoint]);
 
     // 监听 ACP CLI 命令变化
     const acpCliCommand = form.watch("acp_cli_command");
@@ -876,17 +889,36 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                             : undefined,
                 },
             }]),
-            {
+            apiType === "magpie" ? {
                 key: "api_key",
                 config: {
                     type: "password" as const,
                     label: "API Key",
-                    hint: apiType === "opencode_go"
-                        ? <a href="https://opencode.ai/auth" target="_blank" rel="noreferrer">从 OpenCode Console 获取订阅 API Key</a>
-                        : apiType === "magpie"
-                            ? <span>留空时使用 magpie-aipp，在 magpie 用量里记为本应用。访问另一台电脑上的网关时，改为那里的网关密钥。</span>
+                    hint: <span>留空时使用 magpie-aipp，在 magpie 用量里记为本应用。访问另一台电脑上的网关时，改为那里的网关密钥。</span>,
+                    value: "",
+                },
+            } : {
+                key: "api_key",
+                config: {
+                    type: "custom" as const,
+                    label: "API Key",
+                    hint: apiKeyIsVaultRef
+                        ? <span>值保存在凭据保险箱中，只会发往已确认的网站{apiType === "anthropic" ? "；Claude Code 助手不能使用保险箱中的 Key" : ""}。</span>
+                        : apiType === "opencode_go"
+                            ? <a href="https://opencode.ai/auth" target="_blank" rel="noreferrer">从 OpenCode Console 获取订阅 API Key</a>
                             : undefined,
                     value: "",
+                    customRender: (field: { value?: string; onChange: (value: string) => void; name?: string }) => (
+                        <VaultRefField
+                            vault={vault}
+                            id={field.name}
+                            ariaLabel="API Key"
+                            value={field.value ?? ""}
+                            onChange={field.onChange}
+                            suggestedName={`${name} · API Key`}
+                            targetHint={vaultTarget}
+                        />
+                    ),
                 },
             },
             {
@@ -909,7 +941,7 @@ const LLMProviderConfigForm: React.FC<LLMProviderConfigFormProps> = ({
                 },
             },
         ];
-    }, [nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus]);
+    }, [nativeAgentFields, apiType, apiTypeLabel, isCopilotProvider, isAcpProvider, isCodexAppServerProvider, isClaudeSdkProvider, acpCliOptions, tagInputRender, renderProxyAdvancedConfig, hasApiKey, copilot.authInfo, copilot.isAuthorizing, copilot.scanConfigAuth, copilot.oauthFlowAuth, copilot.cancelAuthorization, id, tags, onTagsChange, acpCliCommand, claudeAuthMode, acpEnv, codexEnv, claudeEnv, endpointStatus, vault, apiKeyIsVaultRef, vaultTarget, name]);
 
     // 打开改名对话框
     const handleOpenRenameDialog = useCallback(() => {

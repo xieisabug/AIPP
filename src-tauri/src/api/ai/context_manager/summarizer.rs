@@ -1,7 +1,7 @@
 use super::MessageTuple;
 use crate::errors::AppError;
 use genai::chat::{ChatMessage, ChatRequest, StopReason};
-use genai::Client;
+use crate::api::genai_client::Client;
 use std::borrow::Cow;
 use tracing::{debug, info, warn};
 

@@ -7,6 +7,9 @@ pub(crate) mod assistant_access;
 pub mod detection;
 pub mod execution_api;
 pub(crate) mod http_transport;
+mod content_redaction;
+#[cfg(test)]
+mod content_redaction_tests;
 #[cfg(test)]
 mod http_transport_tests;
 #[cfg(test)]
