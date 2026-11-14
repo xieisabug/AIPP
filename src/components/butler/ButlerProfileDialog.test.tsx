@@ -127,6 +127,29 @@ describe("Butler profile editor", () => {
         expect(onClose).not.toHaveBeenCalled();
     });
 
+    it("should offer one body palette and keep decorations when saving the pixel shape", async () => {
+        const onSave = vi.fn().mockResolvedValue(undefined);
+        render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);
+        const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+        click("脸部：腮红");
+        click("头部：小花");
+        click("像素仔");
+        expect(screen.queryByRole("button", { name: /亮色：/ })).toBeNull();
+        expect(screen.getByRole("button", { name: "身体 · 深色：纯黑" })).toHaveAttribute("aria-pressed", "true");
+        click("身体 · 深色：陶橘");
+        for (const [shape, area] of [["圆团", "外圈"], ["AIPP", "右侧"], ["像素仔", "身体"]]) {
+            click(shape);
+            expect(screen.getByRole("button", { name: `${area} · 深色：陶橘` })).toHaveAttribute("aria-pressed", "true");
+        }
+        click("恢复黑色");
+        expect(document.querySelectorAll('[data-aipp-slot="assistant-profile-preview"] path[fill="#FFFFFF"][stroke="#000000"]')).toHaveLength(2);
+        click("保存");
+        await waitFor(() => expect(onSave).toHaveBeenCalledWith("助手", expect.objectContaining({
+            shape: "pixel", colors: { primary: "#FFFFFF", secondary: "#000000" },
+            accessories: { eyes: "blush", head: "flower" },
+        })));
+    });
+
     it("should retain accessories when changing shape and restoring colors", async () => {
         const onSave = vi.fn().mockResolvedValue(undefined);
         render(<ButlerProfileDialog name="助手" onSave={onSave} onClose={vi.fn()} />);

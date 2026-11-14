@@ -1,19 +1,21 @@
 import { avatarRecipes } from "./avatarRecipes";
 export type { AvatarState } from "./avatarRecipes";
 export type AvatarAction = "blink" | "smile" | "glasses" | "hat" | "peer" | "blush" | "jingle" | "butterfly";
-export type AvatarShape = "aipp" | "pebble";
+export type AvatarShape = "aipp" | "pebble" | "pixel";
 export interface AvatarAnchor { x: number; y: number; scale: number; rotation?: number }
 export interface AvatarDefinition {
     id: AvatarShape;
     label: string;
     // All artwork and anchors use the same 510-unit coordinate system.
     parts: { path: string; color: "primary" | "secondary" }[];
+    /** Uniform artwork scale around the avatar center, including equipped accessories. */
+    artworkScale?: number;
     face: AvatarAnchor;
     crown: AvatarAnchor;
     /** 斜戴发卡的位置：头顶偏左一侧。 */
     clip: AvatarAnchor;
     propDock: AvatarAnchor;
-    colorLabels: { primary: string; secondary: string };
+    colorLabels: { primary?: string; secondary: string };
     capabilities: readonly ("eyes" | "headwear")[];
 }
 
@@ -27,6 +29,13 @@ export const avatarDefinitions: Record<AvatarShape, AvatarDefinition> = {
         face: { x: 152, y: 199, scale: 1 }, crown: { x: 242, y: 25, scale: 1 }, clip: { x: 92, y: 30, scale: 1, rotation: -24 },
         propDock: { x: 415, y: 325, scale: 0.8, rotation: -28 },
         colorLabels: { primary: "左侧", secondary: "右侧" }, capabilities: ["eyes", "headwear"],
+    },
+    pixel: {
+        id: "pixel", label: "像素仔", artworkScale: 507 / 456,
+        parts: [{ color: "secondary", path: "M105 91H405Q429 91 429 115V205H465Q483 205 483 223V247Q483 265 465 265H429V379H405V319H375V379H351V319H159V379H135V319H105V379H81V265H45Q27 265 27 247V223Q27 205 45 205H81V115Q81 91 105 91Z" }],
+        face: { x: 255, y: 178, scale: 1.23 }, crown: { x: 255, y: 91, scale: 1.08 },
+        clip: { x: 114, y: 97, scale: 1, rotation: -16 }, propDock: { x: 380, y: 316, scale: 0.7, rotation: -20 },
+        colorLabels: { secondary: "身体" }, capabilities: ["eyes", "headwear"],
     },
     pebble: {
         id: "pebble", label: "圆团",

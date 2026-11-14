@@ -14,7 +14,7 @@ export default function AvatarEye({ side, open, happy, sad, yaw, tilt, blink, fo
 }) {
     const rgb = [1, 3, 5].map(offset => parseInt(color.slice(offset, offset + 2), 16) / 255);
     const brightness = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
-    const ink = brightness < 0.48 ? "#F5F7FF" : "#111A2D";
+    const ink = color === "#000000" ? "#FFFFFF" : brightness < 0.48 ? "#F5F7FF" : "#111A2D";
     const path = useTransform(() => eyeContour(open.get(), forceSmile ? 1 : happy.get(), sad.get()));
     const width = useTransform(() => Math.max(0.35, Math.cos((yaw.get()+side*20)*Math.PI/180)/Math.cos(20*Math.PI/180)));
     const rotation = useTransform(() => side * tilt.get() * -18);
