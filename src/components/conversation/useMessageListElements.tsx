@@ -7,7 +7,7 @@ import MessageItem from "../MessageItem";
 import ButlerProgressRow from "@/components/butler/ButlerProgressRow";
 import ButlerExchangeRow from "../butler/ButlerExchangeRow";
 import VersionPagination from "../VersionPagination";
-import { AgentActivityEvent, Message, StreamEvent } from "../../data/Conversation";
+import { AgentActivityEvent, Message, readScheduledTaskMetadata, StreamEvent } from "../../data/Conversation";
 import { isHiddenAgentActivity } from "./AgentActivityList";
 import type { InlineInteractionItem } from "../ConversationUI";
 import { useDisplayConfig } from "@/hooks/useDisplayConfig";
@@ -664,6 +664,12 @@ export function useMessageListElements({
                 // 自定义行不并入相邻气泡，按边界处理
                 flushGroup({ keepExpanded: false });
                 result.push(custom);
+                continue;
+            }
+            if (message.message_type === "response" && readScheduledTaskMetadata(message.metadata_json)?.role === "result") {
+                flushGroup();
+                currentGroup.push(message);
+                flushGroup({ keepExpanded: message.id === lastMessageId });
                 continue;
             }
             if (message.message_type === "user" || message.message_type === "agent_plan") {

@@ -343,12 +343,13 @@ function ButlerExperimentWindow() {
         const activity = listen<{ kind: string }>("conversation_list_activity", ({ payload }) => {
             if (payload.kind === "stream_complete") schedule();
         });
+        const scheduled = listen("scheduled_task_delivered", schedule);
         const peer = listen("butler_peer_changed", schedule);
         const task = listen("butler_task_updated", schedule);
         return () => {
             disposed = true;
             clearTimeout(timer);
-            for (const listener of [activity, peer, task]) void listener.then(stop => stop()).catch(console.warn);
+            for (const listener of [activity, scheduled, peer, task]) void listener.then(stop => stop()).catch(console.warn);
         };
     }, [loadPreviews]);
     const activePreview = previews.find(row => row.assistantId === contact?.assistantId);

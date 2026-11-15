@@ -1,5 +1,5 @@
 import { parseStreamRetryMeta } from "@/utils/streamRetryAttempts";
-import type { Message } from "@/data/Conversation";
+import { readScheduledTaskMetadata, type Message } from "@/data/Conversation";
 import { quoteExcerpt } from "./ButlerQuote";
 import { findQuotedMessage, splitReplyQuote } from "./butlerReplyQuote";
 import { visibleText } from "@/utils/turnContext";
@@ -33,12 +33,9 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
                 } catch { /* Historical metadata can be absent or invalid. */ }
             }
         }
-        if (message.message_type === "response" && message.metadata_json?.includes("scheduled_task")) {
-            // 定时任务投递的结果是独立的一条消息，不属于之前的内部回合
-            try {
-                if (JSON.parse(message.metadata_json)?.origin === "scheduled_task") internalTurn = false;
-            } catch { /* Historical metadata can be absent or invalid. */ }
-        }
+        const scheduled = message.message_type === "response" ? readScheduledTaskMetadata(message.metadata_json) : null;
+        if (scheduled) internalTurn = false;
+        const scheduledResult = scheduled?.role === "result";
         if (internalTurn || ["system", "reasoning", "tool_result"].includes(message.message_type)) continue;
         // 失败和 ChatUI 一样显示成可展开的一行；之后已有回复的旧错误属于重试过程，简洁聊天不再显示。
         if (message.message_type === "error") {
@@ -50,14 +47,17 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
             continue;
         }
         if (message.content.trim() === BUTLER_SILENT_REPLY) continue;
-        if (unpublished.has(message.id) || message.finish_time === null || parseStreamRetryMeta(message)?.status === "interrupted") continue;
+        if ((!scheduledResult && unpublished.has(message.id)) || message.finish_time === null || parseStreamRetryMeta(message)?.status === "interrupted") continue;
         // preview_message 展示的是另一条回复，本身就是交给用户的结果，不是执行过程：简洁聊天里保留这张卡片。
         const shownPreviews: string[] = [];
         const content = /MCP_TOOL_CALL/i.test(message.content) ? message.content.replace(
             /(`+)[\s\S]*?\1|(~{3,})[\s\S]*?\2|<!--\s*MCP_TOOL_CALL(?:_STREAMING)?\s*:[\s\S]*?(?:-->|$)|<mcp_tool_call(?:\s[^>]*)?>[\s\S]*?(?:<\/mcp_tool_call>|$)/gi,
             (segment, backticks, tildes) => {
                 if (backticks || tildes) return segment;
-                if (isCompletePreviewMessageCall(segment)) shownPreviews.push(segment);
+                if (isCompletePreviewMessageCall(segment)) {
+                    if (scheduledResult) return segment;
+                    shownPreviews.push(segment);
+                }
                 return "";
             },
         ) : message.content;
@@ -65,7 +65,9 @@ export function butlerTranscript(messages: Message[], unpublished = new Set<numb
             || (!!message.tool_calls_json && !["[]", "null"].includes(message.tool_calls_json.trim()))
             || message.large_message_preview?.reason === "mcp_payload";
         if (!content.trim() && !message.attachment_list?.length && !shownPreviews.length) continue;
-        if (hasTool) {
+        if (scheduledResult && hasTool) {
+            result.push(withReplyQuote({ ...message, content: content.trim(), tool_calls_json: null, large_message_preview: null }, result));
+        } else if (hasTool) {
             if (shownPreviews.length) {
                 // 只留引用卡片：同一条里的过程说明与其他工具调用仍不显示。
                 result.push({ ...message, content: shownPreviews.join("\n\n"), large_message_preview: null });

@@ -47,6 +47,23 @@ describe("Butler transcript", () => {
         expect(butlerTranscript([peer, internalAnswer, delivered])).toEqual([delivered]);
     });
 
+    it("should show persisted scheduled result prose around a tool block on delivery and reload", () => {
+        const trigger = message(26312, "user", "[定时任务] 周日提醒", {
+            metadata_json: '{"origin":"scheduled_task","role":"trigger"}',
+        });
+        const answer = "**今天周日休息。**";
+        const tool = "<mcp_tool_call>工具参数</mcp_tool_call>";
+        const delivered = message(26313, "response", answer + tool + "下周继续。", {
+            parent_id: trigger.id, metadata_json: '{"origin":"scheduled_task","role":"result"}',
+        });
+        const rows = [trigger, delivered];
+        for (const shown of [butlerTranscript(rows, new Set([delivered.id])), butlerTranscript(structuredClone(rows))]) {
+            expect(shown.map(row => [row.id, row.content])).toEqual([[delivered.id, answer + "下周继续。"]]);
+        }
+        expect(butlerTranscript([{ ...delivered, metadata_json: null }])).toEqual([]);
+        expect(delivered.content).toContain(tool);
+    });
+
     it("should show the delegate's own answer and question when the work was handed over to it", () => {
         const handed = message(2, "user", "[助手协作请求 · 来自 总管家]", {metadata_json:'{"origin":"butler_peer","leg":"request","audience":"user"}'});
         const answer = message(3, "response", "这是我写好的稿子");

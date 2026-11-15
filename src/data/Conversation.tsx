@@ -53,6 +53,16 @@ export interface Message {
     reply_quote?: MessageReplyQuote;
 }
 
+export function readScheduledTaskMetadata(raw: Message["metadata_json"]): Record<string, unknown> | null {
+    if (!raw?.includes("scheduled_task")) return null;
+    try {
+        const metadata = JSON.parse(raw);
+        return metadata?.origin === "scheduled_task" ? metadata : null;
+    } catch {
+        return null;
+    }
+}
+
 export interface MessageReplyQuote {
     label: string;
     /** Displayed id of the quoted message, used to jump to it. */

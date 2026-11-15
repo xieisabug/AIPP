@@ -1,3 +1,4 @@
+import { butlerTranscript } from "../butler/butlerTranscript";
 import { ButlerResultsOnlyContext } from "../butler/ButlerPresentationContext";
 import { render, renderHook, screen, fireEvent } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -126,6 +127,19 @@ function makeHookProps(
 describe("useMessageListElements merged assistant preview state", () => {
     afterEach(() => {
         vi.clearAllMocks();
+    });
+
+    it("should give each scheduled result its own bubble after Butler hides the triggers", () => {
+        const trigger = { message_type: "user", metadata_json: '{"origin":"scheduled_task","role":"trigger"}' };
+        const delivery = { metadata_json: '{"origin":"scheduled_task","role":"result"}' };
+        const messages = [
+            makeMessage({ id: 1 }), makeMessage({ id: 2 }),
+            makeMessage({ id: 3, ...trigger }), makeMessage({ id: 4, ...delivery }),
+            makeMessage({ id: 5, ...trigger }), makeMessage({ id: 6, ...delivery }),
+            makeMessage({ id: 7 }), makeMessage({ id: 8 }),
+        ];
+        const { result } = renderHook(() => useMessageListElements(makeHookProps(butlerTranscript(messages))));
+        expect(result.current.messageElements.map(group => group.messageIds)).toEqual([[1, 2], [4], [6], [7, 8]]);
     });
 
     it("treats every message in the trailing merged assistant group as the last message", () => {

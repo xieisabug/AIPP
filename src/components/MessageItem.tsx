@@ -9,7 +9,7 @@ import ImageAttachments from "./message-item/ImageAttachments";
 import RawTextRenderer from "./RawTextRenderer";
 import { ShineBorder } from "./magicui/shine-border";
 import { DEFAULT_SHINE_BORDER_CONFIG } from "@/utils/shineConfig";
-import { Message, StreamEvent, MCPToolCallUpdateEvent, AgentActivityEvent } from "../data/Conversation";
+import { Message, StreamEvent, MCPToolCallUpdateEvent, AgentActivityEvent, readScheduledTaskMetadata } from "../data/Conversation";
 import { AgentActivityTranscript } from "./conversation/AgentActivityTranscript";
 import { AgentPlanCard } from "./conversation/AgentPlanCard";
 import { buildActivitySegments } from "./conversation/agent-activity/activitySegments";
@@ -380,16 +380,11 @@ const MessageItem = React.memo<MessageItemProps>(
 
         // 定时任务投递的结果：标出来源，点击可打开该任务
         const scheduledTaskOrigin = useMemo(() => {
-            if (!message.metadata_json) return null;
-            try {
-                const parsed = JSON.parse(message.metadata_json) as Record<string, unknown>;
-                if (parsed.origin !== "scheduled_task") return null;
-                const taskId = Number(parsed.scheduled_task_id);
-                const taskName = typeof parsed.scheduled_task_name === "string" ? parsed.scheduled_task_name : "";
-                return Number.isInteger(taskId) && taskId > 0 ? { taskId, taskName } : null;
-            } catch {
-                return null;
-            }
+            const metadata = readScheduledTaskMetadata(message.metadata_json);
+            if (!metadata) return null;
+            const taskId = Number(metadata.scheduled_task_id);
+            const taskName = typeof metadata.scheduled_task_name === "string" ? metadata.scheduled_task_name : "";
+            return Number.isInteger(taskId) && taskId > 0 ? { taskId, taskName } : null;
         }, [message.metadata_json]);
 
         const obsoleteGoal = useMemo(() => {
