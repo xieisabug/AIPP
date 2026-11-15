@@ -44,7 +44,7 @@ pub struct NewToolReviewLog {
     pub error_detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MCPServer {
     pub id: i64,
     pub name: String,

@@ -389,24 +389,7 @@ pub async fn test_mcp_connection(
     let db = open_db(&app_handle)?;
     let server = db.get_mcp_server(server_id).map_err(|e| e.to_string())?;
 
-    // 测试实际的MCP连接
-    let test_result = match server.transport_type.as_str() {
-        "stdio" => {
-            if let Some(cmd) = &server.command {
-                if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
-                    // 内置 aipp:* 不需要实际连接
-                    Ok(())
-                } else {
-                    test_stdio_connection(&app_handle, &server).await
-                }
-            } else {
-                test_stdio_connection(&app_handle, &server).await
-            }
-        }
-        "sse" => test_sse_connection(&server).await,
-        "http" => test_http_connection(&app_handle, &server).await,
-        _ => Err(format!("Unsupported transport type: {}", server.transport_type)),
-    };
+    let test_result = probe_connection(&app_handle, &server).await;
 
     match test_result {
         Ok(_) => Ok(true),
@@ -414,6 +397,27 @@ pub async fn test_mcp_connection(
             warn!(error = %e, "MCP connection test failed");
             Ok(false)
         }
+    }
+}
+
+/// Initialize and close the transport without refreshing the tool catalog.
+pub(super) async fn probe_connection(app_handle: &tauri::AppHandle, server: &MCPServer) -> Result<(), String> {
+    match server.transport_type.as_str() {
+        "stdio" => {
+            if let Some(cmd) = &server.command {
+                if crate::mcp::builtin_mcp::is_builtin_mcp_call(cmd) {
+                    // 内置 aipp:* 不需要实际连接
+                    Ok(())
+                } else {
+                    test_stdio_connection(app_handle, server).await
+                }
+            } else {
+                test_stdio_connection(app_handle, server).await
+            }
+        }
+        "sse" => test_sse_connection(server).await,
+        "http" => test_http_connection(app_handle, server).await,
+        _ => Err(format!("Unsupported transport type: {}", server.transport_type)),
     }
 }
 

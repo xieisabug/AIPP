@@ -898,6 +898,7 @@ pub fn run() {
 
             app.manage(initialize_state(&app_handle));
             app.manage(initialize_name_cache_state(&app_handle));
+            crate::mcp::apps::recheck_available_connections(app_handle.clone());
             crate::api::butler_api::spawn_butler_task_reconciler(app_handle.clone());
             #[cfg(desktop)]
             crate::api::butler_peer::start(app_handle.clone());

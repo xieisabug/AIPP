@@ -1,4 +1,6 @@
 pub mod catalog;
+mod startup;
+pub use startup::recheck_available_connections;
 pub mod credentials;
 pub mod oauth;
 pub mod access;
@@ -132,9 +134,9 @@ pub async fn list_app_connections(app_handle: tauri::AppHandle) -> Result<Vec<Ap
     let mut result = Vec::new();
     for row in rows {
         let (server_id, app_id, raw, label, config, mut status, mut error, session, reference) = row.map_err(|e| e.to_string())?;
-        if session.as_deref() != Some(SESSION.as_str()) {
-            if status == "available" { status = "unchecked".into(); }
-            else if status == "connecting" { status = "auth_required".into(); error = Some("上次连接未完成，请重新连接".into()); }
+        if status == "connecting" && session.as_deref() != Some(SESSION.as_str()) {
+            status = "auth_required".into();
+            error = Some("上次连接未完成，请重新连接".into());
         }
         result.push(AppConnection { server_id, app_id, definition: serde_json::from_str(&raw).map_err(|e| format!("连接 {server_id} 的应用描述损坏：{e}"))?, label,
             config: serde_json::from_str(&config).map_err(|e| format!("连接 {server_id} 的配置损坏：{e}"))?, status, error, credential_status: Some(credential_status.clone()),
