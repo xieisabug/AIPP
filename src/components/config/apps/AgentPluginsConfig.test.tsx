@@ -21,6 +21,27 @@ describe('AgentPluginsConfig', () => {
             throw new Error(`Unexpected ${command}`);
         });
     });
+    it('should hide empty skill sections and installation when a catalog application has no skills', async () => {
+        vi.mocked(invoke).mockImplementation(async command => command === 'inspect_agent_plugin'
+            ? { ...preview, skills: [], notices: ['连接需授权'] } : []);
+        render(<AgentPluginsConfig embedded app={{ id: 'github', name: 'GitHub', version: '1', publisher: 'GitHub', category: '开发工具',
+            description: '', notice: '', platforms: ['windows'], fields: [], connection: { transport: 'http', url: 'https://example.com/mcp', auth: 'oauth' } }}
+            initialSource={source} onChanged={vi.fn()} />);
+        await screen.findByText('连接需授权');
+        expect(screen.queryByRole('heading', { name: /技能/ })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /安装/ })).not.toBeInTheDocument();
+    });
+
+    it('should group commands under skills and show applications separately in a plugin overview', async () => {
+        vi.mocked(invoke).mockImplementation(async command => command === 'inspect_agent_plugin'
+            ? { ...preview, skills: [...preview.skills, { ...preview.skills[0], id: 'cmd', name: 'save', kind: 'command' }] } : []);
+        render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()} />);
+        expect(await screen.findByRole('heading', { name: '应用 1' })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: '技能 2' })).toBeInTheDocument();
+        expect(screen.getByText('/save')).toBeInTheDocument();
+        expect(screen.getByText('连接后检测实际可用工具')).toBeInTheDocument();
+    });
+
     it('should preview skills without connecting when a GitHub package is selected', async () => {
         render(<AgentPluginsConfig initialSource={source} onChanged={vi.fn()} />);
         expect(await screen.findByText('保存笔记')).toBeInTheDocument();

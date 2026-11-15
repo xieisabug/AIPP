@@ -197,7 +197,9 @@ describe('ConnectedAppsConfig', () => {
         const user = userEvent.setup();render(<ConnectedAppsConfig />);
         await user.click(await screen.findByRole('button',{name:/Notion/}));
         expect(await screen.findByText('Knowledge capture')).toBeInTheDocument();
-        expect(screen.getByRole('button',{name:'安装配套技能'})).toBeInTheDocument();
+        expect(screen.getByRole('heading',{name:'应用 1'})).toBeInTheDocument();
+        expect(screen.getByRole('heading',{name:'技能 1'})).toBeInTheDocument();
+        expect(screen.getByRole('button',{name:'安装插件'})).toBeInTheDocument();
         expect(screen.getByRole('button',{name:'连接'})).toBeInTheDocument();
         expect(screen.queryByText('此应用未声明配套技能。')).not.toBeInTheDocument();
         expect(screen.queryByRole('textbox',{name:'GitHub 仓库'})).not.toBeInTheDocument();

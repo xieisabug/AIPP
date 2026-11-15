@@ -23,7 +23,7 @@ export default function AppRelatedSkills({ ids }: { ids: string[] }) {
         return () => { alive = false; };
     }, [identity]);
     return <section className="space-y-3">
-        <h4 className="text-sm font-medium">配套技能 {ids.length > 0 && <span className="font-normal text-muted-foreground">{ids.length}</span>}</h4>
+        <h4 className="text-sm font-medium">技能 {ids.length > 0 && <span className="font-normal text-muted-foreground">{ids.length}</span>}</h4>
         {!ids.length && <p className="text-sm text-muted-foreground">此应用未声明配套技能。</p>}
         {loading && <div className="h-14 animate-pulse rounded-lg bg-muted" aria-label="正在查询技能目录" />}
         {error && <p role="alert" className="rounded-lg border border-destructive/30 px-3 py-2 text-sm text-destructive">技能目录读取失败：{error}</p>}

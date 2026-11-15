@@ -1,3 +1,4 @@
+import { CatalogEndpoints } from './CatalogCapabilities';
 import { ReactNode, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -231,7 +232,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
         ['版本', definition.version || '—'],
         ['登录方式', authLabel(definition.connection.auth)],
         ...(definition.connection.auth === 'oauth' ? [['授权范围', definition.connection.scopes?.length ? definition.connection.scopes.join('、') : '由服务商决定，以授权页面为准'] as [string, ReactNode]] : []),
-        ...(definition.connection.transport === 'http' ? [['服务地址', <span className="font-mono text-xs">{definition.connection.url}</span>] as [string, ReactNode]] : []),
+        ['工具', summary?.label ?? '连接后检测实际可用工具'],
         ['支持平台', definition.platforms.map(p => ({ windows: 'Windows', macos: 'macOS', linux: 'Linux', android: 'Android' } as Record<string, string>)[p] ?? p).join('、') || '—'],
         ...(definition.homepage?.startsWith('https://') ? [['服务说明', <button type="button" className="inline-flex items-center gap-1 underline-offset-4 hover:underline" onClick={() => void openUrl(definition.homepage!).catch(e => toast.error(String(e)))}>打开文档<ArrowUpRight className="h-3.5 w-3.5" /></button>] as [string, ReactNode]] : []),
     ];
@@ -258,6 +259,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
                 </button>;
             })}</div>
         </section>}
+        {app && <CatalogEndpoints entries={[{ name: app.name, description: app.connection.transport === 'http' ? app.connection.url : '本地程序' }]} />}
         {pluginOverview && <AgentPluginsConfig key={JSON.stringify(pluginSource)} embedded hasConnection={!!connection || matching.length > 0} initialSource={pluginSource!} app={app}
             onChanged={() => void refresh().catch(() => {})} />}
         {!pluginOverview && app?.skill_ids && app.skill_ids.length > 0 && <AppRelatedSkills key={app.id} ids={app.skill_ids} />}
@@ -281,7 +283,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
             <SheetContent className="w-full gap-0 overflow-y-auto p-0 sm:max-w-2xl">
                 <SheetHeader className="space-y-4 border-b px-6 pb-0 pt-6">
                     <div className="flex items-start gap-4 pr-6">
-                        <AppIcon size="lg" builtin={server?.is_builtin} icon={app?.icon} official={official} />
+                        <AppIcon size="lg" builtin={server?.is_builtin} icon={apps.find(entry => entry.id === app?.id)?.icon ?? app?.icon} official={official} />
                         <div className="min-w-0 flex-1 space-y-1">
                             <SheetTitle className="truncate text-lg">{title}</SheetTitle>
                             <SheetDescription className="truncate">{subtitle}</SheetDescription>

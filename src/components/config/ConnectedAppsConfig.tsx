@@ -203,7 +203,7 @@ export default function ConnectedAppsConfig() {
                     onClick={() => server ? setSelection({ kind: 'server', serverId: server.id }) : setBuiltinId(builtin.id)} />;
             })}</div>
         </Section>}
-        {(filteredApps.length > 0 || filteredPlugins.length > 0) && <Section title="应用与配套技能" count={filteredApps.length + filteredPlugins.length}>
+        {(filteredApps.length > 0 || filteredPlugins.length > 0) && <Section title="应用与技能" count={filteredApps.length + filteredPlugins.length}>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {filteredApps.map(app => {
                     const status = appStatus(app);
@@ -236,7 +236,7 @@ export default function ConnectedAppsConfig() {
                         const connection = connectionOf.get(server.id);
                         const summary = toolSummary(tools.get(server.id), server, connection);
                         return <button key={server.id} type="button" className="flex w-full items-center gap-4 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none" onClick={() => setSelection({ kind: 'server', serverId: server.id })}>
-                            <AppIcon size="sm" builtin={server.is_builtin} icon={connection?.definition.icon} official={official(connection?.definition.plugin_source)} />
+                            <AppIcon size="sm" builtin={server.is_builtin} icon={apps.find(app => app.id === connection?.app_id)?.icon ?? connection?.definition.icon} official={official(connection?.definition.plugin_source)} />
                             <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-medium">{connection?.label ?? server.name}</p>
                                 <p className="truncate text-xs text-muted-foreground">{server.is_builtin ? '内置工具' : connection ? connection.definition.name : `自定义 MCP · ${server.transport_type}`}</p>
