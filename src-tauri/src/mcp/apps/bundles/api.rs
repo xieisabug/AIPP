@@ -82,13 +82,35 @@ pub struct CatalogEntry {
 #[derive(Serialize, serde::Deserialize)]
 pub struct PluginCatalog { pub revision: String, pub entries: Vec<CatalogEntry> }
 
+#[derive(Serialize)]
+pub struct CachedPluginCatalog { catalog: PluginCatalog, fetched_at: String }
+
+#[tauri::command]
+pub async fn get_cached_agent_plugin_catalog(app_handle: tauri::AppHandle, repo: String, git_ref: String) -> Result<Option<CachedPluginCatalog>, String> {
+    use crate::db::connection::OptionalExtension;
+    let database = super::super::db(&app_handle)?;
+    let row: Option<(String, String)> = database.conn.query_row(
+        "SELECT payload,fetched_at FROM agent_plugin_catalog_cache WHERE repo=?1 AND git_ref=?2",
+        [repo, git_ref], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    row.map(|(raw, fetched_at)| {
+        let catalog = serde_json::from_str(&raw).map_err(|e| format!("插件目录缓存无效：{e}"))?;
+        Ok(CachedPluginCatalog { catalog, fetched_at })
+    }).transpose()
+}
+
 #[tauri::command]
 pub async fn fetch_agent_plugin_catalog(app_handle: tauri::AppHandle, repo: String, git_ref: String) -> Result<PluginCatalog, String> {
     let _ = data(&app_handle)?;
     let source = Source { repo, git_ref, path: "plugins".into() };
     let url = helper_url("catalog", &source)?;
     let response = bytes(&client(&app_handle).await?, url.as_str(), 4 * 1024 * 1024, None).await?;
-    serde_json::from_slice(&response).map_err(|e| format!("helper 插件目录无效：{e}"))
+    let catalog: PluginCatalog = serde_json::from_slice(&response).map_err(|e| format!("helper 插件目录无效：{e}"))?;
+    super::super::db(&app_handle)?.conn.execute(
+        "INSERT OR REPLACE INTO agent_plugin_catalog_cache(repo,git_ref,payload,fetched_at) VALUES(?1,?2,?3,?4)",
+        crate::db::connection::params![source.repo, source.git_ref, serde_json::to_string(&catalog).map_err(|e| e.to_string())?, chrono::Utc::now().to_rfc3339()],
+    ).map_err(|e| format!("保存插件目录缓存失败：{e}"))?;
+    Ok(catalog)
 }
 
 #[tauri::command]

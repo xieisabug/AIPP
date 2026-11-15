@@ -165,3 +165,24 @@ fn test_apps_credential_stage_classification_matches_aipp_generated_errors() {
         assert!(!is_credential_auth_failure(error), "{error}");
     }
 }
+
+#[test]
+fn test_catalog_cache_reads_existing_rows_and_retains_skipped_entries() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE app_catalog_cache(id INTEGER PRIMARY KEY,payload TEXT,fetched_at TEXT)").unwrap();
+    assert!(read_catalog_cache(&conn).unwrap().is_none());
+    let legacy = serde_json::to_string(&catalog()).unwrap();
+    conn.execute("INSERT INTO app_catalog_cache VALUES(1,?1,'2026-11-15T00:00:00Z')", [legacy]).unwrap();
+    let old = read_catalog_cache(&conn).unwrap().unwrap();
+    assert_eq!(old.catalog.unwrap().version, catalog().version);
+    assert!(old.skipped.is_empty());
+
+    let saved = CachedCatalogPayload { catalog: catalog(), skipped: vec!["unsupported".into()] };
+    let payload = serde_json::to_string(&saved).unwrap();
+    // The connection path also reads this column directly as AppCatalog.
+    serde_json::from_str::<AppCatalog>(&payload).unwrap().validate().unwrap();
+    conn.execute("UPDATE app_catalog_cache SET payload=?1", [payload]).unwrap();
+    assert_eq!(read_catalog_cache(&conn).unwrap().unwrap().skipped, saved.skipped);
+    conn.execute("UPDATE app_catalog_cache SET payload='{}'", []).unwrap();
+    assert!(read_catalog_cache(&conn).is_err());
+}

@@ -21,6 +21,8 @@ static SESSION: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_stri
 pub fn init(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS app_catalog_cache (
         id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, fetched_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS agent_plugin_catalog_cache (
+        repo TEXT NOT NULL, git_ref TEXT NOT NULL, payload TEXT NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY(repo,git_ref));
         CREATE TABLE IF NOT EXISTS app_connection (
         server_id INTEGER PRIMARY KEY REFERENCES mcp_server(id) ON DELETE CASCADE,
         request_id TEXT NOT NULL UNIQUE, app_id TEXT NOT NULL, definition TEXT NOT NULL,
@@ -51,6 +53,30 @@ fn db(app: &tauri::AppHandle) -> Result<MCPDatabase, String> {
 #[derive(Serialize)]
 pub struct CatalogResponse { pub catalog: Option<AppCatalog>, pub fetched_at: Option<String>, pub warning: Option<String>, pub skipped: Vec<String> }
 
+#[derive(Serialize, Deserialize)]
+struct CachedCatalogPayload {
+    #[serde(flatten)]
+    catalog: AppCatalog,
+    #[serde(default)]
+    skipped: Vec<String>,
+}
+
+fn read_catalog_cache(conn: &Connection) -> Result<Option<CatalogResponse>, String> {
+    let row: Option<(String, String)> = conn.query_row(
+        "SELECT payload,fetched_at FROM app_catalog_cache WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    row.map(|(raw, time)| {
+        let saved: CachedCatalogPayload = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        saved.catalog.validate()?;
+        Ok(CatalogResponse { catalog: Some(saved.catalog), fetched_at: Some(time), warning: None, skipped: saved.skipped })
+    }).transpose()
+}
+
+#[tauri::command]
+pub async fn get_cached_app_catalog(app_handle: tauri::AppHandle) -> Result<Option<CatalogResponse>, String> {
+    read_catalog_cache(&db(&app_handle)?.conn)
+}
+
 #[tauri::command]
 pub async fn fetch_app_catalog(app_handle: tauri::AppHandle) -> Result<CatalogResponse, String> {
     let result = async {
@@ -62,20 +88,18 @@ pub async fn fetch_app_catalog(app_handle: tauri::AppHandle) -> Result<CatalogRe
     match result {
         Ok((catalog, skipped)) => {
             let fetched_at = chrono::Utc::now().to_rfc3339();
+            let saved = CachedCatalogPayload { catalog, skipped };
             db.conn.execute("INSERT INTO app_catalog_cache VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at",
-                params![serde_json::to_string(&catalog).map_err(|e| e.to_string())?, fetched_at]).map_err(|e| e.to_string())?;
-            Ok(CatalogResponse { catalog: Some(catalog), fetched_at: Some(fetched_at), warning: None, skipped })
+                params![serde_json::to_string(&saved).map_err(|e| e.to_string())?, fetched_at]).map_err(|e| e.to_string())?;
+            Ok(CatalogResponse { catalog: Some(saved.catalog), fetched_at: Some(fetched_at), warning: None, skipped: saved.skipped })
         }
         Err(error) => {
-            let cached: Option<(String, String)> = db.conn.query_row("SELECT payload,fetched_at FROM app_catalog_cache WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
-            // A broken cache must not hide why the fetch failed: report both.
-            let cached = cached.map(|(raw, time)| serde_json::from_str::<AppCatalog>(&raw).map_err(|e| e.to_string())
-                .and_then(|value| value.validate().map(|_| (value, time))));
-            match cached {
-                Some(Ok((value, time))) => Ok(CatalogResponse { catalog: Some(value), fetched_at: Some(time), warning: Some(error), skipped: vec![] }),
-                Some(Err(cache)) => Ok(CatalogResponse { catalog: None, fetched_at: None, warning: Some(format!("{error}；本地目录缓存也无法使用：{cache}")), skipped: vec![] }),
-                None => Ok(CatalogResponse { catalog: None, fetched_at: None, warning: Some(error), skipped: vec![] }),
-            }
+            let warning = match read_catalog_cache(&db.conn) {
+                Ok(Some(cached)) => return Ok(CatalogResponse { warning: Some(error), ..cached }),
+                Ok(None) => error,
+                Err(cache) => format!("{error}；本地目录缓存也无法使用：{cache}"),
+            };
+            Ok(CatalogResponse { catalog: None, fetched_at: None, warning: Some(warning), skipped: vec![] })
         }
     }
 }

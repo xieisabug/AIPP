@@ -31,6 +31,50 @@ describe('ConnectedAppsConfig', () => {
             throw new Error(`Unexpected command: ${command}`);
         });
     });
+    it('should show fresh local catalogs without network requests until manually refreshed', async () => {
+        const defaults = vi.mocked(invoke).getMockImplementation()!;
+        const fetched_at = new Date().toISOString();
+        vi.mocked(invoke).mockImplementation(async (command, args) => {
+            if (command === 'get_cached_app_catalog') return { catalog: { apps: [definition] }, fetched_at };
+            if (command === 'get_cached_agent_plugin_catalog') return { catalog: { revision: 'cached', entries: [
+                { name: '缓存插件', category: '开发', description: '', source: { repo: 'openai/plugins', git_ref: 'main', path: 'plugins/example' } },
+            ] }, fetched_at };
+            return defaults(command, args);
+        });
+        const user = userEvent.setup();
+        render(<ConnectedAppsConfig />);
+        expect(await screen.findByText('笔记服务')).toBeInTheDocument();
+        expect(await screen.findByText('缓存插件')).toBeInTheDocument();
+        const commands = () => vi.mocked(invoke).mock.calls.map(([command]) => command);
+        expect(commands()).not.toContain('fetch_app_catalog');
+        expect(commands()).not.toContain('fetch_agent_plugin_catalog');
+        await user.click(screen.getByRole('button', { name: '刷新应用目录和连接' }));
+        await waitFor(() => expect(commands()).toContain('fetch_agent_plugin_catalog'));
+        expect(commands()).toContain('fetch_app_catalog');
+    });
+
+    it('should render stale catalogs while refreshing and retain plugin entries on failure', async () => {
+        const defaults = vi.mocked(invoke).getMockImplementation()!;
+        let finish!: (value: unknown) => void;
+        const remote = new Promise(resolve => { finish = resolve; });
+        vi.mocked(invoke).mockImplementation(async (command, args) => {
+            if (command === 'get_cached_app_catalog') return { catalog: { apps: [definition] }, fetched_at: '2020-01-01' };
+            if (command === 'fetch_app_catalog') return remote;
+            if (command === 'get_cached_agent_plugin_catalog') return { catalog: { revision: 'cached', entries: [
+                { name: '离线插件', category: '开发', description: '', source: { repo: 'openai/plugins', git_ref: 'main', path: 'plugins/example' } },
+            ] }, fetched_at: '2020-01-01' };
+            if (command === 'fetch_agent_plugin_catalog') throw new Error('网络不可用');
+            return defaults(command, args);
+        });
+        render(<ConnectedAppsConfig />);
+        expect(await screen.findByText('笔记服务')).toBeInTheDocument();
+        expect(await screen.findByText(/插件目录刷新失败.*网络不可用/)).toBeInTheDocument();
+        finish({ catalog: { apps: [{ ...definition, name: '新版笔记' }] }, warning: null });
+        expect(await screen.findByText('新版笔记')).toBeInTheDocument();
+        expect(screen.queryByText('笔记服务')).not.toBeInTheDocument();
+        expect(screen.getByText('离线插件')).toBeInTheDocument();
+    });
+
     it('should retain builtins and existing MCP connections when the remote catalog is unavailable', async () => {
         const user = userEvent.setup();
         render(<ConnectedAppsConfig />);

@@ -27,6 +27,21 @@ interface Builtin { id: string; name: string; description: string; command: stri
 
 const ALL = '全部';
 const BUILTIN = '内置工具';
+const CATALOG_FRESH_MS = 5 * 60_000;
+
+function fresh(fetchedAt?: string | null) {
+    const age = Date.now() - Date.parse(fetchedAt ?? '');
+    return age >= 0 && age < CATALOG_FRESH_MS;
+}
+
+// Remounting the settings page can attach to a refresh already updating its disk cache.
+function shareRefresh<T>(fetch: () => Promise<T>) {
+    let pending: Promise<T> | undefined;
+    return () => pending ??= fetch().finally(() => { pending = undefined; });
+}
+const fetchApps = shareRefresh(() => invoke<CatalogResponse>('fetch_app_catalog'));
+const pluginSourceArgs = { repo: 'openai/plugins', gitRef: 'main' };
+const fetchPlugins = shareRefresh(() => invoke<PluginCatalog>('fetch_agent_plugin_catalog', pluginSourceArgs));
 
 function AppCard({ name, meta, description, badge, status, idle, action, icon, onClick }: {
     name: string; meta?: string; description: string; badge?: string; status?: DisplayStatus; idle?: string; action: string; icon: ReactNode; onClick: () => void;
@@ -64,7 +79,8 @@ export default function ConnectedAppsConfig() {
     const [query, setQuery] = useState('');
     const [category, setCategory] = useState(ALL);
     const [catalog, setCatalog] = useState<CatalogResponse>();
-    const [catalogBusy, setCatalogBusy] = useState(false);
+    const [catalogBusy, setCatalogBusy] = useState(true);
+    const [refreshCount, setRefreshCount] = useState(0);
     const [servers, setServers] = useState<MCPServer[]>([]);
     const [connections, setConnections] = useState<AppConnection[]>([]);
     const [builtins, setBuiltins] = useState<Builtin[]>([]);
@@ -95,21 +111,46 @@ export default function ConnectedAppsConfig() {
         onError: e => { setLoading(false); setError(String(e)); } });
     const reload = useCallback(() => refresh().catch(e => setError(String(e))), [refresh]);
 
-    const loadCatalog = useCallback(async () => {
-        setCatalogBusy(true);
-        try { setCatalog(await invoke<CatalogResponse>('fetch_app_catalog')); }
-        catch (e) { setCatalog(old => ({ catalog: old?.catalog ?? null, fetched_at: old?.fetched_at ?? null, warning: String(e) })); }
-        finally { setCatalogBusy(false); }
-    }, []);
-    useEffect(() => { void loadCatalog(); }, [loadCatalog]);
     useEffect(() => {
-        let alive = true;
-        if (!mobile) void invoke<PluginCatalog>('fetch_agent_plugin_catalog', { repo: 'openai/plugins', gitRef: 'main' }).then(value => {
-            if (!Array.isArray(value?.entries)) throw new Error('应用详情目录格式无效');
-            if (alive) { setPluginCatalog(value); setPluginCatalogError(''); }
-        }).catch(e => { if (alive) setPluginCatalogError(String(e)); });
-        return () => { alive = false; };
-    }, [mobile]);
+        let active = true;
+        const force = refreshCount > 0;
+        async function loadApps() {
+            const cached = await invoke<CatalogResponse | null>('get_cached_app_catalog').catch(() => null);
+            if (!active) return;
+            if (cached?.catalog) {
+                setCatalog(cached);
+                if (!force && fresh(cached.fetched_at)) return;
+            }
+            try {
+                const result = await fetchApps();
+                if (active) setCatalog(result);
+            } catch (e) {
+                if (active) setCatalog(old => ({ ...old, catalog: old?.catalog ?? null, fetched_at: old?.fetched_at ?? null, warning: String(e) }));
+            }
+        }
+        async function loadPlugins() {
+            if (mobile) return;
+            let cacheError = '';
+            const cached = await invoke<{ catalog: PluginCatalog; fetched_at: string } | null>('get_cached_agent_plugin_catalog', pluginSourceArgs)
+                .catch(e => { cacheError = String(e); return null; });
+            if (!active) return;
+            if (Array.isArray(cached?.catalog?.entries)) {
+                setPluginCatalog(cached.catalog);
+                setPluginCatalogError('');
+                if (!force && fresh(cached.fetched_at)) return;
+            }
+            try {
+                const next = await fetchPlugins();
+                if (!Array.isArray(next?.entries)) throw new Error('应用详情目录格式无效');
+                if (active) { setPluginCatalog(next); setPluginCatalogError(''); }
+            } catch (e) {
+                if (active) setPluginCatalogError(cacheError ? `${e}；读取本地缓存失败：${cacheError}` : String(e));
+            }
+        }
+        setCatalogBusy(true);
+        void Promise.all([loadApps(), loadPlugins()]).finally(() => { if (active) setCatalogBusy(false); });
+        return () => { active = false; };
+    }, [mobile, refreshCount]);
 
     const apps = useMemo(() => catalog?.catalog?.apps ?? [], [catalog]);
     const connectionOf = useMemo(() => new Map(connections.map(c => [c.server_id, c])), [connections]);
@@ -173,12 +214,12 @@ export default function ConnectedAppsConfig() {
                 {filteredPlugins.map(entry => <AppCard key={`${entry.source.repo}/${entry.source.path}`} name={entry.name} meta={entry.category} description={entry.description}
                     icon={<AppIcon official={entry} />} idle="GitHub 插件" action="查看" onClick={() => setSelection({ kind: 'plugin', source: entry.source, name: entry.name })} />)}
             </div>
-            {pluginCatalogError && <p className="text-xs text-muted-foreground">插件目录暂不可用：{pluginCatalogError}</p>}
-            {!!catalog?.skipped?.length && <details className="text-xs text-muted-foreground">
-                <summary className="cursor-pointer">{catalog.skipped.length} 个应用需要更新 AIPP 后才能使用</summary>
-                <ul className="mt-2 space-y-1 pl-4">{catalog.skipped.map(item => <li key={item} className="list-disc break-words">{item}</li>)}</ul>
-            </details>}
         </Section>}
+        {pluginCatalogError && <p className="text-xs text-muted-foreground">{pluginCatalog ? '插件目录刷新失败，正在显示缓存' : '插件目录暂不可用'}：{pluginCatalogError}</p>}
+        {!!catalog?.skipped?.length && <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer">{catalog.skipped.length} 个应用需要更新 AIPP 后才能使用</summary>
+            <ul className="mt-2 space-y-1 pl-4">{catalog.skipped.map(item => <li key={item} className="list-disc break-words">{item}</li>)}</ul>
+        </details>}
         {(loading || catalogBusy) && catalogEmpty && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{[0, 1, 2, 3].map(i => <div key={i} className="h-40 animate-pulse rounded-xl bg-muted" />)}</div>}
         {!loading && !catalogBusy && catalogEmpty && <p className="py-12 text-center text-sm text-muted-foreground">没有匹配的应用。</p>}
     </div>;
@@ -216,7 +257,7 @@ export default function ConnectedAppsConfig() {
                     <p className="mt-1 text-sm text-muted-foreground">连接外部服务，并决定哪些助手可以使用它们的工具。</p>
                 </div>
                 <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="icon" aria-label="刷新应用目录和连接" disabled={catalogBusy} onClick={() => { void loadCatalog(); void reload(); }}>
+                    <Button variant="ghost" size="icon" aria-label="刷新应用目录和连接" disabled={catalogBusy} onClick={() => { setRefreshCount(count => count + 1); void reload(); }}>
                         <RefreshCw className={cn('h-4 w-4', catalogBusy && 'animate-spin')} />
                     </Button>
                     <DropdownMenu>

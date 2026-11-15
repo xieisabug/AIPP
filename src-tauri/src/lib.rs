@@ -1333,6 +1333,8 @@ pub fn run() {
             open_skill_parent_folder,
             get_skills_directory,
             fetch_official_skills,
+            crate::mcp::apps::get_cached_app_catalog,
+            crate::mcp::apps::bundles::get_cached_agent_plugin_catalog,
             crate::mcp::apps::fetch_app_catalog,
             crate::mcp::apps::bundles::fetch_agent_plugin_catalog,
             crate::mcp::apps::bundles::inspect_agent_plugin,
