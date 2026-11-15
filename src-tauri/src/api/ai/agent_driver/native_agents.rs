@@ -624,11 +624,11 @@ pub(crate) fn review_outcome(options: &[crate::api::ai::acp::AcpPermissionOption
 
 /// Review first; the card (and its notification) only appears when the review does not clear the request.
 async fn review_permission(app: tauri::AppHandle, event: crate::api::ai::acp::AcpPermissionRequestEvent,
-    scope: super::approval::AgentRequestScope, agent: &'static str, working_directory: String) {
+    scope: super::approval::AgentRequestScope, turn: i64, agent: &'static str, working_directory: String) {
     use crate::api::ai::acp::AcpPermissionState;
     use super::approval::{AgentInteractionReply, AgentPermissionReply, AgentReplyTarget};
     let conversation_id = event.conversation_id.unwrap_or_default();
-    let draft = crate::mcp::tool_review::review_agent_permission(&app, conversation_id, agent,
+    let draft = crate::mcp::tool_review::review_agent_permission(&app, conversation_id, turn, agent,
         event.title.as_deref().unwrap_or("未命名操作"), event.parameters.as_deref().unwrap_or_default(), &working_directory).await;
     let state = app.state::<AcpPermissionState>();
     // Answered, cancelled or the turn ended while the model was reviewing.
@@ -676,7 +676,7 @@ async fn queue_permission(app: &tauri::AppHandle, identity: &AgentEventIdentity,
     let (sender, receiver) = oneshot::channel();
     app.state::<AcpPermissionState>().store_request_guarded(event.clone(), sender, scope.clone(), guard.clone()).await?;
     match review {
-        Some((agent, working_directory)) => { tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, agent, working_directory)); }
+        Some((agent, working_directory)) => { tauri::async_runtime::spawn(review_permission(app.clone(), event, scope, turn, agent, working_directory)); }
         None => crate::api::operation_api::emit_permission_request_event(app, crate::api::operation_api::ACP_PERMISSION_REQUEST_EVENT, Some(identity.conversation_id), &event)?,
     }
     let app = app.clone();

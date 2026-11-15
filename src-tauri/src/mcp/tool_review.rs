@@ -14,7 +14,7 @@ use crate::api::ai_api::sanitize_tool_name;
 use crate::api::assistant_api::get_assistant_field_value;
 use crate::api::genai_client;
 use crate::db::llm_db::LLMDatabase;
-use crate::db::mcp_db::{MCPDatabase, MCPServerTool, NewToolReviewLog, ToolReviewLog};
+use crate::db::mcp_db::{MCPDatabase, MCPServerTool, MCPToolCall, NewToolReviewLog, ToolReviewLog};
 use crate::db::system_db::{FeatureConfig, SystemDatabase};
 use super::tool_review_output::{capability_key, load_capability, remember_prompt, unsupported_format_error};
 use genai::adapter::AdapterKind;
@@ -507,35 +507,59 @@ pub struct ReviewIntent {
     pub text: String,
 }
 
-const PROMPT_INTENT_LIMIT: usize = 3000;
-const TOOL_RESULT_PREFIXES: [&str; 2] = ["Tool execution results:", "Tool execution completed:"];
-
-/// 在会话的 user 消息里找用户原话：去掉附加上下文块，跳过工具结果回填。
-pub(crate) fn pick_intent_text(contents: impl IntoIterator<Item = String>) -> Option<String> {
-    contents.into_iter().find_map(|content| {
-        let visible = crate::utils::turn_context::visible(&content).trim().to_string();
-        (!visible.is_empty() && !TOOL_RESULT_PREFIXES.iter().any(|p| visible.starts_with(p))).then_some(visible)
-    })
+/// Follow the response's parents first. For messages without parent links,
+/// search backwards from the earliest linked message.
+fn review_intent_text(
+    conn: &rusqlite::Connection,
+    conversation_id: i64,
+    message_id: Option<i64>,
+    scheduled: bool,
+) -> rusqlite::Result<Option<String>> {
+    if message_id.is_none() && !scheduled {
+        return Ok(None);
+    }
+    let order = if scheduled { "ASC" } else { "DESC" };
+    let sql = format!(
+        "WITH RECURSIVE lineage(id, parent_id, message_type) AS (
+            SELECT id, parent_id, message_type FROM message WHERE conversation_id = ?1 AND id = ?2
+            UNION ALL
+            SELECT m.id, m.parent_id, m.message_type FROM message m JOIN lineage l ON m.id = l.parent_id
+            WHERE m.conversation_id = ?1 AND m.id < l.id AND l.message_type != 'user'
+        )
+        SELECT content FROM message WHERE conversation_id = ?1 AND message_type = 'user'
+        AND ((?3 AND ?2 IS NULL) OR id <= (SELECT MIN(id) FROM lineage))
+        ORDER BY id {order}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params![conversation_id, message_id, scheduled])?;
+    while let Some(row) = rows.next()? {
+        let content: String = row.get(0)?;
+        let visible = crate::utils::turn_context::visible(&content).trim();
+        if visible.starts_with("Tool execution results:") || visible.starts_with("Tool execution completed:") {
+            continue;
+        }
+        return Ok((!visible.is_empty()).then(|| visible.to_owned()));
+    }
+    Ok(None)
 }
 
-/// 从会话里取用户意图：普通会话取最近一条用户请求；定时任务运行会话取任务指令（第一条）。
-pub(crate) fn load_review_intent(app_handle: &tauri::AppHandle, conversation_id: i64) -> Option<ReviewIntent> {
-    use crate::db::conversation_db::{ConversationDatabase, Repository};
-    let db = ConversationDatabase::new(app_handle).ok()?;
-    let kind = db.conversation_repo().ok()?.read(conversation_id).ok()??.conversation_kind;
-    let conn = db.get_connection().ok()?;
+fn load_review_intent(
+    app_handle: &tauri::AppHandle,
+    conversation_id: i64,
+    message_id: Option<i64>,
+) -> Result<Option<ReviewIntent>, String> {
+    use crate::db::conversation_db::ConversationDatabase;
+    let db = ConversationDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    let conn = db.get_connection().map_err(|e| e.to_string())?;
+    let kind: String = conn.query_row(
+        "SELECT conversation_kind FROM conversation WHERE id = ?1", [conversation_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
     let scheduled = kind == crate::db::message_preview::SCHEDULED_RUN_KIND;
-    let order = if scheduled { "ASC" } else { "DESC" };
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT content FROM message WHERE conversation_id = ?1 AND message_type = 'user' ORDER BY id {order} LIMIT 20"
-        ))
-        .ok()?;
-    let contents: Vec<String> = stmt.query_map([conversation_id], |row| row.get(0)).ok()?.filter_map(Result::ok).collect();
-    Some(ReviewIntent {
-        label: if scheduled { "定时任务指令（无人值守运行，用户不在场）" } else { "用户最近的请求" },
-        text: pick_intent_text(contents)?,
-    })
+    let text = review_intent_text(&conn, conversation_id, message_id, scheduled).map_err(|e| e.to_string())?;
+    Ok(text.map(|text| ReviewIntent {
+        label: if scheduled { "定时任务指令（无人值守运行，用户不在场）" } else { "本轮用户消息" },
+        text,
+    }))
 }
 
 fn build_review_user_prompt(
@@ -551,7 +575,7 @@ fn build_review_user_prompt(
     match intent {
         Some(intent) => {
             prompt.push_str(&format!("用户意图（{}）:\n", intent.label));
-            prompt.push_str(&truncate_for_prompt(&intent.text, PROMPT_INTENT_LIMIT, "用户意图"));
+            prompt.push_str(&intent.text);
             prompt.push_str("\n\n");
         }
         None => prompt.push_str("用户意图: 未提供\n\n"),
@@ -693,13 +717,11 @@ async fn execute_review_output(
 async fn review_with_configured_model(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
-    call_id: i64,
-    server_name: &str,
-    tool_name: &str,
-    parameters: &str,
+    call: &MCPToolCall,
 ) -> ReviewRecordDraft {
-    let definition = load_tool_review_definition(app_handle, call_id, server_name, tool_name);
-    review_with_definition(app_handle, conversation_id, call_id, server_name, tool_name, parameters, definition).await
+    let definition = load_tool_review_definition(app_handle, call.id, &call.server_name, &call.tool_name);
+    review_with_definition(app_handle, conversation_id, call.assistant_message_id.or(call.message_id),
+        call.id, &call.server_name, &call.tool_name, &call.parameters, definition).await
 }
 
 /// 原生智能体（Pi / OpenCode / Kiro / Antigravity）的权限请求使用同一审核模型与规则。
@@ -707,6 +729,7 @@ async fn review_with_configured_model(
 pub async fn review_agent_permission(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
+    response_message_id: i64,
     agent: &str,
     title: &str,
     parameters: &str,
@@ -718,12 +741,13 @@ pub async fn review_agent_permission(
         ),
         input_schema: String::new(),
     };
-    review_with_definition(app_handle, conversation_id, 0, &format!("{agent} 智能体"), title, parameters, Some(definition)).await
+    review_with_definition(app_handle, conversation_id, Some(response_message_id), 0, &format!("{agent} 智能体"), title, parameters, Some(definition)).await
 }
 
 async fn review_with_definition(
     app_handle: &tauri::AppHandle,
     conversation_id: i64,
+    message_id: Option<i64>,
     call_id: i64,
     server_name: &str,
     tool_name: &str,
@@ -840,7 +864,15 @@ async fn review_with_definition(
         }
     };
 
-    let intent = if conversation_id > 0 { load_review_intent(app_handle, conversation_id) } else { None };
+    let intent = if conversation_id > 0 {
+        match load_review_intent(app_handle, conversation_id, message_id) {
+            Ok(intent) => intent,
+            Err(error) => return error_outcome(&model_code, Some(provider_id), started.elapsed().as_millis() as i64,
+                format!("读取自动审核的本轮用户消息失败（conversation_id={conversation_id}, message_id={message_id:?}）：{error}")),
+        }
+    } else {
+        None
+    };
     let user_prompt =
         build_review_user_prompt(server_name, tool_name, parameters, definition.as_ref(), intent.as_ref());
     let chat_request = build_chat_request_from_messages(
@@ -996,7 +1028,7 @@ async fn review_decision(
     emit_tool_review_status(app_handle, conversation_id, call_id, "reviewing", None, "");
     let review_result = tokio::select! {
         _ = cancel_token.cancelled() => None,
-        draft = review_with_configured_model(app_handle, conversation_id, call_id, server_name, tool_name, parameters) => {
+        draft = review_with_configured_model(app_handle, conversation_id, &call) => {
             let _ = take_review_cancel_token(call_id).await;
             Some(draft)
         }
@@ -1102,7 +1134,7 @@ pub async fn review_unattended(app_handle: &tauri::AppHandle, conversation_id: i
     }
     emit_tool_review_status(app_handle, conversation_id, call_id, "reviewing", None, "");
     let mut draft = review_with_configured_model(
-        app_handle, conversation_id, call_id, &call.server_name, &call.tool_name, &call.parameters,
+        app_handle, conversation_id, &call,
     ).await;
     if let Some(detail) = draft.error_detail.as_ref() {
         let detail = format!("{detail} (conversation_id={conversation_id}, call_id={call_id}, model={}, provider_id={:?})", draft.model_code, draft.provider_id);

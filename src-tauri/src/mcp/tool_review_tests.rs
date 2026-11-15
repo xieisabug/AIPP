@@ -601,20 +601,25 @@ fn test_review_prompt_carries_user_intent_as_untrusted_data() {
 }
 
 #[test]
-fn test_review_intent_skips_tool_results_and_turn_context() {
-    let contents = vec![
-        "Tool execution results:\n{...}".to_string(),
-        "   ".to_string(),
-        "帮我把周报发给张三".to_string(),
-        "更早的请求".to_string(),
-    ];
-    assert_eq!(pick_intent_text(contents).as_deref(), Some("帮我把周报发给张三"));
-    assert_eq!(pick_intent_text(vec!["Tool execution completed:\nx".to_string()]), None);
-}
-
-#[test]
-fn test_review_intent_truncates_long_text() {
-    let intent = ReviewIntent { label: "用户最近的请求", text: "长".repeat(PROMPT_INTENT_LIMIT + 50) };
-    let user = build_review_user_prompt("fs", "read_file", "{}", None, Some(&intent));
-    assert!(user.contains("用户意图已截断"));
+fn test_review_intent_uses_originating_turn_for_delayed_and_continued_calls() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE message(id INTEGER PRIMARY KEY, conversation_id INTEGER, parent_id INTEGER, message_type TEXT, content TEXT);
+        INSERT INTO message VALUES (1, 1, NULL, 'user', '任务指令'), (2, 1, NULL, 'user', 'placeholder'),
+        (3, 1, NULL, 'response', ''), (4, 1, NULL, 'user', '下一轮'), (5, 1, 2, 'response', '');").unwrap();
+    let request = format!("{}仅允许读取", "长".repeat(3100));
+    let context = crate::utils::turn_context::wrap(["隐藏上下文"]);
+    let stored = crate::utils::turn_context::append(&request, context.as_deref());
+    db.execute("UPDATE message SET content = ?1 WHERE id = 2", [stored]).unwrap();
+    for anchor in [3, 5] {
+        let text = review_intent_text(&db, 1, Some(anchor), false).unwrap().unwrap();
+        let intent = ReviewIntent { label: "本轮用户消息", text };
+        let prompt = build_review_user_prompt("fs", "read", "{}", None, Some(&intent));
+        assert!(prompt.contains(&request));
+        assert!(!prompt.contains("隐藏上下文") && !prompt.contains("下一轮"));
+    }
+    for id in 6..36 {
+        db.execute("INSERT INTO message VALUES (?1, 1, NULL, 'user', 'Tool execution results: ok')", [id]).unwrap();
+    }
+    assert_eq!(review_intent_text(&db, 1, Some(35), false).unwrap().as_deref(), Some("下一轮"));
+    assert_eq!(review_intent_text(&db, 1, Some(35), true).unwrap().as_deref(), Some("任务指令"));
 }
