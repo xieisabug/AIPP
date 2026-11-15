@@ -408,6 +408,8 @@ impl MCPDatabase {
 
         self.migrate_mcp_tool_call_table()?;
         self.migrate_mcp_server_table()?; // ensure headers column exists
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS mcp_summary_progress (
+            id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")?;
         self.create_dynamic_loading_tables()?;
         self.create_tool_review_log_table()?;
         let _ = self.rebuild_dynamic_mcp_catalog();

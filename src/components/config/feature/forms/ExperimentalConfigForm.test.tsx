@@ -77,6 +77,22 @@ describe("ExperimentalConfigForm", () => {
         vi.clearAllMocks();
     });
 
+    it("should restore the previous MCP summary when settings reopen", async () => {
+        mockInvokeHandler("get_experimental_summary_task_status", () => ({
+            mcp_running: false,
+            mcp_progress: { phase: "completed", completed: 3, total: 3, succeeded: 2, failed: 1, failures: ["Custom：请求超时"] },
+        }));
+        function Harness() {
+            const form = useForm<ExperimentalConfigFormState>({
+                defaultValues: { ...EXPERIMENTAL_CONFIG_DEFAULT_VALUES, dynamic_mcp_loading_enabled: "true" },
+            });
+            return <ExperimentalConfigForm form={form} onSave={async () => undefined} />;
+        }
+        render(<Harness />);
+        expect(await screen.findByText("完成: 成功 2，失败 1")).toBeInTheDocument();
+        expect(screen.getByText("Custom：请求超时")).toBeInTheDocument();
+    });
+
     it("在 Butler 模式下只显示管家相关实验设置", () => {
         render(<ButlerScopeHarness />);
 

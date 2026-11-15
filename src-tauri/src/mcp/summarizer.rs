@@ -7,7 +7,8 @@ use crate::db::llm_db::LLMDatabase;
 use crate::db::mcp_db::{MCPDatabase, MCPServer, MCPServerTool};
 use crate::db::system_db::FeatureConfig;
 use crate::errors::AppError;
-use serde::Serialize;
+use crate::db::connection::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Manager};
@@ -46,18 +47,49 @@ const MCP_SUMMARIZER_SYSTEM_PROMPT: &str = r#"
 }
 "#;
 
-#[derive(Debug, Clone, Serialize)]
-struct MCPSummaryProgressPayload {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MCPSummaryProgressPayload {
     phase: String,
     total: usize,
     completed: usize,
     succeeded: usize,
     failed: usize,
+    updated_at: Option<String>,
+    #[serde(default)]
+    failures: Vec<String>,
     server_name: Option<String>,
     message: Option<String>,
 }
 
-fn emit_summary_progress(app_handle: &tauri::AppHandle, payload: MCPSummaryProgressPayload) {
+pub fn last_progress(app: &tauri::AppHandle) -> Result<Option<MCPSummaryProgressPayload>, String> {
+    let db = MCPDatabase::new(app).map_err(|e| e.to_string())?;
+    read_progress(&db.conn, is_mcp_summary_running())
+}
+
+fn read_progress(conn: &Connection, running: bool) -> Result<Option<MCPSummaryProgressPayload>, String> {
+    let raw: Option<String> = conn.query_row("SELECT payload FROM mcp_summary_progress WHERE id=1",
+        [], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+    let mut progress: Option<MCPSummaryProgressPayload> = raw.map(|raw| serde_json::from_str(&raw))
+        .transpose().map_err(|e| format!("读取 MCP 总结进度失败：{e}"))?;
+    if let Some(p) = progress.as_mut() {
+        if !matches!(p.phase.as_str(), "completed" | "failed") && !running {
+            p.phase = "interrupted".into();
+            p.message = Some(format!("上次任务中断，已处理 {}/{}", p.completed, p.total));
+        }
+    }
+    Ok(progress)
+}
+
+fn save_progress(conn: &Connection, payload: &MCPSummaryProgressPayload) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT INTO mcp_summary_progress(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+        [serde_json::json!(payload).to_string()])
+}
+
+fn emit_summary_progress(app_handle: &tauri::AppHandle, mut payload: MCPSummaryProgressPayload) {
+    payload.updated_at = Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true));
+    let saved = MCPDatabase::new(app_handle).and_then(|db| save_progress(&db.conn, &payload));
+    if let Err(error) = saved { warn!(%error, "Persist MCP summary progress failed"); }
     let _ = app_handle.emit("mcp-summary-progress", payload);
 }
 
@@ -220,6 +252,10 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
     if MCP_SUMMARY_RUNNING.swap(true, Ordering::SeqCst) {
         return Err("MCP 总结任务正在进行中，请稍后重试".to_string());
     }
+    run_claimed_summary(app_handle).await
+}
+
+async fn run_claimed_summary(app_handle: tauri::AppHandle) -> Result<(), String> {
     struct ResetRunning;
     impl Drop for ResetRunning {
         fn drop(&mut self) {
@@ -228,28 +264,42 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
     }
     let _reset = ResetRunning;
 
-    let config_map = get_feature_config_map(&app_handle).await.map_err(|e| e.to_string())?;
-    if parse_model_selection(&config_map).is_none() {
-        return Err("请先在实验性配置中选择 MCP 总结 AI 模型".to_string());
+    let result = run_batch(&app_handle).await;
+    if let Err(error) = &result {
+        emit_summary_progress(&app_handle, MCPSummaryProgressPayload {
+            phase: "failed".into(), total: 0, completed: 0, succeeded: 0, failed: 0,
+            server_name: None, message: Some(error.clone()), failures: vec![], updated_at: None,
+        });
     }
+    result
+}
 
-    let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
-    let _ = db.rebuild_dynamic_mcp_catalog();
+async fn run_batch(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
+    db.rebuild_dynamic_mcp_catalog().map_err(|e| e.to_string())?;
     let servers = db.enabled_custom_summary_servers().map_err(|e| e.to_string())?;
-
+    if !servers.is_empty() {
+        let config = get_feature_config_map(app_handle).await.map_err(|e| e.to_string())?;
+        if parse_model_selection(&config).is_none() {
+            return Err("请先在实验性配置中选择自定义 MCP 的总结模型".into());
+        }
+    }
+    let mut failures = Vec::new();
     let total = servers.len();
     let mut completed = 0usize;
     let mut succeeded = 0usize;
     let mut failed = 0usize;
 
     emit_summary_progress(
-        &app_handle,
+        app_handle,
         MCPSummaryProgressPayload {
             phase: "started".to_string(),
             total,
             completed,
             succeeded,
             failed,
+            updated_at: None,
+            failures: failures.clone(),
             server_name: None,
             message: Some("开始总结 MCP 目录".to_string()),
         },
@@ -257,31 +307,35 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
 
     for server in servers {
         emit_summary_progress(
-            &app_handle,
+            app_handle,
             MCPSummaryProgressPayload {
                 phase: "processing".to_string(),
                 total,
                 completed,
                 succeeded,
                 failed,
+                updated_at: None,
+                failures: failures.clone(),
                 server_name: Some(server.name.clone()),
                 message: Some("正在总结".to_string()),
             },
         );
 
-        let result = generate_mcp_catalog_summary(&app_handle, server.id).await;
+        let result = generate_mcp_catalog_summary(app_handle, server.id).await;
         completed += 1;
         match result {
             Ok(()) => {
                 succeeded += 1;
                 emit_summary_progress(
-                    &app_handle,
+                    app_handle,
                     MCPSummaryProgressPayload {
                         phase: "progress".to_string(),
                         total,
                         completed,
                         succeeded,
                         failed,
+                        updated_at: None,
+                        failures: failures.clone(),
                         server_name: Some(server.name.clone()),
                         message: Some("总结完成".to_string()),
                     },
@@ -289,15 +343,18 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
             }
             Err(err) => {
                 failed += 1;
+                failures.push(format!("{}：{}", server.name, err));
                 warn!(server_id = server.id, server_name = %server.name, error = %err, "MCP summary failed");
                 emit_summary_progress(
-                    &app_handle,
+                    app_handle,
                     MCPSummaryProgressPayload {
                         phase: "progress".to_string(),
                         total,
                         completed,
                         succeeded,
                         failed,
+                        updated_at: None,
+                        failures: failures.clone(),
                         server_name: Some(server.name.clone()),
                         message: Some(format!("总结失败: {}", err)),
                     },
@@ -307,13 +364,15 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
     }
 
     emit_summary_progress(
-        &app_handle,
+        app_handle,
         MCPSummaryProgressPayload {
             phase: "completed".to_string(),
             total,
             completed,
             succeeded,
             failed,
+            updated_at: None,
+            failures: failures.clone(),
             server_name: None,
             message: Some("MCP 总结任务完成".to_string()),
         },
@@ -323,17 +382,11 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
 }
 
 pub async fn start_mcp_summary_generation(app_handle: tauri::AppHandle) -> Result<bool, String> {
-    if is_mcp_summary_running() {
+    if MCP_SUMMARY_RUNNING.swap(true, Ordering::SeqCst) {
         return Ok(false);
     }
-
-    let config_map = get_feature_config_map(&app_handle).await.map_err(|e| e.to_string())?;
-    if parse_model_selection(&config_map).is_none() {
-        return Err("请先在实验性配置中选择 MCP 总结 AI 模型".to_string());
-    }
-
     tauri::async_runtime::spawn(async move {
-        if let Err(err) = summarize_all_mcp_catalogs(app_handle).await {
+        if let Err(err) = run_claimed_summary(app_handle).await {
             warn!(error = %err, "MCP summary background task failed");
         }
     });
@@ -414,17 +467,17 @@ async fn generate_mcp_catalog_summary(
     app_handle: &tauri::AppHandle,
     server_id: i64,
 ) -> Result<(), AppError> {
-    let config_map = get_feature_config_map(app_handle).await?;
-    let Some((model_code, provider_id)) = parse_model_selection(&config_map) else {
-        debug!(server_id, "MCP summarizer model not configured, skip generation");
-        return Ok(());
-    };
-
     let mcp_db = MCPDatabase::new(app_handle)?;
     let server = mcp_db.get_mcp_server(server_id)?;
     if !server.is_enabled || server.is_builtin || mcp_db.app_connection_status(server_id)?.is_some() {
         return Ok(());
     }
+
+    let config_map = get_feature_config_map(app_handle).await?;
+    let Some((model_code, provider_id)) = parse_model_selection(&config_map) else {
+        debug!(server_id, "MCP summarizer model not configured, skip generation");
+        return Ok(());
+    };
 
     let tools: Vec<MCPServerTool> = mcp_db
         .get_mcp_server_tools(server_id)?
@@ -483,14 +536,13 @@ async fn generate_mcp_catalog_summary(
 
     let (server_summary, tool_summaries) =
         parse_summary_response(&response_text).ok_or_else(|| {
-            warn!(server_id, response = %response_text, "Failed to parse MCP summary response");
+            warn!(server_id, "Failed to parse MCP summary response");
             AppError::ParseError("解析 MCP 摘要结果失败".to_string())
         })?;
 
     let mut updated_tools = 0usize;
-    if let Some(server_summary) = server_summary {
-        mcp_db.update_server_catalog_summary(server_id, &server_summary)?;
-    }
+    let server_summary = server_summary.ok_or_else(|| AppError::ParseError("模型未返回 MCP 服务摘要".into()))?;
+    mcp_db.update_server_catalog_summary(server_id, &server_summary)?;
 
     for tool in &tools {
         // 先尝试精确匹配（小写），再尝试归一化匹配
@@ -510,15 +562,14 @@ async fn generate_mcp_catalog_summary(
         }
     }
 
-    if updated_tools == 0 && !tools.is_empty() {
-        warn!(
-            server_id,
-            tool_count = tools.len(),
-            ai_keys = ?tool_summaries.keys().collect::<Vec<_>>(),
-            "No tool summaries matched — AI may have returned wrong tool names"
-        );
+    if updated_tools != tools.len() {
+        return Err(AppError::ParseError(format!("模型仅返回了 {updated_tools}/{} 个已启用工具的有效摘要", tools.len())));
     }
 
     info!(server_id, updated_tools, total_tools = tools.len(), "MCP catalog summaries updated");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "summarizer_tests.rs"]
+mod summarizer_tests;

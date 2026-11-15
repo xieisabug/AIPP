@@ -40,7 +40,9 @@ interface ExperimentalConfigFormProps {
 }
 
 interface MCPSummaryProgressPayload {
-    phase: "started" | "processing" | "progress" | "completed";
+    phase: "started" | "processing" | "progress" | "completed" | "interrupted" | "failed";
+    updated_at?: string;
+    failures?: string[];
     total: number;
     completed: number;
     succeeded: number;
@@ -79,6 +81,7 @@ interface FeishuRuntimeStatus {
 }
 
 interface ExperimentalSummaryTaskStatus {
+    mcp_progress?: MCPSummaryProgressPayload;
     mcp_running: boolean;
     assistant_running: boolean;
     conversation_running: boolean;
@@ -216,6 +219,10 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     );
     const loadSummaryTaskStatus = useCallback(async () => {
         const status = await invoke<ExperimentalSummaryTaskStatus>("get_experimental_summary_task_status");
+        const saved = status.mcp_progress;
+        if (saved) {
+            setSummaryProgress(current => current?.updated_at && saved.updated_at && current.updated_at > saved.updated_at ? current : saved);
+        }
         setSummaryTasks(status);
         return status;
     }, []);
@@ -233,7 +240,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
             setSummaryProgress(event.payload);
             setSummaryTasks((current) => ({
                 ...current,
-                mcp_running: event.payload.phase !== "completed",
+                mcp_running: !["failed", "completed", "interrupted"].includes(event.payload.phase),
             }));
             if (event.payload.phase === "completed") {
                 loadSummaryTaskStatus().catch(console.warn);
@@ -295,18 +302,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     ) => {
         const { showToast = false } = options;
         setSummaryActionLoading((current) => ({ ...current, [taskKey]: true }));
-
-        if (taskKey === "mcp") {
-            setSummaryProgress({
-                phase: "started",
-                total: 0,
-                completed: 0,
-                succeeded: 0,
-                failed: 0,
-                server_name: undefined,
-                message: "正在启动 MCP 总结...",
-            });
-        }
 
         if (taskKey === "assistant") {
             setAssistantSummaryProgress({
@@ -789,6 +784,14 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                             : summaryProgress.message || "准备中..."
                                                     : "后台任务正在启动，请稍候..."}
                                             </p>
+                                            {summaryProgress?.updated_at && (
+                                                <p className="text-xs text-muted-foreground">上次更新 {new Date(summaryProgress.updated_at).toLocaleString()}</p>
+                                            )}
+                                            {!!summaryProgress?.failures?.length && (
+                                                <details className="text-xs"><summary>查看失败原因</summary>
+                                                    <ul>{summaryProgress.failures.map((reason, index) => <li key={index}>{reason}</li>)}</ul>
+                                                </details>
+                                            )}
                                         </div>
                                     )}
                                 </div>

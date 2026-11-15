@@ -24,6 +24,7 @@ pub fn mobile_unsupported_error(feature: &str) -> String {
 
 #[derive(Serialize)]
 pub struct ExperimentalSummaryTaskStatus {
+    pub mcp_progress: Option<crate::mcp::summarizer::MCPSummaryProgressPayload>,
     pub mcp_running: bool,
     pub assistant_running: bool,
     pub conversation_running: bool,
@@ -149,11 +150,13 @@ pub async fn refresh_butler_feishu_runtime_command(
 
 #[tauri::command]
 pub async fn get_experimental_summary_task_status(
+    app_handle: tauri::AppHandle,
     scheduler_state: State<'_, SchedulerState>,
 ) -> Result<ExperimentalSummaryTaskStatus, String> {
     let conversation_running_count =
         crate::scheduler::get_conversation_summary_running_count(&scheduler_state).await;
     Ok(ExperimentalSummaryTaskStatus {
+        mcp_progress: crate::mcp::summarizer::last_progress(&app_handle)?,
         mcp_running: crate::mcp::summarizer::is_mcp_summary_running(),
         assistant_running: crate::api::assistant_summary_api::is_assistant_summary_running(),
         conversation_running: conversation_running_count > 0,

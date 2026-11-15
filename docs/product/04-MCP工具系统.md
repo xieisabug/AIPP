@@ -210,12 +210,10 @@ MCP (Model Context Protocol) 工具系统是 AIPP 的核心扩展机制，允许
 - 工具名称规范化
 
 ### MCP 工具摘要生成
-- 使用 AI 模型自动为 MCP 服务器和工具生成简洁的中文摘要
-- 可配置专用的摘要生成模型
-- 批量处理所有已启用的 MCP 服务器
-- 通过 `mcp-summary-progress` 事件报告生成进度
-- 摘要结果持久化到 `mcp_tool_catalog_entry` 表
-- 支持重试机制和 JSON 解析回退
+
+- 目录应用下载 helper 发布的中文摘要，按实际检测到的工具名称匹配。新增的工具先使用服务返回的说明，内置工具直接使用内置说明。
+- 自定义 MCP 可配置专用模型生成摘要。手动批量总结处理已启用的自定义服务。设置页显示最近一次批量任务的更新时间、完成数量和逐项失败原因；重启后仍可查看，中断的任务保留已完成的进度。
+- 服务器和工具摘要分别保存在 `mcp_server_capability_epoch_catalog` 和 `mcp_tool_catalog`。
 
 ### 动态 MCP 加载（实验性）
 - 功能开关：`dynamic_mcp_loading_enabled` 特性标志控制，可在助手上覆盖。关闭时仍把该助手选中的工具 schema 直接注入
