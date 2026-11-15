@@ -52,6 +52,7 @@ fn helper_url(route: &str, source: &Source) -> Result<reqwest::Url, String> {
     source.validate()?;
     let mut url = reqwest::Url::parse(&format!("{HELPER_PLUGINS}/{route}")).map_err(|e|e.to_string())?;
     url.query_pairs_mut().append_pair("repo", &source.repo).append_pair("ref", &source.git_ref).append_pair("path", &source.path);
+    if route != "archive" { url.query_pairs_mut().append_pair("lang", "zh-CN"); }
     Ok(url)
 }
 async fn package(app: &tauri::AppHandle, source: &Source, sha: &str) -> Result<Vec<u8>, String> {
@@ -210,7 +211,7 @@ pub(crate) fn plugin_connection_definition(preview: &Preview, key: &str, server_
         fields.push(super::super::catalog::ConfigField {key:super::super::catalog::OAUTH_CLIENT_SECRET_FIELD.into(),label:"自己的 OAuth Client Secret".into(),kind:"password".into(),required:true,secret:true,help:"仅用于授权服务器的令牌交换与刷新，保存在加密 Vault".into(),default:String::new(),options:vec![],visible_when:None,header:None,prefix:String::new()});
     }
     let auth = if auth == "bearer" || auth == "headers" { "fields".to_string() } else { auth };
-    let definition = AppDefinition { plugin_source: Some(preview.source.clone()), id: format!("agent-plugin:{key}:{server_name}"), version: preview.version.clone(),
+    let definition = AppDefinition { tool_summaries: Default::default(), plugin_source: Some(preview.source.clone()), id: format!("agent-plugin:{key}:{server_name}"), version: preview.version.clone(),
         name: format!("{} · {}", preview.name, server_name), description: preview.description.clone(),
         publisher: preview.publisher.clone(), category: "Agent 插件".into(), icon: None, homepage: None,
         notice: "配套技能已安装；连接完成后选择可使用此插件的助手。".into(), platforms: vec!["windows".into(), "macos".into(), "linux".into()],
@@ -304,7 +305,7 @@ pub async fn connect_agent_plugin_stdio(app_handle: tauri::AppHandle, key: Strin
     let endpoint = runtime::endpoint(&binding);
     let command = format!("{}{}",runtime::PREFIX,serde_json::to_string(&binding).map_err(|e|e.to_string())?);
     let label = format!("{} · {} · {}",r.preview.name,server_name,&reference[..8]);
-    let definition = AppDefinition { plugin_source: Some(r.preview.source.clone()), id: app_id.clone(), version:r.preview.version, name:r.preview.name, description:r.preview.description,
+    let definition = AppDefinition { tool_summaries: Default::default(), plugin_source: Some(r.preview.source.clone()), id: app_id.clone(), version:r.preview.version, name:r.preview.name, description:r.preview.description,
         publisher:r.preview.publisher, category:"Agent 插件".into(), icon:None, homepage:None, notice:"本地 stdio 服务；环境变量保存在加密凭据库。".into(),
         platforms:vec!["windows".into(),"macos".into(),"linux".into()], fields:vec![],skill_ids:vec![],
         connection:ConnectionRecipe { transport:"stdio".into(),oauth_client_auth:None,oauth_redirect_uri:None,url:endpoint.clone(),auth:"none".into(),client_id:None,oauth_resource:None,scopes:vec![] } };

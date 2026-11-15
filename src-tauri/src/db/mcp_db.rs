@@ -774,7 +774,17 @@ impl MCPDatabase {
         Ok(())
     }
 
-    fn app_connection_status(&self, id: i64) -> Result<Option<String>> {
+    pub fn enabled_custom_summary_servers(&self) -> Result<Vec<MCPServer>> {
+        let mut custom = Vec::new();
+        for server in self.get_mcp_servers()? {
+            if server.is_enabled && !server.is_builtin && self.app_connection_status(server.id)?.is_none() {
+                custom.push(server);
+            }
+        }
+        Ok(custom)
+    }
+
+    pub(crate) fn app_connection_status(&self, id: i64) -> Result<Option<String>> {
         let exists: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_connection')", [], |r| r.get(0))?;
         if !exists { return Ok(None); }
         self.conn.query_row("SELECT status FROM app_connection WHERE server_id=?1", [id], |r| r.get(0)).optional()
@@ -1594,17 +1604,34 @@ impl MCPDatabase {
             (),
         )?;
         let mut server_stmt = self.conn.prepare(
-            "SELECT id, name, description
+            "SELECT id, name, COALESCE(description, ''), COALESCE(is_builtin, 0)
              FROM mcp_server
              WHERE is_enabled = 1 OR command = 'aipp:dynamic_mcp'",
         )?;
-        let servers: Vec<(i64, String, String)> = server_stmt
+        let servers: Vec<(i64, String, String, bool)> = server_stmt
             .query_map((), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get(3)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        for (server_id, server_name, server_description) in servers {
+        for (server_id, server_name, server_description, builtin) in servers {
+            let managed = self.app_connection_status(server_id)?.is_some();
+            let preset_at = (builtin || managed).then_some(now.as_str());
+            let mut presets = std::collections::HashMap::<String, String>::new();
+            if managed {
+                // Prefer the refreshed catalog, including for connections created before summaries shipped.
+                let raw: Option<String> = self.conn.query_row(
+                    "SELECT COALESCE(json_extract(app.value, '$.tool_summaries'),
+                                     json_extract(c.definition, '$.tool_summaries'))
+                     FROM app_connection c LEFT JOIN app_catalog_cache cache ON cache.id=1
+                     LEFT JOIN json_each(cache.payload, '$.apps') app
+                       ON json_extract(app.value, '$.id')=c.app_id
+                      AND json_extract(app.value, '$.connection.url')=json_extract(c.definition, '$.connection.url')
+                     WHERE c.server_id=?1", [server_id], |row| row.get(0))?;
+                if let Some(raw) = raw {
+                    presets = serde_json::from_str(&raw).map_err(|e| DbError::InvalidParameterName(e.to_string()))?;
+                }
+            }
             let existing_epoch = self
                 .conn
                 .prepare(
@@ -1668,27 +1695,30 @@ impl MCPDatabase {
 
             self.conn.execute(
                 "INSERT INTO mcp_server_capability_epoch_catalog (
-                    server_id, epoch, last_refresh_at, summary
-                 ) VALUES (?, ?, ?, ?)
+                    server_id, epoch, last_refresh_at, summary, summary_generated_at
+                 ) VALUES (?, ?, ?, ?, ?)
                  ON CONFLICT(server_id) DO UPDATE SET
                     epoch = excluded.epoch,
                     last_refresh_at = excluded.last_refresh_at,
                     summary = CASE
-                        WHEN excluded.epoch != mcp_server_capability_epoch_catalog.epoch THEN excluded.summary
+                        WHEN excluded.summary_generated_at IS NOT NULL OR excluded.epoch != mcp_server_capability_epoch_catalog.epoch THEN excluded.summary
                         WHEN mcp_server_capability_epoch_catalog.summary_generated_at IS NOT NULL
                              AND trim(mcp_server_capability_epoch_catalog.summary) != '' THEN mcp_server_capability_epoch_catalog.summary
                         ELSE excluded.summary
                     END,
                     summary_generated_at = CASE
+                        WHEN excluded.summary_generated_at IS NOT NULL THEN excluded.summary_generated_at
                         WHEN excluded.epoch != mcp_server_capability_epoch_catalog.epoch THEN NULL
                         ELSE mcp_server_capability_epoch_catalog.summary_generated_at
                     END",
-                params![server_id, next_epoch, now.clone(), summary],
+                params![server_id, next_epoch, now.clone(), summary, preset_at],
             )?;
 
             for (tool_id, tool_name, tool_summary, parameters) in tools.iter() {
                 let schema_hash = Self::schema_hash(parameters.as_deref());
-                let summary = if tool_summary.trim().is_empty() {
+                let summary = if let Some(text) = presets.get(tool_name).filter(|s| !s.trim().is_empty()) {
+                    text.clone()
+                } else if tool_summary.trim().is_empty() {
                     tool_name.clone()
                 } else {
                     tool_summary.clone()
@@ -1696,13 +1726,13 @@ impl MCPDatabase {
                 let keywords = serde_json::json!([server_name, tool_name]).to_string();
                 self.conn.execute(
                     "INSERT INTO mcp_tool_catalog (
-                        tool_id, server_id, tool_name, summary, keywords_json, schema_hash, capability_epoch, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        tool_id, server_id, tool_name, summary, keywords_json, schema_hash, capability_epoch, updated_at, summary_generated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(tool_id) DO UPDATE SET
                         server_id = excluded.server_id,
                         tool_name = excluded.tool_name,
                         summary = CASE
-                            WHEN excluded.capability_epoch != mcp_tool_catalog.capability_epoch THEN excluded.summary
+                            WHEN excluded.summary_generated_at IS NOT NULL OR excluded.capability_epoch != mcp_tool_catalog.capability_epoch THEN excluded.summary
                             WHEN mcp_tool_catalog.summary_generated_at IS NOT NULL
                                  AND trim(mcp_tool_catalog.summary) != '' THEN mcp_tool_catalog.summary
                             ELSE excluded.summary
@@ -1712,6 +1742,7 @@ impl MCPDatabase {
                         capability_epoch = excluded.capability_epoch,
                         updated_at = excluded.updated_at,
                         summary_generated_at = CASE
+                            WHEN excluded.summary_generated_at IS NOT NULL THEN excluded.summary_generated_at
                             WHEN excluded.capability_epoch != mcp_tool_catalog.capability_epoch THEN NULL
                             ELSE mcp_tool_catalog.summary_generated_at
                         END",
@@ -1723,7 +1754,8 @@ impl MCPDatabase {
                         keywords,
                         schema_hash,
                         next_epoch,
-                        now.clone()
+                        now.clone(),
+                        preset_at
                     ],
                 )?;
             }
@@ -2111,3 +2143,7 @@ mod null_description_tests {
         assert_eq!(server.description, "");
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_db_summary_tests.rs"]
+mod summary_tests;

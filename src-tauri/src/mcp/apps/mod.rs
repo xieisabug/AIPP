@@ -90,9 +90,14 @@ pub async fn fetch_app_catalog(app_handle: tauri::AppHandle) -> Result<CatalogRe
     match result {
         Ok((catalog, skipped)) => {
             let fetched_at = chrono::Utc::now().to_rfc3339();
+            let previous_version: Option<String> = db.conn.query_row(
+                "SELECT json_extract(payload, '$.version') FROM app_catalog_cache WHERE id=1 AND json_valid(payload)",
+                [], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+            let catalog_changed = previous_version.as_deref() != Some(catalog.version.as_str());
             let saved = CachedCatalogPayload { catalog, skipped };
             db.conn.execute("INSERT INTO app_catalog_cache VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at",
                 params![serde_json::to_string(&saved).map_err(|e| e.to_string())?, fetched_at]).map_err(|e| e.to_string())?;
+            if catalog_changed { db.rebuild_dynamic_mcp_catalog_force().map_err(|e| e.to_string())?; }
             Ok(CatalogResponse { catalog: Some(saved.catalog), fetched_at: Some(fetched_at), warning: None, skipped: saved.skipped })
         }
         Err(error) => {

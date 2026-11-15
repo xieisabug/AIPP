@@ -19,6 +19,8 @@ pub struct AppDefinition {
     pub version: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_summaries: HashMap<String, String>,
     pub publisher: String,
     pub category: String,
     #[serde(default)]

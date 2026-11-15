@@ -349,7 +349,15 @@ pub async fn get_mcp_server_tools(
     server_id: i64,
 ) -> Result<Vec<MCPServerTool>, String> {
     let db = open_db(&app_handle)?;
-    let tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
+    let mut tools = db.get_mcp_server_tools(server_id).map_err(|e| e.to_string())?;
+    if db.app_connection_status(server_id).map_err(|e| e.to_string())?.is_some() {
+        let mut summaries: std::collections::HashMap<_, _> = db.list_tool_catalog(Some(server_id))
+            .map_err(|e| e.to_string())?.into_iter().filter(|row| row.summary_generated_at.is_some())
+            .map(|row| (row.tool_id, row.summary)).collect();
+        for tool in &mut tools {
+            if let Some(summary) = summaries.remove(&tool.id) { tool.tool_description = Some(summary); }
+        }
+    }
     Ok(tools)
 }
 
@@ -578,7 +586,7 @@ pub async fn refresh_mcp_server_capabilities(
 
     match result {
         Ok(_) => {
-            let _ = db.rebuild_dynamic_mcp_catalog();
+            db.rebuild_dynamic_mcp_catalog_force().map_err(|e| e.to_string())?;
             crate::mcp::summarizer::trigger_mcp_catalog_summary_generation(
                 app_handle.clone(),
                 server_id,

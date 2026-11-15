@@ -346,7 +346,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const autoTriggerSummaryTasks = useCallback((previousEnabledState: SummaryEnabledState, nextEnabledState: SummaryEnabledState) => {
         const tasksToTrigger: SummaryTaskKey[] = [];
 
-        if (nextEnabledState.mcp && !previousEnabledState.mcp && !summaryTasks.mcp_running) {
+        if (summarizerModelId && nextEnabledState.mcp && !previousEnabledState.mcp && !summaryTasks.mcp_running) {
             tasksToTrigger.push("mcp");
         }
         if (
@@ -381,6 +381,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
             }
         });
     }, [
+        summarizerModelId,
         summaryTasks.assistant_running,
         summaryTasks.conversation_running,
         summaryTasks.mcp_running,
@@ -464,10 +465,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
     const showSummarySection = scope === "all";
 
     const handleSave = useCallback(async () => {
-        if (showSummarySection && dynamicEnabled && !summarizerModelId) {
-            toast.error("请先选择 MCP 总结 AI 模型后再保存");
-            return;
-        }
         if (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId) {
             toast.error("请先选择助手总结 AI 模型后再保存");
             return;
@@ -627,7 +624,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
 
     const saveDisabled =
         isSaving
-        || (showSummarySection && dynamicEnabled && !summarizerModelId)
         || (showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId)
         || (showSummarySection && conversationSummaryEnabled && !conversationSummaryModel)
         || (butlerEnabled && !butlerModelId)
@@ -738,7 +734,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                     </Select>
                                                 </FormControl>
                                                 <p className="mt-1 text-sm text-muted-foreground">
-                                                    仅在首次启用后保存时自动触发一次；后续如需重跑，可使用下面的按钮单独触发。
+                                                    目录应用使用随目录下载的工具摘要。只有自定义 MCP 使用这里选择的模型生成摘要。
                                                 </p>
                                                 <FormMessage />
                                             </FormItem>
@@ -1497,9 +1493,6 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                         >
                             {isSaving ? "保存中..." : "保存配置"}
                         </Button>
-                        {showSummarySection && dynamicEnabled && !summarizerModelId && (
-                            <p className="text-sm text-destructive mt-2">请先选择 MCP 总结 AI 模型</p>
-                        )}
                         {showSummarySection && assistantSummaryEnabled && !assistantSummarizerModelId && (
                             <p className="text-sm text-destructive mt-2">请先选择助手总结 AI 模型</p>
                         )}

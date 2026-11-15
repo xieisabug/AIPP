@@ -235,12 +235,7 @@ pub async fn summarize_all_mcp_catalogs(app_handle: tauri::AppHandle) -> Result<
 
     let db = MCPDatabase::new(&app_handle).map_err(|e| e.to_string())?;
     let _ = db.rebuild_dynamic_mcp_catalog();
-    let servers: Vec<MCPServer> = db
-        .get_mcp_servers()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|server| server.is_enabled && server.command.as_deref() != Some("aipp:dynamic_mcp"))
-        .collect();
+    let servers = db.enabled_custom_summary_servers().map_err(|e| e.to_string())?;
 
     let total = servers.len();
     let mut completed = 0usize;
@@ -373,9 +368,8 @@ async fn summarize_pending_mcp_catalogs(app_handle: &tauri::AppHandle) -> Result
     let _ = db.rebuild_dynamic_mcp_catalog();
 
     let eligible_servers: HashSet<i64> = db
-        .get_mcp_servers()?
+        .enabled_custom_summary_servers()?
         .into_iter()
-        .filter(|server| server.is_enabled && server.command.as_deref() != Some("aipp:dynamic_mcp"))
         .map(|server| server.id)
         .collect();
 
@@ -428,7 +422,7 @@ async fn generate_mcp_catalog_summary(
 
     let mcp_db = MCPDatabase::new(app_handle)?;
     let server = mcp_db.get_mcp_server(server_id)?;
-    if !server.is_enabled || server.command.as_deref() == Some("aipp:dynamic_mcp") {
+    if !server.is_enabled || server.is_builtin || mcp_db.app_connection_status(server_id)?.is_some() {
         return Ok(());
     }
 
