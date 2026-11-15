@@ -283,7 +283,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
             <SheetContent className="w-full gap-0 overflow-y-auto p-0 sm:max-w-2xl">
                 <SheetHeader className="space-y-4 border-b px-6 pb-0 pt-6">
                     <div className="flex items-start gap-4 pr-6">
-                        <AppIcon size="lg" builtin={server?.is_builtin} icon={apps.find(entry => entry.id === app?.id)?.icon ?? app?.icon} official={official} />
+                        <AppIcon size="lg" builtinCommand={server?.is_builtin ? server.command : undefined} icon={apps.find(entry => entry.id === app?.id)?.icon ?? app?.icon} official={official} />
                         <div className="min-w-0 flex-1 space-y-1">
                             <SheetTitle className="truncate text-lg">{title}</SheetTitle>
                             <SheetDescription className="truncate">{subtitle}</SheetDescription>

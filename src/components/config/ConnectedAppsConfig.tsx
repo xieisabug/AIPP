@@ -172,7 +172,7 @@ export default function ConnectedAppsConfig() {
         {filteredBuiltins.length > 0 && <Section title="AIPP 内置工具" count={filteredBuiltins.length} more={!listing && filteredBuiltins.length>6?()=>setCategory(BUILTIN):undefined}>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{filteredBuiltins.slice(0,listing ? builtinLimit : 6).map(builtin => {
                 const server = servers.find(s => s.is_builtin && s.command === builtin.command);
-                return <AppCard key={builtin.id} name={builtin.name} badge="内置" description={builtin.description} icon={<AppIcon builtin />}
+                return <AppCard key={builtin.id} name={builtin.name} badge="内置" description={builtin.description} icon={<AppIcon builtinCommand={builtin.command} />}
                     status={server ? serverStatus(server) : undefined} idle="未添加" action={server ? '管理' : '添加'}
                     onClick={() => server ? setSelection({ kind: 'server', serverId: server.id }) : setBuiltinId(builtin.id)} />;
             })}</div>
@@ -201,7 +201,7 @@ export default function ConnectedAppsConfig() {
                         const connection = connectionOf.get(server.id);
                         const summary = toolSummary(tools.get(server.id), server, connection);
                         return <button key={server.id} type="button" className="flex w-full items-center gap-4 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none" onClick={() => setSelection({ kind: 'server', serverId: server.id })}>
-                            <AppIcon size="sm" builtin={server.is_builtin} icon={apps.find(app => app.id === connection?.app_id)?.icon ?? connection?.definition.icon} official={official(connection?.definition.plugin_source)} />
+                            <AppIcon size="sm" builtinCommand={server.is_builtin ? server.command : undefined} icon={apps.find(app => app.id === connection?.app_id)?.icon ?? connection?.definition.icon} official={official(connection?.definition.plugin_source)} />
                             <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-medium">{connection?.label ?? server.name}</p>
                                 <p className="truncate text-xs text-muted-foreground">{server.is_builtin ? '内置工具' : connection ? connection.definition.name : `自定义 MCP · ${server.transport_type}`}</p>

@@ -1,3 +1,4 @@
+import AppIcon from './apps/AppIcon';
 import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog";
@@ -366,13 +367,13 @@ const BuiltinToolDialog: React.FC<BuiltinToolDialogProps> = ({
                         <div className="space-y-2">
                             <Label>选择内置工具</Label>
                             <Select value={selectedId} onValueChange={setSelectedId}>
-                                <SelectTrigger className="w-full">
+                                <SelectTrigger className="h-auto w-full">
                                     <SelectValue placeholder="选择一个内置工具" />
                                 </SelectTrigger>
                                 <SelectContent>
                                     {templates.map((t) => (
                                         <SelectItem key={t.id} value={t.id}>
-                                            {t.name}
+                                            <span className="flex items-center gap-2"><AppIcon size="sm" builtinCommand={t.command} />{t.name}</span>
                                         </SelectItem>
                                     ))}
                                 </SelectContent>
