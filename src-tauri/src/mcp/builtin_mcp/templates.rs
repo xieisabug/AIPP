@@ -491,7 +491,7 @@ pub fn get_builtin_tools_for_command(command: &str) -> Vec<BuiltinToolInfo> {
             BuiltinToolInfo {
                 name: "search_own_history".into(),
                 description: "Find a literal phrase in this conversation, including history covered by a checkpoint and your earlier conversations the user archived when starting a new one (those matches carry archived=true and the archived conversation name; treat them as past history). Set scope=all_bots to find matches across the Butler workspace with Bot names and message IDs.".into(),
-                input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"scope":{"enum":["current","all_bots"]}},"required":["query"]}),
+                input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"scope":{"type":"string","enum":["current","all_bots"]}},"required":["query"]}),
             },
             BuiltinToolInfo {
                 name: "load_skill".into(),

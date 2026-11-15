@@ -11,7 +11,7 @@ pub fn definitions() -> Vec<BuiltinToolInfo> {
         BuiltinToolInfo { name:"list_assistants".into(), description:"列出管家模式所有助手（含总管家），按姓名、简介或画像搜索。返回稳定 assistant_id、摘要、联系人会话和当前工作状态；不创建会话。用 ID 消歧同名助手。".into(), input_schema:json!({"type":"object","properties":{
             "query":{"type":"string","maxLength":512},"after_id":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50}}}) },
         BuiltinToolInfo { name:"get_assistant_details".into(), description:"按需查看助手详情。默认 profile/summary/runtime；可选 tools、skills、prompt。工具状态区分直接注入和动态发现，不代表已验证外部服务可用。prompt 仅返回配置正文，非会话历史。".into(), input_schema:json!({"type":"object","required":["assistant_id"],"properties":{
-            "assistant_id":{"type":"integer","minimum":1},"sections":{"type":"array","items":{"enum":["profile","summary","runtime","tools","skills","prompt"]}},
+            "assistant_id":{"type":"integer","minimum":1},"sections":{"type":"array","items":{"type":"string","enum":["profile","summary","runtime","tools","skills","prompt"]}},
             "offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":50},
             "prompt_offset":{"type":"integer","minimum":0},"prompt_limit":{"type":"integer","minimum":1,"maximum":12000}}}) },
         BuiltinToolInfo { name:"get_assistant_exchange".into(), description:"查看自己参与的助手协作。传 exchange_id 查看该次协作的轮次、状态和可选往来正文；省略则分页列出最近协作。答复会自动回流，不要轮询。".into(), input_schema:json!({"type":"object","properties":{

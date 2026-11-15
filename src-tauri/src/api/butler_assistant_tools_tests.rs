@@ -49,6 +49,20 @@ fn test_assistant_exchange_stop_is_idempotent_and_preserves_other_work() {
 }
 
 #[test]
+fn test_butler_agent_tools_declare_string_enum_types() {
+    let tools = crate::mcp::builtin_mcp::templates::get_builtin_tools_for_command("aipp:agent");
+    for (name, path) in [
+        ("get_assistant_details", "/properties/sections/items"),
+        ("search_own_history", "/properties/scope"),
+    ] {
+        let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+        let schema = tool.input_schema.pointer(path).unwrap();
+        assert_eq!(schema["type"], "string", "{name}{path}");
+        assert!(schema["enum"].as_array().unwrap().iter().all(Value::is_string));
+    }
+}
+
+#[test]
 fn test_assistant_details_validate_sections_and_bounds() {
     assert_eq!(sections(&json!({})).unwrap(),vec!["profile","summary","runtime"]);
     assert!(sections(&json!({"sections":["credentials"]})).is_err());
