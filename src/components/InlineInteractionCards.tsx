@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -494,7 +495,12 @@ const fileTypeIcon = (type: string) => {
 };
 
 const resolveImageSrc = (file: PreviewFileItem): string | null => {
-    if (file.url?.trim()) return file.url.trim();
+    const url = file.url?.trim();
+    if (url) {
+        // WebView2 serves custom protocols through a virtual localhost origin.
+        const relay = /^aipp-preview:\/\/localhost\/([\w-]+)$/.exec(url);
+        return relay ? convertFileSrc(relay[1], "aipp-preview") : url;
+    }
     if (!file.content?.trim()) return null;
     if (file.content.startsWith("data:")) return file.content;
     return `data:image/png;base64,${file.content}`;
