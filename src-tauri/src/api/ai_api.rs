@@ -3733,6 +3733,26 @@ pub(crate) fn add_message_with_metadata(
     metadata_json: Option<String>,
 ) -> Result<Message, AppError> {
     let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
+    save_message_with_metadata(&db, parent_id, conversation_id, message_type, content, llm_model_id,
+        llm_model_name, start_time, finish_time, token_count, generation_group_id, parent_group_id, metadata_json)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_message_with_metadata(
+    db: &ConversationDatabase,
+    parent_id: Option<i64>,
+    conversation_id: i64,
+    message_type: String,
+    content: String,
+    llm_model_id: Option<i64>,
+    llm_model_name: Option<String>,
+    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    finish_time: Option<chrono::DateTime<chrono::Utc>>,
+    token_count: i32,
+    generation_group_id: Option<String>,
+    parent_group_id: Option<String>,
+    metadata_json: Option<String>,
+) -> Result<Message, AppError> {
     let message = db
         .message_repo()?
         .create(&Message {
@@ -3769,7 +3789,7 @@ pub(crate) fn add_message_with_metadata(
 }
 
 pub(crate) fn add_scheduled_delivery_message(
-    app_handle: &tauri::AppHandle,
+    db: &ConversationDatabase,
     parent_id: Option<i64>,
     conversation_id: i64,
     message_type: String,
@@ -3783,7 +3803,6 @@ pub(crate) fn add_scheduled_delivery_message(
     parent_group_id: Option<String>,
     metadata_json: Option<String>,
 ) -> Result<Message, AppError> {
-    let db = ConversationDatabase::new(app_handle).map_err(AppError::from)?;
     let message = db
         .message_repo()?
         .create_scheduled_delivery(&Message {

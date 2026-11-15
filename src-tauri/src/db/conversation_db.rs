@@ -1911,6 +1911,15 @@ pub(crate) fn ensure_agent_session_table(conn: &Connection) -> rusqlite::Result<
 }
 
 impl ConversationDatabase {
+    #[cfg(test)]
+    pub(crate) fn shared_in_memory() -> (Self, Connection) {
+        // Keep one connection alive while production repositories open and close their own.
+        let db_path = PathBuf::from(format!("file:{}?mode=memory&cache=shared", uuid::Uuid::new_v4()));
+        let db = Self { db_path, write_lock: Arc::new(Mutex::new(())) };
+        let keeper = db.get_connection().unwrap();
+        (db, keeper)
+    }
+
     pub fn new(app_handle: &tauri::AppHandle) -> rusqlite::Result<Self> {
         let db_path = get_db_path(app_handle, "conversation.db");
         let db_path = db_path.unwrap();

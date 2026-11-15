@@ -62,11 +62,13 @@ fn assistant_name(app: &tauri::AppHandle, assistant_id: i64) -> String {
 }
 
 /// 解析投递会话。私聊在投递时解析，用户重开私聊后自动投到新的那条。
-pub fn resolve_target(app: &tauri::AppHandle, task: &ScheduledTask) -> Result<i64, String> {
-    let db = ConversationDatabase::new(app).map_err(|e| e.to_string())?;
+pub(crate) fn resolve_target(
+    db: &ConversationDatabase, task: &ScheduledTask,
+    active_main: impl FnOnce() -> Result<Option<i64>, String>, name: impl FnOnce() -> String,
+) -> Result<i64, String> {
     match task.deliver_to.as_str() {
         DELIVER_OWNER_CHAT => {
-            if let Some(main_id) = crate::api::butler_api::active_butler_main_conversation_id(app)? {
+            if let Some(main_id) = active_main()? {
                 let main = db.conversation_repo().map_err(|e| e.to_string())?.read(main_id).map_err(|e| e.to_string())?;
                 if main.and_then(|c| c.assistant_id) == Some(task.assistant_id) {
                     return Ok(main_id);
@@ -74,7 +76,7 @@ pub fn resolve_target(app: &tauri::AppHandle, task: &ScheduledTask) -> Result<i6
             }
             db.conversation_repo()
                 .map_err(|e| e.to_string())?
-                .open_butler_contact(task.assistant_id, &assistant_name(app, task.assistant_id))
+                .open_butler_contact(task.assistant_id, &name())
                 .map_err(|e| format!("打开执行助手的私聊失败：{e}"))
         }
         DELIVER_CONVERSATION => {
@@ -128,51 +130,11 @@ pub fn deliver(app: &tauri::AppHandle, task: &ScheduledTask, content: &DeliveryC
         let _ = app.emit("conversation_created", conversation.id);
         Delivered { conversation_id: conversation.id, message_id }
     } else {
-        let conversation_id = resolve_target(app, task)?;
-        let message_id = match existing_delivery(&db, conversation_id, content.run_id, "response")? {
-            Some(id) => id,
-            None => {
-                let now = chrono::Utc::now();
-                let trigger_id = match existing_delivery(&db, conversation_id, content.run_id, "user")? {
-                    Some(id) => id,
-                    None => {
-                        crate::api::ai_api::add_message_with_metadata(
-                            app,
-                            None,
-                            conversation_id,
-                            "user".to_string(),
-                            trigger_text(task, content.scheduled_for),
-                            None,
-                            None,
-                            Some(now),
-                            Some(now),
-                            0,
-                            None,
-                            None,
-                            Some(delivery_metadata(task, content, "trigger")),
-                        )
-                        .map_err(|e| format!("写入触发消息失败：{e}"))?.id
-                    }
-                };
-                crate::api::ai_api::add_scheduled_delivery_message(
-                    app,
-                    Some(trigger_id),
-                    conversation_id,
-                    "response".to_string(),
-                    content.text.to_string(),
-                    content.llm_model_id,
-                    content.llm_model_name.clone(),
-                    Some(now),
-                    Some(now),
-                    0,
-                    None,
-                    None,
-                    Some(delivery_metadata(task, content, "result")),
-                )
-                .map_err(|e| format!("写入投递消息失败：{e}"))?
-                .id
-            }
-        };
+        let conversation_id = resolve_target(&db, task,
+            || crate::api::butler_api::active_butler_main_conversation_id(app),
+            || assistant_name(app, task.assistant_id))?;
+        let delivered = deliver_to_chat(&db, task, content, conversation_id)?;
+        let message_id = delivered.message_id;
         crate::utils::window_utils::send_conversation_event_to_chat_windows(
             app,
             conversation_id,
@@ -181,7 +143,7 @@ pub fn deliver(app: &tauri::AppHandle, task: &ScheduledTask, content: &DeliveryC
                 data: serde_json::json!({ "message_id": message_id, "message_type": "response" }),
             },
         );
-        Delivered { conversation_id, message_id }
+        delivered
     };
     let _ = app.emit(
         SCHEDULED_TASK_DELIVERED_EVENT,
@@ -196,6 +158,56 @@ pub fn deliver(app: &tauri::AppHandle, task: &ScheduledTask, content: &DeliveryC
     );
     notify(app, task, content.text);
     Ok(delivered)
+}
+
+pub(crate) fn deliver_to_chat(
+    db: &ConversationDatabase, task: &ScheduledTask, content: &DeliveryContent<'_>, conversation_id: i64,
+) -> Result<Delivered, String> {
+    let message_id = match existing_delivery(db, conversation_id, content.run_id, "response")? {
+        Some(id) => id,
+        None => {
+            let now = chrono::Utc::now();
+            let trigger_id = match existing_delivery(db, conversation_id, content.run_id, "user")? {
+                Some(id) => id,
+                None => {
+                    crate::api::ai_api::save_message_with_metadata(
+                        db,
+                        None,
+                        conversation_id,
+                        "user".to_string(),
+                        trigger_text(task, content.scheduled_for),
+                        None,
+                        None,
+                        Some(now),
+                        Some(now),
+                        0,
+                        None,
+                        None,
+                        Some(delivery_metadata(task, content, "trigger")),
+                    )
+                    .map_err(|e| format!("写入触发消息失败：{e}"))?.id
+                }
+            };
+            crate::api::ai_api::add_scheduled_delivery_message(
+                db,
+                Some(trigger_id),
+                conversation_id,
+                "response".to_string(),
+                content.text.to_string(),
+                content.llm_model_id,
+                content.llm_model_name.clone(),
+                Some(now),
+                Some(now),
+                0,
+                None,
+                None,
+                Some(delivery_metadata(task, content, "result")),
+            )
+            .map_err(|e| format!("写入投递消息失败：{e}"))?
+            .id
+        }
+    };
+    Ok(Delivered { conversation_id, message_id })
 }
 
 /// 窗口不在前台时发系统通知；在前台时由会话列表的未读提示承担。

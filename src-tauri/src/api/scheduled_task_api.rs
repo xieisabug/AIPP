@@ -5,7 +5,6 @@
 //! → 按任务设置投递给用户（见 `scheduler::delivery`）→ 结果与投递信息一起入库。
 //! 崩溃恢复重放结果日志时投递幂等，不会重复发消息。
 use chrono::{DateTime, Utc};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -129,7 +128,7 @@ fn cancel_scheduled_run(run_id: &str) -> bool {
 
 #[derive(Debug, Clone)]
 pub(crate) enum AgenticLoopStatus {
-    Completed,
+    Completed { message_id: i64 },
     Cancelled,
     MaxRoundsReached,
     Timeout,
@@ -139,7 +138,7 @@ pub(crate) enum AgenticLoopStatus {
 impl fmt::Display for AgenticLoopStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AgenticLoopStatus::Completed => write!(f, "completed"),
+            AgenticLoopStatus::Completed { .. } => write!(f, "completed"),
             AgenticLoopStatus::Cancelled => write!(f, "cancelled"),
             AgenticLoopStatus::MaxRoundsReached => write!(f, "max_rounds_reached"),
             AgenticLoopStatus::Timeout => write!(f, "timeout"),
@@ -418,7 +417,7 @@ pub(crate) fn loop_status_failure(
         String::new()
     };
     match status {
-        AgenticLoopStatus::Completed => None,
+        AgenticLoopStatus::Completed { .. } => None,
         AgenticLoopStatus::Cancelled => Some(("cancelled", format!("任务已手动停止（已进行 {rounds} 轮）{executed}"))),
         AgenticLoopStatus::Timeout => Some((
             "timeout",
@@ -481,6 +480,51 @@ async fn exec_chat_with_retry(
             _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
         }
     }
+}
+
+struct SavedRoundResponse {
+    message: crate::db::conversation_db::Message,
+    tool_calls: Vec<ToolCall>,
+}
+
+impl SavedRoundResponse {
+    fn next_step(
+        self, cancel: &CancellationToken, rounds: usize, total: usize, success: usize, failed: usize,
+    ) -> std::ops::ControlFlow<AgenticLoopResult, Self> {
+        if !self.tool_calls.is_empty() {
+            return std::ops::ControlFlow::Continue(self);
+        }
+        let status = if cancel.is_cancelled() {
+            AgenticLoopStatus::Cancelled
+        } else {
+            AgenticLoopStatus::Completed { message_id: self.message.id }
+        };
+        std::ops::ControlFlow::Break(AgenticLoopResult {
+            final_text: self.message.content, rounds, tool_calls_total: total,
+            tool_calls_success: success, tool_calls_failed: failed, status,
+        })
+    }
+}
+
+fn save_round_response(
+    db: &ConversationDatabase, conversation_id: i64, chat_response: &genai::chat::ChatResponse,
+    model_id: i64, model_name: &str, generation_group: &str,
+) -> Result<SavedRoundResponse, String> {
+    let mut response_text = chat_response.first_text().unwrap_or("").to_string();
+    let mut captured_tool_calls: Vec<ToolCall> = chat_response.tool_calls().into_iter().cloned().collect();
+    if captured_tool_calls.is_empty() {
+        let (prompt_tool_calls, sanitized_text) = extract_prompt_tool_calls(&response_text);
+        if !prompt_tool_calls.is_empty() {
+            captured_tool_calls = prompt_tool_calls;
+            response_text = sanitized_text;
+        }
+    }
+    let now = Utc::now();
+    let message = crate::api::ai_api::save_message_with_metadata(
+        db, None, conversation_id, "response".into(), response_text, Some(model_id), Some(model_name.into()),
+        Some(now), captured_tool_calls.is_empty().then_some(now), 0, Some(generation_group.into()), None, None,
+    ).map_err(|e| e.to_string())?;
+    Ok(SavedRoundResponse { message, tool_calls: captured_tool_calls })
 }
 
 async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResult {
@@ -547,49 +591,27 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
             Err(status) => return result(String::new(), round, tool_calls_total, tool_calls_success, tool_calls_failed, status),
         };
 
-        let mut response_text = chat_response.first_text().unwrap_or("").to_string();
-        let mut captured_tool_calls: Vec<ToolCall> = chat_response.tool_calls().into_iter().cloned().collect();
-        if captured_tool_calls.is_empty() {
-            let (prompt_tool_calls, sanitized_text) = extract_prompt_tool_calls(&response_text);
-            if !prompt_tool_calls.is_empty() {
-                captured_tool_calls = prompt_tool_calls;
-                response_text = sanitized_text;
-            }
-        }
-        debug!(task_id = ctx.task.id, round, text_len = response_text.len(), tool_calls = captured_tool_calls.len(), "scheduled run response");
-        if !response_text.trim().is_empty() {
-            progress = response_text.clone();
-        }
-
-        let mut response_content = response_text.clone();
-        let response_message_id = match crate::api::ai_api::add_message(
-            ctx.app_handle,
-            None,
-            ctx.conversation_id,
-            "response".to_string(),
-            response_content.clone(),
-            Some(ctx.llm_model_id),
-            Some(ctx.llm_model_code.clone()),
-            Some(Utc::now()),
-            if captured_tool_calls.is_empty() { Some(Utc::now()) } else { None },
-            0,
-            Some(generation_group_id.clone()),
-            None,
-        ) {
-            Ok(msg) => msg.id,
-            Err(e) => {
-                warn!(error = %e, "failed to save response message in scheduled run");
-                0
-            }
+        let saved = match save_round_response(ctx.conversation_db, ctx.conversation_id, &chat_response,
+            ctx.llm_model_id, &ctx.llm_model_code, &generation_group_id) {
+            Ok(saved) => saved,
+            Err(e) => return result(String::new(), round, tool_calls_total, tool_calls_success, tool_calls_failed,
+                AgenticLoopStatus::Error(format!("运行 {} 会话 {} 第 {round} 轮回复写入失败：{e}", ctx.run_id, ctx.conversation_id))),
         };
-
-        // 无工具调用 → 循环结束（停止请求优先于完成，避免停止后仍报成功）
-        if captured_tool_calls.is_empty() {
-            if ctx.cancel_token.is_cancelled() {
-                log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "cancel", "模型已回复但任务已停止，不按完成处理");
-                return result(response_text, round, tool_calls_total, tool_calls_success, tool_calls_failed, AgenticLoopStatus::Cancelled);
+        debug!(task_id = ctx.task.id, round, text_len = saved.message.content.len(), tool_calls = saved.tool_calls.len(), "scheduled run response");
+        let saved = match saved.next_step(&ctx.cancel_token, round, tool_calls_total, tool_calls_success, tool_calls_failed) {
+            std::ops::ControlFlow::Break(completed) => {
+                if matches!(completed.status, AgenticLoopStatus::Cancelled) {
+                    log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "cancel", "模型已回复但任务已停止，不按完成处理");
+                }
+                return completed;
             }
-            return result(response_text, round, tool_calls_total, tool_calls_success, tool_calls_failed, AgenticLoopStatus::Completed);
+            std::ops::ControlFlow::Continue(saved) => saved,
+        };
+        let response_message_id = saved.message.id;
+        let mut response_content = saved.message.content;
+        let captured_tool_calls = saved.tool_calls;
+        if !response_content.trim().is_empty() {
+            progress = response_content.clone();
         }
 
         log_task_message(ctx.app_handle, ctx.task.id, ctx.run_id, "tool_round", format!("第 {} 轮：{} 个工具调用", round, captured_tool_calls.len()));
@@ -601,9 +623,8 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
             let params_str = normalize_tool_arguments(&tc.fn_arguments);
             let params_json = serde_json::from_str::<serde_json::Value>(&params_str)
                 .unwrap_or_else(|_| serde_json::Value::String(params_str.clone()));
-            let response_message_id_opt = (response_message_id > 0).then_some(response_message_id);
             let (call_db_id, call_record_error) = match create_scheduled_tool_call_record(
-                ctx.app_handle, ctx.conversation_id, response_message_id_opt, &server_name, &tool_name, &params_str, &tc.call_id,
+                ctx.app_handle, ctx.conversation_id, Some(response_message_id), &server_name, &tool_name, &params_str, &tc.call_id,
             )
             .await
             {
@@ -622,13 +643,11 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
             });
         }
 
-        if response_message_id > 0 {
-            if let Ok(repo) = ctx.conversation_db.message_repo() {
-                if let Ok(Some(mut msg)) = repo.read(response_message_id) {
-                    msg.content = response_content.clone();
-                    msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
-                    let _ = repo.update(&msg);
-                }
+        if let Ok(repo) = ctx.conversation_db.message_repo() {
+            if let Ok(Some(mut msg)) = repo.read(response_message_id) {
+                msg.content = response_content.clone();
+                msg.tool_calls_json = serde_json::to_string(&captured_tool_calls).ok();
+                let _ = repo.update(&msg);
             }
         }
         messages.push(("response".to_string(), response_content.clone(), Vec::new()));
@@ -730,12 +749,10 @@ async fn run_task_agentic_loop(ctx: &AgenticLoopContext<'_>) -> AgenticLoopResul
             );
         }
 
-        if response_message_id > 0 {
-            if let Ok(repo) = ctx.conversation_db.message_repo() {
-                if let Ok(Some(mut msg)) = repo.read(response_message_id) {
-                    msg.finish_time = Some(Utc::now());
-                    let _ = repo.update(&msg);
-                }
+        if let Ok(repo) = ctx.conversation_db.message_repo() {
+            if let Ok(Some(mut msg)) = repo.read(response_message_id) {
+                msg.finish_time = Some(Utc::now());
+                let _ = repo.update(&msg);
             }
         }
         final_text.clear();
@@ -880,10 +897,34 @@ fn summary_of(text: Option<&str>) -> Option<String> {
 /// 投递并入库。返回更新后的连续失败次数。
 fn persist_scheduled_outcome(app_handle: &tauri::AppHandle, entry: &ScheduledOutcomeJournal) -> Result<i64, String> {
     let journal_error = write_outcome_journal(app_handle, entry).err();
-    let outcome = entry.outcome.clone().normalized();
     let db = ScheduledTaskDatabase::new(app_handle).map_err(|e| e.to_string())?;
     let task = db.read_task(entry.task_id).map_err(|e| e.to_string())?
         .ok_or_else(|| format!("定时任务 #{} 已删除，不再保存运行 {} 的结果", entry.task_id, entry.run_id))?;
+    let (failures, finish) = store_run_delivery(&db, entry, |content| delivery::deliver(app_handle, &task, content))
+        .map_err(|error| match journal_error {
+            Some(journal_error) => format!("SQLite: {error}; durable outbox also failed: {journal_error}; outcome retained only in memory"),
+            None => format!("SQLite: {error}; complete outcome retained in durable outbox"),
+        })?;
+    if let Some(error) = &finish.delivery_error {
+        log_task_message(app_handle, task.id, &entry.run_id, "delivery_error", error);
+    } else if let (Some(chat), Some(message)) = (finish.delivery_conversation_id, finish.delivered_message_id) {
+        log_task_message(app_handle, task.id, &entry.run_id, "delivered", format!("已发送到会话 #{chat}（消息 #{message}）"));
+    }
+    remove_outcome_journal(app_handle, &entry.run_id);
+    let _ = app_handle.emit(SCHEDULED_TASK_RUN_UPDATED_EVENT, ScheduledTaskRunUpdateEvent {
+        task_id: task.id,
+        run_id: entry.run_id.clone(),
+        status: finish.status.clone(),
+    });
+    let _ = app_handle.emit(SCHEDULED_TASK_CHANGED_EVENT, serde_json::json!({ "taskId": task.id }));
+    Ok(failures)
+}
+
+fn store_run_delivery(
+    db: &ScheduledTaskDatabase, entry: &ScheduledOutcomeJournal,
+    deliver: impl FnOnce(&DeliveryContent<'_>) -> Result<delivery::Delivered, String>,
+) -> Result<(i64, RunFinish), String> {
+    let outcome = entry.outcome.clone().normalized();
     let mut finish = RunFinish {
         status: outcome.status.clone(),
         notify: false,
@@ -895,7 +936,7 @@ fn persist_scheduled_outcome(app_handle: &tauri::AppHandle, entry: &ScheduledOut
         ..Default::default()
     };
     if outcome.status == RUN_DELIVERED {
-        let scheduled_for = db.read_run(&entry.run_id).ok().flatten().and_then(|run| run.scheduled_for);
+        let scheduled_for = db.read_run(&entry.run_id).map_err(|e| e.to_string())?.and_then(|run| run.scheduled_for);
         let content = DeliveryContent {
             run_id: &entry.run_id,
             scheduled_for,
@@ -905,40 +946,22 @@ fn persist_scheduled_outcome(app_handle: &tauri::AppHandle, entry: &ScheduledOut
             llm_model_id: outcome.llm_model_id,
             llm_model_name: outcome.llm_model_name.clone(),
         };
-        match delivery::deliver(app_handle, &task, &content) {
+        match deliver(&content) {
             Ok(delivered) => {
                 finish.notify = true;
                 finish.delivered_message_id = Some(delivered.message_id);
                 finish.delivery_conversation_id = Some(delivered.conversation_id);
-                log_task_message(app_handle, task.id, &entry.run_id, "delivered",
-                    format!("已发送到会话 #{}（消息 #{}）", delivered.conversation_id, delivered.message_id));
             }
             Err(error) => {
                 finish.status = RUN_FAILED.to_string();
                 finish.error_message = Some(format!("已完成，但发送给用户失败：{error}"));
-                finish.delivery_error = Some(error.clone());
-                log_task_message(app_handle, task.id, &entry.run_id, "delivery_error", error);
+                finish.delivery_error = Some(error);
             }
         }
     }
     let outcome_json = serde_json::to_string(&outcome).map_err(|e| e.to_string())?;
-    let failures = match db.save_run_outcome(&entry.run_id, &finish, &outcome_json) {
-        Ok(failures) => failures,
-        Err(error) => {
-            return Err(match journal_error {
-                Some(journal_error) => format!("SQLite: {error}; durable outbox also failed: {journal_error}; outcome retained only in memory"),
-                None => format!("SQLite: {error}; complete outcome retained in durable outbox"),
-            });
-        }
-    };
-    remove_outcome_journal(app_handle, &entry.run_id);
-    let _ = app_handle.emit(SCHEDULED_TASK_RUN_UPDATED_EVENT, ScheduledTaskRunUpdateEvent {
-        task_id: task.id,
-        run_id: entry.run_id.clone(),
-        status: finish.status.clone(),
-    });
-    let _ = app_handle.emit(SCHEDULED_TASK_CHANGED_EVENT, serde_json::json!({ "taskId": task.id }));
-    Ok(failures)
+    let failures = db.save_run_outcome(&entry.run_id, &finish, &outcome_json).map_err(|e| e.to_string())?;
+    Ok((failures, finish))
 }
 
 fn after_finish(app_handle: &tauri::AppHandle, task_id: i64, run_id: &str, failures: i64) {
@@ -1039,20 +1062,6 @@ fn cleanup_conversation(app_handle: &tauri::AppHandle, conversation_id: i64) -> 
             Ok(())
         })
         .map_err(|e| e.to_string())
-}
-
-/// 运行会话里最后一条完整的助手答复（不含工具调用），即这次运行的产出。
-fn final_response_message_id(db: &ConversationDatabase, conversation_id: i64) -> Option<i64> {
-    let conn = db.get_connection().ok()?;
-    conn.query_row(
-        "SELECT id FROM message WHERE conversation_id=?1 AND message_type IN ('response','assistant')
-           AND trim(content)!='' AND content NOT LIKE '%MCP_TOOL_CALL%' ORDER BY id DESC LIMIT 1",
-        [conversation_id],
-        |r| r.get(0),
-    )
-    .optional()
-    .ok()
-    .flatten()
 }
 
 /// 每个任务只保留最近若干个隐藏运行会话。
@@ -1405,9 +1414,9 @@ async fn execute_run_inner(
         .map_err(|e| RunError::Failed(e.to_string()))?
         .update(&conversation)
         .map_err(|e| RunError::Failed(format!("登记运行会话失败: {e}")))?;
-    if let Ok(db) = ScheduledTaskDatabase::new(app_handle) {
-        let _ = db.set_run_conversation(run_id, conversation_id);
-    }
+    ScheduledTaskDatabase::new(app_handle)
+        .and_then(|db| db.set_run_conversation(run_id, conversation_id))
+        .map_err(|e| RunError::Failed(format!("关联运行 {run_id} 与会话 {conversation_id} 失败：{e}")))?;
 
     // ── 6. 执行 ───────────────────────────────────────────────────────
     let loop_ctx = AgenticLoopContext {
@@ -1442,37 +1451,47 @@ async fn execute_run_inner(
     if !final_text.is_empty() {
         log_task_message(app_handle, task.id, run_id, "response", final_text.clone());
     }
-    let final_message_id = final_response_message_id(&conversation_db, conversation_id);
-    let base = ScheduledRunOutcome {
-        conversation_id: Some(conversation_id),
-        final_message_id,
-        llm_model_id: Some(model_detail.model.id),
-        llm_model_name: Some(model_detail.model.code.clone()),
-        ..ScheduledRunOutcome::failed("error", String::new(), None)
-    };
-    if let Some((end_reason, error)) = loop_status_failure(
-        &loop_result.status,
-        loop_result.rounds,
-        loop_result.tool_calls_success,
-        loop_result.tool_calls_failed,
-    ) {
-        let status = if end_reason == "cancelled" { RUN_CANCELLED } else { RUN_FAILED };
-        return Ok(ScheduledRunOutcome {
+    Ok(loop_result.into_outcome(conversation_id, model_detail.model.id, model_detail.model.code.clone(), &task.deliver_policy))
+}
+
+impl AgenticLoopResult {
+    fn into_outcome(self, conversation_id: i64, model_id: i64, model_name: String, policy: &str) -> ScheduledRunOutcome {
+        let final_text = self.final_text.trim().to_string();
+        let final_message_id = match self.status {
+            AgenticLoopStatus::Completed { message_id } => Some(message_id),
+            _ => None,
+        };
+        let base = ScheduledRunOutcome {
+            conversation_id: Some(conversation_id),
+            final_message_id,
+            llm_model_id: Some(model_id),
+            llm_model_name: Some(model_name),
+            ..ScheduledRunOutcome::failed("error", String::new(), None)
+        };
+        if let Some((end_reason, error)) = loop_status_failure(
+            &self.status,
+            self.rounds,
+            self.tool_calls_success,
+            self.tool_calls_failed,
+        ) {
+            let status = if end_reason == "cancelled" { RUN_CANCELLED } else { RUN_FAILED };
+            return ScheduledRunOutcome {
+                status: status.to_string(),
+                end_reason: end_reason.to_string(),
+                text: (!final_text.is_empty()).then_some(final_text),
+                error: Some(error),
+                ..base
+            };
+        }
+        let (status, end_reason) = classify_completion(&final_text, policy);
+        ScheduledRunOutcome {
             status: status.to_string(),
             end_reason: end_reason.to_string(),
+            error: (status == RUN_FAILED).then(|| "执行完成，但没有产出任何内容".to_string()),
             text: (!final_text.is_empty()).then_some(final_text),
-            error: Some(error),
             ..base
-        });
+        }
     }
-    let (status, end_reason) = classify_completion(&final_text, &task.deliver_policy);
-    Ok(ScheduledRunOutcome {
-        status: status.to_string(),
-        end_reason: end_reason.to_string(),
-        error: (status == RUN_FAILED).then(|| "执行完成，但没有产出任何内容".to_string()),
-        text: (!final_text.is_empty()).then_some(final_text),
-        ..base
-    })
 }
 
 const RUN_RESULT_SAVE_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -1699,3 +1718,7 @@ pub async fn list_scheduled_task_logs(
 #[cfg(test)]
 #[path = "scheduled_task_journal_tests.rs"]
 mod journal_tests;
+
+#[cfg(test)]
+#[path = "tests/scheduled_delivery_flow_tests.rs"]
+mod scheduled_delivery_flow_tests;

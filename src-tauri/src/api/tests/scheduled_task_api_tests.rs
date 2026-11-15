@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn test_loop_status_failure_maps_every_unfinished_reason() {
-        assert!(loop_status_failure(&AgenticLoopStatus::Completed, 3, 1, 0).is_none());
+        assert!(loop_status_failure(&AgenticLoopStatus::Completed { message_id: 1 }, 3, 1, 0).is_none());
         let (reason, msg) = loop_status_failure(&AgenticLoopStatus::Timeout, 4, 2, 1).unwrap();
         assert_eq!(reason, "timeout");
         assert!(msg.contains("超时") && msg.contains("无法撤回"));

@@ -790,10 +790,11 @@ impl ScheduledTaskDatabase {
     /// 运行开始时登记运行会话，界面可以在运行中打开查看过程。
     pub fn set_run_conversation(&self, run_id: &str, conversation_id: i64) -> Result<()> {
         self.with_write_lock(|| {
-            self.conn.execute(
+            let changed = self.conn.execute(
                 "UPDATE scheduled_task_run SET conversation_id = ?1 WHERE run_id = ?2",
                 params![conversation_id, run_id],
             )?;
+            if changed == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
             Ok(())
         })
     }
