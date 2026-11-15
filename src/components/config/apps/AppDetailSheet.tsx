@@ -260,7 +260,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
             })}</div>
         </section>}
         {app && <CatalogEndpoints entries={[{ name: app.name, description: app.connection.transport === 'http' ? app.connection.url : '本地程序' }]} />}
-        {pluginOverview && <AgentPluginsConfig key={JSON.stringify(pluginSource)} embedded hasConnection={!!connection || matching.length > 0} initialSource={pluginSource!} app={app}
+        {pluginOverview && <AgentPluginsConfig key={JSON.stringify(pluginSource)} embedded directoryCatalog={pluginCatalog} hasConnection={!!connection || matching.length > 0} initialSource={pluginSource!} app={app}
             onChanged={() => void refresh().catch(() => {})} />}
         {!pluginOverview && app?.skill_ids && app.skill_ids.length > 0 && <AppRelatedSkills key={app.id} ids={app.skill_ids} />}
         {app && <InfoList rows={appInfo(app)} />}

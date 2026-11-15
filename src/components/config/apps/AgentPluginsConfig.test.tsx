@@ -21,6 +21,14 @@ describe('AgentPluginsConfig', () => {
             throw new Error(`Unexpected ${command}`);
         });
     });
+    it('should show the localized directory introduction when an installed receipt contains the original description', async () => {
+        vi.mocked(invoke).mockImplementation(async command => command === 'list_agent_plugins' ? [{ preview }] : []);
+        render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()}
+            directoryCatalog={{ revision: preview.revision, entries: [{ source, name: 'Notion', description: '管理 Notion 文档', category: '效率' }] }} />);
+        expect(await screen.findByText('管理 Notion 文档')).toBeInTheDocument();
+        expect(screen.queryByText(preview.description)).not.toBeInTheDocument();
+    });
+
     it('should hide empty skill sections and installation when a catalog application has no skills', async () => {
         vi.mocked(invoke).mockImplementation(async command => command === 'inspect_agent_plugin'
             ? { ...preview, skills: [], notices: ['连接需授权'] } : []);

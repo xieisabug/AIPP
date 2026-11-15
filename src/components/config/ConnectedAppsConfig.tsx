@@ -301,7 +301,7 @@ export default function ConnectedAppsConfig() {
             onOpenPluginManager={source => { setPluginSource(source); setPluginsOpen(true); }} />
         <MCPServerDialog isOpen={configOpen} initialConfig={initialConfig} onClose={() => setConfigOpen(false)} onSubmit={() => { setConfigOpen(false); setPage('installed'); setCategory(ALL); void reload(); }} />
         <JSONImportDialog isOpen={importOpen} onClose={() => setImportOpen(false)} onImport={configs => void importConfigs(configs)} />
-        <Sheet open={pluginsOpen} onOpenChange={setPluginsOpen}><SheetContent className="w-full overflow-y-auto sm:max-w-3xl"><SheetHeader><SheetTitle>GitHub 插件</SheetTitle><SheetDescription>高级来源管理；应用详情与安装请从应用目录进入。</SheetDescription></SheetHeader>{pluginsOpen && <div className="px-5 pb-8"><AgentPluginsConfig initialSource={pluginSource} onChanged={() => void reload()} /></div>}</SheetContent></Sheet>
+        <Sheet open={pluginsOpen} onOpenChange={setPluginsOpen}><SheetContent className="w-full overflow-y-auto sm:max-w-3xl"><SheetHeader><SheetTitle>GitHub 插件</SheetTitle><SheetDescription>高级来源管理；应用详情与安装请从应用目录进入。</SheetDescription></SheetHeader>{pluginsOpen && <div className="px-5 pb-8"><AgentPluginsConfig directoryCatalog={pluginCatalog} initialSource={pluginSource} onChanged={() => void reload()} /></div>}</SheetContent></Sheet>
         <BuiltinToolDialog isOpen={!!builtinId} initialTemplateId={builtinId} onClose={() => setBuiltinId(undefined)} onSubmit={() => { setBuiltinId(undefined); void reload(); }} />
     </div>;
 }

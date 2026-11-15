@@ -23,7 +23,7 @@ interface Receipt { preview: Preview; installed_at: string }
 export interface PluginCatalog { revision: string; entries: { name: string; description: string; category: string; source: PluginSource; icon?: string | null; icon_dark?: string | null; icon_small?: string | null }[] }
 const notion: PluginSource = { repo: 'openai/plugins', git_ref: 'main', path: 'plugins/notion' };
 
-export default function AgentPluginsConfig({ initialSource, onChanged, embedded = false, app, onConnect, hasConnection = false }: { initialSource?: PluginSource; onChanged: () => void; embedded?: boolean; app?: AppDefinition; onConnect?: () => void; hasConnection?: boolean }) {
+export default function AgentPluginsConfig({ initialSource, directoryCatalog, onChanged, embedded = false, app, onConnect, hasConnection = false }: { initialSource?: PluginSource; directoryCatalog?: PluginCatalog; onChanged: () => void; embedded?: boolean; app?: AppDefinition; onConnect?: () => void; hasConnection?: boolean }) {
     const [managing, setManaging] = useState(false);
     const [catalog, setCatalog] = useState<PluginCatalog>();
     const [installed, setInstalled] = useState<Receipt[]>([]);
@@ -118,6 +118,10 @@ export default function AgentPluginsConfig({ initialSource, onChanged, embedded 
         return () => { alive = false; };
     }, [current?.preview.key]);
 
+    const description = (directoryCatalog ?? catalog)?.entries?.find(({ source }) =>
+        source.repo === preview?.source.repo && source.git_ref === preview.source.git_ref && source.path === preview.source.path
+    )?.description || preview?.description;
+
     const uninstallConfirmation = current && uninstallRequested && <section role="region" aria-label="确认卸载插件" className="rounded-lg border border-destructive/30 p-3"><p className="font-medium">卸载 {preview.name}？</p><p className="my-2 text-sm text-muted-foreground">删除插件文件、配套技能以及由插件创建的连接和凭据。复用的已有连接会保留。有本地修改时不会删除。</p><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revokeOnUninstall} onChange={e => setRevokeOnUninstall(e.target.checked)} />同时撤销服务商授权（网络或服务商不可用时可取消；仍会删除本地凭据）</label><div className="mt-3 flex gap-2"><Button variant="destructive" disabled={!!busy} onClick={() => void run('正在卸载插件…', async () => { await invoke('uninstall_agent_plugin', { key: preview.key, revokeRemote: revokeOnUninstall }); if (!embedded) setPreview(undefined); setManaging(false); setDefinition(undefined); setStdio(undefined); setEnvironment('{}'); setServerId(undefined); setTools([]); setUninstallRequested(false); setShowInstalled(true); onChanged(); await reload(); })}>确认卸载</Button><Button variant="outline" disabled={!!busy} onClick={() => setUninstallRequested(false)}>取消</Button></div></section>;
 
     const management = <div className="space-y-5 py-4">
@@ -126,7 +130,7 @@ export default function AgentPluginsConfig({ initialSource, onChanged, embedded 
         {busy && <p role="status" className="text-sm text-muted-foreground">{busy}</p>}
         {preview ? <>
             {!embedded && <Button variant="ghost" disabled={!!busy} onClick={() => { setPreview(undefined); setDefinition(undefined); setServerId(undefined); }}><ArrowLeft className="mr-2 h-4 w-4" />返回插件目录</Button>}
-            <div className="space-y-2"><div className="flex items-center gap-3">{preview.icon && <img src={preview.icon} alt="" className="h-12 w-12 shrink-0 rounded-xl object-cover" />}<h3 className="text-xl font-semibold">{preview.name}</h3></div><p className="text-sm text-muted-foreground">{preview.description}</p>
+            <div className="space-y-2"><div className="flex items-center gap-3">{preview.icon && <img src={preview.icon} alt="" className="h-12 w-12 shrink-0 rounded-xl object-cover" />}<h3 className="text-xl font-semibold">{preview.name}</h3></div><p className="text-sm text-muted-foreground">{description}</p>
                 <div className="flex flex-wrap gap-2"><Badge variant="outline">{preview.publisher || preview.source.repo}</Badge><Badge variant="outline">版本 {preview.version}</Badge><Badge variant="outline">{current ? '已安装' : '未安装'}</Badge></div>
                 <p className="break-all text-xs text-muted-foreground">来源 {preview.source.repo}/{preview.source.path} · 提交 {preview.revision.slice(0, 12)}</p>
                 <Button variant="link" className="px-0" onClick={() => void openUrl(`https://github.com/${preview.source.repo}/tree/${preview.revision}/${preview.source.path}`).catch(e => setError(String(e)))}>查看源文件<ExternalLink className="ml-2 h-4 w-4" /></Button>
@@ -249,7 +253,7 @@ export default function AgentPluginsConfig({ initialSource, onChanged, embedded 
         </header>
         {error && <div role="alert" className="space-y-2 rounded-lg border border-destructive/30 p-3 text-sm text-destructive"><p>{error}</p><Button variant="outline" size="sm" disabled={!!busy} onClick={() => initialSource && void inspect(initialSource)}>重试加载详情</Button></div>}
         {busy && <p role="status" className="text-sm text-muted-foreground">{busy}</p>}
-        <p className="text-sm leading-7">{preview?.description}</p>
+        <p className="text-sm leading-7">{description}</p>
         {!preview && !error && <div aria-label="正在加载应用详情" className="space-y-6 animate-pulse"><div className="h-20 rounded-lg bg-muted" /><div className="h-48 rounded-lg bg-muted" /></div>}
         {preview && <>
             <CatalogEndpoints entries={preview.servers.map(server => ({
