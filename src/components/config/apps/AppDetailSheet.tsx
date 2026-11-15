@@ -157,7 +157,7 @@ export default function AppDetailSheet({ selection, onSelect, apps, servers, con
         : server?.is_builtin ? '内置工具 · AIPP'
             : server ? `自定义 MCP · ${server.transport_type}`
                 : app ? [app.publisher, app.category, app.version && `版本 ${app.version}`].filter(Boolean).join(' · ')
-                    : 'GitHub 插件';
+                    : '应用';
 
     const busyIcon = (label: string) => busy === label ? <Loader2 className="h-4 w-4 animate-spin" /> : null;
     const notice = (() => {

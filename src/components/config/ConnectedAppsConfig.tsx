@@ -164,7 +164,7 @@ export default function ConnectedAppsConfig() {
         const status = appStatus(card);
         return <AppCard key={card.id} name={card.name} description={card.description} meta={card.publisher}
             icon={<AppIcon icon={card.icon ?? undefined} official={card}/>} status={status}
-            idle={card.kind==='app'?'未连接':'GitHub 插件'} action={status?'管理':card.kind==='app'?'连接':'查看'} onClick={()=>void openCard(card)} />;
+            idle={card.kind==='app'?'未连接':'应用'} action={status?'管理':card.kind==='app'?'连接':'查看'} onClick={()=>void openCard(card)} />;
     })}</div>;
     const catalogPage = <div className="space-y-8">
         {category!==ALL && <Button variant="ghost" onClick={()=>setCategory(ALL)}><ArrowLeft/>返回应用目录</Button>}

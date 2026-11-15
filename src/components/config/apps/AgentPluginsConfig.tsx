@@ -5,6 +5,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { Download, RefreshCw, ArrowLeft, Package, ExternalLink, Plus, MoreHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { AppConnection, AppDefinition, connectionStatus } from '@/data/ConnectedApp';
@@ -122,7 +123,43 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
         source.repo === preview?.source.repo && source.git_ref === preview.source.git_ref && source.path === preview.source.path
     )?.description || preview?.description;
 
-    const uninstallConfirmation = current && uninstallRequested && <section role="region" aria-label="确认卸载插件" className="rounded-lg border border-destructive/30 p-3"><p className="font-medium">卸载 {preview.name}？</p><p className="my-2 text-sm text-muted-foreground">删除插件文件、配套技能以及由插件创建的连接和凭据。复用的已有连接会保留。有本地修改时不会删除。</p><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revokeOnUninstall} onChange={e => setRevokeOnUninstall(e.target.checked)} />同时撤销服务商授权（网络或服务商不可用时可取消；仍会删除本地凭据）</label><div className="mt-3 flex gap-2"><Button variant="destructive" disabled={!!busy} onClick={() => void run('正在卸载插件…', async () => { await invoke('uninstall_agent_plugin', { key: preview.key, revokeRemote: revokeOnUninstall }); if (!embedded) setPreview(undefined); setManaging(false); setDefinition(undefined); setStdio(undefined); setEnvironment('{}'); setServerId(undefined); setTools([]); setUninstallRequested(false); setShowInstalled(true); onChanged(); await reload(); })}>确认卸载</Button><Button variant="outline" disabled={!!busy} onClick={() => setUninstallRequested(false)}>取消</Button></div></section>;
+    const requestUninstall = () => {
+        setError('');
+        setRevokeOnUninstall(true);
+        setUninstallRequested(true);
+    };
+    const uninstallConfirmation = current && <AlertDialog open={uninstallRequested} onOpenChange={open => {
+        if (!busy) setUninstallRequested(open);
+    }}>
+        <AlertDialogContent>
+            <AlertDialogHeader>
+                <AlertDialogTitle>卸载「{preview.name}」？</AlertDialogTitle>
+                <AlertDialogDescription>将删除应用文件、技能，以及此应用创建的连接和凭据。复用的已有连接会保留。有本地修改时会中止卸载。</AlertDialogDescription>
+            </AlertDialogHeader>
+            <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={revokeOnUninstall} disabled={!!busy} onChange={e => setRevokeOnUninstall(e.target.checked)} />
+                同时撤销服务商授权
+            </label>
+            {localError && <p role="alert" className="break-words text-sm text-destructive">{localError}</p>}
+            <AlertDialogFooter>
+                <AlertDialogCancel disabled={!!busy}>取消</AlertDialogCancel>
+                <Button variant="destructive" disabled={!!busy} onClick={() => void run('正在卸载…', async () => {
+                    await invoke('uninstall_agent_plugin', { key: preview.key, revokeRemote: revokeOnUninstall });
+                    if (!embedded) setPreview(undefined);
+                    setManaging(false);
+                    setDefinition(undefined);
+                    setStdio(undefined);
+                    setEnvironment('{}');
+                    setServerId(undefined);
+                    setTools([]);
+                    setUninstallRequested(false);
+                    setShowInstalled(true);
+                    onChanged();
+                    await reload();
+                })}>{busy || '确认卸载'}</Button>
+            </AlertDialogFooter>
+        </AlertDialogContent>
+    </AlertDialog>;
 
     const connectionPanel = preview && <section className="space-y-3"><h4 className="font-medium">{embedded ? '应用' : '连接器'} · {preview.servers.length}</h4>
                 <p className="text-sm text-muted-foreground">{embedded ? '完成连接后会自动检测可用工具。' : '仓库通常只声明连接器，没有实际工具清单。连接后检测工具，未检测不表示没有工具。'}</p>
@@ -172,7 +209,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
                     await reload(); onChanged(); setPreview({ ...preview, installed_revision: preview.revision });
                 })}><Download className="mr-2 h-4 w-4" />{current ? current.preview.digest === preview.digest ? '已是此版本' : '更新到预览版本' : '安装插件与技能'}</Button>
                 {current && <Button variant="outline" disabled={!!busy} onClick={() => void inspect(preview.source)}><RefreshCw className="mr-2 h-4 w-4" />检查更新</Button>}
-                {current && <Button variant="destructive" disabled={!!busy} onClick={() => { setUninstallRequested(true); setRevokeOnUninstall(true); }}>卸载插件</Button>}
+                {current && <Button variant="destructive" disabled={!!busy} onClick={requestUninstall}>卸载插件</Button>}
                 {current && <Button variant="outline" disabled={!!busy} onClick={() => void run('正在回退…', async () => { await invoke('rollback_agent_plugin', { key: preview.key }); await reload(); onChanged(); await inspect(preview.source); })}>回退上一版本</Button>}
             </div>
             {current && current.preview.digest !== preview.digest && <div className="rounded-lg border p-3 text-sm">已安装 {current.preview.version}（{current.preview.revision.slice(0, 12)}）→ {preview.version}（{preview.revision.slice(0, 12)}）。
@@ -227,7 +264,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
                         {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8" aria-label="更多插件操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                                 <DropdownMenuItem onSelect={() => void inspect(preview.source)}>检查更新</DropdownMenuItem>
-                                <DropdownMenuItem className="text-destructive" onSelect={() => { setUninstallRequested(true); setRevokeOnUninstall(true); }}>卸载插件</DropdownMenuItem>
+                                <DropdownMenuItem className="text-destructive" onSelect={requestUninstall}>卸载应用</DropdownMenuItem>
                             </DropdownMenuContent></DropdownMenu>}
                     </div>
                 </div>
@@ -254,7 +291,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
     return <div className="space-y-9 py-2" data-testid="app-plugin-overview">
         <header className="flex flex-wrap items-center justify-end gap-4">
             <div className="flex items-center gap-2">
-                {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多插件操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={() => { setUninstallRequested(true); setRevokeOnUninstall(true); }}>卸载插件</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+                {current && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多插件操作" disabled={!!busy}><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem className="text-destructive" onSelect={requestUninstall}>卸载应用</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
                 <Button disabled={!!busy || !preview || (!current && preview.locally_modified)} onClick={() => {
                     if (current) { if (onConnect) onConnect(); else setManaging(true); return; }
                     void run('正在安装插件…', async () => {

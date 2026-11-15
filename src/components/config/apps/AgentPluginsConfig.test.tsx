@@ -115,7 +115,11 @@ describe('AgentPluginsConfig', () => {
         });
         render(<AgentPluginsConfig initialSource={source} onChanged={onChanged} />);
         fireEvent.click(await screen.findByRole('button', { name: '卸载插件' }));
+        expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: '取消' }));
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
         expect(invoke).not.toHaveBeenCalledWith('uninstall_agent_plugin', expect.anything());
+        fireEvent.click(screen.getByRole('button', { name: '卸载插件' }));
         fireEvent.click(screen.getByRole('button', { name: '确认卸载' }));
         await screen.findByRole('button', { name: '已安装 0' });
         expect(invoke).toHaveBeenCalledWith('uninstall_agent_plugin', { key: 'abc', revokeRemote: true });
@@ -132,7 +136,7 @@ describe('AgentPluginsConfig', () => {
         fireEvent.click(await screen.findByRole('button', { name: '卸载插件' }));
         fireEvent.click(screen.getByRole('button', { name: '确认卸载' }));
         expect(await screen.findByRole('alert')).toHaveTextContent('服务商撤销未完成');
-        expect(screen.getByRole('button', { name: '卸载插件' })).toBeInTheDocument();
+        expect(screen.getByRole('alertdialog')).toBeInTheDocument();
         fireEvent.click(screen.getByRole('checkbox', { name: /同时撤销服务商授权/ }));
         fireEvent.click(screen.getByRole('button', { name: '确认卸载' }));
         await waitFor(() => expect(invoke).toHaveBeenCalledWith('uninstall_agent_plugin', { key: 'abc', revokeRemote: false }));
@@ -157,7 +161,7 @@ describe('AgentPluginsConfig', () => {
         expect(invoke).toHaveBeenCalledWith('install_agent_plugin',{source,revision:preview.revision,digest:preview.digest});
         await waitFor(() => expect(screen.getByRole('button',{name:'更多插件操作'})).toBeEnabled());
         await userEvent.click(screen.getByRole('button',{name:'更多插件操作'}));
-        await userEvent.click(screen.getByRole('menuitem',{name:'卸载插件'}));
+        await userEvent.click(screen.getByRole('menuitem',{name:'卸载应用'}));
         fireEvent.click(await screen.findByRole('button',{name:'确认卸载'}));
         expect(await screen.findByRole('button',{name:'安装插件'})).toBeInTheDocument();
         expect(screen.queryByRole('textbox',{name:'GitHub 仓库'})).not.toBeInTheDocument();
