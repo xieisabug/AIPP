@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -8,12 +8,14 @@ from app.auth import AuthContext, ensure_device, require_auth, require_device_id
 from app.db import get_db
 from app.models import SyncChange
 from app.schemas import PullChange, PullResponse
+from app.services.provider_settings import CAPABILITY_HEADER, UPGRADE_REQUIRED, requires_ref_reader
 
 router = APIRouter(prefix="/v1/sync", tags=["sync"])
 
 
 @router.get("/pull", response_model=PullResponse)
 def pull_changes(
+    request: Request,
     cursor: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=1000),
     auth: AuthContext = Depends(require_auth),
@@ -32,6 +34,10 @@ def pull_changes(
     )
     has_more = len(rows) > limit
     rows = rows[:limit]
+    if request.headers.get(CAPABILITY_HEADER) != "1" and any(
+        requires_ref_reader(row.object_type, row.payload_json) for row in rows
+    ):
+        raise HTTPException(status_code=409, detail=UPGRADE_REQUIRED)
     next_cursor = rows[-1].seq if rows else cursor
     db.commit()
 

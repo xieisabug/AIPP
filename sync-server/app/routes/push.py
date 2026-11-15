@@ -15,6 +15,7 @@ from app.models import SyncChange, SyncObject
 from app.schemas import AcceptedEvent, ConflictEvent, PushEvent, PushRequest, PushResponse, RejectedEvent
 from app.services.merge import process_push_event, replay_existing_change
 from app.services.notify import NotifyHub
+from app.services.provider_settings import CAPABILITY_HEADER, UPGRADE_REQUIRED, requires_ref_reader
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,10 @@ def push_events(
         if isinstance(result, AcceptedEvent):
             accepted.append(result)
         elif isinstance(result, ConflictEvent):
-            conflicts.append(result)
+            if http_request.headers.get(CAPABILITY_HEADER) != "1" and requires_ref_reader(result.object_type, result.server_payload):
+                rejected.append(RejectedEvent(event_id=result.event_id, reason=UPGRADE_REQUIRED))
+            else:
+                conflicts.append(result)
         else:
             rejected.append(result)
 

@@ -1999,7 +1999,10 @@ fn update_dead_letter_failure(conn: &Connection, id: i64, error: &str) -> Result
 fn sync_http_client() -> Result<reqwest::Client, String> {
     static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-aipp-provider-refs", reqwest::header::HeaderValue::from_static("1"));
         reqwest::Client::builder()
+            .default_headers(headers)
             .no_proxy()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
             .build()
@@ -2355,6 +2358,25 @@ fn enqueue_delete_event(
     base_version: i64,
     device_id: &str,
 ) -> Result<bool, String> {
+    let mut base_version = base_version;
+    if matches!(spec.object_type, "system.feature_config" | "assistant.model_config") {
+        conn.execute("DELETE FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+            AND status='failed' AND outcome_known=1 AND last_error='provider_sync_id_required'",
+            params![spec.object_type, object_id]).map_err(|e| e.to_string())?;
+        let unsent_base: Option<i64> = conn.query_row("SELECT MAX(base_version) FROM sync_outbox
+            WHERE object_type=?1 AND object_id=?2 AND operation='upsert' AND sent_once=0",
+            params![spec.object_type, object_id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        base_version = base_version.max(unsent_base.unwrap_or(0));
+        let parked: Option<i64> = conn.query_row("DELETE FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+            AND provider_conflict_version IS NOT NULL RETURNING provider_conflict_version",
+            params![spec.object_type, object_id], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
+        if let Some(version) = parked {
+            base_version = base_version.max(version);
+            conn.execute("UPDATE sync_outbox SET base_version=MAX(COALESCE(base_version,0),?3)
+                WHERE object_type=?1 AND object_id=?2 AND operation='delete' AND sent_once=0",
+                params![spec.object_type, object_id, base_version]).map_err(|e| e.to_string())?;
+        }
+    }
     if spec.object_type == personal_vault::OBJECT_TYPE {
         // Explicitly rejected uploads can no longer block a withdrawal. Also discard stale scans
         // queued after an existing delete. Unknown outcomes must keep their immutable retry.
@@ -3028,6 +3050,11 @@ fn resolve_remote_foreign_keys(
 
 /// Known settings that embed a provider row ID in a string rather than a SQL FK.
 fn embedded_provider_value(object_type: &str, fields: &Map<String, JsonValue>) -> Option<(String, i64)> {
+    let (prefix, id) = embedded_provider_parts(object_type, fields)?;
+    Some((prefix, id.parse::<i64>().ok().filter(|id| *id > 0)?))
+}
+
+fn embedded_provider_parts<'a>(object_type: &str, fields: &'a Map<String, JsonValue>) -> Option<(String, &'a str)> {
     let value = fields.get("value")?.as_str()?.trim();
     let combined = match object_type {
         "assistant.model_config" if fields.get("name")?.as_str()? == "acp_provider" => false,
@@ -3054,7 +3081,6 @@ fn embedded_provider_value(object_type: &str, fields: &Map<String, JsonValue>) -
     } else {
         (String::new(), value)
     };
-    let id = id.parse::<i64>().ok().filter(|id| *id > 0)?;
     Some((prefix, id))
 }
 
@@ -3064,9 +3090,12 @@ fn resolve_embedded_provider_value(
     refs: &Map<String, JsonValue>,
     mut resolve: impl FnMut(&str, &str) -> Result<Option<i64>, String>,
 ) -> Result<(), String> {
-    if let Some((prefix, _)) = embedded_provider_value(object_type, fields) {
-        let remote_id = refs.get("value_provider_id").and_then(JsonValue::as_str)
-            .ok_or_else(|| format!("远端变更缺少外键引用: {object_type}.value_provider_id（配置包含来源设备的本地供应商 id，需来源设备升级后重新同步）"))?;
+    if let Some((prefix, id)) = embedded_provider_parts(object_type, fields) {
+        if id != "@ref" && !id.parse::<i64>().is_ok_and(|id| id > 0) { return Ok(()); }
+        let remote_id = refs.get("value_provider_id").and_then(JsonValue::as_str).ok_or_else(|| {
+            let key = fields.get("key").or_else(|| fields.get("name")).and_then(JsonValue::as_str).unwrap_or("value");
+            format!("远端变更缺少外键引用: {object_type}.value_provider_id（设置 {key} 缺少供应商全局 ID，无法确定本机供应商）")
+        })?;
         let local_id = resolve("llm.provider", remote_id)?
             .ok_or_else(|| format!("缺少同步依赖: {object_type}.value_provider_id -> {remote_id}"))?;
         fields.insert("value".into(), json!(format!("{prefix}{local_id}")));
@@ -3087,6 +3116,50 @@ fn enqueue_snapshot_if_changed(
         )
         .optional()
         .map_err(|e| e.to_string())?;
+    let mut base_version = shadow.as_ref().map(|(version, _, _)| *version);
+    if matches!(snapshot.object_type.as_str(), "system.feature_config" | "assistant.model_config") {
+        // This server rejection confirms the old event never wrote anything. A
+        // freshly scanned payload with references (or a cleared selection) can replace it.
+        conn.execute("DELETE FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+            AND status='failed' AND outcome_known=1 AND last_error='provider_sync_id_required'
+            AND payload_json!=?3", params![snapshot.object_type, snapshot.object_id, snapshot.payload_json])
+            .map_err(|e| e.to_string())?;
+        let unsent_base: Option<i64> = conn.query_row(
+            "SELECT MAX(base_version) FROM sync_outbox WHERE object_type=?1 AND object_id=?2
+             AND operation='upsert' AND sent_once=0",
+            params![snapshot.object_type, snapshot.object_id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        base_version = base_version.max(unsent_base);
+        let parked = conn.query_row(
+            "SELECT id, provider_conflict_version, payload_json FROM sync_outbox
+             WHERE object_type=?1 AND object_id=?2 AND provider_conflict_version IS NOT NULL",
+            params![snapshot.object_type, snapshot.object_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        if let Some((id, version, previous)) = parked {
+            if shadow.as_ref().map_or(0, |row| row.0) < version {
+                let before: JsonValue = serde_json::from_str(&previous).map_err(|e| e.to_string())?;
+                let after: JsonValue = serde_json::from_str(&snapshot.payload_json).map_err(|e| e.to_string())?;
+                let selection_hash = |payload: &JsonValue| {
+                    let mut refs = Map::new();
+                    if let Some(id) = payload["refs"].get("value_provider_id") {
+                        refs.insert("value_provider_id".into(), id.clone());
+                    }
+                    sync_payload_hash(conn, Some(&json!({"fields":{"value":payload["fields"]["value"]},"refs":refs})))
+                };
+                let enriched_same_value = before["refs"]["value_provider_id"].is_null()
+                    && before["fields"]["value"] == after["fields"]["value"];
+                if enriched_same_value || selection_hash(&before)? == selection_hash(&after)? {
+                    return Ok(false);
+                }
+                base_version = base_version.max(Some(version));
+            }
+            // The scan transaction rebuilds unsent successors from the live selection.
+            conn.execute("DELETE FROM sync_outbox WHERE id=?1 OR
+                (object_type=?2 AND object_id=?3 AND operation='upsert' AND sent_once=0)",
+                params![id, snapshot.object_type, snapshot.object_id]).map_err(|e| e.to_string())?;
+        }
+    }
     // Only coalesce events that have never been sent. Retried event identities
     // and payloads must remain immutable for server-side idempotency.
     conn.execute(
@@ -3099,7 +3172,7 @@ fn enqueue_snapshot_if_changed(
         "SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE object_type = ?1 AND object_id = ?2 AND status IN ('pending', 'pushing', 'failed'))",
         params![snapshot.object_type, snapshot.object_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    if !outstanding && shadow.as_ref().is_some_and(|(_, hash, deleted)| deleted.is_none() && hash == &snapshot.payload_hash) {
+    if !outstanding && shadow.as_ref().is_some_and(|(version, hash, deleted)| Some(*version) == base_version && deleted.is_none() && hash == &snapshot.payload_hash) {
         return Ok(false);
     }
 
@@ -3121,7 +3194,6 @@ fn enqueue_snapshot_if_changed(
     // 新 payload 入队前清理同对象的 failed 旧事件，避免旧 payload 之后被重试覆盖新数据
     drop_failed_upserts_for_object(conn, &snapshot.object_type, &snapshot.object_id)?;
 
-    let base_version = shadow.map(|(version, _, _)| version);
     let now = now_string();
     conn.execute(
         "INSERT INTO sync_outbox
@@ -4665,7 +4737,7 @@ fn reset_failed_events_inner(conn: &Connection) -> Result<usize, String> {
              status = 'pending',
              last_error = NULL,
              next_retry_at = NULL
-         WHERE status = 'failed'",
+         WHERE status = 'failed' AND provider_conflict_version IS NULL",
         [],
     )
     .map_err(|e| e.to_string())
@@ -4878,6 +4950,11 @@ async fn handle_push_response(
                 Err(err) => {
                     // 落地失败（如依赖未就绪）：标 failed 等待重试，保留已发送事件的基线。
                     // 服务器变更后续也会经 pull 正常下发。
+                    if let Some(message) = park_legacy_provider_conflict(&conn, *id, event, &pseudo_change, &err)? {
+                        latest_failure = Some(message);
+                        conflict_failures += 1;
+                        continue;
+                    }
                     let message = format!("冲突落地失败: {err}");
                     latest_failure = Some(message.clone());
                     conflict_failures += 1;
@@ -4901,6 +4978,24 @@ async fn handle_push_response(
         (Err(error), _) | (_, Err(error)) => Err(error),
         (Ok(count), Ok(())) => Ok(count),
     }
+}
+
+fn park_legacy_provider_conflict(
+    conn: &Connection, id: i64, event: &PushEvent, remote: &PullChange, error: &str,
+) -> Result<Option<String>, String> {
+    let Some(fields) = remote.payload.as_ref().and_then(|p| p["fields"].as_object()) else { return Ok(None) };
+    if event.operation != "upsert" || remote.operation != "upsert" ||
+        !error.starts_with(&format!("远端变更缺少外键引用: {}.value_provider_id", event.object_type)) ||
+        embedded_provider_value(&event.object_type, fields).is_none() {
+        return Ok(None);
+    }
+    let key = fields.get("key").or_else(|| fields.get("name"))
+        .and_then(JsonValue::as_str).unwrap_or(&event.object_type);
+    let message = format!("模型设置 {key} 的远端版本 {} 缺少可确认的供应商，请更改模型选择或清空后保存。", remote.version);
+    conn.execute("UPDATE sync_outbox SET status='failed', outcome_known=1, last_error=?2,
+        next_retry_at=NULL, provider_conflict_version=?3 WHERE id=?1",
+        params![id, message, remote.version]).map_err(|e| e.to_string())?;
+    Ok(Some(message))
 }
 
 /// Device-local FK numbers are transport hints only. refs carry identity.
@@ -5076,6 +5171,7 @@ const SYNC_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sync_object_map (
             retry_count INTEGER NOT NULL DEFAULT 0,
             sent_once INTEGER NOT NULL DEFAULT 0,
             outcome_known INTEGER NOT NULL DEFAULT 0,
+            provider_conflict_version INTEGER,
             last_error TEXT,
             next_retry_at INTEGER
         );
@@ -5151,6 +5247,7 @@ fn ensure_sync_db(app_handle: &AppHandle) -> Result<(), String> {
 
 /// CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，这里做幂等的列迁移。
 fn ensure_sync_db_columns(conn: &Connection) -> Result<(), String> {
+    ensure_column(conn, "sync_outbox", "provider_conflict_version", "ALTER TABLE sync_outbox ADD COLUMN provider_conflict_version INTEGER")?;
     ensure_column(conn, "sync_shadow", "server_seq", "ALTER TABLE sync_shadow ADD COLUMN server_seq INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "sync_outbox", "next_retry_at", "ALTER TABLE sync_outbox ADD COLUMN next_retry_at INTEGER")?;
     ensure_column(conn, "sync_outbox", "outcome_known", "ALTER TABLE sync_outbox ADD COLUMN outcome_known INTEGER NOT NULL DEFAULT 0")?;
@@ -5216,7 +5313,7 @@ fn clear_sync_state(conn: &Connection) -> Result<(), String> {
          DELETE FROM sync_cursor;
          DELETE FROM sync_dead_letter;
          UPDATE sync_outbox SET status = 'pending', next_retry_at = NULL
-             WHERE status IN ('pushing', 'failed');
+             WHERE status IN ('pushing', 'failed') AND provider_conflict_version IS NULL;
          RELEASE reset_sync_transport;",
     )
     .map_err(|e| e.to_string())?;

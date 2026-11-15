@@ -237,6 +237,71 @@ fn test_remote_missing_soft_reference_does_not_echo_after_pull() {
 }
 
 #[test]
+fn test_rejected_legacy_provider_payload_releases_valid_successor() {
+    let sync = sync_db();
+    let mut payload = json!({"fields":{"feature_code":"experimental","key":"butler_model_id","value":"model%%7"},"refs":{}});
+    let snapshot = |p: &JsonValue| LocalObjectSnapshot {
+        object_type:"system.feature_config".into(), object_id:"butler".into(),
+        payload_json:p.to_string(), payload_hash:sync_payload_hash(&sync, Some(p)).unwrap(),
+    };
+    enqueue_snapshot_if_changed(&sync, &snapshot(&payload), "source").unwrap();
+    sync.execute("UPDATE sync_outbox SET sent_once=1", []).unwrap();
+    payload["refs"]["value_provider_id"] = json!("global-provider");
+    enqueue_snapshot_if_changed(&sync, &snapshot(&payload), "source").unwrap();
+    sync.execute("UPDATE sync_outbox SET status='failed', outcome_known=1,
+        last_error='provider_sync_id_required' WHERE sent_once=1", []).unwrap();
+    enqueue_snapshot_if_changed(&sync, &snapshot(&payload), "source").unwrap();
+    let events = load_pending_outbox_from_db(&sync, 10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].1.payload.as_ref(), Some(&payload));
+}
+
+#[test]
+fn test_legacy_provider_conflict_waits_for_changed_selection() {
+    let sync = sync_db();
+    let kind = "system.feature_config";
+    let make = |value: &str| {
+        let payload = json!({"fields":{"feature_code":"experimental","key":"butler_helper_model_id","value":value},
+            "refs":{"value_provider_id":"local-provider"}});
+        LocalObjectSnapshot { object_type:kind.into(), object_id:"helper".into(), payload_json:payload.to_string(),
+            payload_hash:sync_payload_hash(&sync, Some(&payload)).unwrap() }
+    };
+    enqueue_snapshot_if_changed(&sync, &make("local%%41"), "reader").unwrap();
+    let (id, event) = load_pending_outbox_from_db(&sync, 1).unwrap().pop().unwrap();
+    mark_events_pushing_in_db(&sync, &[(id, event.clone())]).unwrap();
+    let remote = change(kind, "helper", 4, json!({"fields":{"feature_code":"experimental",
+        "key":"butler_helper_model_id","value":"remote%%52"},"refs":{}}));
+    assert!(park_legacy_provider_conflict(&sync, id, &event, &remote,
+        "远端变更缺少外键引用: system.feature_config.value_provider_id").unwrap().is_some());
+    assert_eq!(reset_failed_events_inner(&sync).unwrap(), 0);
+    assert!(!enqueue_snapshot_if_changed(&sync, &make("local%%99"), "reader").unwrap());
+    assert!(load_pending_outbox_from_db(&sync, 1).unwrap().is_empty());
+    assert!(enqueue_snapshot_if_changed(&sync, &make("selected%%41"), "reader").unwrap());
+    assert!(enqueue_snapshot_if_changed(&sync, &make("edited-again%%41"), "reader").unwrap());
+    let (_, updated) = load_pending_outbox_from_db(&sync, 1).unwrap().pop().unwrap();
+    assert_ne!(updated.event_id, event.event_id);
+    assert_eq!(updated.base_version, Some(4));
+}
+
+#[test]
+fn test_canonical_provider_settings_restore_receiver_ids() {
+    for (kind, fields, expected) in [
+        ("system.feature_config", json!({"feature_code":"experimental","key":"butler_helper_model_id","value":"deepseek-v4.1-flash%%@ref"}), "deepseek-v4.1-flash%%41"),
+        ("system.feature_config", json!({"feature_code":"conversation_summary","key":"title_provider_id","value":"@ref"}), "41"),
+        ("assistant.model_config", json!({"name":"acp_provider","value":"@ref"}), "41"),
+    ] {
+        let mut fields = fields.as_object().unwrap().clone();
+        assert!(resolve_embedded_provider_value(kind, &mut fields, &Map::new(), |_, _| Ok(None)).is_err());
+        let refs = json!({"value_provider_id":"global-provider"});
+        resolve_embedded_provider_value(kind, &mut fields, refs.as_object().unwrap(), |kind, id| {
+            assert_eq!((kind, id), ("llm.provider", "global-provider"));
+            Ok(Some(41))
+        }).unwrap();
+        assert_eq!(fields["value"], expected);
+    }
+}
+
+#[test]
 fn test_embedded_provider_values_resolve_without_losing_model_identity() {
     let sync = sync_db();
     let source = json!({"fields":{"feature_code":"experimental","key":"butler_model_id","value":"model-a%%28"},

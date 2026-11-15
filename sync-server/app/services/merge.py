@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from hashlib import sha256
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from app.config import Settings
 from app.models import SyncChange, SyncObject, VaultRefreshClaim
 from app.schemas import AcceptedEvent, ConflictEvent, PushEvent, RejectedEvent
 from app.services.conflict import should_accept_stale_event
+from app.services.provider_settings import canonical_payload, repair_payload
 
 
 def payload_to_dict(event: PushEvent) -> dict | None:
@@ -34,6 +36,12 @@ def payload_size(payload: dict | None) -> int:
 def replay_existing_change(existing: SyncChange, event: PushEvent) -> AcceptedEvent | RejectedEvent:
     """Use identical idempotency checks for normal retries and uniqueness races."""
     payload = None if event.operation == "delete" else payload_to_dict(event)
+    # Old history retains its exact request. New history stores the canonical form.
+    if existing.payload_json != payload:
+        try:
+            payload = canonical_payload(event.object_type, payload)
+        except ValueError:
+            return RejectedEvent(event_id=event.event_id, reason="event_id_conflict")
     if (
         existing.object_type != event.object_type
         or existing.object_id != event.object_id
@@ -116,6 +124,7 @@ def process_push_event(
 
     if not should_accept_stale_event(event, current, set(settings.stale_lww_types)):
         assert current is not None
+        repair_provider_setting(db, settings, current)
         return ConflictEvent(
             event_id=event.event_id,
             object_type=event.object_type,
@@ -129,6 +138,10 @@ def process_push_event(
     version = (current.version + 1) if current is not None else 1
     deleted_at = now if event.operation == "delete" else None
     stored_payload = None if event.operation == "delete" else payload
+    try:
+        stored_payload = canonical_payload(event.object_type, stored_payload)
+    except ValueError as error:
+        return RejectedEvent(event_id=event.event_id, reason=str(error))
     stored_hash = payload_hash(stored_payload, deleted_at)
 
     if current is None:
@@ -174,3 +187,18 @@ def process_push_event(
         server_version=version,
         server_seq=change.seq,
     )
+
+def repair_provider_setting(db: Session, settings: Settings, current: SyncObject) -> bool:
+    """Publish a repair as a new version so caught-up clients also receive it."""
+    if current.deleted_at is not None or current.object_type not in {"system.feature_config", "assistant.model_config"}:
+        return False
+    repaired = repair_payload(db, current)
+    if repaired is None or repaired == current.payload_json:
+        return False
+    event = PushEvent(event_id=str(uuid4()), object_type=current.object_type, object_id=current.object_id,
+                      operation="upsert", base_version=current.version, payload=repaired,
+                      client_schema_version=settings.max_client_schema_version)
+    result = process_push_event(db, settings, current.account_id, "server-provider-migration", event)
+    if not isinstance(result, AcceptedEvent):
+        raise RuntimeError(f"provider reference repair failed for {current.object_id}: {result}")
+    return True

@@ -21,7 +21,7 @@ def event(kind: str, identity: str, fields: dict, refs: dict | None = None) -> d
 
 
 def push(client, events, device="device-a"):
-    response = client.post("/v1/sync/push", headers={"Authorization": "Bearer test-token"},
+    response = client.post("/v1/sync/push", headers={"Authorization": "Bearer test-token", "X-AIPP-Provider-Refs": "1"},
                            json={"device_id": device, "events": events})
     assert response.status_code == 200, response.text
     return response.json()
@@ -32,7 +32,7 @@ def pull_all(client, device, limit):
     changes = []
     while True:
         response = client.get(f"/v1/sync/pull?cursor={cursor}&limit={limit}", headers={
-            "Authorization": "Bearer test-token", "X-AIPP-Device-ID": device})
+            "Authorization": "Bearer test-token", "X-AIPP-Device-ID": device, "X-AIPP-Provider-Refs": "1"})
         assert response.status_code == 200, response.text
         page = response.json()
         assert all(c["seq"] > cursor for c in page["changes"])

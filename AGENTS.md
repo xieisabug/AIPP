@@ -4,6 +4,7 @@ AIPP (AI 助手平台) is a cross-platform desktop application built with Tauri 
 
 - 详细架构（技术栈、窗口列表、前后端目录结构、API 模块、内置 MCP 工具、关键产品面）：[docs/architecture.md](./docs/architecture.md)
 - 常见开发任务操作步骤（新增 API/组件/助手类型/表结构）：[docs/development-guide.md](./docs/development-guide.md)
+- 跨设备模型设置使用模型代码和 Provider 全局引用。新增包含本地 Provider ID 的配置时，同步更新客户端 `sync/mod.rs` 与服务端 `services/provider_settings.py` 的配置键，校验目标设备能还原本机 ID。协议与旧数据迁移见 [数据存储](./docs/product/15-数据存储.md)。
 - 测试框架与编写规范：[docs/testing-guidelines.md](./docs/testing-guidelines.md)
 - 各功能用户向文档：[docs/product/](./docs/product/README.md)（ACP 集成细节见 `docs/product/11-ACP集成.md`）
 

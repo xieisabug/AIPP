@@ -14,6 +14,8 @@ AIPP Sync Server 是面向 AIPP 桌面端数据的**业务级同步服务**（Fa
 
 服务端保存同步对象快照、变更日志、设备与基于 Token 的账号隔离。
 
+模型设置的供应商全局 ID 保存在 `payload.refs.value_provider_id`。组合设置的 `fields.value` 为 `模型代码%%@ref`，独立供应商设置为 `@ref`。客户端在推拉请求中发送 `X-AIPP-Provider-Refs: 1`，并在写入本机配置前解析引用。部署迁移 `0006_provider_settings` 前先升级客户端，旧客户端遇到新格式会收到升级提示。迁移保留原始事件，并为有可靠来源映射的旧设置追加新版本。
+
 ---
 
 ## 核心概念
