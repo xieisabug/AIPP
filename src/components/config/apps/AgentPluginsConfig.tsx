@@ -124,6 +124,37 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
 
     const uninstallConfirmation = current && uninstallRequested && <section role="region" aria-label="确认卸载插件" className="rounded-lg border border-destructive/30 p-3"><p className="font-medium">卸载 {preview.name}？</p><p className="my-2 text-sm text-muted-foreground">删除插件文件、配套技能以及由插件创建的连接和凭据。复用的已有连接会保留。有本地修改时不会删除。</p><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={revokeOnUninstall} onChange={e => setRevokeOnUninstall(e.target.checked)} />同时撤销服务商授权（网络或服务商不可用时可取消；仍会删除本地凭据）</label><div className="mt-3 flex gap-2"><Button variant="destructive" disabled={!!busy} onClick={() => void run('正在卸载插件…', async () => { await invoke('uninstall_agent_plugin', { key: preview.key, revokeRemote: revokeOnUninstall }); if (!embedded) setPreview(undefined); setManaging(false); setDefinition(undefined); setStdio(undefined); setEnvironment('{}'); setServerId(undefined); setTools([]); setUninstallRequested(false); setShowInstalled(true); onChanged(); await reload(); })}>确认卸载</Button><Button variant="outline" disabled={!!busy} onClick={() => setUninstallRequested(false)}>取消</Button></div></section>;
 
+    const connectionPanel = preview && <section className="space-y-3"><h4 className="font-medium">{embedded ? '应用' : '连接器'} · {preview.servers.length}</h4>
+                <p className="text-sm text-muted-foreground">{embedded ? '完成连接后会自动检测可用工具。' : '仓库通常只声明连接器，没有实际工具清单。连接后检测工具，未检测不表示没有工具。'}</p>
+                {preview.servers.map(server => <div key={server.name} className="space-y-2 rounded-lg border p-3"><p className="text-sm font-medium">{server.name}</p><p className="break-all text-xs text-muted-foreground">{server.config.url ?? [server.config.command, ...(server.config.args ?? [])].join(' ') ?? server.config.type}</p>{server.reason && <p className="text-sm text-destructive">{server.reason}</p>}{(!server.reason || server.reason.includes('OAuth')) && <Button size="sm" variant="outline" disabled={!current || current.preview.digest !== preview.digest || !!busy} onClick={() => void connect(server)}>添加连接</Button>}</div>)}
+                {current && <label className="flex items-center gap-2 text-sm">新连接认证方式<select aria-label="新连接认证方式" className="rounded border bg-background p-2" value={auth} onChange={e => setAuth(e.target.value)}><option value="oauth">浏览器 OAuth</option><option value="none">服务不要求认证</option><option value="bearer">自行提供 Bearer Token</option><option value="headers">配置清单中的请求头</option></select></label>}
+                {current && auth === 'oauth' && <><Input aria-label="OAuth 客户端 ID" placeholder="自己的 OAuth 客户端 ID（可选；不会复用私密客户端）" value={clientId} onChange={e => setClientId(e.target.value)} /><select aria-label="OAuth 客户端认证" className="w-full rounded border bg-background p-2" value={oauthMethod} onChange={e => setOauthMethod(e.target.value)}><option value="none">公共客户端（PKCE）</option><option value="client_secret_post">自有机密客户端 · Secret POST</option><option value="client_secret_basic">自有机密客户端 · Secret Basic</option></select><Input aria-label="OAuth 回调地址" placeholder="自有客户端注册的回调地址（可选，例如 http://127.0.0.1:3000/oauth/callback）" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} /></>}
+                {stdio && current && <div className="space-y-3 rounded-lg border p-3"><h4 className="font-medium">本地服务 · {stdio.name}</h4><p className="text-sm text-muted-foreground">启动时使用插件安装目录，参数直接传入进程。需要本机安装声明的运行时。环境变量保存在加密凭据库；重新连接需要重新填写。声明的变量：{Object.keys(stdio.config.env ?? {}).join('、') || '无'}。</p>
+                    <textarea aria-label="插件环境变量 JSON" className="min-h-24 w-full rounded border bg-background p-2 font-mono text-sm" value={environment} onChange={e => setEnvironment(e.target.value)} spellCheck={false} />
+                    <Button disabled={!!busy} onClick={() => void run('正在启动并检测本地插件…', async () => {
+                        const values: unknown = JSON.parse(environment);
+                        if (!values || Array.isArray(values) || typeof values !== 'object' || Object.values(values).some(v => typeof v !== 'string')) throw new Error('环境变量必须为字符串值的 JSON 对象');
+                        const id = await invoke<number>('connect_agent_plugin_stdio', {key: current.preview.key, serverName: stdio.name, values, serverId: stdioReconnect ?? null});
+                        setEnvironment('{}'); setServerId(id); await reload(); onChanged();
+                        try { await invoke('verify_app_connection', {serverId: id}); setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', {serverId: id})); }
+                        finally { await reload(); }
+                    })}>启动并检测工具</Button></div>}
+                {matching.map(server => <Button key={server.id} variant={serverId === server.id ? 'secondary' : 'outline'} className="mr-2" onClick={() => { setServerId(server.id); setStdio(undefined); setEnvironment('{}'); setDefinition(undefined); }}>{server.name} · 使用已有连接</Button>)}
+                {definition && <AppConnectForm key={`${definition.id}:${editingConnection?.server_id ?? 'new'}:${formGeneration}`} app={definition} connection={editingConnection} onConnected={id => { setServerId(id); void reload().catch(e => setError(String(e))); onChanged(); }} />}
+                {connection && <div className="space-y-2 rounded-lg border p-3"><p className="text-sm">{connection.label} · {connectionStatus(connection.status)}</p>{connection.error && <p className="text-sm text-destructive">{connection.error}</p>}<div className="flex flex-wrap gap-2">
+                    {connection.status === 'connecting' && <Button size="sm" variant="outline" onClick={() => void run('正在打开授权页面…', async () => { const url = await invoke<string | null>('get_app_authorization_url', { serverId }); if (!url) throw new Error('授权已结束，请重新登录'); await openUrl(url); })}>继续授权</Button>}
+                    <Button size="sm" variant="outline" disabled={!!busy} onClick={() => {
+                        if (connection.definition.connection.transport === 'stdio') {
+                            setStdio(current?.preview.servers.find(s => connection.app_id === `agent-plugin:${current.preview.key}:${s.name}`)); setStdioReconnect(connection.server_id); setEnvironment('{}'); setDefinition(undefined);
+                        } else { setEditingConnection(connection); setDefinition(connection.definition); setFormGeneration(g => g + 1); }
+                    }}>{connection.definition.connection.transport === 'stdio' ? '重新配置并连接' : '重新登录'}</Button>
+                    <Button size="sm" variant="outline" disabled={!!busy || connection.status === 'disconnected'} onClick={() => void run('正在断开连接…', async () => { await invoke('disconnect_app_connection', { serverId, revokeRemote: true }); await reload(); onChanged(); })}>断开连接</Button>
+                </div></div>}
+                {serverId && <><div className="rounded-lg border p-3"><div className="flex items-center justify-between"><h4 className="font-medium">{tools.length || connection?.status === 'available' ? `检测到的工具 · ${tools.length}` : '工具尚未检测'}</h4><Button size="sm" variant="outline" disabled={!!busy || (connection && ['connecting', 'disconnected', 'auth_required'].includes(connection.status))} onClick={() => void run('正在刷新工具…', async () => { if (connection) await invoke('verify_app_connection', { serverId }); else await invoke('refresh_mcp_server_capabilities', { serverId }); setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })); await reload(); onChanged(); })}>刷新工具</Button></div>{tools.map(t => <details key={t.id} className="border-b py-2"><summary className="cursor-pointer text-sm">{t.tool_name}</summary><p className="py-2 text-xs text-muted-foreground">{t.tool_description}</p></details>)}</div>
+                    <AppAssistantAccess key={`${preview.key}:${serverId}`} serverId={serverId} pluginKey={current?.preview.key} />
+                </>}
+            </section>;
+
     const management = <div className="space-y-5 py-4">
         <p className="text-sm text-muted-foreground">从 GitHub 安装配套工具和 Skills。技能、参考资料与脚本按原目录保存；连接与助手授权分别管理。</p>
         {error && <p role="alert" className="whitespace-pre-wrap break-words rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{error}</p>}
@@ -156,36 +187,7 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
                 {!preview.skills.length && <p className="text-sm text-muted-foreground">这个插件没有声明可发现的 Skills。</p>}
                 {preview.skills.map(skill => <details key={skill.id} className="rounded-lg border p-3"><summary className="cursor-pointer text-sm font-medium">{skill.kind === 'command' ? '/ ' : ''}{skill.name}<p className="mt-1 font-normal text-muted-foreground">{skill.description}</p></summary><pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs">{skill.content}</pre><p className="mt-2 text-xs text-muted-foreground">附属文件 {skill.files.length} 个</p></details>)}
             </section>
-            <section className="space-y-3"><h4 className="font-medium">连接器 · {preview.servers.length}</h4>
-                <p className="text-sm text-muted-foreground">仓库通常只声明连接器，没有实际工具清单。连接后检测工具，未检测不表示没有工具。</p>
-                {preview.servers.map(server => <div key={server.name} className="space-y-2 rounded-lg border p-3"><p className="text-sm font-medium">{server.name}</p><p className="break-all text-xs text-muted-foreground">{server.config.url ?? [server.config.command, ...(server.config.args ?? [])].join(' ') ?? server.config.type}</p>{server.reason && <p className="text-sm text-destructive">{server.reason}</p>}{(!server.reason || server.reason.includes('OAuth')) && <Button size="sm" variant="outline" disabled={!current || current.preview.digest !== preview.digest || !!busy} onClick={() => void connect(server)}>添加连接</Button>}</div>)}
-                {current && <label className="flex items-center gap-2 text-sm">新连接认证方式<select aria-label="新连接认证方式" className="rounded border bg-background p-2" value={auth} onChange={e => setAuth(e.target.value)}><option value="oauth">浏览器 OAuth</option><option value="none">服务不要求认证</option><option value="bearer">自行提供 Bearer Token</option><option value="headers">配置清单中的请求头</option></select></label>}
-                {current && auth === 'oauth' && <><Input aria-label="OAuth 客户端 ID" placeholder="自己的 OAuth 客户端 ID（可选；不会复用私密客户端）" value={clientId} onChange={e => setClientId(e.target.value)} /><select aria-label="OAuth 客户端认证" className="w-full rounded border bg-background p-2" value={oauthMethod} onChange={e => setOauthMethod(e.target.value)}><option value="none">公共客户端（PKCE）</option><option value="client_secret_post">自有机密客户端 · Secret POST</option><option value="client_secret_basic">自有机密客户端 · Secret Basic</option></select><Input aria-label="OAuth 回调地址" placeholder="自有客户端注册的回调地址（可选，例如 http://127.0.0.1:3000/oauth/callback）" value={redirectUri} onChange={e => setRedirectUri(e.target.value)} /></>}
-                {stdio && current && <div className="space-y-3 rounded-lg border p-3"><h4 className="font-medium">本地服务 · {stdio.name}</h4><p className="text-sm text-muted-foreground">启动时使用插件安装目录，参数直接传入进程。需要本机安装声明的运行时。环境变量保存在加密凭据库；重新连接需要重新填写。声明的变量：{Object.keys(stdio.config.env ?? {}).join('、') || '无'}。</p>
-                    <textarea aria-label="插件环境变量 JSON" className="min-h-24 w-full rounded border bg-background p-2 font-mono text-sm" value={environment} onChange={e => setEnvironment(e.target.value)} spellCheck={false} />
-                    <Button disabled={!!busy} onClick={() => void run('正在启动并检测本地插件…', async () => {
-                        const values: unknown = JSON.parse(environment);
-                        if (!values || Array.isArray(values) || typeof values !== 'object' || Object.values(values).some(v => typeof v !== 'string')) throw new Error('环境变量必须为字符串值的 JSON 对象');
-                        const id = await invoke<number>('connect_agent_plugin_stdio', {key: current.preview.key, serverName: stdio.name, values, serverId: stdioReconnect ?? null});
-                        setEnvironment('{}'); setServerId(id); await reload(); onChanged();
-                        try { await invoke('verify_app_connection', {serverId: id}); setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', {serverId: id})); }
-                        finally { await reload(); }
-                    })}>启动并检测工具</Button></div>}
-                {matching.map(server => <Button key={server.id} variant={serverId === server.id ? 'secondary' : 'outline'} className="mr-2" onClick={() => { setServerId(server.id); setStdio(undefined); setEnvironment('{}'); setDefinition(undefined); }}>{server.name} · 使用已有连接</Button>)}
-                {definition && <AppConnectForm key={`${definition.id}:${editingConnection?.server_id ?? 'new'}:${formGeneration}`} app={definition} connection={editingConnection} onConnected={id => { setServerId(id); void reload().catch(e => setError(String(e))); onChanged(); }} />}
-                {connection && <div className="space-y-2 rounded-lg border p-3"><p className="text-sm">{connection.label} · {connectionStatus(connection.status)}</p>{connection.error && <p className="text-sm text-destructive">{connection.error}</p>}<div className="flex flex-wrap gap-2">
-                    {connection.status === 'connecting' && <Button size="sm" variant="outline" onClick={() => void run('正在打开授权页面…', async () => { const url = await invoke<string | null>('get_app_authorization_url', { serverId }); if (!url) throw new Error('授权已结束，请重新登录'); await openUrl(url); })}>继续授权</Button>}
-                    <Button size="sm" variant="outline" disabled={!!busy} onClick={() => {
-                        if (connection.definition.connection.transport === 'stdio') {
-                            setStdio(current?.preview.servers.find(s => connection.app_id === `agent-plugin:${current.preview.key}:${s.name}`)); setStdioReconnect(connection.server_id); setEnvironment('{}'); setDefinition(undefined);
-                        } else { setEditingConnection(connection); setDefinition(connection.definition); setFormGeneration(g => g + 1); }
-                    }}>{connection.definition.connection.transport === 'stdio' ? '重新配置并连接' : '重新登录'}</Button>
-                    <Button size="sm" variant="outline" disabled={!!busy || connection.status === 'disconnected'} onClick={() => void run('正在断开连接…', async () => { await invoke('disconnect_app_connection', { serverId, revokeRemote: true }); await reload(); onChanged(); })}>断开连接</Button>
-                </div></div>}
-                {serverId && <><div className="rounded-lg border p-3"><div className="flex items-center justify-between"><h4 className="font-medium">{tools.length || connection?.status === 'available' ? `检测到的工具 · ${tools.length}` : '工具尚未检测'}</h4><Button size="sm" variant="outline" disabled={!!busy || (connection && ['connecting', 'disconnected', 'auth_required'].includes(connection.status))} onClick={() => void run('正在刷新工具…', async () => { if (connection) await invoke('verify_app_connection', { serverId }); else await invoke('refresh_mcp_server_capabilities', { serverId }); setTools(await invoke<MCPServerTool[]>('get_mcp_server_tools', { serverId })); await reload(); onChanged(); })}>刷新工具</Button></div>{tools.map(t => <details key={t.id} className="border-b py-2"><summary className="cursor-pointer text-sm">{t.tool_name}</summary><p className="py-2 text-xs text-muted-foreground">{t.tool_description}</p></details>)}</div>
-                    <AppAssistantAccess key={`${preview.key}:${serverId}`} serverId={serverId} pluginKey={current?.preview.key} />
-                </>}
-            </section>
+            {connectionPanel}
             {!!preview.agents?.length && <section className="space-y-3"><h4 className="font-medium">子助手定义 · {preview.agents.length}</h4><p className="text-sm text-muted-foreground">选择一个已有助手，继承它的模型、执行通道和工具授权；使用插件的角色定义创建独立助手。创建后可在联系人中使用或参与协作。</p><select aria-label="子助手模板" className="w-full rounded border bg-background p-2" value={templateId} onChange={e => setTemplateId(e.target.value)}><option value="">选择模板助手</option>{templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
                 {preview.agents.map(agent => <details key={agent.path} className="rounded border p-3"><summary>{agent.name}</summary><pre className="my-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs">{agent.content}</pre><Button disabled={!current || !templateId || !!busy} onClick={() => void run('正在创建插件助手…',async () => { const id = await invoke<number>('create_agent_plugin_assistant',{key: preview.key,agentPath: agent.path,templateId: Number(templateId)}); setAgentResult(`已创建 ${agent.name}（助手 ${id}），可在助手设置中调整并使用。`); onChanged(); })}>创建此助手</Button></details>)}{agentResult && <p role="status" className="text-sm">{agentResult}</p>}</section>}
             {current && !preview.servers.length && <AppAssistantAccess pluginKey={current.preview.key} />}
@@ -236,6 +238,19 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
             {uninstallConfirmation}
         </div>;
     }
+    if (managing && !onConnect && preview) {
+        const hasServers = preview.servers.length > 0;
+        return <section className="space-y-5" aria-label={hasServers ? '连接设置' : '插件管理'}>
+            <Button variant="ghost" size="sm" onClick={() => setManaging(false)}>
+                <ArrowLeft className="h-4 w-4" />返回应用详情
+            </Button>
+            {hasServers ? <>
+                {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+                {busy && <p role="status" className="text-sm text-muted-foreground">{busy}</p>}
+                {connectionPanel}
+            </> : management}
+        </section>;
+    }
     return <div className="space-y-9 py-2" data-testid="app-plugin-overview">
         <header className="flex flex-wrap items-center justify-end gap-4">
             <div className="flex items-center gap-2">
@@ -264,7 +279,6 @@ export default function AgentPluginsConfig({ initialSource, directoryCatalog, on
             {preview.notices.length > 0 && <details className="text-sm"><summary className="cursor-pointer text-muted-foreground">使用条件与兼容性</summary><div className="space-y-2 pt-3">{preview.notices.map(n => <p key={n} className="text-muted-foreground">{n}</p>)}</div></details>}
         </>}
         {uninstallConfirmation}
-        {!onConnect && managing && <section aria-label="插件连接管理">{management}</section>}
     </div>;
 
 }

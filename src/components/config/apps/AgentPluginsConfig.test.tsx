@@ -163,6 +163,19 @@ describe('AgentPluginsConfig', () => {
         expect(screen.queryByRole('textbox',{name:'GitHub 仓库'})).not.toBeInTheDocument();
     });
 
+    it('should replace the overview with connection settings for an installed catalog plugin', async () => {
+        vi.mocked(invoke).mockImplementation(async command => command === 'list_agent_plugins' ? [{preview}] : []);
+        render(<AgentPluginsConfig embedded initialSource={source} onChanged={vi.fn()} />);
+        await userEvent.click(await screen.findByRole('button', {name:'连接应用'}));
+        expect(screen.getByRole('button', {name:'添加连接'})).toBeEnabled();
+        expect(screen.getByLabelText('OAuth 客户端 ID')).toBeInTheDocument();
+        expect(screen.queryByText(preview.description)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button',{name:'检查更新'})).not.toBeInTheDocument();
+        await userEvent.click(screen.getByRole('button', {name:'返回应用详情'}));
+        expect(screen.getAllByText(preview.description)).toHaveLength(1);
+        expect(screen.getAllByRole('button', {name:'检查更新'})).toHaveLength(1);
+    });
+
     it('should retain installation and prevent a second request when the sheet reopens', async () => {
         let finish!: () => void;
         let installed = false;
