@@ -136,69 +136,66 @@ struct SimplePrompt {
 // 持久化工具/资源/提示，带删除缺失项；只在成功获取对应类别时才做删除，避免失败覆盖旧数据
 fn persist_capability_sets(
     db: &MCPDatabase,
-    server_id: i64,
+    server: &MCPServer,
     label: &str,
     tools_opt: Option<Vec<SimpleTool>>,
     resources_opt: Option<Vec<SimpleResource>>,
     prompts_opt: Option<Vec<SimplePrompt>>,
 ) -> Result<(), String> {
+    let server_id = server.id;
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("连接 {server_id} 保存检测结果失败：{e}"))?;
+    if db.get_mcp_server(server_id).map_err(|e| e.to_string())? != *server {
+        return Err(format!("连接 {server_id} 在检测期间已变更，已丢弃过期结果"));
+    }
     if let Some(tools) = tools_opt {
         let remote_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         info!(server_id, tool_count = remote_names.len(), label, "Persisting tools");
         for t in &tools {
             info!(server_id, tool_name = %t.name, label, "Fetched MCP tool");
-            if let Err(e) = db.upsert_mcp_server_tool(
+            db.upsert_mcp_server_tool(
                 server_id,
                 &t.name,
                 t.description.as_deref(),
                 Some(&t.params_json),
-            ) {
-                warn!(server_id, tool = %t.name, error = %e, "Failed to upsert tool");
-            }
+            ).map_err(|e| format!("连接 {server_id} 保存工具 {} 失败：{e}", t.name))?;
         }
-        if let Err(e) = db.delete_mcp_server_tools_not_in(server_id, &remote_names) {
-            warn!(server_id, error = %e, label, "Failed to delete stale tools");
-        }
+        db.delete_mcp_server_tools_not_in(server_id, &remote_names)
+            .map_err(|e| format!("连接 {server_id} 清理已移除的工具失败：{e}"))?;
     }
 
     if let Some(resources) = resources_opt {
         let remote_uris: Vec<String> = resources.iter().map(|r| r.uri.clone()).collect();
         info!(server_id, resource_count = remote_uris.len(), label, "Persisting resources");
         for r in &resources {
-            if let Err(e) = db.upsert_mcp_server_resource(
+            db.upsert_mcp_server_resource(
                 server_id,
                 &r.uri,
                 &r.name,
                 &r.mime_type,
                 r.description.as_deref(),
-            ) {
-                warn!(server_id, resource = %r.name, error = %e, "Failed to upsert resource");
-            }
+            ).map_err(|e| format!("连接 {server_id} 保存资源 {} 失败：{e}", r.name))?;
         }
-        if let Err(e) = db.delete_mcp_server_resources_not_in(server_id, &remote_uris) {
-            warn!(server_id, error = %e, label, "Failed to delete stale resources");
-        }
+        db.delete_mcp_server_resources_not_in(server_id, &remote_uris)
+            .map_err(|e| format!("连接 {server_id} 清理已移除的资源失败：{e}"))?;
     }
 
     if let Some(prompts) = prompts_opt {
         let remote_names: Vec<String> = prompts.iter().map(|p| p.name.clone()).collect();
         info!(server_id, prompt_count = remote_names.len(), label, "Persisting prompts");
         for p in &prompts {
-            if let Err(e) = db.upsert_mcp_server_prompt(
+            db.upsert_mcp_server_prompt(
                 server_id,
                 &p.name,
                 p.description.as_deref(),
                 Some(&p.args_json),
-            ) {
-                warn!(server_id, prompt = %p.name, error = %e, "Failed to upsert prompt");
-            }
+            ).map_err(|e| format!("连接 {server_id} 保存提示 {} 失败：{e}", p.name))?;
         }
-        if let Err(e) = db.delete_mcp_server_prompts_not_in(server_id, &remote_names) {
-            warn!(server_id, error = %e, label, "Failed to delete stale prompts");
-        }
+        db.delete_mcp_server_prompts_not_in(server_id, &remote_names)
+            .map_err(|e| format!("连接 {server_id} 清理已移除的提示失败：{e}"))?;
     }
 
-    Ok(())
+    tx.commit().map_err(|e| format!("连接 {server_id} 保存检测结果失败：{e}"))
 }
 
 #[tauri::command]
@@ -748,7 +745,7 @@ async fn get_stdio_capabilities(
 
     persist_capability_sets(
         &db,
-        server_id,
+        &server,
         "stdio",
         tools_simple,
         resources_simple,
@@ -883,7 +880,7 @@ async fn get_http_capabilities(
     });
     persist_capability_sets(
         &db,
-        server_id,
+        &server,
         "http",
         tools_simple,
         resources_simple,

@@ -215,6 +215,11 @@ fn parse_model_selection(
         return None;
     }
 
+    configured_summary_model(config_map)
+}
+
+fn configured_summary_model(config_map: &HashMap<String, HashMap<String, FeatureConfig>>) -> Option<(String, i64)> {
+    let experimental = config_map.get("experimental")?;
     let raw = experimental.get("mcp_summarizer_model_id")?.value.trim().to_string();
     if raw.is_empty() {
         return None;
@@ -277,11 +282,11 @@ async fn run_claimed_summary(app_handle: tauri::AppHandle) -> Result<(), String>
 async fn run_batch(app_handle: &tauri::AppHandle) -> Result<(), String> {
     let db = MCPDatabase::new(app_handle).map_err(|e| e.to_string())?;
     db.rebuild_dynamic_mcp_catalog().map_err(|e| e.to_string())?;
-    let servers = db.enabled_custom_summary_servers().map_err(|e| e.to_string())?;
+    let servers = db.enabled_summary_servers().map_err(|e| e.to_string())?;
     if !servers.is_empty() {
         let config = get_feature_config_map(app_handle).await.map_err(|e| e.to_string())?;
         if parse_model_selection(&config).is_none() {
-            return Err("请先在实验性配置中选择自定义 MCP 的总结模型".into());
+            return Err("请先在实验性配置中选择 MCP 总结模型".into());
         }
     }
     let mut failures = Vec::new();
@@ -402,6 +407,13 @@ pub fn trigger_mcp_catalog_summary_generation(app_handle: tauri::AppHandle, serv
     });
 }
 
+pub fn trigger_pending_app_summaries(app: &tauri::AppHandle) {
+    match MCPDatabase::new(app).and_then(|db| db.pending_app_summary_server_ids()) {
+        Ok(ids) => for id in ids { trigger_mcp_catalog_summary_generation(app.clone(), id); },
+        Err(error) => warn!(%error, "Could not schedule missing app tool summaries"),
+    }
+}
+
 pub fn trigger_pending_mcp_catalog_summary_generation(app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         if let Err(err) = summarize_pending_mcp_catalogs(&app_handle).await {
@@ -412,7 +424,7 @@ pub fn trigger_pending_mcp_catalog_summary_generation(app_handle: tauri::AppHand
 
 async fn summarize_pending_mcp_catalogs(app_handle: &tauri::AppHandle) -> Result<(), AppError> {
     let config_map = get_feature_config_map(app_handle).await?;
-    if parse_model_selection(&config_map).is_none() {
+    if configured_summary_model(&config_map).is_none() {
         debug!("MCP summarizer model not configured, skip startup summary check");
         return Ok(());
     }
@@ -421,7 +433,7 @@ async fn summarize_pending_mcp_catalogs(app_handle: &tauri::AppHandle) -> Result
     let _ = db.rebuild_dynamic_mcp_catalog();
 
     let eligible_servers: HashSet<i64> = db
-        .enabled_custom_summary_servers()?
+        .enabled_summary_servers()?
         .into_iter()
         .map(|server| server.id)
         .collect();
@@ -430,7 +442,7 @@ async fn summarize_pending_mcp_catalogs(app_handle: &tauri::AppHandle) -> Result
         return Ok(());
     }
 
-    let mut pending_server_ids = HashSet::new();
+    let mut pending_server_ids = db.pending_app_summary_server_ids()?;
     for server in db.list_server_capability_catalog()? {
         if server.summary_generated_at.is_none() && eligible_servers.contains(&server.server_id) {
             pending_server_ids.insert(server.server_id);
@@ -469,21 +481,25 @@ async fn generate_mcp_catalog_summary(
 ) -> Result<(), AppError> {
     let mcp_db = MCPDatabase::new(app_handle)?;
     let server = mcp_db.get_mcp_server(server_id)?;
-    if !server.is_enabled || server.is_builtin || mcp_db.app_connection_status(server_id)?.is_some() {
+    if !server.is_enabled || server.is_builtin {
         return Ok(());
     }
 
+    let managed = mcp_db.app_connection_status(server_id)?.is_some();
+    // Refresh, startup and a manual retry can all schedule the same missing translations.
+    static APP_SUMMARY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = if managed { Some(APP_SUMMARY_LOCK.lock().await) } else { None };
+    let pending = mcp_db.pending_app_tool_summaries(server_id)?;
+    let tools: Vec<MCPServerTool> = mcp_db.get_mcp_server_tools(server_id)?.into_iter()
+        .filter(|tool| tool.is_enabled && (!managed || pending.contains_key(&tool.id))).collect();
+    if managed && tools.is_empty() { return Ok(()); }
+
     let config_map = get_feature_config_map(app_handle).await?;
-    let Some((model_code, provider_id)) = parse_model_selection(&config_map) else {
+    let model = if managed { configured_summary_model(&config_map) } else { parse_model_selection(&config_map) };
+    let Some((model_code, provider_id)) = model else {
         debug!(server_id, "MCP summarizer model not configured, skip generation");
         return Ok(());
     };
-
-    let tools: Vec<MCPServerTool> = mcp_db
-        .get_mcp_server_tools(server_id)?
-        .into_iter()
-        .filter(|tool| tool.is_enabled)
-        .collect();
 
     let llm_db = LLMDatabase::new(app_handle)?;
     let model_detail = llm_db
@@ -541,8 +557,10 @@ async fn generate_mcp_catalog_summary(
         })?;
 
     let mut updated_tools = 0usize;
-    let server_summary = server_summary.ok_or_else(|| AppError::ParseError("模型未返回 MCP 服务摘要".into()))?;
-    mcp_db.update_server_catalog_summary(server_id, &server_summary)?;
+    if !managed {
+        let server_summary = server_summary.ok_or_else(|| AppError::ParseError("模型未返回 MCP 服务摘要".into()))?;
+        mcp_db.update_server_catalog_summary(server_id, &server_summary)?;
+    }
 
     for tool in &tools {
         // 先尝试精确匹配（小写），再尝试归一化匹配
@@ -551,7 +569,11 @@ async fn generate_mcp_catalog_summary(
         let matched_summary =
             tool_summaries.get(&key_lower).or_else(|| tool_summaries.get(&key_normalized));
         if let Some(summary) = matched_summary {
-            mcp_db.update_tool_catalog_summary(tool.id, summary)?;
+            if let Some(hash) = pending.get(&tool.id) {
+                mcp_db.save_missing_app_tool_summary(tool.id, hash, summary)?;
+            } else {
+                mcp_db.update_tool_catalog_summary(tool.id, summary)?;
+            }
             updated_tools += 1;
         } else {
             warn!(
@@ -562,6 +584,7 @@ async fn generate_mcp_catalog_summary(
         }
     }
 
+    if managed && updated_tools > 0 { let _ = app_handle.emit("mcp_state_changed", ()); }
     if updated_tools != tools.len() {
         return Err(AppError::ParseError(format!("模型仅返回了 {updated_tools}/{} 个已启用工具的有效摘要", tools.len())));
     }

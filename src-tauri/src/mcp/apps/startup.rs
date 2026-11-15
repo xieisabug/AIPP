@@ -54,7 +54,7 @@ async fn recheck(app: &tauri::AppHandle, id: i64) -> Result<(), String> {
         Ok(check)
     }).await.map_err(|e| e.to_string())??;
     let Some(check) = check else { return Ok(()); };
-    if let Err(error) = super::super::registry_api::probe_connection(app, &check.server).await {
+    if let Err(error) = super::super::registry_api::refresh_mcp_server_capabilities(app.clone(), id).await {
         // Authentication rejection is recorded by the transport. Missing credentials are device-local.
         if error.contains(credentials::MISSING_ON_DEVICE) { return Ok(()); }
         let _change = CHANGE_LOCK.lock().await;

@@ -729,7 +729,7 @@ export const ExperimentalConfigForm: React.FC<ExperimentalConfigFormProps> = ({
                                                     </Select>
                                                 </FormControl>
                                                 <p className="mt-1 text-sm text-muted-foreground">
-                                                    目录应用使用随目录下载的工具摘要。只有自定义 MCP 使用这里选择的模型生成摘要。
+                                                    连接后自动检测工具。目录应用优先使用线上摘要，缺少的工具摘要和自定义 MCP 摘要由所选模型生成。
                                                 </p>
                                                 <FormMessage />
                                             </FormItem>

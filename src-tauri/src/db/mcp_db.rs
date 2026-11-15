@@ -442,6 +442,12 @@ impl MCPDatabase {
             )",
             (),
         )?;
+        let has_source: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('mcp_tool_catalog') WHERE name='summary_source')",
+            [], |row| row.get(0))?;
+        if !has_source {
+            self.conn.execute("ALTER TABLE mcp_tool_catalog ADD COLUMN summary_source TEXT", [])?;
+        }
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mcp_tool_catalog_server_tool_name ON mcp_tool_catalog(server_id, tool_name)",
             (),
@@ -776,14 +782,45 @@ impl MCPDatabase {
         Ok(())
     }
 
-    pub fn enabled_custom_summary_servers(&self) -> Result<Vec<MCPServer>> {
-        let mut custom = Vec::new();
+    pub fn pending_app_summary_server_ids(&self) -> Result<std::collections::HashSet<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT c.server_id FROM mcp_tool_catalog c
+             JOIN mcp_server_tool t ON t.id=c.tool_id AND t.is_enabled=1
+             JOIN mcp_server s ON s.id=c.server_id AND s.is_enabled=1
+             WHERE c.summary_source='service'")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    pub fn pending_app_tool_summaries(&self, server_id: i64) -> Result<std::collections::HashMap<i64, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.tool_id,c.schema_hash FROM mcp_tool_catalog c
+             JOIN mcp_server_tool t ON t.id=c.tool_id AND t.is_enabled=1
+             JOIN mcp_server s ON s.id=c.server_id AND s.is_enabled=1
+             WHERE c.server_id=?1 AND c.summary_source='service'")?;
+        let rows = stmt.query_map([server_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    pub fn save_missing_app_tool_summary(&self, tool_id: i64, schema_hash: &str, summary: &str) -> Result<usize> {
+        // A late model response must yield to a newer schema or a freshly published helper summary.
+        self.conn.execute("UPDATE mcp_tool_catalog SET summary=?3, summary_source='model',
+            summary_generated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+            WHERE tool_id=?1 AND schema_hash=?2 AND summary_source='service'
+            AND EXISTS(SELECT 1 FROM mcp_server_tool t JOIN mcp_server s ON s.id=t.server_id
+                       WHERE t.id=?1 AND t.is_enabled=1 AND s.is_enabled=1)", params![tool_id,schema_hash,summary])
+    }
+
+    pub fn enabled_summary_servers(&self) -> Result<Vec<MCPServer>> {
+        let pending = self.pending_app_summary_server_ids()?;
+        let mut eligible = Vec::new();
         for server in self.get_mcp_servers()? {
-            if server.is_enabled && !server.is_builtin && self.app_connection_status(server.id)?.is_none() {
-                custom.push(server);
+            if server.is_enabled && !server.is_builtin && (self.app_connection_status(server.id)?.is_none()
+                || pending.contains(&server.id)) {
+                eligible.push(server);
             }
         }
-        Ok(custom)
+        Ok(eligible)
     }
 
     pub(crate) fn app_connection_status(&self, id: i64) -> Result<Option<String>> {
@@ -1576,8 +1613,16 @@ impl MCPDatabase {
     }
 
     pub fn rebuild_dynamic_mcp_catalog(&self) -> Result<()> {
+        self.rebuild_catalog(false)
+    }
+
+    pub fn rebuild_dynamic_mcp_catalog_force(&self) -> Result<()> {
+        self.rebuild_catalog(true)
+    }
+
+    fn rebuild_catalog(&self, force: bool) -> Result<()> {
         let now_ms = Self::now_millis();
-        if now_ms.saturating_sub(CATALOG_LAST_REBUILD_AT_MS.load(Ordering::Relaxed))
+        if !force && now_ms.saturating_sub(CATALOG_LAST_REBUILD_AT_MS.load(Ordering::Relaxed))
             < CATALOG_REBUILD_MIN_INTERVAL_MS
         {
             return Ok(());
@@ -1588,7 +1633,7 @@ impl MCPDatabase {
             Err(poisoned) => poisoned.into_inner(),
         };
         let now_ms = Self::now_millis();
-        if now_ms.saturating_sub(CATALOG_LAST_REBUILD_AT_MS.load(Ordering::Relaxed))
+        if !force && now_ms.saturating_sub(CATALOG_LAST_REBUILD_AT_MS.load(Ordering::Relaxed))
             < CATALOG_REBUILD_MIN_INTERVAL_MS
         {
             return Ok(());
@@ -1718,7 +1763,9 @@ impl MCPDatabase {
 
             for (tool_id, tool_name, tool_summary, parameters) in tools.iter() {
                 let schema_hash = Self::schema_hash(parameters.as_deref());
-                let summary = if let Some(text) = presets.get(tool_name).filter(|s| !s.trim().is_empty()) {
+                let preset = presets.get(tool_name).filter(|s| !s.trim().is_empty());
+                let source = if managed { Some(if preset.is_some() { "helper" } else { "service" }) } else { None };
+                let summary = if let Some(text) = preset {
                     text.clone()
                 } else if tool_summary.trim().is_empty() {
                     tool_name.clone()
@@ -1728,12 +1775,14 @@ impl MCPDatabase {
                 let keywords = serde_json::json!([server_name, tool_name]).to_string();
                 self.conn.execute(
                     "INSERT INTO mcp_tool_catalog (
-                        tool_id, server_id, tool_name, summary, keywords_json, schema_hash, capability_epoch, updated_at, summary_generated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        tool_id, server_id, tool_name, summary, keywords_json, schema_hash, capability_epoch, updated_at, summary_generated_at, summary_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(tool_id) DO UPDATE SET
                         server_id = excluded.server_id,
                         tool_name = excluded.tool_name,
+                        summary_source = CASE WHEN excluded.summary_source='service' AND mcp_tool_catalog.summary_source='model' AND excluded.schema_hash=mcp_tool_catalog.schema_hash THEN 'model' ELSE excluded.summary_source END,
                         summary = CASE
+                            WHEN excluded.summary_source='service' AND mcp_tool_catalog.summary_source='model' AND excluded.schema_hash=mcp_tool_catalog.schema_hash THEN mcp_tool_catalog.summary
                             WHEN excluded.summary_generated_at IS NOT NULL OR excluded.capability_epoch != mcp_tool_catalog.capability_epoch THEN excluded.summary
                             WHEN mcp_tool_catalog.summary_generated_at IS NOT NULL
                                  AND trim(mcp_tool_catalog.summary) != '' THEN mcp_tool_catalog.summary
@@ -1744,6 +1793,7 @@ impl MCPDatabase {
                         capability_epoch = excluded.capability_epoch,
                         updated_at = excluded.updated_at,
                         summary_generated_at = CASE
+                            WHEN excluded.summary_source='service' AND mcp_tool_catalog.summary_source='model' AND excluded.schema_hash=mcp_tool_catalog.schema_hash THEN mcp_tool_catalog.summary_generated_at
                             WHEN excluded.summary_generated_at IS NOT NULL THEN excluded.summary_generated_at
                             WHEN excluded.capability_epoch != mcp_tool_catalog.capability_epoch THEN NULL
                             ELSE mcp_tool_catalog.summary_generated_at
@@ -1757,7 +1807,8 @@ impl MCPDatabase {
                         schema_hash,
                         next_epoch,
                         now.clone(),
-                        preset_at
+                        preset_at,
+                        source
                     ],
                 )?;
             }
@@ -1772,11 +1823,6 @@ impl MCPDatabase {
 
         CATALOG_LAST_REBUILD_AT_MS.store(Self::now_millis(), Ordering::Relaxed);
         Ok(())
-    }
-
-    pub fn rebuild_dynamic_mcp_catalog_force(&self) -> Result<()> {
-        CATALOG_LAST_REBUILD_AT_MS.store(0, Ordering::Relaxed);
-        self.rebuild_dynamic_mcp_catalog()
     }
 
     pub fn list_server_capability_catalog(&self) -> Result<Vec<MCPServerCapabilityEpochCatalog>> {

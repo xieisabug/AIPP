@@ -76,6 +76,11 @@ pub async fn save_feature_config(
     let mut configs = state.configs.lock().await;
     let mut config_feature_map = state.config_feature_map.lock().await;
 
+    let model_key = "mcp_summarizer_model_id";
+    let summary_model_changed = feature_code == "experimental" && config.get(model_key).is_some_and(|model|
+        !model.trim().is_empty() && config_feature_map.get(&feature_code).and_then(|old| old.get(model_key))
+            .is_none_or(|old| old.value != *model));
+
     // 删除旧的配置
     configs.retain(|c| c.feature_code != feature_code);
     config_feature_map.remove(&feature_code);
@@ -95,6 +100,11 @@ pub async fn save_feature_config(
             .entry(feature_code.clone())
             .or_insert(HashMap::new())
             .insert(key.clone(), new_config);
+    }
+    drop(config_feature_map);
+    drop(configs);
+    if summary_model_changed {
+        crate::mcp::summarizer::trigger_pending_app_summaries(&app_handle);
     }
     // 如果更新的是快捷键配置，则尝试重新注册全局快捷键（异步，避免阻塞 runtime）
     #[cfg(desktop)]

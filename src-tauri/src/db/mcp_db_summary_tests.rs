@@ -22,5 +22,17 @@ fn test_summary_catalog_uses_only_discovered_tools_and_skips_custom_servers() {
     assert!(managed.iter().any(|t| t.tool_name == "new" && t.summary == "Original description"));
     assert!(managed.iter().all(|t| t.summary_generated_at.is_some()));
     assert!(db.list_tool_catalog(Some(12)).unwrap()[0].summary_generated_at.is_none());
-    assert_eq!(db.enabled_custom_summary_servers().unwrap().iter().map(|s| s.id).collect::<Vec<_>>(), vec![12]);
+    let pending = db.pending_app_tool_summaries(11).unwrap();
+    assert_eq!(pending.len(), 1);
+    let missing = managed.iter().find(|t| t.tool_name == "new").unwrap();
+    let hash = &pending[&missing.tool_id];
+    assert_eq!(db.save_missing_app_tool_summary(missing.tool_id, hash, "新工具摘要").unwrap(), 1);
+    db.rebuild_dynamic_mcp_catalog_force().unwrap();
+    assert!(db.pending_app_tool_summaries(11).unwrap().is_empty());
+    assert!(db.list_tool_catalog(Some(11)).unwrap().iter().any(|t| t.summary == "新工具摘要"));
+    db.conn.execute("UPDATE app_catalog_cache SET payload=json_set(payload,'$.apps[0].tool_summaries.new','官方摘要')", []).unwrap();
+    db.rebuild_dynamic_mcp_catalog_force().unwrap();
+    assert_eq!(db.save_missing_app_tool_summary(missing.tool_id, hash, "迟到的摘要").unwrap(), 0);
+    assert!(db.list_tool_catalog(Some(11)).unwrap().iter().any(|t| t.summary == "官方摘要"));
+    assert_eq!(db.enabled_summary_servers().unwrap().iter().map(|s| s.id).collect::<Vec<_>>(), vec![12]);
 }

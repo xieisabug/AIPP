@@ -97,7 +97,10 @@ pub async fn fetch_app_catalog(app_handle: tauri::AppHandle) -> Result<CatalogRe
             let saved = CachedCatalogPayload { catalog, skipped };
             db.conn.execute("INSERT INTO app_catalog_cache VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at",
                 params![serde_json::to_string(&saved).map_err(|e| e.to_string())?, fetched_at]).map_err(|e| e.to_string())?;
-            if catalog_changed { db.rebuild_dynamic_mcp_catalog_force().map_err(|e| e.to_string())?; }
+            if catalog_changed {
+                db.rebuild_dynamic_mcp_catalog_force().map_err(|e| e.to_string())?;
+                super::summarizer::trigger_pending_app_summaries(&app_handle);
+            }
             Ok(CatalogResponse { catalog: Some(saved.catalog), fetched_at: Some(fetched_at), warning: None, skipped: saved.skipped })
         }
         Err(error) => {
