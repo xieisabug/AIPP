@@ -143,6 +143,14 @@ fn persist_capability_sets(
     prompts_opt: Option<Vec<SimplePrompt>>,
 ) -> Result<(), String> {
     let server_id = server.id;
+    // Tool cleanup also writes assistant.db. Keep its journal guard alive until
+    // the outer transaction has committed or rolled back.
+    let _journals = if tools_opt.is_some() {
+        Some(crate::db::cascade_delete::prepare_transaction(&db.conn, "mcp_server_tool")
+            .map_err(|e| format!("连接 {server_id} 准备清理已移除的工具失败：{e}"))?)
+    } else {
+        None
+    };
     let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("连接 {server_id} 保存检测结果失败：{e}"))?;
     if db.get_mcp_server(server_id).map_err(|e| e.to_string())? != *server {
@@ -197,6 +205,10 @@ fn persist_capability_sets(
 
     tx.commit().map_err(|e| format!("连接 {server_id} 保存检测结果失败：{e}"))
 }
+
+#[cfg(test)]
+#[path = "registry_api_tests.rs"]
+mod tests;
 
 #[tauri::command]
 #[instrument(level = "debug", skip(app_handle))]
